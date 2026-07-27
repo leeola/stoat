@@ -93,9 +93,9 @@ fn zoomed(area: u16, content: u16, recommended: u16, min: u16, ceiling: u16, zoo
 /// Draw a modal frame around `area` and return the inner content rect.
 ///
 /// This is the single chrome primitive behind every stoat modal and cursor
-/// popup. The fallback -- taken when `style`'s foreground does not resolve to
-/// RGB -- draws a ratatui [`Block`] with [`Borders::ALL`], `style` on the
-/// border, and `title` styled the same, which is exactly what the sites drew
+/// popup. The fallback -- taken when `scene` is dead, or when `style`'s
+/// foreground does not resolve to RGB -- draws a ratatui [`Block`] with [`Borders::ALL`], `style`
+/// on the border, and `title` styled the same, which is exactly what the sites drew
 /// before, so their snapshots stay identical.
 ///
 /// When the border colour resolves to RGB it instead emits a hairline `panel` APC frame with
@@ -122,7 +122,7 @@ pub(crate) fn modal_frame(
 ) -> Rect {
     let inner = Block::default().borders(Borders::ALL).inner(area);
 
-    match style_rgb(style.fg) {
+    match style_rgb(style.fg).filter(|_| scene.live()) {
         Some(border) => {
             command::encode_panel_into(
                 scene.buffer(),
@@ -173,10 +173,10 @@ const POPOUT_INSET_PX: u8 = 4;
 /// The frame is a filled, square-cornered, drop-shadowed panel inset a few pixels
 /// from its cell rect. This draws only the frame, so the caller owns the interior.
 ///
-/// The rich arm -- taken when both `bg` and `border` resolve to RGB -- emits a `panel` APC frame
-/// with `fill` set to `bg`, a [`POPOUT_INSET_PX`] horizontal inset, a drop shadow, and a square
-/// light hairline in `border`. Square corners match the status bar the card extends, so
-/// the card reads as part of it. The inset and shadow are what make the card read
+/// The rich arm -- taken when `scene` is live and both `bg` and `border` resolve to RGB -- emits a
+/// `panel` APC frame with `fill` set to `bg`, a [`POPOUT_INSET_PX`] horizontal inset, a drop
+/// shadow, and a square light hairline in `border`. Square corners match the status bar the card
+/// extends, so the card reads as part of it. The inset and shadow are what make the card read
 /// as tucked behind the bar, and a plain terminal cannot draw them.
 ///
 /// The fallback draws a ratatui [`Block`] with [`Borders::ALL`] in `border`. It
@@ -191,7 +191,10 @@ pub(crate) fn popout_frame(
     _theme: &Theme,
     scene: &mut ApcScene,
 ) {
-    match style_rgb(Some(bg)).zip(style_rgb(Some(border))) {
+    match style_rgb(Some(bg))
+        .zip(style_rgb(Some(border)))
+        .filter(|_| scene.live())
+    {
         Some((bg, border)) => {
             command::encode_panel_into(
                 scene.buffer(),
@@ -223,8 +226,8 @@ pub(crate) fn popout_frame(
 /// Draw a horizontal separator across `width` cells at row `y`, starting at
 /// column `x`.
 ///
-/// The fallback -- taken when `style`'s foreground does not resolve to RGB --
-/// writes `─` glyphs styled with `style`, exactly as the separator sites did
+/// The fallback -- taken when `scene` is dead, or when `style`'s foreground
+/// does not resolve to RGB -- writes `─` glyphs styled with `style`, as the separator sites did
 /// before. Otherwise it emits one hairline [`Bar`] a sixteenth of a cell thick
 /// centered in the row, and writes no glyphs.
 pub(crate) fn hline(
@@ -235,7 +238,7 @@ pub(crate) fn hline(
     style: Style,
     scene: &mut ApcScene,
 ) {
-    match style_rgb(style.fg) {
+    match style_rgb(style.fg).filter(|_| scene.live()) {
         Some(color) => {
             Bar {
                 x: 0,
@@ -257,8 +260,8 @@ pub(crate) fn hline(
 /// Draw a vertical separator down `height` cells at column `x`, starting at row
 /// `y`.
 ///
-/// The fallback -- taken when `style`'s foreground does not resolve to RGB --
-/// writes `│` glyphs styled with `style`, exactly as the separator sites did
+/// The fallback -- taken when `scene` is dead, or when `style`'s foreground
+/// does not resolve to RGB -- writes `│` glyphs styled with `style`, as the separator sites did
 /// before. Otherwise it emits one hairline [`Bar`] a sixteenth of a cell thick
 /// centered in the column, and writes no glyphs.
 pub(crate) fn vline(
@@ -269,7 +272,7 @@ pub(crate) fn vline(
     style: Style,
     scene: &mut ApcScene,
 ) {
-    match style_rgb(style.fg) {
+    match style_rgb(style.fg).filter(|_| scene.live()) {
         Some(color) => {
             Bar {
                 x: 8,
@@ -290,8 +293,8 @@ pub(crate) fn vline(
 
 /// Draw `content` at cell `(x, y)`, clipped before column `end_x`.
 ///
-/// The fallback -- taken when `style`'s foreground does not resolve to RGB, or
-/// `bg` is `None` -- writes glyphs cell-by-cell styled with `style`, stopping
+/// The fallback -- taken when `scene` is dead, `style`'s foreground does not
+/// resolve to RGB, or `bg` is `None` -- writes glyphs cell-by-cell styled with `style`, stopping
 /// before `end_x`, exactly as the text sites did before. Otherwise it emits one [`TextRun`] at
 /// `scale` (256ths of a cell) anchored at the cell, with `bg` as its background box and no grid
 /// glyphs.
@@ -310,7 +313,7 @@ pub(crate) fn text(
     scale: u16,
     scene: &mut ApcScene,
 ) {
-    match (style_rgb(style.fg), bg) {
+    match (style_rgb(style.fg).filter(|_| scene.live()), bg) {
         (Some(color), Some(bg)) => {
             TextRun {
                 col: 0,
@@ -524,6 +527,63 @@ mod tests {
                 shadow: PanelShadow::Overhang,
                 inset_x: POPOUT_INSET_PX,
             }),
+        );
+    }
+
+    /// An RGB theme says nothing about whether the host can draw a hairline. A
+    /// foreign terminal has to get the glyph forms, which is what a dead scene
+    /// selects even though every color here resolves.
+    #[test]
+    fn a_dead_scene_takes_every_cell_arm_despite_rgb_colors() {
+        let area = Rect::new(0, 0, 10, 6);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+        scene.set_live(false);
+        let theme = Theme::empty();
+
+        let inner = modal_frame(
+            &mut buf,
+            Rect::new(0, 0, 6, 3),
+            Some(" hi "),
+            rgb_style(),
+            &theme,
+            &mut scene,
+        );
+        assert_eq!(inner, Rect::new(1, 1, 4, 1));
+        assert_eq!(buf.cell((0, 0)).expect("in bounds").symbol(), "┌");
+
+        popout_frame(
+            &mut buf,
+            Rect::new(0, 3, 6, 2),
+            Color::Rgb(4, 5, 6),
+            Color::Rgb(1, 2, 3),
+            &theme,
+            &mut scene,
+        );
+        assert_eq!(buf.cell((0, 3)).expect("in bounds").symbol(), "┌");
+
+        hline(&mut buf, 6, 0, 3, rgb_style(), &mut scene);
+        assert_eq!(buf.cell((6, 0)).expect("in bounds").symbol(), "─");
+
+        vline(&mut buf, 9, 1, 3, rgb_style(), &mut scene);
+        assert_eq!(buf.cell((9, 1)).expect("in bounds").symbol(), "│");
+
+        text(
+            &mut buf,
+            6,
+            5,
+            10,
+            "ab",
+            rgb_style(),
+            Some([9, 9, 9]),
+            218,
+            &mut scene,
+        );
+        assert_eq!(buf.cell((6, 5)).expect("in bounds").symbol(), "a");
+
+        assert!(
+            scene.bytes().is_empty(),
+            "and no component frame is built for a host that cannot draw one"
         );
     }
 

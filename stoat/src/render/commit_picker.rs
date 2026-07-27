@@ -305,9 +305,9 @@ pub(crate) fn paint_commit_graph(
         return;
     }
 
-    // A theme that resolves to RGB means a terminal that can show the stroked
-    // path, the same gate every other sub-cell component here uses.
-    let rich = style_rgb(theme.get(scope::UI_TEXT).fg).is_some();
+    // A stroked path needs a host that can draw one and a theme that names its
+    // color, the same gate every other sub-cell component here uses.
+    let rich = scene.live() && style_rgb(theme.get(scope::UI_TEXT).fg).is_some();
     let background = style_rgb(theme.get(scope::UI_MODAL_PALETTE).bg);
     let drawn = (*lanes).min(MAX_DRAWN_LANES);
     let raw_lane_color = |lane: u16| LANE_COLORS[lane.min(drawn - 1) as usize % LANE_COLORS.len()];

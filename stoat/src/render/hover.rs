@@ -103,8 +103,8 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
         .map(|line| truncate_line(line, inner.width as usize))
         .collect();
 
-    match (scene, modal_fg, run_bg) {
-        (scene, Some(modal_fg), Some(run_bg)) => {
+    match (scene.live(), modal_fg, run_bg) {
+        (true, Some(modal_fg), Some(run_bg)) => {
             for (row_idx, line) in body.iter().enumerate() {
                 let row = inner.y + row_idx as u16;
                 let selection = sel_rgb.and_then(|rgb| {

@@ -7545,6 +7545,10 @@ impl Stoat {
         // scene and the editor renderer records diagnostic spans during paint.
         let mut scene = std::mem::take(&mut self.apc_scene);
         scene.clear();
+        // Re-declared per frame rather than at construction. The session paints
+        // before the ident handshake answers, so a scene built with `Stoat` would
+        // be stuck at whatever was true then.
+        scene.set_live(self.stoatty);
         let mut undercurls = std::mem::take(&mut self.pending_undercurls);
         undercurls.clear();
         crate::render::frame(self, buf, &mut scene, &mut undercurls);

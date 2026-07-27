@@ -104,7 +104,13 @@ pub(crate) fn render_pane(
                     labels,
                     frame.search_query,
                     diagnostic_info,
-                    Some(&mut *scene),
+                    // The editor's rich surfaces -- gutter, minimap strip, review
+                    // decorations -- fork on having a scene at all, so a dead one
+                    // is withheld and each takes the cell arm it already carries.
+                    match scene.live() {
+                        true => Some(&mut *scene),
+                        false => None,
+                    },
                     Some(undercurls),
                     if is_focused { 0.0 } else { frame.inactive_dim },
                     frame.wrap_mode,
@@ -508,9 +514,9 @@ pub(crate) fn paint_pane_status_cells(
 /// Render the built status segments as rich APC components inside stoatty, or
 /// into cells otherwise.
 ///
-/// Rich mode needs stoatty, a scene, and every segment color as RGB. When any
-/// color falls outside RGB the whole bar drops to the cell fallback, so a theme
-/// without RGB status colors keeps today's cell rendering.
+/// Rich mode needs a live scene and every segment color as RGB. A dead scene or
+/// any color outside RGB drops the whole bar to the cell fallback, so a foreign
+/// terminal and a theme without RGB status colors both keep the cell rendering.
 fn render_status_segments(
     area: Rect,
     base_style: Style,
@@ -521,6 +527,7 @@ fn render_status_segments(
     scene: &mut ApcScene,
 ) {
     let rich = (|| {
+        scene.live().then_some(())?;
         let separator = style_rgb(frame.theme.get(crate::theme::scope::UI_BORDER_INACTIVE).fg)?;
         let base_bg = style_rgb(base_style.bg)?;
         let left_rich = resolve_rich_segments(left, base_style)?;

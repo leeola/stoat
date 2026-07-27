@@ -1244,13 +1244,18 @@ mod tests {
 
     /// Paint `p`'s graph into a fresh buffer and scene under `theme`, returning
     /// both so a test can look at either path's output.
+    ///
+    /// `live` is whether the host can draw APC components, the other half of the
+    /// rich-versus-glyph decision alongside the theme's colors.
     fn painted_graph(
         p: &CommitPicker,
         theme: &crate::theme::Theme,
+        live: bool,
     ) -> (ratatui::buffer::Buffer, stoatty_widgets::ApcScene) {
         let area = ratatui::layout::Rect::new(0, 0, 8, 4);
         let mut buf = ratatui::buffer::Buffer::empty(area);
         let mut scene = stoatty_widgets::ApcScene::new();
+        scene.set_live(live);
         crate::render::commit_picker::paint_commit_graph(p, 0, area, theme, &mut buf, &mut scene);
         (buf, scene)
     }
@@ -1546,7 +1551,7 @@ mod tests {
     fn a_rich_theme_strokes_the_graph_and_writes_no_glyphs() {
         let h = seeded_picker_harness();
         let p = h.stoat.commit_picker.as_ref().expect("open");
-        let (buf, mut scene) = painted_graph(p, &h.stoat.theme);
+        let (buf, mut scene) = painted_graph(p, &h.stoat.theme, true);
 
         let frames = scene
             .buffer()
@@ -1567,7 +1572,7 @@ mod tests {
     fn a_theme_without_rgb_falls_back_to_glyphs() {
         let h = seeded_picker_harness();
         let p = h.stoat.commit_picker.as_ref().expect("open");
-        let (buf, mut scene) = painted_graph(p, &crate::theme::Theme::empty());
+        let (buf, mut scene) = painted_graph(p, &crate::theme::Theme::empty(), true);
 
         assert!(scene.buffer().is_empty(), "the fallback emits no frames");
         let painted: String = (0..3)
@@ -1580,7 +1585,7 @@ mod tests {
         );
 
         let merge = picker(merge_history(), &[], "mmm0000");
-        let (buf, _) = painted_graph(&merge, &crate::theme::Theme::empty());
+        let (buf, _) = painted_graph(&merge, &crate::theme::Theme::empty(), true);
         assert_eq!(
             buf.cell((0, 0)).expect("in bounds").symbol(),
             "○",
@@ -1597,7 +1602,7 @@ mod tests {
 
         let h = seeded_picker_harness();
         let p = h.stoat.commit_picker.as_ref().expect("open");
-        let (_, mut scene) = painted_graph(p, &graph_theme());
+        let (_, mut scene) = painted_graph(p, &graph_theme(), true);
         let nodes = node_discs(&mut scene);
 
         let widths: Vec<u16> = nodes.iter().map(|&(width, _)| width).collect();
@@ -1627,6 +1632,28 @@ mod tests {
         );
     }
 
+    /// An RGB theme says nothing about whether the host can stroke a path. A
+    /// foreign terminal running one used to get an empty column where the graph
+    /// belongs, so the glyph lanes have to come back on the host, not the theme.
+    #[test]
+    fn a_dead_scene_draws_the_graph_as_glyphs_despite_an_rgb_theme() {
+        let h = seeded_picker_harness();
+        let p = h.stoat.commit_picker.as_ref().expect("open");
+        let (buf, mut scene) = painted_graph(p, &graph_theme(), false);
+
+        let painted: String = (0..3)
+            .map(|y| buf.cell((0, y)).expect("in bounds").symbol().to_owned())
+            .collect();
+        assert_eq!(
+            painted, "◉◉●",
+            "the same glyph lanes a non-RGB theme has always drawn"
+        );
+        assert!(
+            scene.buffer().is_empty(),
+            "and no stroked path is built for a host that cannot show one"
+        );
+    }
+
     /// Where a row came from is history a lane line alone cannot show, so a
     /// merge's node has to carry it.
     #[test]
@@ -1634,7 +1661,7 @@ mod tests {
         use crate::render::commit_picker::{MERGE_HOLE, NODE_DIAMETER, NODE_HALO};
 
         let p = picker(merge_history(), &[], "mmm0000");
-        let (_, mut scene) = painted_graph(&p, &graph_theme());
+        let (_, mut scene) = painted_graph(&p, &graph_theme(), true);
         let nodes = node_discs(&mut scene);
 
         assert_eq!(

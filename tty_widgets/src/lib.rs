@@ -30,19 +30,47 @@ pub mod text_run;
 /// zero traffic. Both buffers are reused across frames, so steady-state emission
 /// allocates nothing.
 ///
+/// A scene may also be *dead*, which is how a host that is not stoatty is
+/// described to the widgets. [`Self::live`] reports it so each widget picks its
+/// cell form, and a dead scene swallows anything pushed into it, so a fork
+/// nobody remembered to update emits nothing rather than half a frame.
+///
 /// Per frame: [`Self::clear`], let widgets append via [`Self::buffer`], then
 /// [`Self::flush_to`].
 pub struct ApcScene {
     current: Vec<u8>,
     previous: Vec<u8>,
+    live: bool,
+    /// Where [`Self::buffer`] sends writes while dead. Cleared on every handout,
+    /// so it never holds more than the one append its borrow allows.
+    discard: Vec<u8>,
 }
 
 impl ApcScene {
+    /// A live scene, which is what a caller that never mentions a host wants.
+    /// Deadness is set explicitly via [`Self::set_live`].
     pub fn new() -> ApcScene {
         ApcScene {
             current: Vec::new(),
             previous: Vec::new(),
+            live: true,
+            discard: Vec::new(),
         }
+    }
+
+    /// Whether the host can render APC components, which is what widgets branch
+    /// on to choose their rich form over their cell form.
+    pub fn live(&self) -> bool {
+        self.live
+    }
+
+    /// Declare whether the host can render APC components.
+    ///
+    /// Expected once per frame rather than at construction, since whether a
+    /// stoatty is listening is only learned after the session has already
+    /// painted.
+    pub fn set_live(&mut self, live: bool) {
+        self.live = live;
     }
 
     /// Empty the scene buffer so widgets can build the next frame from scratch.
@@ -52,8 +80,17 @@ impl ApcScene {
 
     /// The buffer widgets append their APC frames into via the protocol's
     /// `encode_*_into` encoders.
+    ///
+    /// While dead this hands back a scratch buffer instead, so the append lands
+    /// nowhere.
     pub fn buffer(&mut self) -> &mut Vec<u8> {
-        &mut self.current
+        match self.live {
+            true => &mut self.current,
+            false => {
+                self.discard.clear();
+                &mut self.discard
+            },
+        }
     }
 
     /// The built scene bytes, for a reader that decodes the frame without
@@ -68,7 +105,7 @@ impl ApcScene {
     /// expansion that pushes later lines down. The full layout is re-sent on each
     /// change, so this rides alongside the widgets in the same frame.
     pub fn set_line_layout(&mut self, heights: &[u16]) {
-        command::encode_line_layout_into(&mut self.current, heights);
+        command::encode_line_layout_into(self.buffer(), heights);
     }
 
     /// Flush the built scene to `out`, but only when it differs from the last
@@ -127,6 +164,23 @@ mod tests {
         let mut expected = encode_reset();
         expected.extend(encode_border(&border()));
         assert_eq!(out, expected);
+    }
+
+    /// Widgets branch on liveness themselves, but one that forgets to must not
+    /// be able to put half a frame on the wire.
+    #[test]
+    fn a_dead_scene_swallows_what_is_pushed_into_it() {
+        let mut scene = ApcScene::new();
+        scene.set_live(false);
+
+        command::encode_border_into(scene.buffer(), &border());
+        scene.set_line_layout(&[1, 2, 3]);
+
+        assert!(!scene.live(), "and reports itself dead to the widgets");
+        assert!(scene.bytes().is_empty(), "nothing reached the scene");
+        let mut out = Vec::new();
+        scene.flush_to(&mut out).expect("vec write");
+        assert!(out.is_empty(), "so a flush has nothing to write");
     }
 
     #[test]
