@@ -49,6 +49,7 @@ use ratatui::{
 use slotmap::SlotMap;
 use std::{
     collections::hash_map::DefaultHasher,
+    ffi::OsStr,
     hash::{Hash, Hasher},
     io,
     ops::Range,
@@ -87,6 +88,11 @@ const THEME_ONE_LIGHT: &str = include_str!("../../themes/one-light.json");
 /// into one diff rebuild rather than three.
 pub(crate) const REVIEW_EXTERNAL_EDIT_DEBOUNCE: std::time::Duration =
     std::time::Duration::from_millis(50);
+
+/// Directory verdicts [`Stoat::ignored_dir_cache`] holds before dropping the
+/// lot. Far above the directory count of any one build, so the bound is a
+/// backstop against a pathological tree rather than a working limit.
+const IGNORED_DIR_CACHE_MAX: usize = 8192;
 
 /// Quiet window after the last code-search keystroke before the blocking
 /// workspace scan spawns, so a burst of typing re-scans once rather than per
@@ -1100,6 +1106,13 @@ pub struct Stoat {
     /// editor, mirroring [`Self::review_pending_external_edits`] but
     /// feeding the code graph instead of the review session.
     index_pending_external_edits: std::collections::HashMap<PathBuf, stoat_scheduler::Task<()>>,
+    /// Memoized [`GitRepo::is_path_ignored`] verdicts, keyed by the directory
+    /// asked about rather than the file, so an fs-event storm out of a build
+    /// directory costs one libgit2 query instead of one per file.
+    ///
+    /// Cleared on any `.git` write or `.gitignore` edit, the two events that can
+    /// change an answer already in here.
+    ignored_dir_cache: std::collections::HashMap<PathBuf, bool>,
     /// Channel the index debounce tasks push onto when their timer fires,
     /// drained by [`Self::drain_pending_index_edits`].
     pub(crate) index_external_edit_tx: Sender<PathBuf>,
@@ -1774,6 +1787,7 @@ impl Stoat {
             diff_warm_files: Vec::new(),
             pending_file_opens: Vec::new(),
             index_pending_external_edits: std::collections::HashMap::new(),
+            ignored_dir_cache: std::collections::HashMap::new(),
             index_external_edit_tx,
             index_external_edit_rx,
             git_host: Arc::new(LocalGit::new()),
@@ -3484,7 +3498,24 @@ impl Stoat {
         let git_dir = git_root.join(".git");
         let mut repo: Option<Option<Arc<dyn GitRepo>>> = None;
         for path in paths {
-            if path.starts_with(&git_dir) {
+            let in_git_dir = path.starts_with(&git_dir);
+
+            // Invalidate before reading any verdict, so a .gitignore edit drained
+            // alongside later paths in the same batch cannot leave them resolving
+            // against the rules it just replaced.
+            if in_git_dir || path.file_name() == Some(OsStr::new(".gitignore")) {
+                self.ignored_dir_cache.clear();
+            }
+
+            // A whole ignored directory is build churn, so none of the three arms
+            // below want it. The initial index walk filters these out too, so
+            // reindexing one here would put generated files in the code graph
+            // that a rebuild drops.
+            if !in_git_dir && self.parent_dir_ignored(&path, &git_root, &mut repo) {
+                continue;
+            }
+
+            if in_git_dir {
                 // A .git write (a commit, reset, rebase step, or branch switch)
                 // moved HEAD and staled every diff base, so it refreshes through
                 // the shared debounce whatever the session state is. Its drain
@@ -3522,6 +3553,48 @@ impl Stoat {
                 self.arm_index_external_edit_debounce(path);
             }
         }
+    }
+
+    /// Whether `path` sits in a gitignored directory, answering from
+    /// [`Self::ignored_dir_cache`] when the directory has been asked about
+    /// before.
+    ///
+    /// Asks about the parent rather than `path` itself, which is what makes the
+    /// answer reusable, since one query then covers every file a build writes
+    /// into that directory. A file individually ignored inside a clean directory
+    /// is not caught here, so the callers that care keep their own per-file
+    /// check.
+    ///
+    /// `repo` memoizes the repository discovery across one drain batch. Paths
+    /// outside `git_root` have no verdict and report false.
+    fn parent_dir_ignored(
+        &mut self,
+        path: &Path,
+        git_root: &Path,
+        repo: &mut Option<Option<Arc<dyn GitRepo>>>,
+    ) -> bool {
+        if !path.starts_with(git_root) {
+            return false;
+        }
+        let Some(parent) = path.parent() else {
+            return false;
+        };
+        if let Some(ignored) = self.ignored_dir_cache.get(parent) {
+            return *ignored;
+        }
+
+        let git_host = self.git_host.clone();
+        let repo = repo.get_or_insert_with(|| git_host.discover(git_root));
+        let ignored = repo.as_ref().is_some_and(|r| r.is_path_ignored(parent));
+
+        // A bound rather than an eviction policy, because the working set here is
+        // the directories one build touches. Dropping all of it costs at most one
+        // query per directory the next batch revisits.
+        if self.ignored_dir_cache.len() >= IGNORED_DIR_CACHE_MAX {
+            self.ignored_dir_cache.clear();
+        }
+        self.ignored_dir_cache.insert(parent.to_path_buf(), ignored);
+        ignored
     }
 
     /// Spawn `future` on the executor and wake the run loop once it
@@ -19231,6 +19304,85 @@ mod tests {
         assert!(
             !h.stoat.active_workspace().diff_map_current(buffer_id),
             "a .git write stales the open buffer's diff map even with no review and no precompute",
+        );
+    }
+
+    /// A repo with `target/` gitignored and precompute on, so a drained event
+    /// reaches both the diff-warm arm and the reindex arm.
+    fn ignored_dir_harness() -> crate::test_harness::TestHarness {
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.rs", "a\n", "b\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.fake_git().add_repo("/repo").ignored("target/debug");
+        h
+    }
+
+    /// A build writing into an ignored directory used to cost a libgit2 query
+    /// per file in the review and diff-warm arms, and the reindex arm checked
+    /// nothing at all, so generated files entered the code graph.
+    #[test]
+    fn a_burst_under_an_ignored_dir_arms_nothing() {
+        let mut h = ignored_dir_harness();
+
+        for name in ["one.rs", "two.rs", "three.rs"] {
+            h.fake_fs_watcher().inject(
+                PathBuf::from("/repo/target/debug").join(name),
+                crate::host::FsEventKind::Modified,
+            );
+        }
+        h.stoat.drain_fs_watch_events();
+
+        assert!(
+            h.stoat.pending_diff_warm_file.is_empty(),
+            "no diff warm is armed for build output"
+        );
+        assert!(
+            h.stoat.index_pending_external_edits.is_empty(),
+            "and none of it reaches the code graph"
+        );
+
+        h.fake_fs_watcher().inject(
+            Path::new("/repo/src/b.rs"),
+            crate::host::FsEventKind::Modified,
+        );
+        h.stoat.drain_fs_watch_events();
+
+        assert_eq!(
+            h.stoat.index_pending_external_edits.len(),
+            1,
+            "a source file beside it still arms the index debounce"
+        );
+    }
+
+    /// The cached verdict has to die with the rules it came from, or a directory
+    /// already asked about keeps its old answer for the rest of the session.
+    #[test]
+    fn a_gitignore_edit_drops_the_cached_verdict() {
+        let mut h = ignored_dir_harness();
+        let built = PathBuf::from("/repo/generated/one.rs");
+
+        h.fake_fs_watcher()
+            .inject(&built, crate::host::FsEventKind::Modified);
+        h.stoat.drain_fs_watch_events();
+        assert_eq!(
+            h.stoat.index_pending_external_edits.len(),
+            1,
+            "the directory is clean, so its verdict caches as not ignored"
+        );
+        h.stoat.index_pending_external_edits.clear();
+
+        h.fake_git().add_repo("/repo").ignored("generated");
+        h.fake_fs_watcher().inject(
+            Path::new("/repo/.gitignore"),
+            crate::host::FsEventKind::Modified,
+        );
+        h.fake_fs_watcher()
+            .inject(&built, crate::host::FsEventKind::Modified);
+        h.stoat.drain_fs_watch_events();
+
+        assert!(
+            h.stoat.index_pending_external_edits.is_empty(),
+            "the new rule applies rather than the verdict cached before it"
         );
     }
 
