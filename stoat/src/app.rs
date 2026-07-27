@@ -15953,6 +15953,38 @@ mod tests {
         );
     }
 
+    /// The box is declared after every modal, so it lands over the commit
+    /// picker's pooled list and preview. Layered with the grid it would be
+    /// painted over by their composites for the length of every glide, which is
+    /// what made it blink out mid-scroll.
+    #[test]
+    fn the_hints_box_panel_floats_above_pooled_surfaces() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        h.stoat.theme = Arc::new(rgb_modal_theme());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.type_keys("space");
+
+        let mut buf = Buffer::empty(h.stoat.size());
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let flags: Vec<bool> = drain_apc(&mut rx)
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::Panel(p) => Some(p.above_pools),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            flags,
+            [true],
+            "the standing hints box is the frame's one panel, flagged above pools"
+        );
+    }
+
     #[test]
     fn hover_body_emits_scaled_text_runs_inside_stoatty() {
         use lsp_types::{HoverProviderCapability, ServerCapabilities};

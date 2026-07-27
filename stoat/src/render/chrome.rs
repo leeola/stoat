@@ -117,8 +117,47 @@ pub(crate) fn modal_frame(
     area: Rect,
     title: Option<&str>,
     style: Style,
+    theme: &Theme,
+    scene: &mut ApcScene,
+) -> Rect {
+    modal_frame_inner(buf, area, title, style, theme, scene, false)
+}
+
+/// Draw a modal frame that survives a pool glide, otherwise identical to
+/// [`modal_frame`].
+///
+/// A pool composite paints after the main pass, scissored to its region, so
+/// chrome layered with the grid inside that region is covered while the pool
+/// glides and reappears when it settles. This variant marks its panel as floating
+/// above every pooled surface, which punches the box's rect out of those
+/// composites and leaves the main-pass result showing through.
+///
+/// Only chrome drawn *over* a pooled surface needs it. A box the pool is content
+/// of should keep [`modal_frame`], or it would float above the very surface it
+/// belongs to.
+///
+/// The flag rides the APC frame alone. The box's hline and text runs need nothing,
+/// because the punched hole exposes the main-pass cells that already carry them.
+pub(crate) fn modal_frame_above_pools(
+    buf: &mut Buffer,
+    area: Rect,
+    title: Option<&str>,
+    style: Style,
+    theme: &Theme,
+    scene: &mut ApcScene,
+) -> Rect {
+    modal_frame_inner(buf, area, title, style, theme, scene, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn modal_frame_inner(
+    buf: &mut Buffer,
+    area: Rect,
+    title: Option<&str>,
+    style: Style,
     _theme: &Theme,
     scene: &mut ApcScene,
+    above_pools: bool,
 ) -> Rect {
     let inner = Block::default().borders(Borders::ALL).inner(area);
 
@@ -137,7 +176,7 @@ pub(crate) fn modal_frame(
                     fill: None,
                     shadow: PanelShadow::Drop,
                     inset_x: 0,
-                    above_pools: false,
+                    above_pools,
                 },
             );
             if let Some(title) = title {
@@ -341,7 +380,10 @@ pub(crate) fn text(
 
 #[cfg(test)]
 mod tests {
-    use super::{hline, modal_box, modal_frame, popout_frame, text, vline, POPOUT_INSET_PX};
+    use super::{
+        hline, modal_box, modal_frame, modal_frame_above_pools, popout_frame, text, vline,
+        POPOUT_INSET_PX,
+    };
     use crate::theme::Theme;
     use ratatui::{
         buffer::Buffer,
@@ -492,6 +534,66 @@ mod tests {
             text: " hi ".to_owned(),
         });
         assert_eq!(scene.buffer(), &[panel, title].concat());
+    }
+
+    /// Chrome drawn over a pooled surface has to say so, or the pool composite
+    /// paints over it for the length of every glide.
+    #[test]
+    fn the_above_pools_variant_flags_only_its_panel() {
+        let area = Rect::new(2, 1, 8, 4);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 12, 6));
+        let mut scene = ApcScene::new();
+        let theme = Theme::empty();
+
+        let inner = modal_frame_above_pools(&mut buf, area, None, rgb_style(), &theme, &mut scene);
+
+        assert_eq!(inner, Rect::new(3, 2, 6, 2), "same layout as modal_frame");
+        assert_eq!(
+            scene.buffer(),
+            &encode_panel(&PanelCommand {
+                top: 1,
+                left: 2,
+                width: 8,
+                height: 4,
+                style: BorderStyle::Rounded,
+                border: [1, 2, 3],
+                corner_radius: 6,
+                fill: None,
+                shadow: PanelShadow::Drop,
+                inset_x: 0,
+                above_pools: true,
+            }),
+            "the flag is the only difference from modal_frame's frame"
+        );
+    }
+
+    /// Every other modal is content a pool may own, so the plain entry point must
+    /// not opt them in.
+    #[test]
+    fn modal_frame_leaves_its_panel_layered_with_the_grid() {
+        let area = Rect::new(2, 1, 8, 4);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 12, 6));
+        let mut scene = ApcScene::new();
+        let theme = Theme::empty();
+
+        modal_frame(&mut buf, area, None, rgb_style(), &theme, &mut scene);
+
+        assert_eq!(
+            scene.buffer(),
+            &encode_panel(&PanelCommand {
+                top: 1,
+                left: 2,
+                width: 8,
+                height: 4,
+                style: BorderStyle::Rounded,
+                border: [1, 2, 3],
+                corner_radius: 6,
+                fill: None,
+                shadow: PanelShadow::Drop,
+                inset_x: 0,
+                above_pools: false,
+            })
+        );
     }
 
     #[test]

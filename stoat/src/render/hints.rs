@@ -95,7 +95,10 @@ pub(crate) fn render_hints_grouped(
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
     let title = format!(" {mode} ");
     Clear.render(help_area, buf);
-    let inner = crate::render::chrome::modal_frame(
+    // Above the pools, because this box is declared after every modal and so sits
+    // over the commit picker's list and preview surfaces. Layered with the grid it
+    // would vanish under their composites for the length of every glide.
+    let inner = crate::render::chrome::modal_frame_above_pools(
         buf,
         help_area,
         Some(title.as_str()),
