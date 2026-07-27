@@ -5449,6 +5449,78 @@ impl Stoat {
         }
     }
 
+    /// Dismiss the modal that currently owns key input, reporting whether one was
+    /// open.
+    ///
+    /// The arms run in [`modal_predicate`]'s order, which is the order keys route
+    /// by, so the modal dismissed is always the one the user is typing into. A
+    /// modal owning a scratch editor is disposed rather than dropped, or its input
+    /// stays in the workspace for the rest of the session.
+    ///
+    /// A run pane is the one arm that does not close. It owns the whole pane
+    /// rather than floating over it, so it interrupts its shell and stays open.
+    fn close_topmost_modal(&mut self) -> bool {
+        if let Some(run_id) = self.modal_run {
+            let ws = self.active_workspace_mut();
+            if let Some(run_state) = ws.runs.get_mut(run_id) {
+                if let Some(handle) = &mut run_state.shell_handle {
+                    handle.kill();
+                }
+                if let Some(block) = run_state.active_block_mut() {
+                    block.finished = true;
+                }
+            }
+            return true;
+        }
+        if self.quit_all_confirm.is_some() {
+            self.quit_all_confirm = None;
+            return true;
+        }
+        if let Some(picker) = self.workspace_picker.take() {
+            picker.dispose(self.active_workspace_mut());
+            return true;
+        }
+        if self.jumplist_picker.take().is_some() {
+            return true;
+        }
+        if self.diagnostics_picker.take().is_some() {
+            return true;
+        }
+        if self.commit_picker.is_some() {
+            action_handlers::review_walk::commit_picker_close(self);
+            return true;
+        }
+        if self.location_picker.take().is_some() {
+            return true;
+        }
+        if self.file_finder.is_some() {
+            action_handlers::close_file_finder(self);
+            return true;
+        }
+        if self.symbol_finder.is_some() {
+            action_handlers::lsp::close_symbol_finder(self);
+            return true;
+        }
+        if action_handlers::code_search::close_code_search(self) {
+            return true;
+        }
+        if let Some(palette) = self.command_palette.take() {
+            let active_idx = self.active_workspace;
+            palette.dispose(&mut self.workspaces[active_idx]);
+            return true;
+        }
+        if self.help.is_some() {
+            action_handlers::close_help(self);
+            return true;
+        }
+
+        action_handlers::lsp::rename_input_cancel(self)
+            || action_handlers::search::search_cancel(self)
+            || action_handlers::split_selection::cancel(self)
+            || action_handlers::filter_selections::cancel(self)
+            || action_handlers::shell::cancel(self)
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> UpdateEffect {
         // A version notice is a one-shot message. Any key press retires it.
         self.badges
@@ -5489,57 +5561,7 @@ impl Stoat {
         );
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if let Some(run_id) = self.modal_run {
-                let ws = self.active_workspace_mut();
-                if let Some(run_state) = ws.runs.get_mut(run_id) {
-                    if let Some(handle) = &mut run_state.shell_handle {
-                        handle.kill();
-                    }
-                    if let Some(block) = run_state.active_block_mut() {
-                        block.finished = true;
-                    }
-                }
-                return UpdateEffect::Redraw;
-            }
-            if self.help.is_some() {
-                action_handlers::close_help(self);
-                return UpdateEffect::Redraw;
-            }
-            if self.file_finder.is_some() {
-                action_handlers::close_file_finder(self);
-                return UpdateEffect::Redraw;
-            }
-            if self.symbol_finder.is_some() {
-                action_handlers::lsp::close_symbol_finder(self);
-                return UpdateEffect::Redraw;
-            }
-            if action_handlers::code_search::close_code_search(self) {
-                return UpdateEffect::Redraw;
-            }
-            if let Some(palette) = self.command_palette.take() {
-                let active_idx = self.active_workspace;
-                palette.dispose(&mut self.workspaces[active_idx]);
-                return UpdateEffect::Redraw;
-            }
-            if let Some(picker) = self.workspace_picker.take() {
-                picker.dispose(self.active_workspace_mut());
-                return UpdateEffect::Redraw;
-            }
-            if self.quit_all_confirm.is_some() {
-                self.quit_all_confirm = None;
-                return UpdateEffect::Redraw;
-            }
-            if self.jumplist_picker.take().is_some() {
-                return UpdateEffect::Redraw;
-            }
-            if self.diagnostics_picker.take().is_some() {
-                return UpdateEffect::Redraw;
-            }
-            if self.commit_picker.is_some() {
-                action_handlers::review_walk::commit_picker_close(self);
-                return UpdateEffect::Redraw;
-            }
-            if self.location_picker.take().is_some() {
+            if self.close_topmost_modal() {
                 return UpdateEffect::Redraw;
             }
             if self.pending_hover.is_some() {
@@ -10030,7 +10052,11 @@ pub(crate) async fn parse_buffer_async(
 mod tests {
     use super::*;
     use crate::{
-        agent_status::AgentHookEvent, buffer::TextBuffer, test_harness::apc::decode_apc_stream,
+        action_handlers::lsp::RenameInputState,
+        agent_status::AgentHookEvent,
+        buffer::TextBuffer,
+        input_view::{InputView, SubmitTarget},
+        test_harness::apc::decode_apc_stream,
     };
     use std::path::{Path, PathBuf};
 
@@ -18331,6 +18357,73 @@ mod tests {
             before,
             "and gave its editor back"
         );
+    }
+
+    /// The transient text inputs carry no Ctrl-C binding of their own, so an
+    /// input missing from the cascade quits the session out from under an edit
+    /// in progress.
+    #[test]
+    fn ctrl_c_cancels_a_rename_rather_than_quitting() {
+        use lsp_types::{Position, Uri};
+        use std::str::FromStr;
+
+        let mut h = Stoat::test();
+        let before = h.stoat.active_workspace().editors.len();
+        let executor = h.stoat.executor.clone();
+        let input = InputView::create(
+            h.stoat.active_workspace_mut(),
+            executor,
+            SubmitTarget::RenameSymbol,
+            "old_name",
+            "insert",
+            1,
+        );
+        let buffer_id = input.buffer_id;
+        h.stoat.rename_input = Some(RenameInputState {
+            input,
+            source_uri: Uri::from_str("file:///src/lib.rs").expect("valid uri"),
+            symbol_position: Position::new(0, 0),
+            anchor_offset: 0,
+            server: None,
+            buffer_id,
+        });
+
+        let effect = h.stoat.handle_key(ctrl_c());
+
+        assert!(
+            !matches!(effect, UpdateEffect::Quit),
+            "cancelling a rename must not take the session with it"
+        );
+        assert!(h.stoat.rename_input.is_none(), "the rename is cancelled");
+        assert_eq!(
+            h.stoat.active_workspace().editors.len(),
+            before,
+            "and gave its editor back"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_cancels_the_search_input_rather_than_quitting() {
+        let mut h = Stoat::test();
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSearchInput);
+        assert!(h.stoat.search_input.is_some(), "the input opened");
+
+        let effect = h.stoat.handle_key(ctrl_c());
+
+        assert!(
+            !matches!(effect, UpdateEffect::Quit),
+            "cancelling a search must not take the session with it"
+        );
+        assert!(h.stoat.search_input.is_none(), "the input is cancelled");
+    }
+
+    /// Quitting on an unbound Ctrl-C is the behavior the cascade arms carve out
+    /// of, so it has to survive them.
+    #[test]
+    fn ctrl_c_with_no_modal_open_still_quits() {
+        let mut h = Stoat::test();
+
+        assert!(matches!(h.stoat.handle_key(ctrl_c()), UpdateEffect::Quit));
     }
 
     #[test]
