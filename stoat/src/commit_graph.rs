@@ -19,6 +19,14 @@ use crate::host::CommitInfo;
 pub(crate) struct GraphEdge {
     pub(crate) from_lane: u16,
     pub(crate) to_lane: u16,
+    /// Whether this edge runs to a merge's second or later parent.
+    ///
+    /// Such an edge is the merged-in branch's own line arriving at the merge
+    /// rather than anything belonging to the row it lands on, which is the one
+    /// case where the renderer takes a color from [`Self::to_lane`] instead of
+    /// [`Self::from_lane`]. Ordered last so sorting a row's edges still keys on
+    /// the lanes.
+    pub(crate) second_parent: bool,
 }
 
 /// Where one commit sits in the graph and what runs below it.
@@ -78,6 +86,7 @@ pub(crate) fn assign_lanes(commits: &[CommitInfo]) -> (Vec<GraphRow>, u16) {
             edges.push(GraphEdge {
                 from_lane: node_lane as u16,
                 to_lane: to_lane as u16,
+                second_parent: nth >= 1,
             });
         }
 
@@ -89,6 +98,7 @@ pub(crate) fn assign_lanes(commits: &[CommitInfo]) -> (Vec<GraphRow>, u16) {
             edges.push(GraphEdge {
                 from_lane: lane as u16,
                 to_lane: lane as u16,
+                second_parent: false,
             });
         }
         edges.sort();
@@ -140,9 +150,9 @@ mod tests {
         }
     }
 
-    /// One row as `(node_lane, [(from, to), ...])`, which reads as a table
-    /// where the struct form would not.
-    type FlatRow = (u16, Vec<(u16, u16)>);
+    /// One row as `(node_lane, [(from, to, second_parent), ...])`, which reads
+    /// as a table where the struct form would not.
+    type FlatRow = (u16, Vec<(u16, u16, bool)>);
 
     fn laid_out(commits: &[CommitInfo]) -> (Vec<FlatRow>, u16) {
         let (rows, lanes) = assign_lanes(commits);
@@ -151,7 +161,13 @@ mod tests {
             .map(|GraphRow { node_lane, edges }| {
                 let edges = edges
                     .into_iter()
-                    .map(|GraphEdge { from_lane, to_lane }| (from_lane, to_lane))
+                    .map(
+                        |GraphEdge {
+                             from_lane,
+                             to_lane,
+                             second_parent,
+                         }| (from_lane, to_lane, second_parent),
+                    )
                     .collect();
                 (node_lane, edges)
             })
@@ -169,7 +185,14 @@ mod tests {
 
         assert_eq!(
             laid_out(&history),
-            (vec![(0, vec![(0, 0)]), (0, vec![(0, 0)]), (0, vec![])], 1)
+            (
+                vec![
+                    (0, vec![(0, 0, false)]),
+                    (0, vec![(0, 0, false)]),
+                    (0, vec![]),
+                ],
+                1
+            )
         );
     }
 
@@ -185,9 +208,9 @@ mod tests {
             laid_out(&history),
             (
                 vec![
-                    (0, vec![(0, 0)]),
+                    (0, vec![(0, 0, false)]),
                     // b opens lane 1, then merges straight back into root's lane.
-                    (1, vec![(0, 0), (1, 0)]),
+                    (1, vec![(0, 0, false), (1, 0, false)]),
                     (0, vec![]),
                 ],
                 2
@@ -208,9 +231,11 @@ mod tests {
             laid_out(&history),
             (
                 vec![
-                    (0, vec![(0, 0), (0, 1)]),
-                    (0, vec![(0, 0), (1, 1)]),
-                    (1, vec![(0, 0), (1, 0)]),
+                    // m's second parent opens lane 1, and that edge is the
+                    // only one belonging to the branch rather than to m.
+                    (0, vec![(0, 0, false), (0, 1, true)]),
+                    (0, vec![(0, 0, false), (1, 1, false)]),
+                    (1, vec![(0, 0, false), (1, 0, false)]),
                     (0, vec![]),
                 ],
                 2
@@ -226,10 +251,10 @@ mod tests {
             laid_out(&history),
             (
                 vec![
-                    (0, vec![(0, 0), (0, 1)]),
+                    (0, vec![(0, 0, false), (0, 1, true)]),
                     // The last row still carries lane 1 downward, because the
                     // commit it waits for is not in the list.
-                    (0, vec![(1, 1)]),
+                    (0, vec![(1, 1, false)]),
                 ],
                 2
             )
@@ -250,10 +275,10 @@ mod tests {
             laid_out(&history),
             (
                 vec![
-                    (0, vec![(0, 0)]),
-                    (1, vec![(0, 0), (1, 1)]),
-                    (0, vec![(0, 0), (1, 1)]),
-                    (1, vec![(0, 0), (1, 0)]),
+                    (0, vec![(0, 0, false)]),
+                    (1, vec![(0, 0, false), (1, 1, false)]),
+                    (0, vec![(0, 0, false), (1, 1, false)]),
+                    (1, vec![(0, 0, false), (1, 0, false)]),
                     (0, vec![]),
                 ],
                 2

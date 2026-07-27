@@ -350,10 +350,18 @@ pub(crate) fn paint_commit_graph(
             let (from, to) = (clamp(edge.from_lane), clamp(edge.to_lane));
             match rich {
                 true => {
+                    // A merge's diagonal is the line of the branch it absorbs,
+                    // so it takes that branch's lane rather than the node's or
+                    // it breaks color against the run continuing below it.
+                    let stroke = match edge.second_parent {
+                        true => to,
+                        false => from,
+                    };
+
                     Polyline {
                         points: edge_points(from, to, y),
                         width: LANE_STROKE,
-                        color: lane_color(from),
+                        color: lane_color(stroke),
                     }
                     .render(area, buf, scene);
                 },

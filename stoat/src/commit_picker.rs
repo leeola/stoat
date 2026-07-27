@@ -531,6 +531,7 @@ mod tests {
     };
     use crossterm::event::{MouseButton, MouseEventKind};
     use std::{collections::HashMap, path::PathBuf};
+    use stoatty_protocol::command::PolylineCommand;
 
     fn commit(sha: &str, summary: &str) -> CommitInfo {
         CommitInfo {
@@ -644,10 +645,10 @@ mod tests {
             .collect()
     }
 
-    /// The point list of every lane transition the graph emitted, in emission
-    /// order. A transition is the only path whose ends sit in different
-    /// columns, so straight runs and node discs fall out.
-    fn lane_transitions(scene: &mut stoatty_widgets::ApcScene) -> Vec<Vec<[i16; 2]>> {
+    /// Every lane transition the graph emitted, in emission order. A transition
+    /// is the only path whose ends sit in different columns, so straight runs
+    /// and node discs fall out.
+    fn lane_transitions(scene: &mut stoatty_widgets::ApcScene) -> Vec<PolylineCommand> {
         use stoatty_protocol::command::Command;
 
         crate::test_harness::apc::decode_apc_stream(scene.buffer())
@@ -656,7 +657,7 @@ mod tests {
                 Command::Polyline(line)
                     if line.points.first().map(|p| p[0]) != line.points.last().map(|p| p[0]) =>
                 {
-                    Some(line.points)
+                    Some(line)
                 },
                 _ => None,
             })
@@ -1703,6 +1704,36 @@ mod tests {
         );
     }
 
+    /// A merge's diagonal is the absorbed branch's own line arriving at the
+    /// merge, not something belonging to the row it lands on. Stroking it in
+    /// the node's lane color would break that branch's line in two at the row
+    /// boundary, where the run below it continues in its own color.
+    #[test]
+    fn a_merge_swoop_keeps_the_color_of_the_branch_it_absorbs() {
+        let p = picker(merge_history(), &[], "mmm0000");
+        let (_, mut scene) = painted_graph(&p, &graph_theme(), true);
+        let colors: Vec<[u8; 3]> = lane_transitions(&mut scene)
+            .iter()
+            .map(|line| line.color)
+            .collect();
+
+        assert_eq!(
+            colors.len(),
+            2,
+            "the feature lane opens under the merge and folds back two rows down"
+        );
+        assert_eq!(
+            colors[0], colors[1],
+            "both belong to the feature branch, so its line runs one color from \
+             where it leaves the mainline up into the merge absorbing it"
+        );
+        assert_ne!(
+            colors[0],
+            node_discs(&mut scene)[1].1,
+            "and that color is the feature lane's rather than the merge node's"
+        );
+    }
+
     /// A lane reads as a column only if it stays one right up to the bend, the
     /// way a git GUI draws it. A line that starts drifting sideways the moment
     /// it leaves a node reads as a diagonal, not as a branch leaving its lane.
@@ -1720,7 +1751,7 @@ mod tests {
             "the merge opens a second lane and the feature row folds it back"
         );
 
-        for points in transitions {
+        for PolylineCommand { points, .. } in transitions {
             let (start, end) = (points[0], points[points.len() - 1]);
             let (bend_top, bend_bottom) = (start[1] + CURVE_STRAIGHT, end[1] - CURVE_STRAIGHT);
 
