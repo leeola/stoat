@@ -273,9 +273,20 @@ pub(crate) const NODE_HALO: u16 = 4;
 /// ordinary one at a glance, without spending a second color on it.
 pub(crate) const MERGE_HOLE: u16 = 4;
 
-/// Intermediate points sampled along a lane transition. Four segments read as a
-/// curve at cell scale without the protocol needing a curve primitive.
-const CURVE_SEGMENTS: i32 = 4;
+/// Sixteenths of the row a lane transition runs vertical at each end, before
+/// and after the blend that carries it across.
+///
+/// A lane has to read as a vertical column right up to the bend, so the line
+/// cannot start drifting sideways the moment it leaves a node.
+pub(crate) const CURVE_STRAIGHT: i16 = 4;
+
+/// Chords sampled along the blended middle of a lane transition.
+///
+/// The blend spans only the eight sixteenths [`CURVE_STRAIGHT`] leaves between
+/// the stubs, so eight chords put a vertex at every sixteenth and the round
+/// caps cover the joins, reading as a curve without the protocol needing a
+/// curve primitive.
+const CURVE_SEGMENTS: i32 = 8;
 
 /// Paint the node graph for the rows starting at `start_row`, one graph row per
 /// table row.
@@ -423,8 +434,13 @@ fn row_center(y: u16) -> i16 {
 /// The points of the segment running from row `y`'s center to the next row's.
 ///
 /// A lane that keeps its column is a straight run of two points. One that
-/// changes column is sampled along a smoothstep in x against a linear y, so it
-/// leaves and arrives vertically and reads as an S rather than a corner.
+/// changes column runs straight, bends, then runs straight again: a vertical
+/// stub [`CURVE_STRAIGHT`] long at each end of the row, with a smoothstep in x
+/// against a linear y confined to the middle between them.
+///
+/// The stubs are what let a lane read as a column rather than a drift, and the
+/// smoothstep's zero slope at both ends is tangent to them, so the three pieces
+/// join without a corner.
 fn edge_points(from: u16, to: u16, y: u16) -> Vec<[i16; 2]> {
     let (x0, x1) = (lane_center(from), lane_center(to));
     let (y0, y1) = (row_center(y), row_center(y + 1));
@@ -432,16 +448,21 @@ fn edge_points(from: u16, to: u16, y: u16) -> Vec<[i16; 2]> {
         return vec![[x0, y0], [x1, y1]];
     }
 
-    (0..=CURVE_SEGMENTS)
-        .map(|step| {
-            let t = step as f32 / CURVE_SEGMENTS as f32;
-            let eased = t * t * (3.0 - 2.0 * t);
-            [
-                x0 + ((x1 - x0) as f32 * eased).round() as i16,
-                y0 + ((y1 - y0) as f32 * t).round() as i16,
-            ]
-        })
-        .collect()
+    let (bend_top, bend_bottom) = (y0 + CURVE_STRAIGHT, y1 - CURVE_STRAIGHT);
+    let mut points = Vec::with_capacity(CURVE_SEGMENTS as usize + 3);
+
+    points.push([x0, y0]);
+    points.extend((0..=CURVE_SEGMENTS).map(|step| {
+        let t = step as f32 / CURVE_SEGMENTS as f32;
+        let eased = t * t * (3.0 - 2.0 * t);
+        [
+            x0 + ((x1 - x0) as f32 * eased).round() as i16,
+            bend_top + ((bend_bottom - bend_top) as f32 * t).round() as i16,
+        ]
+    }));
+    points.push([x1, y1]);
+
+    points
 }
 
 /// The fallback's one glyph for an edge, written at its origin lane.

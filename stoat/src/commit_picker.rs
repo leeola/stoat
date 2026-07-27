@@ -644,6 +644,25 @@ mod tests {
             .collect()
     }
 
+    /// The point list of every lane transition the graph emitted, in emission
+    /// order. A transition is the only path whose ends sit in different
+    /// columns, so straight runs and node discs fall out.
+    fn lane_transitions(scene: &mut stoatty_widgets::ApcScene) -> Vec<Vec<[i16; 2]>> {
+        use stoatty_protocol::command::Command;
+
+        crate::test_harness::apc::decode_apc_stream(scene.buffer())
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Polyline(line)
+                    if line.points.first().map(|p| p[0]) != line.points.last().map(|p| p[0]) =>
+                {
+                    Some(line.points)
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
     fn shown(p: &CommitPicker) -> Vec<String> {
         p.filtered
             .iter()
@@ -1682,6 +1701,46 @@ mod tests {
             "only the two-parent row draws a third disc, the other three rows \
              a halo and a filled node each"
         );
+    }
+
+    /// A lane reads as a column only if it stays one right up to the bend, the
+    /// way a git GUI draws it. A line that starts drifting sideways the moment
+    /// it leaves a node reads as a diagonal, not as a branch leaving its lane.
+    #[test]
+    fn a_lane_transition_runs_straight_before_and_after_its_bend() {
+        use crate::render::commit_picker::CURVE_STRAIGHT;
+
+        let p = picker(merge_history(), &[], "mmm0000");
+        let (_, mut scene) = painted_graph(&p, &graph_theme(), true);
+        let transitions = lane_transitions(&mut scene);
+
+        assert_eq!(
+            transitions.len(),
+            2,
+            "the merge opens a second lane and the feature row folds it back"
+        );
+
+        for points in transitions {
+            let (start, end) = (points[0], points[points.len() - 1]);
+            let (bend_top, bend_bottom) = (start[1] + CURVE_STRAIGHT, end[1] - CURVE_STRAIGHT);
+
+            assert_eq!(
+                points[1],
+                [start[0], bend_top],
+                "the line leaves its node vertically"
+            );
+            assert_eq!(
+                points[points.len() - 2],
+                [end[0], bend_bottom],
+                "and arrives at the next one vertically"
+            );
+            assert!(
+                points[2..points.len() - 2]
+                    .iter()
+                    .all(|p| p[1] > bend_top && p[1] < bend_bottom),
+                "with the whole bend confined to the middle of the row, got {points:?}"
+            );
+        }
     }
 
     /// The picker covers the pane behind it, so a wheel anywhere over it has to
