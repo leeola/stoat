@@ -456,7 +456,9 @@ pub struct PolylineCommand {
     /// Vertices in draw order, each `[x, y]`. Consecutive pairs are the
     /// segments. An empty list draws nothing.
     pub points: Vec<[i16; 2]>,
-    /// Stroke thickness, centered on the path.
+    /// Stroke thickness, centered on the path, in sixteenths of the cell's
+    /// width. Measured against the width on both axes, so a diagonal is as
+    /// thick as a vertical and 16 draws exactly one column wide.
     pub width: u16,
     pub color: [u8; 3],
 }

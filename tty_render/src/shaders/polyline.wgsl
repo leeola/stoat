@@ -4,6 +4,11 @@
 // cell-fraction units and scaled by the live cell size, so a path tracks font
 // zoom like a bar does.
 //
+// The half-width arrives in the same cell-fraction units and is scaled here
+// too, or every stroke would collapse to a sub-pixel hairline. It scales by the
+// cell's width alone rather than per axis: the SDF measures euclidean distance,
+// so one scalar is what keeps a dot round and a diagonal evenly thick.
+//
 // Unlike bar.wgsl this never snaps to whole pixels. Snapping each vertex of a
 // diagonal would move the two ends by different amounts and make the line
 // wobble as it scrolls, so the pass follows minimap.wgsl and passes pixel
@@ -50,6 +55,8 @@ struct VsOut {
     // its own distance to the capsule's spine.
     @location(2) @interpolate(flat) p0: vec2<f32>,
     @location(3) @interpolate(flat) p1: vec2<f32>,
+    // Also in pixels, so the fragment stage can use it as the capsule radius
+    // directly.
     @location(4) @interpolate(flat) half_width: f32,
 }
 
@@ -74,6 +81,7 @@ fn vs_main(
 
     let p0 = p0_cells * globals.cell_size;
     let p1 = p1_cells * globals.cell_size;
+    let half_width_px = half_width * globals.cell_size.x;
 
     // A zero-length segment has no direction to orient by, so it falls back to
     // the axis-aligned square that bounds its cap. The SDF still resolves that
@@ -86,7 +94,7 @@ fn vs_main(
     }
     let across = vec2<f32>(-along.y, along.x);
 
-    let reach = half_width + AA_MARGIN;
+    let reach = half_width_px + AA_MARGIN;
     let center = (p0 + p1) * 0.5;
     let half_span = length * 0.5 + reach;
     let pixel = center + along * (corner.x * half_span) + across * (corner.y * reach);
@@ -102,7 +110,7 @@ fn vs_main(
     out.seq = seq;
     out.p0 = p0;
     out.p1 = p1;
-    out.half_width = half_width;
+    out.half_width = half_width_px;
     return out;
 }
 

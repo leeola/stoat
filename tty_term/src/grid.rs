@@ -929,6 +929,9 @@ pub struct Bar {
 pub struct Polyline {
     /// Vertices in draw order, each `[x, y]`.
     pub points: Vec<[i16; 2]>,
+    /// Stroke thickness in sixteenths of the cell's width, centered on the
+    /// path. Measured against the width on both axes, so a diagonal is as thick
+    /// as a vertical and 16 draws exactly one column wide.
     pub width: u16,
     pub color: Rgb,
     /// Monotonic declaration-order index across all non-cell components. See

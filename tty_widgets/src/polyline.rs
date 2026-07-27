@@ -16,7 +16,9 @@ pub struct Polyline {
     /// Vertices in draw order, each `[x, y]` in sixteenths from the area's
     /// top-left.
     pub points: Vec<[i16; 2]>,
-    /// Stroke thickness in sixteenths, centered on the path.
+    /// Stroke thickness in sixteenths of the cell's width, centered on the
+    /// path. Measured against the width on both axes, so a diagonal is as thick
+    /// as a vertical and 16 draws exactly one column wide.
     pub width: u16,
     pub color: [u8; 3],
 }
