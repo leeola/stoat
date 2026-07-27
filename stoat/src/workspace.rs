@@ -4,7 +4,7 @@ pub(crate) mod registry;
 
 use crate::{
     agent_status::AgentStatus,
-    app::{parse_buffer_async, parse_buffer_step, ParseJobOutput},
+    app::{parse_buffer_step, ParseJobOutput},
     badge::BadgeTray,
     buffer::{BufferId, SharedBuffer},
     buffer_registry::{self, BufferRegistry},
@@ -776,8 +776,9 @@ impl Workspace {
 
             // Only the tree-sitter step honors the deadline. The full reparse
             // and captures walk that follow it are unbounded O(file), so a
-            // large buffer skips the synchronous fast path and parses on the
-            // background pool instead of blocking the keystroke.
+            // large buffer skips this synchronous fast path and parses on the
+            // blocking pool below, landing through the job poll instead of
+            // holding the run loop for the whole file.
             let sync_out = (snapshot.len() <= SYNC_PARSE_MAX_BYTES)
                 .then(|| {
                     let deadline = executor.now() + std::time::Duration::from_millis(1);
@@ -819,11 +820,25 @@ impl Workspace {
                 continue;
             }
 
+            // A blocking-pool run rather than a plain spawn, because the parse is
+            // one non-yielding stretch of CPU and the app runs a current_thread
+            // runtime. A spawned future would poll it on the run-loop thread and
+            // freeze the UI until the whole file was done.
             let styles = syntax_styles.clone();
-            let task = executor.spawn_with_redraw(
-                redraw_notify.clone(),
-                parse_buffer_async(buffer_id, snapshot, lang, prior, prior_map, styles),
-            );
+            let parse = executor.spawn_blocking(move || {
+                let mut prior = prior;
+                let mut prior_map = prior_map;
+                parse_buffer_step(
+                    buffer_id,
+                    snapshot,
+                    &lang,
+                    &mut prior,
+                    &mut prior_map,
+                    &styles,
+                    None,
+                )
+            });
+            let task = executor.spawn_with_redraw(redraw_notify.clone(), parse);
             self.parse_jobs.insert(
                 buffer_id,
                 ParseJob {
@@ -1775,6 +1790,21 @@ mod tests {
         assert!(
             ws.buffers.syntax_version(id).is_none(),
             "and is not parsed inline on the main thread"
+        );
+
+        // The scheduler tick resolves the blocking task. The second
+        // drive_background is the poll that moves its output into the registry.
+        h.settle();
+        h.stoat.drive_background();
+
+        let ws = h.stoat.active_workspace();
+        assert!(
+            !ws.parse_jobs.contains_key(&id),
+            "the finished job leaves the map"
+        );
+        assert!(
+            ws.buffers.syntax_version(id).is_some(),
+            "and its highlights land through the job poll"
         );
     }
 

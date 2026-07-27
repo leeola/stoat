@@ -10023,27 +10023,6 @@ pub(crate) fn parse_buffer_step(
     })
 }
 
-/// Background parse worker. Owns all inputs by value so the future is `Send`
-/// and can run on any executor thread.
-pub(crate) async fn parse_buffer_async(
-    buffer_id: BufferId,
-    snapshot: TextBufferSnapshot,
-    lang: Arc<Language>,
-    mut prior: Option<SyntaxState>,
-    mut prior_syntax_map: Option<stoat_language::SyntaxMap>,
-    styles: SyntaxStyles,
-) -> Option<ParseJobOutput> {
-    parse_buffer_step(
-        buffer_id,
-        snapshot,
-        &lang,
-        &mut prior,
-        &mut prior_syntax_map,
-        &styles,
-        None,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
