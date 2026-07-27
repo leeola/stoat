@@ -7974,13 +7974,13 @@ impl Stoat {
     /// Runs at the frame seam after [`Self::emit_smooth_scroll`], so each editor's
     /// reserved strip rect from the paint is current. The strip declaration rides
     /// the diffed scene from the paint. This sends only the persistent content
-    /// stores. A no-op until the APC channel is installed, or with the minimap
-    /// off.
+    /// stores. A no-op until [`Self::stoatty`] confirms a listener and the APC
+    /// channel is installed, or with the minimap off.
     fn emit_minimap(&mut self) {
         // Recomputed below from each synced strip. Cleared first so the early
-        // exits (no channel, minimap off) leave no build pending.
+        // exits (no listener, no channel, minimap off) leave no build pending.
         self.minimap_build_pending = false;
-        let Some(apc_tx) = self.apc_tx.clone() else {
+        let Some(apc_tx) = self.apc_tx.clone().filter(|_| self.stoatty) else {
             return;
         };
         let ws_id = self.active_workspace;
