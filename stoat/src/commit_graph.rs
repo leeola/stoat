@@ -4,10 +4,6 @@
 //! colors, so the cell-glyph fallback and the stroked APC path can share one
 //! layout.
 
-// Nothing draws the graph yet, so the whole module reads as dead until the
-// picker's painter calls into it.
-#![allow(dead_code)]
-
 use crate::host::CommitInfo;
 
 /// One line segment running from this row to the next.
