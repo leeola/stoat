@@ -80,6 +80,7 @@ fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene) {
             fill: None,
             shadow: PanelShadow::Drop,
             inset_x: 0,
+            above_pools: false,
         },
         dialog,
         scene,

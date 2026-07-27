@@ -98,6 +98,7 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         fill: None,
         shadow: PanelShadow::None_,
         inset_x: 0,
+        above_pools: false,
         seq: 100,
     }]);
     grid.set_bars(vec![Bar {
@@ -251,6 +252,7 @@ fn a_box_occludes_the_pool_composite_beneath_it() {
         fill: None,
         shadow: PanelShadow::None_,
         inset_x: 0,
+        above_pools: false,
         seq: 100,
     }];
 

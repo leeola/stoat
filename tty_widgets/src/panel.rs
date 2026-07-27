@@ -28,6 +28,11 @@ pub struct Panel {
     /// draws narrower than its cell rect. `0` is cell-exact. The fallback border
     /// ignores it (cell borders are whole cells).
     pub inset_x: u8,
+    /// The panel floats above every pooled surface, so pool composites must not
+    /// paint over its rect. `false` layers the panel with the grid, where a pool
+    /// composite covering the same cells draws over it. The fallback border
+    /// ignores it (a plain terminal has no pools).
+    pub above_pools: bool,
 }
 
 impl StatefulWidget for Panel {
@@ -49,6 +54,7 @@ impl StatefulWidget for Panel {
                 fill: self.fill,
                 shadow: self.shadow,
                 inset_x: self.inset_x,
+                above_pools: self.above_pools,
             },
         );
     }
@@ -93,6 +99,7 @@ mod tests {
             fill: Some([40, 44, 52]),
             shadow: PanelShadow::Drop,
             inset_x: 4,
+            above_pools: false,
         }
         .render(area, &mut buf, &mut scene);
 
@@ -107,6 +114,7 @@ mod tests {
             fill: Some([40, 44, 52]),
             shadow: PanelShadow::Drop,
             inset_x: 4,
+            above_pools: false,
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
     }
@@ -124,6 +132,7 @@ mod tests {
             fill: None,
             shadow: PanelShadow::None_,
             inset_x: 0,
+            above_pools: false,
         }
         .render(area, &mut buf, &mut scene);
 
@@ -148,6 +157,7 @@ mod tests {
             fill: None,
             shadow: PanelShadow::None_,
             inset_x: 0,
+            above_pools: false,
         }
         .render(area, &mut buf, &mut scene);
 

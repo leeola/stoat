@@ -807,6 +807,10 @@ pub struct Panel {
     /// than its cell rect. Carried from the panel command and applied by the
     /// renderer to the frame, fill, corners, and shadow.
     pub inset_x: u8,
+    /// The panel floats above every pooled surface, so pool composites must not
+    /// paint over its rect. `false` layers the panel with the grid, where a pool
+    /// composite covering the same cells draws over it.
+    pub above_pools: bool,
     /// Monotonic declaration-order index across all non-cell components. A later
     /// component (higher `seq`) draws on top, so a box's own runs and bars carry
     /// a higher `seq` than its panel while a lower box's components carry a lower

@@ -240,6 +240,10 @@ pub struct PanelCommand {
     /// and shadow all follow the inset rect, leaving the strip outside it showing
     /// the cells behind.
     pub inset_x: u8,
+    /// The panel floats above every pooled surface, so pool composites must not
+    /// paint over its rect. `false` layers the panel with the grid, where a pool
+    /// composite covering the same cells draws over it.
+    pub above_pools: bool,
 }
 
 /// Draw the glyph at a cell `scale` times the cell size.
@@ -691,6 +695,7 @@ pub fn encode_panel_into(out: &mut Vec<u8>, command: &PanelCommand) {
         w.write_all(&command.fill.unwrap_or([0, 0, 0]))?;
         w.write_all(&[shadow_code(command.shadow)])?;
         w.write_all(&[command.inset_x])?;
+        w.write_all(&[command.above_pools as u8])?;
         Ok(())
     });
     frame::end(out);
@@ -1614,6 +1619,7 @@ fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
         fill: (arg[13] != 0).then_some([arg[14], arg[15], arg[16]]),
         shadow: decode_shadow(arg[17]),
         inset_x: arg[18],
+        above_pools: arg.get(19).is_some_and(|byte| *byte != 0),
     })
 }
 
@@ -2105,6 +2111,29 @@ mod tests {
             fill: Some([20, 22, 30]),
             shadow: PanelShadow::Drop,
             inset_x: 4,
+            above_pools: false,
+        };
+
+        assert_eq!(
+            decode(&encode_panel(&command)),
+            Some(Command::Panel(command))
+        );
+    }
+
+    #[test]
+    fn panel_above_pools_round_trips() {
+        let command = PanelCommand {
+            top: 3,
+            left: 12,
+            width: 40,
+            height: 10,
+            style: BorderStyle::Rounded,
+            border: [200, 40, 90],
+            corner_radius: 6,
+            fill: Some([20, 22, 30]),
+            shadow: PanelShadow::Drop,
+            inset_x: 4,
+            above_pools: true,
         };
 
         assert_eq!(
@@ -2126,6 +2155,7 @@ mod tests {
             fill: None,
             shadow: PanelShadow::None_,
             inset_x: 0,
+            above_pools: false,
         };
 
         assert_eq!(
@@ -2147,6 +2177,7 @@ mod tests {
             fill: Some([4, 5, 6]),
             shadow: PanelShadow::Tucked,
             inset_x: 4,
+            above_pools: false,
         };
 
         assert_eq!(
@@ -2168,6 +2199,7 @@ mod tests {
             fill: Some([4, 5, 6]),
             shadow: PanelShadow::Overhang,
             inset_x: 4,
+            above_pools: false,
         };
 
         assert_eq!(
@@ -2193,11 +2225,12 @@ mod tests {
     }
 
     #[test]
-    fn panel_decode_ignores_legacy_title_gap_bytes() {
-        // A 22-byte arg carries three trailing bytes past the 19-byte base from
-        // an emitter that still wrote the retired title-gap span. The decoder
-        // reads the base -- here a zero inset -- and ignores the rest rather than
-        // rejecting the frame.
+    fn panel_decode_tolerates_legacy_title_gap_bytes() {
+        // A 22-byte arg carries three trailing bytes past the 19-byte base from an
+        // emitter that still wrote the retired title-gap span. The decoder reads
+        // what it knows rather than rejecting the frame. Byte 19 now holds the
+        // above_pools flag, so the retired gap start's nonzero low byte reads as a
+        // set flag and only the two bytes past it are ignored.
         let mut arg = Vec::new();
         arg.extend_from_slice(&3u16.to_be_bytes());
         arg.extend_from_slice(&12u16.to_be_bytes());
@@ -2226,6 +2259,44 @@ mod tests {
                 fill: Some([20, 22, 30]),
                 shadow: PanelShadow::Drop,
                 inset_x: 0,
+                above_pools: true,
+            })
+        );
+    }
+
+    #[test]
+    fn panel_decode_defaults_a_flagless_frame_to_grid_layering() {
+        // A 19-byte arg predates the above_pools flag. An emitter left over from
+        // before a mid-session rebuild still decodes, its panel layered with the
+        // grid as it was when the frame was written.
+        let mut arg = Vec::new();
+        arg.extend_from_slice(&3u16.to_be_bytes());
+        arg.extend_from_slice(&12u16.to_be_bytes());
+        arg.extend_from_slice(&40u16.to_be_bytes());
+        arg.extend_from_slice(&10u16.to_be_bytes());
+        arg.push(super::style_code(BorderStyle::Rounded));
+        arg.extend_from_slice(&[200, 40, 90]);
+        arg.push(6);
+        arg.push(0);
+        arg.extend_from_slice(&[0, 0, 0]);
+        arg.push(super::shadow_code(PanelShadow::Tucked));
+        arg.push(4);
+        assert_eq!(arg.len(), 19);
+
+        assert_eq!(
+            super::decode_panel(&[arg]),
+            Some(PanelCommand {
+                top: 3,
+                left: 12,
+                width: 40,
+                height: 10,
+                style: BorderStyle::Rounded,
+                border: [200, 40, 90],
+                corner_radius: 6,
+                fill: None,
+                shadow: PanelShadow::Tucked,
+                inset_x: 4,
+                above_pools: false,
             })
         );
     }

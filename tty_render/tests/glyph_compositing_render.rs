@@ -90,6 +90,7 @@ fn grid_glyph_blends_over_the_framebuffer_not_an_assumed_bg() {
         fill: Some(fill),
         shadow: PanelShadow::None_,
         inset_x: 0,
+        above_pools: false,
         seq: 0,
     };
 

@@ -117,6 +117,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         fill: Some(Rgb::new(30, 30, 50)),
         shadow: PanelShadow::Drop,
         inset_x: 0,
+        above_pools: false,
         seq: 0,
     }]);
 

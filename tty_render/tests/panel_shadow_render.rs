@@ -142,6 +142,7 @@ fn unfilled_panel_shadow_stays_outside_the_box() {
         fill: None,
         shadow: PanelShadow::Drop,
         inset_x: 0,
+        above_pools: false,
         seq: 0,
     }) else {
         eprintln!("panel_shadow_render: no wgpu adapter available, skipping");
@@ -184,6 +185,7 @@ fn a_horizontal_inset_leaves_the_cell_edge_strip_clear() {
         fill: Some(Rgb::new(20, 22, 30)),
         shadow: PanelShadow::None_,
         inset_x: inset,
+        above_pools: false,
         seq: 0,
     }) else {
         eprintln!("panel_shadow_render: no wgpu adapter available, skipping");

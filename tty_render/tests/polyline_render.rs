@@ -121,6 +121,7 @@ fn a_later_panel_hides_the_line_beneath_it() {
         fill: Some(Rgb::new(90, 90, 120)),
         shadow: PanelShadow::None_,
         inset_x: 0,
+        above_pools: false,
         seq: 100,
     }]);
 

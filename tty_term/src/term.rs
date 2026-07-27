@@ -2953,6 +2953,7 @@ fn panel_grid(command: &PanelCommand, seq: u32) -> Panel {
         fill: command.fill.map(|[r, g, b]| Rgb::new(r, g, b)),
         shadow: grid_panel_shadow(command.shadow),
         inset_x: command.inset_x,
+        above_pools: command.above_pools,
         seq,
     }
 }
@@ -4014,6 +4015,7 @@ mod tests {
             fill: Some([10, 20, 30]),
             shadow: ProtoPanelShadow::Drop,
             inset_x: 0,
+            above_pools: false,
         });
 
         let mut terminal = Terminal::new(8, 8, Theme::default());
@@ -4034,6 +4036,47 @@ mod tests {
                 fill: Some(Rgb::new(10, 20, 30)),
                 shadow: PanelShadow::Drop,
                 inset_x: 0,
+                above_pools: false,
+                seq: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn panel_apc_frame_carries_the_above_pools_flag() {
+        let frame = encode_panel(&PanelCommand {
+            top: 1,
+            left: 2,
+            width: 4,
+            height: 3,
+            style: ProtoBorderStyle::Rounded,
+            border: [40, 50, 60],
+            corner_radius: 6,
+            fill: Some([10, 20, 30]),
+            shadow: ProtoPanelShadow::Drop,
+            inset_x: 0,
+            above_pools: true,
+        });
+
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&frame);
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.panels(),
+            [Panel {
+                top: 1,
+                left: 2,
+                width: 4,
+                height: 3,
+                style: BorderStyle::Rounded,
+                border: Rgb::new(40, 50, 60),
+                corner_radius: 6,
+                fill: Some(Rgb::new(10, 20, 30)),
+                shadow: PanelShadow::Drop,
+                inset_x: 0,
+                above_pools: true,
                 seq: 1,
             }]
         );
@@ -4052,6 +4095,7 @@ mod tests {
             fill: None,
             shadow: ProtoPanelShadow::None_,
             inset_x: 0,
+            above_pools: false,
         });
 
         let mut terminal = Terminal::new(4, 4, Theme::default());
@@ -4076,6 +4120,7 @@ mod tests {
             fill: None,
             shadow: ProtoPanelShadow::None_,
             inset_x: 0,
+            above_pools: false,
         });
         stream.extend_from_slice(&encode_icon(&IconCommand {
             top: 0,
@@ -4137,6 +4182,7 @@ mod tests {
             fill: None,
             shadow: ProtoPanelShadow::None_,
             inset_x: 0,
+            above_pools: false,
         });
 
         let mut terminal = Terminal::new(4, 3, Theme::default());

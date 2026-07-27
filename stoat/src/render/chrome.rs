@@ -137,6 +137,7 @@ pub(crate) fn modal_frame(
                     fill: None,
                     shadow: PanelShadow::Drop,
                     inset_x: 0,
+                    above_pools: false,
                 },
             );
             if let Some(title) = title {
@@ -209,6 +210,7 @@ pub(crate) fn popout_frame(
                     fill: Some(bg),
                     shadow: PanelShadow::Overhang,
                     inset_x: POPOUT_INSET_PX,
+                    above_pools: false,
                 },
             );
         },
@@ -476,6 +478,7 @@ mod tests {
             fill: None,
             shadow: PanelShadow::Drop,
             inset_x: 0,
+            above_pools: false,
         });
         // The title run carries no background box and anchors one cell into the
         // modal (area.x * 16 + 16 = 48, area.y * 16 = 16), so the hairline draws
@@ -526,6 +529,7 @@ mod tests {
                 fill: Some([4, 5, 6]),
                 shadow: PanelShadow::Overhang,
                 inset_x: POPOUT_INSET_PX,
+                above_pools: false,
             }),
         );
     }

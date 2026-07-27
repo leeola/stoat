@@ -368,6 +368,7 @@ mod tests {
             fill: Some(Rgb::new(255, 0, 0)),
             shadow: PanelShadow::Drop,
             inset_x: 0,
+            above_pools: false,
             seq: 0,
         }];
         let first = build_panel_instances(&panels);
@@ -399,6 +400,7 @@ mod tests {
             fill: Some(Rgb::new(255, 0, 0)),
             shadow: PanelShadow::Drop,
             inset_x: 0,
+            above_pools: false,
             seq: 0,
         }];
 
@@ -430,6 +432,7 @@ mod tests {
             fill: None,
             shadow: PanelShadow::None_,
             inset_x: 0,
+            above_pools: false,
             seq: 0,
         }];
 
@@ -454,6 +457,7 @@ mod tests {
             fill: Some(Rgb::new(4, 5, 6)),
             shadow: PanelShadow::Tucked,
             inset_x: 4,
+            above_pools: false,
             seq: 0,
         }];
 
