@@ -134,31 +134,50 @@ pub(crate) fn upload_needed<T: PartialEq>(built: &[T], last: &[T]) -> bool {
 
 /// One occluder per panel, in declaration order.
 pub(crate) fn build_occluders(panels: &[Panel]) -> Vec<Occluder> {
+    panels.iter().map(panel_occluder).collect()
+}
+
+/// The occluders a pool composite uploads, given the panels on the live grid.
+///
+/// A pane pool sits beneath every box, so an occludable pool takes all `panels`.
+/// A non-pane pool is box content itself, drawn where a box already sits, so
+/// nothing occludes it except chrome that floats above every pooled surface.
+/// Those are exactly the panels flagged [`Panel::above_pools`], and the rest are
+/// filtered out.
+///
+/// See also:
+/// - [`occlusion_globals`] for the count the composite shaders read off this list.
+pub(crate) fn pool_occluders(occludable: bool, panels: &[Panel]) -> Vec<Occluder> {
     panels
         .iter()
-        .map(|panel| Occluder {
-            cell: [panel.left as f32, panel.top as f32],
-            size: [panel.width as f32, panel.height as f32],
-            seq: panel.seq,
-            _pad: [0; 3],
-        })
+        .filter(|panel| occludable || panel.above_pools)
+        .map(panel_occluder)
         .collect()
 }
 
 /// The `(panel_count, occlude_all)` a pool composite writes into its globals
-/// uniform for `panels`.
+/// uniform for `occluders`.
 ///
-/// A pane pool sits beneath every box, so it occludes against all `panels`
-/// with the seq test bypassed. The returned `occlude_all` of 1 tells the
-/// shader to discard a fragment inside any panel rect regardless of seq. A
-/// non-pane pool is box content itself and never occludes, so it reports no
-/// panels. The returned pair maps directly onto the `panel_count` and
-/// `occlude_all` fields the bar, text, and background composite shaders read.
-pub(crate) fn composite_occlusion(occludable: bool, panels: &[Occluder]) -> (u32, u32) {
-    if occludable {
-        (panels.len() as u32, 1)
-    } else {
+/// The pair maps directly onto the `panel_count` and `occlude_all` fields the
+/// bar, text, polyline, and background composite shaders read. An `occlude_all`
+/// of 1 tells the shader to discard a fragment inside any uploaded occluder
+/// regardless of seq, which is what a pool wants: [`pool_occluders`] has already
+/// narrowed the list to the panels that cover this pool, so a seq test would only
+/// undo that. An empty list occludes nothing.
+pub(crate) fn occlusion_globals(occluders: &[Occluder]) -> (u32, u32) {
+    if occluders.is_empty() {
         (0, 0)
+    } else {
+        (occluders.len() as u32, 1)
+    }
+}
+
+fn panel_occluder(panel: &Panel) -> Occluder {
+    Occluder {
+        cell: [panel.left as f32, panel.top as f32],
+        size: [panel.width as f32, panel.height as f32],
+        seq: panel.seq,
+        _pad: [0; 3],
     }
 }
 
@@ -176,29 +195,64 @@ pub fn cell_size(font_size: u32, scale_factor: f32) -> [f32; 2] {
 
 #[cfg(test)]
 mod tests {
-    use super::{composite_occlusion, CellMetrics, Occluder};
+    use super::{occlusion_globals, pool_occluders, CellMetrics};
+    use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
 
-    fn occluder() -> Occluder {
-        Occluder {
-            cell: [0.0, 0.0],
-            size: [1.0, 1.0],
-            seq: 0,
-            _pad: [0; 3],
+    fn panel(seq: u32, above_pools: bool) -> Panel {
+        Panel {
+            top: 0,
+            left: 0,
+            width: 1,
+            height: 1,
+            style: BorderStyle::Light,
+            border: Rgb::new(0, 0, 0),
+            corner_radius: 0,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools,
+            seq,
         }
     }
 
     #[test]
     fn occludable_pool_occludes_all_panels_without_a_seq_test() {
-        let panels = [occluder(), occluder()];
+        let occluders = pool_occluders(true, &[panel(1, false), panel(2, true)]);
+
         assert_eq!(
-            composite_occlusion(true, &panels),
+            occluders.iter().map(|o| o.seq).collect::<Vec<_>>(),
+            [1, 2],
+            "a pane pool sits beneath every box, flagged or not"
+        );
+        assert_eq!(
+            occlusion_globals(&occluders),
             (2, 1),
             "a pane pool reports every panel and bypasses the seq test"
         );
+    }
+
+    #[test]
+    fn non_pane_pool_occludes_only_against_panels_above_pools() {
+        let occluders = pool_occluders(false, &[panel(1, false), panel(2, true)]);
+
         assert_eq!(
-            composite_occlusion(false, &panels),
+            occluders.iter().map(|o| o.seq).collect::<Vec<_>>(),
+            [2],
+            "a non-pane pool is box content, so only chrome above every pooled \
+             surface covers it"
+        );
+        assert_eq!(occlusion_globals(&occluders), (1, 1));
+    }
+
+    #[test]
+    fn non_pane_pool_with_no_panel_above_pools_occludes_nothing() {
+        let occluders = pool_occluders(false, &[panel(1, false), panel(2, false)]);
+
+        assert_eq!(occluders.len(), 0, "no panel floats above the pool");
+        assert_eq!(
+            occlusion_globals(&occluders),
             (0, 0),
-            "a non-pane pool is box content and never occludes"
+            "an empty list leaves the composite unoccluded, as before the flag"
         );
     }
 

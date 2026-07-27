@@ -10,7 +10,7 @@
 
 use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
-    render::{build_occluders, composite_occlusion, CellMetrics, Frame, Occluder},
+    render::{build_occluders, occlusion_globals, pool_occluders, CellMetrics, Frame, Occluder},
 };
 use bytemuck::{Pod, Zeroable};
 use cosmic_text::{
@@ -1050,11 +1050,12 @@ impl TextPass {
     ) {
         // An occludable pane pool sits under every box, so its composite draws
         // discard inside any panel rect with the seq test bypassed. A non-pane
-        // pool is box content and leaves the panel count at zero. The composite
-        // draws bind self.globals, so the occlusion rides that buffer alone.
-        let occluders = build_occluders(panels);
+        // pool is box content and keeps only the panels floating above every
+        // pooled surface. The composite draws bind self.globals, so the occlusion
+        // rides that buffer alone.
+        let occluders = pool_occluders(occludable, panels);
         self.upload_occluders(device, queue, &occluders);
-        let (panel_count, occlude_all) = composite_occlusion(occludable, &occluders);
+        let (panel_count, occlude_all) = occlusion_globals(&occluders);
         queue.write_buffer(
             &self.globals,
             0,

@@ -6,7 +6,7 @@
 //! ride in cell-fraction units and the vertex shader scales them by the live
 //! cell size, so a path tracks font zoom.
 
-use crate::render::{build_occluders, composite_occlusion, CellMetrics, Occluder};
+use crate::render::{occlusion_globals, pool_occluders, CellMetrics, Occluder};
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::grid::{Panel, Polyline, Rgb};
 use wgpu::{
@@ -268,9 +268,10 @@ impl PolylinePass {
     /// shared globals uniform the live pass already wrote this frame.
     ///
     /// `occludable` marks a pane pool that sits under every box. Its paths are
-    /// then occluded against `panels` with the seq test bypassed, so a line
-    /// gliding beneath a modal is hidden by it. A non-pane pool passes `false`
-    /// and its paths never occlude, since they are a box's own content.
+    /// then occluded against all of `panels` with the seq test bypassed, so a line
+    /// gliding beneath a modal is hidden by it. A non-pane pool passes `false` and
+    /// its paths occlude only against the panels that float above every pooled
+    /// surface, since they are a box's own content.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_composite(
         &mut self,
@@ -282,9 +283,9 @@ impl PolylinePass {
         shift_rows: f32,
         occludable: bool,
     ) {
-        let occluders = build_occluders(panels);
+        let occluders = pool_occluders(occludable, panels);
         self.upload_occluders(device, queue, &occluders);
-        let (panel_count, occlude_all) = composite_occlusion(occludable, &occluders);
+        let (panel_count, occlude_all) = occlusion_globals(&occluders);
 
         let globals = Globals {
             resolution,

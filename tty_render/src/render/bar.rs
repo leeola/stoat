@@ -7,7 +7,7 @@
 //! cell-fraction units and the vertex shader scales it by the live cell size, so
 //! bars track font zoom.
 
-use crate::render::{build_occluders, composite_occlusion, CellMetrics, Occluder};
+use crate::render::{occlusion_globals, pool_occluders, CellMetrics, Occluder};
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::grid::{Bar, Panel, Rgb};
 use wgpu::{
@@ -260,9 +260,10 @@ impl BarPass {
     /// only when the bar count outgrows the composite capacity.
     ///
     /// `occludable` marks a pane pool that sits under every box. Its bars are
-    /// then occluded against `panels` with the seq test bypassed, so a gutter
-    /// bar gliding beneath a modal is hidden by it. A non-pane pool passes
-    /// `false` and its bars never occlude, since they are a box's own content.
+    /// then occluded against all of `panels` with the seq test bypassed, so a
+    /// gutter bar gliding beneath a modal is hidden by it. A non-pane pool passes
+    /// `false` and its bars occlude only against the panels that float above every
+    /// pooled surface, since they are a box's own content.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_composite(
         &mut self,
@@ -274,9 +275,9 @@ impl BarPass {
         shift_rows: f32,
         occludable: bool,
     ) {
-        let occluders = build_occluders(panels);
+        let occluders = pool_occluders(occludable, panels);
         self.upload_occluders(device, queue, &occluders);
-        let (panel_count, occlude_all) = composite_occlusion(occludable, &occluders);
+        let (panel_count, occlude_all) = occlusion_globals(&occluders);
 
         let globals = Globals {
             resolution,
