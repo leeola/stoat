@@ -449,6 +449,22 @@ impl ActiveModal {
         self.hides_minimap() || self == Self::Palette
     }
 
+    /// Whether the frame paints this modal as its own centered box.
+    ///
+    /// False for the transient text inputs, which render in the popup section
+    /// beside the cursor instead, leaving the frame free to paint the key-hints
+    /// box over the editor behind them.
+    pub(crate) fn paints_own_box(self) -> bool {
+        !matches!(
+            self,
+            Self::Rename
+                | Self::Search
+                | Self::SplitSelection
+                | Self::FilterSelections
+                | Self::ShellInput
+        )
+    }
+
     /// The resizable-box kind a zoom step applies to, or `None` for a modal that
     /// sizes entirely to its content.
     pub(crate) fn zoom_kind(self) -> Option<ModalKind> {
@@ -474,24 +490,12 @@ impl ActiveModal {
 /// Modals are mutually exclusive in practice, since the keymap's `!modal` guards
 /// keep a modal's own context from reaching the bindings that open another. That
 /// makes the order unobservable in normal operation and load-bearing only if some
-/// path opens a second modal anyway, which the debug assertion below catches. It
-/// stays debug-only because the release behavior wanted in that case is the
-/// canonical pick, not a panic in the user's editor.
-pub(crate) fn active_modal(stoat: &Stoat) -> Option<ActiveModal> {
-    debug_assert!(
-        open_modal_count(stoat) <= 1,
-        "modals must be mutually exclusive, found {} open",
-        open_modal_count(stoat)
-    );
-
-    topmost_modal(stoat)
-}
-
-/// The canonical pick with no exclusivity check.
+/// path opens a second modal anyway, which
+/// [`debug_assert_modal_exclusivity`] catches.
 ///
-/// Split out from [`active_modal`] so the ranking can be pinned by a test over a
-/// state that has two modals open, which the assertion there rejects by design.
-fn topmost_modal(stoat: &Stoat) -> Option<ActiveModal> {
+/// This resolver stays pure so a caller can ask what the canonical pick would be
+/// over any state, including one with two modals open.
+pub(crate) fn active_modal(stoat: &Stoat) -> Option<ActiveModal> {
     if stoat.modal_run.is_some() {
         Some(ActiveModal::Run)
     } else if stoat.quit_all_confirm.is_some() {
@@ -529,6 +533,24 @@ fn topmost_modal(stoat: &Stoat) -> Option<ActiveModal> {
     } else {
         None
     }
+}
+
+/// Panic in a debug build when two modals are open at once.
+///
+/// The keymap's `!modal` guards are what hold this invariant, since a modal's own
+/// context never reaches the bindings that would open another. Breaking it is a
+/// routing bug rather than a rendering one, because keys and paint then disagree
+/// about which modal the user is in, so the check sits on the key path and runs
+/// once per press rather than once per render.
+///
+/// Debug-only because the release behavior wanted here is
+/// [`active_modal`]'s canonical pick, not a panic in the user's editor.
+pub(crate) fn debug_assert_modal_exclusivity(stoat: &Stoat) {
+    debug_assert!(
+        open_modal_count(stoat) <= 1,
+        "modals must be mutually exclusive, found {} open",
+        open_modal_count(stoat)
+    );
 }
 
 fn open_modal_count(stoat: &Stoat) -> usize {
@@ -1046,14 +1068,14 @@ mod tests {
     }
 
     /// The canonical order is only observable when two modals are somehow open at
-    /// once, which [`active_modal`] asserts against. This pins what the release
-    /// build does in that case, through the unchecked resolver.
+    /// once, which the keymap's `!modal` guards prevent. This pins what the app
+    /// does anyway if some path ever opens a second one.
     #[test]
     fn a_quit_prompt_outranks_a_finder_opened_under_it() {
         let mut h = Stoat::test();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
         assert_eq!(
-            topmost_modal(&h.stoat),
+            active_modal(&h.stoat),
             Some(ActiveModal::FileFinder),
             "the finder alone is the active modal"
         );
@@ -1064,7 +1086,7 @@ mod tests {
         ));
 
         assert_eq!(
-            topmost_modal(&h.stoat),
+            active_modal(&h.stoat),
             Some(ActiveModal::QuitConfirm),
             "the prompt keys route to wins over the finder behind it"
         );

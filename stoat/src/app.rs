@@ -19,8 +19,8 @@ use crate::{
     },
     keymap::{Keymap, ResolvedAction, StateValue},
     keymap_state::{
-        active_modal, modal_predicate, normalize_shift_event, resolve_action, ActiveModal,
-        StoatKeymapState,
+        active_modal, debug_assert_modal_exclusivity, modal_predicate, normalize_shift_event,
+        resolve_action, ActiveModal, StoatKeymapState,
     },
     pane::{DockId, DockVisibility, FocusTarget, NodeId, PaneId, PaneTree, Placement, View},
     quit_all_confirm::QuitAllConfirm,
@@ -5532,6 +5532,8 @@ impl Stoat {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> UpdateEffect {
+        debug_assert_modal_exclusivity(self);
+
         // A version notice is a one-shot message. Any key press retires it.
         self.badges
             .remove_by_source(crate::badge::BadgeSource::Version);

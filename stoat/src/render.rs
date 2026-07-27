@@ -408,6 +408,12 @@ pub(crate) fn frame(
     let lsp_pending = stoat.lsp_pending_label();
     let diff_warm_busy = stoat.diff_warm_busy();
 
+    // Resolved here because the modal chain below cannot resolve it. active_modal
+    // takes the whole &Stoat, and ws holds a &mut into it from the next line to
+    // the end of the function. Nothing between here and the chain opens or closes
+    // a modal, so the value still holds there.
+    let painted_modal = active_modal(stoat);
+
     let ws = &mut stoat.workspaces[stoat.active_workspace];
 
     ws.layout(size);
@@ -663,230 +669,300 @@ pub(crate) fn frame(
         &stoat.theme,
         buf,
     );
-    if let Some(run_id) = stoat.modal_run {
-        if let Some(run_state) = ws.runs.get(run_id) {
-            run_pane::render_modal_run(run_state, &stoat.theme, full, buf, &mut *scene);
-        }
-    } else if let Some(help) = &stoat.help {
-        help::render_help(
-            help,
-            &mode,
-            ws,
-            &stoat.theme,
-            &stoat.settings.mode_badges,
-            full,
-            modal_zoom_steps(&stoat.modal_zoom, ModalKind::Help),
-            buf,
-            &mut *scene,
-        );
-        cached_modal_hints(
-            &mut stoat.hints_cache,
-            &stoat.keymap,
-            &mode,
-            "help",
-            None,
-            &stoat.theme,
-            full,
-            buf,
-            &mut *scene,
-        );
-    } else if let Some(finder) = &mut stoat.file_finder {
-        let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::FileFinder);
-        let split = modal_split_percent(&stoat.modal_split, ModalKind::FileFinder);
-        file_finder::render_file_finder(
-            finder,
-            ws,
-            &stoat.theme,
-            full,
-            zoom,
-            split,
-            buf,
-            &mut *scene,
-        );
-        cached_modal_hints(
-            &mut stoat.hints_cache,
-            &stoat.keymap,
-            &mode,
-            "finder",
-            None,
-            &stoat.theme,
-            full,
-            buf,
-            &mut *scene,
-        );
-    } else if let Some(finder) = &mut stoat.symbol_finder {
-        symbol_finder::render_symbol_finder(
-            finder,
-            ws,
-            &stoat.theme,
-            &stoat.language_registry,
-            full,
-            modal_zoom_steps(&stoat.modal_zoom, ModalKind::SymbolFinder),
-            modal_split_percent(&stoat.modal_split, ModalKind::SymbolFinder),
-            buf,
-            &mut *scene,
-        );
-        cached_modal_hints(
-            &mut stoat.hints_cache,
-            &stoat.keymap,
-            &mode,
-            "symbols",
-            None,
-            &stoat.theme,
-            full,
-            buf,
-            &mut *scene,
-        );
-    } else if let Some(finder) = &mut stoat.code_search {
-        let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::CodeSearch);
-        let split = modal_split_percent(&stoat.modal_split, ModalKind::CodeSearch);
-        code_search::render_code_search(
-            finder,
-            ws,
-            &stoat.theme,
-            full,
-            zoom,
-            split,
-            buf,
-            &mut *scene,
-        );
-        cached_modal_hints(
-            &mut stoat.hints_cache,
-            &stoat.keymap,
-            &mode,
-            "code_search",
-            None,
-            &stoat.theme,
-            full,
-            buf,
-            &mut *scene,
-        );
-    } else if let Some(palette) = &mut stoat.command_palette {
-        let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::Palette);
-        command_palette::render_command_palette(
-            palette,
-            ws,
-            &stoat.theme,
-            full,
-            zoom,
-            buf,
-            &mut *scene,
-        );
-        cached_modal_hints(
-            &mut stoat.hints_cache,
-            &stoat.keymap,
-            &mode,
-            "palette",
-            None,
-            &stoat.theme,
-            full,
-            buf,
-            &mut *scene,
-        );
-    } else if let Some(picker) = &mut stoat.workspace_picker {
-        workspace_picker::render_workspace_picker(picker, ws, &stoat.theme, full, buf, &mut *scene);
-        cached_modal_hints(
-            &mut stoat.hints_cache,
-            &stoat.keymap,
-            &mode,
-            "workspace_picker",
-            Some("picker"),
-            &stoat.theme,
-            full,
-            buf,
-            &mut *scene,
-        );
-    } else if let Some(modal) = &stoat.quit_all_confirm {
-        quit_all_confirm::render_quit_all_confirm(modal, &stoat.theme, full, buf, &mut *scene);
-        cached_modal_hints(
-            &mut stoat.hints_cache,
-            &stoat.keymap,
-            &mode,
-            "quit_confirm",
-            Some("quit"),
-            &stoat.theme,
-            full,
-            buf,
-            &mut *scene,
-        );
-    } else if let Some(picker) = &mut stoat.jumplist_picker {
-        jumplist_picker::render_jumplist_picker(picker, &stoat.theme, full, buf, &mut *scene);
-        cached_modal_hints(
-            &mut stoat.hints_cache,
-            &stoat.keymap,
-            &mode,
-            "jumplist",
-            None,
-            &stoat.theme,
-            full,
-            buf,
-            &mut *scene,
-        );
-    } else if let Some(picker) = &mut stoat.commit_picker {
-        let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::CommitPicker);
-        let split = modal_split_percent(&stoat.modal_split, ModalKind::CommitPicker);
-        commit_picker::render_commit_picker(
-            picker,
-            ws,
-            &stoat.theme,
-            full,
-            zoom,
-            split,
-            buf,
-            &mut *scene,
-        );
-        cached_modal_hints(
-            &mut stoat.hints_cache,
-            &stoat.keymap,
-            &mode,
-            "commit_picker",
-            None,
-            &stoat.theme,
-            full,
-            buf,
-            &mut *scene,
-        );
-    } else if let Some(picker) = &mut stoat.diagnostics_picker {
-        diagnostics_picker::render_diagnostics_picker(
-            picker,
-            &ws.git_root,
-            &stoat.theme,
-            full,
-            buf,
-            &mut *scene,
-        );
-        cached_modal_hints(
-            &mut stoat.hints_cache,
-            &stoat.keymap,
-            &mode,
-            "diagnostics",
-            None,
-            &stoat.theme,
-            full,
-            buf,
-            &mut *scene,
-        );
-    } else if let Some(picker) = &mut stoat.location_picker {
-        location_picker::render_location_picker(
-            picker,
-            &ws.git_root,
-            &stoat.theme,
-            full,
-            buf,
-            &mut *scene,
-        );
-        cached_modal_hints(
-            &mut stoat.hints_cache,
-            &stoat.keymap,
-            &mode,
-            "location",
-            Some("locations"),
-            &stoat.theme,
-            full,
-            buf,
-            &mut *scene,
-        );
-    } else if mode != "space_pane_display"
+    match painted_modal {
+        Some(ActiveModal::Run) => {
+            if let Some(run_id) = stoat.modal_run
+                && let Some(run_state) = ws.runs.get(run_id)
+            {
+                run_pane::render_modal_run(run_state, &stoat.theme, full, buf, &mut *scene);
+            }
+        },
+        Some(ActiveModal::QuitConfirm) => {
+            if let Some(modal) = &stoat.quit_all_confirm {
+                quit_all_confirm::render_quit_all_confirm(
+                    modal,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+                cached_modal_hints(
+                    &mut stoat.hints_cache,
+                    &stoat.keymap,
+                    &mode,
+                    "quit_confirm",
+                    Some("quit"),
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+            }
+        },
+        Some(ActiveModal::WorkspacePicker) => {
+            if let Some(picker) = &mut stoat.workspace_picker {
+                workspace_picker::render_workspace_picker(
+                    picker,
+                    ws,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+                cached_modal_hints(
+                    &mut stoat.hints_cache,
+                    &stoat.keymap,
+                    &mode,
+                    "workspace_picker",
+                    Some("picker"),
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+            }
+        },
+        Some(ActiveModal::Jumplist) => {
+            if let Some(picker) = &mut stoat.jumplist_picker {
+                jumplist_picker::render_jumplist_picker(
+                    picker,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+                cached_modal_hints(
+                    &mut stoat.hints_cache,
+                    &stoat.keymap,
+                    &mode,
+                    "jumplist",
+                    None,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+            }
+        },
+        Some(ActiveModal::Diagnostics) => {
+            if let Some(picker) = &mut stoat.diagnostics_picker {
+                diagnostics_picker::render_diagnostics_picker(
+                    picker,
+                    &ws.git_root,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+                cached_modal_hints(
+                    &mut stoat.hints_cache,
+                    &stoat.keymap,
+                    &mode,
+                    "diagnostics",
+                    None,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+            }
+        },
+        Some(ActiveModal::CommitPicker) => {
+            if let Some(picker) = &mut stoat.commit_picker {
+                let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::CommitPicker);
+                let split = modal_split_percent(&stoat.modal_split, ModalKind::CommitPicker);
+                commit_picker::render_commit_picker(
+                    picker,
+                    ws,
+                    &stoat.theme,
+                    full,
+                    zoom,
+                    split,
+                    buf,
+                    &mut *scene,
+                );
+                cached_modal_hints(
+                    &mut stoat.hints_cache,
+                    &stoat.keymap,
+                    &mode,
+                    "commit_picker",
+                    None,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+            }
+        },
+        Some(ActiveModal::Location) => {
+            if let Some(picker) = &mut stoat.location_picker {
+                location_picker::render_location_picker(
+                    picker,
+                    &ws.git_root,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+                cached_modal_hints(
+                    &mut stoat.hints_cache,
+                    &stoat.keymap,
+                    &mode,
+                    "location",
+                    Some("locations"),
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+            }
+        },
+        Some(ActiveModal::FileFinder) => {
+            if let Some(finder) = &mut stoat.file_finder {
+                let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::FileFinder);
+                let split = modal_split_percent(&stoat.modal_split, ModalKind::FileFinder);
+                file_finder::render_file_finder(
+                    finder,
+                    ws,
+                    &stoat.theme,
+                    full,
+                    zoom,
+                    split,
+                    buf,
+                    &mut *scene,
+                );
+                cached_modal_hints(
+                    &mut stoat.hints_cache,
+                    &stoat.keymap,
+                    &mode,
+                    "finder",
+                    None,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+            }
+        },
+        Some(ActiveModal::SymbolFinder) => {
+            if let Some(finder) = &mut stoat.symbol_finder {
+                symbol_finder::render_symbol_finder(
+                    finder,
+                    ws,
+                    &stoat.theme,
+                    &stoat.language_registry,
+                    full,
+                    modal_zoom_steps(&stoat.modal_zoom, ModalKind::SymbolFinder),
+                    modal_split_percent(&stoat.modal_split, ModalKind::SymbolFinder),
+                    buf,
+                    &mut *scene,
+                );
+                cached_modal_hints(
+                    &mut stoat.hints_cache,
+                    &stoat.keymap,
+                    &mode,
+                    "symbols",
+                    None,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+            }
+        },
+        Some(ActiveModal::CodeSearch) => {
+            if let Some(finder) = &mut stoat.code_search {
+                let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::CodeSearch);
+                let split = modal_split_percent(&stoat.modal_split, ModalKind::CodeSearch);
+                code_search::render_code_search(
+                    finder,
+                    ws,
+                    &stoat.theme,
+                    full,
+                    zoom,
+                    split,
+                    buf,
+                    &mut *scene,
+                );
+                cached_modal_hints(
+                    &mut stoat.hints_cache,
+                    &stoat.keymap,
+                    &mode,
+                    "code_search",
+                    None,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+            }
+        },
+        Some(ActiveModal::Palette) => {
+            if let Some(palette) = &mut stoat.command_palette {
+                let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::Palette);
+                command_palette::render_command_palette(
+                    palette,
+                    ws,
+                    &stoat.theme,
+                    full,
+                    zoom,
+                    buf,
+                    &mut *scene,
+                );
+                cached_modal_hints(
+                    &mut stoat.hints_cache,
+                    &stoat.keymap,
+                    &mode,
+                    "palette",
+                    None,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+            }
+        },
+        Some(ActiveModal::Help) => {
+            if let Some(help) = &stoat.help {
+                help::render_help(
+                    help,
+                    &mode,
+                    ws,
+                    &stoat.theme,
+                    &stoat.settings.mode_badges,
+                    full,
+                    modal_zoom_steps(&stoat.modal_zoom, ModalKind::Help),
+                    buf,
+                    &mut *scene,
+                );
+                cached_modal_hints(
+                    &mut stoat.hints_cache,
+                    &stoat.keymap,
+                    &mode,
+                    "help",
+                    None,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+            }
+        },
+        // The transient text inputs paint in the popup section further down
+        // rather than as a centered box, so they leave the key-hints branch
+        // below to run exactly as no-modal frames do.
+        Some(
+            ActiveModal::Rename
+            | ActiveModal::Search
+            | ActiveModal::SplitSelection
+            | ActiveModal::FilterSelections
+            | ActiveModal::ShellInput,
+        )
+        | None => {},
+    }
+
+    if !painted_modal.is_some_and(ActiveModal::paints_own_box)
+        && mode != "space_pane_display"
         && (!PRIMARY_MODES.contains(&mode.as_str())
             || screen == Some("review")
             || screen == Some("conflict")
@@ -1237,6 +1313,70 @@ mod normalize_tests {
         assert!(
             buf.content.iter().all(|cell| cell.bg != Color::Reset),
             "every cell carries the theme's background, so the screen tracks :theme",
+        );
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::{hints_cache_key, Flags, FocusFlags};
+    use crate::{
+        app::Stoat,
+        keymap_state::modal_predicate,
+        location_picker::{LocationEntry, LocationPicker},
+    };
+
+    /// The `modal` a frame painted, read back off the hints cache the painting arm
+    /// populated.
+    fn painted_modal_hints(h: &crate::test_harness::TestHarness) -> Option<u64> {
+        h.stoat.hints_cache.as_ref().map(|c| c.key)
+    }
+
+    fn modal_hints_key(mode: &str, modal: &str) -> u64 {
+        hints_cache_key(
+            mode,
+            None,
+            &Flags::default(),
+            None,
+            &FocusFlags::default(),
+            Some(modal),
+        )
+    }
+
+    /// The frame used to walk the modal fields in its own order, so a second modal
+    /// opened over a first could be the one painted while keys still routed to the
+    /// other. Both now derive from the same authority.
+    #[test]
+    fn the_painted_modal_is_the_one_keys_route_to() {
+        let mut h = Stoat::test();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+        h.render_composited();
+        let mode = h.stoat.focused_mode().to_string();
+        assert_eq!(
+            painted_modal_hints(&h),
+            Some(modal_hints_key(&mode, "finder")),
+            "the finder alone paints the finder"
+        );
+
+        h.stoat.location_picker = Some(LocationPicker::new(vec![LocationEntry {
+            path: std::path::PathBuf::from("/repo/a.rs"),
+            offset: 0,
+            line: 1,
+            column: 1,
+            text: "candidate".to_owned(),
+        }]));
+        h.render_composited();
+
+        assert_eq!(
+            modal_predicate(&h.stoat),
+            Some("location"),
+            "the location picker outranks the finder for keys"
+        );
+        let mode = h.stoat.focused_mode().to_string();
+        assert_eq!(
+            painted_modal_hints(&h),
+            Some(modal_hints_key(&mode, "location")),
+            "and so it is what the frame paints"
         );
     }
 }
