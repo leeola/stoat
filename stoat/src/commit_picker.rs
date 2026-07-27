@@ -597,6 +597,53 @@ mod tests {
         ]
     }
 
+    /// A history whose newest commit merges a side branch back into the
+    /// mainline, so the graph has a two-parent row to draw.
+    fn merge_history() -> Vec<CommitInfo> {
+        let mut merge = commit("mmm0000", "merge the feature");
+        merge.parents = vec!["bbb2222".into(), "fff4444".into()];
+        let mut mainline = commit("bbb2222", "rename the gadget");
+        mainline.parents = vec!["aaa1111".into()];
+        let mut feature = commit("fff4444", "add the widget");
+        feature.parents = vec!["aaa1111".into()];
+
+        vec![
+            merge,
+            mainline,
+            feature,
+            commit("aaa1111", "initial import"),
+        ]
+    }
+
+    /// A theme stating both the RGB foreground the graph's rich path gates on
+    /// and the modal background its blends and halos are drawn from, rather
+    /// than relying on whatever the default carries.
+    fn graph_theme() -> crate::theme::Theme {
+        let src = r##"theme t { ui.text.fg = "#ffffff"; ui.modal.palette.bg = "#282c34"; }"##;
+        let (config, _) = stoat_config::parse(src);
+        crate::theme::Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+    }
+
+    /// The modal background [`graph_theme`] declares, which is the color every
+    /// halo and merge hole is drawn in.
+    const GRAPH_BG: [u8; 3] = [0x28, 0x2c, 0x34];
+
+    /// Every node disc the graph emitted, in emission order, as
+    /// `(width, color)`. A node is the zero-length path the renderer draws as a
+    /// disc, so the lane runs between rows -- which carry two or more points --
+    /// are left out.
+    fn node_discs(scene: &mut stoatty_widgets::ApcScene) -> Vec<(u16, [u8; 3])> {
+        use stoatty_protocol::command::Command;
+
+        crate::test_harness::apc::decode_apc_stream(scene.buffer())
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Polyline(line) if line.points.len() == 1 => Some((line.width, line.color)),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn shown(p: &CommitPicker) -> Vec<String> {
         p.filtered
             .iter()
@@ -1531,53 +1578,82 @@ mod tests {
             "each row's node lands in lane 0, and the two branch tips take the \
              ringed glyph while the commit under them takes the plain one"
         );
+
+        let merge = picker(merge_history(), &[], "mmm0000");
+        let (buf, _) = painted_graph(&merge, &crate::theme::Theme::empty());
+        assert_eq!(
+            buf.cell((0, 0)).expect("in bounds").symbol(),
+            "○",
+            "and a merge takes the hollow glyph, the fallback's stand-in for \
+             the ring the stroked path draws"
+        );
     }
 
     /// A branch tip is the row a reader navigates by, so it has to be tellable
     /// from the history running past it at a glance.
     #[test]
     fn a_branch_tip_strokes_a_wider_node_in_a_stronger_color() {
-        use crate::render::commit_picker::{BRANCH_NODE_DIAMETER, NODE_DIAMETER};
-        use stoatty_protocol::command::Command;
-
-        // The blend only shows against a modal background that resolves to RGB,
-        // so the theme states both that and the foreground the rich path gates
-        // on rather than relying on whatever the default carries.
-        let theme = {
-            let src = r##"theme t { ui.text.fg = "#ffffff"; ui.modal.palette.bg = "#282c34"; }"##;
-            let (config, _) = stoat_config::parse(src);
-            crate::theme::Theme::from_config(&config.expect("theme parses"), "t")
-                .expect("theme loads")
-        };
+        use crate::render::commit_picker::{BRANCH_NODE_DIAMETER, NODE_DIAMETER, NODE_HALO};
 
         let h = seeded_picker_harness();
         let p = h.stoat.commit_picker.as_ref().expect("open");
-        let (_, mut scene) = painted_graph(p, &theme);
-
-        // A node is the zero-length polyline the renderer draws as a disc. The
-        // lane runs between rows carry two or more points.
-        let nodes: Vec<(u16, [u8; 3])> =
-            crate::test_harness::apc::decode_apc_stream(scene.buffer())
-                .into_iter()
-                .filter_map(|cmd| match cmd {
-                    Command::Polyline(line) if line.points.len() == 1 => {
-                        Some((line.width, line.color))
-                    },
-                    _ => None,
-                })
-                .collect();
+        let (_, mut scene) = painted_graph(p, &graph_theme());
+        let nodes = node_discs(&mut scene);
 
         let widths: Vec<u16> = nodes.iter().map(|&(width, _)| width).collect();
         assert_eq!(
             widths,
-            [BRANCH_NODE_DIAMETER, BRANCH_NODE_DIAMETER, NODE_DIAMETER],
+            [
+                BRANCH_NODE_DIAMETER + NODE_HALO,
+                BRANCH_NODE_DIAMETER,
+                BRANCH_NODE_DIAMETER + NODE_HALO,
+                BRANCH_NODE_DIAMETER,
+                NODE_DIAMETER + NODE_HALO,
+                NODE_DIAMETER,
+            ],
             "main and feature sit on the first two rows and draw wide nodes, \
-             leaving the commit below them an ordinary one"
+             leaving the commit below them an ordinary one, and each rides a \
+             halo a touch wider than itself"
+        );
+        assert_eq!(
+            nodes[0].1, GRAPH_BG,
+            "the halo is drawn in the modal background, which is what cuts the \
+             node out of the lane running through it"
         );
         assert_ne!(
-            nodes[0].1, nodes[2].1,
+            nodes[1].1, nodes[5].1,
             "and a tip keeps the raw lane color rather than the blended one \
              every other node shares"
+        );
+    }
+
+    /// Where a row came from is history a lane line alone cannot show, so a
+    /// merge's node has to carry it.
+    #[test]
+    fn a_merge_strokes_a_ring_rather_than_another_filled_dot() {
+        use crate::render::commit_picker::{MERGE_HOLE, NODE_DIAMETER, NODE_HALO};
+
+        let p = picker(merge_history(), &[], "mmm0000");
+        let (_, mut scene) = painted_graph(&p, &graph_theme());
+        let nodes = node_discs(&mut scene);
+
+        assert_eq!(
+            nodes[0],
+            (NODE_DIAMETER + NODE_HALO, GRAPH_BG),
+            "the merge's halo goes down first"
+        );
+        assert_eq!(nodes[1].0, NODE_DIAMETER, "then the node over it");
+        assert_ne!(nodes[1].1, GRAPH_BG, "in its own lane color");
+        assert_eq!(
+            nodes[2],
+            (MERGE_HOLE, GRAPH_BG),
+            "and the background hole last, which is what leaves a ring"
+        );
+        assert_eq!(
+            nodes.len(),
+            9,
+            "only the two-parent row draws a third disc, the other three rows \
+             a halo and a filled node each"
         );
     }
 

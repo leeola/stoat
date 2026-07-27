@@ -259,6 +259,20 @@ pub(crate) const NODE_DIAMETER: u16 = 10;
 /// the rows a reader orients by stand out from the history running past them.
 pub(crate) const BRANCH_NODE_DIAMETER: u16 = 14;
 
+/// Sixteenths a node's halo adds to its diameter.
+///
+/// A lane runs straight through its own node in nearly the same color, so
+/// without a ring of background between them the two read as one thick stroke
+/// instead of a dot threaded onto a line.
+pub(crate) const NODE_HALO: u16 = 4;
+
+/// Diameter of the background disc punched out of a merge's node, in
+/// sixteenths of a cell.
+///
+/// Leaving a ring is what tells a commit with more than one parent from an
+/// ordinary one at a glance, without spending a second color on it.
+pub(crate) const MERGE_HOLE: u16 = 4;
+
 /// Intermediate points sampled along a lane transition. Four segments read as a
 /// curve at cell scale without the protocol needing a curve primitive.
 const CURVE_SEGMENTS: i32 = 4;
@@ -266,8 +280,11 @@ const CURVE_SEGMENTS: i32 = 4;
 /// Paint the node graph for the rows starting at `start_row`, one graph row per
 /// table row.
 ///
-/// A row whose commit is a local branch tip gets a wider node in the unblended
-/// lane color, since those are the rows a reader navigates by.
+/// A node's shape says what kind of commit it marks. A branch tip takes a wider
+/// disc in the unblended lane color, since those are the rows a reader navigates
+/// by. A merge is hollowed out to a ring, and an ordinary commit stays a filled
+/// disc. Each sits inside a halo of the modal background, which is what keeps it
+/// readable as a dot against the lane running through it.
 ///
 /// Under a terminal whose theme resolves to RGB this strokes the lanes as
 /// polylines and writes no glyphs, matching how every other sub-cell component
@@ -314,6 +331,9 @@ pub(crate) fn paint_commit_graph(
         let y = row_idx as u16;
         let node_lane = clamp(row.node_lane);
         let tip = picker.branch_tips.contains_key(&commit.sha);
+        // A tip that is also a merge draws as a tip. Which branch a row heads
+        // is what a reader navigates by, so it outranks how the row was made.
+        let merge = !tip && commit.parents.len() >= 2;
 
         for edge in &row.edges {
             let (from, to) = (clamp(edge.from_lane), clamp(edge.to_lane));
@@ -332,32 +352,62 @@ pub(crate) fn paint_commit_graph(
 
         match rich {
             true => {
-                Polyline {
-                    points: vec![[lane_center(node_lane), row_center(y)]],
-                    width: match tip {
-                        true => BRANCH_NODE_DIAMETER,
-                        false => NODE_DIAMETER,
-                    },
-                    color: match tip {
-                        true => raw_lane_color(node_lane),
-                        false => lane_color(node_lane),
-                    },
+                let diameter = match tip {
+                    true => BRANCH_NODE_DIAMETER,
+                    false => NODE_DIAMETER,
+                };
+
+                if let Some(bg) = background {
+                    dot(area, node_lane, y, diameter + NODE_HALO, bg, buf, scene);
                 }
-                .render(area, buf, scene);
+                let color = match tip {
+                    true => raw_lane_color(node_lane),
+                    false => lane_color(node_lane),
+                };
+                dot(area, node_lane, y, diameter, color, buf, scene);
+
+                // Without a background to punch the ring out of, a merge keeps
+                // the filled disc rather than losing its node entirely.
+                if merge && let Some(bg) = background {
+                    dot(area, node_lane, y, MERGE_HOLE, bg, buf, scene);
+                }
             },
             false => {
                 let x = area.x + node_lane * LANE_CELLS;
                 if x < area.x + area.width {
                     buf[(x, area.y + y)]
-                        .set_char(match tip {
-                            true => '◉',
-                            false => '●',
+                        .set_char(match (tip, merge) {
+                            (true, _) => '◉',
+                            (false, true) => '○',
+                            (false, false) => '●',
                         })
                         .set_style(theme.get(scope::UI_TEXT));
                 }
             },
         }
     }
+}
+
+/// Stroke a disc `width` sixteenths across, centered on `lane` in row `y`.
+///
+/// A path of one point has no direction, which the renderer resolves to a round
+/// cap and so to a dot. That is the only circle the protocol offers, so every
+/// node, halo, and merge hole is one of these.
+fn dot(
+    area: Rect,
+    lane: u16,
+    y: u16,
+    width: u16,
+    color: [u8; 3],
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) {
+    Polyline {
+        points: vec![[lane_center(lane), row_center(y)]],
+        width,
+        color,
+    }
+    .render(area, buf, scene);
 }
 
 /// Horizontal center of `lane` in sixteenths from the column's left edge.
