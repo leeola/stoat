@@ -18426,6 +18426,84 @@ mod tests {
         assert!(matches!(h.stoat.handle_key(ctrl_c()), UpdateEffect::Quit));
     }
 
+    fn resolves(h: &crate::test_harness::TestHarness, key: &KeyEvent) -> bool {
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        h.stoat.keymap.lookup(&state, key).is_some()
+    }
+
+    fn space() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty())
+    }
+
+    /// A normal-mode modal binds only the keys it handles, so the editor's own
+    /// normal-mode block has to stop applying while one is open. Otherwise Space
+    /// opens a second modal over the picker and Ctrl-d scrolls the editor hidden
+    /// behind it, leaving render painting one modal while keys route to another.
+    #[test]
+    fn normal_mode_bindings_stop_at_the_location_picker() {
+        use crate::location_picker::{LocationEntry, LocationPicker};
+
+        let mut h = Stoat::test();
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(resolves(&h, &space()), "Space starts a chord in the editor");
+        assert!(resolves(&h, &ctrl_d), "and Ctrl-d scrolls it");
+
+        h.stoat.location_picker = Some(LocationPicker::new(vec![LocationEntry {
+            path: PathBuf::from("/repo/a.rs"),
+            offset: 0,
+            line: 1,
+            column: 1,
+            text: "candidate".to_owned(),
+        }]));
+
+        assert!(
+            !resolves(&h, &space()),
+            "Space starts no chord over the picker"
+        );
+        assert!(
+            !resolves(&h, &ctrl_d),
+            "and Ctrl-d does not scroll the editor behind it"
+        );
+    }
+
+    #[test]
+    fn space_chord_never_starts_over_the_quit_confirm() {
+        let mut h = Stoat::test();
+        h.stoat.quit_all_confirm = Some(QuitAllConfirm::new(&[], Path::new("/")));
+
+        assert!(
+            !resolves(&h, &space()),
+            "without a chord start, `space a s` cannot split behind the prompt"
+        );
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "the editor is still in normal mode, so only the guard suppressed it"
+        );
+    }
+
+    /// The guard must narrow when the block applies without changing how it
+    /// ranks, or it ties the equally-specific view blocks and beats them on
+    /// source order.
+    #[test]
+    fn a_view_block_still_outranks_the_guarded_normal_block() {
+        let mut h = Stoat::test();
+        h.seed_linear_history("/repo", &[("c1", "first", &[("a.rs", "fn a() {}\n")])]);
+        h.open_commits("/repo");
+
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty());
+        let actions = h
+            .stoat
+            .keymap
+            .lookup(&state, &j)
+            .expect("j is bound on the commits screen");
+        assert!(
+            actions.iter().any(|a| a.name == "CommitsNext"),
+            "the commits screen keeps j, got {actions:?}"
+        );
+    }
+
     #[test]
     fn run_pane_ctrl_c_interrupts_instead_of_quitting() {
         let mut h = Stoat::test();

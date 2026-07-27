@@ -356,7 +356,12 @@ on key {
         Enter -> LocationPickerSelect();
         Escape -> LocationPickerClose();
     }
-    mode == normal {
+    # Every normal-mode modal block above is self-contained, binding only the
+    # keys it handles. Without the modal guard this block's bindings stay live
+    # underneath them, so Space or `:` opens a second modal over an open picker
+    # and Ctrl-d/gg/G scroll the editor hidden behind it. Render then paints one
+    # modal while keys route to another.
+    !modal && mode == normal {
         Enter -> RunSubmit();
         q -> ReplayMacro();
         Space -> SetMode(space);

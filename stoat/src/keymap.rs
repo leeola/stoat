@@ -255,13 +255,19 @@ pub fn evaluate(predicate: &Predicate, state: &dyn KeymapState) -> bool {
 /// The count of leaf predicate atoms in `predicate`, the specificity a binding
 /// contributes per predicate when resolving competing bindings.
 ///
-/// An `And` sums its branches, since satisfying it requires all of them. Every
-/// other form counts as one. Leaves are a single atom, an `Or` scores one
-/// because it is satisfiable by its weakest branch, and a `Not` scores one
-/// because a negation is broadly satisfiable and so earns no specificity.
+/// An `And` sums its branches, since satisfying it requires all of them. A leaf
+/// is a single atom, and an `Or` scores one because it is satisfiable by its
+/// weakest branch.
+///
+/// A `Not` scores zero. A negation says which situations a block stays out of,
+/// not which one it is for, so it must not outrank a block that names the
+/// situation positively. `!modal && mode == normal` guards the editor bindings
+/// against every modal while still losing to `view == commits && mode == normal`
+/// on a `j` press, which is what makes the guard usable on a broad block.
 fn predicate_atoms(predicate: &Predicate) -> usize {
     match predicate {
         Predicate::And(l, r) => predicate_atoms(&l.node) + predicate_atoms(&r.node),
+        Predicate::Not(_) => 0,
         _ => 1,
     }
 }
