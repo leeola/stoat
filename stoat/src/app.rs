@@ -546,8 +546,11 @@ pub struct Stoat {
     /// the modal it belongs to. Reopening the file finder brings back the size
     /// the user last chose for it. They are session-scoped and deliberately not
     /// persisted, because a zoom is a reaction to what is on screen right now.
-    /// Every entry sits within [`MODAL_ZOOM_MIN`]`..=`[`MODAL_ZOOM_MAX`], which
-    /// [`Self::handle_zoom_step`] enforces as the only writer.
+    /// Every entry sits within [`MODAL_ZOOM_MIN`]`..=`[`MODAL_ZOOM_MAX`], and
+    /// usually within the narrower band that moves the box at the terminal's
+    /// current size, which [`Self::handle_zoom_step`] enforces as the only
+    /// writer. An entry can still sit outside that band after the terminal
+    /// shrinks, since nothing rewrites the ledger on resize.
     pub(crate) modal_zoom: std::collections::BTreeMap<ModalKind, i8>,
     /// Share of its body each modal's list pane takes, as a percentage, for the
     /// kinds whose list/preview separator the user has dragged. An absent kind
@@ -2000,14 +2003,21 @@ impl Stoat {
     /// resizing a pane hidden behind it would be a change the user cannot see.
     /// With no modal open the step resizes the focused pane against its split.
     ///
-    /// Modal levels are clamped to the range [`Self::modal_zoom`] documents.
-    /// They are per modal kind and outlive the modal, so reopening one brings
-    /// back the size the user last chose for it.
+    /// Modal levels are per modal kind and outlive the modal, so reopening one
+    /// brings back the size the user last chose for it. A level is clamped to
+    /// [`Self::modal_zoom_range`] rather than the wider ledger range, so a press
+    /// the box cannot act on is never remembered and the next press the other
+    /// way moves the modal immediately. Clamping the stored level before the
+    /// delta also brings an entry left over from a larger terminal back into
+    /// range on its first press.
     fn handle_zoom_step(&mut self, delta: i32) -> UpdateEffect {
         if let Some(kind) = crate::render::zoom_target_kind(self) {
+            let (lo, hi) = self
+                .modal_zoom_range(kind)
+                .unwrap_or((MODAL_ZOOM_MIN, MODAL_ZOOM_MAX));
             let level = self.modal_zoom.entry(kind).or_insert(0);
-            let stepped = i32::from(*level).saturating_add(delta);
-            *level = stepped.clamp(MODAL_ZOOM_MIN.into(), MODAL_ZOOM_MAX.into()) as i8;
+            let stepped = i32::from((*level).clamp(lo, hi)).saturating_add(delta);
+            *level = stepped.clamp(lo.into(), hi.into()) as i8;
             return UpdateEffect::Redraw;
         }
         if crate::render::zoom_context_modal(self) {
@@ -4089,6 +4099,118 @@ impl Stoat {
         } else {
             action_handlers::palette_move_selection(self, delta).unwrap_or(UpdateEffect::Redraw)
         }
+    }
+
+    /// The bordered box `kind`'s modal would occupy at `zoom`, sized from the
+    /// same inputs its renderer reads.
+    ///
+    /// Each kind resolves its own content measurement, so the box is the one the
+    /// user is looking at rather than a nominal size for the family.
+    ///
+    /// `None` when that modal is not open, or when the terminal is too small to
+    /// host it.
+    ///
+    /// See also:
+    /// - [`Self::modal_zoom_range`], which walks this across the zoom ledger to find the levels
+    ///   that actually move the box.
+    fn open_modal_box(&self, kind: ModalKind, zoom: i8) -> Option<Rect> {
+        let size = self.size();
+        let split = modal_split_percent(&self.modal_split, kind);
+
+        let modal = match kind {
+            ModalKind::Help => {
+                let help = self.help.as_ref()?;
+                crate::render::help::help_layout(
+                    size,
+                    crate::render::help::help_content_rows(help),
+                    zoom,
+                )?
+                .modal
+            },
+            ModalKind::FileFinder => {
+                let finder = self.file_finder.as_ref()?;
+                crate::render::file_finder::file_finder_layout(
+                    size,
+                    finder.content_size,
+                    zoom,
+                    split,
+                )?
+                .modal
+            },
+            ModalKind::SymbolFinder => {
+                let finder = self.symbol_finder.as_ref()?;
+                crate::render::symbol_finder::symbol_finder_layout(
+                    size,
+                    finder.content_rows,
+                    zoom,
+                    split,
+                )?
+                .0
+            },
+            // Search hits are unbounded, so code search declares the whole area
+            // exactly as its renderer does.
+            ModalKind::CodeSearch => {
+                self.code_search.as_ref()?;
+                crate::render::file_finder::file_finder_layout(
+                    size,
+                    (u16::MAX, u16::MAX),
+                    zoom,
+                    split,
+                )?
+                .modal
+            },
+            // Filter mode and argument mode share one box, so the hint alone
+            // sizes both.
+            ModalKind::Palette => {
+                let palette = self.command_palette.as_ref()?;
+                crate::render::command_palette::palette_filter_layout(
+                    size,
+                    palette.list_rows_hint(),
+                    zoom,
+                )?
+                .modal
+            },
+            ModalKind::CommitPicker => {
+                let picker = self.commit_picker.as_ref()?;
+                crate::render::commit_picker::commit_picker_layout(
+                    size,
+                    crate::render::commit_picker::graph_lanes(picker),
+                    zoom,
+                    split,
+                )?
+                .modal
+            },
+        };
+
+        Some(modal)
+    }
+
+    /// The zoom levels that actually move `kind`'s box, as an inclusive
+    /// `(lo, hi)` pair.
+    ///
+    /// A modal saturates against the screen well before the ledger's own
+    /// [`MODAL_ZOOM_MIN`]`..=`[`MODAL_ZOOM_MAX`] runs out, because
+    /// [`modal_box`](crate::render::chrome::modal_box) clamps the box to between
+    /// its minimum and the area less a thin margin. Steps past that point change
+    /// nothing on screen, and counting them would leave the user unwinding
+    /// invisible levels before the modal moved again.
+    ///
+    /// `None` when there is no box to measure, or when the box is the same at
+    /// both ends of the ledger and there is nothing to narrow to.
+    fn modal_zoom_range(&self, kind: ModalKind) -> Option<(i8, i8)> {
+        let smallest = self.open_modal_box(kind, MODAL_ZOOM_MIN)?;
+        let largest = self.open_modal_box(kind, MODAL_ZOOM_MAX)?;
+
+        // Both dimensions grow monotonically with the level, so the levels
+        // sharing an end's box are a contiguous run and one scan from each end
+        // finds where it stops.
+        let lo = (MODAL_ZOOM_MIN..=MODAL_ZOOM_MAX)
+            .rev()
+            .find(|&level| self.open_modal_box(kind, level) == Some(smallest))?;
+        let hi = (MODAL_ZOOM_MIN..=MODAL_ZOOM_MAX)
+            .find(|&level| self.open_modal_box(kind, level) == Some(largest))?;
+
+        (lo <= hi).then_some((lo, hi))
     }
 
     /// The open modal's list/preview separator, sized from the same inputs the
@@ -9920,13 +10042,137 @@ mod tests {
         );
     }
 
+    /// A finder over a terminal and a content size that pin its box arithmetic:
+    /// `modal_box` gives it width `(56 + 6z).clamp(40, 58)` and height
+    /// `(32 + 7z).clamp(12, 68)`, so the box stops growing at level 6 and stops
+    /// shrinking at level -3, both well inside the ledger's own range.
+    fn zoomable_finder() -> crate::test_harness::TestHarness {
+        use stoat_action::OpenFileFinder;
+
+        let mut h = crate::test_harness::TestHarness::with_size(60, 70);
+        action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+        h.stoat
+            .file_finder
+            .as_mut()
+            .expect("finder open")
+            .content_size = (120, 8);
+        h
+    }
+
+    /// The box the finder draws at the level the ledger currently holds for it.
+    fn finder_box(h: &crate::test_harness::TestHarness) -> Option<Rect> {
+        h.stoat.open_modal_box(
+            ModalKind::FileFinder,
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
+        )
+    }
+
+    /// A modal saturates against the screen long before the ledger runs out, and
+    /// steps the box cannot take must not be counted -- otherwise the user has
+    /// to unwind invisible levels before the modal moves again.
+    #[test]
+    fn zoom_steps_stop_where_the_modal_box_stops_growing() {
+        let mut h = zoomable_finder();
+
+        for _ in 0..20 {
+            h.stoat.handle_window_ipc(zoom(1));
+        }
+        assert_eq!(
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
+            6,
+            "growing stops at the last level that moves the box, not at MODAL_ZOOM_MAX"
+        );
+        assert_eq!(
+            finder_box(&h),
+            Some(Rect::new(1, 1, 58, 68)),
+            "which is the largest box the area allows"
+        );
+
+        h.stoat.handle_window_ipc(zoom(-1));
+
+        assert_eq!(
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
+            5,
+            "so the next step back lands one level down"
+        );
+        assert_eq!(
+            finder_box(&h),
+            Some(Rect::new(1, 1, 58, 67)),
+            "and shrinks the modal on that first press"
+        );
+    }
+
+    #[test]
+    fn zoom_steps_stop_where_the_modal_box_stops_shrinking() {
+        let mut h = zoomable_finder();
+
+        for _ in 0..20 {
+            h.stoat.handle_window_ipc(zoom(-1));
+        }
+        assert_eq!(
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
+            -3,
+            "shrinking stops at the last level that moves the box, not at MODAL_ZOOM_MIN"
+        );
+        assert_eq!(
+            finder_box(&h),
+            Some(Rect::new(10, 29, 40, 12)),
+            "which is the smallest box the modal allows"
+        );
+
+        h.stoat.handle_window_ipc(zoom(1));
+
+        assert_eq!(
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
+            -2,
+            "so the next step forward lands one level up"
+        );
+        assert_eq!(
+            finder_box(&h),
+            Some(Rect::new(8, 26, 44, 18)),
+            "and grows the modal on that first press"
+        );
+    }
+
+    /// Nothing rewrites the ledger when the terminal shrinks, so a level left
+    /// over from a larger one sits past what the box can take. The first press
+    /// has to re-enter the range rather than spend itself on a counter.
+    #[test]
+    fn a_stale_zoom_level_moves_the_modal_on_its_first_step() {
+        let mut h = zoomable_finder();
+        h.stoat
+            .modal_zoom
+            .insert(ModalKind::FileFinder, MODAL_ZOOM_MAX);
+
+        h.stoat.handle_window_ipc(zoom(-1));
+
+        assert_eq!(
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
+            5,
+            "the stale level clamps into range before the step applies"
+        );
+        assert_eq!(
+            finder_box(&h),
+            Some(Rect::new(1, 1, 58, 67)),
+            "so the box is a row shorter than the one the stale level drew"
+        );
+    }
+
+    /// An area too small to host the modal has no box to measure, leaving the
+    /// ledger range as the only bound on a step.
     #[test]
     fn modal_zoom_steps_clamp_at_both_ends() {
         use stoat_action::OpenFileFinder;
 
-        let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+        let mut h = crate::test_harness::TestHarness::with_size(30, 20);
         action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
         h.settle();
+        assert_eq!(
+            h.stoat.open_modal_box(ModalKind::FileFinder, 0),
+            None,
+            "the finder does not fit a terminal this small"
+        );
 
         for _ in 0..20 {
             h.stoat.handle_window_ipc(zoom(1));
