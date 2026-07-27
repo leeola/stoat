@@ -86,6 +86,11 @@ impl TestHarness {
             Arc::new(crate::host::FakeTerminalHost::new(fake_terminal.clone()));
         let mut stoat = Stoat::new(executor, settings, std::path::PathBuf::new());
         stoat.persistence_disabled = true;
+        // Stands in for the ident handshake a real session runs, so tests and
+        // their APC snapshots see the rich output a stoatty session produces
+        // rather than the foreign-terminal fallback. A test of that fallback
+        // clears this.
+        stoat.stoatty = true;
         stoat.active_workspace_mut().name = String::new();
         stoat.set_fs_host(fake_fs.clone());
         stoat.set_fs_watch_host(fake_fs_watcher.clone());

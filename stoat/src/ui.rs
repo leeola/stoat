@@ -25,7 +25,7 @@ use stoatty_protocol::{
     frame,
 };
 use tokio::sync::{
-    mpsc::{Sender, UnboundedReceiver},
+    mpsc::{Sender, UnboundedReceiver, UnboundedSender},
     watch,
 };
 
@@ -88,10 +88,14 @@ pub fn install_panic_hook() {
     });
 }
 
+/// `stoatty_tx` carries the ident handshake's one-shot answer to the app. The
+/// app cannot learn it any other way, since the handshake needs raw mode and
+/// sole ownership of fd 0, both of which live on this thread.
 pub fn spawn(
     event_tx: Sender<Event>,
     mut render_rx: watch::Receiver<Option<RenderFrame>>,
     mut apc_rx: UnboundedReceiver<Vec<u8>>,
+    stoatty_tx: UnboundedSender<bool>,
     mouse_captured: bool,
 ) -> thread::JoinHandle<io::Result<()>> {
     thread::spawn(move || {
@@ -105,7 +109,14 @@ pub fn spawn(
             if mouse_captured {
                 execute!(io::stdout(), EnableMouseCapture)?;
             }
-            let result = run(&event_tx, &mut render_rx, &mut apc_rx, &mut terminal).await;
+            let result = run(
+                &event_tx,
+                &mut render_rx,
+                &mut apc_rx,
+                &stoatty_tx,
+                &mut terminal,
+            )
+            .await;
             if mouse_captured {
                 let _ = execute!(io::stdout(), DisableMouseCapture);
             }
@@ -119,6 +130,7 @@ async fn run(
     event_tx: &Sender<Event>,
     render_rx: &mut watch::Receiver<Option<RenderFrame>>,
     apc_rx: &mut UnboundedReceiver<Vec<u8>>,
+    stoatty_tx: &UnboundedSender<bool>,
     terminal: &mut ratatui::DefaultTerminal,
 ) -> io::Result<()> {
     // Main thread needs terminal dimensions before it can render the first frame
@@ -131,7 +143,10 @@ async fn run(
         return Ok(());
     }
 
-    stoatty_handshake();
+    // The app renders its first frames while this is still waiting for a reply,
+    // so they go out through the foreign-terminal fallback and the report is
+    // what upgrades the session once one arrives.
+    let _ = stoatty_tx.send(stoatty_handshake());
 
     let mut events = EventStream::new();
 
@@ -255,19 +270,19 @@ async fn run(
 /// which typed keystrokes are consumed here and lost.
 const IDENT_REPLY_TIMEOUT: Duration = Duration::from_millis(250);
 
-/// Announce this editor to the terminal and log its ident reply.
+/// Announce this editor to the terminal and report whether a stoatty answered.
 ///
 /// Writes an APC hello frame identifying this process, then reads raw stdin for
 /// up to [`IDENT_REPLY_TIMEOUT`] for the terminal's ident reply. The hello is
 /// sent unconditionally because an APC frame degrades to nothing in a foreign
 /// terminal, so a missing reply is the normal headless, ssh, or
-/// foreign-terminal case.
+/// foreign-terminal case, reported as `false`.
 ///
 /// Any keystrokes typed during the read window are consumed here and lost. This
 /// wart is tolerated because crossterm's [`EventStream`] cannot surface an APC
 /// reply and must not own stdin until the window closes, so the handshake reads
 /// fd 0 directly first.
-fn stoatty_handshake() {
+fn stoatty_handshake() -> bool {
     let hello = command::encode_hello(&HelloCommand {
         pid: std::process::id(),
         log_id: stoat_log::ident::get()
@@ -280,19 +295,25 @@ fn stoatty_handshake() {
     {
         let mut stdout = io::stdout().lock();
         if stdout.write_all(&hello).is_err() || stdout.flush().is_err() {
-            return;
+            return false;
         }
     }
 
     match read_ident_reply(IDENT_REPLY_TIMEOUT) {
-        Some(reply) => tracing::info!(
-            stoatty_pid = reply.pid,
-            stoatty_log_id = %reply.log_id,
-            stoatty_hostname = %reply.hostname,
-            stoatty_version = %reply.version,
-            "stoatty ident"
-        ),
-        None => tracing::info!("no stoatty ident reply (headless or foreign terminal)"),
+        Some(reply) => {
+            tracing::info!(
+                stoatty_pid = reply.pid,
+                stoatty_log_id = %reply.log_id,
+                stoatty_hostname = %reply.hostname,
+                stoatty_version = %reply.version,
+                "stoatty ident"
+            );
+            true
+        },
+        None => {
+            tracing::info!("no stoatty ident reply (headless or foreign terminal)");
+            false
+        },
     }
 }
 

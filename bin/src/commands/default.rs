@@ -204,6 +204,10 @@ fn run_tui(
     // from the render watch because `fill` page content must not coalesce or
     // drop; written to stdout by the UI thread right after each grid frame.
     let (apc_tx, apc_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    // The UI thread's one report of whether a stoatty answered the startup ident
+    // handshake, which only it can run: the reply arrives on raw stdin, which
+    // that thread owns.
+    let (stoatty_tx, stoatty_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
 
     let mouse_capture_policy = stoat::default_mouse_capture_policy();
     let mouse_captured =
@@ -213,7 +217,7 @@ fn run_tui(
     // would hold the event channel open past a natural shutdown.
     let driver_tx = inputs.is_some().then(|| event_tx.clone());
 
-    let ui_handle = stoat::ui::spawn(event_tx, render_rx, apc_rx, mouse_captured);
+    let ui_handle = stoat::ui::spawn(event_tx, render_rx, apc_rx, stoatty_tx, mouse_captured);
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -323,6 +327,7 @@ fn run_tui(
             env_theme,
         );
         stoat.set_apc_tx(apc_tx);
+        stoat.set_stoatty_rx(stoatty_rx);
         // Push the theme's colors as the terminal's defaults up front, so the
         // window gutter matches from the first frame rather than only after a
         // `:theme` switch.

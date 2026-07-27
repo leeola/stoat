@@ -667,6 +667,15 @@ pub struct Stoat {
     /// [`Self::handle_window_ipc`].
     window_ipc_tx: UnboundedSender<WindowIpc>,
     window_ipc_rx: UnboundedReceiver<WindowIpc>,
+    /// The UI thread's one report of whether a stoatty answered the ident
+    /// handshake, drained into [`Self::handle_stoatty_present`].
+    ///
+    /// Unlike the side channels above, whose senders this struct holds, the
+    /// sender lives on the UI thread and so goes away when that thread exits.
+    /// [`Self::run`] matches `Some` on this arm rather than testing for a closed
+    /// channel, which parks the arm once it closes instead of waking the loop on
+    /// every poll. Born closed, since a process with no UI thread never reports.
+    stoatty_rx: UnboundedReceiver<bool>,
     /// Whether the window-event socket is currently connected. Gates pane
     /// detach, which needs stoatty to host the aux window and report its events.
     pub(crate) window_ipc_connected: bool,
@@ -1377,6 +1386,14 @@ pub struct Stoat {
     /// [`Self::set_apc_tx`] installs it, which startup does after construction
     /// and a test need not do at all.
     pub(crate) apc_tx: Option<UnboundedSender<Vec<u8>>>,
+    /// Whether a stoatty answered the startup ident handshake.
+    ///
+    /// False until [`Self::handle_stoatty_present`] hears otherwise, and that
+    /// default carries weight. The rich protocol is only safe to emit once a
+    /// listener is confirmed, because a foreign terminal prints the parts of it
+    /// that are not APC-wrapped rather than dropping them. No frame may assume
+    /// rich output before this is set.
+    pub(crate) stoatty: bool,
     /// Reused per-frame APC decoration buffer. Widgets append their component
     /// frames while painting; [`Self::emit_apc_scene`] diffs it against the last
     /// flush so unchanged decoration costs no bytes. Empty until a widget appends.
@@ -1598,6 +1615,10 @@ impl Stoat {
         let (code_search_query_tx, code_search_query_rx) = tokio::sync::mpsc::channel(256);
         let (diff_warm_file_tx, diff_warm_file_rx) = tokio::sync::mpsc::channel(256);
         let (index_external_edit_tx, index_external_edit_rx) = tokio::sync::mpsc::channel(256);
+        // Dropped at once, leaving the channel closed until `set_stoatty_rx`
+        // installs the UI thread's end. Closed is the truthful state for a
+        // process that has no UI thread to hear from.
+        let (_, stoatty_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
 
         let env_host: Arc<dyn EnvHost> = Arc::new(LocalEnv);
         let home = env_host.var("HOME").map(PathBuf::from);
@@ -1651,6 +1672,7 @@ impl Stoat {
             index_update_rx,
             window_ipc_tx,
             window_ipc_rx,
+            stoatty_rx,
             window_ipc_connected: false,
             aux_windows: std::collections::BTreeMap::new(),
             aux_cursor: None,
@@ -1801,6 +1823,7 @@ impl Stoat {
             version_info: "unknown",
             next_aux_window: 1,
             apc_tx: None,
+            stoatty: false,
             apc_scene: ApcScene::new(),
             pending_undercurls: Vec::new(),
             theme_epoch: 0,
@@ -1908,6 +1931,36 @@ impl Stoat {
     /// at startup, before [`Self::run`].
     pub fn set_apc_tx(&mut self, apc_tx: UnboundedSender<Vec<u8>>) {
         self.apc_tx = Some(apc_tx);
+    }
+
+    /// Listen for the UI thread's report of the startup ident handshake.
+    ///
+    /// The bin layer creates the channel before spawning that thread and hands
+    /// this end over once the app exists. Left uncalled, [`Self::stoatty`] stays
+    /// false for the process's life, which is what a headless or embedded run
+    /// wants.
+    pub fn set_stoatty_rx(&mut self, stoatty_rx: UnboundedReceiver<bool>) {
+        self.stoatty_rx = stoatty_rx;
+    }
+
+    /// Record that a stoatty is listening, repainting the frames that went out
+    /// before the handshake could say so.
+    ///
+    /// The handshake waits up to a quarter second for a reply, and the app
+    /// renders throughout, so the opening frames are drawn for a foreign
+    /// terminal. Without the repaint a real stoatty session would keep that
+    /// fallback rendering until something else happened to dirty the screen.
+    ///
+    /// Only the confirming report does anything. A `false` report is the state
+    /// the app already starts in, and a repeat cannot arrive since the handshake
+    /// runs once.
+    fn handle_stoatty_present(&mut self, present: bool) -> UpdateEffect {
+        if !present || self.stoatty {
+            return UpdateEffect::None;
+        }
+
+        self.stoatty = true;
+        UpdateEffect::Redraw
     }
 
     /// Connect to stoatty's window-event socket at `socket`, if set, so detached
@@ -2528,6 +2581,12 @@ impl Stoat {
                     let Some(msg) = msg else { continue };
                     self.handle_window_ipc(msg)
                 }
+                // Matching `Some` rather than testing for closure parks this arm
+                // once the UI thread drops its sender, where the `continue` its
+                // neighbours use would wake the loop on every poll.
+                Some(present) = self.stoatty_rx.recv() => {
+                    self.handle_stoatty_present(present)
+                }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
                 _ = self.shutdown_notify.notified() => UpdateEffect::Quit,
                 _ = frame_timer.tick(), if animating || building || dirty || spinning => {
@@ -2821,6 +2880,10 @@ impl Stoat {
         }
         while let Ok(msg) = self.window_ipc_rx.try_recv() {
             effect = effect.merge(self.handle_window_ipc(msg));
+            coalesced += 1;
+        }
+        while let Ok(present) = self.stoatty_rx.try_recv() {
+            effect = effect.merge(self.handle_stoatty_present(present));
             coalesced += 1;
         }
         self.drain_index_updates();
@@ -9981,6 +10044,40 @@ mod tests {
         let panes = &stoat.active_workspace().panes;
         assert_eq!(panes.pane(detached).placement, Placement::Split);
         assert!(panes.split_pane_ids().contains(&detached));
+    }
+
+    /// Nothing may assume a stoatty is listening before the handshake says so,
+    /// since the rich protocol splatters raw payload over a foreign terminal.
+    #[test]
+    fn a_fresh_stoat_assumes_no_stoatty_is_listening() {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+
+        assert!(!stoat.stoatty, "the default is the safe one");
+    }
+
+    /// The first frames go out before the handshake can answer, so confirming a
+    /// listener has to repaint them rather than only affect later frames.
+    #[test]
+    fn a_confirmed_stoatty_sets_the_flag_and_repaints() {
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        h.stoat.stoatty = false;
+
+        assert_eq!(h.stoat.handle_stoatty_present(true), UpdateEffect::Redraw);
+        assert!(h.stoat.stoatty, "and the flag stays set");
+    }
+
+    #[test]
+    fn an_unanswered_handshake_leaves_the_session_foreign() {
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        h.stoat.stoatty = false;
+
+        assert_eq!(h.stoat.handle_stoatty_present(false), UpdateEffect::None);
+        assert!(!h.stoat.stoatty, "a silent terminal is a foreign one");
     }
 
     fn zoom(delta: i32) -> WindowIpc {
