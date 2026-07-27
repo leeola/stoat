@@ -1951,6 +1951,10 @@ impl Stoat {
     /// terminal. Without the repaint a real stoatty session would keep that
     /// fallback rendering until something else happened to dirty the screen.
     ///
+    /// This is also where the session-scoped claims go out. The bin layer cannot
+    /// make them itself, because it wires the app up before the run loop starts
+    /// and the flag is necessarily still false there, which would gate them away.
+    ///
     /// Only the confirming report does anything. A `false` report is the state
     /// the app already starts in, and a repeat cannot arrive since the handshake
     /// runs once.
@@ -1960,6 +1964,9 @@ impl Stoat {
         }
 
         self.stoatty = true;
+        self.emit_theme_default_colors();
+        self.emit_zoom_capture(true);
+
         UpdateEffect::Redraw
     }
 
@@ -7551,12 +7558,12 @@ impl Stoat {
 
     /// Flush the frame's APC decoration scene to the channel, when it changed.
     ///
-    /// A no-op unless running inside stoatty. [`ApcScene::flush_to`] writes
-    /// nothing when the scene matches the previous flush, so steady-state or
-    /// widget-free frames push no batch at all. Runs at the frame seam after the
-    /// live frame is published, beside [`Self::emit_smooth_scroll`].
+    /// A no-op until [`Self::stoatty`] confirms a listener. [`ApcScene::flush_to`]
+    /// writes nothing when the scene matches the previous flush, so steady-state
+    /// or widget-free frames push no batch at all. Runs at the frame seam after
+    /// the live frame is published, beside [`Self::emit_smooth_scroll`].
     fn emit_apc_scene(&mut self) {
-        let Some(apc_tx) = self.apc_tx.clone() else {
+        let Some(apc_tx) = self.apc_tx.clone().filter(|_| self.stoatty) else {
             return;
         };
 
@@ -7571,11 +7578,15 @@ impl Stoat {
     ///
     /// Normalized cells cover the grid, but the terminal resolves its own
     /// defaults wherever no cell reaches, so without this the window gutter past
-    /// the grid keeps showing the host's theme. Sent at startup and on every
-    /// theme switch. A no-op outside stoatty, and when the theme defines neither
-    /// color as RGB.
-    pub fn emit_theme_default_colors(&self) {
-        let Some(apc_tx) = self.apc_tx.clone() else {
+    /// the grid keeps showing the host's theme. Sent once a listener is
+    /// confirmed and on every theme switch after that. A no-op until
+    /// [`Self::stoatty`] confirms one, and when the theme defines neither color
+    /// as RGB.
+    ///
+    /// Paired with [`Self::emit_reset_default_colors`], which gates the same way
+    /// so a session that never colored the host never uncolors it either.
+    pub(crate) fn emit_theme_default_colors(&self) {
+        let Some(apc_tx) = self.apc_tx.clone().filter(|_| self.stoatty) else {
             return;
         };
 
@@ -7591,8 +7602,11 @@ impl Stoat {
     /// Sent once the run loop breaks. `apc_tx` is unbounded and the UI thread
     /// only observes the channel closing after draining what is queued, so this
     /// reaches stdout even though the process is on its way out.
+    ///
+    /// A no-op until [`Self::stoatty`] confirms a listener, which is what keeps
+    /// it paired with [`Self::emit_theme_default_colors`].
     fn emit_reset_default_colors(&self) {
-        let Some(apc_tx) = self.apc_tx.clone() else {
+        let Some(apc_tx) = self.apc_tx.clone().filter(|_| self.stoatty) else {
             return;
         };
         let _ = apc_tx.send(OSC_RESET_DEFAULT_COLORS.to_vec());
@@ -7601,11 +7615,11 @@ impl Stoat {
     /// Tell the hosting terminal its config file changed on disk, so it re-reads
     /// and re-applies it.
     ///
-    /// A no-op unless running inside stoatty. Unlike the frame-seam emitters
-    /// this carries no state to reconcile. Each call reports one save, and the
-    /// terminal reads the file itself.
+    /// A no-op until [`Self::stoatty`] confirms a listener. Unlike the
+    /// frame-seam emitters this carries no state to reconcile. Each call reports
+    /// one save, and the terminal reads the file itself.
     pub(crate) fn emit_config_reload(&self) {
-        let Some(apc_tx) = self.apc_tx.clone() else {
+        let Some(apc_tx) = self.apc_tx.clone().filter(|_| self.stoatty) else {
             return;
         };
 
@@ -7619,13 +7633,15 @@ impl Stoat {
     /// While claimed the terminal forwards each press as a
     /// [`WindowIpcEvent::Zoom`] instead of stepping its own font size, which is
     /// what lets the combo mean whatever the current context calls for. The
-    /// claim lasts the session, so this is sent once at startup rather than
-    /// tracked per frame, and the terminal drops it when this process exits.
+    /// claim lasts the session, so this is sent once from
+    /// [`Self::handle_stoatty_present`] rather than tracked per frame, and the
+    /// terminal drops it when this process exits.
     ///
-    /// A no-op outside stoatty, where the combo never reaches stoat at all and
-    /// the terminal keeps its own font zoom.
-    pub fn emit_zoom_capture(&self, on: bool) {
-        let Some(apc_tx) = self.apc_tx.clone() else {
+    /// A no-op until [`Self::stoatty`] confirms a listener, since under any
+    /// other terminal the combo never reaches stoat at all and that terminal
+    /// keeps its own font zoom.
+    pub(crate) fn emit_zoom_capture(&self, on: bool) {
+        let Some(apc_tx) = self.apc_tx.clone().filter(|_| self.stoatty) else {
             return;
         };
 
@@ -8115,9 +8131,14 @@ impl Stoat {
     /// Emit the stoatty smooth-scroll APC for every visible editor pane's current
     /// scroll position, pushing one byte batch onto the APC channel.
     ///
-    /// A no-op unless running inside stoatty. Each plain-editor split pane (a
-    /// [`View::Editor`] that is not a review view) gets its own pool, keyed by the
-    /// pane's stable index, so split panes glide independently and at once. A pane
+    /// A no-op until [`Self::stoatty`] confirms a listener. That gate matters
+    /// more here than on the other emitters. A fill frame carries its page as
+    /// raw ANSI between APC markers, so a terminal that drops the markers prints
+    /// the payload over whatever the screen was showing.
+    ///
+    /// Each plain-editor split pane (a [`View::Editor`] that is not a review
+    /// view) gets its own pool, keyed by the pane's stable index, so split panes
+    /// glide independently and at once. A pane
     /// that is no longer pooled -- closed, switched to another view, turned into a
     /// review, or hidden behind a full-screen overlay (commits, rebase, reword,
     /// conflict) -- is retired with `pool_drop`, so returning to it re-declares the
@@ -8127,7 +8148,7 @@ impl Stoat {
     /// layout (and thus each editor rectangle) reflects the frame just drawn and
     /// the APC bytes are written to stdout right after the grid frame.
     pub(crate) fn emit_smooth_scroll(&mut self) {
-        let Some(apc_tx) = self.apc_tx.clone() else {
+        let Some(apc_tx) = self.apc_tx.clone().filter(|_| self.stoatty) else {
             return;
         };
 
@@ -10069,6 +10090,72 @@ mod tests {
 
         assert_eq!(h.stoat.handle_stoatty_present(true), UpdateEffect::Redraw);
         assert!(h.stoat.stoatty, "and the flag stays set");
+    }
+
+    /// The bin layer wires the app up before the run loop drains the handshake,
+    /// so the session-scoped claims cannot go out there and ride confirmation
+    /// instead.
+    #[test]
+    fn confirming_a_stoatty_sends_the_session_scoped_claims() {
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        h.stoat.stoatty = false;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        h.stoat.handle_stoatty_present(true);
+
+        let sent: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
+            .flatten()
+            .collect();
+        let mut expected = osc_default_colors(&h.stoat.theme);
+        assert!(
+            expected.starts_with(b"\x1b]10;"),
+            "the harness theme defines the default colors this covers"
+        );
+        stoatty_protocol::command::encode_zoom_capture_into(&mut expected, true);
+        assert_eq!(
+            sent, expected,
+            "confirmation pushes the theme defaults, claims the zoom combo, and \
+             sends nothing else"
+        );
+    }
+
+    /// A fill frame carries raw ANSI between its APC markers, so a terminal that
+    /// drops the markers prints the payload over the screen. Nothing may reach
+    /// the wire before a listener is confirmed.
+    #[test]
+    fn a_frame_emits_nothing_until_a_stoatty_is_confirmed() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.stoatty = false;
+
+        let root = std::path::PathBuf::from("/gate");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        h.stoat.emit_smooth_scroll();
+        h.stoat.emit_apc_scene();
+        assert_eq!(
+            drain_apc(&mut rx),
+            Vec::new(),
+            "no pool is declared, so nothing is left needing a drop either"
+        );
+
+        h.stoat.stoatty = true;
+        h.stoat.emit_smooth_scroll();
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter().any(|cmd| matches!(cmd, Command::PoolRegion(_))),
+            "and the same frame declares the editor pool once one answers, got {cmds:?}"
+        );
     }
 
     #[test]

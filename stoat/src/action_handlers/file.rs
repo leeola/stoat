@@ -374,26 +374,17 @@ fn maybe_apply_config_save(
 /// Drive [`ActionKind::FontSizeInc`](stoat_action::ActionKind::FontSizeInc) and
 /// its decrementing twin, stepping the hosting terminal's font size by `delta`.
 ///
-/// Only stoatty can be asked. Under any other terminal the frame would be
-/// swallowed silently, so this reports the requirement rather than appearing to
-/// work.
+/// Only stoatty can be asked, and only the startup ident handshake knows
+/// whether one is there. Under any other terminal the frame would be swallowed
+/// silently, so this reports the requirement rather than appearing to work.
 pub(crate) fn font_size_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
-    if !under_stoatty(stoat) {
+    if !stoat.stoatty {
         stoat.set_status("font size needs stoatty");
         return UpdateEffect::Redraw;
     }
 
     stoat.emit_font_step(delta);
     UpdateEffect::None
-}
-
-/// Whether stoat is running inside stoatty.
-///
-/// stoatty sets `STOATTY_VERSION` on its child. A release older than that
-/// variable sets only `STOATTY`, so either one counts.
-fn under_stoatty(stoat: &Stoat) -> bool {
-    let env = stoat.env_host();
-    env.var("STOATTY_VERSION").is_some() || env.var("STOATTY").is_some()
 }
 
 /// True when the file at `path` has an on-disk mtime newer than the baseline
@@ -2442,8 +2433,6 @@ mod tests {
         use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
-        h.fake_env()
-            .set("STOATTY_VERSION", "0.2.0 (aaa 2026-07-03)");
 
         assert_eq!(
             commands_from(&mut h, &stoat_action::FontSizeInc),
@@ -2466,6 +2455,7 @@ mod tests {
     #[test]
     fn font_size_actions_report_the_requirement_outside_stoatty() {
         let mut h = Stoat::test();
+        h.stoat.stoatty = false;
 
         assert_eq!(
             commands_from(&mut h, &stoat_action::FontSizeInc),

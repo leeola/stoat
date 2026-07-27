@@ -1447,6 +1447,9 @@ mod tests {
             None,
         );
         stoat.update(Event::Resize(80, 24));
+        // Stands in for the ident handshake, as the shared harness does, so
+        // these read as a real stoatty session rather than a foreign terminal.
+        stoat.stoatty = true;
         stoat
     }
 
