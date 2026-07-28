@@ -668,6 +668,7 @@ pub(crate) fn frame(
         stoat.render_tick,
         &stoat.theme,
         buf,
+        &mut *scene,
     );
     match painted_modal {
         Some(ActiveModal::Run) => {

@@ -1,9 +1,14 @@
 use crate::{
     agent_status::AgentStatus,
     badge::{Anchor, Badge, BadgeSource, BadgeState, BadgeTray, StackDirection},
-    render::text::{write_cell, write_str},
+    render::{
+        review::style_rgb,
+        text::{write_cell, write_str},
+    },
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use stoatty_protocol::command::{self, BorderStyle, PanelCommand, PanelShadow};
+use stoatty_widgets::ApcScene;
 
 pub(crate) fn render_badges(
     workspace: &BadgeTray,
@@ -12,6 +17,7 @@ pub(crate) fn render_badges(
     render_tick: u64,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    scene: &mut ApcScene,
 ) {
     if workspace.is_empty() && global.is_empty() {
         return;
@@ -65,7 +71,7 @@ pub(crate) fn render_badges(
                 cy
             };
 
-            render_single_badge(badge, draw_x, draw_y, render_tick, theme, buf);
+            render_single_badge(badge, draw_x, draw_y, render_tick, theme, buf, scene);
 
             match tray.stack {
                 StackDirection::Horizontal => {
@@ -98,6 +104,7 @@ pub(crate) fn sync_agent_badge(tray: &mut BadgeTray, agent: Option<&AgentStatus>
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_single_badge(
     badge: &Badge,
     x: u16,
@@ -105,9 +112,67 @@ fn render_single_badge(
     render_tick: u64,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    scene: &mut ApcScene,
 ) {
     let (w, h) = badge_size(badge);
     let border_style = badge_border_style(badge.state, theme);
+
+    match style_rgb(border_style.fg).filter(|_| scene.live()) {
+        // A badge anchored to a screen edge overhangs the pane behind it, and
+        // that pane's pool composite would erase the overhanging rows on every
+        // glide frame. A panel over the rect punches it out of the composite.
+        //
+        // above_pools stays false because a pane pool occludes against every
+        // panel regardless of the flag, which is all this needs, while leaving
+        // it false is what keeps a modal's own pooled surfaces painting over
+        // badges.
+        //
+        // The panel's seq occludes lower-seq main-pass runs and bars inside the
+        // rect, so a rich status bar's scaled text no longer draws through the
+        // badge's bottom row where the two overlap. That is accepted.
+        Some(border) => {
+            command::encode_panel_into(
+                scene.buffer(),
+                &PanelCommand {
+                    top: y,
+                    left: x,
+                    width: w,
+                    height: h,
+                    style: BorderStyle::Rounded,
+                    border,
+                    corner_radius: 6,
+                    fill: None,
+                    shadow: PanelShadow::None_,
+                    inset_x: 0,
+                    above_pools: false,
+                },
+            );
+        },
+        None => {
+            for col in x..x + w {
+                write_cell(buf, col, y, border_char_at(col - x, 0, w, h), border_style);
+            }
+            for col in x..x + w {
+                write_cell(
+                    buf,
+                    col,
+                    y + h - 1,
+                    border_char_at(col - x, h - 1, w, h),
+                    border_style,
+                );
+            }
+            for row in y + 1..y + h - 1 {
+                write_cell(buf, x, row, border_char_at(0, row - y, w, h), border_style);
+                write_cell(
+                    buf,
+                    x + w - 1,
+                    row,
+                    border_char_at(w - 1, row - y, w, h),
+                    border_style,
+                );
+            }
+        },
+    }
 
     let perimeter_len = 2 * (w as usize) + 2 * (h as usize) - 4;
     let spinner_pos = if badge.state == BadgeState::Active {
@@ -115,29 +180,6 @@ fn render_single_badge(
     } else {
         None
     };
-
-    for col in x..x + w {
-        write_cell(buf, col, y, border_char_at(col - x, 0, w, h), border_style);
-    }
-    for col in x..x + w {
-        write_cell(
-            buf,
-            col,
-            y + h - 1,
-            border_char_at(col - x, h - 1, w, h),
-            border_style,
-        );
-    }
-    for row in y + 1..y + h - 1 {
-        write_cell(buf, x, row, border_char_at(0, row - y, w, h), border_style);
-        write_cell(
-            buf,
-            x + w - 1,
-            row,
-            border_char_at(w - 1, row - y, w, h),
-            border_style,
-        );
-    }
 
     if let Some(pos) = spinner_pos {
         let (sc, sr) = perimeter_position(pos, w, h);
@@ -248,6 +290,7 @@ fn badge_border_style(state: BadgeState, theme: &crate::theme::Theme) -> Style {
 mod tests {
     use super::*;
     use crate::{agent_status::AgentHookEvent, Stoat};
+    use stoatty_protocol::command::encode_panel;
 
     #[test]
     fn snapshot_agent_badge_active() {
@@ -285,5 +328,130 @@ mod tests {
         status.apply(AgentHookEvent::SessionEnd);
         sync_agent_badge(&mut tray, Some(&status));
         assert!(tray.find_by_source(BadgeSource::Agent).is_none());
+    }
+
+    /// A theme whose badge colors resolve to RGB, which is what selects the rich
+    /// arm once the scene is live.
+    fn rgb_badge_theme() -> crate::theme::Theme {
+        let src = r##"theme rgbbadge {
+            ui.badge.active.fg = "#010203";
+            ui.badge.complete.fg = "#010203";
+            ui.text.fg = "#c8ccd4";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbbadge")
+            .expect("rgb theme builds")
+    }
+
+    fn badge(state: BadgeState) -> Badge {
+        Badge {
+            source: BadgeSource::Agent,
+            anchor: Anchor::TopLeft,
+            state,
+            label: "ab".to_owned(),
+            detail: None,
+        }
+    }
+
+    /// Paint one badge at the buffer origin and hand back what it wrote to each
+    /// surface. `live` picks the arm the way a stoatty host would.
+    fn paint(state: BadgeState, render_tick: u64, live: bool) -> (Buffer, Vec<u8>) {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 5));
+        let mut scene = ApcScene::new();
+        scene.set_live(live);
+
+        render_single_badge(
+            &badge(state),
+            0,
+            0,
+            render_tick,
+            &rgb_badge_theme(),
+            &mut buf,
+            &mut scene,
+        );
+
+        let bytes = scene.bytes().to_vec();
+        (buf, bytes)
+    }
+
+    fn box_glyphs(buf: &Buffer) -> Vec<String> {
+        buf.content()
+            .iter()
+            .map(|cell| cell.symbol().to_owned())
+            .filter(|s| "╭╮╰╯─│".contains(s.as_str()))
+            .collect()
+    }
+
+    /// The badge's own w-by-h panel is what a pane pool occludes against, which
+    /// is what keeps the badge painted through a glide.
+    #[test]
+    fn rich_arm_emits_a_panel_and_no_border_glyphs() {
+        let (buf, bytes) = paint(BadgeState::Complete, 0, true);
+
+        assert_eq!(
+            bytes,
+            encode_panel(&PanelCommand {
+                top: 0,
+                left: 0,
+                width: 4,
+                height: 3,
+                style: BorderStyle::Rounded,
+                border: [1, 2, 3],
+                corner_radius: 6,
+                fill: None,
+                shadow: PanelShadow::None_,
+                inset_x: 0,
+                above_pools: false,
+            }),
+            "one panel over the badge rect, unflagged"
+        );
+        assert_eq!(
+            box_glyphs(&buf),
+            Vec::<String>::new(),
+            "the panel is the border, so no glyph border is drawn"
+        );
+        assert_eq!(
+            buf.cell((1, 1)).unwrap().symbol(),
+            "a",
+            "label still paints"
+        );
+    }
+
+    /// A foreign terminal renders no panel, so the badge keeps the glyph border
+    /// it has always drawn there.
+    #[test]
+    fn fallback_arm_paints_the_glyph_border_and_no_panel() {
+        let (buf, bytes) = paint(BadgeState::Complete, 0, false);
+
+        assert_eq!(bytes, Vec::<u8>::new(), "a dead scene emits nothing");
+        assert_eq!(
+            box_glyphs(&buf),
+            ["╭", "─", "─", "╮", "│", "│", "╰", "─", "─", "╯"],
+            "the full rounded perimeter"
+        );
+        assert_eq!(
+            buf.cell((1, 1)).unwrap().symbol(),
+            "a",
+            "label still paints"
+        );
+    }
+
+    /// The spinner is content rather than border, so it survives the arm that
+    /// drops the border glyphs.
+    #[test]
+    fn both_arms_paint_the_active_spinner() {
+        let (rich, _) = paint(BadgeState::Active, 0, true);
+        let (fallback, _) = paint(BadgeState::Active, 0, false);
+
+        assert_eq!(
+            rich.cell((0, 0)).unwrap().symbol(),
+            "⣰",
+            "the spinner draws over the panel"
+        );
+        assert_eq!(
+            fallback.cell((0, 0)).unwrap().symbol(),
+            "⣰",
+            "and over the glyph corner it replaces"
+        );
     }
 }
