@@ -613,6 +613,30 @@ fn merged_fold_regions<'a>(
     regions
 }
 
+/// Text summary of `range` in the inlay layer's output space.
+///
+/// Accumulated over the chunk stream, which is the same source the fold chunk
+/// stream reads. Taking it from a materialized string instead would mean
+/// building the whole file plus its hints to read one span of it.
+///
+/// `TextSummary`'s own join is what makes this exact: a row crossing a chunk
+/// boundary still counts once, and the longest row is still the longest.
+fn inlay_text_summary(inlay_snapshot: &InlaySnapshot, range: Range<usize>) -> TextSummary {
+    if !inlay_snapshot.has_inlays() {
+        return inlay_snapshot.rope().text_summary_for_range(range);
+    }
+
+    let mut summary = TextSummary::default();
+    let chunks = inlay_snapshot.chunks(
+        InlayOffset(range.start)..InlayOffset(range.end),
+        Arc::from(Vec::new()),
+    );
+    for chunk in chunks {
+        ContextLessSummary::add_summary(&mut summary, &TextSummary::from_str(&chunk.text));
+    }
+    summary
+}
+
 fn build_fold_transforms(
     inlay_snapshot: &InlaySnapshot,
     folds: &SumTree<Fold>,
@@ -640,34 +664,29 @@ fn build_fold_transforms(
     let rope = inlay_snapshot.rope();
     let has_inlays = inlay_snapshot.has_inlays();
 
-    // The inlay text and its scanner are consulted only in the has-inlays
-    // branches below, so materializing the whole buffer as a String is wasted
-    // work with no inlays -- the rope answers lengths and summaries directly.
-    let inlay_text: Option<&str> = has_inlays.then(|| inlay_snapshot.inlay_text());
-    let text_len = inlay_text.map_or(rope.len(), |text| text.len());
-    let mut scanner = inlay_text.map(|text| PointScanner::new(text.as_bytes()));
+    // With no inlays an inlay offset is a buffer offset, and the rope answers
+    // lengths and summaries without a chunk iterator in between.
+    let text_len = if has_inlays {
+        inlay_snapshot.total_summary().len
+    } else {
+        rope.len()
+    };
+    let offset_of = |point: InlayPoint| -> usize {
+        if has_inlays {
+            inlay_snapshot.inlay_point_to_offset(point).0.min(text_len)
+        } else {
+            let buf_point = inlay_snapshot.to_buffer_point(point);
+            rope.point_to_offset(buf_point).min(rope.len())
+        }
+    };
     let mut cursor = 0usize;
 
     for (fold, region) in merged_fold_regions(folds.iter()) {
-        let fold_start = if let Some(scanner) = scanner.as_mut() {
-            scanner.advance_to(&region.start)
-        } else {
-            let buf_point = inlay_snapshot.to_buffer_point(region.start);
-            rope.point_to_offset(buf_point).min(rope.len())
-        };
-        let fold_end = if let Some(scanner) = scanner.as_mut() {
-            scanner.advance_to(&region.end)
-        } else {
-            let buf_point = inlay_snapshot.to_buffer_point(region.end);
-            rope.point_to_offset(buf_point).min(rope.len())
-        };
+        let fold_start = offset_of(region.start);
+        let fold_end = offset_of(region.end);
 
         if fold_start > cursor {
-            let summary = if let Some(text) = inlay_text {
-                TextSummary::from_str(&text[cursor..fold_start])
-            } else {
-                rope.text_summary_for_range(cursor..fold_start)
-            };
+            let summary = inlay_text_summary(inlay_snapshot, cursor..fold_start);
             transforms.push(
                 Transform {
                     summary: TransformSummary {
@@ -681,11 +700,7 @@ fn build_fold_transforms(
             );
         }
 
-        let input_summary = if let Some(text) = inlay_text {
-            TextSummary::from_str(&text[fold_start..fold_end])
-        } else {
-            rope.text_summary_for_range(fold_start..fold_end)
-        };
+        let input_summary = inlay_text_summary(inlay_snapshot, fold_start..fold_end);
         let placeholder_text = fold.placeholder.display_text().clone();
         let output_summary = TextSummary::from_str(&placeholder_text);
         transforms.push(
@@ -704,11 +719,7 @@ fn build_fold_transforms(
     }
 
     if cursor < text_len {
-        let summary = if let Some(text) = inlay_text {
-            TextSummary::from_str(&text[cursor..])
-        } else {
-            rope.text_summary_for_range(cursor..rope.len())
-        };
+        let summary = inlay_text_summary(inlay_snapshot, cursor..text_len);
         transforms.push(
             Transform {
                 summary: TransformSummary {
@@ -966,10 +977,11 @@ fn sync_fold_incremental(
 ) -> (SumTree<Transform>, Patch<u32>) {
     let has_inlays = inlay_snapshot.has_inlays();
     let rope = inlay_snapshot.rope();
-    // Materialize the inlay text only with inlays. The rope answers lengths and
-    // summaries directly otherwise, sparing an O(file) String per keystroke.
-    let text: Option<&str> = has_inlays.then(|| inlay_snapshot.inlay_text());
-    let text_len = text.map_or(rope.len(), |t| t.len());
+    let text_len = if has_inlays {
+        inlay_snapshot.total_summary().len
+    } else {
+        rope.len()
+    };
 
     let row_to_offset = |row: u32| -> usize {
         if has_inlays {
@@ -979,13 +991,8 @@ fn sync_fold_incremental(
         }
     };
 
-    let text_summary = |a: usize, b: usize| -> TextSummary {
-        if let Some(text) = text {
-            TextSummary::from_str(&text[a..b])
-        } else {
-            rope.text_summary_for_range(a..b)
-        }
-    };
+    let text_summary =
+        |a: usize, b: usize| -> TextSummary { inlay_text_summary(inlay_snapshot, a..b) };
 
     // The incoming edits carry OLD row indices, and the cursor walks the old
     // transform tree in OLD input-offset space, so old rows must resolve through
@@ -994,9 +1001,8 @@ fn sync_fold_incremental(
     let old_inlay = old_snapshot.inlay_snapshot();
     let old_has_inlays = old_inlay.has_inlays();
     let old_rope = old_inlay.rope();
-    // old_text is consulted only for its length below, so avoid the String.
     let old_text_len = if old_has_inlays {
-        old_inlay.inlay_text().len()
+        old_inlay.total_summary().len
     } else {
         old_rope.len()
     };
@@ -1207,11 +1213,7 @@ fn sync_fold_incremental(
     new_transforms.append(cursor.suffix(), ());
 
     if new_transforms.is_empty() && text_len != 0 {
-        let summary = if let Some(text) = text {
-            TextSummary::from_str(text)
-        } else {
-            rope.summary().clone()
-        };
+        let summary = inlay_text_summary(inlay_snapshot, 0..text_len);
         new_transforms.push(
             Transform {
                 summary: TransformSummary {
@@ -1227,32 +1229,6 @@ fn sync_fold_incremental(
 
     row_edits.consolidate();
     (new_transforms, row_edits)
-}
-
-struct PointScanner<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-    row: u32,
-}
-
-impl<'a> PointScanner<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self {
-            bytes,
-            pos: 0,
-            row: 0,
-        }
-    }
-
-    fn advance_to(&mut self, point: &InlayPoint) -> usize {
-        while self.row < point.row() && self.pos < self.bytes.len() {
-            if self.bytes[self.pos] == b'\n' {
-                self.row += 1;
-            }
-            self.pos += 1;
-        }
-        (self.pos + point.column() as usize).min(self.bytes.len())
-    }
 }
 
 fn point_overshoot(base: Point, target: Point) -> Point {
@@ -2936,6 +2912,80 @@ mod tests {
         let inlay2 = InlayMap::new(snap2).1;
         let (fold_snap, _) = fold_map.sync(inlay2, &Patch::empty());
         assert_eq!(fold_snap.fold_line(2), "...");
+    }
+
+    /// The transforms describe the inlay-expanded text, and their summaries
+    /// carry byte lengths, row counts, and longest-row bookkeeping that a chunk
+    /// boundary landing mid-row could disturb. Multi-byte text is where
+    /// counting bytes and counting characters come apart, so the fixture holds
+    /// wide characters on both sides of a hint and inside a fold.
+    #[test]
+    fn transforms_over_folds_and_hints_describe_the_painted_text() {
+        let buffer = TextBuffer::with_text(
+            BufferId::new(0),
+            "let 名前 = 1\nfn 関数() {}\nlet x = 2\n終わり",
+        );
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (mut inlay_map, inlay_snap) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snap);
+
+        let at = |row: u32, column: u32| {
+            buffer_snapshot
+                .rope()
+                .point_to_offset(stoat_text::Point::new(row, column))
+        };
+        let hint = |offset: usize, text: &str| {
+            (
+                buffer_snapshot.anchor_at(offset, Bias::Right),
+                text.to_string(),
+                InlayKind::Hint,
+            )
+        };
+
+        // Column 10 of row 0 sits just past the wide name, column 5 of row 2
+        // just past `let x`.
+        inlay_map.splice(
+            &buffer_snapshot,
+            Vec::new(),
+            vec![hint(at(0, 10), ": 数値型"), hint(at(2, 5), ": i64")],
+        );
+        fold_map.fold(
+            vec![
+                buffer_snapshot.anchor_at(at(1, 0), Bias::Right)
+                    ..buffer_snapshot.anchor_at(at(1, 14), Bias::Left),
+            ],
+            FoldPlaceholder::default(),
+            &buffer_snapshot,
+        );
+
+        let (inlay_snap, _) = inlay_map.sync(buffer_snapshot, &Patch::empty());
+        let (snap, _) = fold_map.sync(inlay_snap, &Patch::empty());
+
+        let painted: String = snap
+            .chunks(
+                FoldOffset(0)..FoldOffset(snap.len().0),
+                Arc::from(Vec::new()),
+            )
+            .map(|chunk| chunk.text.to_string())
+            .collect();
+        assert_eq!(painted, "let 名前: 数値型 = 1\n...\nlet x: i64 = 2\n終わり");
+
+        // 49 buffer bytes, plus 11 and 5 for the hints, is the 65 the fold layer
+        // reads. It paints 14 of them as a 3-byte placeholder.
+        let summary = snap.transforms.summary();
+        assert_eq!((summary.input.len, summary.output.len), (65, 54));
+        assert_eq!(
+            (summary.output.lines.row, summary.output.longest_row),
+            (3, 0),
+            "row 0 carries the wider hint, at 15 characters against row 2's 14",
+        );
+
+        let rows: Vec<u32> = (0..snap.line_count())
+            .map(|row| snap.line_len(row))
+            .collect();
+        assert_eq!(rows, vec![25, 3, 14, 9]);
     }
 
     /// A row's measured width has to be the width the chunk stream paints,

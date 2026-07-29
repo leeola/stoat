@@ -7,7 +7,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     ops::{Add, AddAssign, Deref, Range, Sub},
-    sync::{Arc, OnceLock},
+    sync::Arc,
 };
 use stoat_text::{
     patch::Patch, Anchor, Bias, ContextLessSummary, Cursor, Dimension, Dimensions, Item, Point,
@@ -171,7 +171,6 @@ pub struct InlaySnapshot {
     buffer: MultiBufferSnapshot,
     transforms: SumTree<Transform>,
     inlay_count: usize,
-    inlay_text_cache: OnceLock<String>,
     pub inlay_version: usize,
 }
 
@@ -189,7 +188,6 @@ impl InlayMap {
             buffer: buffer_snapshot,
             transforms,
             inlay_count: 0,
-            inlay_text_cache: OnceLock::new(),
             inlay_version: 0,
         });
         let map = InlayMap {
@@ -282,7 +280,6 @@ impl InlayMap {
             buffer: buffer_snapshot,
             transforms,
             inlay_count,
-            inlay_text_cache: OnceLock::new(),
             inlay_version: self.snapshot_version,
         });
         self.last_buffer_version = snapshot.buffer.version();
@@ -948,28 +945,6 @@ impl InlaySnapshot {
         self.inlay_point_to_offset(InlayPoint::new(row, 0))
     }
 
-    pub fn inlay_text(&self) -> &str {
-        self.inlay_text_cache.get_or_init(|| {
-            let buffer_text = self.buffer.text();
-            let mut result = String::new();
-            let mut buffer_offset = 0usize;
-
-            for transform in self.transforms.iter() {
-                match transform {
-                    Transform::Isomorphic(s) => {
-                        let end = buffer_offset + s.len;
-                        result.push_str(&buffer_text[buffer_offset..end]);
-                        buffer_offset = end;
-                    },
-                    Transform::Inlay(inlay) => {
-                        result.push_str(&inlay.text);
-                    },
-                }
-            }
-            result
-        })
-    }
-
     pub fn inlay_point_cursor(&self) -> InlayPointCursor<'_> {
         InlayPointCursor {
             cursor: self.transforms.cursor::<Dimensions<Point, InlayPoint>>(()),
@@ -1148,6 +1123,19 @@ mod tests {
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, snapshot) = InlayMap::new(buffer_snapshot);
         snapshot
+    }
+
+    /// The whole snapshot as the chunk stream paints it, which is what these
+    /// tests are comparing against. Nothing builds this outside tests, since a
+    /// real consumer wants the span it is about to render.
+    fn painted_text(snapshot: &super::InlaySnapshot) -> String {
+        snapshot
+            .chunks(
+                super::InlayOffset(0)..super::InlayOffset(snapshot.total_summary().len),
+                Arc::from(Vec::new()),
+            )
+            .map(|chunk| chunk.text.to_string())
+            .collect()
     }
 
     fn make_snapshot_with_inlays(
@@ -1425,7 +1413,10 @@ mod tests {
         );
         let (rebuilt_snapshot, _) = rebuilt.sync(buffer_snapshot, &Patch::empty());
 
-        assert_eq!(patched_snapshot.inlay_text(), rebuilt_snapshot.inlay_text());
+        assert_eq!(
+            painted_text(&patched_snapshot),
+            painted_text(&rebuilt_snapshot),
+        );
     }
 
     #[test]
@@ -1507,8 +1498,7 @@ mod tests {
                 vec![(Point::new(0, 5), hint.to_string())],
             );
 
-            let painted: Vec<u32> = snap
-                .inlay_text()
+            let painted: Vec<u32> = painted_text(&snap)
                 .split('\n')
                 .map(|row| row.len() as u32)
                 .collect();
