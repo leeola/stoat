@@ -7,6 +7,7 @@ use std::{
     any::TypeId,
     borrow::Cow,
     cmp::Ordering,
+    collections::HashMap,
     ops::{Add, AddAssign, Deref, Range, Sub},
     sync::Arc,
 };
@@ -371,19 +372,40 @@ impl FoldMap {
         valid_folds.sort_by_key(|f| f.resolved_start);
         self.folds = SumTree::from_iter(valid_folds, ());
 
+        resolved.sort_by_key(|f| f.range.start);
+        let resolved_tree = SumTree::from_iter(resolved, ());
+
+        // A fold toggle moves no inlay row, so the rows it changed have to be
+        // derived from the fold set itself. Without this every toggle falls to
+        // the full rebuild below and invalidates the whole file downstream.
+        //
+        // Only when the inlay text is unchanged, though. An inlay row patch
+        // does not encode how far rows shifted (inserting a line reports
+        // `5..6 -> 5..6`), so a fold's rows cannot be placed in the old
+        // transform tree once an edit has moved them. A fold arriving with a
+        // buffer edit therefore keeps the full rebuild.
+        let inlay_unchanged = inlay_snapshot.inlay_version == self.last_inlay_version;
+        let fold_edits = self
+            .cached_snapshot
+            .as_ref()
+            .filter(|_| inlay_unchanged)
+            .map(|cached| fold_set_edits(&cached.folds, &resolved_tree));
+
         let can_incremental = !inlay_edits.is_empty()
             && self.version == self.last_self_version
             && self.cached_snapshot.is_some();
 
-        resolved.sort_by_key(|f| f.range.start);
-        let resolved_tree = SumTree::from_iter(resolved, ());
+        // A fold-only change and a buffer edit cannot both apply here. The
+        // former is exactly the case where the inlay version held still, and
+        // the latter is what moved it.
+        let sync_edits = fold_edits.or_else(|| can_incremental.then(|| inlay_edits.clone()));
 
-        let (transforms, edits) = if can_incremental {
+        let (transforms, edits) = if let Some(sync_edits) = sync_edits {
             let old_snapshot = self
                 .cached_snapshot
                 .as_ref()
-                .expect("guarded by can_incremental");
-            sync_fold_incremental(old_snapshot, &inlay_snapshot, inlay_edits, &resolved_tree)
+                .expect("sync_edits is Some only with a cached snapshot");
+            sync_fold_incremental(old_snapshot, &inlay_snapshot, &sync_edits, &resolved_tree)
         } else {
             let old_line_count = self
                 .cached_snapshot
@@ -714,6 +736,49 @@ fn push_fold_isomorphic(tree: &mut SumTree<Transform>, summary: TransformSummary
             (),
         );
     }
+}
+
+/// The inlay rows whose fold coverage differs between two resolved fold sets,
+/// as an identity patch the incremental sync can rebuild.
+///
+/// A fold toggle moves no inlay row, so the caller's edit patch says nothing
+/// about it and the rows have to come from the sets themselves. Reading them
+/// here rather than recording them when `fold` and `unfold` run is what covers
+/// the cases no caller names. Folding over an existing fold merges the two (see
+/// [`FoldMap::merge_overlapping_presorted`]), and a sync drops folds whose
+/// anchors have collapsed.
+///
+/// Both sides must be in the same row space, which holds only while the inlay
+/// text is unchanged. That is the sole caller's condition.
+fn fold_set_edits(old_folds: &SumTree<Fold>, new_folds: &SumTree<Fold>) -> Patch<u32> {
+    let by_id = |folds: &SumTree<Fold>| -> HashMap<FoldId, Range<InlayPoint>> {
+        folds.iter().map(|f| (f.id, f.range.clone())).collect()
+    };
+    let old_by_id = by_id(old_folds);
+    let new_by_id = by_id(new_folds);
+
+    let mut changed: Vec<Range<u32>> = Vec::new();
+    let mut collect = |from: &HashMap<FoldId, Range<InlayPoint>>,
+                       other: &HashMap<FoldId, Range<InlayPoint>>| {
+        for (id, range) in from {
+            if other.get(id) != Some(range) {
+                changed.push(range.start.row()..range.end.row() + 1);
+            }
+        }
+    };
+    collect(&old_by_id, &new_by_id);
+    collect(&new_by_id, &old_by_id);
+
+    changed.sort_by_key(|rows| rows.start);
+    let mut patch = Patch::default();
+    for rows in changed {
+        patch.push(stoat_text::patch::Edit {
+            old: rows.clone(),
+            new: rows,
+        });
+    }
+    patch.consolidate();
+    patch
 }
 
 fn sync_fold_incremental(
@@ -1832,6 +1897,129 @@ mod tests {
             fold_point,
             snap.to_inlay_point(fold_point),
         )
+    }
+
+    /// A fold toggle moves no inlay row, so the sync has to work out which
+    /// rows it changed from the fold set. Emitting the whole file instead
+    /// cascades an O(file) re-wrap and re-block for a few rows of change.
+    #[test]
+    fn folding_one_range_emits_only_its_rows() {
+        let text: String = (0..200)
+            .map(|i| format!("line{i}\n"))
+            .collect::<Vec<_>>()
+            .join("");
+        let buffer = TextBuffer::with_text(BufferId::new(0), &text);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+        fold_map.sync(inlay_snapshot.clone(), &Patch::empty());
+
+        let anchor_at = |row: u32, col: u32, bias| {
+            let off = buffer_snapshot
+                .rope()
+                .point_to_offset(stoat_text::Point::new(row, col));
+            (off, buffer_snapshot.anchor_at(off, bias))
+        };
+        let (start_off, start) = anchor_at(100, 0, Bias::Right);
+        let (end_off, end) = anchor_at(102, 0, Bias::Left);
+
+        fold_map.fold(
+            vec![start..end],
+            FoldPlaceholder::default(),
+            &buffer_snapshot,
+        );
+        let (_, edits) = fold_map.sync(inlay_snapshot.clone(), &Patch::empty());
+        let covered: Vec<std::ops::Range<u32>> =
+            edits.edits().iter().map(|e| e.old.clone()).collect();
+        assert_eq!(
+            covered,
+            vec![100..103],
+            "a fold over rows 100..102 must not invalidate all 200 rows",
+        );
+
+        #[allow(clippy::single_range_in_vec_init)]
+        fold_map.unfold(vec![start_off..end_off], &buffer_snapshot);
+        let (_, edits) = fold_map.sync(inlay_snapshot, &Patch::empty());
+        let covered: Vec<std::ops::Range<u32>> =
+            edits.edits().iter().map(|e| e.old.clone()).collect();
+        assert_eq!(
+            covered.len(),
+            1,
+            "unfolding names one region too, got {covered:?}",
+        );
+        assert!(
+            covered[0].start >= 100 && covered[0].end <= 103,
+            "and it is the unfolded rows, got {covered:?}",
+        );
+    }
+
+    /// An LSP folding-range install can land in the same sync as a keystroke.
+    /// The fold rows cannot be placed in the old transform tree once an edit
+    /// has moved them, so that sync falls back to a full rebuild. This pins the
+    /// result it has to produce either way.
+    #[test]
+    fn a_fold_landing_with_a_buffer_edit_renders_both() {
+        let text: String = (0..40)
+            .map(|i| format!("line{i}\n"))
+            .collect::<Vec<_>>()
+            .join("");
+        let buffer = TextBuffer::with_text(BufferId::new(0), &text);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let (mut inlay_map, inlay_snapshot) = InlayMap::new(multi_buffer.snapshot());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+        fold_map.sync(inlay_snapshot, &Patch::empty());
+
+        // Edit row 5 and fold rows 20..22 before the same sync runs.
+        let before = multi_buffer.snapshot();
+        let edit_at = before.rope().point_to_offset(stoat_text::Point::new(5, 0));
+        shared
+            .write()
+            .expect("poisoned")
+            .edit(edit_at..edit_at, "inserted\n");
+
+        let after = multi_buffer.snapshot();
+        let buffer_edits = after.edits_since(before.version());
+        let start = after.rope().point_to_offset(stoat_text::Point::new(21, 0));
+        let end = after.rope().point_to_offset(stoat_text::Point::new(23, 0));
+        fold_map.fold(
+            vec![after.anchor_at(start, Bias::Right)..after.anchor_at(end, Bias::Left)],
+            FoldPlaceholder::default(),
+            &after,
+        );
+
+        let (inlay_snapshot, inlay_edits) = inlay_map.sync(after.clone(), &buffer_edits);
+        let (snap, _) = fold_map.sync(inlay_snapshot, &inlay_edits);
+
+        assert_eq!(snap.line_count(), 40);
+        let rendered: Vec<String> = (0..snap.line_count())
+            .map(|row| {
+                snap.chunks(
+                    snap.row_start_offset(row)..snap.row_start_offset(row + 1),
+                    Arc::from(Vec::new()),
+                )
+                .map(|chunk| chunk.text.to_string())
+                .collect::<String>()
+                .trim_end_matches('\n')
+                .to_string()
+            })
+            .collect();
+
+        let mut expected: Vec<String> = (0..40).map(|i| format!("line{i}")).collect();
+        // The buffer's trailing newline leaves an empty last row.
+        expected.push(String::new());
+        expected.insert(5, "inserted".to_string());
+        // The fold swallows rows 21 and 22 and both their newlines, so row 23's
+        // text carries on after the placeholder rather than starting a row.
+        let after_fold = expected[23].clone();
+        expected.splice(21..24, [format!("...{after_fold}")]);
+
+        assert_eq!(
+            rendered, expected,
+            "a fold arriving with a buffer edit still renders both",
+        );
     }
 
     /// An LSP folding range can name its own collapsed text, and the fold's
