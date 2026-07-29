@@ -513,27 +513,33 @@ impl MinimapContent {
         tokens_for: &impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
         marks: &impl EdgeSource,
     ) {
-        let old_start_row = self.synced_rope.offset_to_point(edit.old.start).row;
-        if old_start_row >= self.built_upto {
+        // The earlier edits of this patch already spliced the rows under this
+        // one, so the row it replaces has moved by their line delta. The new
+        // rope's prefix differs from the old one's by exactly that much, which
+        // makes its own start row the index the store wants.
+        let new_start_row = new_rope.offset_to_point(edit.new.start).row;
+        if new_start_row >= self.built_upto {
             return;
         }
-        let old_end_row = self.synced_rope.offset_to_point(edit.old.end).row;
-
-        let new_start_row = new_rope.offset_to_point(edit.new.start).row;
         let new_end_row = new_rope.offset_to_point(edit.new.end).row;
+
+        let old_start_row = self.synced_rope.offset_to_point(edit.old.start).row;
+        let old_end_row = self.synced_rope.offset_to_point(edit.old.end).row;
 
         let tokens = tokens_for(new_start_row..new_end_row + 1);
 
-        let removed = (old_end_row + 1).min(self.built_upto) - old_start_row;
+        // A shift moves where the replaced rows sit, not how many there are.
+        let replaced = old_end_row + 1 - old_start_row;
+        let removed = (new_start_row + replaced).min(self.built_upto) - new_start_row;
         let inserted = summarize_rows(new_rope, new_start_row..new_end_row + 1, &tokens, marks);
         let inserted_edges: Vec<Option<u8>> = (new_start_row..new_end_row + 1)
             .map(|row| marks.edge_of(row))
             .collect();
 
-        let start = old_start_row as usize;
+        let start = new_start_row as usize;
         let end = (start + removed as usize).min(self.lines.len());
         self.lines.splice(start..end, inserted.iter().cloned());
-        self.splice_edges(old_start_row..end as u32, &inserted_edges);
+        self.splice_edges(new_start_row..end as u32, &inserted_edges);
 
         let delta = inserted.len() as i64 - removed as i64;
         self.built_upto = (self.built_upto as i64 + delta).max(0) as u32;
@@ -545,11 +551,15 @@ impl MinimapContent {
         //
         // `resync_end` of `None` runs to `built_upto`, which the splice above
         // already moved, so only a bounded end needs sliding.
+        //
+        // The bounds are the rows the edit replaced as the store held them, so
+        // they read from the new start rather than the old.
+        let edit_last_row = new_start_row + replaced - 1;
         let slide = |row: u32| {
-            if old_end_row < row {
-                (row as i64 + delta).max(old_start_row as i64) as u32
-            } else if old_start_row < row {
-                old_start_row
+            if edit_last_row < row {
+                (row as i64 + delta).max(new_start_row as i64) as u32
+            } else if new_start_row < row {
+                new_start_row
             } else {
                 row
             }
@@ -565,7 +575,7 @@ impl MinimapContent {
         }
 
         self.queue_splice(Splice {
-            start: old_start_row,
+            start: new_start_row,
             removed,
             lines: inserted,
         });
@@ -1061,6 +1071,55 @@ mod tests {
         // The last char sits at display column 40 (x at even columns, shifted
         // past the 2-column lane); run 12 stretches to cover it.
         assert_eq!(last.start_col as u32 + last.len as u32, 41);
+    }
+
+    /// A patch orders its old ranges in old-rope rows and its new ranges in
+    /// new-rope rows, and its edits apply in order, so the rows under a later
+    /// edit have already moved by the earlier ones' line delta. Indexing that
+    /// edit by its old row would write it one delta too high.
+    #[test]
+    fn a_later_edit_in_one_patch_lands_on_the_moved_row() {
+        let before = rope("alpha\nbravo\ncharlie\ndelta");
+        let mut content = MinimapContent::new(1);
+        content.sync(
+            &before,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
+        let _ = content.take_queued();
+
+        // One patch that opens a line at the top and rewrites "charlie", whose
+        // row the first edit pushes from 2 down to 3.
+        let after = rope("new\nalpha\nbravo\nCHARLIE\ndelta");
+        let edit = Patch::new(vec![
+            Edit {
+                old: 0..0,
+                new: 0..4,
+            },
+            Edit {
+                old: 12..19,
+                new: 16..23,
+            },
+        ]);
+        content.sync(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
+
+        assert_eq!(
+            content
+                .take_queued()
+                .iter()
+                .map(|s| (s.start, s.removed, s.lines.len()))
+                .collect::<Vec<_>>(),
+            vec![(0, 1, 2), (3, 1, 1)],
+            "the second edit splices the row it moved to, not the row it left",
+        );
+        assert_eq!(
+            content.lines[3],
+            summarize_line("CHARLIE", &[], None),
+            "and the store holds the rewritten line at that row",
+        );
     }
 
     #[test]
@@ -1793,6 +1852,69 @@ mod tests {
         assert!(
             stale.is_empty(),
             "the finished sweep left rows {stale:?} on their pre-recolor runs"
+        );
+    }
+
+    /// The slide reads the rows the edit replaced as the store held them, which a
+    /// prior edit in the same patch has already moved. Reading them unshifted
+    /// puts a cursor sitting just above the later edit on the wrong side of it,
+    /// and it jumps forward over rows neither edit re-summarized.
+    #[test]
+    fn a_later_edit_in_one_patch_leaves_the_sweep_cursor_put() {
+        let total = RESYNC_CHUNK + RESYNC_CHUNK / 2;
+        let (before, mut content) = built_recolor_fixture();
+
+        // Sweep the first chunk, parking the cursor at RESYNC_CHUNK.
+        content.sync(
+            &before,
+            1,
+            &Patch::empty(),
+            versions(0, 1),
+            color(1),
+            no_edges,
+        );
+        content.take_queued();
+
+        // Five lines open at the top, sliding the cursor to RESYNC_CHUNK + 5, and
+        // one more opens two rows below where the cursor lands. Every line is
+        // "line\n", so a row starts every five bytes.
+        let after = rope(&vec!["line"; total as usize + 6].join("\n"));
+        let second = 5 * (RESYNC_CHUNK as usize + 2);
+        let edit = Patch::new(vec![
+            Edit {
+                old: 0..0,
+                new: 0..25,
+            },
+            Edit {
+                old: second..second,
+                new: second + 25..second + 30,
+            },
+        ]);
+        content.sync(&after, 2, &edit, versions(0, 1), color(1), no_edges);
+
+        while content.build_pending() {
+            content.sync(
+                &after,
+                2,
+                &Patch::empty(),
+                versions(0, 1),
+                color(1),
+                no_edges,
+            );
+        }
+
+        let recolored = summarize_line("line", &[tok(0..4, 1)], None);
+        let stale: Vec<usize> = content
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| **line != recolored)
+            .map(|(row, _)| row)
+            .collect();
+
+        assert!(
+            stale.is_empty(),
+            "the sweep skipped rows {stale:?}, which neither edit re-summarized"
         );
     }
 
