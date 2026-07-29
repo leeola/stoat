@@ -533,7 +533,15 @@ pub(crate) fn frame(
         &stoat.lsp_progress,
     );
 
-    let lsp_progress_entries = stoat.lsp_progress.entries_by_freshness();
+    // The status card is the only reader, so a closed one collects nothing.
+    // Otherwise every frame sorts the in-flight entries for a card that is not
+    // painting. Both read one value so the gate cannot drift off the card's own
+    // condition.
+    let lsp_status_open = stoat.lsp_status_pinned || stoat.lsp_badge_hovered;
+    let lsp_progress_entries = match lsp_status_open {
+        true => stoat.lsp_progress.entries_by_freshness(),
+        false => Vec::new(),
+    };
 
     let frame = FrameCtx {
         workspace_name: &workspace_name,
@@ -547,7 +555,7 @@ pub(crate) fn frame(
             .expect("refresh_chrome ran at the top of the frame")
             .1,
         pending_count: stoat.pending_count,
-        lsp_status_open: stoat.lsp_status_pinned || stoat.lsp_badge_hovered,
+        lsp_status_open,
         lsp_progress_entries: &lsp_progress_entries,
         spinner_phase: app::spinner_phase(stoat.spinner_clock),
         lsp_servers,
