@@ -12,7 +12,7 @@ use stoatty_protocol::command::{self, MinimapCommand};
 ///
 /// The strip has no cell fallback. Any other terminal leaves the reserved
 /// cells blank, degrading to no minimap.
-pub struct Minimap {
+pub struct Minimap<'a> {
     /// Names this declaration, so its view thumb and any redeclare address it.
     pub strip_id: u32,
     /// The line-summary store the strip renders, updated by `minimap_lines`.
@@ -28,10 +28,13 @@ pub struct Minimap {
     /// Viewport-thumb outline, rgb.
     pub thumb_border: [u8; 3],
     /// Run-class palette, up to 64 rgb entries a summary's classes index.
-    pub palette: Vec<[u8; 3]>,
+    ///
+    /// Borrowed, since a strip is redeclared every frame and the palette it
+    /// names outlives the declaration.
+    pub palette: &'a [[u8; 3]],
 }
 
-impl StatefulWidget for Minimap {
+impl StatefulWidget for Minimap<'_> {
     type State = ApcScene;
 
     fn render(self, area: Rect, _buf: &mut Buffer, scene: &mut ApcScene) {
@@ -62,7 +65,9 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
     use stoatty_protocol::command::{encode_minimap, MinimapCommand};
 
-    fn config() -> Minimap {
+    const PALETTE: [[u8; 3]; 2] = [[224, 108, 117], [152, 195, 121]];
+
+    fn config() -> Minimap<'static> {
         Minimap {
             strip_id: 3,
             content_id: 7,
@@ -71,7 +76,7 @@ mod tests {
             bg: [40, 44, 52, 0],
             thumb: [99, 109, 131, 64],
             thumb_border: [60, 66, 77],
-            palette: vec![[224, 108, 117], [152, 195, 121]],
+            palette: &PALETTE,
         }
     }
 
@@ -95,7 +100,7 @@ mod tests {
             bg: [40, 44, 52, 0],
             thumb: [99, 109, 131, 64],
             thumb_border: [60, 66, 77],
-            palette: vec![[224, 108, 117], [152, 195, 121]],
+            palette: PALETTE.to_vec(),
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
     }

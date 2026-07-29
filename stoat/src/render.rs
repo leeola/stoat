@@ -106,6 +106,13 @@ pub(crate) struct MinimapChrome<'a> {
     pub(crate) content: &'a HashMap<(WorkspaceId, BufferId), MinimapContent>,
     /// Syntax-scope palette the strip declares and its run summaries index.
     pub(crate) palette: &'a [[u8; 3]],
+    /// [`Self::palette`] pre-blended toward the background at the inactive dim,
+    /// for an unfocused pane's strip.
+    ///
+    /// Every unfocused pane blends the same palette the same way, so the frame
+    /// does it once rather than each pane doing it again. Aliases
+    /// [`Self::palette`] when no dim applies.
+    pub(crate) dimmed_palette: &'a [[u8; 3]],
     /// Viewport-thumb fill color, rgba.
     pub(crate) thumb: [u8; 4],
 }
@@ -469,16 +476,45 @@ pub(crate) fn frame(
     let single_minimap_rect = stoat.single_minimap_rect;
     let modal_overlay = modal_overlay_open(stoat);
     let size = stoat.layout_size();
+    let inactive_dim = stoat
+        .settings
+        .ui_inactive_dim
+        .unwrap_or(0.25)
+        .clamp(0.0, 1.0) as f32;
+
+    // Every unfocused pane's strip blends this identically, so the frame blends
+    // it once. `None` leaves those strips on the undimmed palette, which is what
+    // no dim or no resolvable background means.
+    let dimmed_palette: Option<Vec<[u8; 3]>> = (minimap_enabled && inactive_dim > 0.0)
+        .then(|| {
+            let bg = review::style_rgb(
+                stoat
+                    .theme
+                    .try_get(crate::theme::scope::UI_BACKGROUND)
+                    .and_then(|s| s.bg),
+            )?;
+            let palette = stoat.minimap_class_table.palette();
+            Some(
+                palette
+                    .iter()
+                    .map(|&c| review::dim_rgb(c, bg, inactive_dim))
+                    .collect(),
+            )
+        })
+        .flatten();
+
     let minimap_chrome = minimap_enabled.then(|| {
         let thumb = {
             let sel = stoat.theme.get(crate::theme::scope::UI_SELECTION_EDITOR);
             let [r, g, b] = review::style_rgb(sel.bg).unwrap_or([90, 90, 110]);
             [r, g, b, 96]
         };
+        let palette = stoat.minimap_class_table.palette();
         MinimapChrome {
             workspace: stoat.active_workspace,
             content: &stoat.minimap_content,
-            palette: stoat.minimap_class_table.palette(),
+            palette,
+            dimmed_palette: dimmed_palette.as_deref().unwrap_or(palette),
             thumb,
         }
     });
@@ -577,11 +613,7 @@ pub(crate) fn frame(
             .unwrap_or(LineNumbers::Relative),
         wrap_mode: stoat.settings.editor_wrap.unwrap_or(WrapMode::EditorWidth),
         wrap_column: stoat.settings.editor_wrap_column.unwrap_or(80).max(1),
-        inactive_dim: stoat
-            .settings
-            .ui_inactive_dim
-            .unwrap_or(0.25)
-            .clamp(0.0, 1.0) as f32,
+        inactive_dim,
         minimap_enabled: minimap_enabled && minimap_mode == MinimapMode::PerPane,
         minimap_chrome,
         minimap_band: single_minimap_rect,
@@ -652,7 +684,7 @@ pub(crate) fn frame(
             bg: [0, 0, 0, 0],
             thumb: chrome.thumb,
             thumb_border: [tr, tg, tb],
-            palette: chrome.palette.to_vec(),
+            palette: chrome.palette,
         }
         .render(band, buf, scene);
     }

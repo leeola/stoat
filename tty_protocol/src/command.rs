@@ -580,8 +580,13 @@ pub type LineSummary = Vec<MinimapRun>;
 /// cell, up to `max_columns` wide. [`Self::bg`] and [`Self::thumb`] are rgba, the
 /// thumb being the viewport overlay; [`Self::thumb_border`] is its rgb outline.
 /// [`Self::palette`] holds up to 64 rgb entries a run's class indexes.
+///
+/// The palette is generic over its container so an emitter declaring a strip per
+/// frame can hand a borrowed slice, while a decoded command owns its copy. It
+/// defaults to the owned form, so a holder that is not encoding writes the type
+/// with no parameter.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct MinimapCommand {
+pub struct MinimapCommand<P = Vec<[u8; 3]>> {
     pub top: u16,
     pub left: u16,
     pub width: u16,
@@ -593,7 +598,7 @@ pub struct MinimapCommand {
     pub bg: [u8; 4],
     pub thumb: [u8; 4],
     pub thumb_border: [u8; 3],
-    pub palette: Vec<[u8; 3]>,
+    pub palette: P,
 }
 
 /// Splice line summaries into the content store [`Self::content_id`].
@@ -1180,14 +1185,14 @@ pub fn encode_pool_drop_into(out: &mut Vec<u8>, pool: u32) {
 ///
 /// The fixed head rides in a 29-byte first argument and the palette in a second
 /// argument of consecutive rgb triples.
-pub fn encode_minimap(command: &MinimapCommand) -> Vec<u8> {
+pub fn encode_minimap<P: AsRef<[[u8; 3]]>>(command: &MinimapCommand<P>) -> Vec<u8> {
     let mut out = Vec::new();
     encode_minimap_into(&mut out, command);
     out
 }
 
 /// Append a `Gstoatty;minimap` frame for `command` to `out`.
-pub fn encode_minimap_into(out: &mut Vec<u8>, command: &MinimapCommand) {
+pub fn encode_minimap_into<P: AsRef<[[u8; 3]]>>(out: &mut Vec<u8>, command: &MinimapCommand<P>) {
     frame::begin(out, "minimap");
     frame::push_arg(out, |w| {
         w.write_all(&command.top.to_be_bytes())?;
@@ -1202,7 +1207,7 @@ pub fn encode_minimap_into(out: &mut Vec<u8>, command: &MinimapCommand) {
         w.write_all(&command.thumb_border)
     });
     frame::push_arg(out, |w| {
-        for entry in &command.palette {
+        for entry in command.palette.as_ref() {
             w.write_all(entry)?;
         }
         Ok(())

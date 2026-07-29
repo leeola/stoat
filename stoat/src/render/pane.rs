@@ -146,7 +146,10 @@ pub(crate) fn render_pane(
                         bg: [0, 0, 0, 0],
                         thumb: [tr, tg, tb, ta],
                         thumb_border: [tr, tg, tb],
-                        palette: chrome.palette.iter().map(|&c| blend(c)).collect(),
+                        palette: match is_focused {
+                            true => chrome.palette,
+                            false => chrome.dimmed_palette,
+                        },
                     }
                     .render(strip, buf, scene);
                 }
