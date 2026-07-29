@@ -1002,10 +1002,10 @@ pub(crate) fn frame(
                 .iter()
                 .map(|(key, actions)| (key.as_str(), binding_display_desc(actions)))
                 .collect();
-            stoat.hints_cache = Some(hints::HintsCache {
+            stoat.hints_cache = Some(hints::HintsCache::new(
                 key,
-                rows: hints::group_by_action(&bindings),
-            });
+                hints::group_by_action(&bindings),
+            ));
         }
 
         // The review footer is cached against the session version so its
@@ -1061,14 +1061,10 @@ pub(crate) fn frame(
             Some("conflict") => "conflict",
             _ => mode.as_str(),
         };
-        let rows = &stoat
-            .hints_cache
-            .as_ref()
-            .expect("cache populated above")
-            .rows;
+        let cache = stoat.hints_cache.as_mut().expect("cache populated above");
         hints::render_hints_grouped(
             hint_label,
-            rows,
+            cache,
             footer,
             &stoat.theme,
             full,
@@ -1136,13 +1132,13 @@ fn cached_modal_hints(
             .iter()
             .map(|(key, actions)| (key.as_str(), binding_display_desc(actions)))
             .collect();
-        *cache = Some(hints::HintsCache {
+        *cache = Some(hints::HintsCache::new(
             key,
-            rows: hints::group_by_action(&bindings),
-        });
+            hints::group_by_action(&bindings),
+        ));
     }
-    let rows = &cache.as_ref().expect("cache populated above").rows;
-    hints::render_hints_grouped(title.unwrap_or(modal), rows, None, theme, area, buf, scene);
+    let cache = cache.as_mut().expect("cache populated above");
+    hints::render_hints_grouped(title.unwrap_or(modal), cache, None, theme, area, buf, scene);
 }
 
 /// Build the review-screen hints footer from the session progress and theme.

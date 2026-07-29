@@ -7,6 +7,17 @@ use ratatui::{
 };
 use std::collections::HashMap;
 
+/// Columns between a row's key and its action.
+const GAP: usize = 3;
+/// Columns between one column's action and the next column's key.
+const INTER_COL_GAP: usize = 3;
+/// Rows and columns the frame itself occupies.
+const BORDER_PAD: usize = 2;
+/// Columns of breathing room inside the frame.
+const CONTENT_PAD: usize = 2;
+/// Rows a footer adds, being a separator and the text under it.
+const FOOTER_ROWS: usize = 2;
+
 #[derive(Clone)]
 pub(crate) struct HintsFooter {
     pub(crate) text: String,
@@ -21,6 +32,57 @@ pub(crate) struct HintsFooter {
 pub(crate) struct HintsCache {
     pub(crate) key: u64,
     pub(crate) rows: Vec<(String, String)>,
+    /// The most recent layout of [`Self::rows`], or `None` before one is built.
+    layout: Option<HintsLayout>,
+}
+
+impl HintsCache {
+    pub(crate) fn new(key: u64, rows: Vec<(String, String)>) -> Self {
+        Self {
+            key,
+            rows,
+            layout: None,
+        }
+    }
+}
+
+/// The hints box arranged into columns, with every cell's text already padded.
+///
+/// Laying out rescans each column's widths and formats two strings per row. The
+/// box is always on over the review and conflict screens, so deriving that per
+/// frame would rebuild a few hundred strings for a box that did not move.
+struct HintsLayout {
+    /// Everything the layout was derived from, so a frame that changed none of
+    /// it paints from what is here.
+    key: LayoutKey,
+    columns: Vec<LaidColumn>,
+    /// Rows in the tallest column, which the footer separator sits below.
+    max_col_rows: usize,
+    box_width: u16,
+    box_height: u16,
+}
+
+/// The inputs [`HintsLayout`] is derived from.
+///
+/// The footer and title contribute their lengths rather than their text,
+/// because that is all the layout reads of them. A review footer counting
+/// chunks changes length as the review advances, so its presence alone would
+/// not catch a box that needs to be wider.
+#[derive(PartialEq, Eq)]
+struct LayoutKey {
+    rows: u64,
+    area_width: u16,
+    area_height: u16,
+    title_len: usize,
+    footer_len: Option<usize>,
+}
+
+/// One column of the box, holding each row's text as it will be painted.
+struct LaidColumn {
+    /// Right-aligned key and indented action, ready to hand to the painter.
+    cells: Vec<(String, String)>,
+    key_width: usize,
+    action_width: usize,
 }
 
 /// Paint the hints box from pre-grouped `(keys, action)` rows.
@@ -31,14 +93,14 @@ pub(crate) struct HintsCache {
 /// building rows fresh.
 pub(crate) fn render_hints_grouped(
     mode: &str,
-    rows: &[(String, String)],
+    cache: &mut HintsCache,
     footer: Option<&HintsFooter>,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
-    if rows.is_empty() || area.width < 10 || area.height < 4 {
+    if cache.rows.is_empty() || area.width < 10 || area.height < 4 {
         return;
     }
 
@@ -46,44 +108,24 @@ pub(crate) fn render_hints_grouped(
     // full window, so the box lays out flush to the right edge above the bar.
     let area = super::hints_overlay_area(area);
 
-    let gap = 3;
-    let inter_col_gap = 3;
-    let border_pad = 2;
-    let content_pad = 2;
-    let extra_rows = footer.map(|_| 2).unwrap_or(0);
-
-    // Rows that fit vertically inside the box. The layout grows into extra
-    // columns once the bindings would overflow this height.
-    let available_rows = (area.height as usize).saturating_sub(border_pad + extra_rows);
-    if available_rows == 0 {
-        return;
+    let key = LayoutKey {
+        rows: cache.key,
+        area_width: area.width,
+        area_height: area.height,
+        title_len: mode.len(),
+        footer_len: footer.map(|f| f.text.len()),
+    };
+    if cache.layout.as_ref().map(|layout| &layout.key) != Some(&key) {
+        cache.layout = lay_out(&cache.rows, key);
     }
 
-    let col_count = rows.len().div_ceil(available_rows);
-    let rows_per_col = rows.len().div_ceil(col_count);
-
-    let columns: Vec<_> = rows
-        .chunks(rows_per_col)
-        .map(|chunk| {
-            let key_width = chunk.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
-            let action_width = chunk.iter().map(|(_, a)| a.len()).max().unwrap_or(0);
-            (chunk, key_width, action_width)
-        })
-        .collect();
-
-    let max_col_rows = columns.iter().map(|(c, _, _)| c.len()).max().unwrap_or(0);
-    let columns_width: usize = columns
-        .iter()
-        .map(|(_, kw, aw)| kw + gap + aw)
-        .sum::<usize>()
-        + inter_col_gap * columns.len().saturating_sub(1);
-
-    let title_width = mode.len() + 4;
-    let footer_width = footer.map(|f| f.text.len()).unwrap_or(0);
-    let content_width = columns_width.max(title_width).max(footer_width);
-    let box_width = (content_width + border_pad + content_pad) as u16;
-    let box_height = (max_col_rows + border_pad + extra_rows) as u16;
-
+    // A box the area cannot hold is cached as readily as one it can, so a
+    // window too small stops re-laying out every frame.
+    let Some(layout) = cache.layout.as_ref() else {
+        return;
+    };
+    let (box_width, box_height) = (layout.box_width, layout.box_height);
+    let max_col_rows = layout.max_col_rows;
     if box_width > area.width || box_height > area.height {
         return;
     }
@@ -117,39 +159,37 @@ pub(crate) fn render_hints_grouped(
     );
 
     let mut col_x = inner.x + 1;
-    for &(chunk, key_width, action_width) in &columns {
-        for (i, (key, action)) in chunk.iter().enumerate() {
+    for column in &layout.columns {
+        for (i, (padded_key, action_text)) in column.cells.iter().enumerate() {
             let row = inner.y + i as u16;
             if row >= inner.y + inner.height {
                 break;
             }
-            let padded_key = format!("{key:>width$}", width = key_width);
             crate::render::chrome::text(
                 buf,
                 col_x,
                 row,
                 end_x,
-                &padded_key,
+                padded_key,
                 key_style,
                 run_bg,
                 TEXT_SCALE_POPUP,
                 &mut *scene,
             );
 
-            let action_text = format!("   {action}");
             crate::render::chrome::text(
                 buf,
-                col_x + key_width as u16,
+                col_x + column.key_width as u16,
                 row,
                 end_x,
-                &action_text,
+                action_text,
                 action_style,
                 run_bg,
                 TEXT_SCALE_POPUP,
                 &mut *scene,
             );
         }
-        col_x += (key_width + gap + action_width + inter_col_gap) as u16;
+        col_x += (column.key_width + GAP + column.action_width + INTER_COL_GAP) as u16;
     }
 
     if let Some(footer) = footer {
@@ -182,6 +222,62 @@ pub(crate) fn render_hints_grouped(
     }
 }
 
+/// Arrange `rows` into columns that fit `key`'s area, padding every cell.
+///
+/// `None` when the area leaves no room for a single row, which is the one case
+/// that has nothing to lay out rather than something too large to show. A box
+/// wider or taller than the area still lays out, so the caller can cache that it
+/// does not fit.
+fn lay_out(rows: &[(String, String)], key: LayoutKey) -> Option<HintsLayout> {
+    let extra_rows = key.footer_len.map(|_| FOOTER_ROWS).unwrap_or(0);
+
+    // Rows that fit vertically inside the box. The layout grows into extra
+    // columns once the bindings would overflow this height.
+    let available_rows = (key.area_height as usize).saturating_sub(BORDER_PAD + extra_rows);
+    if available_rows == 0 {
+        return None;
+    }
+
+    let col_count = rows.len().div_ceil(available_rows);
+    let rows_per_col = rows.len().div_ceil(col_count);
+
+    let columns: Vec<LaidColumn> = rows
+        .chunks(rows_per_col)
+        .map(|chunk| {
+            let key_width = chunk.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+            let action_width = chunk.iter().map(|(_, a)| a.len()).max().unwrap_or(0);
+            let cells = chunk
+                .iter()
+                .map(|(k, a)| (format!("{k:>key_width$}"), format!("   {a}")))
+                .collect();
+            LaidColumn {
+                cells,
+                key_width,
+                action_width,
+            }
+        })
+        .collect();
+
+    let max_col_rows = columns.iter().map(|c| c.cells.len()).max().unwrap_or(0);
+    let columns_width: usize = columns
+        .iter()
+        .map(|c| c.key_width + GAP + c.action_width)
+        .sum::<usize>()
+        + INTER_COL_GAP * columns.len().saturating_sub(1);
+
+    let title_width = key.title_len + 4;
+    let footer_width = key.footer_len.unwrap_or(0);
+    let content_width = columns_width.max(title_width).max(footer_width);
+
+    Some(HintsLayout {
+        box_width: (content_width + BORDER_PAD + CONTENT_PAD) as u16,
+        box_height: (max_col_rows + BORDER_PAD + extra_rows) as u16,
+        key,
+        columns,
+        max_col_rows,
+    })
+}
+
 /// Collapses entries that share an action description, joining their keys with
 /// `", "` in first-seen order. Ensures each action appears on exactly one row.
 pub(crate) fn group_by_action(bindings: &[(&str, String)]) -> Vec<(String, String)> {
@@ -203,7 +299,7 @@ pub(crate) fn group_by_action(bindings: &[(&str, String)]) -> Vec<(String, Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{group_by_action, render_hints_grouped};
+    use super::{group_by_action, render_hints_grouped, HintsCache, HintsFooter};
     use crate::theme::Theme;
     use ratatui::{buffer::Buffer, layout::Rect};
 
@@ -215,6 +311,17 @@ mod tests {
     }
 
     fn render(bindings: &[(&str, String)], width: u16, height: u16) -> Buffer {
+        let mut cache = HintsCache::new(0, group_by_action(bindings));
+        render_into(&mut cache, None, width, height)
+    }
+
+    /// Paint `cache` at the given size, laying it out first if it needs it.
+    fn render_into(
+        cache: &mut HintsCache,
+        footer: Option<&HintsFooter>,
+        width: u16,
+        height: u16,
+    ) -> Buffer {
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
         // An empty theme resolves no RGB colours, so the helpers still take their
@@ -222,8 +329,8 @@ mod tests {
         let mut scene = stoatty_widgets::ApcScene::new();
         render_hints_grouped(
             "normal",
-            &group_by_action(bindings),
-            None,
+            cache,
+            footer,
             &Theme::empty(),
             area,
             &mut buf,
@@ -273,6 +380,71 @@ mod tests {
         assert!(
             side_by_side,
             "the first rows of two columns share a buffer row",
+        );
+    }
+
+    /// The padded strings are what a repaint is meant to stop rebuilding, so an
+    /// unchanged frame has to reach the paint without touching them.
+    #[test]
+    fn an_unchanged_frame_paints_from_the_laid_out_strings() {
+        let bindings = vec![("k", "act".to_string()), ("kk", "other".to_string())];
+        let mut cache = HintsCache::new(7, group_by_action(&bindings));
+
+        let first = render_into(&mut cache, None, 40, 20);
+        let laid_out: Vec<Vec<(String, String)>> = cache
+            .layout
+            .as_ref()
+            .expect("the first paint lays out")
+            .columns
+            .iter()
+            .map(|column| column.cells.clone())
+            .collect();
+
+        let second = render_into(&mut cache, None, 40, 20);
+        assert_eq!(
+            second.content, first.content,
+            "a repaint with nothing changed paints the same cells",
+        );
+
+        let after: Vec<Vec<(String, String)>> = cache
+            .layout
+            .as_ref()
+            .expect("the layout survives the repaint")
+            .columns
+            .iter()
+            .map(|column| column.cells.clone())
+            .collect();
+        assert_eq!(after, laid_out, "and reuses the strings it laid out before");
+    }
+
+    /// The footer's length sets the box width, so a footer that outgrows the
+    /// columns has to widen the box rather than be clipped by a stale layout.
+    #[test]
+    fn a_longer_footer_widens_the_box() {
+        let bindings = vec![("k", "act".to_string())];
+        let mut cache = HintsCache::new(7, group_by_action(&bindings));
+
+        let footer = |text: &str| HintsFooter {
+            text: text.to_string(),
+            style: Default::default(),
+        };
+
+        render_into(&mut cache, Some(&footer("1/9")), 60, 20);
+        let narrow = cache.layout.as_ref().expect("laid out").box_width;
+
+        render_into(
+            &mut cache,
+            Some(&footer(
+                "a footer far longer than the single binding above it",
+            )),
+            60,
+            20,
+        );
+        let wide = cache.layout.as_ref().expect("laid out again").box_width;
+
+        assert!(
+            wide > narrow,
+            "the longer footer must widen the box, got {narrow} then {wide}",
         );
     }
 
