@@ -2152,6 +2152,50 @@ mod tests {
         assert_eq!(text, "let x: u32 = 1");
     }
 
+    /// The rows a splice patches have to arrive intact at the far end of the
+    /// pipeline, where the fold, wrap, and block layers each sync against the
+    /// inlay patch rather than rebuilding. A hint landing deep in a file is
+    /// where a mis-scoped patch would leave the wrong row painted.
+    #[test]
+    fn a_spliced_hint_paints_through_every_layer() {
+        // A fixed-width name puts the hint's column at the same place on every
+        // row, so the assertions below name one column rather than three.
+        let text: String = (0..200).map(|i| format!("let x{i:03} = {i}\n")).collect();
+        let buffer = TextBuffer::with_text(BufferId::new(0), &text);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
+        display_map.snapshot();
+
+        let hint_at = |display_map: &DisplayMap, row: u32| {
+            let snap = display_map.multi_buffer.snapshot();
+            let off = snap.rope().point_to_offset(Point::new(row, 8));
+            snap.anchor_at(off, stoat_text::Bias::Left)
+        };
+
+        let row_text = |display_map: &mut DisplayMap, row: u32| -> String {
+            let snapshot = display_map.snapshot();
+            snapshot
+                .highlighted_chunks(row..row + 1)
+                .map(|chunk| chunk.text.to_string())
+                .collect()
+        };
+
+        let anchor = hint_at(&display_map, 150);
+        let ids = display_map.splice_inlays(
+            Vec::new(),
+            vec![(anchor, ": u32".to_string(), InlayKind::Hint)],
+        );
+        assert_eq!(row_text(&mut display_map, 150), "let x150: u32 = 150");
+        assert_eq!(row_text(&mut display_map, 149), "let x149 = 149");
+
+        // Replacing the set is what an unchanged hint refresh looks like, and it
+        // has to leave the same text behind.
+        let anchor = hint_at(&display_map, 150);
+        display_map.splice_inlays(ids, vec![(anchor, ": u32".to_string(), InlayKind::Hint)]);
+        assert_eq!(row_text(&mut display_map, 150), "let x150: u32 = 150");
+    }
+
     #[test]
     fn soft_wrap_indent_exposed() {
         let mut display_map = create_display_map("    hello world foo");
