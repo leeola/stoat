@@ -185,22 +185,40 @@ impl BufferSemanticTokens {
     /// `prefix_max_end`. `resolve` need only be order-consistent with the
     /// resolver used at query time. Any buffer snapshot satisfies that, since
     /// resolution preserves relative order.
+    ///
+    /// Costs one `resolve` call per token. A caller that already holds the
+    /// resolved ends, or the byte offsets the anchors were just built from,
+    /// should pair [`prefix_max_end_indices`] with
+    /// [`Self::with_prefix_max_end`] instead.
     pub fn new(
         tokens: Arc<[SemanticTokenHighlight]>,
         interner: Arc<HighlightStyleInterner>,
         resolve: impl Fn(&Anchor) -> usize,
     ) -> Self {
-        let mut prefix_max_end = Vec::with_capacity(tokens.len());
-        let mut max_end = 0;
-        let mut max_idx = 0;
-        for (i, token) in tokens.iter().enumerate() {
-            let end = resolve(&token.range.end);
-            if i == 0 || end > max_end {
-                max_end = end;
-                max_idx = i as u32;
-            }
-            prefix_max_end.push(max_idx);
-        }
+        let ends: Vec<usize> = tokens
+            .iter()
+            .map(|token| resolve(&token.range.end))
+            .collect();
+        Self::with_prefix_max_end(tokens, interner, prefix_max_end_indices(&ends))
+    }
+
+    /// Build the channel from an already-computed `prefix_max_end` index.
+    ///
+    /// `prefix_max_end` must come from [`prefix_max_end_indices`] over ends
+    /// ordered the same way a query-time resolver would order them, and must
+    /// have one entry per token. Anchor resolution preserves relative order,
+    /// so the byte offsets a batch of anchors was just created from satisfy
+    /// that without any anchor being resolved.
+    pub fn with_prefix_max_end(
+        tokens: Arc<[SemanticTokenHighlight]>,
+        interner: Arc<HighlightStyleInterner>,
+        prefix_max_end: Vec<u32>,
+    ) -> Self {
+        debug_assert_eq!(
+            tokens.len(),
+            prefix_max_end.len(),
+            "prefix_max_end must have one entry per token",
+        );
         Self {
             tokens,
             interner,
@@ -252,6 +270,28 @@ impl BufferSemanticTokens {
         }
         left..hi
     }
+}
+
+/// The running argmax of `ends`, as the search index
+/// [`BufferSemanticTokens::overlap_bounds`] binary-searches.
+///
+/// Entry `i` is the index of the greatest end among `0..=i`. Ties keep the
+/// earlier index. Which index wins a tie is not observable, since both name
+/// a token with the same end and the search reads the same bound either way.
+pub(crate) fn prefix_max_end_indices(ends: &[usize]) -> Vec<u32> {
+    let mut indices = Vec::with_capacity(ends.len());
+    let mut max_end = 0;
+    let mut max_idx = 0;
+
+    for (i, &end) in ends.iter().enumerate() {
+        if i == 0 || end > max_end {
+            max_end = end;
+            max_idx = i as u32;
+        }
+        indices.push(max_idx);
+    }
+
+    indices
 }
 
 pub type SemanticTokensHighlights = Arc<HashMap<BufferId, BufferSemanticTokens>>;
@@ -1039,6 +1079,65 @@ mod tests {
             0..2,
             "an enclosing token reaching the range is kept"
         );
+    }
+
+    /// The parse path builds the search index straight from the byte offsets it
+    /// anchored, never resolving an anchor. That is only sound if it lands on
+    /// the same index the resolving constructor computes.
+    #[test]
+    fn with_prefix_max_end_matches_the_resolving_constructor() {
+        use super::{
+            prefix_max_end_indices, BufferSemanticTokens, HighlightStyleInterner,
+            SemanticTokenHighlight,
+        };
+
+        // Ends run deliberately out of order relative to starts. An enclosing
+        // token comes first, two nest inside it, one reaches past everything,
+        // and a short one trails. Two tokens share an end so the tie-break is
+        // pinned as well.
+        let spans = [
+            (0usize, 20usize),
+            (2, 6),
+            (4, 20),
+            (10, 12),
+            (11, 40),
+            (30, 35),
+        ];
+
+        let mut interner = HighlightStyleInterner::default();
+        let style = interner.intern(HighlightStyle::default());
+        let interner = Arc::new(interner);
+        let tokens: Arc<[SemanticTokenHighlight]> = spans
+            .iter()
+            .map(|&(s, e)| SemanticTokenHighlight {
+                range: anchor(s)..anchor(e),
+                style,
+            })
+            .collect();
+
+        let resolve = |a: &Anchor| a.offset as usize;
+        let resolving = BufferSemanticTokens::new(tokens.clone(), interner.clone(), resolve);
+
+        let ends: Vec<usize> = spans.iter().map(|&(_, e)| e).collect();
+        let batched = BufferSemanticTokens::with_prefix_max_end(
+            tokens,
+            interner,
+            prefix_max_end_indices(&ends),
+        );
+
+        assert_eq!(
+            &*batched.prefix_max_end, &*resolving.prefix_max_end,
+            "byte-offset ends must yield the same argmax as resolved ends",
+        );
+        for start in 0..=40 {
+            for end in start..=40 {
+                assert_eq!(
+                    batched.overlap_bounds(&(start..end), resolve),
+                    resolving.overlap_bounds(&(start..end), resolve),
+                    "bounds must agree for {start}..{end}",
+                );
+            }
+        }
     }
 
     #[test]

@@ -7,8 +7,11 @@ use crate::{
     code_index::build::IndexUpdate,
     command_palette::CommandPalette,
     display_map::{
-        highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles, DisplayPoint,
-        DisplaySnapshot,
+        highlights::{
+            prefix_max_end_indices, BufferSemanticTokens, HighlightStyleId, SemanticTokenHighlight,
+        },
+        syntax_theme::SyntaxStyles,
+        DisplayPoint, DisplaySnapshot,
     },
     editor_state::{EditorId, ScrollGlide},
     file_finder::FileFinder,
@@ -1468,7 +1471,10 @@ pub(crate) struct ParseJobOutput {
     /// highlight path and the capture-merging path can run side by side
     /// while consumers migrate.
     pub(crate) syntax_map: stoat_language::SyntaxMap,
-    pub(crate) tokens: Arc<[SemanticTokenHighlight]>,
+    /// The highlight channel, built once here and installed into every editor
+    /// viewing the buffer. It owns the token list, so the search index inside
+    /// it cannot drift from the tokens it indexes.
+    pub(crate) token_channel: BufferSemanticTokens,
 }
 
 impl Stoat {
@@ -10071,7 +10077,7 @@ pub(crate) fn parse_buffer_step(
     // (start, Reverse(end), depth) is kept so deeper injection layers land later
     // and win under the display map's endpoint precedence. highlight_map() clones
     // a locked map, so memoize it per layer language.
-    let tokens: Arc<[SemanticTokenHighlight]> = {
+    let styled: Vec<(Range<usize>, HighlightStyleId)> = {
         use std::collections::HashMap;
 
         let mut highlight_maps = HashMap::new();
@@ -10088,18 +10094,37 @@ pub(crate) fn parse_buffer_step(
                     .entry(cap.language as *const Language as usize)
                     .or_insert_with(|| cap.language.highlight_map());
                 let style_id = styles.id_for_highlight(map.get(cap.index))?;
-                Some(SemanticTokenHighlight {
-                    // Insertions at the start of a token attach to the previous
-                    // span, not this one; insertions at the end attach to the
-                    // next span. Keeps a typed character from silently extending
-                    // a keyword or string into neighboring text.
-                    range: snapshot.anchor_at(range.start, Bias::Right)
-                        ..snapshot.anchor_at(range.end, Bias::Left),
-                    style: style_id,
-                })
+                Some((range, style_id))
             })
             .collect()
     };
+
+    // Anchor the whole batch with two cursor walks rather than a root descent
+    // per endpoint. The two ends take opposite biases, so an insertion at a
+    // token's start attaches to the previous span and one at its end attaches
+    // to the next. That keeps a typed character from silently extending a
+    // keyword or string into neighboring text.
+    let starts: Vec<usize> = styled.iter().map(|(range, _)| range.start).collect();
+    let ends: Vec<usize> = styled.iter().map(|(range, _)| range.end).collect();
+    let tokens: Arc<[SemanticTokenHighlight]> = styled
+        .iter()
+        .map(|(_, style)| *style)
+        .zip(snapshot.anchors_at_batch(&starts, Bias::Right))
+        .zip(snapshot.anchors_at_batch(&ends, Bias::Left))
+        .map(|((style, start), end)| SemanticTokenHighlight {
+            range: start..end,
+            style,
+        })
+        .collect();
+
+    // The search index is an argmax over resolved token ends, and each anchor
+    // above resolves to the offset it was just built from, so the byte ends
+    // answer it without resolving anything.
+    let token_channel = BufferSemanticTokens::with_prefix_max_end(
+        tokens,
+        styles.interner.clone(),
+        prefix_max_end_indices(&ends),
+    );
 
     Some(ParseJobOutput {
         buffer_id,
@@ -10109,7 +10134,7 @@ pub(crate) fn parse_buffer_step(
             rope_snapshot: new_rope,
         },
         syntax_map,
-        tokens,
+        token_channel,
     })
 }
 
@@ -13384,7 +13409,8 @@ mod tests {
         };
 
         let resolve = |out: &ParseJobOutput| {
-            out.tokens
+            out.token_channel
+                .tokens
                 .iter()
                 .map(|t| {
                     (
@@ -13434,6 +13460,63 @@ mod tests {
                 .any(|&(start, _, _)| start >= fence_body && start < fence_body + 20),
             "fixture must produce tokens inside the rust fence, got {fresh:?}",
         );
+    }
+
+    /// The parse builds its token anchors and search index in batch, from byte
+    /// offsets rather than per-anchor tree seeks. The result has to be the same
+    /// channel the per-anchor construction produces, or viewport queries would
+    /// bracket a different set of tokens than the highlights they paint.
+    #[test]
+    fn batched_parse_channel_matches_per_anchor_construction() {
+        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
+        let registry = LanguageRegistry::standard();
+        install_highlight_maps(&registry, &styles);
+        let lang = registry.for_path(Path::new("a.rs")).unwrap();
+        let buffer_id = BufferId::new(1);
+
+        // Nested captures give the search index overlapping, out-of-order ends
+        // to bracket, which a flat token stream would not exercise.
+        let text =
+            "fn outer() -> u32 {\n    let s = \"a string\";\n    if true { 1 } else { 2 }\n}\n";
+        let buf = TextBuffer::with_text(buffer_id, text);
+        let snapshot = buf.snapshot.clone();
+
+        let out = {
+            let mut prior = None;
+            let mut prior_map = None;
+            parse_buffer_step(
+                buffer_id,
+                snapshot.clone(),
+                &lang,
+                &mut prior,
+                &mut prior_map,
+                &styles,
+                None,
+            )
+            .expect("parse should succeed")
+        };
+        assert!(
+            out.token_channel.tokens.len() > 5,
+            "fixture must produce a token stream worth indexing",
+        );
+
+        let resolve = |a: &Anchor| snapshot.resolve_anchor(a);
+        let per_anchor = BufferSemanticTokens::new(
+            out.token_channel.tokens.clone(),
+            styles.interner.clone(),
+            resolve,
+        );
+
+        for start in 0..=text.len() {
+            for end in [start, start + 1, start + 40, text.len()] {
+                let end = end.min(text.len());
+                assert_eq!(
+                    out.token_channel.overlap_bounds(&(start..end), resolve),
+                    per_anchor.overlap_bounds(&(start..end), resolve),
+                    "bounds must agree for {start}..{end}",
+                );
+            }
+        }
     }
 
     #[test]

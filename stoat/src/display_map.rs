@@ -23,6 +23,7 @@ pub use crease_map::{
     Crease, CreaseId, CreaseMap, CreaseMetadata, CreaseSnapshot, RenderToggleFn, RenderTrailerFn,
 };
 pub use fold_map::{FoldMap, FoldMetadata, FoldOffset, FoldPlaceholder, FoldPoint, FoldSnapshot};
+use highlights::prefix_max_end_indices;
 pub use highlights::{
     BufferSemanticTokens, CachedHighlightEndpoints, Chunk, ChunkRenderer, ChunkRendererId,
     ChunkReplacement, HighlightKey, HighlightLayer, HighlightStyle, HighlightStyleId,
@@ -481,6 +482,20 @@ impl DisplayMap {
             let snapshot = self.multi_buffer.snapshot();
             BufferSemanticTokens::new(tokens, interner, |a| snapshot.resolve_anchor(a))
         };
+        self.set_semantic_token_channel(buffer_id, channel);
+    }
+
+    /// Install a channel the caller already built.
+    ///
+    /// The parse pipeline builds one channel per buffer and installs that same
+    /// value into every editor viewing it, rather than having each editor
+    /// rebuild it from the token list. Building it costs a resolve per token,
+    /// so the rebuild was paid once per editor per keystroke.
+    pub fn set_semantic_token_channel(
+        &mut self,
+        buffer_id: BufferId,
+        channel: BufferSemanticTokens,
+    ) {
         Arc::make_mut(&mut self.semantic_token_highlights).insert(buffer_id, channel);
         self.highlights_dirty = true;
     }
@@ -501,7 +516,9 @@ impl DisplayMap {
     ) {
         let channel = {
             let snapshot = self.multi_buffer.snapshot();
-            BufferSemanticTokens::new(tokens, interner, |a| snapshot.resolve_anchor(a))
+            let ends: Vec<Anchor> = tokens.iter().map(|token| token.range.end).collect();
+            let prefix_max_end = prefix_max_end_indices(&snapshot.resolve_anchors_batch(&ends));
+            BufferSemanticTokens::with_prefix_max_end(tokens, interner, prefix_max_end)
         };
         Arc::make_mut(&mut self.lsp_token_highlights).insert(buffer_id, channel);
         self.highlights_dirty = true;

@@ -715,16 +715,14 @@ impl Workspace {
             self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
             self.buffers.store_tokens(
                 out.buffer_id,
-                out.tokens.clone(),
+                out.token_channel.tokens.clone(),
                 syntax_styles.interner.clone(),
             );
             for editor in self.editors.values_mut() {
                 if editor.buffer_id == out.buffer_id {
-                    editor.display_map.set_semantic_token_highlights(
-                        out.buffer_id,
-                        out.tokens.clone(),
-                        syntax_styles.interner.clone(),
-                    );
+                    editor
+                        .display_map
+                        .set_semantic_token_channel(out.buffer_id, out.token_channel.clone());
                 }
             }
             let text = self.buffers.get(out.buffer_id).map(|shared| {
@@ -798,16 +796,14 @@ impl Workspace {
                 self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
                 self.buffers.store_tokens(
                     out.buffer_id,
-                    out.tokens.clone(),
+                    out.token_channel.tokens.clone(),
                     syntax_styles.interner.clone(),
                 );
                 for editor in self.editors.values_mut() {
                     if editor.buffer_id == out.buffer_id {
-                        editor.display_map.set_semantic_token_highlights(
-                            out.buffer_id,
-                            out.tokens.clone(),
-                            syntax_styles.interner.clone(),
-                        );
+                        editor
+                            .display_map
+                            .set_semantic_token_channel(out.buffer_id, out.token_channel.clone());
                     }
                 }
                 self.enqueue_reindex(
