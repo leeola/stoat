@@ -245,6 +245,13 @@ pub struct Workspace {
     /// are not retried every frame, and drives re-population when a buffer is
     /// edited past the recorded version.
     diff_versions: HashMap<BufferId, u64>,
+    /// The buffer ids [`Self::collect_visible_buffer_ids`] last collected.
+    ///
+    /// Held rather than returned because both the parse and the diff driver
+    /// collect them every redraw frame. Carries nothing between frames, and each
+    /// user takes it out for the walk so its borrow never overlaps the rest of
+    /// the workspace.
+    visible_buffers: Vec<BufferId>,
     /// In-flight live-reindex jobs, one per buffer, held so the spawned
     /// extraction is not cancelled. Replaced when the buffer reparses.
     index_jobs: HashMap<BufferId, Task<()>>,
@@ -366,6 +373,7 @@ impl Workspace {
             parse_jobs: HashMap::new(),
             diff_jobs: HashMap::new(),
             diff_versions: HashMap::new(),
+            visible_buffers: Vec::new(),
             index_jobs: HashMap::new(),
             index_debounce: HashMap::new(),
             index_fire_tx,
@@ -776,7 +784,8 @@ impl Workspace {
             self.arm_index_debounce(executor, redraw_notify, out.buffer_id);
         }
 
-        let visible = self.visible_buffer_ids();
+        let mut visible = std::mem::take(&mut self.visible_buffers);
+        self.collect_visible_buffer_ids(&mut visible);
 
         for &buffer_id in &visible {
             let Some(lang) = self.buffers.language_for(buffer_id) else {
@@ -894,6 +903,9 @@ impl Workspace {
                 "evicted hidden highlight state"
             );
         }
+        // Handed back for its capacity alone. The eviction set grew past the
+        // visible ids, and the next collect clears it before reading.
+        self.visible_buffers = protected;
 
         installed
     }
@@ -901,8 +913,8 @@ impl Workspace {
     /// Buffer ids currently shown in a split-pane editor or held as a preview,
     /// deduplicated. Drives which buffers the background parse and diff jobs keep
     /// current.
-    fn visible_buffer_ids(&self) -> Vec<BufferId> {
-        let mut visible: Vec<BufferId> = Vec::new();
+    fn collect_visible_buffer_ids(&self, visible: &mut Vec<BufferId>) {
+        visible.clear();
         for (_, pane) in self.panes.split_panes() {
             match pane.view {
                 View::Editor(editor_id) => {
@@ -920,7 +932,6 @@ impl Workspace {
                 visible.push(id);
             }
         }
-        visible
     }
 
     /// Populate visible git-tracked buffers' diff maps on a background thread.
@@ -960,18 +971,17 @@ impl Workspace {
             self.diff_versions.insert(out.buffer_id, out.target_version);
         }
 
-        let git_root = self.git_root.clone();
-        for buffer_id in self.visible_buffer_ids() {
-            let Some(path) = self.buffers.path_for(buffer_id).map(Path::to_path_buf) else {
-                continue;
-            };
+        let mut visible = std::mem::take(&mut self.visible_buffers);
+        self.collect_visible_buffer_ids(&mut visible);
+
+        // The staleness checks come first so a settled buffer costs one lock
+        // acquisition and nothing else. Its path would otherwise be cloned and
+        // dropped every frame.
+        for &buffer_id in &visible {
             let Some(shared) = self.buffers.get(buffer_id) else {
                 continue;
             };
-            let (cur_version, buffer_rope) = {
-                let guard = shared.read().expect("buffer poisoned");
-                (guard.snapshot.version, guard.snapshot.visible_text.clone())
-            };
+            let cur_version = shared.read().expect("buffer poisoned").snapshot.version;
 
             if self.diff_versions.get(&buffer_id) == Some(&cur_version) {
                 continue;
@@ -984,10 +994,20 @@ impl Workspace {
                 continue;
             }
 
+            let Some(path) = self.buffers.path_for(buffer_id).map(Path::to_path_buf) else {
+                continue;
+            };
+            let buffer_rope = shared
+                .read()
+                .expect("buffer poisoned")
+                .snapshot
+                .visible_text
+                .clone();
+
             let language = language_registry.for_path(&path);
             let task = executor.spawn_blocking({
                 let git_host = git_host.clone();
-                let git_root = git_root.clone();
+                let git_root = self.git_root.clone();
                 let redraw = redraw_notify.clone();
                 let syntax_styles = syntax_styles.clone();
                 let base_cache = base_cache.clone();
@@ -1020,6 +1040,7 @@ impl Workspace {
                 },
             );
         }
+        self.visible_buffers = visible;
     }
 
     /// Detect and assign a language to every path-bearing buffer that
