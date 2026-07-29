@@ -599,12 +599,12 @@ fn sync_incremental(
             );
         }
 
-        let new_out = new_transforms.summary().output.lines;
-        let new_end_row = if new_out.column > 0 {
-            new_out.row + 1
-        } else {
-            new_out.row.max(new_start_row + 1)
-        };
+        // The row holding the last byte the edit wrote, plus one, matching how
+        // the old range was taken above. Reading it as the row *reached*
+        // instead loses a row whenever the edit ends on a row boundary, which
+        // is what inserting or replacing a whole line does, and the patch then
+        // reports a shift of zero for an edit that moved every row below it.
+        let new_end_row = new_transforms.summary().output.lines.row + 1;
 
         row_edits.push(stoat_text::patch::Edit {
             old: old_inlay_start_row..old_inlay_end_row,
@@ -1325,6 +1325,62 @@ mod tests {
         for (edits, offsets) in cases {
             let (mine, oracle) = both_shifts(&offsets, &edits);
             assert_eq!(mine, oracle, "offsets {offsets:?}");
+        }
+    }
+
+    /// The row patch is the only thing telling the fold layer how far an edit
+    /// moved the rows below it, and an edit landing on a row boundary is where
+    /// that is easiest to get wrong. Under-reporting the new side by a row
+    /// makes a whole-line insert look like an in-place change, and the fold
+    /// layer then consumes the displaced text without emitting it again.
+    #[test]
+    fn row_patch_reports_the_rows_an_edit_shifts() {
+        let cases = [
+            (
+                "fn a() {}\n",
+                0..0,
+                "//1\n",
+                0..1,
+                0..2,
+                "a line inserted above",
+            ),
+            (
+                "abc\ndef\n",
+                0..4,
+                "xyz\n",
+                0..2,
+                0..2,
+                "a line replaced in place",
+            ),
+            ("abc\ndef\n", 0..4, "", 0..2, 0..1, "a line deleted"),
+            (
+                "abc\ndef\n",
+                1..1,
+                "X",
+                0..1,
+                0..1,
+                "an insert inside one row",
+            ),
+        ];
+
+        for (text, range, insert, want_old, want_new, what) in cases {
+            let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), text)));
+            let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+            let (mut map, _) = InlayMap::new(multi_buffer.snapshot());
+
+            let before = multi_buffer.snapshot();
+            shared.write().expect("poisoned").edit(range, insert);
+            let after = multi_buffer.snapshot();
+
+            let (_, rows) = map.sync(after.clone(), &after.edits_since(before.version()));
+            assert_eq!(
+                rows.edits()
+                    .iter()
+                    .map(|e| (e.old.clone(), e.new.clone()))
+                    .collect::<Vec<_>>(),
+                vec![(want_old, want_new)],
+                "{what}",
+            );
         }
     }
 }

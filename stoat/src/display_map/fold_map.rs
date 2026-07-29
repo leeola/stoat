@@ -389,12 +389,15 @@ impl FoldMap {
         // derived from the fold set itself. Without this every toggle falls to
         // the full rebuild below and invalidates the whole file downstream.
         //
-        // Only when the inlay text is unchanged, though. An inlay row patch
-        // does not encode how far rows shifted (inserting a line reports
-        // `5..6 -> 5..6`), so a fold's rows cannot be placed in the old
-        // transform tree once an edit has moved them. A fold arriving with a
-        // buffer edit therefore keeps the full rebuild.
-        let inlay_unchanged = inlay_snapshot.inlay_version == self.last_inlay_version;
+        // Only when the inlay text is unchanged, though. Fold rows are placed
+        // against the cached transform tree, which describes the text as it was,
+        // so a fold arriving with a buffer edit keeps the full rebuild.
+        //
+        // Both versions have to agree. The inlay set can change without a
+        // buffer edit, and the buffer can change without touching the inlay
+        // set, so either one moving alone still means different text.
+        let inlay_unchanged = inlay_snapshot.inlay_version == self.last_inlay_version
+            && inlay_snapshot.buffer_snapshot().version() == self.last_buffer_version;
         let fold_edits = self
             .cached_snapshot
             .as_ref()
@@ -423,12 +426,6 @@ impl FoldMap {
                 .map(|s| s.line_count())
                 .unwrap_or(0);
             let transforms = build_fold_transforms(&inlay_snapshot, &resolved_tree);
-            debug_assert_eq!(
-                transforms.summary().input.len,
-                inlay_snapshot.total_summary().len,
-                "a full rebuild walks the inlay text end to end, so its transforms \
-                 must account for every byte exactly once",
-            );
             let new_line_count = if transforms.is_empty() {
                 1
             } else {
@@ -441,6 +438,17 @@ impl FoldMap {
             }]);
             (transforms, edits)
         };
+
+        // Every conversion out of fold space answers from this tree, so a tree
+        // describing a different amount of text than the inlay layer holds is
+        // wrong everywhere at once and visible nowhere. The readings stay
+        // consistent with each other while drifting from the text they claim
+        // to describe.
+        debug_assert_eq!(
+            transforms.summary().input.len,
+            inlay_snapshot.total_summary().len,
+            "fold transforms must account for the inlay text exactly",
+        );
 
         // The map holds anchors and a `None`, so a buffer edit alone cannot
         // change any entry. Only a toggle, or a fold dropped above for having
@@ -914,6 +922,42 @@ fn fold_set_edits(old_folds: &SumTree<Fold>, new_folds: &SumTree<Fold>) -> Patch
     patch
 }
 
+/// `rows` widened until no fold crosses either end of it.
+///
+/// A fold becomes one transform, so a rebuild starting or stopping partway
+/// through one would have to emit half a placeholder. Widening the rebuilt
+/// span instead keeps every fold it touches whole, at the cost of revisiting
+/// the rows the fold spans.
+///
+/// Widening can pull in a further fold that the original span did not reach,
+/// so this repeats until the span stops growing.
+fn rows_covering_folds(folds: &SumTree<Fold>, rows: Range<u32>) -> Range<u32> {
+    let mut rows = rows;
+    loop {
+        let start = InlayPoint::new(rows.start, 0);
+        let end = InlayPoint::new(rows.end, 0);
+        let mut cursor = folds.filter::<_, FoldStart>((), |summary| {
+            summary.max_end > start && summary.min_start < end
+        });
+
+        let mut widened = rows.clone();
+        for fold in &mut cursor {
+            if fold.range.start >= end {
+                break;
+            }
+            if fold.range.end > start {
+                widened.start = widened.start.min(fold.range.start.row());
+                widened.end = widened.end.max(fold.range.end.row() + 1);
+            }
+        }
+
+        if widened == rows {
+            return rows;
+        }
+        rows = widened;
+    }
+}
+
 fn sync_fold_incremental(
     old_snapshot: &FoldSnapshot,
     inlay_snapshot: &InlaySnapshot,
@@ -968,10 +1012,29 @@ fn sync_fold_incremental(
     let mut cursor = old_snapshot.transforms.cursor::<InputOffset>(());
     let mut row_edits = Patch::empty();
 
+    // Rows already rebuilt, so a widened edit cannot reach back over one its
+    // predecessor covered and emit that text a second time.
+    let mut covered_old_row = 0;
+    let mut covered_new_row = 0;
+
     let mut edits_iter = inlay_edits.into_iter().peekable();
     while let Some(edit) = edits_iter.next() {
-        let old_start_offset = old_row_to_offset(edit.old.start);
-        let old_end_offset = old_row_to_offset(edit.old.end).min(old_text_len);
+        let new_rows = rows_covering_folds(resolved_folds, edit.new.clone());
+        let old_rows = {
+            let grew_start = edit.new.start - new_rows.start;
+            let grew_end = new_rows.end - edit.new.end;
+            edit.old.start.saturating_sub(grew_start)..edit.old.end + grew_end
+        };
+        let new_rows = new_rows.start.max(covered_new_row)..new_rows.end;
+        let old_rows = old_rows.start.max(covered_old_row)..old_rows.end;
+        if new_rows.start >= new_rows.end {
+            continue;
+        }
+        covered_old_row = old_rows.end;
+        covered_new_row = new_rows.end;
+
+        let old_start_offset = old_row_to_offset(old_rows.start);
+        let old_end_offset = old_row_to_offset(old_rows.end).min(old_text_len);
 
         // Preserve unchanged prefix
         new_transforms.append(cursor.slice(&InputOffset(old_start_offset), Bias::Left), ());
@@ -987,18 +1050,18 @@ fn sync_fold_incremental(
 
         // Record old output rows
         let old_fold_start = old_snapshot
-            .to_fold_point(InlayPoint::new(edit.old.start, 0), Bias::Right)
+            .to_fold_point(InlayPoint::new(old_rows.start, 0), Bias::Right)
             .row();
-        let old_fold_end = if edit.old.start == edit.old.end {
+        let old_fold_end = if old_rows.start == old_rows.end {
             old_fold_start + 1
-        } else if edit.old.end >= old_inlay.line_count() {
+        } else if old_rows.end >= old_inlay.line_count() {
             // An end row one past the last names the end of the tree.
             // `to_fold_point` clamps a point past the extent back into range
             // rather than extrapolating, so ask the snapshot directly.
             old_snapshot.line_count()
         } else {
             old_snapshot
-                .to_fold_point(InlayPoint::new(edit.old.end, 0), Bias::Right)
+                .to_fold_point(InlayPoint::new(old_rows.end, 0), Bias::Right)
                 .row()
                 .max(old_fold_start + 1)
         };
@@ -1006,26 +1069,11 @@ fn sync_fold_incremental(
         // Seek past old content
         cursor.seek_forward(&InputOffset(old_end_offset), Bias::Right);
 
-        // Push gap from current position to edit.new.start
-        let new_start_offset = row_to_offset(edit.new.start);
-        let current_pos = new_transforms.summary().input.len;
-        if new_start_offset > current_pos {
-            let summary = text_summary(current_pos, new_start_offset);
-            push_fold_isomorphic(
-                &mut new_transforms,
-                TransformSummary {
-                    input: summary.clone(),
-                    output: summary,
-                },
-            );
-        }
-        let new_fold_start = new_transforms.summary().output.lines.row;
-
-        // Rebuild transforms for the edit region [new_start, new_end)
-        let new_end_offset = row_to_offset(edit.new.end).min(text_len);
+        let new_start_offset = row_to_offset(new_rows.start);
+        let new_end_offset = row_to_offset(new_rows.end).min(text_len);
         let folds_in_range: Vec<&Fold> = {
-            let new_start_inlay = InlayPoint::new(edit.new.start, 0);
-            let new_end_inlay = InlayPoint::new(edit.new.end, 0);
+            let new_start_inlay = InlayPoint::new(new_rows.start, 0);
+            let new_end_inlay = InlayPoint::new(new_rows.end, 0);
             let mut fold_cursor = resolved_folds.filter::<_, FoldStart>((), |summary| {
                 summary.max_end > new_start_inlay && summary.min_start < new_end_inlay
             });
@@ -1040,8 +1088,22 @@ fn sync_fold_incremental(
             }
             result
         };
+        let regions = merged_fold_regions(folds_in_range.iter().copied());
 
-        if folds_in_range.is_empty() {
+        let current_pos = new_transforms.summary().input.len;
+        if new_start_offset > current_pos {
+            let summary = text_summary(current_pos, new_start_offset);
+            push_fold_isomorphic(
+                &mut new_transforms,
+                TransformSummary {
+                    input: summary.clone(),
+                    output: summary,
+                },
+            );
+        }
+        let new_fold_start = new_transforms.summary().output.lines.row;
+
+        if regions.is_empty() {
             let current_pos = new_transforms.summary().input.len;
             if new_end_offset > current_pos {
                 let summary = text_summary(current_pos, new_end_offset);
@@ -1055,7 +1117,7 @@ fn sync_fold_incremental(
             }
         } else {
             let mut region_cursor = new_transforms.summary().input.len;
-            for (fold, region) in merged_fold_regions(folds_in_range.iter().copied()) {
+            for (fold, region) in regions {
                 let fold_start_offset = inlay_snapshot
                     .inlay_point_to_offset(region.start)
                     .0
@@ -2572,6 +2634,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Inserting a whole line above everything is the edit that pushes every
+    /// row below it down, so it is the one a row patch reporting no shift
+    /// strands. The transforms would then describe only the inserted line and
+    /// drop the text it displaced.
+    #[test]
+    fn a_line_inserted_above_leaves_the_text_below_accounted_for() {
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "fn a() {}\n",
+        )));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let (mut inlay_map, inlay_snapshot) = InlayMap::new(multi_buffer.snapshot());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot);
+
+        for text in ["//1\n", "//2\n"] {
+            let before = multi_buffer.snapshot();
+            shared.write().expect("poisoned").edit(0..0, text);
+
+            let after = multi_buffer.snapshot();
+            let buffer_edits = after.edits_since(before.version());
+            let (inlay_snapshot, inlay_edits) = inlay_map.sync(after, &buffer_edits);
+            let (snap, _) = fold_map.sync(inlay_snapshot, &inlay_edits);
+
+            assert_eq!(
+                snap.transforms.summary().input.len,
+                snap.inlay_snapshot.total_summary().len,
+                "inserting {text:?} left the transforms describing the wrong amount of text",
+            );
+        }
+
+        assert_eq!(
+            multi_buffer.snapshot().rope().to_string(),
+            "//2\n//1\nfn a() {}\n",
+        );
     }
 
     #[test]
