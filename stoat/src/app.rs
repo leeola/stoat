@@ -93,6 +93,17 @@ const THEME_ONE_LIGHT: &str = include_str!("../../themes/one-light.json");
 pub(crate) const REVIEW_EXTERNAL_EDIT_DEBOUNCE: std::time::Duration =
     std::time::Duration::from_millis(50);
 
+/// Quiet window after the last parse of a buffer before its symbols are
+/// extracted again.
+///
+/// An extract reads the whole file and its drain rebuilds the project's
+/// adjacency, so a burst of keystrokes must collapse into one rather than
+/// queue an extract each. Far longer than
+/// [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`], which is sized for a
+/// formatter-on-save burst. Typing pauses less often than that, and nothing
+/// reads the symbol index between keystrokes.
+pub(crate) const INDEX_EDIT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Directory verdicts [`Stoat::ignored_dir_cache`] holds before dropping the
 /// lot. Far above the directory count of any one build, so the bound is a
 /// backstop against a pathological tree rather than a working limit.
@@ -11980,7 +11991,13 @@ mod tests {
             action_handlers::file::open_file_in_pane(&mut stoat, pane, Path::new("/repo/src/a.rs"))
                 .expect("open the buffer");
 
+        // A parse arms the index debounce rather than extracting, so the
+        // extract lands on a later pass once the buffer has gone quiet.
         let drive = |stoat: &mut Stoat| {
+            stoat.drive_parse_jobs();
+            scheduler.run_until_parked();
+            scheduler.advance_clock(INDEX_EDIT_DEBOUNCE);
+            scheduler.run_until_parked();
             stoat.drive_parse_jobs();
             scheduler.run_until_parked();
             stoat.drain_index_updates();
@@ -12017,6 +12034,74 @@ mod tests {
                 .step(caller, codegraph::EdgeKind::Calls, codegraph::Dir::Down),
             vec![callee],
             "the edit's new call appears as a Calls edge in the graph",
+        );
+    }
+
+    #[test]
+    fn two_parses_inside_the_debounce_window_extract_once() {
+        use crate::host::FakeFs;
+
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+        stoat.persistence_disabled = true;
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/src/a.rs", "fn caller() {}\n");
+        stoat.set_fs_host(fs);
+
+        let pane = stoat.active_workspace().panes.focus();
+        let buffer_id =
+            action_handlers::file::open_file_in_pane(&mut stoat, pane, Path::new("/repo/src/a.rs"))
+                .expect("open the buffer");
+
+        let parse = |stoat: &mut Stoat| {
+            stoat.drive_parse_jobs();
+            scheduler.run_until_parked();
+        };
+        let settle = |stoat: &mut Stoat| {
+            scheduler.advance_clock(INDEX_EDIT_DEBOUNCE);
+            scheduler.run_until_parked();
+            stoat.drive_parse_jobs();
+            scheduler.run_until_parked();
+            stoat.drain_index_updates();
+        };
+        let edit = |stoat: &mut Stoat, text: &str| {
+            let ws = stoat.active_workspace();
+            let buffer = ws.buffers.get(buffer_id).expect("buffer");
+            buffer.write().expect("poisoned").edit(14..14, text);
+        };
+
+        parse(&mut stoat);
+        settle(&mut stoat);
+        let before = stoat.active_workspace().index_generation;
+
+        edit(&mut stoat, "\nfn one() {}");
+        parse(&mut stoat);
+        edit(&mut stoat, "\nfn two() {}");
+        parse(&mut stoat);
+
+        assert_eq!(
+            stoat.active_workspace().index_generation,
+            before,
+            "neither parse extracts while the buffer is still being typed in",
+        );
+
+        settle(&mut stoat);
+        assert_eq!(
+            stoat.active_workspace().index_generation,
+            before + 1,
+            "the two parses collapse into a single extract",
+        );
+
+        let file = crate::code_index::build::file_id("src/a.rs");
+        let ws = stoat.active_workspace();
+        assert!(
+            ws.code_graph.symbol_at(file, 19).is_some()
+                && ws.code_graph.symbol_at(file, 31).is_some(),
+            "the one extract sees both edits, having read the rope when it fired",
         );
     }
 

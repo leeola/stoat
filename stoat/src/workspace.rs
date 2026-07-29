@@ -4,7 +4,7 @@ pub(crate) mod registry;
 
 use crate::{
     agent_status::AgentStatus,
-    app::{parse_buffer_step, ParseJobOutput},
+    app::{parse_buffer_step, ParseJobOutput, INDEX_EDIT_DEBOUNCE},
     badge::BadgeTray,
     buffer::{BufferId, SharedBuffer},
     buffer_registry::{self, BufferRegistry},
@@ -50,7 +50,10 @@ use stoat_language::{
 };
 use stoat_scheduler::{Executor, Task};
 use stoat_text::{Point, Rope};
-use tokio::sync::{mpsc::UnboundedSender, oneshot, Notify};
+use tokio::sync::{
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
+    oneshot, Notify,
+};
 
 new_key_type! {
     pub struct WorkspaceId;
@@ -245,6 +248,17 @@ pub struct Workspace {
     /// In-flight live-reindex jobs, one per buffer, held so the spawned
     /// extraction is not cancelled. Replaced when the buffer reparses.
     index_jobs: HashMap<BufferId, Task<()>>,
+    /// Timers waiting out a buffer's typing before its symbols are extracted.
+    ///
+    /// A parse replaces the buffer's timer, so a burst leaves one survivor and
+    /// costs one extract. Dropping a timer cancels it, which is the whole point:
+    /// once an extract reaches the blocking pool nothing can call it back, so
+    /// the collapsing has to happen before it is spawned.
+    index_debounce: HashMap<BufferId, Task<()>>,
+    /// Buffers whose debounce elapsed, waiting for the next
+    /// [`Self::drive_parse_jobs`] to extract them.
+    index_fire_tx: UnboundedSender<BufferId>,
+    index_fire_rx: UnboundedReceiver<BufferId>,
     pub(crate) badges: BadgeTray,
     /// Status of the owned Claude subshell for this workspace's session, or
     /// `None` until one is spawned. Owned here so the render process reads it
@@ -310,6 +324,7 @@ impl Workspace {
 
         let uid = WorkspaceUid::now(executor);
         let name = name::default_workspace_name(uid);
+        let (index_fire_tx, index_fire_rx) = mpsc::unbounded_channel();
 
         Self {
             id: WorkspaceId::default(),
@@ -352,6 +367,9 @@ impl Workspace {
             diff_jobs: HashMap::new(),
             diff_versions: HashMap::new(),
             index_jobs: HashMap::new(),
+            index_debounce: HashMap::new(),
+            index_fire_tx,
+            index_fire_rx,
             badges: BadgeTray::new(),
             agent: None,
             editor_bridge_waiters: HashMap::new(),
@@ -719,6 +737,10 @@ impl Workspace {
         index_update_tx: &UnboundedSender<IndexUpdate>,
         retention: usize,
     ) -> Vec<(BufferId, Option<Range<u32>>)> {
+        // Ahead of this pass's parses, so a buffer that has gone quiet is
+        // extracted before anything arms its timer again.
+        self.drain_index_debounce(executor, index_update_tx, redraw_notify);
+
         let mut installed: Vec<(BufferId, Option<Range<u32>>)> = Vec::new();
         let waker = futures::task::noop_waker();
         let mut completed: Vec<ParseJobOutput> = Vec::new();
@@ -751,23 +773,7 @@ impl Workspace {
                         .set_semantic_token_channel(out.buffer_id, out.token_channel.clone());
                 }
             }
-            let text = self.buffers.get(out.buffer_id).map(|shared| {
-                shared
-                    .read()
-                    .expect("buffer poisoned")
-                    .snapshot
-                    .visible_text
-                    .clone()
-            });
-            if let Some(text) = text {
-                self.enqueue_reindex(
-                    executor,
-                    index_update_tx,
-                    redraw_notify,
-                    out.buffer_id,
-                    text,
-                );
-            }
+            self.arm_index_debounce(executor, redraw_notify, out.buffer_id);
         }
 
         let visible = self.visible_buffer_ids();
@@ -837,13 +843,7 @@ impl Workspace {
                             .set_semantic_token_channel(out.buffer_id, out.token_channel.clone());
                     }
                 }
-                self.enqueue_reindex(
-                    executor,
-                    index_update_tx,
-                    redraw_notify,
-                    buffer_id,
-                    snapshot.visible_text.clone(),
-                );
+                self.arm_index_debounce(executor, redraw_notify, buffer_id);
                 continue;
             }
 
@@ -1030,6 +1030,58 @@ impl Workspace {
         for (id, path) in self.buffers.buffers_needing_language() {
             if let Some(lang) = registry.for_path(&path) {
                 self.buffers.set_language(id, lang);
+            }
+        }
+    }
+
+    /// Wait out `buffer_id`'s typing before extracting its symbols again.
+    ///
+    /// Replaces any timer already waiting on this buffer, so a burst of parses
+    /// leaves one survivor and costs one extract. The buffer id travels rather
+    /// than its text, because the text a keystroke armed with is already stale
+    /// by the time the window elapses.
+    fn arm_index_debounce(
+        &mut self,
+        executor: &Executor,
+        redraw_notify: &Arc<Notify>,
+        buffer_id: BufferId,
+    ) {
+        let tx = self.index_fire_tx.clone();
+        let timer_executor = executor.clone();
+        let task = executor.spawn_with_redraw(redraw_notify.clone(), async move {
+            timer_executor.timer(INDEX_EDIT_DEBOUNCE).await;
+            let _ = tx.send(buffer_id);
+        });
+        self.index_debounce.insert(buffer_id, task);
+    }
+
+    /// Extract the symbols of every buffer whose debounce has elapsed.
+    ///
+    /// Reads each buffer's rope here rather than carrying it through the timer,
+    /// so the extract sees the text as it stands now.
+    fn drain_index_debounce(
+        &mut self,
+        executor: &Executor,
+        index_update_tx: &UnboundedSender<IndexUpdate>,
+        redraw_notify: &Arc<Notify>,
+    ) {
+        let mut fired = Vec::new();
+        while let Ok(buffer_id) = self.index_fire_rx.try_recv() {
+            fired.push(buffer_id);
+        }
+
+        for buffer_id in fired {
+            self.index_debounce.remove(&buffer_id);
+            let text = self.buffers.get(buffer_id).map(|shared| {
+                shared
+                    .read()
+                    .expect("buffer poisoned")
+                    .snapshot
+                    .visible_text
+                    .clone()
+            });
+            if let Some(text) = text {
+                self.enqueue_reindex(executor, index_update_tx, redraw_notify, buffer_id, text);
             }
         }
     }
