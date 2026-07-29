@@ -90,6 +90,14 @@ impl ContextLessSummary for TransformSummary {
 #[derive(Clone, Debug)]
 struct Transform {
     summary: TransformSummary,
+    /// Tab column each sub-row of this line starts at, or empty for a line
+    /// that occupies one row starting at column 0.
+    ///
+    /// Most lines in a file do not wrap, and `Vec::new` does not allocate,
+    /// so spelling that case as the empty vec rather than `[0]` keeps a
+    /// whole-file rebuild from paying one small allocation per line. Read it
+    /// through [`Transform::wrap_column`] and [`Transform::next_wrap_column`],
+    /// which resolve both encodings.
     wrap_columns: Vec<u32>,
     tab_line_len: u32,
     /// Display columns each continuation row is indented by, matching the
@@ -98,6 +106,29 @@ struct Transform {
     /// every `sub_row > 0`, so the synthetic margin needs no special casing
     /// downstream.
     indent: u32,
+}
+
+impl Transform {
+    /// Tab column `sub_row` starts at.
+    ///
+    /// Sub-row 0 of a non-wrapping line starts at column 0, which the empty
+    /// `wrap_columns` leaves implicit.
+    fn wrap_column(&self, sub_row: usize) -> u32 {
+        self.wrap_columns.get(sub_row).copied().unwrap_or(0)
+    }
+
+    /// Tab column the row after `sub_row` starts at, or `None` when `sub_row`
+    /// runs to the end of the line.
+    fn next_wrap_column(&self, sub_row: usize) -> Option<u32> {
+        self.wrap_columns.get(sub_row + 1).copied()
+    }
+
+    /// The sub-row holding `tab_col`.
+    fn sub_row_at(&self, tab_col: u32) -> usize {
+        self.wrap_columns
+            .partition_point(|&c| c <= tab_col)
+            .saturating_sub(1)
+    }
 }
 
 impl Item for Transform {
@@ -514,7 +545,7 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
         let tab_line_len = tab_snapshot.line_len(tab_row);
 
         let (wrap_columns, indent) = match wrap_width {
-            None => (vec![0], 0),
+            None => (Vec::new(), 0),
             Some(width) => {
                 let chars = tab_snapshot.fold_snapshot().fold_line_chars(tab_row);
                 compute_wrap_columns(
@@ -527,7 +558,7 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
             },
         };
 
-        let output_rows = wrap_columns.len() as u32;
+        let output_rows = wrap_columns.len().max(1) as u32;
         let (local_longest_row, local_longest_chars) =
             compute_transform_longest(&wrap_columns, tab_line_len, indent);
 
@@ -588,7 +619,7 @@ fn sync_incremental(
         for tab_row in edit.new.start..edit.new.end {
             let tab_line_len = tab_snapshot.line_len(tab_row);
             let (wrap_columns, indent) = match wrap_width {
-                None => (vec![0], 0),
+                None => (Vec::new(), 0),
                 Some(width) => {
                     let chars = tab_snapshot.fold_snapshot().fold_line_chars(tab_row);
                     compute_wrap_columns(
@@ -600,7 +631,7 @@ fn sync_incremental(
                     )
                 },
             };
-            let output_rows = wrap_columns.len() as u32;
+            let output_rows = wrap_columns.len().max(1) as u32;
             let (local_longest_row, local_longest_chars) =
                 compute_transform_longest(&wrap_columns, tab_line_len, indent);
             new_transforms.push(
@@ -647,7 +678,15 @@ fn sync_incremental(
     (snapshot, wrap_edits)
 }
 
+/// The widest sub-row of a line and its display width.
+///
+/// An empty `wrap_columns` is the non-wrapping line, whose one row is the whole
+/// line, so it answers straight from `tab_line_len` rather than walking.
 fn compute_transform_longest(wrap_columns: &[u32], tab_line_len: u32, indent: u32) -> (u32, u32) {
+    if wrap_columns.is_empty() {
+        return (0, tab_line_len);
+    }
+
     let mut best_row = 0u32;
     let mut best_chars = 0u32;
     for sub_idx in 0..wrap_columns.len() {
@@ -672,11 +711,15 @@ fn compute_transform_longest(wrap_columns: &[u32], tab_line_len: u32, indent: u3
 /// Break a tab-expanded line into sub-row start columns and its continuation
 /// indent.
 ///
-/// The returned columns always start with `0`. Each later entry is the tab
-/// column a continuation row begins at. The indent is the line's leading-
-/// whitespace display width capped at `width / 2`, and continuation rows wrap at
-/// `width - indent` so the indent plus text fills the pane. Both are zero when
-/// the line fits or wrapping is off.
+/// A returned non-empty column list starts with `0`, and each later entry is
+/// the tab column a continuation row begins at. A line that fits, or any line
+/// with wrapping off, comes back empty rather than as `[0]`, which is the
+/// allocation-free spelling of the same single row (see
+/// [`Transform::wrap_columns`]).
+///
+/// The indent is the line's leading-whitespace display width capped at
+/// `width / 2`, and continuation rows wrap at `width - indent` so the indent
+/// plus text fills the pane. It is zero when the line does not wrap.
 fn compute_wrap_columns(
     chars: impl Iterator<Item = char>,
     tab_line_len: u32,
@@ -685,7 +728,7 @@ fn compute_wrap_columns(
     max_expansion_column: u32,
 ) -> (Vec<u32>, u32) {
     if width == 0 || tab_line_len <= width {
-        return (vec![0], 0);
+        return (Vec::new(), 0);
     }
 
     let mut breaks = vec![0u32];
@@ -781,7 +824,7 @@ impl WrapSnapshot {
                             longest_row: 0,
                             longest_row_chars: tab_line_len,
                         },
-                        wrap_columns: vec![0],
+                        wrap_columns: Vec::new(),
                         tab_line_len,
                         indent: 0,
                     },
@@ -841,7 +884,7 @@ impl WrapSnapshot {
             } else {
                 wrap_point.column()
             };
-            let tab_col = transform.wrap_columns[sub_row as usize] + text_col;
+            let tab_col = transform.wrap_column(sub_row as usize) + text_col;
             TabPoint::new(input_start.0, tab_col)
         } else {
             let last_tab_row = input_start.0.saturating_sub(1);
@@ -864,11 +907,8 @@ impl WrapSnapshot {
 
         if let Some(transform) = cursor.item() {
             let tab_col = tab_point.column();
-            let sub_row = transform
-                .wrap_columns
-                .partition_point(|&c| c <= tab_col)
-                .saturating_sub(1);
-            let text_col = tab_col - transform.wrap_columns[sub_row];
+            let sub_row = transform.sub_row_at(tab_col);
+            let text_col = tab_col - transform.wrap_column(sub_row);
             let wrap_col = if sub_row > 0 {
                 text_col + transform.indent
             } else {
@@ -972,12 +1012,8 @@ impl WrapSnapshot {
                     buf.push(' ');
                 }
             }
-            let start_col = transform.wrap_columns[sub_row];
-            let end_col = if sub_row + 1 < transform.wrap_columns.len() {
-                Some(transform.wrap_columns[sub_row + 1])
-            } else {
-                None
-            };
+            let start_col = transform.wrap_column(sub_row);
+            let end_col = transform.next_wrap_column(sub_row);
             self.tab_snapshot
                 .write_expand_line_range(buf, tab_row, start_col, end_col);
         } else {
@@ -1243,17 +1279,10 @@ impl<'a> WrappedChunksInner<'a> {
         let tab_row = input_start.0;
 
         let transform = cursor.item()?;
-        let (target_start, target_end) = if sub_row < transform.wrap_columns.len() {
-            let start = transform.wrap_columns[sub_row];
-            let end = if sub_row + 1 < transform.wrap_columns.len() {
-                Some(transform.wrap_columns[sub_row + 1])
-            } else {
-                None
-            };
-            (start, end)
-        } else {
-            (0, None)
-        };
+        let (target_start, target_end) = (
+            transform.wrap_column(sub_row),
+            transform.next_wrap_column(sub_row),
+        );
 
         let fold = self.snapshot.tab_snapshot.fold_snapshot();
         if tab_row >= fold.line_count() {
@@ -1350,11 +1379,8 @@ impl WrapPointCursor<'_> {
         let Dimensions(_input_start, output_start, _) = self.cursor.start();
         if let Some(transform) = self.cursor.item() {
             let tab_col = tab_point.column();
-            let sub_row = transform
-                .wrap_columns
-                .partition_point(|&c| c <= tab_col)
-                .saturating_sub(1);
-            let text_col = tab_col - transform.wrap_columns[sub_row];
+            let sub_row = transform.sub_row_at(tab_col);
+            let text_col = tab_col - transform.wrap_column(sub_row);
             let wrap_col = if sub_row > 0 {
                 text_col + transform.indent
             } else {
@@ -1368,10 +1394,9 @@ impl WrapPointCursor<'_> {
 }
 
 fn transform_sub_row_len(transform: &Transform, sub_idx: usize) -> u32 {
-    let text_len = if sub_idx + 1 < transform.wrap_columns.len() {
-        transform.wrap_columns[sub_idx + 1] - transform.wrap_columns[sub_idx]
-    } else {
-        transform.tab_line_len - transform.wrap_columns[sub_idx]
+    let text_len = match transform.next_wrap_column(sub_idx) {
+        Some(next) => next - transform.wrap_column(sub_idx),
+        None => transform.tab_line_len - transform.wrap_column(sub_idx),
     };
     if sub_idx > 0 {
         text_len + transform.indent
@@ -1755,6 +1780,65 @@ mod tests {
                 "line_len mismatch at row {row}"
             );
         }
+    }
+
+    /// A non-wrapping line stores no wrap columns at all, so every reader has
+    /// to resolve that to the single sub-row starting at column 0. This walks a
+    /// file mixing both encodings and pins the display text, the widths, and
+    /// the point conversions each reader feeds.
+    #[test]
+    fn lines_that_do_not_wrap_render_beside_lines_that_do() {
+        // The first line wraps into "ab cd" and "ef". The rest each stay whole.
+        let snap = make_snapshot("ab cd ef\nshort\n\nxy", Some(6));
+
+        let rendered: Vec<String> = (0..snap.line_count())
+            .map(|row| snap.display_line(row))
+            .collect();
+        assert_eq!(rendered, vec!["ab cd ", "ef", "short", "", "xy"]);
+
+        let lens: Vec<u32> = (0..snap.line_count())
+            .map(|row| snap.line_len(row))
+            .collect();
+        assert_eq!(
+            lens,
+            rendered
+                .iter()
+                .map(|line| line.len() as u32)
+                .collect::<Vec<_>>(),
+            "a non-wrapping row's width is its whole line",
+        );
+
+        // The unwrapped rows are the ones with no stored columns, so their
+        // conversions are what the empty encoding has to answer for.
+        for (wrap_row, tab_point) in [
+            (2, TabPoint::new(1, 0)),
+            (2, TabPoint::new(1, 3)),
+            (3, TabPoint::new(2, 0)),
+            (4, TabPoint::new(3, 2)),
+        ] {
+            let wrap_point = snap.to_wrap_point(tab_point);
+            assert_eq!(wrap_point.row(), wrap_row, "row for {tab_point:?}");
+            assert_eq!(
+                snap.to_tab_point(wrap_point),
+                tab_point,
+                "round trip for {tab_point:?}",
+            );
+        }
+
+        assert_eq!(
+            (snap.longest_row, snap.longest_row_chars),
+            (0, 6),
+            "the widest row is the wrapped \"ab cd \", counted across both encodings",
+        );
+
+        // With nothing wrapping at all, every transform stores no columns, so
+        // the widest row is decided entirely from the line lengths.
+        let plain = make_snapshot("ab\nlonger\nx", Some(20));
+        assert_eq!(
+            (plain.longest_row, plain.longest_row_chars),
+            (1, 6),
+            "an unwrapped line's width is its whole length",
+        );
     }
 
     #[test]
