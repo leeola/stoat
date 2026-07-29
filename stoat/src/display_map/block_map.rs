@@ -17,7 +17,7 @@ use std::{
     ops::{Deref, Range},
     sync::{
         atomic::{AtomicUsize, Ordering::SeqCst},
-        Arc, OnceLock,
+        Arc, LazyLock, OnceLock,
     },
 };
 use stoat_text::{
@@ -56,6 +56,27 @@ pub enum BlockStyle {
 
 /// Render callback producing styled terminal lines for a block.
 pub type RenderBlock = Arc<dyn Fn(&BlockContext<'_>) -> Vec<Line<'static>> + Send + Sync>;
+
+/// A block's rendered lines together with the byte length of each.
+///
+/// Measuring a line means writing it out, and the callers that only want the
+/// width would otherwise build and drop a `String` per line on every call. The
+/// lengths are taken here, while the render is already in hand, and kept beside
+/// the lines they describe so the two cannot come to disagree.
+struct RenderedBlock {
+    lines: Vec<Line<'static>>,
+    line_lens: Vec<u32>,
+}
+
+impl RenderedBlock {
+    fn new(lines: Vec<Line<'static>>) -> Self {
+        let line_lens = lines
+            .iter()
+            .map(|line| line.to_string().len() as u32)
+            .collect();
+        Self { lines, line_lens }
+    }
+}
 
 pub struct BlockContext<'a> {
     pub block_id: BlockId,
@@ -219,7 +240,7 @@ pub struct CustomBlock {
     /// [`Block::default_ctx`], and this block's closure is pure over the data it
     /// captured at construction (the diff and text blocks ignore the context),
     /// so the render is invariant and cached once instead of re-run per line.
-    rendered: OnceLock<Arc<Vec<Line<'static>>>>,
+    rendered: OnceLock<Arc<RenderedBlock>>,
 }
 
 impl std::fmt::Debug for CustomBlock {
@@ -277,8 +298,8 @@ impl Block {
     fn default_ctx(&self) -> BlockContext<'static> {
         // Non-Custom blocks render static content and don't access the buffer.
         // Custom blocks receive a real BlockContext through the display pipeline.
-        static EMPTY_SNAPSHOT: std::sync::LazyLock<MultiBufferSnapshot> =
-            std::sync::LazyLock::new(MultiBufferSnapshot::empty);
+        static EMPTY_SNAPSHOT: LazyLock<MultiBufferSnapshot> =
+            LazyLock::new(MultiBufferSnapshot::empty);
         BlockContext {
             block_id: match self {
                 Block::Custom(b) => BlockId::Custom(b.id),
@@ -301,7 +322,7 @@ impl Block {
         }
     }
 
-    /// Rendered lines for this block, memoized on custom blocks.
+    /// Rendered content for this block, memoized on custom blocks.
     ///
     /// Custom blocks render with the constant [`Self::default_ctx`], so the
     /// output never varies between calls. The diff and text block closures these
@@ -310,20 +331,23 @@ impl Block {
     /// (`get_line`, `line_len`, `write_line`, `longest_block_line`) then reuse one
     /// render instead of re-running the closure for every line. Non-custom blocks
     /// carry no rendered content here.
-    fn rendered_lines_memo(&self) -> Arc<Vec<Line<'static>>> {
+    fn rendered_memo(&self) -> Arc<RenderedBlock> {
+        static EMPTY: LazyLock<Arc<RenderedBlock>> =
+            LazyLock::new(|| Arc::new(RenderedBlock::new(Vec::new())));
         match self {
             Block::Custom(b) => b
                 .rendered
-                .get_or_init(|| Arc::new((b.render)(&self.default_ctx())))
+                .get_or_init(|| Arc::new(RenderedBlock::new((b.render)(&self.default_ctx()))))
                 .clone(),
-            _ => Arc::new(Vec::new()),
+            _ => EMPTY.clone(),
         }
     }
 
     pub fn get_line(&self, index: u32) -> String {
         match self {
             Block::Custom(_) => self
-                .rendered_lines_memo()
+                .rendered_memo()
+                .lines
                 .get(index as usize)
                 .map(|l| l.to_string())
                 .unwrap_or_default(),
@@ -332,7 +356,11 @@ impl Block {
     }
 
     pub fn line_len(&self, index: u32) -> u32 {
-        self.get_line(index).len() as u32
+        self.rendered_memo()
+            .line_lens
+            .get(index as usize)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn write_line(&self, buf: &mut String, index: u32) {
@@ -1957,8 +1985,7 @@ pub fn balancing_block(
 fn longest_block_line(block: &Block) -> (u32, u32) {
     let mut best_row = 0u32;
     let mut best_chars = 0u32;
-    for (i, line) in block.rendered_lines_memo().iter().enumerate() {
-        let len = line.to_string().len() as u32;
+    for (i, &len) in block.rendered_memo().line_lens.iter().enumerate() {
         if len > best_chars {
             best_row = i as u32;
             best_chars = len;
@@ -2020,7 +2047,8 @@ mod tests {
         display_map::{fold_map::FoldMap, inlay_map::InlayMap, tab_map::TabMap, wrap_map::WrapMap},
         multi_buffer::MultiBuffer,
     };
-    use std::sync::{Arc, RwLock};
+    use ratatui::text::Line;
+    use std::sync::{Arc, OnceLock, RwLock};
     use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::{patch::Patch, Bias, Point};
 
@@ -2077,7 +2105,7 @@ mod tests {
             diff_status: props.diff_status,
             style: props.style,
             priority: props.priority,
-            rendered: std::sync::OnceLock::new(),
+            rendered: OnceLock::new(),
         }));
 
         for _ in 0..3 {
@@ -2250,6 +2278,44 @@ mod tests {
         assert_eq!(snapshot.line_len(0), 5);
         assert_eq!(snapshot.line_len(1), 12);
         assert_eq!(snapshot.line_len(2), 2);
+    }
+
+    /// The lengths are taken once and kept beside the lines, so nothing forces
+    /// them to keep describing the text `get_line` hands back. A block whose
+    /// lines differ in width is what would show the two coming apart.
+    #[test]
+    fn a_blocks_reported_lengths_describe_the_lines_it_renders() {
+        let block = super::Block::Custom(Arc::new(super::CustomBlock {
+            id: super::CustomBlockId(0),
+            placement: BlockPlacement::Below(0),
+            height: Some(4),
+            render: {
+                let lines = ["", "one", "a much wider line", "mid"];
+                Arc::new(move |_: &super::BlockContext<'_>| {
+                    lines.iter().map(|l| Line::from(l.to_string())).collect()
+                })
+            },
+            diff_status: None,
+            style: BlockStyle::Fixed,
+            priority: 0,
+            rendered: OnceLock::new(),
+        }));
+
+        let lens: Vec<u32> = (0..5).map(|i| block.line_len(i)).collect();
+        assert_eq!(
+            lens,
+            vec![0, 3, 17, 3, 0],
+            "a row past the end measures zero"
+        );
+
+        for row in 0..4 {
+            assert_eq!(
+                block.line_len(row) as usize,
+                block.get_line(row).len(),
+                "row {row}",
+            );
+        }
+        assert_eq!(super::longest_block_line(&block), (2, 17));
     }
 
     #[test]
