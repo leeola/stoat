@@ -1,6 +1,7 @@
 //! The grid render passes that draw [`stoatty_term`]'s cells.
 
 use bytemuck::{Pod, Zeroable};
+use std::ops::Range;
 use stoatty_term::{grid::Panel, term::Damage};
 
 pub mod background;
@@ -186,6 +187,92 @@ pub(crate) fn rotate_row_cache<T>(cache: &mut [Vec<T>], by: isize, mut repair: i
     }
 }
 
+/// The writes that carry a frame's changed rows into a per-row instance buffer,
+/// each an instance offset and the rows to send there.
+///
+/// `rebuilt` are the rows rebuilt this frame, ascending. They are patched where
+/// they sit, adjacent ones sharing a write, which is only sound while the rows
+/// before them still hold the lengths the buffer was written with.
+///
+/// `rewrite_from` is the row where that stops holding, because it or an earlier
+/// row came back a different length and displaced everything after it. From
+/// there to the end of `cache` the buffer is rewritten as one span, and the
+/// rebuilt rows it covers are left out of the per-row writes. `None` means every
+/// rebuilt row kept its length and nothing moved.
+pub(crate) fn row_uploads<T>(
+    cache: &[Vec<T>],
+    rebuilt: &[usize],
+    rewrite_from: Option<usize>,
+) -> impl Iterator<Item = (usize, Range<usize>)> {
+    let patchable = rewrite_from.unwrap_or(cache.len());
+    let patched = &rebuilt[..rebuilt.partition_point(|&row| row < patchable)];
+
+    row_runs(cache, patched)
+        .chain(rewrite_from.map(|first| (row_len(&cache[..first]), first..cache.len())))
+}
+
+/// Group `rows` into contiguous runs, pairing each with where the run's
+/// instances start in the buffer.
+///
+/// The per-row passes re-upload only the rows that changed, and rows that sit
+/// next to each other occupy one contiguous stretch of the buffer, so a run of
+/// them travels as a single write. `rows` must be ascending and free of
+/// duplicates, which is how both passes collect it.
+///
+/// The offset counts instances, not bytes, and is the sum of every row's length
+/// before the run. That only locates a run correctly while the rows before it
+/// still hold the lengths the buffer was written with, so a caller that rebuilds
+/// a row to a different length must stop patching at that row.
+pub(crate) fn row_runs<'cache, 'rows, T>(
+    cache: &'cache [Vec<T>],
+    rows: &'rows [usize],
+) -> RowRuns<'cache, 'rows, T> {
+    RowRuns {
+        cache,
+        rows,
+        offset: 0,
+        walked: 0,
+    }
+}
+
+/// The iterator [`row_runs`] returns.
+pub(crate) struct RowRuns<'cache, 'rows, T> {
+    cache: &'cache [Vec<T>],
+    rows: &'rows [usize],
+    /// Instances counted so far, which is the offset of the next run once the
+    /// gap before it is added.
+    offset: usize,
+    /// The first row not yet counted into [`Self::offset`].
+    walked: usize,
+}
+
+impl<T> Iterator for RowRuns<'_, '_, T> {
+    type Item = (usize, Range<usize>);
+
+    fn next(&mut self) -> Option<(usize, Range<usize>)> {
+        let &start = self.rows.first()?;
+        self.offset += row_len(&self.cache[self.walked..start]);
+
+        let mut len = 1;
+        while self.rows.get(len) == Some(&(start + len)) {
+            len += 1;
+        }
+        self.rows = &self.rows[len..];
+
+        let run = start..start + len;
+        let at = self.offset;
+        self.offset += row_len(&self.cache[run.clone()]);
+        self.walked = run.end;
+
+        Some((at, run))
+    }
+}
+
+/// The instances `rows` holds in total.
+pub(crate) fn row_len<T>(rows: &[Vec<T>]) -> usize {
+    rows.iter().map(Vec::len).sum()
+}
+
 /// Build into `out` one occluder per panel, in declaration order.
 ///
 /// Every pass that occludes reads the same list off the same panels, so a frame
@@ -254,8 +341,133 @@ pub fn cell_size(font_size: u32, scale_factor: f32) -> [f32; 2] {
 
 #[cfg(test)]
 mod tests {
-    use super::{occlusion_globals, pool_occluders, rotate_row_cache, CellMetrics};
+    use super::{
+        occlusion_globals, pool_occluders, rotate_row_cache, row_runs, row_uploads, CellMetrics,
+    };
     use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
+
+    /// Rows of uneven length, so a run's offset can only come out right by
+    /// summing the rows before it rather than multiplying by a fixed width.
+    fn uneven_cache() -> Vec<Vec<u8>> {
+        vec![
+            vec![1, 2, 3],
+            vec![4],
+            vec![],
+            vec![5, 6],
+            vec![7, 8, 9, 10],
+        ]
+    }
+
+    /// Two rows with an untouched row between them must travel as two writes.
+    /// One write spanning both would re-send the row in the middle, which is
+    /// the whole cost the run walk exists to avoid.
+    #[test]
+    fn disjoint_rows_upload_separately() {
+        let cache = uneven_cache();
+
+        assert_eq!(
+            row_runs(&cache, &[1, 3]).collect::<Vec<_>>(),
+            vec![(3, 1..2), (4, 3..4)],
+            "each row goes out on its own, offset past the rows before it",
+        );
+    }
+
+    #[test]
+    fn adjacent_rows_upload_as_one_run() {
+        let cache = uneven_cache();
+
+        assert_eq!(
+            row_runs(&cache, &[2, 3, 4]).collect::<Vec<_>>(),
+            vec![(4, 2..5)],
+            "rows sitting next to each other share one contiguous write",
+        );
+    }
+
+    #[test]
+    fn a_row_list_splits_into_runs_at_every_gap() {
+        let cache = uneven_cache();
+
+        assert_eq!(
+            row_runs(&cache, &[0, 1, 3, 4]).collect::<Vec<_>>(),
+            vec![(0, 0..2), (4, 3..5)],
+            "the gap at row 2 splits the list, and the second run skips its \
+             length",
+        );
+        assert!(
+            row_runs(&cache, &[]).next().is_none(),
+            "no changed row is no write",
+        );
+    }
+
+    /// Apply an upload plan to a buffer holding `stale` and report what the
+    /// buffer ends up with, so a plan that misplaces or omits a write shows up
+    /// as bytes that differ from the rows it was meant to deliver.
+    fn apply(
+        cache: &[Vec<u8>],
+        stale: &[u8],
+        rebuilt: &[usize],
+        rewrite_from: Option<usize>,
+    ) -> Vec<u8> {
+        let mut buffer = stale.to_vec();
+        buffer.resize(cache.iter().map(Vec::len).sum(), 0);
+
+        for (offset, rows) in row_uploads(cache, rebuilt, rewrite_from) {
+            let sent: Vec<u8> = cache[rows].iter().flatten().copied().collect();
+            buffer[offset..offset + sent.len()].copy_from_slice(&sent);
+        }
+        buffer
+    }
+
+    /// Rows that kept their lengths are patched where they sit, so the buffer
+    /// ends up holding the whole cache without the untouched rows being re-sent.
+    #[test]
+    fn patched_rows_land_where_the_buffer_holds_them() {
+        let cache = uneven_cache();
+        let flat: Vec<u8> = cache.iter().flatten().copied().collect();
+
+        // Rows 1 and 3 changed content but not length, so the buffer still holds
+        // the right bytes everywhere else.
+        let stale = vec![1, 2, 3, 0, 0, 0, 7, 8, 9, 10];
+
+        assert_eq!(
+            apply(&cache, &stale, &[1, 3], None),
+            flat,
+            "patching the changed rows in place restores the whole buffer",
+        );
+    }
+
+    /// A row that changed length moves every later row, so the plan must rewrite
+    /// from there rather than patch the rows after it where they used to be.
+    #[test]
+    fn a_resized_row_rewrites_the_rest_of_the_buffer() {
+        let cache = uneven_cache();
+        let flat: Vec<u8> = cache.iter().flatten().copied().collect();
+
+        // Row 1 grew from one instance to two before this frame, so every row
+        // after it sits one instance earlier in the stale buffer.
+        let stale = vec![1, 2, 3, 4, 0, 5, 6, 7, 8, 9];
+
+        assert_eq!(
+            apply(&cache, &stale, &[1, 4], Some(1)),
+            flat,
+            "the rewrite carries every row the resize displaced",
+        );
+    }
+
+    /// A rebuilt row at or past the rewrite point is already covered by the
+    /// span, so patching it individually would write bytes about to be
+    /// overwritten at an offset the resize has already invalidated.
+    #[test]
+    fn rows_past_the_rewrite_point_are_left_to_the_span() {
+        let cache = uneven_cache();
+
+        assert_eq!(
+            row_uploads(&cache, &[0, 3, 4], Some(3)).collect::<Vec<_>>(),
+            vec![(0, 0..1), (4, 3..5)],
+            "row 0 is patched, and rows 3 and 4 ride the span rather than two \
+             writes of their own",
+        );
+    }
 
     /// Rows keep the work already done for them, land repaired for where they
     /// now sit, and the rows the scroll exposed come back empty.

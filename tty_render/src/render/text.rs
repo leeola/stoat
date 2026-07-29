@@ -10,7 +10,9 @@
 
 use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
-    render::{occlusion_globals, pool_occluders, CellMetrics, Frame, Occluder},
+    render::{
+        occlusion_globals, pool_occluders, row_len, row_uploads, CellMetrics, Frame, Occluder,
+    },
 };
 use bytemuck::{Pod, Zeroable};
 use cosmic_text::{
@@ -19,7 +21,7 @@ use cosmic_text::{
     SwashCache,
 };
 use rustc_hash::FxHashMap;
-use std::{mem, sync::Arc};
+use std::{mem, ops::Range, sync::Arc};
 use stoatty_term::{
     grid::{Cell, Grid, Overlay, Panel, Rgb, Scale, ScrollRegion, UnderlineStyle},
     term::Damage,
@@ -1947,12 +1949,17 @@ impl TextPass {
 
     /// Rebuild and re-upload only the changed rows' plain-glyph instances.
     ///
-    /// Unchanged rows reuse last frame's [`Self::plain_row_instances`]; the rows
+    /// Unchanged rows reuse last frame's [`Self::plain_row_instances`]. The rows
     /// in `rebuilt` rebuild from their cached glyphs, and `rebuild_all` rebuilds
-    /// every row (an atlas grow moved every UV, or text runs may grow it). Only
-    /// the buffer from the first changed row to the end is uploaded, since the
-    /// rows before it keep their bytes; a buffer that must grow is fully
-    /// re-uploaded. Used only with no scroll region, so every glyph is plain.
+    /// every row (an atlas grow moved every UV, or text runs may grow it). A
+    /// buffer that must grow is fully re-uploaded.
+    ///
+    /// Rows are patched where they sit, contiguous ones sharing a write, up to
+    /// the first row that came back a different length. That row moved every
+    /// later row's place in the buffer, so from there on the rest is rewritten
+    /// as one span.
+    ///
+    /// Used only with no scroll region, so every glyph is plain.
     fn patch_plain_rows(
         &mut self,
         device: &Device,
@@ -1968,71 +1975,92 @@ impl TextPass {
             self.plain_row_instances = vec![Vec::new(); rows];
         }
 
-        let first = if rebuild_all || stale {
+        let rewrite_from = if rebuild_all || stale {
             for row in 0..rows {
                 self.rebuild_plain_row(device, queue, row);
             }
             (rows > 0).then_some(0)
         } else {
+            let mut resized = None;
             for &row in rebuilt {
-                self.rebuild_plain_row(device, queue, row);
+                if self.rebuild_plain_row(device, queue, row) && resized.is_none() {
+                    resized = Some(row);
+                }
             }
             // A rotation moved every kept instance, so the buffer rewrites from
-            // the top rather than from the first rebuilt row.
+            // the top rather than from the first row that changed length.
             if self.rows_shifted {
                 (rows > 0).then_some(0)
             } else {
-                rebuilt.first().copied()
+                resized
             }
         };
-        let Some(first) = first else {
-            return;
-        };
-
-        let offset: usize = self.plain_row_instances[..first].iter().map(Vec::len).sum();
-        let tail_len: usize = self.plain_row_instances[first..].iter().map(Vec::len).sum();
-        self.count = (offset + tail_len) as u32;
-        if offset + tail_len == 0 {
+        if rewrite_from.is_none() && rebuilt.is_empty() {
             return;
         }
 
-        if offset + tail_len > self.capacity {
+        let total = row_len(&self.plain_row_instances);
+        self.count = total as u32;
+        if total == 0 {
+            return;
+        }
+
+        let mut scratch = mem::take(&mut self.plain_upload_scratch);
+        if total > self.capacity {
             // Growing the buffer drops its contents, so re-upload every row.
-            self.capacity = (offset + tail_len).next_power_of_two();
+            self.capacity = total.next_power_of_two();
             self.instances = alloc_instances(
                 device,
                 "text instances",
                 instance_bytes::<TextInstance>(self.capacity),
             );
-            self.plain_upload_scratch.clear();
-            self.plain_upload_scratch
-                .extend(self.plain_row_instances.iter().flatten().copied());
-            queue.write_buffer(
-                &self.instances,
-                0,
-                bytemuck::cast_slice(&self.plain_upload_scratch),
-            );
+            self.upload_plain_rows(queue, &mut scratch, 0, 0..rows);
         } else {
-            self.plain_upload_scratch.clear();
-            self.plain_upload_scratch
-                .extend(self.plain_row_instances[first..].iter().flatten().copied());
-            let byte_offset = (offset * size_of::<TextInstance>()) as u64;
-            queue.write_buffer(
-                &self.instances,
-                byte_offset,
-                bytemuck::cast_slice(&self.plain_upload_scratch),
-            );
+            for (offset, run) in row_uploads(&self.plain_row_instances, rebuilt, rewrite_from) {
+                self.upload_plain_rows(queue, &mut scratch, offset, run);
+            }
         }
+        self.plain_upload_scratch = scratch;
+    }
+
+    /// Write rows `range` of the per-row cache into the instance buffer, at
+    /// `offset` instances from its start.
+    fn upload_plain_rows(
+        &self,
+        queue: &Queue,
+        scratch: &mut Vec<TextInstance>,
+        offset: usize,
+        range: Range<usize>,
+    ) {
+        scratch.clear();
+        scratch.extend(self.plain_row_instances[range].iter().flatten().copied());
+        if scratch.is_empty() {
+            return;
+        }
+
+        queue.write_buffer(
+            &self.instances,
+            (offset * size_of::<TextInstance>()) as u64,
+            bytemuck::cast_slice(scratch),
+        );
     }
 
     /// Rebuild one plain row's text instances from its cached glyphs, leaving
     /// the glyph cache intact for the next frame.
-    fn rebuild_plain_row(&mut self, device: &Device, queue: &Queue, row: usize) {
+    ///
+    /// Reports whether the row's instance count changed. A row that grew or
+    /// shrank displaces every later row in the buffer, so the caller can no
+    /// longer patch those rows where they were.
+    fn rebuild_plain_row(&mut self, device: &Device, queue: &Queue, row: usize) -> bool {
         let glyphs = mem::take(&mut self.glyph_row_cache[row]);
         let mut instances = mem::take(&mut self.plain_row_instances[row]);
+        let held = instances.len();
         self.build_text_instances_into(device, queue, &glyphs, &mut instances);
+
+        let resized = instances.len() != held;
         self.plain_row_instances[row] = instances;
         self.glyph_row_cache[row] = glyphs;
+        resized
     }
 
     /// Shape and rasterize one grid row's glyphs, returning its placements.
