@@ -195,6 +195,16 @@ pub struct DiffMap {
     /// [`Self::base_changes`], mapping each base line a hunk removed to that
     /// hunk's [`DiffHunk::staged`]. Added hunks contribute no base line.
     base_staged: Arc<BaseStaged>,
+    /// Hunks counted by staged state as `(staged, unstaged)`.
+    ///
+    /// Kept rather than folded on demand because the status bar asks every
+    /// frame while the answer moves only when the diff is rebuilt.
+    ///
+    /// [`Self::from_hunks`] is the only path that builds the tree outside
+    /// tests, since a staging change re-runs the diff rather than editing the
+    /// hunks in place. Nothing else takes the tree mutably, so the count cannot
+    /// drift from it.
+    staged_tally: (usize, usize),
     version: usize,
 }
 
@@ -210,12 +220,21 @@ impl DiffMap {
         let hunks = SumTree::from_iter(hunks, ());
         let base_changes = Arc::new(compute_base_change_spans(&hunks, base_text.as_ref()));
         let base_staged = Arc::new(compute_base_staged(&hunks, base_text.as_ref()));
+        let staged_tally = hunks.iter().fold((0, 0), |(staged, unstaged), hunk| {
+            if hunk.staged() {
+                (staged + 1, unstaged)
+            } else {
+                (staged, unstaged + 1)
+            }
+        });
+
         Self {
             hunks,
             base_text,
             base_highlights: None,
             base_changes,
             base_staged,
+            staged_tally,
             version: Self::next_version(),
         }
     }
@@ -363,13 +382,7 @@ impl DiffMap {
     /// A partially line-staged hunk counts as unstaged, so the statusline
     /// reports it staged only once every changed row is in the index.
     pub fn staged_counts(&self) -> (usize, usize) {
-        self.hunks.iter().fold((0, 0), |(staged, unstaged), hunk| {
-            if hunk.staged() {
-                (staged + 1, unstaged)
-            } else {
-                (staged, unstaged + 1)
-            }
-        })
+        self.staged_tally
     }
 
     pub fn has_deletion_after(&self, line: u32) -> bool {
@@ -577,6 +590,12 @@ impl DiffMap {
 
     #[cfg(test)]
     pub fn push_hunk(&mut self, hunk: DiffHunk) {
+        if hunk.staged() {
+            self.staged_tally.0 += 1;
+        } else {
+            self.staged_tally.1 += 1;
+        }
+
         self.hunks.push(hunk, ());
         self.base_changes = Arc::new(compute_base_change_spans(
             &self.hunks,
@@ -1051,6 +1070,51 @@ mod tests {
             anchor_range: None,
             token_detail: None,
         }
+    }
+
+    /// The tally is stepped rather than refolded, so pushing has to move the
+    /// bucket matching the pushed hunk and leave the other alone.
+    #[test]
+    fn pushing_a_hunk_steps_the_staged_tally() {
+        let staged = DiffHunk {
+            unstaged_lines: Vec::new(),
+            ..added_hunk(1..2)
+        };
+        let recount = |dm: &DiffMap| {
+            dm.hunks().fold((0, 0), |(s, u), hunk| {
+                if hunk.staged() {
+                    (s + 1, u)
+                } else {
+                    (s, u + 1)
+                }
+            })
+        };
+
+        let mut dm = DiffMap::from_hunks([staged.clone()], None);
+        assert_eq!(
+            dm.staged_counts(),
+            (1, 0),
+            "the staged hunk it was built with"
+        );
+
+        dm.push_hunk(added_hunk(3..4));
+        assert_eq!(
+            dm.staged_counts(),
+            (1, 1),
+            "an unstaged push moves only that bucket"
+        );
+        assert_eq!(
+            dm.staged_counts(),
+            recount(&dm),
+            "and agrees with a full recount"
+        );
+
+        dm.push_hunk(DiffHunk {
+            unstaged_lines: Vec::new(),
+            ..added_hunk(5..6)
+        });
+        assert_eq!(dm.staged_counts(), (2, 1));
+        assert_eq!(dm.staged_counts(), recount(&dm), "and still agrees");
     }
 
     fn deleted_hunk(after_line: u32, base_byte_range: std::ops::Range<usize>) -> DiffHunk {

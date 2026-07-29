@@ -18,6 +18,13 @@ use std::{
 struct PathDiagnostics {
     by_server: BTreeMap<String, Vec<Diagnostic>>,
     merged: Vec<Diagnostic>,
+    /// Severity counts over [`Self::merged`], refreshed whenever a server
+    /// republishes for this path.
+    ///
+    /// The status bar asks for this every frame while diagnostics change only
+    /// when a server speaks, so counting on read would walk the list for an
+    /// answer that almost never moves.
+    summary: DiagnosticSummary,
 }
 
 impl PathDiagnostics {
@@ -93,13 +100,17 @@ impl DiagnosticSet {
         }
         if entry.by_server.is_empty() {
             self.by_path.remove(&path);
-        } else if entry.by_server.len() > 1 {
+            return;
+        }
+
+        if entry.by_server.len() > 1 {
             entry.merged = entry.by_server.values().flatten().cloned().collect();
         } else {
             // A single server's slice is read directly by `merged()`, so skip
             // the clone. Drop any stale multi-server copy so it never lingers.
             entry.merged = Vec::new();
         }
+        entry.summary = summarize_diagnostics(entry.merged());
     }
 
     /// Replaces the whole diagnostic list for `path` from a single unnamed
@@ -162,30 +173,45 @@ impl DiagnosticSet {
     }
 
     /// Returns severity counts plus the worst severity for `path`.
+    ///
+    /// Read from what the last publish for `path` computed rather than counted
+    /// here, so a status bar can ask per frame.
     pub fn summarize(&self, path: &Path) -> DiagnosticSummary {
-        let mut summary = DiagnosticSummary::default();
-        for diag in self.get(path) {
-            match diag.severity {
-                Some(DiagnosticSeverity::ERROR) => summary.error += 1,
-                Some(DiagnosticSeverity::WARNING) => summary.warning += 1,
-                Some(DiagnosticSeverity::INFORMATION) => summary.information += 1,
-                Some(DiagnosticSeverity::HINT) => summary.hint += 1,
-                _ => summary.error += 1,
-            }
-        }
-        summary.worst = if summary.error > 0 {
-            Some(DiagnosticSeverity::ERROR)
-        } else if summary.warning > 0 {
-            Some(DiagnosticSeverity::WARNING)
-        } else if summary.information > 0 {
-            Some(DiagnosticSeverity::INFORMATION)
-        } else if summary.hint > 0 {
-            Some(DiagnosticSeverity::HINT)
-        } else {
-            None
-        };
-        summary
+        self.by_path
+            .get(path)
+            .map(|entry| entry.summary)
+            .unwrap_or_default()
     }
+}
+
+/// Bucket `diagnostics` by severity and name the worst one present.
+///
+/// A diagnostic with no severity is counted as an error, since a server that
+/// omits it is reporting something it could not classify rather than nothing.
+fn summarize_diagnostics(diagnostics: &[Diagnostic]) -> DiagnosticSummary {
+    let mut summary = DiagnosticSummary::default();
+    for diag in diagnostics {
+        match diag.severity {
+            Some(DiagnosticSeverity::ERROR) => summary.error += 1,
+            Some(DiagnosticSeverity::WARNING) => summary.warning += 1,
+            Some(DiagnosticSeverity::INFORMATION) => summary.information += 1,
+            Some(DiagnosticSeverity::HINT) => summary.hint += 1,
+            _ => summary.error += 1,
+        }
+    }
+
+    summary.worst = if summary.error > 0 {
+        Some(DiagnosticSeverity::ERROR)
+    } else if summary.warning > 0 {
+        Some(DiagnosticSeverity::WARNING)
+    } else if summary.information > 0 {
+        Some(DiagnosticSeverity::INFORMATION)
+    } else if summary.hint > 0 {
+        Some(DiagnosticSeverity::HINT)
+    } else {
+        None
+    };
+    summary
 }
 
 #[cfg(test)]
@@ -229,6 +255,50 @@ mod tests {
         assert_eq!(set.version(), 1);
         set.replace_for_path(path.clone(), vec![]);
         assert_eq!(set.version(), 2, "clearing a path is still a change");
+    }
+
+    /// The summary is stored at publish rather than counted at read, so it has
+    /// to be refreshed on every path that a publish touches, and go away with
+    /// the path when the last server clears it.
+    #[test]
+    fn the_stored_summary_follows_each_publish() {
+        let mut set = DiagnosticSet::new();
+        let path = PathBuf::from("/ws/a.rs");
+
+        set.replace_for_path(
+            path.clone(),
+            vec![
+                diag(DiagnosticSeverity::ERROR, "x"),
+                diag(DiagnosticSeverity::WARNING, "y"),
+            ],
+        );
+        assert_eq!(
+            set.summarize(&path),
+            DiagnosticSummary {
+                error: 1,
+                warning: 1,
+                worst: Some(DiagnosticSeverity::ERROR),
+                ..DiagnosticSummary::default()
+            },
+        );
+
+        set.replace_for_path(path.clone(), vec![diag(DiagnosticSeverity::HINT, "z")]);
+        assert_eq!(
+            set.summarize(&path),
+            DiagnosticSummary {
+                hint: 1,
+                worst: Some(DiagnosticSeverity::HINT),
+                ..DiagnosticSummary::default()
+            },
+            "republishing replaces the counts rather than adding to them",
+        );
+
+        set.replace_for_path(path.clone(), vec![]);
+        assert_eq!(
+            set.summarize(&path),
+            DiagnosticSummary::default(),
+            "clearing the last server leaves nothing to summarize",
+        );
     }
 
     #[test]
