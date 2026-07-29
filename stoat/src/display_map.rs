@@ -1817,6 +1817,100 @@ mod tests {
         assert_eq!(snapshot.line_count(), 3);
     }
 
+    /// The chunk stream is what every paint reads, so any change to how it is
+    /// walked has to leave it identical. Each layer contributes its own way for
+    /// a restart to differ from a continuation. A wrapped row splits mid-chunk,
+    /// a fold and a hint move the offsets the layers below are addressed by, and
+    /// a block interrupts the run entirely.
+    #[test]
+    fn the_chunk_stream_over_wraps_folds_inlays_and_blocks() {
+        // Row 1 is indented, so its continuation rows carry an indent. Row 3 is
+        // long enough to wrap after the fold collapses part of it.
+        let text = "fn alpha() { let x = 1; }\n\
+                    \x20   indented line that wraps a few times\n\
+                    short\n\
+                    fn gamma() { let z = 3; } and more text\n";
+        let buffer = TextBuffer::with_text(BufferId::new(0), text);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
+
+        let hint_at = {
+            let snap = display_map.multi_buffer.snapshot();
+            snap.anchor_at(
+                snap.rope().point_to_offset(Point::new(0, 12)),
+                stoat_text::Bias::Right,
+            )
+        };
+        display_map.splice_inlays(
+            Vec::new(),
+            vec![(hint_at, ": u32".to_string(), InlayKind::Hint)],
+        );
+        display_map.fold(vec![Point::new(3, 12)..Point::new(3, 24)]);
+        display_map.insert_blocks(vec![BlockProperties::from_text(
+            BlockPlacement::Below(1),
+            vec!["a block row".to_string(), "and another".to_string()],
+            BlockStyle::Fixed,
+        )]);
+        display_map.set_wrap_width(Some(14));
+
+        let snapshot = display_map.snapshot();
+        let stream: Vec<String> = snapshot
+            .highlighted_chunks(0..snapshot.line_count())
+            .map(|chunk| {
+                format!(
+                    "{:?}{}{}",
+                    chunk.text,
+                    if chunk.is_inlay { " inlay" } else { "" },
+                    if chunk.is_tab { " tab" } else { "" },
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            stream.join("\n"),
+            [
+                // Row 0 wraps mid-hint, so the hint arrives as two chunks
+                // either side of the break.
+                r#""fn alpha() {""#,
+                r#"":" inlay"#,
+                r#""\n""#,
+                r#"" u32" inlay"#,
+                r#"" let x = 1; }""#,
+                r#""\n""#,
+                // Row 1's first sub-row, then the block splitting it.
+                r#""    indented ""#,
+                r#""\n""#,
+                r#""a block row""#,
+                r#""\n""#,
+                r#""and another""#,
+                r#""\n""#,
+                // Its remaining sub-rows, each opening with the carried indent.
+                r#""    ""#,
+                r#""line that ""#,
+                r#""\n""#,
+                r#""    ""#,
+                r#""wraps a ""#,
+                r#""\n""#,
+                r#""    ""#,
+                r#""few times""#,
+                r#""\n""#,
+                r#""short""#,
+                r#""\n""#,
+                // Row 3, whose fold placeholder is a chunk of its own.
+                r#""fn gamma() ""#,
+                r#""\n""#,
+                r#""{""#,
+                r#""...""#,
+                r#""} and ""#,
+                r#""\n""#,
+                r#""more text""#,
+                r#""\n""#,
+            ]
+            .join("\n"),
+        );
+    }
+
     #[test]
     fn wrap_width_none_by_default() {
         let mut display_map = create_display_map("hello");

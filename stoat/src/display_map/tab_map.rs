@@ -508,6 +508,15 @@ fn tab_spaces_slice(width: u32) -> &'static str {
     &TAB_SPACES[..len]
 }
 
+/// A run of exactly `width` spaces, borrowed from the shared static.
+///
+/// `None` once `width` outruns the static, leaving the caller to allocate.
+/// Unlike [`tab_spaces_slice`] this never shortens the run, since a caller
+/// padding to a column needs the width it asked for or nothing.
+pub(super) fn spaces(width: u32) -> Option<&'static str> {
+    TAB_SPACES.get(..width as usize)
+}
+
 /// Advance an expanded (tab-expanded, display-width) column past `ch`.
 ///
 /// A tab jumps to the next `tab_size` stop until `max_expansion_column`, past

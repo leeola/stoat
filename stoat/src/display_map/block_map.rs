@@ -21,8 +21,8 @@ use std::{
     },
 };
 use stoat_text::{
-    patch::Patch, tree_map::TreeMap, Bias, ContextLessSummary, Dimension, Dimensions, Item, Point,
-    SeekTarget, SumTree,
+    patch::Patch, tree_map::TreeMap, Bias, ContextLessSummary, Cursor, Dimension, Dimensions, Item,
+    Point, SeekTarget, SumTree,
 };
 
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -474,13 +474,19 @@ use super::{highlights::HighlightEndpoint, wrap_map::WrapChunks};
 /// Iterator over a range of block rows, emitting [`Chunk`]s that propagate
 /// highlight styles from the wrap layer below.
 ///
-/// Walks the block transform tree row-by-row. For block transforms, emits one
-/// unstyled chunk per block line. For regular transforms, forwards chunks from
-/// [`WrapSnapshot::chunks`] for the matching wrap row. Newline separators are
-/// inserted between rows.
+/// Walks the block transform tree, emitting one unstyled chunk per line of a
+/// block transform and forwarding [`WrapSnapshot::chunks`] for everything else.
+///
+/// A run of rows carrying no block is forwarded as one `WrapChunks`, which emits
+/// the newlines between them itself. Only the boundaries a block sits on are
+/// stepped here, so the layers below are opened once per run rather than once
+/// per row.
 pub struct BlockChunks<'a> {
     snapshot: &'a BlockSnapshot,
     endpoints: Arc<[HighlightEndpoint]>,
+    /// Advanced in step with the rows, since they are visited in order. A fresh
+    /// seek per row would re-descend the tree for a position it already holds.
+    cursor: Cursor<'a, 'static, Transform, Dimensions<InputRow, OutputRow>>,
     current_row: u32,
     end_row: u32,
     pending_wrap_chunks: Option<WrapChunks<'a>>,
@@ -504,8 +510,8 @@ impl<'a> Iterator for BlockChunks<'a> {
                 if let Some(chunk) = wc.next() {
                     return Some(chunk);
                 }
+                // The row already moved to the end of the run when it opened.
                 self.pending_wrap_chunks = None;
-                self.current_row += 1;
                 if self.current_row < self.end_row {
                     self.pending_newline = true;
                 }
@@ -516,25 +522,22 @@ impl<'a> Iterator for BlockChunks<'a> {
                 return None;
             }
 
-            // Classify the current row via the block transform cursor.
+            // Classify the current row. Rows are visited in order, so the cursor
+            // moves forward from where it already stands.
             let target = OutputRow(self.current_row + 1);
-            let mut cursor = self
-                .snapshot
-                .transforms
-                .cursor::<Dimensions<InputRow, OutputRow>>(());
-            cursor.seek(&target, Bias::Left);
-            let Dimensions(input_start, output_start, _) = *cursor.start();
+            if self.cursor.did_seek() {
+                self.cursor.seek_forward(&target, Bias::Left);
+            } else {
+                self.cursor.seek(&target, Bias::Left);
+            }
+            let Dimensions(input_start, output_start, _) = *self.cursor.start();
             let rows_into_transform = self.current_row - output_start.0;
 
-            let is_block = cursor.item().and_then(|t| t.block.as_ref()).is_some();
-
-            if is_block {
+            if let Some(transform) = self.cursor.item()
+                && let Some(ref block) = transform.block
+            {
                 let mut line = String::new();
-                if let Some(transform) = cursor.item()
-                    && let Some(ref block) = transform.block
-                {
-                    block.write_line(&mut line, rows_into_transform);
-                }
+                block.write_line(&mut line, rows_into_transform);
                 self.current_row += 1;
                 if self.current_row < self.end_row {
                     self.pending_newline = true;
@@ -545,15 +548,46 @@ impl<'a> Iterator for BlockChunks<'a> {
                 });
             }
 
-            // Regular transform: pull chunks from the wrap layer for exactly
-            // one wrap row.
-            let wrap_row = input_start.0 + rows_into_transform;
+            // Everything up to the next block belongs to one wrap-row range, and
+            // the wrap layer emits the newlines within it.
+            let wrap_start = input_start.0 + rows_into_transform;
+            let run_end = self.run_end(self.current_row);
+            let wrap_end = wrap_start + (run_end - self.current_row);
+
+            self.current_row = run_end;
             self.pending_wrap_chunks = Some(
                 self.snapshot
                     .wrap_snapshot
-                    .chunks(wrap_row..wrap_row + 1, self.endpoints.clone()),
+                    .chunks(wrap_start..wrap_end, self.endpoints.clone()),
             );
         }
+    }
+}
+
+impl BlockChunks<'_> {
+    /// Output row where the block-free run containing `row` ends.
+    ///
+    /// Walks its own cursor over the transforms rather than the rows, so a long
+    /// run costs one step per transform. The scan cannot borrow the iterator's
+    /// cursor, which has to stay on the row being emitted.
+    fn run_end(&self, row: u32) -> u32 {
+        let mut scan = self
+            .snapshot
+            .transforms
+            .cursor::<Dimensions<InputRow, OutputRow>>(());
+        scan.seek(&OutputRow(row + 1), Bias::Left);
+
+        let mut end = scan.start().1 .0 + scan.item().map_or(0, |t| t.summary.output_rows);
+        while end < self.end_row {
+            scan.next();
+            match scan.item() {
+                Some(transform) if transform.block.is_none() => {
+                    end += transform.summary.output_rows;
+                },
+                _ => break,
+            }
+        }
+        end.min(self.end_row)
     }
 }
 
@@ -1327,6 +1361,9 @@ impl BlockSnapshot {
         BlockChunks {
             snapshot: self,
             endpoints,
+            cursor: self
+                .transforms
+                .cursor::<Dimensions<InputRow, OutputRow>>(()),
             current_row: rows.start,
             end_row: rows.end,
             pending_wrap_chunks: None,

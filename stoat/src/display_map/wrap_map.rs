@@ -1183,12 +1183,20 @@ pub struct WrappedChunksInner<'a> {
     pending_newline: bool,
 }
 
-/// Per-wrap-row streaming state. Holds an open [`TabChunks`] over the full
-/// underlying tab row plus the running display column. Chunks pulled from
-/// `tab_chunks` are sliced to the `[target_start, target_end)` display
-/// column window before being yielded.
+/// Streaming state for one tab row, carried across every wrap row it produces.
+///
+/// Holds an open [`TabChunks`] over the whole tab row plus the running display
+/// column. Chunks pulled from it are sliced to the `[target_start, target_end)`
+/// window before being yielded, and the window moves as the sub-rows advance.
+///
+/// It is the tab row rather than the wrap row that owns this, because a wrapped
+/// line's sub-rows read one continuous run of the same text. Reopening the
+/// stream per sub-row would re-read the row from column zero once per sub-row.
 struct RowChunksState<'a> {
     tab_chunks: TabChunks<'a>,
+    /// Tab row the stream covers, so the next wrap row can tell whether it
+    /// continues this run or starts a new one.
+    tab_row: u32,
     column: u32,
     target_start: u32,
     target_end: Option<u32>,
@@ -1196,6 +1204,11 @@ struct RowChunksState<'a> {
     /// Synthetic leading spaces yielded before this continuation row's text, so
     /// its columns line up with the parent's indent. Zero on a primary row.
     indent: u32,
+    /// The part of the last chunk that fell past this sub-row's window.
+    ///
+    /// The window can end mid-chunk, and those bytes open the next sub-row. Held
+    /// here so the stream does not have to be rewound to recover them.
+    carried: Option<Chunk<'a>>,
 }
 
 impl<'a> Iterator for WrapChunks<'a> {
@@ -1238,15 +1251,22 @@ impl<'a> WrappedChunksInner<'a> {
             }
 
             if state.indent > 0 {
-                let spaces = " ".repeat(state.indent as usize);
+                let indent = state.indent;
                 state.indent = 0;
                 return Some(Chunk {
-                    text: Cow::Owned(spaces),
+                    text: match super::tab_map::spaces(indent) {
+                        Some(shared) => Cow::Borrowed(shared),
+                        None => Cow::Owned(" ".repeat(indent as usize)),
+                    },
                     ..Default::default()
                 });
             }
 
-            let Some(chunk) = state.tab_chunks.next() else {
+            let next = match state.carried.take() {
+                Some(chunk) => Some(chunk),
+                None => state.tab_chunks.next(),
+            };
+            let Some(chunk) = next else {
                 self.advance_row();
                 continue;
             };
@@ -1258,15 +1278,41 @@ impl<'a> WrappedChunksInner<'a> {
         }
     }
 
+    /// Move to the next wrap row, keeping the tab stream when it is a further
+    /// sub-row of the same tab row.
+    ///
+    /// The sub-rows of one wrapped line read one continuous run, so the stream
+    /// is already sitting where the next window opens. Dropping it would mean
+    /// re-reading the row from column zero.
     fn advance_row(&mut self) {
-        self.row_state = None;
         self.current_row += 1;
-        if self.current_row < self.rows.end {
-            self.pending_newline = true;
+        if self.current_row >= self.rows.end {
+            self.row_state = None;
+            return;
+        }
+        self.pending_newline = true;
+
+        match self.row_window(self.current_row) {
+            Some((tab_row, window)) if self.continues_run(tab_row) => {
+                let state = self.row_state.as_mut().expect("checked by continues_run");
+                state.target_start = window.target_start;
+                state.target_end = window.target_end;
+                state.indent = window.indent;
+                state.done = false;
+            },
+            _ => self.row_state = None,
         }
     }
 
-    fn start_row(&self, wrap_row: u32) -> Option<RowChunksState<'a>> {
+    fn continues_run(&self, tab_row: u32) -> bool {
+        self.row_state
+            .as_ref()
+            .is_some_and(|state| state.tab_row == tab_row)
+    }
+
+    /// The column window and indent wrap row `wrap_row` occupies, with the tab
+    /// row it reads from.
+    fn row_window(&self, wrap_row: u32) -> Option<(u32, RowWindow)> {
         let target = OutputRow(wrap_row + 1);
         let mut cursor = self
             .snapshot
@@ -1276,13 +1322,20 @@ impl<'a> WrappedChunksInner<'a> {
 
         let Dimensions(input_start, output_start, _) = cursor.start();
         let sub_row = (wrap_row - output_start.0) as usize;
-        let tab_row = input_start.0;
-
         let transform = cursor.item()?;
-        let (target_start, target_end) = (
-            transform.wrap_column(sub_row),
-            transform.next_wrap_column(sub_row),
-        );
+
+        Some((
+            input_start.0,
+            RowWindow {
+                target_start: transform.wrap_column(sub_row),
+                target_end: transform.next_wrap_column(sub_row),
+                indent: if sub_row > 0 { transform.indent } else { 0 },
+            },
+        ))
+    }
+
+    fn start_row(&self, wrap_row: u32) -> Option<RowChunksState<'a>> {
+        let (tab_row, window) = self.row_window(wrap_row)?;
 
         let fold = self.snapshot.tab_snapshot.fold_snapshot();
         if tab_row >= fold.line_count() {
@@ -1298,13 +1351,23 @@ impl<'a> WrappedChunksInner<'a> {
 
         Some(RowChunksState {
             tab_chunks,
+            tab_row,
             column: 0,
-            target_start,
-            target_end,
+            target_start: window.target_start,
+            target_end: window.target_end,
             done: false,
-            indent: if sub_row > 0 { transform.indent } else { 0 },
+            indent: window.indent,
+            carried: None,
         })
     }
+}
+
+/// The display-column span one wrap row covers of its tab row, and the indent it
+/// opens with.
+struct RowWindow {
+    target_start: u32,
+    target_end: Option<u32>,
+    indent: u32,
 }
 
 /// Slice `chunk` to the display-column window described by `state`. Returns
@@ -1340,6 +1403,15 @@ fn slice_chunk_to_window<'a>(
         {
             byte_end = byte_idx;
             state.done = true;
+            // These bytes belong to the next sub-row, which reads them from
+            // here rather than reopening the stream to find them again.
+            state.carried = Some(Chunk {
+                text: match &chunk.text {
+                    Cow::Borrowed(s) => Cow::Borrowed(&s[byte_idx..]),
+                    Cow::Owned(s) => Cow::Owned(s[byte_idx..].to_string()),
+                },
+                ..chunk.clone()
+            });
             break;
         }
         if byte_start.is_none() {
