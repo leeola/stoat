@@ -164,6 +164,10 @@ pub(crate) struct EditorState {
     /// and buffer versions, so the per-frame render paths reuse one resolution.
     /// Transient render state, not persisted.
     pub(crate) diagnostic_span_cache: Option<crate::render::editor::DiagnosticSpanCache>,
+    /// Collections the diagnostic paint refills every frame, retained so it
+    /// reuses their capacity instead of allocating a pair per pane per frame.
+    /// Holds nothing between frames. Transient render state, not persisted.
+    pub(crate) diagnostic_paint_scratch: crate::render::editor::DiagnosticPaintScratch,
     /// Cells the last render reserved on the left for the diagnostic gutter (0
     /// or 1), so click-to-offset can subtract the same inset the text rect was
     /// shifted by. Transient render state written by `render_editor`, not
@@ -236,6 +240,7 @@ impl EditorState {
             gutter_severity_cache: None,
             gutter_geometry_cache: None,
             diagnostic_span_cache: None,
+            diagnostic_paint_scratch: Default::default(),
             gutter_width: 0,
             minimap_rect: None,
             cursor_screen_cell: None,
@@ -275,6 +280,7 @@ impl EditorState {
             gutter_severity_cache: None,
             gutter_geometry_cache: None,
             diagnostic_span_cache: None,
+            diagnostic_paint_scratch: Default::default(),
             gutter_width: 0,
             minimap_rect: None,
             cursor_screen_cell: None,

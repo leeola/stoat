@@ -404,27 +404,34 @@ pub(crate) fn render_editor_with_overlay(
     if let Some((path, set, registry)) = diagnostic_info {
         let rope = buffer_snapshot.rope();
         build_diagnostic_span_cache(editor, set, path, rope, registry, buffer_snapshot.version());
-        let spans: &[ResolvedDiag] = editor
-            .diagnostic_span_cache
-            .as_ref()
-            .map_or(&[], |c| c.spans.as_slice());
-        paint_diagnostic_spans(
-            spans,
-            visible.clone(),
-            rope,
-            &snapshot,
-            theme,
-            fallback_style,
-            editor.scroll_row,
-            end_row,
-            inner,
-            right,
-            bottom,
-            buf,
-            undercurls,
-            severity.as_ref(),
-            dim,
-        );
+        // The cache and the scratch are disjoint fields, so the paint borrows one
+        // of each rather than the editor twice.
+        let EditorState {
+            diagnostic_span_cache,
+            diagnostic_paint_scratch,
+            scroll_row,
+            ..
+        } = editor;
+        if let Some(cache) = diagnostic_span_cache.as_ref() {
+            paint_diagnostic_spans(
+                cache,
+                diagnostic_paint_scratch,
+                visible.clone(),
+                rope,
+                &snapshot,
+                theme,
+                fallback_style,
+                *scroll_row,
+                end_row,
+                inner,
+                right,
+                bottom,
+                buf,
+                undercurls,
+                severity.as_ref(),
+                dim,
+            );
+        }
     }
 
     if let Some(query) = search_query.filter(|q| !q.is_empty()) {
@@ -762,6 +769,25 @@ pub(crate) struct DiagnosticSpanCache {
     set_version: u64,
     buffer_version: u64,
     pub(crate) spans: Vec<ResolvedDiag>,
+    /// Running maximum of [`Self::spans`]' ends, one entry per span.
+    ///
+    /// The spans are sorted by start, so their ends are not, and a viewport's
+    /// lower bound cannot be searched for directly. This is non-decreasing by
+    /// construction, and entry `i` at or below an offset proves every span up to
+    /// `i` ends at or before it, which is what makes the bound searchable.
+    prefix_max_end: Vec<usize>,
+}
+
+impl DiagnosticSpanCache {
+    /// The index range of [`Self::spans`] that can overlap `visible`.
+    ///
+    /// Spans outside it are settled, so a caller still filters the ones inside
+    /// for a real overlap.
+    fn overlapping(&self, visible: Range<usize>) -> Range<usize> {
+        let lo = self.prefix_max_end.partition_point(|&e| e <= visible.start);
+        let hi = self.spans.partition_point(|s| s.start < visible.end);
+        lo..hi.max(lo)
+    }
 }
 
 /// Resolve every diagnostic for `path` to byte offsets, sorted by start.
@@ -825,12 +851,40 @@ pub(crate) fn build_diagnostic_span_cache(
         // Resolve the per-server encodings only on rebuild, not every frame. The
         // cache goes stale only when the diagnostic set or buffer version moves.
         let encodings = registry.offset_encodings();
+        let spans = resolve_diagnostic_spans(set, path, rope, &encodings);
         editor.diagnostic_span_cache = Some(DiagnosticSpanCache {
             set_version,
             buffer_version,
-            spans: resolve_diagnostic_spans(set, path, rope, &encodings),
+            prefix_max_end: prefix_max_ends(&spans),
+            spans,
         });
     }
+}
+
+/// The collections [`paint_diagnostic_spans`] refills on every call.
+///
+/// Lives on the editor rather than the paint so a frame reuses the capacity of
+/// the last one. Neither collection carries meaning across calls, and the paint
+/// clears both before use.
+#[derive(Default)]
+pub(crate) struct DiagnosticPaintScratch {
+    /// The viewport's spans, least-severe first.
+    ordered: Vec<ResolvedDiag>,
+    /// Cells an `Unnecessary` span has already muted, so overlapping spans
+    /// never blend a shared cell twice.
+    muted_cells: HashSet<(u16, u16)>,
+}
+
+/// The running maximum of `spans`' ends, for [`DiagnosticSpanCache::prefix_max_end`].
+fn prefix_max_ends(spans: &[ResolvedDiag]) -> Vec<usize> {
+    let mut max_end = 0;
+    spans
+        .iter()
+        .map(|span| {
+            max_end = max_end.max(span.end);
+            max_end
+        })
+        .collect()
 }
 
 fn severity_rank(sev: DiagnosticSeverity) -> u8 {
@@ -1513,7 +1567,8 @@ pub(crate) fn draw_fallback_line_numbers(
 /// nothing.
 #[allow(clippy::too_many_arguments)]
 fn paint_diagnostic_spans(
-    spans: &[ResolvedDiag],
+    cache: &DiagnosticSpanCache,
+    scratch: &mut DiagnosticPaintScratch,
     visible: Range<usize>,
     rope: &Rope,
     snapshot: &DisplaySnapshot,
@@ -1537,22 +1592,27 @@ fn paint_diagnostic_spans(
             .try_get(crate::theme::scope::UI_BACKGROUND)
             .and_then(|s| s.bg)
     }));
-    let mut muted_cells: HashSet<(u16, u16)> = HashSet::new();
+    let DiagnosticPaintScratch {
+        ordered,
+        muted_cells,
+    } = scratch;
+    muted_cells.clear();
 
-    // Only spans overlapping the viewport can paint a cell, so the start-sorted
-    // cache bounds the upper end with a partition_point. Paint the visible
-    // subset least-severe first so the worst severity lands last, on top, for
-    // both the cell foreground and the collected undercurl spans -- rust-analyzer
-    // can publish a WARNING and a HINT over the same `unused` in any order, and
-    // publish order alone would let the hint's grey win.
-    let hi = spans.partition_point(|s| s.start < visible.end);
-    let mut ordered: Vec<&ResolvedDiag> = spans[..hi]
-        .iter()
-        .filter(|s| s.start < s.end && s.end > visible.start)
-        .collect();
+    // Only spans overlapping the viewport can paint a cell, and the cache bounds
+    // which those are at both ends. Paint them least-severe first so the worst
+    // severity lands last, on top, for both the cell foreground and the
+    // collected undercurl spans. rust-analyzer can publish a WARNING and a HINT
+    // over the same `unused` in any order, and publish order alone would let the
+    // hint's grey win.
+    ordered.clear();
+    ordered.extend(
+        cache.spans[cache.overlapping(visible.clone())]
+            .iter()
+            .filter(|s| s.start < s.end && s.end > visible.start),
+    );
     ordered.sort_by_key(|s| Reverse(severity_rank(s.severity)));
 
-    for diag in ordered {
+    for diag in &*ordered {
         let sev = diag.severity;
         // Clip to the visible bytes so offscreen columns are never walked. The
         // clamped range paints exactly the on-screen cells `paint_offset_range`
@@ -3375,6 +3435,68 @@ mod tests {
         assert_eq!(super::diagnostic_at_offset(&spans, 0), None);
     }
 
+    /// A cache over spans at the given byte ranges, ordered as
+    /// [`super::resolve_diagnostic_spans`] leaves them.
+    fn span_cache(ranges: &[(usize, usize)]) -> super::DiagnosticSpanCache {
+        let spans: Vec<super::ResolvedDiag> = ranges
+            .iter()
+            .enumerate()
+            .map(|(index, &(start, end))| super::ResolvedDiag {
+                start,
+                end,
+                severity: DiagnosticSeverity::WARNING,
+                unnecessary: false,
+                start_line: 0,
+                end_line: 0,
+                index,
+            })
+            .collect();
+
+        super::DiagnosticSpanCache {
+            set_version: 0,
+            buffer_version: 0,
+            prefix_max_end: super::prefix_max_ends(&spans),
+            spans,
+        }
+    }
+
+    /// Spans are ordered by start, so a long one opening above the viewport sits
+    /// among short ones that close before it reaches them. Bounding the walk by
+    /// the running maximum of the ends is what keeps that span while still
+    /// skipping its neighbours.
+    #[test]
+    fn the_overlap_bound_keeps_a_span_reaching_in_from_above() {
+        let cache = span_cache(&[
+            (0, 5),
+            (10, 400),
+            (20, 25),
+            (30, 35),
+            (200, 205),
+            (500, 505),
+        ]);
+
+        assert_eq!(
+            cache.overlapping(100..300),
+            1..5,
+            "the walk opens at the long span and closes before the one below",
+        );
+        assert_eq!(
+            cache.overlapping(600..700),
+            6..6,
+            "a viewport past every span walks nothing",
+        );
+    }
+
+    /// A zero-width span sits at an offset it neither starts before nor ends
+    /// after, which leaves the two bounds crossed. The bound has to come back in
+    /// order anyway, since the caller indexes the spans with it.
+    #[test]
+    fn the_overlap_bound_survives_a_zero_width_span_at_the_viewport_start() {
+        let cache = span_cache(&[(5, 5)]);
+
+        assert!(cache.spans[cache.overlapping(5..5)].is_empty());
+    }
+
     #[test]
     fn resolve_diagnostic_spans_uses_each_servers_encoding() {
         use crate::host::OffsetEncoding;
@@ -3569,6 +3691,117 @@ mod tests {
             [0xe5, 0xc0, 0x7b],
             "the run carries the shipped warning severity color",
         );
+    }
+
+    /// The paint bounds which spans it walks by the viewport. A span opening far
+    /// above a scrolled viewport and closing inside it still paints, and the
+    /// short ones it was sorted among do not.
+    #[test]
+    fn a_span_reaching_into_a_scrolled_viewport_still_paints() {
+        let mut h = Stoat::test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/undercurl-scrolled");
+        let path = root.join("a.txt");
+        let text = vec!["alpha"; 60].join("\n");
+        h.fake_fs().insert_file(&path, text.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+
+        // Short hints on the top rows, all closing well above the viewport, plus
+        // one warning opening on row 0 and closing inside it.
+        let mut diags: Vec<Diagnostic> = (0..20)
+            .map(|line| overlap_diag(line, 0, 1, DiagnosticSeverity::HINT))
+            .collect();
+        diags.push(Diagnostic {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 45,
+                    character: 3,
+                },
+            },
+            severity: Some(DiagnosticSeverity::WARNING),
+            message: String::new(),
+            ..Default::default()
+        });
+        h.stoat.diagnostics.replace_for_path(path, diags);
+
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .unwrap()
+            .scroll_row = 40;
+        let _ = h.stoat.render();
+
+        let colors: Vec<[u8; 3]> = h.stoat.pending_undercurls.iter().map(|u| u.color).collect();
+        assert!(
+            !colors.is_empty() && colors.iter().all(|c| *c == [0xe5, 0xc0, 0x7b]),
+            "only the warning reaches the viewport, got {colors:?}",
+        );
+    }
+
+    /// The paint refills collections that outlive it on the editor, so each one
+    /// has to start from empty. A leaked ordered subset repaints spans the
+    /// diagnostics have since dropped.
+    #[test]
+    fn a_repaint_drops_the_spans_the_diagnostics_no_longer_carry() {
+        let mut h = Stoat::test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/undercurl-repaint");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+
+        h.stoat.diagnostics.replace_for_path(
+            path.clone(),
+            vec![
+                overlap_diag(0, 0, 5, DiagnosticSeverity::WARNING),
+                overlap_diag(1, 0, 5, DiagnosticSeverity::WARNING),
+            ],
+        );
+        let _ = h.stoat.render();
+        assert_eq!(h.stoat.pending_undercurls.len(), 2, "both spans paint");
+
+        h.stoat.diagnostics.replace_for_path(
+            path,
+            vec![overlap_diag(2, 0, 5, DiagnosticSeverity::WARNING)],
+        );
+        let _ = h.stoat.render();
+        assert_eq!(
+            h.stoat.pending_undercurls.len(),
+            1,
+            "only the span the new set carries paints",
+        );
+    }
+
+    /// A leaked mute set skips the cells it blended last frame, so the inactive
+    /// region stops being greyed from the second paint on.
+    #[test]
+    fn an_unchanged_repaint_mutes_the_same_cells() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/diag-remute");
+        let path = root.join("a.rs");
+        h.fake_fs().insert_file(&path, b"let x = 1;\nlet y = 2;\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+
+        h.stoat.diagnostics.replace_for_path(
+            path,
+            vec![tagged_overlap_diag(1, 0, 10, DiagnosticSeverity::HINT)],
+        );
+
+        let first = h.render_composited();
+        let second = h.render_composited();
+        assert_eq!(first, second, "nothing moved, so the paint repeats exactly");
     }
 
     #[test]
