@@ -344,6 +344,20 @@ pub struct TextPass {
     plain_pending_scratch: Vec<PendingGlyph>,
     /// Region-side half of the [`Self::plain_pending_scratch`] split.
     region_pending_scratch: Vec<PendingGlyph>,
+    /// Scratch reused across the frames that rebuild the off-grid text runs,
+    /// which a chrome change or an atlas move triggers and which builds twice
+    /// when packing a run glyph bounces the atlas.
+    text_run_build_scratch: Vec<TextInstance>,
+    /// Scratch for the runs' background rects, rebuilt alongside
+    /// [`Self::text_run_build_scratch`].
+    run_rect_build_scratch: Vec<RectInstance>,
+    /// Scratch reused across the frames that re-anchor the overlay glyphs, which
+    /// an autoscrolling popover triggers on every frame it moves.
+    overlay_instance_scratch: Vec<TextInstance>,
+    /// Scratch for the draw ranges built beside
+    /// [`Self::overlay_instance_scratch`], swapped with
+    /// [`Self::overlay_draws`] once filled.
+    overlay_draw_scratch: Vec<OverlayDraw>,
     /// Scratch reused across `prepare_composite` calls for a pool's shaped glyphs,
     /// its glyph instances, its text-run instances, and its run rects, so a pool
     /// re-composite allocates no per-frame temporary. Dedicated to the composite
@@ -654,6 +668,10 @@ impl TextPass {
             underline_upload_scratch: Vec::new(),
             plain_pending_scratch: Vec::new(),
             region_pending_scratch: Vec::new(),
+            text_run_build_scratch: Vec::new(),
+            run_rect_build_scratch: Vec::new(),
+            overlay_instance_scratch: Vec::new(),
+            overlay_draw_scratch: Vec::new(),
             composite_pending_scratch: Vec::new(),
             composite_upload_scratch: Vec::new(),
             composite_run_scratch: Vec::new(),
@@ -846,25 +864,28 @@ impl TextPass {
         // skip packs no run glyphs, so it cannot grow the atlas and the grid UVs
         // are unaffected.
         let text_runs_epoch = grid.text_runs_epoch();
-        let runs_unchanged = text_runs_epoch == self.last_text_run_epoch
-            && self.atlas.content_epoch() == self.last_atlas_epoch;
-        let (text_run_instances, run_rects) = if runs_unchanged {
-            (None, None)
-        } else {
+        let runs_rebuilt = text_runs_epoch != self.last_text_run_epoch
+            || self.atlas.content_epoch() != self.last_atlas_epoch;
+        if runs_rebuilt {
             let epoch_at_build = self.atlas.content_epoch();
-            let mut instances = self.build_text_run_instances(device, queue, grid);
+            let mut instances = mem::take(&mut self.text_run_build_scratch);
+            self.build_text_run_instances_into(device, queue, grid, &mut instances);
             // Packing a run glyph can move the UVs the instances already emitted
             // this pass froze. An eviction reuses a slot without resizing the
             // texture, so only the content epoch reveals it. Every run glyph is
             // resident after the first pass, so a second one reads final UVs.
             if self.atlas.content_epoch() != epoch_at_build {
-                instances = self.build_text_run_instances(device, queue, grid);
+                self.build_text_run_instances_into(device, queue, grid, &mut instances);
             }
-            let rects = self.build_run_rects(grid);
+            self.text_run_build_scratch = instances;
+
+            let mut rects = mem::take(&mut self.run_rect_build_scratch);
+            self.build_run_rects_into(grid, &mut rects);
+            self.run_rect_build_scratch = rects;
+
             self.last_text_run_epoch = text_runs_epoch;
             self.last_atlas_epoch = self.atlas.content_epoch();
-            (Some(instances), Some(rects))
-        };
+        }
 
         let region = grid.scroll_region();
 
@@ -951,16 +972,25 @@ impl TextPass {
         // so re-add the anchor and the current scroll offset to the cached bases
         // rather than rebuilding them. When the scroll offsets also match the
         // uploaded ones, the buffer and draws already hold and nothing is redone.
-        let scrolls: Vec<f32> = (0..overlays.len())
-            .map(|index| scroll.popovers.get(index).copied().unwrap_or(0.0))
-            .collect();
-        if !bases_reused || scrolls != self.last_popover_scrolls {
-            let mut overlay_instances = Vec::new();
-            let mut draws = Vec::with_capacity(self.overlay_bases.len());
+        //
+        // The offsets are compared one at a time. An autoscrolling popover
+        // reaches here on every frame it moves, and gathering them into a vector
+        // just to compare it would allocate on each of those frames.
+        let scroll_at = |index: usize| scroll.popovers.get(index).copied().unwrap_or(0.0);
+        let scrolls_moved = self.last_popover_scrolls.len() != overlays.len()
+            || (0..overlays.len())
+                .any(|index| self.last_popover_scrolls[index] != scroll_at(index));
+
+        if !bases_reused || scrolls_moved {
+            let mut overlay_instances = mem::take(&mut self.overlay_instance_scratch);
+            let mut draws = mem::take(&mut self.overlay_draw_scratch);
+            overlay_instances.clear();
+            draws.clear();
+
             for (index, (overlay, base)) in overlays.iter().zip(&self.overlay_bases).enumerate() {
                 let start = overlay_instances.len() as u32;
                 let anchor = [overlay.offset[0] as f32, overlay.offset[1] as f32];
-                let scroll_px = scrolls[index] * metrics.height;
+                let scroll_px = scroll_at(index) * metrics.height;
                 overlay_instances.extend(base.iter().map(|instance| {
                     let mut instance = *instance;
                     instance.pos[0] += anchor[0];
@@ -975,7 +1005,6 @@ impl TextPass {
             }
 
             self.overlay_count = overlay_instances.len() as u32;
-            self.overlay_draws = draws;
             upload_instances(
                 device,
                 queue,
@@ -984,29 +1013,40 @@ impl TextPass {
                 &mut self.overlay_capacity,
                 "overlay text instances",
             );
-            self.last_popover_scrolls = scrolls;
+            self.overlay_instance_scratch = overlay_instances;
+
+            // The draws just built become the ones drawn from, and the ones they
+            // replace become next frame's scratch.
+            self.overlay_draw_scratch = mem::replace(&mut self.overlay_draws, draws);
+
+            self.last_popover_scrolls.clear();
+            self.last_popover_scrolls
+                .extend((0..overlays.len()).map(scroll_at));
         }
-        if let Some(text_run_instances) = &text_run_instances {
-            self.text_run_count = text_run_instances.len() as u32;
+        if runs_rebuilt {
+            let instances = mem::take(&mut self.text_run_build_scratch);
+            self.text_run_count = instances.len() as u32;
             upload_instances(
                 device,
                 queue,
-                text_run_instances,
+                &instances,
                 &mut self.text_run_instances,
                 &mut self.text_run_capacity,
                 "text run instances",
             );
-        }
-        if let Some(run_rects) = &run_rects {
-            self.rect_count = run_rects.len() as u32;
+            self.text_run_build_scratch = instances;
+
+            let rects = mem::take(&mut self.run_rect_build_scratch);
+            self.rect_count = rects.len() as u32;
             upload_instances(
                 device,
                 queue,
-                run_rects,
+                &rects,
                 &mut self.rect_instances,
                 &mut self.rect_capacity,
                 "text run rect instances",
             );
+            self.run_rect_build_scratch = rects;
         }
 
         // The bind group references only the atlas texture views, which are
@@ -1307,12 +1347,9 @@ impl TextPass {
         }
     }
 
-    /// Build the glyph instances for the grid's off-grid text runs.
-    ///
-    /// Each run is shaped at its fractional scale and laid out by
-    /// [`text_run_origin`]: screen-anchored (no grid scroll), advancing one
-    /// scaled cell width per glyph, vertically centered in its row. A
-    /// non-positive scale draws nothing.
+    /// Build the glyph instances for the grid's off-grid text runs, into a
+    /// vector of the caller's.
+    #[cfg(test)]
     fn build_text_run_instances(
         &mut self,
         device: &Device,
@@ -1324,8 +1361,15 @@ impl TextPass {
         instances
     }
 
-    /// Build the off-grid text-run glyph instances into `out`, clearing it first
-    /// so a reused scratch buffer holds only this frame's instances.
+    /// Build the glyph instances for the grid's off-grid text runs into `out`.
+    ///
+    /// Each run is shaped at its fractional scale and laid out by
+    /// [`text_run_origin`]: screen-anchored (no grid scroll), advancing one
+    /// scaled cell width per glyph, vertically centered in its row. A
+    /// non-positive scale draws nothing.
+    ///
+    /// `out` is cleared first, so a reused scratch buffer holds only this
+    /// frame's instances.
     fn build_text_run_instances_into(
         &mut self,
         device: &Device,
@@ -1379,22 +1423,26 @@ impl TextPass {
         }
     }
 
-    /// One opaque background rect per scaled text run that carries a background,
-    /// painted before its glyphs so they alpha-blend over it.
-    ///
-    /// A run with no background contributes no rect. Its glyphs blend directly
-    /// over whatever lies beneath, so a title run leaves the panel hairline it
-    /// sits over unbroken. When present, the rect spans the run's full character
-    /// width (spaces included) and one full cell height, an opaque backing where
-    /// a run needs one.
+    /// Build the text runs' background rects into a vector of the caller's.
+    #[cfg(test)]
     fn build_run_rects(&self, grid: &Grid) -> Vec<RectInstance> {
         let mut rects = Vec::new();
         self.build_run_rects_into(grid, &mut rects);
         rects
     }
 
-    /// Build the text-run background rects into `out`, clearing it first so a
-    /// reused scratch buffer holds only this frame's rects.
+    /// Build into `out` one opaque background rect per scaled text run that
+    /// carries a background, painted before its glyphs so they alpha-blend over
+    /// it.
+    ///
+    /// A run with no background contributes no rect. Its glyphs blend directly
+    /// over whatever lies beneath, so a title run leaves the panel hairline it
+    /// sits over unbroken. When present, the rect spans the run's full character
+    /// width (spaces included) and one full cell height, an opaque backing where
+    /// a run needs one.
+    ///
+    /// `out` is cleared first, so a reused scratch buffer holds only this
+    /// frame's rects.
     fn build_run_rects_into(&self, grid: &Grid, out: &mut Vec<RectInstance>) {
         out.clear();
         for run in grid.text_runs() {
@@ -4054,6 +4102,91 @@ mod tests {
             pass.overlay_draws.len(),
             2,
             "each overlay records its own draw range"
+        );
+    }
+
+    #[test]
+    fn a_rescrolled_overlay_holds_only_this_frame_s_instances() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+        let mut grid = Grid::new(6, 20);
+        grid.set_overlays(vec![Overlay {
+            top: 0,
+            left: 0,
+            width: 6,
+            height: 3,
+            fill: Rgb::new(0, 0, 0),
+            border: Rgb::new(0, 0, 0),
+            content_fg: Rgb::new(255, 255, 255),
+            scale: 1,
+            offset: [0, 0],
+            bold: false,
+            content: "ab".to_owned(),
+        }]);
+
+        let resolution = [640.0, 480.0];
+        let idle = Damage::Partial(vec![false; 6]);
+        fn frame<'a>(idle: &'a Damage, popovers: &'a [f32]) -> Frame<'a> {
+            Frame {
+                cursor: None,
+                cursor_corners: None,
+                scroll: Scroll {
+                    grid: 0.0,
+                    document: 0.0,
+                    scrollback: 0.0,
+                    region: 0.0,
+                    popovers,
+                },
+                damage: idle,
+                decoration_damage: idle,
+                scrolled_rows: 0,
+            }
+        }
+        let tops = |pass: &TextPass| {
+            pass.overlay_instance_scratch
+                .iter()
+                .map(|instance| instance.pos[1])
+                .collect::<Vec<_>>()
+        };
+
+        pass.prepare(&device, &queue, &grid, resolution, &frame(&idle, &[0.0]));
+        let unscrolled = tops(&pass);
+        assert_eq!(
+            unscrolled.len(),
+            2,
+            "the two-glyph overlay builds two instances"
+        );
+
+        // Three scroll frames in a row, so the buffers the second and third
+        // build into are ones an earlier frame already filled.
+        for scroll in [1.0, 2.0, 3.0] {
+            pass.prepare(&device, &queue, &grid, resolution, &frame(&idle, &[scroll]));
+        }
+
+        assert_eq!(
+            pass.overlay_count, 2,
+            "a reused instance buffer rebuilds rather than accumulates"
+        );
+        assert_eq!(
+            pass.overlay_draws.len(),
+            1,
+            "a reused draw buffer holds the one overlay's range"
+        );
+        assert_eq!(
+            (pass.overlay_draws[0].start, pass.overlay_draws[0].count),
+            (0, 2),
+            "the range covers this frame's instances from the buffer's start"
+        );
+
+        let want: Vec<f32> = unscrolled
+            .iter()
+            .map(|top| top - 3.0 * pass.metrics.height)
+            .collect();
+        assert_eq!(
+            tops(&pass),
+            want,
+            "the instances are the last scroll offset's, not an earlier frame's"
         );
     }
 
