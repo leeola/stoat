@@ -8,8 +8,9 @@
 //! the cell backgrounds, so the pass alpha-blends and runs after the background
 //! fill.
 
-use crate::render::CellMetrics;
+use crate::render::{row_len, row_uploads, CellMetrics};
 use bytemuck::{Pod, Zeroable};
+use std::{mem, ops::Range};
 use stoatty_term::{
     grid::{Border, BorderStyle, Borders, Grid, Rgb},
     term::Damage,
@@ -86,6 +87,12 @@ pub struct DecorationPass {
     /// touched rather than scanning the whole grid. Scroll rides the globals
     /// uniform, so the cache survives a scroll-only frame.
     border_row_instances: Vec<Vec<BorderInstance>>,
+    /// The rows to rebuild this frame, reused across frames so collecting them
+    /// costs no allocation.
+    rows_to_build: Vec<usize>,
+    /// Where a run of rows is gathered before its upload, reused across frames
+    /// for the same reason.
+    upload_scratch: Vec<BorderInstance>,
     metrics: CellMetrics,
 }
 
@@ -187,6 +194,8 @@ impl DecorationPass {
             capacity: INITIAL_CAPACITY,
             count: 0,
             border_row_instances: Vec::new(),
+            rows_to_build: Vec::new(),
+            upload_scratch: Vec::new(),
             metrics,
         }
     }
@@ -203,9 +212,13 @@ impl DecorationPass {
     /// uniform, so the per-row instance cache is unaffected by scroll.
     ///
     /// `decoration_damage` marks the rows an APC border changed since the last
-    /// frame: only those rows rebuild (every row when the cache is stale or the
-    /// damage is `Full`), and the upload runs from the first changed row to the
-    /// end. A frame that marks no rows reuses the buffer untouched.
+    /// frame. Only those rows rebuild, every row when the cache is stale or the
+    /// damage is `Full`. A frame that marks no rows reuses the buffer untouched.
+    ///
+    /// Rows are patched where they sit, contiguous ones sharing a write, up to
+    /// the first row that came back a different instance count. That row moved
+    /// every later row's place in the buffer, so from there on the rest is
+    /// rewritten as one span.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
@@ -237,61 +250,88 @@ impl DecorationPass {
             |instance| instance.cell[1] -= scrolled_rows as f32,
         );
 
-        let rows_to_build: Vec<usize> = if matches!(decoration_damage, Damage::Full) || stale {
-            (0..rows).collect()
+        self.rows_to_build.clear();
+        if matches!(decoration_damage, Damage::Full) || stale {
+            self.rows_to_build.extend(0..rows);
         } else {
-            (0..rows)
-                .filter(|&row| decoration_damage.is_dirty(row))
-                .collect()
-        };
-        // A rotation moved every kept instance, so the buffer rewrites from the
-        // top even on a frame that rebuilt no row.
-        let first = if scrolled_rows != 0 {
-            0
-        } else {
-            let Some(&first) = rows_to_build.iter().min() else {
-                return;
-            };
-            first
-        };
-
-        for &row in &rows_to_build {
-            self.border_row_instances[row] = build_border_row(grid, row);
+            self.rows_to_build
+                .extend((0..rows).filter(|&row| decoration_damage.is_dirty(row)));
         }
-
-        let offset: usize = self.border_row_instances[..first]
-            .iter()
-            .map(Vec::len)
-            .sum();
-        let tail_len: usize = self.border_row_instances[first..]
-            .iter()
-            .map(Vec::len)
-            .sum();
-        self.count = (offset + tail_len) as u32;
-        if offset + tail_len == 0 {
+        if self.rows_to_build.is_empty() && scrolled_rows == 0 {
             return;
         }
 
-        if offset + tail_len > self.capacity {
-            // Growing the buffer drops its contents, so re-upload every row.
-            self.capacity = (offset + tail_len).next_power_of_two();
-            self.instances = alloc_instances(device, self.capacity);
-            let all: Vec<BorderInstance> = self
-                .border_row_instances
-                .iter()
-                .flatten()
-                .copied()
-                .collect();
-            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&all));
-        } else {
-            let tail: Vec<BorderInstance> = self.border_row_instances[first..]
-                .iter()
-                .flatten()
-                .copied()
-                .collect();
-            let byte_offset = (offset * size_of::<BorderInstance>()) as u64;
-            queue.write_buffer(&self.instances, byte_offset, bytemuck::cast_slice(&tail));
+        let mut resized = None;
+        {
+            let DecorationPass {
+                rows_to_build,
+                border_row_instances,
+                ..
+            } = self;
+            for &row in rows_to_build.iter() {
+                let built = &mut border_row_instances[row];
+                let held = built.len();
+                build_border_row_into(grid, row, built);
+
+                if built.len() != held && resized.is_none() {
+                    resized = Some(row);
+                }
+            }
         }
+
+        // A rotation moved every kept instance, so the buffer rewrites from the
+        // top even on a frame that rebuilt no row.
+        let rewrite_from = if scrolled_rows != 0 {
+            (rows > 0).then_some(0)
+        } else {
+            resized
+        };
+
+        let total = row_len(&self.border_row_instances);
+        self.count = total as u32;
+        if total == 0 {
+            return;
+        }
+
+        let mut scratch = mem::take(&mut self.upload_scratch);
+        if total > self.capacity {
+            // Growing the buffer drops its contents, so re-upload every row.
+            self.capacity = total.next_power_of_two();
+            self.instances = alloc_instances(device, self.capacity);
+            self.upload_border_rows(queue, &mut scratch, 0, 0..rows);
+        } else {
+            let uploads = row_uploads(
+                &self.border_row_instances,
+                &self.rows_to_build,
+                rewrite_from,
+            );
+            for (offset, run) in uploads {
+                self.upload_border_rows(queue, &mut scratch, offset, run);
+            }
+        }
+        self.upload_scratch = scratch;
+    }
+
+    /// Write rows `range` of the per-row cache into the instance buffer, at
+    /// `offset` instances from its start.
+    fn upload_border_rows(
+        &self,
+        queue: &Queue,
+        scratch: &mut Vec<BorderInstance>,
+        offset: usize,
+        range: Range<usize>,
+    ) {
+        scratch.clear();
+        scratch.extend(self.border_row_instances[range].iter().flatten().copied());
+        if scratch.is_empty() {
+            return;
+        }
+
+        queue.write_buffer(
+            &self.instances,
+            (offset * size_of::<BorderInstance>()) as u64,
+            bytemuck::cast_slice(scratch),
+        );
     }
 
     /// Record the border draw into `render_pass`.
@@ -327,11 +367,25 @@ fn build_border_instances(grid: &Grid) -> Vec<BorderInstance> {
         .collect()
 }
 
-/// One instance per bordered cell in `row`, in column order.
+/// One instance per bordered cell in `row`, in column order, into a vector of
+/// the caller's.
+#[cfg(test)]
 fn build_border_row(grid: &Grid, row: usize) -> Vec<BorderInstance> {
-    (0..grid.cols())
-        .filter_map(|col| cell_instance([col as f32, row as f32], grid.get(row, col).borders))
-        .collect()
+    let mut instances = Vec::new();
+    build_border_row_into(grid, row, &mut instances);
+    instances
+}
+
+/// Build into `out` one instance per bordered cell in `row`, in column order.
+///
+/// `out` is cleared first, so a reused row cache holds only what the row carries
+/// now.
+fn build_border_row_into(grid: &Grid, row: usize, out: &mut Vec<BorderInstance>) {
+    out.clear();
+    out.extend(
+        (0..grid.cols())
+            .filter_map(|col| cell_instance([col as f32, row as f32], grid.get(row, col).borders)),
+    );
 }
 
 /// Pack a cell's borders into one instance, or `None` when no edge is set.
@@ -394,8 +448,8 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_border_instances, EDGE_BOTTOM_BIT, EDGE_LEFT_BIT, EDGE_TOP_BIT, STYLE_HEAVY,
-        STYLE_LIGHT, STYLE_ROUNDED,
+        build_border_instances, build_border_row, build_border_row_into, BorderInstance,
+        EDGE_BOTTOM_BIT, EDGE_LEFT_BIT, EDGE_TOP_BIT, STYLE_HEAVY, STYLE_LIGHT, STYLE_ROUNDED,
     };
     use stoatty_term::grid::{Border, BorderStyle, Grid, Rgb};
     use wgpu::naga::{
@@ -410,6 +464,30 @@ mod tests {
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate decoration");
+    }
+
+    /// The row cache is refilled in place across frames, so a row that loses a
+    /// border has to come back shorter rather than keeping the old instance.
+    /// Its length is what tells the pass whether the rows after it moved.
+    #[test]
+    fn a_reused_row_holds_only_the_borders_the_row_carries_now() {
+        let mut grid = Grid::new(1, 2);
+        grid.get_mut(0, 0).borders.top = Some(Border {
+            style: BorderStyle::Heavy,
+            color: Rgb::new(255, 0, 0),
+        });
+
+        let mut row = build_border_row(&grid, 0);
+        assert_eq!(row.len(), 1, "the one bordered cell builds one instance");
+
+        grid.get_mut(0, 0).borders.top = None;
+        build_border_row_into(&grid, 0, &mut row);
+
+        assert_eq!(
+            bytemuck::cast_slice::<BorderInstance, u8>(&row),
+            &[] as &[u8],
+            "the dropped border leaves the row empty rather than stale",
+        );
     }
 
     #[test]
