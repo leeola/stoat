@@ -983,6 +983,11 @@ fn sync_fold_incremental(
             .row();
         let old_fold_end = if edit.old.start == edit.old.end {
             old_fold_start + 1
+        } else if edit.old.end >= old_inlay.line_count() {
+            // An end row one past the last names the end of the tree.
+            // `to_fold_point` clamps a point past the extent back into range
+            // rather than extrapolating, so ask the snapshot directly.
+            old_snapshot.line_count()
         } else {
             old_snapshot
                 .to_fold_point(InlayPoint::new(edit.old.end, 0), Bias::Right)
@@ -1221,13 +1226,25 @@ impl FoldSnapshot {
         item.and_then(|t| t.fold_id)
     }
 
+    /// The fold point `inlay_point` renders at, resolving a point inside a fold
+    /// to whichever side `bias` asks for.
+    ///
+    /// A folded span occupies one placeholder in fold space, so every inlay
+    /// point within it has to collapse to one edge or the other. `Bias::Left`
+    /// takes the fold's start, which is what puts leftward motion across a fold
+    /// on the near side of it rather than past it.
+    ///
+    /// The transform lookup always seeks `Bias::Right`, so that `start` names
+    /// the transform the point falls in. Seeking with the caller's bias would
+    /// land on the previous transform at a fold boundary, and the branch below
+    /// would then answer from the wrong fold.
     pub fn to_fold_point(&self, inlay_point: InlayPoint, bias: Bias) -> FoldPoint {
         let (start, end, item) = self
             .transforms
-            .find::<Dimensions<InlayPoint, FoldPoint>, _>((), &inlay_point, bias);
+            .find::<Dimensions<InlayPoint, FoldPoint>, _>((), &inlay_point, Bias::Right);
         match item {
             Some(t) if t.placeholder_text.is_some() => {
-                if inlay_point.0 == start.0 .0 {
+                if bias == Bias::Left || inlay_point.0 == start.0 .0 {
                     start.1
                 } else {
                     end.1
@@ -1235,7 +1252,9 @@ impl FoldSnapshot {
             },
             Some(_) | None => {
                 let overshoot = point_overshoot(start.0 .0, inlay_point.0);
-                FoldPoint(start.1 .0 + overshoot)
+                // A column past the end of the line the transform covers would
+                // otherwise carry straight through into the next one.
+                FoldPoint((start.1 .0 + overshoot).min(end.1 .0))
             },
         }
     }
@@ -1253,10 +1272,34 @@ impl FoldSnapshot {
         }
     }
 
+    /// Move `point` to the nearest position a caret can occupy, in the
+    /// direction `bias` asks for.
+    ///
+    /// Walks the transforms rather than clipping in inlay space, because inlay
+    /// space cannot express "inside a fold": every point within one resolves to
+    /// the fold's start there, so a round trip would discard which side the
+    /// caller was on before the bias could be applied.
     pub fn clip_point(&self, point: FoldPoint, bias: Bias) -> FoldPoint {
-        let inlay = self.to_inlay_point(point);
-        let clipped = self.inlay_snapshot.clip_point(inlay, bias);
-        self.to_fold_point(clipped, bias)
+        let (start, end, item) = self
+            .transforms
+            .find::<Dimensions<InlayPoint, FoldPoint>, _>((), &point, Bias::Right);
+        let Some(transform) = item else {
+            return FoldPoint(self.transforms.summary().output.lines);
+        };
+
+        if transform.placeholder_text.is_some() {
+            // A fold is one indivisible position, so a caret lands on an edge.
+            if bias == Bias::Left || point.0 == start.1 .0 {
+                start.1
+            } else {
+                end.1
+            }
+        } else {
+            let overshoot = point_overshoot(start.1 .0, point.0);
+            let inlay_point = InlayPoint(start.0 .0 + overshoot);
+            let clipped = self.inlay_snapshot.clip_point(inlay_point, bias);
+            FoldPoint(start.1 .0 + point_overshoot(start.0 .0, clipped.0))
+        }
     }
 
     pub fn fold_count(&self) -> usize {
@@ -1582,24 +1625,27 @@ pub struct FoldPointCursor<'a> {
 }
 
 impl FoldPointCursor<'_> {
+    /// The cursor-held equivalent of [`FoldSnapshot::to_fold_point`], for a
+    /// caller mapping a run of ascending points. Same semantics.
     pub fn map(&mut self, inlay_point: InlayPoint, bias: Bias) -> FoldPoint {
         if self.cursor.did_seek() {
-            self.cursor.seek_forward(&inlay_point, bias);
+            self.cursor.seek_forward(&inlay_point, Bias::Right);
         } else {
-            self.cursor.seek(&inlay_point, bias);
+            self.cursor.seek(&inlay_point, Bias::Right);
         }
-        let start = self.cursor.start();
+        let start = *self.cursor.start();
+        let end = self.cursor.end();
         match self.cursor.item() {
             Some(t) if t.placeholder_text.is_some() => {
-                if inlay_point.0 == start.0 .0 {
+                if bias == Bias::Left || inlay_point.0 == start.0 .0 {
                     start.1
                 } else {
-                    self.cursor.end().1
+                    end.1
                 }
             },
             Some(_) | None => {
                 let overshoot = point_overshoot(start.0 .0, inlay_point.0);
-                FoldPoint(start.1 .0 + overshoot)
+                FoldPoint((start.1 .0 + overshoot).min(end.1 .0))
             },
         }
     }
@@ -1886,6 +1932,73 @@ mod tests {
         assert_eq!(
             snap.to_fold_point(InlayPoint::new(0, 11), Bias::Right),
             FoldPoint::new(0, 8)
+        );
+    }
+
+    /// A folded span is one position on screen, so a caret arriving from the
+    /// left has to stop before it and one arriving from the right after it.
+    /// Answering the same side to both walks the caret straight over the fold.
+    #[test]
+    fn a_point_inside_a_fold_resolves_to_the_side_its_bias_asks_for() {
+        // "hello world foo" with cols 5..11 folded, painting "hello... foo".
+        let snap = make_snapshot_with_folds(
+            "hello world foo",
+            vec![(InlayPoint::new(0, 5), InlayPoint::new(0, 11))],
+        );
+
+        let inside = InlayPoint::new(0, 8);
+        assert_eq!(
+            snap.to_fold_point(inside, Bias::Left),
+            FoldPoint::new(0, 5),
+            "leftward motion stops at the fold's near side",
+        );
+        assert_eq!(
+            snap.to_fold_point(inside, Bias::Right),
+            FoldPoint::new(0, 8),
+            "rightward motion passes to its far side",
+        );
+
+        // Clipping a fold point landing mid-placeholder has to make the same
+        // choice, which it cannot do by way of inlay space.
+        let mid_placeholder = FoldPoint::new(0, 6);
+        assert_eq!(
+            snap.clip_point(mid_placeholder, Bias::Left),
+            FoldPoint::new(0, 5),
+        );
+        assert_eq!(
+            snap.clip_point(mid_placeholder, Bias::Right),
+            FoldPoint::new(0, 8),
+        );
+    }
+
+    /// Overshoot must not carry a point past the transform it landed in, and a
+    /// clipped point must not sit past the end of its row.
+    #[test]
+    fn overshoot_past_a_folded_row_stays_in_range() {
+        // Row 0 is "hello world foo" with cols 5..11 folded, painting
+        // "hello... foo" across 12 columns. Row 1 is "second".
+        let snap = make_snapshot_with_folds(
+            "hello world foo\nsecond",
+            vec![(InlayPoint::new(0, 5), InlayPoint::new(0, 11))],
+        );
+        let max = snap.max_point();
+        assert_eq!(max, FoldPoint::new(1, 6));
+
+        assert_eq!(
+            snap.to_fold_point(InlayPoint::new(9, 0), Bias::Right),
+            max,
+            "a row past the last one stops at the end rather than extrapolating",
+        );
+
+        assert_eq!(
+            snap.clip_point(FoldPoint::new(0, 400), Bias::Left),
+            FoldPoint::new(0, 12),
+            "a column past a folded row's end clips to it",
+        );
+        assert_eq!(
+            snap.clip_point(FoldPoint::new(1, 400), Bias::Left),
+            max,
+            "and so does one past an unfolded row",
         );
     }
 
