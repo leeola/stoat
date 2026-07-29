@@ -28,7 +28,7 @@ pub use highlights::{
     BufferSemanticTokens, CachedHighlightEndpoints, Chunk, ChunkRenderer, ChunkRendererId,
     ChunkReplacement, HighlightKey, HighlightLayer, HighlightStyle, HighlightStyleId,
     HighlightStyleInterner, HighlightedChunk, Highlights, InlayHighlight, InlayHighlights,
-    SemanticTokenHighlight, SemanticTokensHighlights, TextHighlights,
+    SemanticTokenHighlight, SemanticTokenSpans, SemanticTokensHighlights, TextHighlights,
 };
 pub use inlay_map::{InlayId, InlayKind, InlayMap, InlayOffset, InlayPoint, InlaySnapshot};
 use std::{

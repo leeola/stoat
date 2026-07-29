@@ -9,6 +9,7 @@ use crate::{
     display_map::{
         highlights::{
             prefix_max_end_indices, BufferSemanticTokens, HighlightStyleId, SemanticTokenHighlight,
+            SemanticTokenSpans,
         },
         syntax_theme::SyntaxStyles,
         DisplayPoint, DisplaySnapshot,
@@ -63,7 +64,7 @@ use stoat_action::{Conflict, Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
 use stoat_config::{LineNumbers, MinimapMode, Settings, Spanned, TabBarMode, ThemeBlock, WrapMode};
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
-use stoat_text::{Anchor, Bias, IndentStyle, Selection};
+use stoat_text::{patch::Patch, Anchor, Bias, IndentStyle, Rope, Selection};
 use stoatty_protocol::window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent};
 use stoatty_widgets::ApcScene;
 use tokio::{
@@ -1475,6 +1476,9 @@ pub(crate) struct ParseJobOutput {
     /// viewing the buffer. It owns the token list, so the search index inside
     /// it cannot drift from the tokens it indexes.
     pub(crate) token_channel: BufferSemanticTokens,
+    /// This parse's tokens as raw byte spans, retained so the next parse can
+    /// diff against them and report its own changed rows.
+    pub(crate) token_spans: SemanticTokenSpans,
     /// Buffer rows whose tokens this parse changed, or `None` when that could
     /// not be determined and every row must be treated as changed.
     ///
@@ -7206,7 +7210,7 @@ impl Stoat {
     /// offset dedupe when the selections are rebuilt.
     fn editor_delete_ranges<F>(&mut self, editor_id: EditorId, buffer_id: BufferId, range_for: F)
     where
-        F: Fn(&stoat_text::Rope, usize) -> (usize, usize),
+        F: Fn(&Rope, usize) -> (usize, usize),
     {
         let ws = self.active_workspace_mut();
         let editor = match ws.editors.get_mut(editor_id) {
@@ -9836,7 +9840,7 @@ const TAB_WIDTH: usize = 4;
 /// trimmed back to the previous `indent_width` column (a full unit when already
 /// aligned). Anywhere else it removes a single grapheme. Returns `(start, end)`
 /// with `start == end` for a no-op at the buffer start.
-fn backspace_range(rope: &stoat_text::Rope, cursor: usize, indent_width: usize) -> (usize, usize) {
+fn backspace_range(rope: &Rope, cursor: usize, indent_width: usize) -> (usize, usize) {
     if cursor == 0 {
         return (0, 0);
     }
@@ -9892,7 +9896,7 @@ fn backspace_range(rope: &stoat_text::Rope, cursor: usize, indent_width: usize) 
 /// the lines. A cursor after the line's first non-whitespace char targets that
 /// char, preserving the indent. Anywhere else it targets the line start.
 /// Returns `cursor` itself for a no-op at the buffer start.
-fn kill_to_line_start_target(rope: &stoat_text::Rope, cursor: usize) -> usize {
+fn kill_to_line_start_target(rope: &Rope, cursor: usize) -> usize {
     let row = rope.offset_to_point(cursor).row;
     let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
 
@@ -10033,12 +10037,14 @@ pub(crate) fn lsp_uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {
 /// signalling that the caller should fall back to the background path.
 /// `None` is also returned for ordinary parse failures (unsupported
 /// language, etc.); the difference does not matter for the call sites.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_buffer_step(
     buffer_id: BufferId,
     snapshot: TextBufferSnapshot,
     lang: &Arc<Language>,
     prior: &mut Option<SyntaxState>,
     prior_syntax_map: &mut Option<stoat_language::SyntaxMap>,
+    prior_token_spans: Option<&[(Range<usize>, HighlightStyleId)]>,
     styles: &SyntaxStyles,
     deadline: Option<(std::time::Instant, &Executor)>,
 ) -> Option<ParseJobOutput> {
@@ -10061,6 +10067,7 @@ pub(crate) fn parse_buffer_step(
         (tree, edits)
     });
     let edited_tree = edited.as_ref().map(|(tree, _)| tree);
+    let edits = edited.as_ref().map(|(_, edits)| edits);
 
     let tree = match edited_tree {
         Some(old_tree) => match deadline {
@@ -10160,6 +10167,13 @@ pub(crate) fn parse_buffer_step(
         prefix_max_end_indices(&ends),
     );
 
+    // Which rows this parse restained, for consumers that colour per row. It
+    // needs the prior parse's spans and the patch that carries them forward;
+    // without either, callers must assume the whole file.
+    let changed_token_rows = prior_token_spans
+        .zip(edits)
+        .map(|(prior, edits)| changed_token_rows(prior, &styled, edits, &new_rope));
+
     Some(ParseJobOutput {
         buffer_id,
         syntax: SyntaxState {
@@ -10169,9 +10183,76 @@ pub(crate) fn parse_buffer_step(
         },
         syntax_map,
         token_channel,
-        // FIXME: always a full recolor until the span diff lands.
-        changed_token_rows: None,
+        token_spans: Arc::from(styled),
+        changed_token_rows,
     })
+}
+
+/// The buffer rows whose tokens differ between the parse that produced `prior`
+/// and the one that produced `current`.
+///
+/// `prior` is in the previous parse's byte coordinates, so `edits` carries it
+/// into `rope`'s before anything is compared. Both lists arrive in document
+/// order, so trimming the matching head and tail leaves only what moved, and
+/// the answer is the row span covering both sides of that difference.
+///
+/// The rows `edits` itself touched are always included. Carrying an offset
+/// through a patch and resolving an anchor disagree where an insertion lands
+/// exactly on a token's end, which could otherwise make a genuinely-changed
+/// token compare equal. Those rows are re-summarized on the buffer-edit path
+/// regardless, so covering them again costs a comparison and changes nothing.
+fn changed_token_rows(
+    prior: &[(Range<usize>, HighlightStyleId)],
+    current: &[(Range<usize>, HighlightStyleId)],
+    edits: &Patch<usize>,
+    rope: &Rope,
+) -> Range<u32> {
+    let carried = |span: &Range<usize>| edits.old_to_new(span.start)..edits.old_to_new(span.end);
+    let same = |a: &(Range<usize>, HighlightStyleId), b: &(Range<usize>, HighlightStyleId)| {
+        carried(&a.0) == b.0 && a.1 == b.1
+    };
+
+    let head = prior
+        .iter()
+        .zip(current)
+        .take_while(|(a, b)| same(a, b))
+        .count();
+    let tail = prior[head..]
+        .iter()
+        .rev()
+        .zip(current[head.min(current.len())..].iter().rev())
+        .take_while(|(a, b)| same(a, b))
+        .count();
+
+    let mut span: Option<Range<usize>> = None;
+    let mut cover = |range: Range<usize>| {
+        span = Some(match span.take() {
+            Some(have) => have.start.min(range.start)..have.end.max(range.end),
+            None => range,
+        });
+    };
+    for (range, _) in &prior[head..prior.len() - tail] {
+        cover(carried(range));
+    }
+    for (range, _) in &current[head.min(current.len())..current.len() - tail] {
+        cover(range.clone());
+    }
+    for edit in edits.edits() {
+        cover(edit.new.clone());
+    }
+
+    match span {
+        Some(span) => {
+            // Spans are half-open, so the last row they occupy holds `end - 1`.
+            // Converting `end` itself would pull in the following row every
+            // time a span stops at a line break.
+            let last = span.end.max(span.start + 1) - 1;
+            let start = rope.offset_to_point(span.start.min(rope.len())).row;
+            let end = rope.offset_to_point(last.min(rope.len())).row;
+            start..end + 1
+        },
+        None => 0..0,
+    }
 }
 
 #[cfg(test)]
@@ -13255,6 +13336,7 @@ mod tests {
             &lang,
             &mut prior,
             &mut prior_map,
+            None,
             &styles,
             None,
         )
@@ -13273,6 +13355,7 @@ mod tests {
             &lang,
             &mut prior,
             &mut prior_map,
+            None,
             &styles,
             Some((deadline, &executor)),
         );
@@ -13295,6 +13378,7 @@ mod tests {
             &lang,
             &mut prior,
             &mut prior_map,
+            None,
             &styles,
             None,
         )
@@ -13330,6 +13414,7 @@ mod tests {
             &lang,
             &mut prior,
             &mut prior_map,
+            None,
             &styles,
             None,
         )
@@ -13347,6 +13432,7 @@ mod tests {
             &lang,
             &mut prior,
             &mut prior_map,
+            None,
             &styles,
             Some((deadline, &executor)),
         )
@@ -13365,6 +13451,7 @@ mod tests {
             &lang,
             &mut prior,
             &mut prior_map,
+            None,
             &styles,
             Some((deadline, &executor)),
         );
@@ -13406,6 +13493,7 @@ mod tests {
                 &lang,
                 &mut prior,
                 &mut prior_map,
+                None,
                 &styles,
                 None,
             )
@@ -13424,6 +13512,7 @@ mod tests {
                 &lang,
                 &mut prior,
                 &mut prior_map,
+                None,
                 &styles,
                 None,
             )
@@ -13438,6 +13527,7 @@ mod tests {
                 &lang,
                 &mut prior,
                 &mut prior_map,
+                None,
                 &styles,
                 None,
             )
@@ -13498,6 +13588,209 @@ mod tests {
         );
     }
 
+    /// Parse `original`, apply one edit, parse again carrying the first
+    /// parse's spans forward, and return the second parse's changed rows.
+    fn changed_rows_after_edit(
+        path: &str,
+        original: &str,
+        edit_at: usize,
+        inserted: &str,
+    ) -> Option<Range<u32>> {
+        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
+        let registry = LanguageRegistry::standard();
+        install_highlight_maps(&registry, &styles);
+        let lang = registry.for_path(Path::new(path)).unwrap();
+        let buffer_id = BufferId::new(1);
+
+        let mut buf = TextBuffer::with_text(buffer_id, original);
+        let first = {
+            let mut prior = None;
+            let mut prior_map = None;
+            parse_buffer_step(
+                buffer_id,
+                buf.snapshot.clone(),
+                &lang,
+                &mut prior,
+                &mut prior_map,
+                None,
+                &styles,
+                None,
+            )
+            .expect("first parse should succeed")
+        };
+
+        buf.edit(edit_at..edit_at, inserted);
+        let mut prior = Some(first.syntax);
+        let mut prior_map = Some(first.syntax_map);
+        parse_buffer_step(
+            buffer_id,
+            buf.snapshot.clone(),
+            &lang,
+            &mut prior,
+            &mut prior_map,
+            Some(&first.token_spans),
+            &styles,
+            None,
+        )
+        .expect("second parse should succeed")
+        .changed_token_rows
+    }
+
+    /// The minimap recolors the rows a parse reports, so a keystroke that
+    /// restains one line must not name the rest of the file.
+    #[test]
+    fn a_local_edit_reports_only_its_own_rows() {
+        let original = "fn a() {}\n".repeat(40);
+        let row_20 = original
+            .match_indices('\n')
+            .nth(19)
+            .map(|(i, _)| i + 1)
+            .unwrap();
+
+        let rows = changed_rows_after_edit("a.rs", &original, row_20, "let x = 1;\n")
+            .expect("a second parse with prior spans reports its rows");
+        assert_eq!(
+            rows,
+            20..21,
+            "an inserted line restains itself and nothing above or below",
+        );
+    }
+
+    /// An edit leaving every token identical still covers the row it touched,
+    /// because carrying a span through the patch and resolving an anchor
+    /// disagree exactly there. It must not widen past that row.
+    #[test]
+    fn an_edit_leaving_tokens_alone_reports_only_the_edited_row() {
+        let original = "fn a() {}\n".repeat(40);
+        let row_20 = original
+            .match_indices('\n')
+            .nth(19)
+            .map(|(i, _)| i + 1)
+            .unwrap();
+
+        let rows = changed_rows_after_edit("a.rs", &original, row_20, "\n")
+            .expect("a second parse with prior spans reports its rows");
+        assert_eq!(
+            rows,
+            20..21,
+            "a blank line adds no tokens, so only the row it split is suspect",
+        );
+    }
+
+    /// The rows a parse reports have to reach the strip that paints them.
+    ///
+    /// Splices cannot show this. A sweep queues nothing for a row whose
+    /// summary is unchanged, so a scoped sweep and a full one emit the same
+    /// frames and differ only in how many rows they re-summarize. What the
+    /// scope does change is whether the sweep finishes inside one sync. Past
+    /// one chunk's worth of rows a full sweep has to span several, which the
+    /// strip reports as still pending.
+    #[test]
+    fn an_edit_sweeps_without_spilling_past_one_sync() {
+        let mut h = Stoat::test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        // More rows than one recolor chunk, so a full sweep cannot finish in
+        // the single sync that follows the edit.
+        let total = crate::minimap::RESYNC_CHUNK as usize + 500;
+        let body: String = vec!["fn a() {}"; total].join("\n");
+        let root = PathBuf::from("/minimap");
+        let path = root.join("big.rs");
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.resize(80, 24);
+
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        for _ in 0..100 {
+            h.stoat.emit_minimap();
+            if !h.stoat.minimap_build_pending {
+                break;
+            }
+        }
+        assert!(
+            !h.stoat.minimap_build_pending,
+            "the fixture must settle its build and first full sweep",
+        );
+
+        // Insert a `let` on the second line, restaining that row alone.
+        let (_, buffer_id) = h.stoat.focused_editor_ids().expect("a focused editor");
+        {
+            let buffer = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer");
+            buffer.write().expect("poisoned").edit(10..10, "let z = 1;");
+        }
+
+        // One settle only spawns the parse. Installing its result takes another
+        // trip through the background drive.
+        let target = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .snapshot
+            .version;
+        for _ in 0..10 {
+            h.stoat.drive_background();
+            h.settle();
+            if h.stoat.active_workspace().buffers.syntax_version(buffer_id) == Some(target) {
+                break;
+            }
+        }
+        assert_eq!(
+            h.stoat.active_workspace().buffers.syntax_version(buffer_id),
+            Some(target),
+            "the edit's reparse must land before the strip can sweep for it",
+        );
+
+        h.stoat.emit_minimap();
+        assert!(
+            !h.stoat.minimap_build_pending,
+            "a one-row recolor must not leave a multi-sync sweep outstanding",
+        );
+    }
+
+    /// Without a prior parse to diff against there is no row information, and
+    /// the strip has to fall back to recoloring everything.
+    #[test]
+    fn a_first_parse_reports_no_rows_at_all() {
+        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
+        let registry = LanguageRegistry::standard();
+        install_highlight_maps(&registry, &styles);
+        let lang = registry.for_path(Path::new("a.rs")).unwrap();
+        let buffer_id = BufferId::new(1);
+
+        let buf = TextBuffer::with_text(buffer_id, "fn a() {}\n");
+        let mut prior = None;
+        let mut prior_map = None;
+        let out = parse_buffer_step(
+            buffer_id,
+            buf.snapshot.clone(),
+            &lang,
+            &mut prior,
+            &mut prior_map,
+            None,
+            &styles,
+            None,
+        )
+        .expect("parse should succeed");
+
+        assert_eq!(
+            out.changed_token_rows, None,
+            "a first parse cannot bound what it changed",
+        );
+    }
+
     /// The parse builds its token anchors and search index in batch, from byte
     /// offsets rather than per-anchor tree seeks. The result has to be the same
     /// channel the per-anchor construction produces, or viewport queries would
@@ -13526,6 +13819,7 @@ mod tests {
                 &lang,
                 &mut prior,
                 &mut prior_map,
+                None,
                 &styles,
                 None,
             )

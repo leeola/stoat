@@ -166,6 +166,14 @@ pub struct SemanticTokenHighlight {
     pub style: HighlightStyleId,
 }
 
+/// One parse's tokens as raw byte spans, in the parsed snapshot's coordinates.
+///
+/// The same tokens as [`SemanticTokenHighlight`] before anchoring. Retained so
+/// the next parse can carry them across the buffer's edits and diff them.
+/// Anchors cannot stand in here, because an anchor already follows every later
+/// edit, and that movement is exactly what the diff needs to observe.
+pub type SemanticTokenSpans = Arc<[(Range<usize>, HighlightStyleId)]>;
+
 /// One buffer's semantic tokens for a highlight channel, plus a search index
 /// that bounds the per-frame endpoint build to the viewport.
 ///

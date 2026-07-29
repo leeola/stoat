@@ -1,6 +1,6 @@
 use crate::{
     buffer::{BufferHistory, BufferId, SharedBuffer, TextBuffer},
-    display_map::{HighlightStyleInterner, SemanticTokenHighlight},
+    display_map::{HighlightStyleInterner, SemanticTokenHighlight, SemanticTokenSpans},
     lsp::LspSymbolKind,
 };
 use serde::{Deserialize, Serialize};
@@ -68,6 +68,14 @@ struct BufferEntry {
     /// callers migrate to capture merging. The `parse_buffer_step`
     /// pipeline writes to both fields on every reparse.
     syntax_map: Option<SyntaxMap>,
+    /// The last parse's tokens as raw byte spans, before they were anchored.
+    /// The next parse shifts these through the buffer's edits and compares, to
+    /// report which rows its tokens actually changed.
+    ///
+    /// Kept apart from [`Self::tokens`] because these must stay in the parsed
+    /// snapshot's byte coordinates. Anchors would silently follow later edits,
+    /// which is exactly the movement the comparison needs to see.
+    token_spans: Option<SemanticTokenSpans>,
     /// Tree-sitter highlight tokens retained across editor lifetimes. The parse
     /// pipeline stores the same `(tokens, interner)` it installs onto editors,
     /// so a fresh editor built for an already-parsed buffer can be seeded and
@@ -214,6 +222,7 @@ impl BufferRegistry {
                 language: None,
                 syntax: None,
                 syntax_map: None,
+                token_spans: None,
                 tokens: None,
                 lsp_tokens: None,
                 lsp_symbol_kinds: None,
@@ -247,6 +256,7 @@ impl BufferRegistry {
                 language: None,
                 syntax: None,
                 syntax_map: None,
+                token_spans: None,
                 tokens: None,
                 lsp_tokens: None,
                 lsp_symbol_kinds: None,
@@ -671,6 +681,20 @@ impl BufferRegistry {
         self.buffers.get_mut(&id)?.syntax_map.take()
     }
 
+    /// Retain a parse's raw token spans for `id`, so the next parse can report
+    /// which rows its tokens moved rather than restaining the file.
+    pub(crate) fn store_token_spans(&mut self, id: BufferId, spans: SemanticTokenSpans) {
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.token_spans = Some(spans);
+        }
+    }
+
+    /// Move the retained token spans for `id` out of the registry, to be
+    /// diffed against the parse now running and replaced by its own.
+    pub(crate) fn take_token_spans(&mut self, id: BufferId) -> Option<SemanticTokenSpans> {
+        self.buffers.get_mut(&id)?.token_spans.take()
+    }
+
     /// Return a cached [`DiffResult`] for `(buffer, base_text)` if one
     /// was stored against the current buffer version and base
     /// fingerprint; otherwise `None`. Callers recompute and cache via
@@ -772,6 +796,7 @@ impl BufferRegistry {
                     language: None,
                     syntax: None,
                     syntax_map: None,
+                    token_spans: None,
                     tokens: None,
                     lsp_tokens: None,
                     lsp_symbol_kinds: None,

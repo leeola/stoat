@@ -35,7 +35,7 @@ const BUILD_CHUNK: u32 = 4096;
 
 /// Lines re-summarized per [`MinimapContent::sync`] during a recolor sweep, so a
 /// large file's syntax recolor spreads across frames rather than stalling one.
-const RESYNC_CHUNK: u32 = 4096;
+pub(crate) const RESYNC_CHUNK: u32 = 4096;
 
 /// Line count past which a buffer disables its minimap, so a huge file neither
 /// summarizes nor emits.

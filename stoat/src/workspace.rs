@@ -721,6 +721,8 @@ impl Workspace {
             installed.push((out.buffer_id, out.changed_token_rows.clone()));
             self.buffers.store_syntax(out.buffer_id, out.syntax);
             self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
+            self.buffers
+                .store_token_spans(out.buffer_id, out.token_spans.clone());
             self.buffers.store_tokens(
                 out.buffer_id,
                 out.token_channel.tokens.clone(),
@@ -779,6 +781,7 @@ impl Workspace {
 
             let mut prior = self.buffers.take_syntax(buffer_id);
             let mut prior_map = self.buffers.take_syntax_map(buffer_id);
+            let prior_spans = self.buffers.take_token_spans(buffer_id);
 
             // Only the tree-sitter step honors the deadline. The full reparse
             // and captures walk that follow it are unbounded O(file), so a
@@ -794,6 +797,7 @@ impl Workspace {
                         &lang,
                         &mut prior,
                         &mut prior_map,
+                        prior_spans.as_deref(),
                         syntax_styles,
                         Some((deadline, executor)),
                     )
@@ -803,6 +807,8 @@ impl Workspace {
                 installed.push((out.buffer_id, out.changed_token_rows.clone()));
                 self.buffers.store_syntax(out.buffer_id, out.syntax);
                 self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
+                self.buffers
+                    .store_token_spans(out.buffer_id, out.token_spans.clone());
                 self.buffers.store_tokens(
                     out.buffer_id,
                     out.token_channel.tokens.clone(),
@@ -839,6 +845,7 @@ impl Workspace {
                     &lang,
                     &mut prior,
                     &mut prior_map,
+                    prior_spans.as_deref(),
                     &styles,
                     None,
                 )
