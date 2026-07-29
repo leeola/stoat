@@ -71,15 +71,11 @@ impl TabMap {
         } else {
             let mut expanded = Vec::new();
             for edit in fold_edits.into_iter() {
+                // Fold edits arrive as whole rows, so every row whose tab stops
+                // the edit moved is already inside it. The row just past the end
+                // is the one exception. An edit that left the line count alone
+                // can still shift its stops, and nothing else would report it.
                 let mut new_end = edit.new.end;
-                for row in edit.new.start..edit.new.end {
-                    let has_tab = fold_snapshot.fold_line_chars(row).any(|ch| ch == '\t');
-                    if has_tab {
-                        new_end = new_end.max(row + 1);
-                    }
-                }
-                // Check the row past the edit end if the edit did not change
-                // line count -- tabs on that line may have shifted.
                 let old_rows = edit.old.end - edit.old.start;
                 let new_rows = edit.new.end - edit.new.start;
                 if old_rows == new_rows && edit.new.end < fold_snapshot.line_count() {
@@ -647,7 +643,7 @@ mod tests {
         num::NonZeroU32,
         sync::{Arc, RwLock},
     };
-    use stoat_text::{patch::Patch, Bias};
+    use stoat_text::{patch::Patch, Bias, Point};
 
     fn make_snapshot(content: &str) -> super::TabSnapshot {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
@@ -740,6 +736,52 @@ mod tests {
         assert_eq!(
             snap.clip_point(TabPoint::new(0, 100), Bias::Left),
             TabPoint::new(0, 5)
+        );
+    }
+
+    /// Sync widens each incoming edit to the rows whose tab stops it moved.
+    /// Editing inside a tabbed line moves that line's own stops, so its row has
+    /// to come back in the emitted edit. The row past the edit comes with it
+    /// when the edit changed no line count, since its stops move too and it sits
+    /// outside the edit that reports them.
+    #[test]
+    fn an_edit_inside_a_tabbed_line_invalidates_that_row() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "\tone\n\ttwo\n\tthree\n");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let (mut inlay_map, inlay_snapshot) = InlayMap::new(multi_buffer.snapshot());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot);
+        let mut tab_map = TabMap::new(NonZeroU32::new(4).unwrap());
+
+        let before = multi_buffer.snapshot();
+        tab_map.sync(
+            fold_map
+                .sync(
+                    inlay_map.sync(before.clone(), &Patch::empty()).0,
+                    &Patch::empty(),
+                )
+                .0,
+            Patch::empty(),
+        );
+
+        // Insert inside row 1, between its tab and its text.
+        let at = before.rope().point_to_offset(Point::new(1, 1));
+        shared.write().expect("poisoned").edit(at..at, "X");
+
+        let after = multi_buffer.snapshot();
+        let buffer_edits = after.edits_since(before.version());
+        let (inlay_snapshot, inlay_edits) = inlay_map.sync(after, &buffer_edits);
+        let (fold_snapshot, fold_edits) = fold_map.sync(inlay_snapshot, &inlay_edits);
+        let (_, tab_edits) = tab_map.sync(fold_snapshot, fold_edits);
+
+        let covered: Vec<(u32, u32)> = tab_edits
+            .edits()
+            .iter()
+            .map(|edit| (edit.new.start, edit.new.end))
+            .collect();
+        assert!(
+            covered.iter().any(|&(start, end)| start <= 1 && 1 < end),
+            "row 1 carries the edit, so its expansion must be rebuilt: {covered:?}",
         );
     }
 
