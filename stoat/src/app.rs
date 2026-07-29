@@ -1396,6 +1396,17 @@ pub struct Stoat {
     /// starts from a clean slate.
     pub(crate) last_completion_signature: Option<(BufferId, u64)>,
 
+    /// The cursor context the completion trigger last computed, keyed by the
+    /// `(BufferId, version, cursor offset)` it was computed at.
+    ///
+    /// Signature help triggers on the same event and asks the same question, so
+    /// it reads this rather than walking the rope a second time per keystroke.
+    /// Transient, not persisted.
+    pub(crate) completion_context: Option<(
+        (BufferId, u64, usize),
+        crate::completion::request::ContextOwned,
+    )>,
+
     /// In-flight snippet expansion. Populated by
     /// [`crate::completion::accept::execute`] when accepting a
     /// snippet completion item; consumed by
@@ -1870,6 +1881,7 @@ impl Stoat {
             pending_completion_resolve: None,
             pending_completion_accept: None,
             last_completion_signature: None,
+            completion_context: None,
             active_snippet: None,
             version_info: "unknown",
             next_aux_window: 1,

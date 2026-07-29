@@ -82,34 +82,45 @@ impl ContextOwned {
 /// Compute the cursor's completion context from a rope plus byte
 /// offset. Walks back from the cursor through identifier-or-path
 /// characters (alphanumeric, `_`, `/`, `.`, `-`, `~`) to determine
-/// the prefix and its byte range, and slices the line content from
-/// the line start to the cursor for [`CompletionContext::text_before_cursor`].
+/// the prefix and its byte range.
 ///
-/// Multi-byte safe: walk-back uses [`str::char_indices`] so prefix
-/// boundaries always land on UTF-8 codepoint edges.
+/// [`CompletionContext::text_before_cursor`] is the prefix plus the one
+/// character preceding it, not the whole line. That character is what a
+/// caller reads to spot a trigger character, since those (`(`, `,`, `:`)
+/// are never prefix characters and so sit just outside it. Nothing needs
+/// more. The path-shape tests all look for prefix characters, and the path
+/// suffix walk covers the same character class the prefix does. The window
+/// stops at the line start, so it never reports text from the line above.
+///
+/// Bounded rather than sliced from the line start because this runs on
+/// every insert-mode keystroke, and a long line would otherwise cost a
+/// copy of everything left of the cursor to answer a question about the
+/// few characters beside it.
 pub(crate) fn compute_context(rope: &Rope, cursor_offset: usize) -> ContextOwned {
     let cursor_offset = cursor_offset.min(rope.len());
     let row = rope.offset_to_point(cursor_offset).row;
     let line_start = rope.point_to_offset(Point::new(row, 0));
-    let text_before_cursor = rope.slice(line_start..cursor_offset).to_string();
 
-    let mut start = text_before_cursor.len();
-    for (idx, ch) in text_before_cursor.char_indices().rev() {
-        if is_word_or_path_char(ch) {
-            start = idx;
-        } else {
+    let mut prefix_start = cursor_offset;
+    let mut window_start = cursor_offset;
+    for ch in rope.reversed_chars_at(cursor_offset) {
+        if window_start <= line_start {
             break;
         }
+        window_start -= ch.len_utf8();
+        if !is_word_or_path_char(ch) {
+            // Kept by the window so a trigger character is readable, but not
+            // by the prefix, which is what it terminates.
+            break;
+        }
+        prefix_start = window_start;
     }
-    let prefix = text_before_cursor[start..].to_string();
-    let prefix_byte_len = prefix.len();
-    let prefix_range = (cursor_offset - prefix_byte_len)..cursor_offset;
 
     ContextOwned {
         cursor_offset,
-        prefix,
-        prefix_range,
-        text_before_cursor,
+        prefix: rope.slice(prefix_start..cursor_offset).to_string(),
+        prefix_range: prefix_start..cursor_offset,
+        text_before_cursor: rope.slice(window_start..cursor_offset).to_string(),
     }
 }
 
@@ -149,25 +160,42 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         return;
     }
 
-    let snapshot = match focused_editor_snapshot(stoat) {
-        Some(s) => s,
-        None => return,
+    // Probed before the full snapshot, which clones the rope and allocates two
+    // paths that an unchanged buffer would throw away. The popup check still
+    // runs first, since a motion moves the cursor out of range without touching
+    // the version the dedupe reads.
+    let Some((buffer_id, buffer_version, cursor_offset)) = focused_buffer_probe(stoat) else {
+        return;
     };
 
     if let Some(popup) = &stoat.pending_completion
-        && (snapshot.cursor_offset < popup.prefix_range.start
-            || snapshot.cursor_offset > popup.prefix_range.end)
+        && (cursor_offset < popup.prefix_range.start || cursor_offset > popup.prefix_range.end)
     {
         stoat.pending_completion = None;
     }
 
-    let signature = (snapshot.buffer_id, snapshot.buffer_version);
+    let signature = (buffer_id, buffer_version);
     if stoat.last_completion_signature == Some(signature) {
         return;
     }
     stoat.last_completion_signature = Some(signature);
 
+    let snapshot = match focused_editor_snapshot(stoat) {
+        Some(s) => s,
+        None => return,
+    };
+
     let owned = compute_context(&snapshot.rope, snapshot.cursor_offset);
+    // Signature help asks the same question on this same event, so it reads
+    // this rather than walking the rope again.
+    stoat.completion_context = Some((
+        (
+            snapshot.buffer_id,
+            snapshot.buffer_version,
+            snapshot.cursor_offset,
+        ),
+        owned.clone(),
+    ));
 
     let trigger_char = owned.text_before_cursor.chars().last();
     let is_trigger_char = match (
@@ -337,8 +365,51 @@ fn focused_editor_snapshot(stoat: &Stoat) -> Option<EditorSnapshot> {
 }
 
 fn focused_buffer_signature(stoat: &Stoat) -> Option<(BufferId, u64)> {
-    let snapshot = focused_editor_snapshot(stoat)?;
-    Some((snapshot.buffer_id, snapshot.buffer_version))
+    let (buffer_id, version, _) = focused_buffer_probe(stoat)?;
+    Some((buffer_id, version))
+}
+
+/// The focused editor's `(buffer_id, version, cursor_offset)`.
+///
+/// What [`focused_editor_snapshot`] reads to decide whether the event is worth
+/// answering at all, without the rope clone and two path allocations it also
+/// makes. Runs on every insert-mode keystroke, most of which the dedupe it
+/// feeds discards.
+fn focused_buffer_probe(stoat: &Stoat) -> Option<(BufferId, u64, usize)> {
+    let ws = stoat.active_workspace();
+    let FocusTarget::SplitPane = ws.focus else {
+        return None;
+    };
+    let pane_id = ws.panes.focus();
+    let View::Editor(editor_id) = ws.panes.pane(pane_id).view else {
+        return None;
+    };
+    let editor = ws.editors.get(editor_id)?;
+    let sel = editor.selections.newest_anchor();
+    let buffer = ws.buffers.get(editor.buffer_id)?;
+    let guard = buffer.read().expect("buffer lock");
+    let tail_off = guard.resolve_anchor(&sel.tail());
+    let head_off = guard.resolve_anchor(&sel.head());
+    Some((
+        editor.buffer_id,
+        guard.version(),
+        stoat_text::cursor_offset(guard.rope(), tail_off, head_off),
+    ))
+}
+
+/// The context the completion trigger computed for this event, when the buffer
+/// and cursor have not moved since.
+///
+/// Both triggers run on the same event and ask the same question, so the second
+/// one walking the rope again is pure repetition.
+pub(crate) fn cached_context(
+    stoat: &Stoat,
+    buffer_id: BufferId,
+    version: u64,
+    cursor_offset: usize,
+) -> Option<ContextOwned> {
+    let (key, context) = stoat.completion_context.as_ref()?;
+    (*key == (buffer_id, version, cursor_offset)).then(|| context.clone())
 }
 
 fn base_dir_for(source_path: Option<&Path>, git_root: &Path) -> PathBuf {
@@ -477,7 +548,34 @@ mod tests {
         let ctx = compute_context(&r, 7);
         assert_eq!(ctx.prefix, "foo");
         assert_eq!(ctx.prefix_range, 4..7);
-        assert_eq!(ctx.text_before_cursor, "let foo");
+        assert_eq!(
+            ctx.text_before_cursor, " foo",
+            "the window is the prefix plus the character that ended it",
+        );
+    }
+
+    /// The character before an empty prefix is the one a caller reads to spot a
+    /// trigger character, and trigger characters are exactly the ones a prefix
+    /// stops at, so the window has to reach one past it.
+    #[test]
+    fn a_trigger_character_is_inside_the_window_past_an_empty_prefix() {
+        let r = rope("foo(");
+        let ctx = compute_context(&r, 4);
+        assert_eq!(ctx.prefix, "");
+        assert_eq!(ctx.text_before_cursor, "(");
+        assert_eq!(ctx.text_before_cursor.chars().last(), Some('('));
+    }
+
+    /// The walk stops at the prefix, so the cost of a keystroke does not grow
+    /// with how far along the line the cursor sits.
+    #[test]
+    fn a_long_line_does_not_widen_the_window() {
+        let mut line = "x".repeat(10_000);
+        line.push_str(" foo");
+        let r = rope(&line);
+        let ctx = compute_context(&r, r.len());
+        assert_eq!(ctx.prefix, "foo");
+        assert_eq!(ctx.text_before_cursor, " foo");
     }
 
     #[test]
@@ -518,9 +616,16 @@ mod tests {
         let cursor = r.len();
         let ctx = compute_context(&r, cursor);
         assert_eq!(ctx.prefix, "foo");
-        assert_eq!(ctx.text_before_cursor, "second foo");
+        assert_eq!(ctx.text_before_cursor, " foo");
         let prefix_byte_len = "foo".len();
         assert_eq!(ctx.prefix_range, (cursor - prefix_byte_len)..cursor);
+
+        // At column zero the window has nowhere on this line to reach, and it
+        // must not reach into the line above.
+        let start_of_second = "first line\n".len();
+        let at_line_start = compute_context(&r, start_of_second);
+        assert_eq!(at_line_start.prefix, "");
+        assert_eq!(at_line_start.text_before_cursor, "");
     }
 
     #[test]
@@ -702,6 +807,46 @@ mod harness_tests {
         assert!(
             got.iter().any(|l| l == "foobaz"),
             "expected foobaz in {got:?}",
+        );
+    }
+
+    /// A motion moves the cursor without touching the buffer version, so the
+    /// signature dedupe would sit the event out. The popup still has to notice
+    /// the cursor leaving the range it was filtered for, which is why the range
+    /// check runs ahead of that dedupe.
+    #[test]
+    fn a_motion_out_of_range_dismisses_the_popup() {
+        let mut h = TestHarness::default();
+        enable_completion(&h);
+        open_scratch(&mut h, "");
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 0, 7, &["foobar", "foobaz"]);
+
+        // Typed past column zero, so the prefix has somewhere to leave from.
+        h.type_keys("i");
+        h.type_text("bar foo");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+        let popup = h.stoat.pending_completion.clone().expect("popup armed");
+        assert!(popup.prefix_range.start > 0, "the prefix has room to leave");
+
+        let version = |h: &mut TestHarness| {
+            let (_, buffer_id) = h.stoat.focused_editor_ids().expect("focused editor");
+            let ws = h.stoat.active_workspace();
+            ws.buffers
+                .get(buffer_id)
+                .expect("buffer")
+                .read()
+                .expect("poisoned")
+                .version()
+        };
+        let before = version(&mut h);
+
+        // Arrowing back off the prefix moves the cursor and edits nothing.
+        h.type_keys("left left left left");
+        assert_eq!(version(&mut h), before, "a motion changes no text");
+        assert!(
+            h.stoat.pending_completion.is_none(),
+            "the cursor left the range the popup was filtered for",
         );
     }
 

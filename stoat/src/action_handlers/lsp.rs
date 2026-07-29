@@ -1558,7 +1558,11 @@ pub(crate) fn signature_help_trigger(stoat: &mut Stoat) {
     }
     stoat.last_signature_help_key = Some((buffer_id, version));
 
-    let context = crate::completion::request::compute_context(&rope, cursor_offset);
+    // The completion trigger ran on this same event and asked the same
+    // question, so this reads its answer rather than walking the rope again.
+    let context =
+        crate::completion::request::cached_context(stoat, buffer_id, version, cursor_offset)
+            .unwrap_or_else(|| crate::completion::request::compute_context(&rope, cursor_offset));
     let Some(ch) = context.text_before_cursor.chars().last() else {
         return;
     };
