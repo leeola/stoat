@@ -506,6 +506,16 @@ impl MinimapContent {
     ///
     /// An edit starting past the build cursor is left for the chunked build to
     /// summarize fresh when it reaches those rows.
+    ///
+    /// An edit that starts inside the prefix but reaches past the cursor keeps
+    /// every row it inserted. It summarizes all of them and the cursor advances
+    /// by the same line delta, so the rows the store holds and the rows the
+    /// cursor claims stay equal, and the build picks up at the row after the
+    /// edit's last.
+    ///
+    /// `removed` is clamped to the prefix for the same reason. The store cannot
+    /// lose a row it never held, so the clamp is what keeps the count the splice
+    /// reports equal to what the store gave up.
     fn apply_edit(
         &mut self,
         edit: &Edit<usize>,
@@ -1071,6 +1081,127 @@ mod tests {
         // The last char sits at display column 40 (x at even columns, shifted
         // past the 2-column lane); run 12 stretches to cover it.
         assert_eq!(last.start_col as u32 + last.len as u32, 41);
+    }
+
+    /// An edit can insert rows past the build cursor, since the cursor sits
+    /// wherever the last chunk stopped. It summarizes those rows itself and the
+    /// cursor advances by the same delta, so the summarized prefix and the
+    /// claimed one stay equal and the build resumes at the seam.
+    #[test]
+    fn an_edit_reaching_past_the_build_cursor_summarizes_what_it_inserts() {
+        let total = BUILD_CHUNK as usize + 904;
+        let before = rope(&vec!["line"; total].join("\n"));
+        let mut content = MinimapContent::new(1);
+
+        // One chunk, leaving the cursor at BUILD_CHUNK with the tail unbuilt.
+        content.sync(
+            &before,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
+        let _ = content.take_queued();
+        assert_eq!(content.lines.len(), BUILD_CHUNK as usize, "one chunk built");
+
+        // Three lines open on the cursor's last built row, so the rows they
+        // occupy run past where the build had reached. Every line is "line\n", so
+        // a row starts every five bytes.
+        let seam = 5 * (BUILD_CHUNK as usize - 1);
+        let mut after: Vec<&str> = vec!["line"; total];
+        after.splice(
+            BUILD_CHUNK as usize - 1..BUILD_CHUNK as usize - 1,
+            ["new"; 3],
+        );
+        let after = rope(&after.join("\n"));
+        let edit = Patch::new(vec![Edit {
+            old: seam..seam,
+            new: seam..seam + 12,
+        }]);
+        content.sync(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
+
+        // The same sync then builds the tail, so the two splices together show
+        // the edit's reach and where the build picked up from it.
+        assert_eq!(
+            content
+                .take_queued()
+                .iter()
+                .map(|s| (s.start, s.removed, s.lines.len()))
+                .collect::<Vec<_>>(),
+            vec![
+                (BUILD_CHUNK - 1, 1, 4),
+                (BUILD_CHUNK + 3, 0, total - BUILD_CHUNK as usize),
+            ],
+            "the edit removes the one row it replaced, and the build resumes at \
+             the row after the four it left, with no gap and no overlap",
+        );
+        assert_eq!(
+            content.lines.len(),
+            total + 3,
+            "the store holds every row, the edit's included",
+        );
+
+        let inserted = summarize_line("new", &[], None);
+        assert_eq!(
+            &content.lines[BUILD_CHUNK as usize - 1..BUILD_CHUNK as usize + 2],
+            &[inserted.clone(), inserted.clone(), inserted][..],
+            "including the rows that landed past where the build had reached",
+        );
+        assert!(!content.build_pending(), "and nothing is left to build");
+    }
+
+    /// An edit can also replace rows across the build cursor, and the store only
+    /// held the ones before it. The splice has to report what the store gave up
+    /// rather than what the buffer lost, or the terminal drops rows the strip
+    /// never had.
+    #[test]
+    fn an_edit_replacing_across_the_build_cursor_reports_only_the_built_rows() {
+        let total = BUILD_CHUNK as usize + 904;
+        let before = rope(&vec!["line"; total].join("\n"));
+        let mut content = MinimapContent::new(1);
+
+        content.sync(
+            &before,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
+        let _ = content.take_queued();
+        assert_eq!(content.lines.len(), BUILD_CHUNK as usize, "one chunk built");
+
+        // Four rows collapse into one, starting two rows below the cursor, so two
+        // of the four were built and two were not. Every line is "line\n", so a
+        // row starts every five bytes and a row's last byte is its newline.
+        let first = BUILD_CHUNK as usize - 2;
+        let after = rope(
+            &[
+                vec!["line"; first],
+                vec!["ONE"],
+                vec!["line"; total - first - 4],
+            ]
+            .concat()
+            .join("\n"),
+        );
+        let edit = Patch::new(vec![Edit {
+            old: 5 * first..5 * (first + 4) - 1,
+            new: 5 * first..5 * first + 3,
+        }]);
+        content.sync(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
+
+        let splices = content.take_queued();
+        assert_eq!(
+            (splices[0].start, splices[0].removed, splices[0].lines.len()),
+            (first as u32, 2, 1),
+            "the two built rows go, not the four the buffer lost",
+        );
+        assert_eq!(
+            content.lines.len(),
+            total - 3,
+            "and the store still holds exactly the rows the cursor claims",
+        );
     }
 
     /// A patch orders its old ranges in old-rope rows and its new ranges in
