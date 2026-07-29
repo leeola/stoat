@@ -38,7 +38,7 @@ pub(crate) mod text;
 pub(crate) mod undercurl;
 pub(crate) mod workspace_picker;
 
-use self::undercurl::UndercurlSpan;
+use self::undercurl::UndercurlBatch;
 use crate::{
     app::{self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
     buffer::BufferId,
@@ -358,7 +358,7 @@ pub(crate) fn frame(
     stoat: &mut Stoat,
     buf: &mut Buffer,
     scene: &mut ApcScene,
-    undercurls: &mut Vec<UndercurlSpan>,
+    undercurls: &mut UndercurlBatch,
 ) {
     let full = stoat.size();
 
@@ -590,7 +590,7 @@ pub(crate) fn frame(
     // Record each undercurl span's cells now, after the editor panes painted but
     // before the overlay stack, so the re-stamp can drop cells a later layer
     // repaints and never draw over an overlay covering a diagnostic.
-    undercurl::snapshot_cells(buf, undercurls);
+    undercurl::snapshot_cells(buf, undercurls.spans_mut());
 
     pane::render_pane_dividers(&ws.panes.dividers(), &stoat.theme, buf, &mut *scene);
 

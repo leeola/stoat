@@ -21,17 +21,74 @@ pub(crate) struct UndercurlSpan {
     pub(crate) cells: Vec<ratatui::buffer::Cell>,
 }
 
+/// One frame's undercurl spans, retaining their cell records between frames.
+///
+/// A span's record is a vector sized to the run, and a frame that dropped the
+/// spans would rebuild every one of those from scratch. Retiring a span by
+/// moving a cursor instead keeps its allocation for the next frame's span to
+/// refill.
+///
+/// The retired tail stays in the vector, so it must not be reachable: a span
+/// left over from an earlier frame would re-stamp a squiggle over whatever now
+/// occupies its cells. Only the live prefix is handed out.
+#[derive(Default)]
+pub(crate) struct UndercurlBatch {
+    spans: Vec<UndercurlSpan>,
+    live: usize,
+}
+
+impl UndercurlBatch {
+    /// Retire the previous frame's spans, keeping their records' allocations.
+    pub(crate) fn begin(&mut self) {
+        self.live = 0;
+    }
+
+    /// Add a span over `len` cells from `(x, y)`, reusing a retired span's cell
+    /// record when one is available.
+    pub(crate) fn push(&mut self, x: u16, y: u16, len: u16, color: [u8; 3]) {
+        match self.spans.get_mut(self.live) {
+            Some(span) => {
+                span.x = x;
+                span.y = y;
+                span.len = len;
+                span.color = color;
+                span.cells.clear();
+            },
+            None => self.spans.push(UndercurlSpan {
+                x,
+                y,
+                len,
+                color,
+                cells: Vec::new(),
+            }),
+        }
+        self.live += 1;
+    }
+
+    /// This frame's spans, without the retired tail.
+    pub(crate) fn spans(&self) -> &[UndercurlSpan] {
+        &self.spans[..self.live]
+    }
+
+    pub(crate) fn spans_mut(&mut self) -> &mut [UndercurlSpan] {
+        &mut self.spans[..self.live]
+    }
+}
+
 /// Record each span's current buffer cells so [`build`] can later drop any cell
 /// a subsequently-painted overlay has overwritten.
 ///
 /// Call once the editor panes have painted (cursor and selections included) and
 /// before the overlay stack draws, so the record reflects the editor's output
 /// and every later layer counts as a change.
+///
+/// Each record is replaced rather than appended to, so a span carrying one from
+/// an earlier frame comes out sized to its current run.
 pub(crate) fn snapshot_cells(buf: &Buffer, spans: &mut [UndercurlSpan]) {
     for span in spans {
-        span.cells = (0..span.len)
-            .map(|i| buf[(span.x + i, span.y)].clone())
-            .collect();
+        span.cells.clear();
+        span.cells
+            .extend((0..span.len).map(|i| buf[(span.x + i, span.y)].clone()));
     }
 }
 
@@ -143,7 +200,7 @@ impl Display for SgrBg {
 
 #[cfg(test)]
 mod tests {
-    use super::{build, snapshot_cells, UndercurlSpan};
+    use super::{build, snapshot_cells, UndercurlBatch, UndercurlSpan};
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
@@ -156,6 +213,57 @@ mod tests {
                 .set_char(ch)
                 .set_style(Style::default().fg(fg).bg(bg));
         }
+    }
+
+    /// Retiring a span is what makes its cell record available to the next
+    /// frame, and the record is the whole reason the batch outlives a frame.
+    /// Retired spans also have to be out of reach, since a re-stamp would draw
+    /// their squiggle over whatever now occupies those cells.
+    #[test]
+    fn a_retired_span_lends_its_cell_record_to_the_next_frame() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 1));
+        paint(&mut buf, 0, "abc", Color::Rgb(1, 1, 1), Color::Rgb(0, 0, 0));
+
+        let mut batch = UndercurlBatch::default();
+        batch.begin();
+        batch.push(0, 0, 3, [9, 9, 9]);
+        snapshot_cells(&buf, batch.spans_mut());
+
+        let record = batch.spans()[0].cells.capacity();
+        assert!(record >= 3, "the run's cells were recorded, got {record}");
+
+        batch.begin();
+        assert!(batch.spans().is_empty(), "the retired span is out of reach");
+
+        batch.push(4, 0, 2, [1, 2, 3]);
+        let reused = &batch.spans()[0];
+        assert_eq!(
+            (reused.x, reused.len, reused.color, reused.cells.capacity()),
+            (4, 2, [1, 2, 3], record),
+            "the new span overwrote the retired one and kept its record",
+        );
+        assert!(reused.cells.is_empty(), "with nothing recorded yet");
+    }
+
+    /// A record is sized to its span's run, so recording into one that already
+    /// holds cells has to replace them. Appending would leave the record longer
+    /// than the run it stands for.
+    #[test]
+    fn recording_replaces_a_record_rather_than_growing_it() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 1));
+        paint(&mut buf, 0, "abc", Color::Rgb(1, 1, 1), Color::Rgb(0, 0, 0));
+
+        let mut spans = [UndercurlSpan {
+            x: 0,
+            y: 0,
+            len: 3,
+            color: [9, 9, 9],
+            cells: Vec::new(),
+        }];
+        snapshot_cells(&buf, &mut spans);
+        snapshot_cells(&buf, &mut spans);
+
+        assert_eq!(spans[0].cells.len(), 3, "one cell per column of the run");
     }
 
     #[test]

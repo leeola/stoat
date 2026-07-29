@@ -9,7 +9,7 @@ use crate::{
     render::{
         conflict_view::render_conflict_view,
         review::{dim_rgb, render_diff_view, render_review, style_rgb},
-        undercurl::UndercurlSpan,
+        undercurl::UndercurlBatch,
     },
 };
 use lsp_types::{DiagnosticSeverity, DiagnosticTag};
@@ -110,7 +110,7 @@ pub(crate) fn render_editor_with_overlay(
     search_query: Option<&str>,
     diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet, &LspRegistry)>,
     mut scene: Option<&mut ApcScene>,
-    undercurls: Option<&mut Vec<UndercurlSpan>>,
+    undercurls: Option<&mut UndercurlBatch>,
     dim: f32,
     wrap: WrapMode,
     wrap_column: u32,
@@ -1580,7 +1580,7 @@ fn paint_diagnostic_spans(
     right: u16,
     bottom: u16,
     buf: &mut Buffer,
-    mut undercurls: Option<&mut Vec<UndercurlSpan>>,
+    mut undercurls: Option<&mut UndercurlBatch>,
     colors: Option<&SeverityColors>,
     dim: f32,
 ) {
@@ -1692,13 +1692,9 @@ fn paint_diagnostic_spans(
                 Some(bg) if dim > 0.0 => dim_rgb(base, bg, dim),
                 _ => base,
             };
-            undercurls.extend(runs.into_iter().map(|(x, y, len)| UndercurlSpan {
-                x,
-                y,
-                len,
-                color,
-                cells: Vec::new(),
-            }));
+            for (x, y, len) in runs {
+                undercurls.push(x, y, len, color);
+            }
         }
     }
 }
@@ -3682,12 +3678,12 @@ mod tests {
         let _ = h.stoat.render();
 
         assert_eq!(
-            h.stoat.pending_undercurls.len(),
+            h.stoat.pending_undercurls.spans().len(),
             1,
             "the warning span paints one underline run",
         );
         assert_eq!(
-            h.stoat.pending_undercurls[0].color,
+            h.stoat.pending_undercurls.spans()[0].color,
             [0xe5, 0xc0, 0x7b],
             "the run carries the shipped warning severity color",
         );
@@ -3737,7 +3733,13 @@ mod tests {
             .scroll_row = 40;
         let _ = h.stoat.render();
 
-        let colors: Vec<[u8; 3]> = h.stoat.pending_undercurls.iter().map(|u| u.color).collect();
+        let colors: Vec<[u8; 3]> = h
+            .stoat
+            .pending_undercurls
+            .spans()
+            .iter()
+            .map(|u| u.color)
+            .collect();
         assert!(
             !colors.is_empty() && colors.iter().all(|c| *c == [0xe5, 0xc0, 0x7b]),
             "only the warning reaches the viewport, got {colors:?}",
@@ -3768,7 +3770,11 @@ mod tests {
             ],
         );
         let _ = h.stoat.render();
-        assert_eq!(h.stoat.pending_undercurls.len(), 2, "both spans paint");
+        assert_eq!(
+            h.stoat.pending_undercurls.spans().len(),
+            2,
+            "both spans paint"
+        );
 
         h.stoat.diagnostics.replace_for_path(
             path,
@@ -3776,7 +3782,7 @@ mod tests {
         );
         let _ = h.stoat.render();
         assert_eq!(
-            h.stoat.pending_undercurls.len(),
+            h.stoat.pending_undercurls.spans().len(),
             1,
             "only the span the new set carries paints",
         );

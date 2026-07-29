@@ -14,7 +14,7 @@ use crate::{
         review::{dim_rgb, style_rgb},
         run_pane::render_run_pane,
         term_pane::render_term_pane,
-        undercurl::UndercurlSpan,
+        undercurl::UndercurlBatch,
         FrameCtx, PaneCtx, TEXT_SCALE_COMPACT, TEXT_SCALE_FULL,
     },
     workspace::Workspace,
@@ -49,7 +49,7 @@ pub(crate) fn render_pane(
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
     scene: &mut ApcScene,
-    undercurls: &mut Vec<UndercurlSpan>,
+    undercurls: &mut UndercurlBatch,
     badge_rect: &mut Option<Rect>,
 ) {
     let theme = frame.theme;

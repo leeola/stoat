@@ -33,7 +33,7 @@ use crate::{
     register,
     render::{
         commit_picker::MIN_LIST_ROWS,
-        undercurl::{self, UndercurlSpan},
+        undercurl::{self, UndercurlBatch},
     },
     review_session::ReviewSource,
     run::{CommandMark, GridSelection, PtyNotification, RunId},
@@ -1452,11 +1452,13 @@ pub struct Stoat {
     /// frames while painting; [`Self::emit_apc_scene`] diffs it against the last
     /// flush so unchanged decoration costs no bytes. Empty until a widget appends.
     pub(crate) apc_scene: ApcScene,
-    /// Diagnostic underline spans collected during the current paint. The editor
-    /// renderer fills this while painting under stoatty; [`Self::paint_into`]
-    /// turns it into the curly-underline VT re-stamp carried on the frame. Reused
-    /// across frames like [`Self::apc_scene`] to avoid a per-frame allocation.
-    pub(crate) pending_undercurls: Vec<UndercurlSpan>,
+    /// Diagnostic underline spans collected during the current paint.
+    ///
+    /// The editor renderer fills this while painting under stoatty, and
+    /// [`Self::paint_into`] turns it into the curly-underline VT re-stamp carried
+    /// on the frame. Reused across frames like [`Self::apc_scene`], down to each
+    /// span's cell record, so a steady frame allocates nothing here.
+    pub(crate) pending_undercurls: UndercurlBatch,
     /// Counter bumped every time the active theme changes.
     ///
     /// Every pooled surface paints theme colors, so a page buffered in the
@@ -1909,7 +1911,7 @@ impl Stoat {
             apc_tx: None,
             stoatty: false,
             apc_scene: ApcScene::new(),
-            pending_undercurls: Vec::new(),
+            pending_undercurls: UndercurlBatch::default(),
             theme_epoch: 0,
             chrome: None,
             smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
@@ -2748,7 +2750,7 @@ impl Stoat {
                         self.paint_into(&mut b);
                         #[cfg(feature = "perf")]
                         self.perf.record_paint(painted.elapsed());
-                        let undercurl = undercurl::build(&b, &self.pending_undercurls);
+                        let undercurl = undercurl::build(&b, self.pending_undercurls.spans());
                         (Arc::new(b), undercurl)
                     };
                     let cursor = self.primary_cursor_screen_pos();
@@ -7782,7 +7784,7 @@ impl Stoat {
         // be stuck at whatever was true then.
         scene.set_live(self.stoatty);
         let mut undercurls = std::mem::take(&mut self.pending_undercurls);
-        undercurls.clear();
+        undercurls.begin();
         crate::render::frame(self, buf, &mut scene, &mut undercurls);
         self.apc_scene = scene;
         self.pending_undercurls = undercurls;
@@ -8058,7 +8060,7 @@ impl Stoat {
                 let mut buf = Buffer::empty(area);
                 {
                     let mut scene = ApcScene::new();
-                    let mut undercurls = Vec::new();
+                    let mut undercurls = UndercurlBatch::default();
                     crate::render::pane::render_pane(
                         ws.panes.pane(pane_id),
                         is_focused,
