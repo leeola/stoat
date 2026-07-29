@@ -1558,7 +1558,12 @@ impl ApplicationHandler<PtyEvent> for App {
                                 },
                                 damage: &damage,
                                 decoration_damage: &decoration_damage,
-                                scrolled_rows: 0,
+                                // The projection slid the grid by this much and
+                                // reported damage naming only the rows that
+                                // really changed, so the row caches have to
+                                // rotate to match or the clean ones redraw from
+                                // their pre-slide instances.
+                                scrolled_rows: scroll_delta as isize,
                             },
                         );
                         easing
