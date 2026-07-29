@@ -667,6 +667,56 @@ impl DisplayMap {
         self.lsp_folding_crease_ids.insert(buffer_id, ids);
     }
 
+    /// Bring the installed deleted-line blocks in line with `signature`,
+    /// keeping the block already standing for each hunk that survived.
+    ///
+    /// Most refreshes change one hunk out of many, and replacing the whole set
+    /// would mark every one of their rows for rebuild and hand back fresh ids
+    /// for blocks that never moved.
+    fn resplice_diff_blocks(
+        &mut self,
+        signature: Vec<(DiffHunkStatus, u32, Range<usize>)>,
+        diff_map: Option<&DiffMap>,
+    ) {
+        let mut standing: HashMap<(DiffHunkStatus, u32, Range<usize>), CustomBlockId> = self
+            .inserted_diff_block_signature
+            .drain(..)
+            .zip(self.inserted_diff_block_ids.drain(..))
+            .collect();
+
+        // Built in the same order as the signature, since both walk one filtered
+        // pass over the hunks.
+        let props = match diff_map.filter(|_| self.show_deleted_blocks) {
+            Some(dm) => dm.deleted_blocks(),
+            None => Vec::new(),
+        };
+
+        let mut ids: Vec<Option<CustomBlockId>> = Vec::with_capacity(signature.len());
+        let mut fresh_props = Vec::new();
+        let mut fresh_slots = Vec::new();
+        for (slot, key) in signature.iter().enumerate() {
+            match standing.remove(key) {
+                Some(id) => ids.push(Some(id)),
+                None => {
+                    ids.push(None);
+                    fresh_slots.push(slot);
+                    fresh_props.push(props[slot].clone());
+                },
+            }
+        }
+
+        self.block_map.remove(&standing.into_values().collect());
+        for (slot, id) in fresh_slots
+            .into_iter()
+            .zip(self.block_map.insert(fresh_props))
+        {
+            ids[slot] = Some(id);
+        }
+
+        self.inserted_diff_block_ids = ids.into_iter().flatten().collect();
+        self.inserted_diff_block_signature = signature;
+    }
+
     /// Sync the layers up to wrapping, returning the wrap snapshot, the wrap
     /// rows the sync changed, and the same edits restated in buffer rows.
     ///
@@ -736,20 +786,9 @@ impl DisplayMap {
 
             // A recompute that found the same hunks yields the same blocks, and
             // re-splicing them would only mint new ids for identical content
-            // while forcing the transform tree to be rebuilt around them.
+            // while forcing the transform tree to be patched around them.
             if signature != self.inserted_diff_block_signature {
-                self.block_map
-                    .remove(&self.inserted_diff_block_ids.drain(..).collect());
-                let props = if self.show_deleted_blocks {
-                    diff_map
-                        .as_ref()
-                        .map(|dm| dm.deleted_blocks())
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                self.inserted_diff_block_ids = self.block_map.insert(props);
-                self.inserted_diff_block_signature = signature;
+                self.resplice_diff_blocks(signature, diff_map.as_ref());
             }
 
             self.last_diff_version = diff_version;
@@ -1322,6 +1361,44 @@ mod tests {
         assert_eq!(
             display_map.inserted_diff_block_ids, first,
             "a refresh finding the same hunks re-splices nothing",
+        );
+    }
+
+    /// A refresh that found one new hunk should cost one block, not a whole new
+    /// set. The ids show it: an untouched hunk keeps the block it already had.
+    #[test]
+    fn a_refresh_finding_a_new_hunk_keeps_the_other_blocks() {
+        let base = "line1\ndeleted\nline2\ngone\nline3";
+        let mut buffer = TextBuffer::with_text(BufferId::new(0), "line1\nline2\nline3");
+        buffer.diff_map = Some(make_diff_with_deletion(0, base, 6..13, 1));
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
+        display_map.set_show_deleted_blocks(true);
+
+        display_map.snapshot();
+        let first = display_map.inserted_diff_block_ids.clone();
+        assert_eq!(first.len(), 1);
+
+        // The same hunk plus one further down the file.
+        let mut grown = make_diff_with_deletion(0, base, 6..13, 1);
+        grown.push_hunk(DiffHunk {
+            status: DiffHunkStatus::Deleted,
+            unstaged_lines: std::iter::once(2..2).collect(),
+            buffer_start_line: 2,
+            buffer_line_range: 2..2,
+            base_byte_range: 19..24,
+            anchor_range: None,
+            token_detail: None,
+        });
+        shared.write().expect("poisoned").diff_map = Some(grown);
+        display_map.snapshot();
+
+        let after = display_map.inserted_diff_block_ids.clone();
+        assert_eq!(after.len(), 2, "the new hunk adds a block");
+        assert_eq!(
+            after[0], first[0],
+            "the hunk that did not move keeps the block it had",
         );
     }
 
