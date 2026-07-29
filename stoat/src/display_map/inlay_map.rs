@@ -602,6 +602,27 @@ impl<'a> SeekTarget<'a, TransformSummary, Dimensions<OutputOffset, Point, InlayP
     }
 }
 
+/// Byte index in `text` where its `line`-th row begins, counting from zero.
+///
+/// Answers `text.len()` when `text` holds fewer rows than that, which keeps a
+/// caller measuring the last row from running past the end.
+fn line_start_byte(text: &str, line: u32) -> usize {
+    if line == 0 {
+        return 0;
+    }
+
+    let mut seen = 0;
+    for (i, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            seen += 1;
+            if seen == line {
+                return i + 1;
+            }
+        }
+    }
+    text.len()
+}
+
 fn push_isomorphic(tree: &mut SumTree<Transform>, summary: TextSummary) {
     if summary.len == 0 {
         return;
@@ -822,28 +843,56 @@ impl InlaySnapshot {
         self.transforms.summary().output.clone()
     }
 
+    /// Byte length of inlay row `row` as it paints, excluding its newline.
+    ///
+    /// `row` is an inlay row, not a buffer row. The two agree until a hint
+    /// carrying a newline splits the row it sits on, and then only the inlay
+    /// row names what a caller bounding a rendered row is asking about.
     pub fn line_len(&self, row: u32) -> u32 {
-        let len = self.buffer.rope().line_len(row);
         if !self.has_inlays() {
-            return len;
+            return self.buffer.rope().line_len(row);
         }
-        let target = Point::new(row, 0);
-        let mut cursor = self.transforms.cursor::<Point>(());
-        cursor.seek(&target, Bias::Left);
-        let mut extra = 0u32;
-        while let Some(transform) = cursor.item() {
-            let pos: Point = *cursor.start();
-            if pos.row > row {
-                break;
-            }
-            if let Transform::Inlay(inlay) = transform
-                && inlay.position.row == row
-            {
-                extra += inlay.text.len() as u32;
-            }
-            cursor.next();
+
+        let total = &self.transforms.summary().output;
+        if row > total.lines.row {
+            return 0;
         }
-        len + extra
+
+        let start = self.row_start_offset(row);
+        // The next row starts one past this row's newline, and the last row
+        // runs to the end of the text.
+        let end = if row == total.lines.row {
+            total.len
+        } else {
+            self.row_start_offset(row + 1).saturating_sub(1)
+        };
+        (end - start) as u32
+    }
+
+    /// Output offset where inlay row `row` begins.
+    ///
+    /// Unlike [`Self::inlay_point_to_offset`], which treats a hint as one
+    /// indivisible position, this reaches inside a hint's own text. A hint
+    /// carrying a newline starts a row there, and that row's beginning is a
+    /// real place in the painted output even though it is no place in the
+    /// buffer.
+    fn row_start_offset(&self, row: u32) -> usize {
+        let target = InlayPoint::new(row, 0);
+        let (start, _end, item) = self
+            .transforms
+            .find::<Dimensions<OutputOffset, Point, InlayPoint>, _>((), &target, Bias::Right);
+
+        match item {
+            Some(Transform::Inlay(inlay)) => {
+                start.0 .0 + line_start_byte(&inlay.text, row - start.2.row())
+            },
+            _ => {
+                let overshoot = point_overshoot(start.2 .0, target.0);
+                let rope = self.buffer.rope();
+                start.0 .0
+                    + (rope.point_to_offset(start.1 + overshoot) - rope.point_to_offset(start.1))
+            },
+        }
     }
 
     pub fn has_inlays(&self) -> bool {
@@ -1437,6 +1486,39 @@ mod tests {
             InlayPoint::new(0, 0),
             "so does a row past the end",
         );
+    }
+
+    /// Every row a hint produces has to measure what it paints, which is what a
+    /// caller bounding a rendered row relies on. Reading the buffer's row length
+    /// and adding the hint's bytes cannot say that once the hint carries a
+    /// newline, since the row it sat on has become two.
+    #[test]
+    fn line_len_matches_the_painted_row() {
+        let cases = [
+            (": str", vec![16]),
+            (" → u32", vec![19]),
+            ("a\nb", vec![6, 7]),
+            ("one\ntwo\n", vec![8, 3, 6]),
+        ];
+
+        for (hint, want) in cases {
+            let snap = make_snapshot_with_inlays(
+                "hello world",
+                vec![(Point::new(0, 5), hint.to_string())],
+            );
+
+            let painted: Vec<u32> = snap
+                .inlay_text()
+                .split('\n')
+                .map(|row| row.len() as u32)
+                .collect();
+            assert_eq!(painted, want, "the fixture for {hint:?} paints these rows");
+
+            let measured: Vec<u32> = (0..painted.len() as u32)
+                .map(|row| snap.line_len(row))
+                .collect();
+            assert_eq!(measured, want, "measuring the rows a {hint:?} hint leaves");
+        }
     }
 
     #[test]
