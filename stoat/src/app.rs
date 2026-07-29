@@ -9225,10 +9225,26 @@ impl Stoat {
                     diff_view,
                     dim,
                 } => {
+                    // The pages of one refill are adjacent, so resolving each
+                    // one's highlights separately walks the same span of the
+                    // buffer once per page. Endpoints wider than the rows a page
+                    // paints are valid, so one resolve over their union serves
+                    // them all.
+                    let endpoints = match (pages.first(), pages.last()) {
+                        (Some(&first), Some(&last)) => {
+                            let top = crate::smooth_scroll::page_top_row(first, height);
+                            let bottom = crate::smooth_scroll::page_top_row(last, height)
+                                .saturating_add(height as u32);
+                            snapshot.highlighted_endpoints(top..bottom)
+                        },
+                        _ => Arc::from(Vec::new()),
+                    };
+
                     for index in pages {
                         let snapshot = snapshot.clone();
                         let gutter = gutter.clone();
                         let apc_tx = apc_tx.clone();
+                        let endpoints = endpoints.clone();
                         self.executor
                             .spawn_blocking(move || {
                                 let fill = crate::smooth_scroll::render_page_fill(
@@ -9241,6 +9257,7 @@ impl Stoat {
                                     &gutter,
                                     diff_view,
                                     dim,
+                                    endpoints,
                                 );
                                 let _ = apc_tx.send(fill);
                             })

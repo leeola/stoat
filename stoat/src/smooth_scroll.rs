@@ -25,7 +25,7 @@ use crate::{
     commit_list::CommitListState,
     completion::CompletionItem,
     conflict_session::ConflictViewState,
-    display_map::{display_width, DisplaySnapshot},
+    display_map::{display_width, highlights::HighlightEndpoint, DisplaySnapshot},
     file_finder::FileFinder,
     help::Help,
     render::{
@@ -375,6 +375,18 @@ fn scroll_target(pool: u32, scroll_offset: f32, region_height: u16) -> ScrollCom
 /// `encode_fill_into` marker, the [`render_page_from_snapshot`] page, then an
 /// `encode_fill_end_into` terminator.
 #[allow(clippy::too_many_arguments)]
+/// Display row page `index` starts at, for a pool whose regions are
+/// `region_height` rows tall.
+///
+/// Shared with the callers that resolve highlights across a run of pages, so the
+/// span they resolve and the rows the pages paint cannot come apart.
+pub(crate) fn page_top_row(index: u64, region_height: u16) -> u32 {
+    index
+        .saturating_mul(region_height as u64)
+        .min(u32::MAX as u64) as u32
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_page_fill(
     snapshot: &DisplaySnapshot,
     pool: u32,
@@ -385,10 +397,9 @@ pub(crate) fn render_page_fill(
     gutter: &PageGutter,
     diff_view: bool,
     dim: f32,
+    endpoints: Arc<[HighlightEndpoint]>,
 ) -> Vec<u8> {
-    let top_row = index
-        .saturating_mul(region_height as u64)
-        .min(u32::MAX as u64) as u32;
+    let top_row = page_top_row(index, region_height);
     let bytes = render_page_from_snapshot(
         snapshot,
         top_row,
@@ -398,6 +409,7 @@ pub(crate) fn render_page_fill(
         gutter,
         diff_view,
         dim,
+        endpoints,
     );
 
     let mut frame = Vec::with_capacity(bytes.len() + 16);
@@ -412,8 +424,11 @@ pub(crate) fn render_page_fill(
 ///
 /// Takes a snapshot rather than `&mut EditorState` so a page can render off the
 /// run-loop thread. A [`DisplaySnapshot`] is `Send` and carries everything the
-/// text needs, and the uncached [`DisplaySnapshot::highlighted_chunks`] keeps the
-/// render from touching the editor's shared endpoint cache.
+/// text needs.
+///
+/// `endpoints` may span more rows than this page, which is what lets the pages
+/// of one refill share a single resolve. It must cover them, since anything it
+/// omits paints unhighlighted.
 ///
 /// Paints the line-number gutter, then the text and syntax highlights inset past
 /// it -- the same cells the unfocused live grid paints for these rows, minus the
@@ -434,6 +449,7 @@ pub(crate) fn render_page_from_snapshot(
     gutter: &PageGutter,
     diff_view: bool,
     dim: f32,
+    endpoints: Arc<[HighlightEndpoint]>,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
     let mut buf = Buffer::empty(area);
@@ -476,7 +492,9 @@ pub(crate) fn render_page_from_snapshot(
         let mut y = area.y;
         let inlay_style =
             fallback_style.patch(gutter.theme().get(crate::theme::scope::UI_VIRTUAL_INLAY));
-        'chunks: for chunk in snapshot.highlighted_chunks(top_row..end_row) {
+        'chunks: for chunk in
+            snapshot.highlighted_chunks_with_endpoints(top_row..end_row, endpoints)
+        {
             let style = if chunk.is_inlay {
                 inlay_style
             } else {
@@ -1067,7 +1085,19 @@ pub(crate) fn serialize_buffer(buf: &mut Buffer, theme: &crate::theme::Theme) ->
 #[cfg(test)]
 mod tests {
     use super::{emit_into, scroll_target, window_range, SmoothScrollState, WINDOW_PAGES};
+    use crate::display_map::{highlights::HighlightEndpoint, DisplaySnapshot};
     use std::sync::Arc;
+
+    /// The endpoints a page resolved for itself before a refill began sharing
+    /// one set across its pages, which is the behavior these tests pin.
+    fn page_endpoints(
+        snapshot: &DisplaySnapshot,
+        top_row: u32,
+        height: u16,
+    ) -> Arc<[HighlightEndpoint]> {
+        snapshot.highlighted_endpoints(top_row..top_row + height as u32)
+    }
+
     use stoatty_protocol::command::{
         decode, Command, PoolDropCommand, PoolRegionCommand, RepositionCommand, ScrollCommand,
     };
@@ -1143,8 +1173,17 @@ mod tests {
             let expected = serialize_buffer(&mut expected, &theme);
 
             let snapshot = editor.display_map.snapshot();
-            let got =
-                render_page_from_snapshot(&snapshot, top_row, fallback, 12, 4, &gutter, false, 0.0);
+            let got = render_page_from_snapshot(
+                &snapshot,
+                top_row,
+                fallback,
+                12,
+                4,
+                &gutter,
+                false,
+                0.0,
+                page_endpoints(&snapshot, top_row, 4),
+            );
 
             assert_eq!(got, expected, "page at top_row {top_row}");
         }
@@ -1208,7 +1247,17 @@ mod tests {
         let expected = serialize_buffer(&mut expected, &theme);
 
         let snapshot = editor.display_map.snapshot();
-        let got = render_page_from_snapshot(&snapshot, 0, fallback, 12, 2, &gutter, false, 0.0);
+        let got = render_page_from_snapshot(
+            &snapshot,
+            0,
+            fallback,
+            12,
+            2,
+            &gutter,
+            false,
+            0.0,
+            page_endpoints(&snapshot, 0, 2),
+        );
 
         assert_eq!(
             got, expected,
@@ -1283,7 +1332,17 @@ mod tests {
         let expected = serialize_buffer(&mut expected, &theme);
 
         let snapshot = editor.display_map.snapshot();
-        let got = render_page_from_snapshot(&snapshot, 0, fallback, 20, 3, &gutter, false, 0.0);
+        let got = render_page_from_snapshot(
+            &snapshot,
+            0,
+            fallback,
+            20,
+            3,
+            &gutter,
+            false,
+            0.0,
+            page_endpoints(&snapshot, 0, 3),
+        );
 
         assert_eq!(
             got, expected,
@@ -1324,9 +1383,28 @@ mod tests {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let snapshot = editor.display_map.snapshot();
 
-        let undimmed =
-            render_page_from_snapshot(&snapshot, 0, fallback, 12, 4, &gutter, false, 0.0);
-        let dimmed = render_page_from_snapshot(&snapshot, 0, fallback, 12, 4, &gutter, false, 0.5);
+        let undimmed = render_page_from_snapshot(
+            &snapshot,
+            0,
+            fallback,
+            12,
+            4,
+            &gutter,
+            false,
+            0.0,
+            page_endpoints(&snapshot, 0, 4),
+        );
+        let dimmed = render_page_from_snapshot(
+            &snapshot,
+            0,
+            fallback,
+            12,
+            4,
+            &gutter,
+            false,
+            0.5,
+            page_endpoints(&snapshot, 0, 4),
+        );
         assert_ne!(undimmed, dimmed, "threading dim changes the page bytes");
 
         let area = Rect::new(0, 0, 12, 4);
@@ -1400,7 +1478,17 @@ mod tests {
         );
         let expected = serialize_buffer(&mut expected, &theme);
 
-        let got = render_page_from_snapshot(&snapshot, 0, fallback, 40, 8, &gutter, true, 0.0);
+        let got = render_page_from_snapshot(
+            &snapshot,
+            0,
+            fallback,
+            40,
+            8,
+            &gutter,
+            true,
+            0.0,
+            page_endpoints(&snapshot, 0, 8),
+        );
         assert_eq!(
             got, expected,
             "the diff-view page paints the two-column body, not the single-column path"
@@ -1749,6 +1837,101 @@ mod tests {
         );
     }
 
+    /// A refill resolves one set of endpoints across the pages it spawns, so
+    /// each page now chunks against a set reaching past its own rows. That is
+    /// only sound if a wider set paints the same bytes as the page's own, which
+    /// is what this holds it to. A file with syntax highlighting is the case
+    /// where endpoints exist to get wrong.
+    #[test]
+    fn a_shared_endpoint_set_paints_each_page_as_its_own_would() {
+        use super::{page_top_row, render_page_fill, PageGutter};
+        use crate::{
+            action_handlers::{self, dispatch},
+            buffer::BufferId,
+            display_map::highlights::{
+                HighlightStyle, HighlightStyleInterner, SemanticTokenHighlight,
+            },
+            theme::{scope, Theme},
+            Stoat,
+        };
+        use ratatui::style::Color;
+        use std::{collections::BTreeMap, path::PathBuf};
+        use stoat_action::OpenFile;
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/shared-endpoints");
+        let path = root.join("doc.rs");
+        let source: String = (0..30)
+            .map(|i| format!("fn f{i}() -> u32 {{ let x = {i}; x }}\n"))
+            .collect();
+        h.fake_fs().insert_file(&path, source.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let theme = Theme::empty();
+        let fallback = theme.get(scope::UI_TEXT);
+        let gutter = PageGutter::new(
+            true,
+            Arc::new(BTreeMap::new()),
+            Arc::new(theme.clone()),
+            None,
+            None,
+        );
+
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+
+        // A colored token on each row, so the shared set spans rows the page
+        // being painted does not and there is something for a wrong span to
+        // drop.
+        let (tokens, interner) = {
+            let mut interner = HighlightStyleInterner::default();
+            let style_id = interner.push(HighlightStyle {
+                foreground: Some(Color::Red),
+                ..Default::default()
+            });
+            let snap = editor.display_map.snapshot().buffer_snapshot().clone();
+            let tokens: Vec<SemanticTokenHighlight> = (0..30u32)
+                .map(|row| {
+                    let start = snap.rope().point_to_offset(stoat_text::Point::new(row, 0));
+                    SemanticTokenHighlight {
+                        range: snap.anchor_at(start, stoat_text::Bias::Right)
+                            ..snap.anchor_at(start + 2, stoat_text::Bias::Left),
+                        style: style_id,
+                    }
+                })
+                .collect();
+            (Arc::from(tokens), Arc::new(interner))
+        };
+        editor
+            .display_map
+            .set_semantic_token_highlights(BufferId::new(0), tokens, interner);
+
+        let snapshot = editor.display_map.snapshot();
+
+        let height = 4u16;
+        let pages = [2u64, 3, 4];
+        let shared = {
+            let top = page_top_row(pages[0], height);
+            let bottom = page_top_row(pages[pages.len() - 1], height) + height as u32;
+            snapshot.highlighted_endpoints(top..bottom)
+        };
+        assert!(
+            !shared.is_empty(),
+            "the fixture must carry highlights for this to test anything",
+        );
+
+        for index in pages {
+            let own = page_endpoints(&snapshot, page_top_row(index, height), height);
+            let fill = |endpoints| {
+                render_page_fill(
+                    &snapshot, 5, index, fallback, 40, height, &gutter, false, 0.0, endpoints,
+                )
+            };
+            assert_eq!(fill(shared.clone()), fill(own), "page {index}");
+        }
+    }
+
     #[test]
     fn render_page_fill_wraps_the_page_in_fill_frames() {
         use super::{render_page_fill, render_page_from_snapshot, PageGutter};
@@ -1781,7 +1964,18 @@ mod tests {
             None,
         );
 
-        let frame = render_page_fill(&snapshot, 7, 2, fallback, 12, 3, &gutter, false, 0.0);
+        let frame = render_page_fill(
+            &snapshot,
+            7,
+            2,
+            fallback,
+            12,
+            3,
+            &gutter,
+            false,
+            0.0,
+            page_endpoints(&snapshot, 6, 3),
+        );
 
         let cmds = commands(&frame);
         assert!(
@@ -1793,8 +1987,17 @@ mod tests {
             "frame closes the fill, got {cmds:?}"
         );
 
-        let page =
-            render_page_from_snapshot(&snapshot, 2 * 3, fallback, 12, 3, &gutter, false, 0.0);
+        let page = render_page_from_snapshot(
+            &snapshot,
+            2 * 3,
+            fallback,
+            12,
+            3,
+            &gutter,
+            false,
+            0.0,
+            page_endpoints(&snapshot, 6, 3),
+        );
         assert!(
             find(&frame, &page).is_some(),
             "the page bytes ride between the fill markers"
@@ -1837,7 +2040,18 @@ mod tests {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let snapshot = editor.display_map.snapshot();
 
-        let frame = render_page_fill(&snapshot, 3, 0, fallback, 12, 4, &gutter, false, 0.0);
+        let frame = render_page_fill(
+            &snapshot,
+            3,
+            0,
+            fallback,
+            12,
+            4,
+            &gutter,
+            false,
+            0.0,
+            page_endpoints(&snapshot, 0, 4),
+        );
         let cmds = commands(&frame);
 
         assert!(
