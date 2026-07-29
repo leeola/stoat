@@ -846,7 +846,7 @@ pub(crate) fn refilter(
     let items = visible
         .iter()
         .copied()
-        .map(|entry| (entry, entry.command_name.clone()));
+        .map(|entry| (entry, entry.command_name.as_str()));
     let Some(mut matches) = fuzzy::match_and_rank(input, items) else {
         let mut all = visible;
         all.sort_by_key(|e| (e.def.priority().ord(), e.command_name.as_str()));

@@ -187,7 +187,7 @@ fn rank_entries(entries: &[SymbolFinderEntry], query: &str) -> (Vec<usize>, Vec<
     let items = entries
         .iter()
         .enumerate()
-        .map(|(idx, entry)| (idx, entry.title.clone()));
+        .map(|(idx, entry)| (idx, entry.title.as_str()));
     let Some(mut matches) = fuzzy::match_and_rank(query, items) else {
         return (
             (0..entries.len()).collect(),

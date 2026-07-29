@@ -47,9 +47,9 @@ pub fn parse_query(text: &str) -> Option<Pattern> {
 /// can use it for tie-break ordering without having to recompute it.
 /// `matched_indices` is sorted and deduplicated so renderers can do
 /// `binary_search` lookups when painting cells.
-pub struct RankedMatch<T> {
+pub struct RankedMatch<'a, T> {
     pub item: T,
-    pub haystack: String,
+    pub haystack: &'a str,
     pub score: u32,
     pub matched_indices: Vec<u32>,
 }
@@ -64,17 +64,19 @@ pub struct RankedMatch<T> {
 /// The result is **not** sorted -- callers tie-break per their own
 /// rules (alphabetical, priority+name, etc.) after sorting by
 /// `score` descending.
-pub fn match_and_rank<T>(
+pub fn match_and_rank<'a, T>(
     query: &str,
-    items: impl IntoIterator<Item = (T, String)>,
-) -> Option<Vec<RankedMatch<T>>> {
+    items: impl IntoIterator<Item = (T, &'a str)>,
+) -> Option<Vec<RankedMatch<'a, T>>> {
     let pattern = parse_query(query)?;
     let mut guard = matcher().lock().expect("fuzzy matcher poisoned");
     let mut hay_buf: Vec<char> = Vec::new();
-    let mut out: Vec<RankedMatch<T>> = Vec::new();
+    let mut scratch = Scratch::default();
+    let mut out: Vec<RankedMatch<'a, T>> = Vec::new();
     for (item, haystack) in items {
-        let hay = Utf32Str::new(&haystack, &mut hay_buf);
-        if let Some(scored) = score_with_bonuses(&pattern, &haystack, hay, &mut guard) {
+        let hay = Utf32Str::new(haystack, &mut hay_buf);
+        if let Some(scored) = score_with_bonuses(&pattern, haystack, hay, &mut guard, &mut scratch)
+        {
             out.push(RankedMatch {
                 item,
                 haystack,
@@ -95,17 +97,32 @@ pub fn match_and_rank<T>(
 ///
 /// A list that ranks by something of its own -- the palette's command priority,
 /// the workspace picker's insertion index -- sorts for itself instead.
-pub(crate) fn sort_ranked<T>(matches: &mut [RankedMatch<T>]) {
+pub(crate) fn sort_ranked<T>(matches: &mut [RankedMatch<'_, T>]) {
     matches.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
-            .then_with(|| a.haystack.cmp(&b.haystack))
+            .then_with(|| a.haystack.cmp(b.haystack))
     });
 }
 
 struct Scored {
     score: u32,
     indices: Vec<u32>,
+}
+
+/// Index buffers [`score_with_bonuses`] reuses across candidates.
+///
+/// Most candidates fail to match, and each one would otherwise allocate a
+/// vector per query atom before being discarded. The buffers are cleared rather
+/// than replaced so their capacity survives, and only a candidate that actually
+/// matches takes one away.
+#[derive(Default)]
+struct Scratch {
+    /// Matched indices per query atom. The atom count is fixed for a whole
+    /// [`match_and_rank`] call, so this settles on the first candidate.
+    per_atom: Vec<Vec<u32>>,
+    /// Every atom's indices merged, which a match carries off as its own.
+    combined: Vec<u32>,
 }
 
 /// Walks `pattern.atoms` individually and combines per-atom scores
@@ -122,33 +139,41 @@ fn score_with_bonuses(
     haystack_str: &str,
     haystack: Utf32Str<'_>,
     matcher: &mut Matcher,
+    scratch: &mut Scratch,
 ) -> Option<Scored> {
+    scratch.per_atom.resize_with(pattern.atoms.len(), Vec::new);
+    for atom_indices in &mut scratch.per_atom {
+        atom_indices.clear();
+    }
+    scratch.combined.clear();
+
     let mut total_score: u32 = 0;
-    let mut per_atom: Vec<Vec<u32>> = Vec::with_capacity(pattern.atoms.len());
-    for atom in &pattern.atoms {
-        let mut atom_indices: Vec<u32> = Vec::new();
-        let score = atom.indices(haystack, matcher, &mut atom_indices)?;
+    for (atom, atom_indices) in pattern.atoms.iter().zip(&mut scratch.per_atom) {
+        let score = atom.indices(haystack, matcher, atom_indices)?;
         total_score = total_score.saturating_add(u32::from(score));
         atom_indices.sort_unstable();
         atom_indices.dedup();
-        per_atom.push(atom_indices);
     }
 
-    if is_in_order(&per_atom) {
+    if is_in_order(&scratch.per_atom) {
         total_score = total_score.saturating_mul(5) / 4;
     }
 
-    let mut combined: Vec<u32> = per_atom.into_iter().flatten().collect();
-    combined.sort_unstable();
-    combined.dedup();
+    scratch
+        .combined
+        .extend(scratch.per_atom.iter().flatten().copied());
+    scratch.combined.sort_unstable();
+    scratch.combined.dedup();
 
-    if all_in_basename(&combined, haystack_str) {
+    if all_in_basename(&scratch.combined, haystack_str) {
         total_score = total_score.saturating_add(BASENAME_BONUS);
     }
 
+    // The match owns its indices from here, so the buffer it grew is handed
+    // over rather than copied. The next candidate starts from a fresh one.
     Some(Scored {
         score: total_score,
-        indices: combined,
+        indices: std::mem::take(&mut scratch.combined),
     })
 }
 
@@ -207,13 +232,35 @@ mod tests {
 
     #[test]
     fn match_and_rank_with_no_query_returns_none() {
-        let items = vec![(0usize, "foo.rs".to_string())];
+        let items = vec![(0usize, "foo.rs")];
         assert!(match_and_rank("", items).is_none());
+    }
+
+    /// The index buffers are reused across candidates, so a candidate that
+    /// records indices for one atom and then fails on a later one leaves them
+    /// behind. What it left must not reach the candidate after it.
+    #[test]
+    fn a_rejected_candidate_leaves_nothing_behind_for_the_next() {
+        let after_partial =
+            match_and_rank("foo bar", vec![(0usize, "foo zzz"), (1usize, "xfoo bar")])
+                .expect("query has atoms");
+        let alone = match_and_rank("foo bar", vec![(1usize, "xfoo bar")]).expect("query has atoms");
+
+        assert_eq!(after_partial.len(), 1, "only the second candidate matches");
+        assert_eq!(after_partial[0].item, 1);
+        assert_eq!(
+            after_partial[0].matched_indices, alone[0].matched_indices,
+            "the rejected candidate's indices must not survive into this one",
+        );
+        assert_eq!(
+            after_partial[0].score, alone[0].score,
+            "and its score must be the same as if it were scored on its own",
+        );
     }
 
     #[test]
     fn match_and_rank_returns_matched_indices_sorted_and_deduped() {
-        let items = vec![(0usize, "foo.rs".to_string())];
+        let items = vec![(0usize, "foo.rs")];
         let results = match_and_rank("foo", items).expect("query has atoms");
         assert_eq!(results.len(), 1);
         let m = &results[0];
@@ -226,10 +273,7 @@ mod tests {
 
     #[test]
     fn match_and_rank_filters_non_matches() {
-        let items = vec![
-            (0usize, "foo.rs".to_string()),
-            (1usize, "bar.rs".to_string()),
-        ];
+        let items = vec![(0usize, "foo.rs"), (1usize, "bar.rs")];
         let results = match_and_rank("foo", items).expect("query has atoms");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].item, 0);
@@ -237,17 +281,14 @@ mod tests {
 
     #[test]
     fn match_and_rank_smart_case_lowercase_query_is_insensitive() {
-        let items = vec![(0usize, "Foo.rs".to_string())];
+        let items = vec![(0usize, "Foo.rs")];
         let results = match_and_rank("foo", items).expect("query has atoms");
         assert_eq!(results.len(), 1);
     }
 
     #[test]
     fn match_and_rank_smart_case_uppercase_query_is_sensitive() {
-        let items = vec![
-            (0usize, "Foo.rs".to_string()),
-            (1usize, "foo.rs".to_string()),
-        ];
+        let items = vec![(0usize, "Foo.rs"), (1usize, "foo.rs")];
         let results = match_and_rank("F", items).expect("query has atoms");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].item, 0);
@@ -255,7 +296,7 @@ mod tests {
 
     #[test]
     fn match_and_rank_multi_token_matches_in_either_order() {
-        let items = vec![(0usize, "src/foo.rs".to_string())];
+        let items = vec![(0usize, "src/foo.rs")];
         let forward = match_and_rank(".rs foo", items.clone()).expect("query has atoms");
         let reverse = match_and_rank("foo .rs", items).expect("query has atoms");
         assert_eq!(forward.len(), 1);
@@ -264,7 +305,7 @@ mod tests {
 
     #[test]
     fn match_and_rank_in_order_query_outscores_reversed() {
-        let items = vec![(0usize, "src/foo.rs".to_string())];
+        let items = vec![(0usize, "src/foo.rs")];
         let in_order = match_and_rank("foo .rs", items.clone()).expect("query has atoms");
         let reversed = match_and_rank(".rs foo", items).expect("query has atoms");
         assert_eq!(in_order.len(), 1);
@@ -281,7 +322,7 @@ mod tests {
     fn match_and_rank_single_atom_receives_in_order_bonus() {
         // Query that matches as a single atom should still get the
         // bonus; the order check vacuously holds for one atom.
-        let items = vec![(0usize, "foo.rs".to_string())];
+        let items = vec![(0usize, "foo.rs")];
         let bonus = match_and_rank("foo", items).expect("query has atoms");
         assert_eq!(bonus.len(), 1);
         assert!(bonus[0].score > 0);
@@ -289,10 +330,7 @@ mod tests {
 
     #[test]
     fn match_and_rank_basename_match_outscores_directory_prefix() {
-        let items = vec![
-            (0usize, "src/foo.rs".to_string()),
-            (1usize, "foo_helpers/util.rs".to_string()),
-        ];
+        let items = vec![(0usize, "src/foo.rs"), (1usize, "foo_helpers/util.rs")];
         let results = match_and_rank("foo", items).expect("query has atoms");
         assert_eq!(results.len(), 2);
         let basename = results
@@ -316,7 +354,7 @@ mod tests {
         // `srf` matches `s` `r` `f` at indices 0, 1, 4 in `src/foo.rs`.
         // 0 and 1 are at-or-before the slash (index 3), so the bonus
         // must not fire.
-        let items = vec![(0usize, "src/foo.rs".to_string())];
+        let items = vec![(0usize, "src/foo.rs")];
         let with = match_and_rank("srf", items.clone()).expect("query has atoms");
         let basename_only = match_and_rank("foo", items).expect("query has atoms");
         // Sanity check both queries match the same haystack so we can
@@ -337,7 +375,7 @@ mod tests {
         // Action-name-style haystacks (no slash) should receive the
         // bonus trivially, since "every match is in the basename"
         // is vacuously true.
-        let items = vec![(0usize, "QuitAll".to_string())];
+        let items = vec![(0usize, "QuitAll")];
         let results = match_and_rank("quit", items).expect("query has atoms");
         assert_eq!(results.len(), 1);
         assert!(results[0].score > 0);

@@ -404,18 +404,13 @@ impl CommitPicker {
         }
         self.last_filter_key = Some(key);
 
-        let items: Vec<(usize, String)> = self
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(idx, row)| {
-                let text = match column {
-                    Some(column) => row.cells[column as usize].text.clone(),
-                    None => row.text.clone(),
-                };
-                (idx, text)
-            })
-            .collect();
+        let items = self.rows.iter().enumerate().map(|(idx, row)| {
+            let text = match column {
+                Some(column) => row.cells[column as usize].text.as_str(),
+                None => row.text.as_str(),
+            };
+            (idx, text)
+        });
 
         let (filtered, match_indices) = match fuzzy::match_and_rank(query, items) {
             None => (

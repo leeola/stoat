@@ -195,11 +195,17 @@ impl WorkspacePicker {
     /// either the workspace name or any part of its root path. Match highlights
     /// land only on name-column indices when painted.
     pub(crate) fn refilter(&mut self, query: &str) {
-        let items = self
+        // The only haystack here is built rather than stored, so it is
+        // materialized once and lent to the matcher.
+        let haystacks: Vec<String> = self
             .entries
             .iter()
+            .map(|e| format!("{} {}", e.basename, e.git_root.display()))
+            .collect();
+        let items = haystacks
+            .iter()
             .enumerate()
-            .map(|(idx, e)| (idx, format!("{} {}", e.basename, e.git_root.display())));
+            .map(|(idx, haystack)| (idx, haystack.as_str()));
 
         match fuzzy::match_and_rank(query, items) {
             Some(mut matches) => {

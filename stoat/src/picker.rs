@@ -203,7 +203,7 @@ impl PickList {
             .iter()
             .enumerate()
             .filter(|(_, display)| keeps(display))
-            .map(|(idx, display)| (idx, display.clone()));
+            .map(|(idx, display)| (idx, display.as_str()));
 
         let Some(mut matches) = fuzzy::match_and_rank(pattern, items) else {
             // Pre-sorted at cache build, so an unfiltered list is a walk rather
