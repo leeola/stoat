@@ -1,6 +1,6 @@
 use super::TEXT_SCALE_COMPACT;
 use crate::{
-    diff_map::ChangeKind,
+    diff_map::{ChangeKind, DiffHunk},
     display_map::{
         highlights::{HighlightEndpoint, HighlightStyle},
         BlockRowKind, CachedHighlightEndpoints, DisplaySnapshot,
@@ -271,6 +271,11 @@ pub(crate) fn paint_diff_rows(
         None => snapshot.highlighted_endpoints(scroll_row..end_row),
     };
     let mut line_buf = String::new();
+    // Reused across rows. Each row seeks the same one-line range and keeps
+    // neither its hunks nor its spans past itself, so the buffers only ever
+    // grow to the widest row rather than being rebuilt for every one.
+    let mut hunk_scratch: Vec<&DiffHunk> = Vec::new();
+    let mut span_scratch: Vec<(std::ops::Range<usize>, ChangeKind)> = Vec::new();
 
     for display_row in scroll_row..end_row {
         let y = inner.y + (display_row - scroll_row) as u16;
@@ -364,7 +369,13 @@ pub(crate) fn paint_diff_rows(
                     buffer_row + 1,
                     dim_style,
                 );
-                let changes = buffer_row_change_spans(snapshot, buffer_row);
+                write_buffer_row_change_spans(
+                    snapshot,
+                    buffer_row,
+                    &mut hunk_scratch,
+                    &mut span_scratch,
+                );
+                let changes = &span_scratch;
                 let staged = snapshot
                     .diff_map()
                     .and_then(|dm| dm.staged_for_line(buffer_row));
@@ -392,13 +403,14 @@ pub(crate) fn paint_diff_rows(
                     buf,
                     fallback_style,
                     inlay_style,
-                    &changes,
+                    changes,
                     side.map(|c| c.added_span),
                     side.map(|c| c.moved_span),
                     &row_endpoints,
                 );
                 if status == DiffStatus::Moved
-                    && let Some((path, line)) = move_chip_source(snapshot, buffer_row)
+                    && let Some((path, line)) =
+                        move_chip_source(snapshot, buffer_row, &mut hunk_scratch)
                 {
                     line_buf.clear();
                     snapshot.write_display_line(&mut line_buf, display_row);
@@ -773,24 +785,32 @@ pub(crate) fn paint_highlighted_row(
     }
 }
 
-/// Display-column ranges, each tagged with its [`ChangeKind`], to wash on buffer
-/// `buffer_row` in the diff view's right column, from the buffer spans of any
-/// hunk covering the row.
+/// Write into `out` the display-column ranges to wash on buffer `buffer_row` in
+/// the diff view's right column, each tagged with its [`ChangeKind`], taken from
+/// the buffer spans of any hunk covering the row.
 ///
 /// The token detail's byte ranges are absolute buffer offsets. Each is clamped
 /// to the row and mapped through [`DisplaySnapshot::buffer_to_display`], so tab
-/// expansion in the painted chunks stays aligned. Empty when no hunk refines the
-/// row.
-fn buffer_row_change_spans(
-    snapshot: &DisplaySnapshot,
+/// expansion in the painted chunks stays aligned.
+///
+/// Both vectors belong to the caller and are reused across the rows of one
+/// paint, so each is cleared before being filled. A row no hunk refines leaves
+/// `out` empty rather than carrying the previous row's spans.
+fn write_buffer_row_change_spans<'a>(
+    snapshot: &'a DisplaySnapshot,
     buffer_row: u32,
-) -> Vec<(std::ops::Range<usize>, ChangeKind)> {
+    hunks: &mut Vec<&'a DiffHunk>,
+    out: &mut Vec<(std::ops::Range<usize>, ChangeKind)>,
+) {
+    out.clear();
+    hunks.clear();
+
     let Some(diff_map) = snapshot.diff_map() else {
-        return Vec::new();
+        return;
     };
-    let hunks = diff_map.hunks_in_range(buffer_row..buffer_row + 1);
+    diff_map.hunks_in_range_into(buffer_row..buffer_row + 1, hunks);
     if hunks.is_empty() {
-        return Vec::new();
+        return;
     }
 
     let buffer_snapshot = snapshot.buffer_snapshot();
@@ -798,8 +818,7 @@ fn buffer_row_change_spans(
     let line_start = rope.point_to_offset(Point::new(buffer_row, 0));
     let line_end = line_start + rope.line_len(buffer_row) as usize;
 
-    let mut ranges = Vec::new();
-    for hunk in hunks {
+    for hunk in hunks.iter() {
         let Some(detail) = &hunk.token_detail else {
             continue;
         };
@@ -813,13 +832,12 @@ fn buffer_row_change_spans(
                 .buffer_to_display(rope.offset_to_point(start))
                 .column as usize;
             let end_col = snapshot.buffer_to_display(rope.offset_to_point(end)).column as usize;
-            ranges.push((start_col..end_col, span.kind.clone()));
+            out.push((start_col..end_col, span.kind.clone()));
         }
     }
     // Spans arrive per hunk and are not otherwise ordered. Start-sorting them
     // makes the painter's monotonic span cursor correct.
-    ranges.sort_by_key(|(range, _)| range.start);
-    ranges
+    out.sort_by_key(|(range, _)| range.start);
 }
 
 /// The origin of a moved buffer row, for the diff view's move chip.
@@ -828,9 +846,15 @@ fn buffer_row_change_spans(
 /// first counterpart source as `(file name, 0-based line)`. The file name is
 /// `None` for an intra-file move (no counterpart buffer), so the chip omits the
 /// path. Returns `None` when the row is not part of a move.
-fn move_chip_source(snapshot: &DisplaySnapshot, buffer_row: u32) -> Option<(Option<String>, u32)> {
+fn move_chip_source<'a>(
+    snapshot: &'a DisplaySnapshot,
+    buffer_row: u32,
+    hunks: &mut Vec<&'a DiffHunk>,
+) -> Option<(Option<String>, u32)> {
+    hunks.clear();
     let diff_map = snapshot.diff_map()?;
-    for hunk in diff_map.hunks_in_range(buffer_row..buffer_row + 1) {
+    diff_map.hunks_in_range_into(buffer_row..buffer_row + 1, hunks);
+    for hunk in hunks.iter() {
         let Some(detail) = &hunk.token_detail else {
             continue;
         };
@@ -2411,6 +2435,52 @@ mod tests {
             buf[(rx, 1)].bg,
             staged_span,
             "a span on a staged line takes the dimmer staged span wash"
+        );
+    }
+
+    /// Both scratch buffers are shared across the rows of one paint, so a row
+    /// that contributes nothing has to clear what the row before it left rather
+    /// than paint the previous row's spans onto itself.
+    #[test]
+    fn a_row_without_spans_clears_what_the_row_before_it_left() {
+        let detail = Arc::new(TokenDetail {
+            buffer_spans: vec![ChangeSpan {
+                byte_range: 3..5,
+                kind: ChangeKind::Replaced,
+                move_metadata: None,
+            }],
+            base_spans: Vec::new(),
+        });
+        let dm = DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Modified,
+                unstaged_lines: std::iter::once(1..2).collect(),
+                buffer_start_line: 1,
+                buffer_line_range: 1..2,
+                base_byte_range: 0..0,
+                anchor_range: None,
+                token_detail: Some(detail),
+            }],
+            None,
+        );
+        let mut editor = diff_editor_with_map("aa\nbb\ncc\n", dm);
+        let snapshot = editor.display_map.snapshot();
+
+        let mut hunks = Vec::new();
+        let mut spans = Vec::new();
+
+        write_buffer_row_change_spans(&snapshot, 1, &mut hunks, &mut spans);
+        assert_eq!(
+            spans,
+            vec![(0..2, ChangeKind::Replaced)],
+            "the modified row reports the span covering its changed bytes",
+        );
+
+        write_buffer_row_change_spans(&snapshot, 2, &mut hunks, &mut spans);
+        assert_eq!(
+            spans,
+            Vec::new(),
+            "the unmodified row after it reports nothing of its own",
         );
     }
 

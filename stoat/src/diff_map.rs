@@ -481,6 +481,19 @@ impl DiffMap {
 
     pub fn hunks_in_range(&self, line_range: Range<u32>) -> Vec<&DiffHunk> {
         let mut result = Vec::new();
+        self.hunks_in_range_into(line_range, &mut result);
+        result
+    }
+
+    /// Collect the hunks overlapping `line_range` into `out`, replacing what it
+    /// held.
+    ///
+    /// For callers seeking once per painted row, where allocating a vector per
+    /// row is the cost rather than the seek. Everyone else wants
+    /// [`Self::hunks_in_range`].
+    pub fn hunks_in_range_into<'a>(&'a self, line_range: Range<u32>, out: &mut Vec<&'a DiffHunk>) {
+        out.clear();
+
         let target = HunkKeyRef(Some(&line_range.start));
         let mut cursor = self.hunks.cursor::<HunkKeyRef<'_>>(());
         cursor.seek(&target, Bias::Right);
@@ -489,17 +502,16 @@ impl DiffMap {
         if let Some(hunk) = cursor.item()
             && hunk.buffer_line_range.end > line_range.start
         {
-            result.push(hunk);
+            out.push(hunk);
         }
         cursor.next();
         while let Some(hunk) = cursor.item() {
             if hunk.buffer_start_line >= line_range.end {
                 break;
             }
-            result.push(hunk);
+            out.push(hunk);
             cursor.next();
         }
-        result
     }
 
     pub fn token_detail_for_line(&self, line: u32) -> Option<&TokenDetail> {
