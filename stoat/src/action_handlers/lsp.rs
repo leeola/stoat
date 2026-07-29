@@ -18,7 +18,7 @@ use crate::{
         syntax_theme, DisplayPoint, DisplaySnapshot, HighlightKey, HighlightLayer, HighlightStyle,
         InlayKind, SemanticTokenHighlight,
     },
-    editor_state::EditorId,
+    editor_state::{EditorId, ScrollGlide},
     host::{LanguageServerFeature, LocalLsp, LspHost, LspTranscript, OffsetEncoding},
     location_picker::{LocationEntry, LocationPicker},
     lsp::{servers::ServerSource, LspSymbolKind},
@@ -1816,15 +1816,26 @@ fn inlay_hint_key(stoat: &mut Stoat) -> Option<(BufferId, u64, u32, u32)> {
 /// Issue a viewport inlay-hint request for the focused editor, waiting
 /// `debounce` before the server call (pass [`Duration::ZERO`] to skip it).
 ///
-/// Returns whether a server capable of inlay hints was found. A capable server
-/// with no buildable request yet (no viewport, review view) or an unchanged
-/// (buffer, version, visible rows) key still returns `true` without spawning:
-/// the caller treats inlay hints as available and the per-frame trigger will
-/// request once viable. The response is applied by [`pump_lsp_inlay_hints`].
+/// Returns whether a server capable of inlay hints was found.
+///
+/// A capable server still returns `true` without spawning when the request is
+/// not viable yet (no viewport, a review view, a scroll glide still in flight)
+/// or when the (buffer, version, visible rows) key has not moved. The caller
+/// treats inlay hints as available either way, and the per-frame trigger
+/// requests once viable. The response is applied by [`pump_lsp_inlay_hints`].
 fn request_inlay_hints(stoat: &mut Stoat, debounce: Duration) -> bool {
     let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
         return false;
     };
+    // A wheel notch moves the scroll row, and the key includes it, so a flick
+    // would arm and cancel a request per notch and discard every one of them.
+    // The viewport the glide lands on is the only one worth asking about, and
+    // the settle in `Stoat::frame_tick` triggers for it.
+    if crate::action_handlers::focused_editor_mut(stoat)
+        .is_some_and(|editor| editor.scroll_glide != ScrollGlide::None)
+    {
+        return true;
+    }
     let Some(key) = inlay_hint_key(stoat) else {
         return true;
     };

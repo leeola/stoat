@@ -2792,6 +2792,10 @@ impl Stoat {
             self.emit_smooth_scroll();
             UpdateEffect::None
         } else if animating {
+            // The glide just landed. Viewport-keyed LSP work is held back while
+            // one is in flight, and a frame tick never reaches the trigger
+            // epilogue at the end of `update`, so the landed viewport asks here.
+            action_handlers::lsp::inlay_hints_trigger(self);
             UpdateEffect::Redraw
         } else if building {
             // A build-only wakeup advances one minimap build chunk with no
@@ -18808,6 +18812,75 @@ mod tests {
         assert!(
             settled_fills > 1,
             "the settle emit refills the whole window once, got {settled_fills}: {settled:?}"
+        );
+    }
+
+    /// A wheel notch moves the scroll row, which the inlay-hint request keys
+    /// on, so a flick used to arm and cancel a request per notch and throw
+    /// every one away. Only the viewport the glide lands on is worth asking
+    /// about, and the settle is where it asks, since a frame tick never reaches
+    /// the trigger epilogue at the end of `update`.
+    #[test]
+    fn a_wheel_glide_requests_inlay_hints_once_at_the_settle() {
+        use lsp_types::{OneOf, ServerCapabilities};
+
+        let mut h = Stoat::test();
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            inlay_hint_provider: Some(OneOf::Left(true)),
+            ..Default::default()
+        });
+
+        let root = PathBuf::from("/glide-hints");
+        let path = root.join("a.rs");
+        let body: String = (0..400).map(|i| format!("let x{i} = 1\n")).collect();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        h.type_keys("space l h");
+        h.advance_clock(std::time::Duration::from_millis(150));
+        let resting = h
+            .stoat
+            .last_inlay_hint_key
+            .expect("enabling hints requested the resting viewport");
+
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            for _ in 0..5 {
+                action_handlers::movement::wheel_scroll(editor, true);
+            }
+        }
+        // The trigger every one of those notches ran through, had the glide not
+        // held it back.
+        action_handlers::lsp::inlay_hints_trigger(&mut h.stoat);
+        assert_eq!(
+            h.stoat.last_inlay_hint_key,
+            Some(resting),
+            "a glide in flight requests nothing, however far the rows moved",
+        );
+
+        for _ in 0..1000 {
+            let animating = h.stoat.is_animating();
+            h.stoat.frame_tick(0.016);
+            if !animating {
+                break;
+            }
+        }
+        assert!(!h.stoat.is_animating(), "the glide settles");
+
+        let landed = h
+            .stoat
+            .last_inlay_hint_key
+            .expect("the settle requested once");
+        assert_ne!(landed, resting, "the landed viewport is what finally asks",);
+        assert_eq!(
+            landed.2,
+            action_handlers::focused_editor_mut(&mut h.stoat)
+                .expect("focused editor")
+                .scroll_row,
+            "and it asks about the row the glide landed on",
         );
     }
 
