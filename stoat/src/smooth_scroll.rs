@@ -48,6 +48,7 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::{
     collections::{BTreeMap, HashMap},
     ops::Range,
+    path::Path,
     sync::Arc,
 };
 use stoat_action::registry::RegistryEntry;
@@ -771,6 +772,7 @@ pub(crate) fn render_conflict_page_from_parts(
 /// here -- the page index alone selects the rows.
 pub(crate) fn render_finder_page(
     finder: &FileFinder,
+    home: Option<&Path>,
     page: u64,
     theme: &crate::theme::Theme,
     region_width: u16,
@@ -782,7 +784,7 @@ pub(crate) fn render_finder_page(
     let start_row = page
         .saturating_mul(region_height as u64)
         .min(usize::MAX as u64) as usize;
-    paint_finder_rows(finder, area, start_row, theme, &mut buf);
+    paint_finder_rows(finder, home, area, start_row, theme, &mut buf);
 
     serialize_buffer(&mut buf, theme)
 }
@@ -830,6 +832,7 @@ pub(crate) fn render_palette_page(
 /// the live inline picker. The picker is read-only here.
 pub(crate) fn render_arg_page(
     picker: &ArgPicker,
+    home: Option<&Path>,
     page: u64,
     theme: &crate::theme::Theme,
     region_width: u16,
@@ -850,6 +853,7 @@ pub(crate) fn render_arg_page(
     crate::render::picker::paint_path_rows(
         &core.picklist,
         &core.git_root,
+        home,
         prefix,
         area,
         start_row,

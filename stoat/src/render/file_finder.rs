@@ -7,6 +7,7 @@ use ratatui::{
     layout::Rect,
     widgets::{Block, Borders, Clear, Widget},
 };
+use std::path::Path;
 
 /// The on-screen rectangles of the file finder modal, derived from a terminal
 /// `area` by [`file_finder_layout`].
@@ -75,6 +76,7 @@ pub(crate) fn file_finder_layout(
 pub(crate) fn render_file_finder(
     finder: &mut FileFinder,
     ws: &mut Workspace,
+    home: Option<&Path>,
     theme: &crate::theme::Theme,
     area: Rect,
     zoom: i8,
@@ -126,14 +128,20 @@ pub(crate) fn render_file_finder(
     }
 
     finder.active_core().picklist.viewport_rows = Some(layout.list.height as usize);
-    render_list(finder, layout.list, theme, buf);
+    render_list(finder, home, layout.list, theme, buf);
 }
 
-fn render_list(finder: &FileFinder, area: Rect, theme: &crate::theme::Theme, buf: &mut Buffer) {
+fn render_list(
+    finder: &FileFinder,
+    home: Option<&Path>,
+    area: Rect,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+) {
     let rows = area.height as usize;
     let start_row =
         crate::render::picker::window_start(finder.active_core_ref().picklist.selected, rows);
-    paint_finder_rows(finder, area, start_row, theme, buf);
+    paint_finder_rows(finder, home, area, start_row, theme, buf);
 }
 
 /// Paint finder result rows into `area` starting at `start_row`.
@@ -142,6 +150,7 @@ fn render_list(finder: &FileFinder, area: Rect, theme: &crate::theme::Theme, buf
 /// the smooth-scroll pool paints pages through a `&FileFinder`.
 pub(crate) fn paint_finder_rows(
     finder: &FileFinder,
+    home: Option<&Path>,
     area: Rect,
     start_row: usize,
     theme: &crate::theme::Theme,
@@ -156,6 +165,7 @@ pub(crate) fn paint_finder_rows(
     crate::render::picker::paint_path_rows(
         &core.picklist,
         &core.git_root,
+        home,
         prefix,
         area,
         start_row,

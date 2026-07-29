@@ -117,9 +117,11 @@ pub(crate) mod test_support {
 /// it from the selection while the smooth-scroll pool paints absolute pages, and
 /// both render identical rows. Rows are read from `picklist.base`, which every
 /// caller keeps in sync with its display set on refilter.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_path_rows(
     picklist: &PickList,
     git_root: &Path,
+    home: Option<&Path>,
     prefix: &str,
     area: Rect,
     start_row: usize,
@@ -137,8 +139,6 @@ pub(crate) fn paint_path_rows(
     let end_x = area.x + area.width;
     let label_x = area.x + 1;
     let prefix_len = prefix.chars().count() as u32;
-    let home = crate::paths::home_dir();
-    let home = home.as_deref();
 
     for (row_idx, (&idx, indices)) in picklist
         .filtered
@@ -349,7 +349,16 @@ mod tests {
         // Column width 20 leaves a 19-cell label area after the one-cell pad.
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
-        paint_path_rows(&list, git_root, "", area, 0, &Theme::empty(), &mut buf);
+        paint_path_rows(
+            &list,
+            git_root,
+            None,
+            "",
+            area,
+            0,
+            &Theme::empty(),
+            &mut buf,
+        );
 
         let text = row_text(&buf, 0, area);
         assert!(
@@ -362,13 +371,53 @@ mod tests {
         );
     }
 
+    /// A row outside the repo abbreviates against the home the caller supplies,
+    /// which is what keeps the row paint from resolving one itself.
+    #[test]
+    fn a_row_outside_the_repo_abbreviates_against_the_given_home() {
+        let git_root = Path::new("/r");
+        let list = list_of(vec![PathBuf::from("/fixture-home/a.rs")], vec![vec![]]);
+        let area = Rect::new(0, 0, 24, 1);
+
+        let paint = |home: Option<&Path>| {
+            let mut buf = Buffer::empty(area);
+            paint_path_rows(
+                &list,
+                git_root,
+                home,
+                "",
+                area,
+                0,
+                &Theme::empty(),
+                &mut buf,
+            );
+            row_text(&buf, 0, area).trim().to_string()
+        };
+
+        assert_eq!(paint(Some(Path::new("/fixture-home"))), "~/a.rs");
+        assert_eq!(
+            paint(None),
+            "/fixture-home/a.rs",
+            "and stays whole with no home to measure against"
+        );
+    }
+
     #[test]
     fn short_path_renders_in_full_without_an_ellipsis() {
         let git_root = Path::new("/r");
         let list = list_of(vec![PathBuf::from("/r/a.rs")], vec![vec![]]);
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
-        paint_path_rows(&list, git_root, "", area, 0, &Theme::empty(), &mut buf);
+        paint_path_rows(
+            &list,
+            git_root,
+            None,
+            "",
+            area,
+            0,
+            &Theme::empty(),
+            &mut buf,
+        );
 
         let text = row_text(&buf, 0, area);
         assert!(
@@ -392,7 +441,7 @@ mod tests {
         );
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
-        paint_path_rows(&list, git_root, "", area, 0, &match_theme(), &mut buf);
+        paint_path_rows(&list, git_root, None, "", area, 0, &match_theme(), &mut buf);
 
         let match_fg = Color::Rgb(255, 0, 0);
         let highlighted: Vec<u16> = (area.x..area.x + area.width)

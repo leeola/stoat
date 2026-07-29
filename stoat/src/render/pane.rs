@@ -666,7 +666,7 @@ fn status_segments(
     }
 
     let (filename, dirty, cursor_pos) =
-        pane_status_info(view, frame.workspace_root, editors, buffers);
+        pane_status_info(view, frame.workspace_root, frame.home, editors, buffers);
     if let Some(name) = filename {
         let left_pad = if cursor == area.x { " " } else { "" };
         let text = if dirty {
@@ -1048,6 +1048,7 @@ pub(crate) fn screen_segment(
 fn pane_status_info(
     view: &View,
     workspace_root: &Path,
+    home: Option<&Path>,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
 ) -> (Option<String>, bool, Option<(u32, u32)>) {
@@ -1059,7 +1060,7 @@ fn pane_status_info(
             let buffer_id = editor.buffer_id;
             let path = buffers.path_for(buffer_id);
             let filename = path
-                .map(|p| crate::paths::display_relative(p, workspace_root))
+                .map(|p| crate::paths::display_relative_with_home(p, workspace_root, home))
                 .or_else(|| Some("[scratch]".to_string()));
             let dirty = buffers
                 .get(buffer_id)
@@ -1121,6 +1122,40 @@ mod tests {
     fn bar_row(buf: &ratatui::buffer::Buffer) -> String {
         let y = buf.area.height - 1;
         (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    /// A buffer outside the workspace falls back to `~`-abbreviating against the
+    /// home the frame carries, which comes from the env host so a test controls
+    /// it. Resolving it in the paint instead would read the real environment.
+    #[test]
+    fn a_pane_status_abbreviates_against_the_frames_home() {
+        let paint = |home: Option<&str>| {
+            let mut h = crate::test_harness::TestHarness::with_size(60, 8);
+            if let Some(home) = home {
+                h.fake_env().set("HOME", home);
+                // The cached home resolves when the env host is set, so re-inject
+                // it now that HOME is populated.
+                h.stoat.set_env_host(h.fake_env().clone());
+            }
+
+            let path = PathBuf::from("/fixture-home/notes.txt");
+            h.fake_fs().insert_file(&path, b"hello");
+            h.stoat.active_workspace_mut().git_root = PathBuf::from("/elsewhere");
+            dispatch(&mut h.stoat, &OpenFile { path });
+            h.settle();
+            bar_row(&h.render_composited())
+        };
+
+        assert!(
+            paint(Some("/fixture-home")).contains("~/notes.txt"),
+            "a path under the frame's home paints abbreviated, got {:?}",
+            paint(Some("/fixture-home")),
+        );
+        assert!(
+            paint(None).contains("/fixture-home/notes.txt"),
+            "and stays whole with no home to measure against, got {:?}",
+            paint(None),
+        );
     }
 
     /// Push a work-done progress begin so `fake`'s server reads as busy, painting

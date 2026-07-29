@@ -8911,6 +8911,7 @@ impl Stoat {
                 core.picklist.filter_generation.hash(&mut hasher);
                 hasher.finish()
             };
+            let home = self.home.as_deref();
             crate::smooth_scroll::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
@@ -8921,6 +8922,7 @@ impl Stoat {
                 |page| {
                     crate::smooth_scroll::render_finder_page(
                         finder,
+                        home,
                         page,
                         theme,
                         region.width,
@@ -9013,6 +9015,7 @@ impl Stoat {
                 core.picklist.filter_generation.hash(&mut hasher);
                 hasher.finish()
             };
+            let home = self.home.as_deref();
             crate::smooth_scroll::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
@@ -9023,6 +9026,7 @@ impl Stoat {
                 |page| {
                     crate::smooth_scroll::render_arg_page(
                         picker,
+                        home,
                         page,
                         theme,
                         region.width,

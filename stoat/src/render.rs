@@ -838,6 +838,7 @@ pub(crate) fn frame(
                 file_finder::render_file_finder(
                     finder,
                     ws,
+                    stoat.home.as_deref(),
                     &stoat.theme,
                     full,
                     zoom,
@@ -917,6 +918,7 @@ pub(crate) fn frame(
                 command_palette::render_command_palette(
                     palette,
                     ws,
+                    stoat.home.as_deref(),
                     &stoat.theme,
                     full,
                     zoom,

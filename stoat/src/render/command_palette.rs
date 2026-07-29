@@ -12,6 +12,7 @@ use ratatui::{
     layout::Rect,
     widgets::{Block, Borders, Clear, Widget},
 };
+use std::path::Path;
 use stoat_action::registry::RegistryEntry;
 
 const LIST_ROWS: u16 = 10;
@@ -153,9 +154,11 @@ fn arg_body_split(inner: Rect) -> Option<(Rect, Option<Rect>)> {
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_command_palette(
     palette: &mut CommandPalette,
     ws: &mut Workspace,
+    home: Option<&Path>,
     theme: &crate::theme::Theme,
     area: Rect,
     zoom: i8,
@@ -163,7 +166,7 @@ pub(crate) fn render_command_palette(
     scene: &mut stoatty_widgets::ApcScene,
 ) {
     if palette.arg_picker.is_some() && palette.arg_source().is_some() {
-        render_palette_arg_picker(palette, ws, theme, area, zoom, buf, scene);
+        render_palette_arg_picker(palette, ws, home, theme, area, zoom, buf, scene);
         return;
     }
 
@@ -209,9 +212,11 @@ pub(crate) fn render_command_palette(
 /// command list + doc body with a result list beside a live preview, mirroring
 /// the standalone file finder. State is synced before the frame by
 /// [`crate::action_handlers::sync_palette_picker`], so this only paints.
+#[allow(clippy::too_many_arguments)]
 fn render_palette_arg_picker(
     palette: &mut CommandPalette,
     ws: &mut Workspace,
+    home: Option<&Path>,
     theme: &crate::theme::Theme,
     area: Rect,
     zoom: i8,
@@ -273,6 +278,7 @@ fn render_palette_arg_picker(
     crate::render::picker::paint_path_rows(
         &core.picklist,
         &core.git_root,
+        home,
         &prefix,
         list,
         start_row,
