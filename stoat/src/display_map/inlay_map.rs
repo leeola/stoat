@@ -183,7 +183,7 @@ impl Deref for InlaySnapshot {
 
 impl InlayMap {
     pub fn new(buffer_snapshot: MultiBufferSnapshot) -> (Self, Arc<InlaySnapshot>) {
-        let transforms = build_transforms(buffer_snapshot.rope(), buffer_snapshot.text(), &[]);
+        let transforms = build_transforms(buffer_snapshot.rope(), &[]);
         let snapshot = Arc::new(InlaySnapshot {
             buffer: buffer_snapshot,
             transforms,
@@ -260,8 +260,7 @@ impl InlayMap {
                 .as_ref()
                 .map(|s| s.line_count())
                 .unwrap_or(0);
-            let transforms =
-                build_transforms(buffer_snapshot.rope(), buffer_snapshot.text(), &resolved);
+            let transforms = build_transforms(buffer_snapshot.rope(), &resolved);
             let new_line_count = if transforms.is_empty() {
                 buffer_snapshot.line_count()
             } else {
@@ -527,11 +526,11 @@ fn shift_offsets(offsets: &mut [usize], needs_resolve: &mut [bool], edits: &Patc
     }
 }
 
-fn build_transforms(rope: &Rope, text: &str, inlays: &[Inlay]) -> SumTree<Transform> {
+fn build_transforms(rope: &Rope, inlays: &[Inlay]) -> SumTree<Transform> {
     let mut transforms = SumTree::new(());
 
     if inlays.is_empty() {
-        if !text.is_empty() {
+        if !rope.is_empty() {
             transforms.push(Transform::Isomorphic(rope.summary().clone()), ());
         }
         return transforms;
@@ -540,7 +539,7 @@ fn build_transforms(rope: &Rope, text: &str, inlays: &[Inlay]) -> SumTree<Transf
     let mut cursor = 0usize;
 
     for inlay in inlays {
-        let offset = rope.point_to_offset(inlay.position).min(text.len());
+        let offset = rope.point_to_offset(inlay.position).min(rope.len());
 
         if offset > cursor {
             transforms.push(
@@ -552,9 +551,9 @@ fn build_transforms(rope: &Rope, text: &str, inlays: &[Inlay]) -> SumTree<Transf
         cursor = offset;
     }
 
-    if cursor < text.len() {
+    if cursor < rope.len() {
         transforms.push(
-            Transform::Isomorphic(rope.text_summary_for_range(cursor..text.len())),
+            Transform::Isomorphic(rope.text_summary_for_range(cursor..rope.len())),
             (),
         );
     }
