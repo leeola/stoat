@@ -291,6 +291,10 @@ pub struct FoldMap {
     cached_snapshot: Option<Arc<FoldSnapshot>>,
     last_inlay_version: usize,
     last_self_version: usize,
+    /// Buffer version the stored folds. `resolved_start` and `resolved_end`
+    /// were measured against, so the next sync can carry them across exactly
+    /// the edits made since.
+    last_buffer_version: u64,
 }
 
 pub struct FoldSnapshot {
@@ -306,6 +310,7 @@ impl FoldMap {
         let empty_folds = SumTree::new(());
         let transforms = build_fold_transforms(&inlay_snapshot, &empty_folds);
         let inlay_version = inlay_snapshot.inlay_version;
+        let buffer_version = inlay_snapshot.buffer_snapshot().version();
         let snapshot = Arc::new(FoldSnapshot {
             inlay_snapshot,
             transforms,
@@ -320,6 +325,7 @@ impl FoldMap {
             cached_snapshot: Some(Arc::clone(&snapshot)),
             last_inlay_version: inlay_version,
             last_self_version: 0,
+            last_buffer_version: buffer_version,
         };
         (map, snapshot)
     }
@@ -338,11 +344,14 @@ impl FoldMap {
 
         let buffer = inlay_snapshot.buffer_snapshot();
         let all_folds: Vec<AnchoredFold> = self.folds.iter().cloned().collect();
-        let all_anchors: Vec<Anchor> = all_folds
-            .iter()
-            .flat_map(|af| [af.range.start, af.range.end])
-            .collect();
-        let all_points = buffer.points_for_anchors_batch(&all_anchors);
+        let all_points = resolve_fold_points(
+            &all_folds,
+            buffer,
+            // A toggle leaves the stored folds' offsets on mixed footing:
+            // `fold` writes new ones at insert time and the merge pass rewrites
+            // others, so none of them are reliably as of `last_buffer_version`.
+            (self.version == self.last_self_version).then_some(self.last_buffer_version),
+        );
         let mut valid_folds = Vec::new();
         let mut resolved = Vec::new();
         for (i, af) in all_folds.iter().enumerate() {
@@ -369,6 +378,7 @@ impl FoldMap {
                 placeholder: af.placeholder.clone(),
             });
         }
+        let dropped_a_fold = valid_folds.len() != all_folds.len();
         valid_folds.sort_by_key(|f| f.resolved_start);
         self.folds = SumTree::from_iter(valid_folds, ());
 
@@ -426,16 +436,27 @@ impl FoldMap {
             (transforms, edits)
         };
 
-        let mut fold_metadata_by_id = TreeMap::default();
-        for fold in self.folds.iter() {
-            fold_metadata_by_id.insert(
-                fold.id,
-                FoldMetadata {
-                    range: fold.range.clone(),
-                    display_width: None,
-                },
-            );
-        }
+        // The map holds anchors and a `None`, so a buffer edit alone cannot
+        // change any entry. Only a toggle, or a fold dropped above for having
+        // collapsed, changes which entries exist.
+        let reuse_metadata = self.version == self.last_self_version && !dropped_a_fold;
+        let fold_metadata_by_id = match self.cached_snapshot.as_ref().filter(|_| reuse_metadata) {
+            Some(cached) => cached.fold_metadata_by_id.clone(),
+            None => {
+                let mut map = TreeMap::default();
+                for fold in self.folds.iter() {
+                    map.insert(
+                        fold.id,
+                        FoldMetadata {
+                            range: fold.range.clone(),
+                            display_width: None,
+                        },
+                    );
+                }
+                map
+            },
+        };
+
         let snapshot = Arc::new(FoldSnapshot {
             inlay_snapshot,
             transforms,
@@ -445,6 +466,7 @@ impl FoldMap {
         });
         self.last_inlay_version = snapshot.inlay_snapshot.inlay_version;
         self.last_self_version = self.version;
+        self.last_buffer_version = snapshot.inlay_snapshot.buffer_snapshot().version();
         self.cached_snapshot = Some(Arc::clone(&snapshot));
         (snapshot, edits)
     }
@@ -736,6 +758,109 @@ fn push_fold_isomorphic(tree: &mut SumTree<Transform>, summary: TransformSummary
             (),
         );
     }
+}
+
+/// Carry `offsets` across `edits`, flagging the ones an edit could have moved
+/// in a way the arithmetic cannot predict.
+///
+/// One forward pass over both ascending sequences. An offset ends up carrying
+/// the summed delta of every edit it sits after.
+///
+/// Mirrors the inlay layer's `shift_offsets` but treats an edit's boundaries as
+/// ambiguous rather than only its interior. A fold's end anchor is biased Left,
+/// so an insertion landing exactly on it leaves it where it was while the carry
+/// would push it along by the inserted length. Flagging it sends it back to its
+/// anchor, which is the only thing that knows.
+///
+/// `offsets` must be ascending. The caller sorts an index permutation, since an
+/// edit can leave the previous sync's fold offsets crossed.
+fn carry_offsets(offsets: &mut [usize], needs_resolve: &mut [bool], edits: &Patch<usize>) {
+    let mut delta: isize = 0;
+    let mut i = 0;
+    for edit in edits {
+        while i < offsets.len() && offsets[i] < edit.old.start {
+            offsets[i] = ((offsets[i] as isize) + delta).max(0) as usize;
+            i += 1;
+        }
+        while i < offsets.len() && offsets[i] <= edit.old.end {
+            offsets[i] = ((offsets[i] as isize) + delta).max(0) as usize;
+            needs_resolve[i] = true;
+            i += 1;
+        }
+        delta += (edit.new.end as isize) - (edit.old.end as isize);
+    }
+    for offset in &mut offsets[i..] {
+        *offset = ((*offset as isize) + delta).max(0) as usize;
+    }
+}
+
+/// Buffer points for every fold's start and end, interleaved as
+/// `[start0, end0, start1, end1, ..]`.
+///
+/// With `carry_from` naming the buffer version the folds' cached
+/// `resolved_start` and `resolved_end` were measured at, the offsets are
+/// carried across the edits made since and only those landing inside an edit
+/// are re-resolved from their anchors. Otherwise every anchor is resolved,
+/// which sorts them and walks two sum trees, so a keystroke with a fold on
+/// every function pays for the whole file however small the edit was.
+///
+/// `None` forces the full resolve, for a caller that cannot vouch for the
+/// cached offsets.
+fn resolve_fold_points(
+    folds: &[AnchoredFold],
+    buffer: &MultiBufferSnapshot,
+    carry_from: Option<u64>,
+) -> Vec<Point> {
+    let anchors = || -> Vec<Anchor> {
+        folds
+            .iter()
+            .flat_map(|af| [af.range.start, af.range.end])
+            .collect()
+    };
+
+    let Some(since) = carry_from else {
+        return buffer.points_for_anchors_batch(&anchors());
+    };
+
+    let edits = buffer.edits_since(since);
+    let mut offsets: Vec<usize> = folds
+        .iter()
+        .flat_map(|af| [af.resolved_start, af.resolved_end])
+        .collect();
+    let mut needs_resolve = vec![false; offsets.len()];
+
+    let mut order: Vec<usize> = (0..offsets.len()).collect();
+    order.sort_unstable_by_key(|&i| offsets[i]);
+    let mut sorted: Vec<usize> = order.iter().map(|&i| offsets[i]).collect();
+    let mut sorted_flags = vec![false; sorted.len()];
+    carry_offsets(&mut sorted, &mut sorted_flags, &edits);
+    for (slot, &i) in order.iter().enumerate() {
+        offsets[i] = sorted[slot];
+        needs_resolve[i] = sorted_flags[slot];
+    }
+
+    let affected: Vec<usize> = needs_resolve
+        .iter()
+        .enumerate()
+        .filter(|&(_, &needs)| needs)
+        .map(|(i, _)| i)
+        .collect();
+    if !affected.is_empty() {
+        let all = anchors();
+        let to_resolve: Vec<Anchor> = affected.iter().map(|&i| all[i]).collect();
+        for (&i, offset) in affected
+            .iter()
+            .zip(buffer.resolve_anchors_batch(&to_resolve))
+        {
+            offsets[i] = offset;
+        }
+    }
+
+    let len = buffer.rope().len();
+    for offset in &mut offsets {
+        *offset = (*offset).min(len);
+    }
+    buffer.rope().offsets_to_points_batch(&offsets)
 }
 
 /// The inlay rows whose fold coverage differs between two resolved fold sets,
@@ -1584,7 +1709,7 @@ impl Iterator for FoldLineChars<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FoldMap, FoldOffset, FoldPlaceholder, FoldPoint};
+    use super::{FoldId, FoldMap, FoldOffset, FoldPlaceholder, FoldPoint};
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::inlay_map::{InlayKind, InlayMap, InlayPoint},
@@ -1897,6 +2022,93 @@ mod tests {
             fold_point,
             snap.to_inlay_point(fold_point),
         )
+    }
+
+    /// A deterministic pseudo-random walk, so the edits and fold sets below
+    /// land in shapes nobody hand-picked while staying reproducible.
+    fn lcg(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state >> 33
+    }
+
+    /// Carrying the cached resolved offsets across a buffer edit has to land
+    /// exactly where re-resolving every anchor would. It is an arithmetic
+    /// shortcut past the anchor trees, so a discrepancy would misplace folds
+    /// with nothing else to catch it.
+    #[test]
+    fn carried_fold_offsets_match_a_full_resolve() {
+        for seed in 0..40u64 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+
+            let text: String = (0..30)
+                .map(|i| format!("line{i} with some trailing words\n"))
+                .collect();
+            let buffer = TextBuffer::with_text(BufferId::new(0), &text);
+            let shared = Arc::new(RwLock::new(buffer));
+            let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+            // A handful of folds at pseudo-random rows, kept disjoint so the
+            // merge pass does not rewrite them out from under the comparison.
+            let snap0 = multi_buffer.snapshot();
+            let mut ranges = Vec::new();
+            let mut row = 0u32;
+            while row < 26 {
+                let span = 1 + (lcg(&mut state) % 3) as u32;
+                let start = snap0.rope().point_to_offset(stoat_text::Point::new(row, 0));
+                let end = snap0
+                    .rope()
+                    .point_to_offset(stoat_text::Point::new(row + span, 0));
+                ranges.push(snap0.anchor_at(start, Bias::Right)..snap0.anchor_at(end, Bias::Left));
+                row += span + 1 + (lcg(&mut state) % 2) as u32;
+            }
+
+            let (mut inlay_map, inlay_snapshot) = InlayMap::new(snap0.clone());
+            let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+            fold_map.fold(ranges.clone(), FoldPlaceholder::default(), &snap0);
+            fold_map.sync(inlay_snapshot, &Patch::empty());
+
+            // Several edits, some landing inside a fold and some between them,
+            // each driven through the carrying sync.
+            for _ in 0..4 {
+                let before = multi_buffer.snapshot();
+                let len = before.rope().len();
+                let at = (lcg(&mut state) as usize) % (len + 1);
+                if lcg(&mut state).is_multiple_of(3) && at + 4 <= len {
+                    shared.write().expect("poisoned").edit(at..at + 4, "");
+                } else {
+                    shared.write().expect("poisoned").edit(at..at, "zz\n");
+                }
+
+                let after = multi_buffer.snapshot();
+                let buffer_edits = after.edits_since(before.version());
+                let (inlay_snapshot, inlay_edits) = inlay_map.sync(after, &buffer_edits);
+                fold_map.sync(inlay_snapshot, &inlay_edits);
+            }
+
+            let carried: Vec<(FoldId, std::ops::Range<usize>)> = fold_map
+                .folds
+                .iter()
+                .map(|f| (f.id, f.resolved_start..f.resolved_end))
+                .collect();
+
+            // The same folds, resolved from their anchors with no carrying.
+            let final_snapshot = multi_buffer.snapshot();
+            let all: Vec<super::AnchoredFold> = fold_map.folds.iter().cloned().collect();
+            let points = super::resolve_fold_points(&all, &final_snapshot, None);
+            let full: Vec<(FoldId, std::ops::Range<usize>)> = all
+                .iter()
+                .enumerate()
+                .map(|(i, af)| {
+                    let start = final_snapshot.rope().point_to_offset(points[i * 2]);
+                    let end = final_snapshot.rope().point_to_offset(points[i * 2 + 1]);
+                    (af.id, start..end)
+                })
+                .collect();
+
+            assert_eq!(carried, full, "seed {seed}");
+        }
     }
 
     /// A fold toggle moves no inlay row, so the sync has to work out which
