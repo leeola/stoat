@@ -239,6 +239,16 @@ pub struct Terminal {
     /// `reset`), when the painted page is committed onto its pool's buffer.
     /// `None` while writing the live grid.
     fill: Option<FillTarget>,
+    /// A committed page's fill context, parked for the next page to paint into.
+    ///
+    /// Building one constructs an alacritty `Term` with its main and alt grids
+    /// and a parser holding a large synchronized-update buffer. The editor emits
+    /// a fill per page entering its scroll window and re-requests the window on
+    /// every content change, so scrolling paid that construction over and over.
+    ///
+    /// `None` until the first page commits, and only reused for a page whose
+    /// pool region matches the parked screen's size.
+    fill_scratch: Option<FillTarget>,
     /// The in-progress content capture, set while a `Gstoatty;popover` or
     /// `Gstoatty;text_run` open marker has redirected the streamed bytes into a
     /// pending command's text.
@@ -467,6 +477,14 @@ struct FillTarget {
     index: u64,
     term: Term<ResponseSink>,
     parser: Processor,
+    /// The sink [`Self::term`]'s listener writes into, kept reachable so a
+    /// recycled context can be drained.
+    ///
+    /// Its buffers sit behind an `Arc`, so this shares them with the copy the
+    /// `Term` holds. Nothing reads what page content emits, but a context that
+    /// outlives its page has to be emptied or the sink grows for the life of the
+    /// terminal.
+    responses: ResponseSink,
     /// Page-targeted text runs captured while this page paints, moved onto the
     /// pool slot when the fill commits.
     text_runs: Vec<TextRunCommand>,
@@ -482,10 +500,11 @@ impl FillTarget {
     /// Create a `rows` by `cols` fill context for page `index` of pool `pool`,
     /// with a blank screen ready to receive the page's streamed bytes.
     fn new(pool: u32, index: u64, rows: usize, cols: usize) -> FillTarget {
+        let responses = ResponseSink::default();
         let term = Term::new(
             Config::default(),
             &GridSize { rows, cols },
-            ResponseSink::default(),
+            responses.clone(),
         );
 
         FillTarget {
@@ -493,10 +512,32 @@ impl FillTarget {
             index,
             term,
             parser: Processor::new(),
+            responses,
             text_runs: Vec::new(),
             bars: Vec::new(),
             polylines: Vec::new(),
         }
+    }
+
+    /// Blank the screen and empty the sink, leaving the context ready to paint
+    /// another page.
+    ///
+    /// `CAN` abandons any escape the page left half-written, so the `RIS` after
+    /// it is read as a command rather than swallowed as part of that sequence.
+    /// `RIS` then resets the screen, cursor, and SGR state while the grid keeps
+    /// its row allocations, which is the whole point of holding the context.
+    ///
+    /// Ending a buffered synchronized update first is unconditional, since
+    /// `stop_sync` does nothing when none is open.
+    ///
+    /// The captured decorations are not this method's to clear. [`Terminal::commit_fill`]
+    /// moves them out on its way here, so they are already empty.
+    fn recycle(&mut self) {
+        self.parser.stop_sync(&mut self.term);
+        self.parser.advance(&mut self.term, b"\x18\x1bc");
+
+        let _ = self.responses.take();
+        let _ = self.responses.take_events();
     }
 }
 
@@ -600,6 +641,7 @@ impl Terminal {
             last_history: 0,
             pools: BTreeMap::new(),
             fill: None,
+            fill_scratch: None,
             capture: None,
             pending_events: Vec::new(),
             cell_pixels: (0, 0),
@@ -1474,10 +1516,13 @@ impl Terminal {
     ///
     /// Any already-open fill is committed first, so a dropped `fill_end` cannot
     /// strand the redirect: the next `fill` (or a `reset`) closes the previous
-    /// page. The fresh context is sized to the pool's region, matching the slots
-    /// [`Self::commit_fill`] writes into; an unknown pool falls back to the
+    /// page. The context is sized to the pool's region, matching the slots
+    /// [`Self::commit_fill`] writes into. An unknown pool falls back to the
     /// viewport so the redirect still captures (and later discards) the bytes
     /// rather than leaking them onto the live grid.
+    ///
+    /// The context parked by the last page serves this one when their sizes match,
+    /// so only a differently shaped region builds a new one.
     fn begin_fill(&mut self, pool: u32, index: u64) {
         self.commit_fill();
         let (rows, cols) = match self.pools.get(&pool) {
@@ -1487,7 +1532,21 @@ impl Terminal {
             ),
             None => (self.term.screen_lines(), self.term.columns()),
         };
-        self.fill = Some(FillTarget::new(pool, index, rows, cols));
+        // A committed page's context is reset and parked, so an ordinary scroll
+        // paints every page through the same screen and parser. A region resize
+        // is the only thing that invalidates it, and that is cold.
+        let recycled = self
+            .fill_scratch
+            .take_if(|fill| fill.term.screen_lines() == rows && fill.term.columns() == cols);
+
+        self.fill = Some(match recycled {
+            Some(mut fill) => {
+                fill.pool = pool;
+                fill.index = index;
+                fill
+            },
+            None => FillTarget::new(pool, index, rows, cols),
+        });
     }
 
     /// Commit the open page fill onto its pool's slot and restore the live grid.
@@ -1498,21 +1557,34 @@ impl Terminal {
     /// every close trigger (`fill_end`, the next `fill`, `reset`) can call it
     /// unconditionally. The painted page is discarded if its pool was dropped
     /// mid-fill.
+    ///
+    /// The fill context itself is reset and parked in [`Self::fill_scratch`] for
+    /// the next page to paint through.
     fn commit_fill(&mut self) {
-        let Some(fill) = self.fill.take() else {
-            return;
-        };
-        let Some(pool) = self.pools.get_mut(&fill.pool) else {
+        let Some(mut fill) = self.fill.take() else {
             return;
         };
 
-        let grid = pool.page_pool.fill(fill.index);
-        project_term_cells(grid, &fill.term, &self.theme, &self.palette);
-        pool.page_pool
-            .set_decorations(fill.index, fill.text_runs, fill.bars, fill.polylines);
-        pool.content_version = pool.content_version.wrapping_add(1);
-        let window = pool.region.window;
-        self.mark_window_dirty(window);
+        // Taken before the pool lookup so a page whose pool vanished leaves the
+        // context as empty as a committed one does.
+        let text_runs = mem::take(&mut fill.text_runs);
+        let bars = mem::take(&mut fill.bars);
+        let polylines = mem::take(&mut fill.polylines);
+
+        if let Some(pool) = self.pools.get_mut(&fill.pool) {
+            let grid = pool.page_pool.fill(fill.index);
+            project_term_cells(grid, &fill.term, &self.theme, &self.palette);
+            pool.page_pool
+                .set_decorations(fill.index, text_runs, bars, polylines);
+            pool.content_version = pool.content_version.wrapping_add(1);
+            let window = pool.region.window;
+            self.mark_window_dirty(window);
+        }
+
+        // Parked whether or not the page landed, since a pool dropped mid-fill
+        // leaves the context just as reusable as a committed one.
+        fill.recycle();
+        self.fill_scratch = Some(fill);
     }
 
     /// Open a content capture for the command described by `target`.
@@ -5578,6 +5650,143 @@ mod tests {
         assert!(
             runs.is_empty() && bars.is_empty(),
             "recycled slot drops the previous page's decorations"
+        );
+    }
+
+    /// A committed page's VT context is reset and reused for the next page.
+    ///
+    /// The reset has to clear everything a page leaves behind. That means its
+    /// cells, where it parked the cursor, the colors it was still painting in,
+    /// and the decorations it captured.
+    #[test]
+    fn a_page_paints_into_a_reused_context_without_the_previous_page() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+
+        declare_pool(&mut terminal, 0, 2, 4);
+
+        // The first page fills both rows, leaves the cursor on the second one,
+        // captures a bar, and closes mid-SGR with a red foreground still set.
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+        stream.extend_from_slice(b"\x1b[31mAAAA\r\nBBBB");
+        stream.extend_from_slice(&encode_bar(&BarCommand {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 16,
+            color: [1, 2, 3],
+        }));
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+        assert_eq!(pool_page(&terminal, 0, 0).get(1, 0).ch, 'B', "first page");
+
+        // The second page writes one character into a different slot. Anything
+        // the reset missed shows up here.
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 1 });
+        stream.extend_from_slice(b"z");
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        let page = pool_page(&terminal, 0, 1);
+        let row = |r: usize| (0..4).map(|c| page.get(r, c).ch).collect::<String>();
+        assert_eq!(
+            (row(0), row(1)),
+            ("z   ".to_string(), "    ".to_string()),
+            "the character lands at the origin on an otherwise blank screen",
+        );
+        assert_ne!(
+            page.get(0, 0).fg,
+            pool_page(&terminal, 0, 0).get(0, 0).fg,
+            "and in the default foreground, not the color the last page left set",
+        );
+
+        let (runs, bars, polylines) = terminal.pools[&0]
+            .page_pool
+            .page_decorations(1)
+            .expect("page buffered");
+        assert!(
+            runs.is_empty() && bars.is_empty() && polylines.is_empty(),
+            "and carries none of the previous page's decorations",
+        );
+    }
+
+    /// A parked context is sized to the pool it last painted, so it is only good
+    /// for a page of the same shape. A larger region gets a fresh one, or the page
+    /// would paint into a screen too small to hold it.
+    #[test]
+    fn a_pool_of_another_size_does_not_paint_through_the_parked_context() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        declare_pool(&mut terminal, 0, 2, 4);
+        declare_pool(&mut terminal, 1, 4, 8);
+
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+        stream.extend_from_slice(b"AAAA");
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        // The last row and column of the wider region lie outside the narrow
+        // screen the first page parked.
+        let mut stream = encode_fill(&FillCommand { pool: 1, index: 0 });
+        stream.extend_from_slice(b"\x1b[4;8Hz");
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        assert_eq!(
+            pool_page(&terminal, 1, 0).get(3, 7).ch,
+            'z',
+            "the wider page paints its far corner",
+        );
+    }
+
+    /// Nothing reads what a page's content replies, so a parked context has to be
+    /// drained anyway. One sink now serves every page, and an undrained one would
+    /// grow for the life of the terminal.
+    #[test]
+    fn a_parked_context_holds_no_replies_from_the_page_it_painted() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+
+        declare_pool(&mut terminal, 0, 2, 4);
+
+        // DA1 makes the screen reply toward the PTY, and an OSC title queues a
+        // listener event.
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+        stream.extend_from_slice(b"\x1b[c\x1b]0;page\x07x");
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        let parked = terminal.fill_scratch.as_ref().expect("context parked");
+        let (bytes, events) = (parked.responses.take(), parked.responses.take_events());
+        assert!(
+            bytes.is_empty() && events.is_empty(),
+            "parked context holds {} reply bytes and {} events",
+            bytes.len(),
+            events.len(),
+        );
+    }
+
+    /// A page that opens a synchronized update and never closes it leaves the
+    /// parser buffering. Carried into the next page, that would swallow its
+    /// content instead of painting it.
+    #[test]
+    fn a_page_left_mid_synchronized_update_does_not_hold_the_next_one_back() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+
+        declare_pool(&mut terminal, 0, 2, 4);
+
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+        stream.extend_from_slice(b"\x1b[?2026hA");
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 1 });
+        stream.extend_from_slice(b"z");
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        assert_eq!(
+            pool_page(&terminal, 0, 1).get(0, 0).ch,
+            'z',
+            "the second page paints through a parser the first one left syncing",
         );
     }
 
