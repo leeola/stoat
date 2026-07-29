@@ -125,6 +125,8 @@ pub(crate) fn render_conflict(
         let mut y = inner.y + 3;
         let max_y = inner.y + inner.height;
         let max_w = right_w as usize;
+        // One buffer for every number this loop paints, rather than one per row.
+        let mut num_text = String::new();
 
         let draw_line = |y: &mut u16, text: &str, style: Style, buf: &mut Buffer| {
             if *y >= max_y {
@@ -172,6 +174,7 @@ pub(crate) fn render_conflict(
             };
             paint_merge_side(
                 buf,
+                &mut num_text,
                 ours_x,
                 y,
                 row.ours.as_ref(),
@@ -182,6 +185,7 @@ pub(crate) fn render_conflict(
             );
             paint_merge_side(
                 buf,
+                &mut num_text,
                 base_x,
                 y,
                 row.base.as_ref(),
@@ -192,6 +196,7 @@ pub(crate) fn render_conflict(
             );
             paint_merge_side(
                 buf,
+                &mut num_text,
                 theirs_x,
                 y,
                 row.theirs.as_ref(),
@@ -212,6 +217,7 @@ pub(crate) fn render_conflict(
 #[allow(clippy::too_many_arguments)]
 fn paint_merge_side(
     buf: &mut Buffer,
+    num_text: &mut String,
     x: u16,
     y: u16,
     side: Option<&ReviewSide>,
@@ -222,7 +228,7 @@ fn paint_merge_side(
 ) {
     match side {
         Some(side) => {
-            render_side_num(buf, x, y, side.line_num, dim);
+            render_side_num(buf, num_text, x, y, side.line_num, dim);
             render_side_text(
                 buf,
                 x + 5,

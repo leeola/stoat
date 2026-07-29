@@ -321,9 +321,25 @@ pub(crate) fn row_display(
     display_roots: Option<&[PathBuf]>,
     home: Option<&Path>,
 ) -> String {
+    let mut out = String::new();
+    write_row_display(&mut out, path, git_root, display_roots, home);
+    out
+}
+
+/// Append [`row_display`]'s text for `path` to `out`.
+///
+/// For the row paint, which draws one candidate per visible row every frame and
+/// would otherwise allocate a fresh string for each.
+pub(crate) fn write_row_display(
+    out: &mut String,
+    path: &Path,
+    git_root: &Path,
+    display_roots: Option<&[PathBuf]>,
+    home: Option<&Path>,
+) {
     match display_roots {
-        Some(roots) => workspace_rooted_display(path, roots),
-        None => paths::display_relative_with_home(path, git_root, home),
+        Some(roots) => out.push_str(&workspace_rooted_display(path, roots)),
+        None => paths::write_display_relative_with_home(out, path, git_root, home),
     }
 }
 

@@ -109,26 +109,43 @@ pub(crate) fn display_relative_with_home(
     context: &Path,
     home: Option<&Path>,
 ) -> String {
+    let mut out = String::new();
+    write_display_relative_with_home(&mut out, path, context, home);
+    out
+}
+
+/// Append [`display_relative_with_home`]'s text for `path` to `out`.
+///
+/// For a caller resolving one path per row of a paint, where a returned `String`
+/// would allocate per row.
+pub(crate) fn write_display_relative_with_home(
+    out: &mut String,
+    path: &Path,
+    context: &Path,
+    home: Option<&Path>,
+) {
     if !path.is_absolute() {
-        return path.to_string_lossy().into_owned();
+        out.push_str(&path.to_string_lossy());
+        return;
     }
     if let Ok(rel) = path.strip_prefix(context) {
-        return if rel.as_os_str().is_empty() {
-            ".".to_string()
-        } else {
-            rel.to_string_lossy().into_owned()
-        };
+        match rel.as_os_str().is_empty() {
+            true => out.push('.'),
+            false => out.push_str(&rel.to_string_lossy()),
+        }
+        return;
     }
     if let Some(home) = home
         && let Ok(rel) = path.strip_prefix(home)
     {
-        return if rel.as_os_str().is_empty() {
-            "~".to_string()
-        } else {
-            format!("~/{}", rel.to_string_lossy())
-        };
+        out.push('~');
+        if !rel.as_os_str().is_empty() {
+            out.push('/');
+            out.push_str(&rel.to_string_lossy());
+        }
+        return;
     }
-    path.to_string_lossy().into_owned()
+    out.push_str(&path.to_string_lossy());
 }
 
 pub(crate) fn home_dir() -> Option<PathBuf> {

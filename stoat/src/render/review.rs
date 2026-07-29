@@ -16,7 +16,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::StatefulWidget,
 };
-use std::sync::Arc;
+use std::{fmt::Write, sync::Arc};
 use stoat_text::{cursor_offset, Point};
 use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
 
@@ -230,6 +230,9 @@ pub(crate) fn paint_diff_rows(
         return;
     }
 
+    // One buffer for every number this loop paints, rather than one per row.
+    let mut num_text = String::new();
+
     // Rich mode replaces the ASCII gutter (status glyphs, line numbers, and the
     // separators) with sub-cell APC components. It engages only when a scene is
     // threaded and every gutter color resolves to RGB, so the two paths never
@@ -301,6 +304,7 @@ pub(crate) fn paint_diff_rows(
                 draw_diff_num(
                     &mut rich,
                     buf,
+                    &mut num_text,
                     inner,
                     left_num_x,
                     y,
@@ -363,6 +367,7 @@ pub(crate) fn paint_diff_rows(
                 draw_diff_num(
                     &mut rich,
                     buf,
+                    &mut num_text,
                     inner,
                     right_num_x,
                     y,
@@ -449,6 +454,7 @@ pub(crate) fn paint_diff_rows(
                     draw_diff_num(
                         &mut rich,
                         buf,
+                        &mut num_text,
                         inner,
                         left_num_x,
                         y,
@@ -987,6 +993,9 @@ pub(crate) fn render_review_rows(
         return;
     }
 
+    // One buffer for every number this loop paints, rather than one per row.
+    let mut num_text = String::new();
+
     let full_w = inner.width as usize;
     let status_w: usize = 1;
     let num_w: usize = 5;
@@ -1062,6 +1071,7 @@ pub(crate) fn render_review_rows(
                         draw_side_num(
                             &mut rich,
                             buf,
+                            &mut num_text,
                             inner,
                             left_num_x,
                             y,
@@ -1083,6 +1093,7 @@ pub(crate) fn render_review_rows(
                         draw_side_num(
                             &mut rich,
                             buf,
+                            &mut num_text,
                             inner,
                             right_num_x,
                             y,
@@ -1105,7 +1116,14 @@ pub(crate) fn render_review_rows(
                     ReviewRow::Changed { left, right } => {
                         if let Some(l) = left {
                             draw_side_num(
-                                &mut rich, buf, inner, left_num_x, y, l.line_num, dim_style,
+                                &mut rich,
+                                buf,
+                                &mut num_text,
+                                inner,
+                                left_num_x,
+                                y,
+                                l.line_num,
+                                dim_style,
                             );
                             render_side_text(
                                 buf,
@@ -1138,6 +1156,7 @@ pub(crate) fn render_review_rows(
                             draw_side_num(
                                 &mut rich,
                                 buf,
+                                &mut num_text,
                                 inner,
                                 right_num_x,
                                 y,
@@ -1238,19 +1257,22 @@ fn draw_status_gutter(
 
 /// Emit a right-aligned line number as a sub-cell run (rich) or paint the ASCII
 /// number.
+#[allow(clippy::too_many_arguments)]
 fn draw_side_num(
     rich: &mut Option<RichGutter<'_>>,
     buf: &mut Buffer,
+    scratch: &mut String,
     inner: Rect,
     num_x: u16,
     y: u16,
     num: u32,
     dim_style: Style,
 ) {
+    scratch.clear();
+    write!(scratch, "{num}").expect("writing to a String is infallible");
     match rich {
         Some(rg) => {
-            let text = num.to_string();
-            let digits = text.len() as u16;
+            let digits = scratch.len() as u16;
             let right_edge = (num_x - inner.x + 4) * 16;
             TextRun {
                 col: right_edge.saturating_sub(digits * TEXT_SCALE_COMPACT / 16),
@@ -1258,11 +1280,11 @@ fn draw_side_num(
                 scale: TEXT_SCALE_COMPACT,
                 color: rg.colors.dim,
                 bg: Some(rg.colors.bg),
-                text: &text,
+                text: scratch,
             }
             .render(inner, buf, &mut *rg.scene);
         },
-        None => render_side_num(buf, num_x, y, num, dim_style),
+        None => render_side_num(buf, scratch, num_x, y, num, dim_style),
     }
 }
 
@@ -1401,19 +1423,22 @@ fn resolve_diff_rich_colors(
 
 /// Emit a right-aligned diff line number as a sub-cell run (rich) or paint the
 /// ASCII number.
+#[allow(clippy::too_many_arguments)]
 fn draw_diff_num(
     rich: &mut Option<DiffRichGutter<'_>>,
     buf: &mut Buffer,
+    scratch: &mut String,
     inner: Rect,
     num_x: u16,
     y: u16,
     num: u32,
     dim_style: Style,
 ) {
+    scratch.clear();
+    write!(scratch, "{num}").expect("writing to a String is infallible");
     match rich {
         Some(rg) => {
-            let text = num.to_string();
-            let digits = text.len() as u16;
+            let digits = scratch.len() as u16;
             let right_edge = (num_x - inner.x + 4) * 16;
             TextRun {
                 col: right_edge.saturating_sub(digits * TEXT_SCALE_COMPACT / 16),
@@ -1421,11 +1446,11 @@ fn draw_diff_num(
                 scale: TEXT_SCALE_COMPACT,
                 color: rg.colors.dim,
                 bg: Some(rg.colors.bg),
-                text: &text,
+                text: scratch,
             }
             .render(inner, buf, &mut *rg.scene);
         },
-        None => render_side_num(buf, num_x, y, num, dim_style),
+        None => render_side_num(buf, scratch, num_x, y, num, dim_style),
     }
 }
 
@@ -1492,9 +1517,22 @@ pub(crate) fn dim_rgb(fg: [u8; 3], bg: [u8; 3], amount: f32) -> [u8; 3] {
     ]
 }
 
-pub(crate) fn render_side_num(buf: &mut Buffer, x: u16, y: u16, num: u32, style: Style) {
-    let s = format!("{num:>4} ");
-    for (i, ch) in s.chars().enumerate() {
+/// Paint `num` right-aligned in the five-cell number field at `x`.
+///
+/// `scratch` holds the formatted field. Callers paint one number per row of a
+/// side, so they pass one buffer for the whole loop rather than letting each row
+/// allocate its own.
+pub(crate) fn render_side_num(
+    buf: &mut Buffer,
+    scratch: &mut String,
+    x: u16,
+    y: u16,
+    num: u32,
+    style: Style,
+) {
+    scratch.clear();
+    write!(scratch, "{num:>4} ").expect("writing to a String is infallible");
+    for (i, ch) in scratch.chars().enumerate() {
         let col = x + i as u16;
         if col >= buf.area.x + buf.area.width {
             break;

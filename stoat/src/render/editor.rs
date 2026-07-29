@@ -22,6 +22,7 @@ use ratatui::{
 use std::{
     cmp::Reverse,
     collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet},
+    fmt::Write,
     hash::{Hash, Hasher},
     ops::Range,
     path::Path,
@@ -1524,21 +1525,48 @@ pub(crate) fn draw_fallback_line_numbers(
     let width = mark_w + width_digits + 2 + gap;
     let number_style = theme.get(s::UI_TEXT_MUTED);
 
+    // A scope resolves by walking progressively broadening keys, so a gutter
+    // repeating a mark down fifty rows would pay that walk fifty times. Each
+    // scope resolves on the first row that wants it and is remembered for the
+    // rest, which also leaves an unmarked gutter resolving none of them.
+    //
+    // The slots cannot run out. A row paints one of four severities, one of four
+    // diff statuses, and one of two staged states.
+    let mut resolved: [Option<(&'static str, Style)>; 10] = [None; 10];
+    let mut style_for =
+        |scope: &'static str| match resolved.iter().flatten().find(|(known, _)| *known == scope) {
+            Some(&(_, style)) => style,
+            None => {
+                let style = theme.get(scope);
+                let free = resolved
+                    .iter_mut()
+                    .find(|slot| slot.is_none())
+                    .expect("a gutter paints at most ten distinct mark scopes");
+                *free = Some((scope, style));
+                style
+            },
+        };
+
+    let mut number = String::new();
     let mut top = 0u16;
-    for &(number, height) in folded {
+    for &(line, height) in folded {
         let y = inner.y + top;
         if y >= inner.y + inner.height {
             break;
         }
-        if let Some(sev) = row_severity.get(&(number - 1)) {
+        if let Some(sev) = row_severity.get(&(line - 1)) {
             buf[(inner.x, y)]
                 .set_char(severity_mark(*sev))
-                .set_style(theme.get(severity_scope(*sev)));
+                .set_style(style_for(severity_scope(*sev)));
         }
-        let text = format!("{}", gutter_display_number(number, current_line));
-        let start = inner.x + mark_w + width_digits.saturating_sub(text.len() as u16);
-        buf.set_stringn(start, y, &text, text.len(), number_style);
-        if let Some(&(status, staged)) = diff_marks.get(&(number - 1)) {
+
+        number.clear();
+        write!(number, "{}", gutter_display_number(line, current_line))
+            .expect("writing to a String is infallible");
+        let start = inner.x + mark_w + width_digits.saturating_sub(number.len() as u16);
+        buf.set_stringn(start, y, &number, number.len(), number_style);
+
+        if let Some(&(status, staged)) = diff_marks.get(&(line - 1)) {
             let (mark, scope) = match status {
                 DiffHunkStatus::Deleted => ('▔', s::DIFF_DELETED),
                 DiffHunkStatus::Added => ('▎', s::DIFF_ADDED),
@@ -1547,15 +1575,14 @@ pub(crate) fn draw_fallback_line_numbers(
             };
             buf[(change_x, y)]
                 .set_char(mark)
-                .set_style(theme.get(scope));
-            let staged_scope = if staged {
-                s::DIFF_STAGED
-            } else {
-                s::DIFF_UNSTAGED
+                .set_style(style_for(scope));
+            let staged_scope = match staged {
+                true => s::DIFF_STAGED,
+                false => s::DIFF_UNSTAGED,
             };
             buf[(staged_x, y)]
                 .set_char('▎')
-                .set_style(theme.get(staged_scope));
+                .set_style(style_for(staged_scope));
         }
         top += height;
     }
@@ -2594,6 +2621,57 @@ mod tests {
             buf[(3u16, 1u16)].symbol(),
             " ",
             "a row with no diff mark leaves the staged cell blank",
+        );
+    }
+
+    /// A mark's scope resolves on the first row that paints it and is reused by
+    /// the rest, so a second row of the same kind has to come out in that kind's
+    /// color rather than whatever the reuse hands back.
+    #[test]
+    fn fallback_gutter_reuses_a_resolved_mark_style_across_rows() {
+        use crate::{diff_map::DiffHunkStatus, theme::scope as s};
+
+        let theme = {
+            let src = r##"theme t { ui.text.fg = "#111111"; diff.modified.fg = "#22ff22"; diff.unstaged.fg = "#3333ff"; }"##;
+            let (config, _) = stoat_config::parse(src);
+            crate::theme::Theme::from_config(&config.expect("theme parses"), "t")
+                .expect("theme loads")
+        };
+
+        let folded = [(1u32, 1u16), (2, 1)];
+        let mut diff_marks = std::collections::BTreeMap::new();
+        diff_marks.insert(0u32, (DiffHunkStatus::Modified, false));
+        diff_marks.insert(1u32, (DiffHunkStatus::Modified, false));
+        let area = Rect::new(0, 0, 12, 2);
+        let mut buf = Buffer::empty(area);
+
+        super::draw_fallback_line_numbers(
+            &folded,
+            1,
+            &std::collections::BTreeMap::new(),
+            &diff_marks,
+            None,
+            area,
+            &theme,
+            &mut buf,
+        );
+
+        let modified = theme.get(s::DIFF_MODIFIED).fg.expect("the fixture sets it");
+        let unstaged = theme.get(s::DIFF_UNSTAGED).fg.expect("the fixture sets it");
+        assert_ne!(
+            modified,
+            theme.get(s::UI_TEXT).fg.expect("the fixture sets it"),
+            "the fixture must give the mark its own color"
+        );
+        assert_eq!(
+            (
+                buf[(2u16, 0u16)].fg,
+                buf[(2u16, 1u16)].fg,
+                buf[(3u16, 0u16)].fg,
+                buf[(3u16, 1u16)].fg
+            ),
+            (modified, modified, unstaged, unstaged),
+            "both rows paint their marks in the kind's color",
         );
     }
 

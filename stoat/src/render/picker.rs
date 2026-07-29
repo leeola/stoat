@@ -7,7 +7,7 @@
 
 use crate::{
     input_view::InputView,
-    picker::{row_display, PickList, Preview},
+    picker::{write_row_display, PickList, Preview},
     render::{
         editor::render_editor,
         text::{write_str, write_str_clipped},
@@ -139,6 +139,7 @@ pub(crate) fn paint_path_rows(
     let end_x = area.x + area.width;
     let label_x = area.x + 1;
     let prefix_len = prefix.chars().count() as u32;
+    let mut label = String::new();
 
     for (row_idx, (&idx, indices)) in picklist
         .filtered
@@ -158,14 +159,14 @@ pub(crate) fn paint_path_rows(
         for col in area.x..end_x {
             buf[(col, row)].set_char(' ').set_style(style);
         }
-        let label = format!(
-            "{prefix}{}",
-            row_display(
-                &picklist.base[idx],
-                git_root,
-                picklist.display_roots.as_deref(),
-                home
-            )
+        label.clear();
+        label.push_str(prefix);
+        write_row_display(
+            &mut label,
+            &picklist.base[idx],
+            git_root,
+            picklist.display_roots.as_deref(),
+            home,
         );
         let width = end_x.saturating_sub(label_x) as usize;
         let label_len = label.chars().count();

@@ -227,6 +227,9 @@ fn paint_conflict_rows(
         None => snapshot.highlighted_endpoints(scroll_row..end_row),
     };
 
+    // One buffer for every number this loop paints, rather than one per row.
+    let mut num_text = String::new();
+
     for display_row in scroll_row..end_row {
         let y = inner.y + (display_row - scroll_row) as u16;
 
@@ -249,7 +252,14 @@ fn paint_conflict_rows(
 
         match snapshot.classify_row(display_row) {
             BlockRowKind::BufferRow { buffer_row } => {
-                render_side_num(buf, cols.center_num_x, y, buffer_row + 1, dim);
+                render_side_num(
+                    buf,
+                    &mut num_text,
+                    cols.center_num_x,
+                    y,
+                    buffer_row + 1,
+                    dim,
+                );
                 paint_highlighted_row(
                     snapshot,
                     display_row,
@@ -273,6 +283,7 @@ fn paint_conflict_rows(
         if let Some(row) = plan_row {
             paint_side(
                 buf,
+                &mut num_text,
                 cols.ours_num_x,
                 cols.ours_text_x,
                 y,
@@ -285,6 +296,7 @@ fn paint_conflict_rows(
             );
             paint_side(
                 buf,
+                &mut num_text,
                 cols.theirs_num_x,
                 cols.theirs_text_x,
                 y,
@@ -306,6 +318,7 @@ fn paint_conflict_rows(
 #[allow(clippy::too_many_arguments)]
 fn paint_side(
     buf: &mut Buffer,
+    num_text: &mut String,
     num_x: u16,
     text_x: u16,
     y: u16,
@@ -319,7 +332,7 @@ fn paint_side(
     match side {
         Some(side) => {
             if side_nums {
-                render_side_num(buf, num_x, y, side.line_num, dim);
+                render_side_num(buf, num_text, num_x, y, side.line_num, dim);
             }
             render_side_text(
                 buf,

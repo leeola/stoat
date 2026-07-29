@@ -295,6 +295,9 @@ pub(crate) fn render_commit_preview(
     let move_hl = theme.get(s::DIFF_MOVED).add_modifier(Modifier::ITALIC);
     let fallback_style = Style::default();
 
+    // One buffer for every number this loop paints, rather than one per row.
+    let mut num_text = String::new();
+
     let full_w = area.width as usize;
     let status_w: usize = 1;
     let num_w: usize = 5;
@@ -360,7 +363,7 @@ pub(crate) fn render_commit_preview(
                 let right_text_x = right_num_x + num_w as u16;
                 match diff_row {
                     ReviewRow::Context { left, right } => {
-                        render_side_num(buf, left_num_x, y, left.line_num, dim);
+                        render_side_num(buf, &mut num_text, left_num_x, y, left.line_num, dim);
                         render_side_text(
                             buf,
                             left_text_x,
@@ -373,7 +376,7 @@ pub(crate) fn render_commit_preview(
                             &[],
                             move_hl,
                         );
-                        render_side_num(buf, right_num_x, y, right.line_num, dim);
+                        render_side_num(buf, &mut num_text, right_num_x, y, right.line_num, dim);
                         render_side_text(
                             buf,
                             right_text_x,
@@ -389,7 +392,7 @@ pub(crate) fn render_commit_preview(
                     },
                     ReviewRow::Changed { left, right } => {
                         if let Some(l) = left {
-                            render_side_num(buf, left_num_x, y, l.line_num, dim);
+                            render_side_num(buf, &mut num_text, left_num_x, y, l.line_num, dim);
                             render_side_text(
                                 buf,
                                 left_text_x,
@@ -406,7 +409,7 @@ pub(crate) fn render_commit_preview(
                             render_empty_num(buf, left_num_x, y, dim);
                         }
                         if let Some(r) = right {
-                            render_side_num(buf, right_num_x, y, r.line_num, dim);
+                            render_side_num(buf, &mut num_text, right_num_x, y, r.line_num, dim);
                             render_side_text(
                                 buf,
                                 right_text_x,
