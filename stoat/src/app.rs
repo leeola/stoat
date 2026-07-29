@@ -7003,15 +7003,24 @@ impl Stoat {
         let buf_snapshot = display_snapshot.buffer_snapshot();
         let rope = buf_snapshot.rope();
 
+        // One walk for every cursor's endpoints rather than a root descent per
+        // anchor, which a multi-cursor session pays on every typed character.
+        let ends = {
+            let anchors: Vec<Anchor> = editor
+                .selections
+                .all_anchors()
+                .iter()
+                .flat_map(|sel| [sel.tail(), sel.head()])
+                .collect();
+            buf_snapshot.resolve_anchors_batch(&anchors)
+        };
+
         let mut inserts: Vec<(usize, usize)> = editor
             .selections
             .all_anchors()
             .iter()
-            .map(|sel| {
-                let tail = buf_snapshot.resolve_anchor(&sel.tail());
-                let head = buf_snapshot.resolve_anchor(&sel.head());
-                (sel.id, stoat_text::cursor_offset(rope, tail, head))
-            })
+            .zip(ends.chunks_exact(2))
+            .map(|(sel, ends)| (sel.id, stoat_text::cursor_offset(rope, ends[0], ends[1])))
             .collect();
         inserts.sort_by_key(|(id, offset)| (*offset, *id));
 

@@ -28,7 +28,7 @@ use std::{
     sync::Arc,
 };
 use stoat_config::{LineNumbers, WrapMode};
-use stoat_text::{cursor_offset, Bias, Point, Rope};
+use stoat_text::{cursor_offset, Anchor, Bias, Point, Rope};
 use stoatty_protocol::command::IconKind;
 use stoatty_widgets::{
     bar::Bar,
@@ -504,15 +504,28 @@ pub(crate) fn render_editor_with_overlay(
     // or dock, nothing downstream would draw it, so it is painted here.
     let delegates_cursor = scene.is_some();
     let rope = buffer_snapshot.rope();
-    for selection in editor.selections.all_anchors() {
-        let start_offset = buffer_snapshot.resolve_anchor(&selection.start);
-        let end_offset = buffer_snapshot.resolve_anchor(&selection.end);
-        let head_offset = buffer_snapshot.resolve_anchor(&selection.head());
-        let cursor = cursor_offset(
-            rope,
-            buffer_snapshot.resolve_anchor(&selection.tail()),
-            head_offset,
-        );
+    // Every selection's four endpoints in one walk. Per-anchor resolution
+    // descends the fragment tree from the root, so a few hundred cursors would
+    // otherwise cost a thousand descents on every frame painted.
+    let endpoints = {
+        let anchors: Vec<Anchor> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .flat_map(|sel| [sel.start, sel.end, sel.tail(), sel.head()])
+            .collect();
+        buffer_snapshot.resolve_anchors_batch(&anchors)
+    };
+    for (selection, ends) in editor
+        .selections
+        .all_anchors()
+        .iter()
+        .zip(endpoints.chunks_exact(4))
+    {
+        let &[start_offset, end_offset, tail_offset, head_offset] = ends else {
+            continue;
+        };
+        let cursor = cursor_offset(rope, tail_offset, head_offset);
 
         let lo = start_offset.max(visible.start);
         let hi = end_offset.min(visible.end);

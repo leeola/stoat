@@ -238,11 +238,37 @@ impl SelectionsCollection {
             !new_disjoint.is_empty(),
             "SelectionsCollection invariant: at least one selection"
         );
-        let mut indexed: Vec<(usize, Selection<Anchor>)> = new_disjoint
+        /// A selection alongside the offsets its anchors resolve to, so the
+        /// sort and the dedupe read a span already in hand rather than seeking
+        /// the fragment tree per comparison.
+        struct Resolved {
+            start: usize,
+            end: usize,
+            selection: Selection<Anchor>,
+        }
+
+        // Every endpoint in one pass. Resolving anchors one at a time descends
+        // from the root each time, which a few hundred cursors turn into
+        // thousands of descents on a keystroke. The batch is two sorted walks
+        // for the whole set, and returns results in input order.
+        let offsets = {
+            let anchors: Vec<Anchor> = new_disjoint
+                .iter()
+                .flat_map(|sel| [sel.start, sel.end])
+                .collect();
+            snapshot.resolve_anchors_batch(&anchors)
+        };
+
+        let mut indexed: Vec<Resolved> = new_disjoint
             .into_iter()
-            .map(|s| (snapshot.resolve_anchor(&s.start), s))
+            .zip(offsets.chunks_exact(2))
+            .map(|(selection, span)| Resolved {
+                start: span[0],
+                end: span[1],
+                selection,
+            })
             .collect();
-        indexed.sort_by_key(|(offset, sel)| (*offset, sel.id));
+        indexed.sort_by_key(|r| (r.start, r.selection.id));
 
         // Merge selections that resolve to the same span, keeping the
         // highest-id survivor. Under the min-width-1 model duplicate cursors
@@ -250,20 +276,20 @@ impl SelectionsCollection {
         // multi-cursor page motion landing every cursor on one row), so the
         // dedupe keys on the whole span, not just an empty offset. Sorted by
         // start offset, any duplicate is adjacent to its twin.
-        let mut deduped: Vec<Selection<Anchor>> = Vec::with_capacity(indexed.len());
-        for (offset, sel) in indexed {
+        let mut deduped: Vec<Resolved> = Vec::with_capacity(indexed.len());
+        for entry in indexed {
             if let Some(prev) = deduped.last_mut()
-                && snapshot.resolve_anchor(&prev.start) == offset
-                && snapshot.resolve_anchor(&prev.end) == snapshot.resolve_anchor(&sel.end)
+                && prev.start == entry.start
+                && prev.end == entry.end
             {
-                if sel.id > prev.id {
-                    *prev = sel;
+                if entry.selection.id > prev.selection.id {
+                    prev.selection = entry.selection;
                 }
                 continue;
             }
-            deduped.push(sel);
+            deduped.push(entry);
         }
-        self.disjoint = deduped;
+        self.disjoint = deduped.into_iter().map(|r| r.selection).collect();
     }
 }
 
@@ -585,6 +611,42 @@ mod tests {
             .map(|s| snapshot.resolve_anchor(&s.start))
             .collect();
         assert_eq!(offsets, vec![5]);
+    }
+
+    /// The collection is ordered by where each selection starts. A selection
+    /// enclosing another starts first but ends last, so the two endpoints
+    /// disagree about the order and only the start gives the documented one.
+    #[test]
+    fn replace_with_orders_by_start_not_end() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+
+        let span = |id: usize, start: usize, end: usize| Selection {
+            id,
+            start: snapshot.anchor_at(start, Bias::Right),
+            end: snapshot.anchor_at(end, Bias::Left),
+            reversed: false,
+            goal: SelectionGoal::None,
+        };
+        // Handed over end-first, so an unsorted result would keep that order.
+        collection.replace_with(vec![span(1, 2, 4), span(2, 0, 8)], &snapshot);
+
+        let spans: Vec<(usize, usize)> = collection
+            .all_anchors()
+            .iter()
+            .map(|s| {
+                (
+                    snapshot.resolve_anchor(&s.start),
+                    snapshot.resolve_anchor(&s.end),
+                )
+            })
+            .collect();
+        assert_eq!(
+            spans,
+            vec![(0, 8), (2, 4)],
+            "the enclosing selection sorts first because it starts first",
+        );
     }
 
     #[test]
