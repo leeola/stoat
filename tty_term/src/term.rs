@@ -195,6 +195,13 @@ pub struct Terminal {
     /// two buffers alternate roles and a steady-state projection allocates
     /// neither.
     footprint_scratch: Vec<bool>,
+    /// One projected row, reused across the rows of a projection.
+    ///
+    /// A scrolled frame projects each row here first so it can be compared
+    /// against what the grid already holds, and only rows that differ are
+    /// written back. Reusing it keeps that comparison from allocating a row per
+    /// row per frame.
+    row_scratch: Vec<Cell>,
     /// The inclusive viewport row span the selection covered at the previous
     /// [`Self::project`], so a growing or shrinking drag can damage the rows it
     /// entered or left and repaint their INVERSE overlay. `None` when there was
@@ -552,6 +559,7 @@ impl Terminal {
             decorations_dirty: DecorationDirty::default(),
             last_decoration_footprint: Vec::new(),
             footprint_scratch: Vec::new(),
+            row_scratch: Vec::new(),
             last_selection_span: None,
             decoration_damage: Vec::new(),
             last_history: 0,
@@ -1705,6 +1713,16 @@ impl Terminal {
         let offset = content.display_offset as i32;
         let selection = content.selection;
 
+        // Read before the projection below, which wants to know how far the
+        // content moved so it can slide the grid to match.
+        let history = self.term.history_size();
+        let grew = history.saturating_sub(self.last_history);
+        self.last_history = history;
+        // A non-zero display offset means the user has scrolled back: the
+        // viewport is pinned to its content as history grows, so report no
+        // scroll and leave the renderer's auto-scroll ease idle.
+        let scrolled = if offset > 0 { 0 } else { grew };
+
         // Repaint rows the selection entered or left since the last projection,
         // so its INVERSE overlay tracks a drag even on rows VT damage did not
         // touch. A `Damage::Full` frame already covers every row.
@@ -1723,31 +1741,59 @@ impl Terminal {
         }
         self.last_selection_span = span;
 
+        // A scroll damages the whole terminal even though the content only moved
+        // up. Sliding the grid by the same amount and then keeping the rows that
+        // come out identical turns that into damage naming the few rows that
+        // really changed, which is what lets the render passes reuse the rest.
+        //
+        // The slide is only a guess at how far the content moved, and nothing
+        // rests on it. Every row is still projected and compared, so a wrong
+        // guess marks every row dirty, which is what a full frame did anyway.
+        let sliding =
+            matches!(dirty, Damage::Full) && !resized && offset == 0 && grew > 0 && grew < rows;
+        if sliding {
+            grid.scroll_up(grew);
+            dirty = Damage::Partial(vec![false; rows]);
+        }
+
         // Visit only the rows damage marked, and read their cells straight from
         // the terminal grid rather than filtering the whole viewport per cell.
         // `display_iter` maps grid `line + offset` to viewport `row`. Inverting
         // it as `line = row - offset` yields the same cells and points.
         let term_grid = self.term.grid();
+        let mut projected = mem::take(&mut self.row_scratch);
         for row in 0..rows {
-            if !dirty.is_dirty(row) {
+            if !sliding && !dirty.is_dirty(row) {
                 continue;
             }
             let line = Line(row as i32 - offset);
             let source = &term_grid[line];
-            for col in 0..cols {
-                let point = Point::new(line, Column(col));
-                let cell = grid.get_mut(row, col);
-                *cell = project_cell(
+
+            projected.clear();
+            projected.extend((0..cols).map(|col| {
+                let mut cell = project_cell(
                     &source[Column(col)],
                     content.colors,
                     &self.theme,
                     &self.palette,
                 );
-                if selection.is_some_and(|s| s.contains(point)) {
+                if selection.is_some_and(|s| s.contains(Point::new(line, Column(col)))) {
                     cell.flags = cell.flags.toggle(Flags::INVERSE);
                 }
+                cell
+            }));
+
+            if sliding {
+                if grid.row(row) == projected.as_slice() {
+                    continue;
+                }
+                if let Damage::Partial(rows_dirty) = &mut dirty {
+                    rows_dirty[row] = true;
+                }
             }
+            grid.row_mut(row).copy_from_slice(&projected);
         }
+        self.row_scratch = projected;
 
         let cursor = project_cursor(content.cursor, offset);
 
@@ -1867,14 +1913,6 @@ impl Terminal {
         );
 
         self.decorations_dirty = DecorationDirty::default();
-
-        let history = self.term.history_size();
-        let grew = history.saturating_sub(self.last_history);
-        self.last_history = history;
-        // A non-zero display offset means the user has scrolled back: the
-        // viewport is pinned to its content as history grows, so report no
-        // scroll and leave the renderer's auto-scroll ease idle.
-        let scrolled = if offset > 0 { 0 } else { grew };
 
         self.term.reset_damage();
         (cursor, scrolled, dirty)
@@ -3014,8 +3052,8 @@ fn cube_channel(level: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApcScanner, Cursor, CursorShape, OscNotifyScanner, TermEvent, Terminal, XtVersionScanner,
-        MAX_OSC_NOTIFY_BYTES, XTVERSION_REPLY,
+        ApcScanner, Cursor, CursorShape, Damage, OscNotifyScanner, TermEvent, Terminal,
+        XtVersionScanner, MAX_OSC_NOTIFY_BYTES, XTVERSION_REPLY,
     };
     use crate::{
         grid::{
@@ -3723,6 +3761,63 @@ mod tests {
         // A projection with no new output reports no scroll.
         let (_, scrolled, _) = terminal.project(&mut grid);
         assert_eq!(scrolled, 0, "no further scroll");
+    }
+
+    /// A line of output damages the whole terminal, but the screen only moved
+    /// up, so the projection has to come back naming the rows that actually
+    /// differ rather than all of them.
+    #[test]
+    fn a_scroll_reports_only_the_rows_that_changed() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        let mut grid = Grid::new(4, 8);
+
+        terminal.advance(b"aaa\r\nbbb\r\nccc\r\nddd");
+        terminal.project(&mut grid);
+
+        // One more line scrolls the screen up by one. Rows zero to two now
+        // hold what rows one to three held, and only the bottom row is new.
+        terminal.advance(b"\r\neee");
+        let (_, scrolled, damage) = terminal.project(&mut grid);
+
+        assert_eq!(scrolled, 1, "the screen moved up by one row");
+        let Damage::Partial(rows) = damage else {
+            panic!("a scroll must not report the whole screen damaged");
+        };
+        assert_eq!(
+            rows,
+            vec![false, false, false, true],
+            "only the row the scroll exposed is rewritten",
+        );
+
+        let row_text = |row: usize| grid.row(row).iter().map(|cell| cell.ch).collect::<String>();
+        assert_eq!(
+            row_text(0),
+            "bbb     ",
+            "the slide moved row one to row zero"
+        );
+        assert_eq!(row_text(3), "eee     ", "the new row holds the new output");
+    }
+
+    /// While scrolled back the viewport is pinned to its content as history
+    /// grows, so there is no slide to make and the projection stays as it was.
+    #[test]
+    fn a_scroll_while_scrolled_back_still_reports_full_damage() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+
+        terminal.advance(b"a\r\nb\r\nc\r\nd");
+        terminal.project(&mut grid);
+        terminal.scroll_display(1);
+        terminal.project(&mut grid);
+
+        terminal.advance(b"\r\ne");
+        let (_, scrolled, damage) = terminal.project(&mut grid);
+
+        assert_eq!(scrolled, 0, "a pinned viewport reports no scroll");
+        assert!(
+            matches!(damage, Damage::Full),
+            "and takes the unchanged full-projection path",
+        );
     }
 
     #[test]

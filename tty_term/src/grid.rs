@@ -154,6 +154,26 @@ impl Grid {
         &mut self.cells[row * self.cols..(row + 1) * self.cols]
     }
 
+    /// Move every row up by `rows`, blanking the rows that leaves at the bottom.
+    ///
+    /// A terminal scroll moves the screen's content without changing it, so a
+    /// projector can slide the grid to match and then rewrite only the rows that
+    /// really differ. Sliding by at least the height keeps nothing and blanks
+    /// the grid.
+    pub fn scroll_up(&mut self, rows: usize) {
+        if rows == 0 {
+            return;
+        }
+        if rows >= self.rows {
+            self.cells.fill(Cell::default());
+            return;
+        }
+
+        self.cells.rotate_left(rows * self.cols);
+        let kept = (self.rows - rows) * self.cols;
+        self.cells[kept..].fill(Cell::default());
+    }
+
     /// Resize to `rows` by `cols`, resetting every cell to [`Cell::default`].
     ///
     /// Content is not preserved; the driver repopulates the grid afterward.
@@ -1098,6 +1118,47 @@ mod tests {
         Bar, Cell, Flags, Grid, Icon, IconKind, Overlay, PagePool, Rgb, Scale, ScrollRegion,
         TextRun,
     };
+
+    /// The rows the slide vacates have to come back blank rather than holding
+    /// what the rows above them held, since a projector then rewrites only what
+    /// it finds different.
+    #[test]
+    fn scrolling_up_moves_rows_and_blanks_the_tail() {
+        let mut grid = Grid::new(4, 2);
+        for row in 0..4 {
+            for col in 0..2 {
+                grid.get_mut(row, col).ch = char::from(b'a' + (row * 2 + col) as u8);
+            }
+        }
+
+        grid.scroll_up(1);
+
+        let row_text =
+            |grid: &Grid, row: usize| grid.row(row).iter().map(|cell| cell.ch).collect::<String>();
+        assert_eq!(row_text(&grid, 0), "cd", "row one moved up to row zero");
+        assert_eq!(row_text(&grid, 2), "gh", "row three moved up to row two");
+        assert_eq!(
+            grid.row(3),
+            &[Cell::default(), Cell::default()],
+            "the row the slide vacated is blank",
+        );
+    }
+
+    /// A slide of at least the height leaves nothing that was on screen, so
+    /// every row blanks rather than wrapping around.
+    #[test]
+    fn scrolling_up_past_the_height_blanks_every_row() {
+        let mut grid = Grid::new(2, 2);
+        grid.get_mut(0, 0).ch = 'x';
+        grid.get_mut(1, 1).ch = 'y';
+
+        grid.scroll_up(2);
+
+        assert!(
+            (0..2).all(|row| grid.row(row) == [Cell::default(), Cell::default()]),
+            "nothing survives a slide of the whole screen",
+        );
+    }
 
     #[test]
     fn draw_colors_swaps_only_under_inverse() {
