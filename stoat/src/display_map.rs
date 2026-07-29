@@ -779,6 +779,17 @@ impl DisplayMap {
         self.snapshot_with_companion(None)
     }
 
+    /// The buffer as it stands now, without syncing the display layers.
+    ///
+    /// For a caller whose question is buffer-level -- where an anchor resolves,
+    /// how many lines there are -- and so needs none of the fold, wrap, or block
+    /// mapping a [`DisplaySnapshot`] carries. Costs a few refcount bumps against
+    /// [`Self::snapshot`]'s wrap sync, and answers about the current buffer
+    /// rather than the one the display layers were last synced against.
+    pub fn buffer_snapshot(&self) -> MultiBufferSnapshot {
+        self.multi_buffer.snapshot()
+    }
+
     pub fn snapshot_with_companion(
         &mut self,
         companion_wrap_data: Option<(&WrapSnapshot, &Patch<u32>)>,

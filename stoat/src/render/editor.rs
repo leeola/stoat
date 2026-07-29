@@ -28,7 +28,7 @@ use std::{
     sync::Arc,
 };
 use stoat_config::{LineNumbers, WrapMode};
-use stoat_text::{cursor_offset, Bias, Rope};
+use stoat_text::{cursor_offset, Bias, Point, Rope};
 use stoatty_protocol::command::IconKind;
 use stoatty_widgets::{
     bar::Bar,
@@ -134,16 +134,18 @@ pub(crate) fn render_editor_with_overlay(
         return;
     }
 
-    // A first snapshot drives the gutter measurement and the wrap-width
-    // decision. Its buffer-level facts (line count, cursor line, diagnostics)
-    // are wrap-independent, so the width is resolved and stamped here before the
-    // wrapped snapshot the gutter and text paint from is taken below.
-    let snapshot = editor.display_map.snapshot();
-
+    // The gutter measurement and the wrap-width decision ask only buffer-level
+    // questions, so they run off a buffer snapshot. A display snapshot taken
+    // here would be wasted work, since set_wrap_width below invalidates it and
+    // the one the gutter and text paint from re-syncs the wrap from scratch.
     let rich_gutter_colors = resolve_rich_gutter(theme, fallback_style);
     let gutter_is_rich = scene.is_some() && rich_gutter_colors.is_some();
     let measured_gutter_w = if line_numbers != LineNumbers::Off {
-        measure_gutter_width(&snapshot, gutter_is_rich)
+        let buffer = editor.display_map.buffer_snapshot();
+        measure_gutter_width(
+            gutter_digits(buffer.line_count(), buffer.rope().max_point()),
+            gutter_is_rich,
+        )
     } else {
         match diagnostic_info {
             Some((path, set, _)) if !set.get(path).is_empty() => 1,
@@ -1122,27 +1124,36 @@ pub(crate) fn gutter_geometry(
     (folded, gutter_width_digits(snapshot))
 }
 
-/// The digit width the gutter reserves for `snapshot`'s line numbers, at least
+/// [`gutter_digits`] for a snapshot the caller already holds.
+fn gutter_width_digits(snapshot: &DisplaySnapshot) -> u16 {
+    gutter_digits(
+        snapshot.buffer_line_count(),
+        snapshot.buffer_snapshot().rope().max_point(),
+    )
+}
+
+/// The digit width the gutter reserves for a buffer's line numbers, at least
 /// two.
 ///
 /// A trailing newline leaves an empty final line the min-width-1 cursor cannot
 /// reach, so it is rendering padding rather than a line and never widens the
-/// gutter. Counts only buffer lines, never wrap or block rows, so it can be
-/// measured before the wrapped snapshot is taken.
-fn gutter_width_digits(snapshot: &DisplaySnapshot) -> u16 {
-    let max = snapshot.buffer_snapshot().rope().max_point();
-    let phantom = max.row > 0 && max.column == 0;
-    decimal_digits(snapshot.buffer_line_count() - phantom as u32).max(2)
+/// gutter. `max_point` is what identifies it.
+///
+/// Both inputs are buffer facts, never wrap or block rows, which is what lets
+/// the paint size the gutter and resolve the wrap width before the display
+/// snapshot they would otherwise be read from exists.
+fn gutter_digits(line_count: u32, max_point: Point) -> u16 {
+    let phantom = max_point.row > 0 && max_point.column == 0;
+    decimal_digits(line_count - phantom as u32).max(2)
 }
 
 /// The cell columns the line-number gutter reserves, measured without painting.
 ///
 /// `rich` selects the sub-cell [`Gutter::cell_width`] layout. The degraded
 /// gutter instead reserves a mark column, the digits, and a gap. The result
-/// matches what [`draw_line_number_gutter`] paints for the same snapshot, so the
-/// wrap width can be resolved before the wrapped snapshot exists.
-fn measure_gutter_width(snapshot: &DisplaySnapshot, rich: bool) -> u16 {
-    let width_digits = gutter_width_digits(snapshot);
+/// matches what [`draw_line_number_gutter`] paints for the same digit count, so
+/// the wrap width can be resolved before the wrapped snapshot exists.
+fn measure_gutter_width(width_digits: u16, rich: bool) -> u16 {
     if rich {
         rich_gutter(&[], width_digits, [0; 3], [0; 3], [0; 3]).cell_width()
     } else {
@@ -2061,18 +2072,24 @@ fn visible_byte_range(
     row_offset(scroll_row)..row_offset(end_row)
 }
 
-pub(crate) fn editor_cursor_position(editor: &mut EditorState) -> Option<(u32, u32)> {
+/// The 1-based line and column of `editor`'s newest cursor, or `None` for a
+/// review view, which has no single cursor to report.
+///
+/// Reads the buffer rather than a display snapshot. Where an anchor lands and
+/// what row an offset is on are buffer facts, so the fold, wrap, and block
+/// mapping a display snapshot would sync are all beside the point. That matters
+/// because this runs per pane per frame from the status bar.
+pub(crate) fn editor_cursor_position(editor: &EditorState) -> Option<(u32, u32)> {
     if editor.review_view.is_some() {
         return None;
     }
-    let snapshot = editor.display_map.snapshot();
-    let buffer_snapshot = snapshot.buffer_snapshot();
+    let buffer = editor.display_map.buffer_snapshot();
     let sel = editor.selections.newest_anchor();
-    let rope = buffer_snapshot.rope();
+    let rope = buffer.rope();
     let cursor = cursor_offset(
         rope,
-        buffer_snapshot.resolve_anchor(&sel.tail()),
-        buffer_snapshot.resolve_anchor(&sel.head()),
+        buffer.resolve_anchor(&sel.tail()),
+        buffer.resolve_anchor(&sel.head()),
     );
     let point = rope.offset_to_point(cursor);
     Some((point.row + 1, point.column + 1))
@@ -2384,9 +2401,55 @@ mod tests {
             "120 lines need three digits",
         );
         assert_eq!(
-            super::measure_gutter_width(&snapshot, false),
+            super::measure_gutter_width(super::gutter_width_digits(&snapshot), false),
             editor.gutter_width,
             "the measured fallback width matches the painted gutter",
+        );
+    }
+
+    /// The paint sizes the gutter from a buffer snapshot rather than a display
+    /// one, which is what lets it take a single snapshot per frame. That only
+    /// works if the buffer it reads is the current one, so an edit crossing a
+    /// digit boundary has to widen the gutter on the very next frame.
+    #[test]
+    fn the_gutter_widens_on_the_frame_an_edit_adds_a_digit() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/gutter-digits");
+        let path = root.join("a.txt");
+        let body: String = (0..99).map(|i| format!("line {i}\n")).collect();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        rendered_gutter(&mut h.stoat, true, false, LineNumbers::Absolute, 6);
+        let narrow = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .gutter_width;
+
+        // 99 lines plus the trailing newline's phantom line still fit in two
+        // digits. One more line does not.
+        let (_, buffer_id) = h.stoat.focused_editor_ids().expect("a focused editor");
+        {
+            let buffer = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer");
+            let mut guard = buffer.write().expect("poisoned");
+            let end = guard.snapshot.visible_text.len();
+            guard.edit(end..end, "line 99\n");
+        }
+
+        rendered_gutter(&mut h.stoat, true, false, LineNumbers::Absolute, 6);
+        let wide = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .gutter_width;
+        assert_eq!(
+            wide,
+            narrow + 1,
+            "the hundredth line widens the gutter by its extra digit",
         );
     }
 
