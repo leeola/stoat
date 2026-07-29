@@ -394,7 +394,7 @@ impl MinimapContent {
                 .min(self.built_upto);
             let from = from.min(end);
             let to = from.saturating_add(RESYNC_CHUNK).min(end);
-            self.resync_chunk(new_rope, from..to, &tokens_for, &marks);
+            self.resync_chunk(new_rope, from..to, &tokens_for);
             if to >= end {
                 self.resync_upto = None;
                 self.synced_syntax_version = self.resync_target;
@@ -404,8 +404,9 @@ impl MinimapContent {
         }
 
         // A diff or diagnostic change re-checks every built line's edge mark,
-        // independent of the content sweep. A row the sweep just re-summarized
-        // already carries the current edge, so resync_edges skips it.
+        // independent of the content sweep. The sweep above paints the marks as
+        // of the last decoration sync, so a row whose mark this bump moves is
+        // re-spliced here even when the sweep just touched it.
         if versions.decoration != self.synced_decoration_version {
             self.resync_edges(new_rope, &tokens_for, &marks);
             self.synced_decoration_version = versions.decoration;
@@ -418,23 +419,26 @@ impl MinimapContent {
     ///
     /// A recolor can touch any line, so the caller sweeps the whole built range
     /// one [`RESYNC_CHUNK`] at a time across successive syncs rather than in one.
+    ///
+    /// Each row keeps the mark it already carries, read from the stored index
+    /// rather than resolved again. A recolor cannot move a mark, and asking the
+    /// source would cost a seek per line of the file for an answer it already
+    /// holds. A decoration bump landing in the same sync makes those marks one
+    /// version stale, which [`Self::resync_edges`] corrects immediately after.
     fn resync_chunk(
         &mut self,
         new_rope: &Rope,
         range: Range<u32>,
         tokens_for: &impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
-        marks: &impl EdgeSource,
     ) {
         let tokens = tokens_for(range.clone());
         let mut text = String::new();
         for row in range {
-            let edge = marks.edge_of(row);
             write_line_text(new_rope, row, &mut text);
-            let summary = summarize_line(&text, row_tokens(&tokens, row), edge);
+            let summary = summarize_line(&text, row_tokens(&tokens, row), self.edge_at(row));
             if self.lines[row as usize] == summary {
                 continue;
             }
-            self.set_edge(row, edge);
             self.replace_line(row, summary);
         }
     }
@@ -2194,6 +2198,49 @@ mod tests {
             splices[0].lines[0],
             vec![run(2, 5, 0)],
             "line 0 goes monochrome"
+        );
+    }
+
+    /// A recolor cannot move a mark, so the sweep takes each row's from the
+    /// store rather than paying a seek per line to resolve it again. The rows
+    /// still have to come out marked, since reading nothing would silently
+    /// strip the lane off every line a recolor touched.
+    #[test]
+    fn a_recolor_sweep_keeps_the_marks_without_asking_for_them() {
+        let text = rope("alpha\nbravo");
+        let mut content = MinimapContent::new(1);
+        let asked = RefCell::new(Vec::new());
+        let source = RecordingEdges {
+            marked: &[1],
+            asked: &asked,
+        };
+
+        content.sync(&text, 1, &Patch::empty(), versions(0, 1), no_tokens, source);
+        let _ = content.take_queued();
+        asked.borrow_mut().clear();
+
+        // The buffer and the marks stand still, only the coloring moves.
+        content.sync(&text, 1, &Patch::empty(), versions(0, 2), color(2), source);
+
+        assert!(
+            asked.borrow().is_empty(),
+            "a recolor resolves no marks, got {:?}",
+            asked.borrow(),
+        );
+
+        let splices = content.take_queued();
+        assert_eq!(
+            splices.iter().map(|s| s.start).collect::<Vec<_>>(),
+            vec![0],
+            "both rows recolor, so they coalesce into one splice",
+        );
+        assert_eq!(
+            splices[0].lines,
+            vec![
+                summarize_line("alpha", &[tok(0..4, 2)], None),
+                summarize_line("bravo", &[tok(0..4, 2)], Some(40)),
+            ],
+            "the marked row keeps its lane through the recolor",
         );
     }
 
