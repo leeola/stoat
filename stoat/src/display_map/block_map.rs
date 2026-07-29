@@ -1422,7 +1422,7 @@ impl BlockSnapshot {
 }
 
 fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
-    blocks.sort_unstable_by(|(a, _), (b, _)| {
+    blocks.sort_unstable_by(|(a, block_a), (b, block_b)| {
         a.start_wrap_row()
             .cmp(&b.start_wrap_row())
             .then_with(|| {
@@ -1447,17 +1447,44 @@ fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
                 }
                 tie(a).cmp(&tie(b))
             })
+            // Everything above can tie, and `sort_unstable_by` is free to order
+            // ties either way, so the same set of blocks could render in a
+            // different order on any rebuild. What is left to separate two
+            // blocks is which block each one is.
+            .then_with(|| kind_rank(block_a).cmp(&kind_rank(block_b)))
+            .then_with(|| match (block_a, block_b) {
+                // Ids are minted in insertion order, so blocks left equal by
+                // priority render in the order they were added.
+                (Block::Custom(a), Block::Custom(b)) => {
+                    Ord::cmp(&a.priority, &b.priority).then_with(|| Ord::cmp(&a.id, &b.id))
+                },
+                (Block::Spacer { id: a, .. }, Block::Spacer { id: b, .. }) => Ord::cmp(a, b),
+                (
+                    Block::ExcerptBoundary { excerpt: a, .. }
+                    | Block::BufferHeader { excerpt: a, .. }
+                    | Block::FoldedBuffer {
+                        first_excerpt: a, ..
+                    },
+                    Block::ExcerptBoundary { excerpt: b, .. }
+                    | Block::BufferHeader { excerpt: b, .. }
+                    | Block::FoldedBuffer {
+                        first_excerpt: b, ..
+                    },
+                ) => Ord::cmp(&a.id, &b.id),
+                // Blocks of different kinds were already separated by rank.
+                _ => Ordering::Equal,
+            })
     });
 
     blocks.dedup_by(|right, left| match (&mut left.0, &right.0) {
+        // Near is left out. It attaches beside a row rather than occupying one,
+        // and a replaced range stands for the rows it replaces.
         (
             ResolvedPlacement::Replace {
                 start: left_start,
                 end: left_end,
             },
-            ResolvedPlacement::Above(row)
-            | ResolvedPlacement::Below(row)
-            | ResolvedPlacement::Near(row),
+            ResolvedPlacement::Above(row) | ResolvedPlacement::Below(row),
         ) => *row >= *left_start && *row <= *left_end,
         (
             ResolvedPlacement::Replace { end: left_end, .. },
@@ -1471,6 +1498,21 @@ fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
         },
         _ => false,
     });
+}
+
+/// Which kind of block goes first when two land on the same row with the same
+/// placement.
+///
+/// Structural blocks rank ahead of decorative ones, so a header stays at the top
+/// of its excerpt whatever else was spliced onto the row.
+fn kind_rank(block: &Block) -> u8 {
+    match block {
+        Block::FoldedBuffer { .. } => 0,
+        Block::BufferHeader { .. } => 1,
+        Block::ExcerptBoundary { .. } => 2,
+        Block::Spacer { .. } => 3,
+        Block::Custom(_) => 4,
+    }
 }
 
 fn resolve_block_placement(
@@ -2611,6 +2653,67 @@ mod tests {
             BlockRowKind::BufferRow { buffer_row } => assert_eq!(buffer_row, 4),
             _ => panic!("expected buffer row"),
         }
+    }
+
+    /// The sort is unstable, so blocks landing on one row with the same
+    /// placement render in whatever order it happened to leave them unless the
+    /// comparator separates them itself.
+    #[test]
+    fn blocks_sharing_a_row_render_in_one_settled_order() {
+        let rendered = |props: &[BlockProperties]| -> Vec<String> {
+            let snapshot = create_block_snapshot("line0\nline1", props);
+            (0..snapshot.total_lines())
+                .map(|row| snapshot.display_line(row))
+                .collect()
+        };
+
+        let mut props: Vec<BlockProperties> = [("first", 5), ("second", 3), ("third", 1)]
+            .iter()
+            .map(|(text, priority)| {
+                let mut block = text_block(BlockPlacement::Below(0), text);
+                block.priority = *priority;
+                block
+            })
+            .collect();
+
+        let by_priority = vec!["line0", "third", "second", "first", "line1"];
+        assert_eq!(rendered(&props), by_priority);
+
+        // The same blocks handed over in the opposite order land the same way,
+        // which holds only if the comparator settled it rather than the sort.
+        props.reverse();
+        assert_eq!(rendered(&props), by_priority, "priority outranks insertion");
+
+        // Blocks left equal by priority fall back to the order they arrived in,
+        // since ids are minted as they are inserted.
+        let tied: Vec<BlockProperties> = ["alpha", "beta"]
+            .iter()
+            .map(|text| text_block(BlockPlacement::Below(0), text))
+            .collect();
+        assert_eq!(
+            rendered(&tied),
+            vec!["line0", "alpha", "beta", "line1"],
+            "an equal priority leaves insertion order deciding",
+        );
+    }
+
+    /// A replaced range stands for the rows it replaces. A `Near` block is
+    /// attached beside a row rather than occupying one, so it outlives the
+    /// replacement the way it outlives the row itself.
+    #[test]
+    fn a_near_block_survives_a_replacement_over_its_row() {
+        // Near resolves a row past the one it names, so this lands inside the
+        // replaced span rather than beyond it.
+        let blocks = vec![
+            text_block(BlockPlacement::Replace { start: 1, end: 3 }, "replacement"),
+            text_block(BlockPlacement::Near(1), "near-block"),
+        ];
+        let snapshot = create_block_snapshot("line0\nline1\nline2\nline3\nline4", &blocks);
+
+        let rows: Vec<String> = (0..snapshot.total_lines())
+            .map(|row| snapshot.display_line(row))
+            .collect();
+        assert_eq!(rows, vec!["line0", "replacement", "near-block", "line4"]);
     }
 
     #[test]
