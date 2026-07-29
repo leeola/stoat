@@ -127,6 +127,7 @@ fn grid_glyph_blends_over_the_framebuffer_not_an_assumed_bg() {
             },
             damage: &Damage::Full,
             decoration_damage: &Damage::Partial(Vec::new()),
+            scrolled_rows: 0,
         },
     );
 

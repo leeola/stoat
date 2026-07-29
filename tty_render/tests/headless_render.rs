@@ -217,6 +217,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             },
             damage: &Damage::Full,
             decoration_damage: &Damage::Partial(Vec::new()),
+            scrolled_rows: 0,
         },
     );
 }

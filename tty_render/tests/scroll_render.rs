@@ -95,6 +95,7 @@ fn grid_scroll_moves_glyph_down_without_rebuild() {
         },
         damage,
         decoration_damage: &no_decoration,
+        scrolled_rows: 0,
     };
 
     // First frame builds the instances at row 0.
@@ -202,6 +203,7 @@ fn document_scroll_shifts_the_grid_like_grid_scroll() {
         },
         damage,
         decoration_damage: &no_decoration,
+        scrolled_rows: 0,
     };
 
     // The document offset rides the same globals as the grid offset, so a

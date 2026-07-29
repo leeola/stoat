@@ -120,6 +120,7 @@ fn pool_decorations_composite_and_glide_with_the_shift() {
             },
             damage: &Damage::Full,
             decoration_damage: &no_decoration,
+            scrolled_rows: 0,
         };
         renderer.render_into(&device, &queue, &view, &base, plain);
         renderer.composite_pool(&device, &queue, &view, &pool, &[], full, shift, true, true);

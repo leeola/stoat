@@ -114,6 +114,7 @@ fn render_panel(build: impl FnOnce(usize, usize) -> Panel) -> Option<Rendered> {
             },
             damage: &Damage::Full,
             decoration_damage: &Damage::Partial(Vec::new()),
+            scrolled_rows: 0,
         },
     );
 

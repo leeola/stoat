@@ -152,6 +152,7 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
             },
             damage: &Damage::Full,
             decoration_damage: &Damage::Partial(Vec::new()),
+            scrolled_rows: 0,
         };
         renderer.render_into(&device, &queue, &view, &grid, frame);
         read_back(&device, &queue, &target, width, height)
@@ -294,6 +295,7 @@ fn a_box_occludes_the_pool_composite_beneath_it() {
                 },
                 damage: &Damage::Full,
                 decoration_damage: &Damage::Partial(Vec::new()),
+                scrolled_rows: 0,
             },
         );
     };

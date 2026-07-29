@@ -3887,6 +3887,7 @@ mod tests {
                 },
                 damage: idle,
                 decoration_damage: idle,
+                scrolled_rows: 0,
             }
         }
 
@@ -4033,6 +4034,7 @@ mod tests {
             },
             damage,
             decoration_damage: &idle_damage,
+            scrolled_rows: 0,
         };
 
         // Warm the cache and atlas.
@@ -4080,6 +4082,7 @@ mod tests {
             scroll,
             damage,
             decoration_damage: &idle_damage,
+            scrolled_rows: 0,
         };
         let no_scroll = Scroll {
             grid: 0.0,

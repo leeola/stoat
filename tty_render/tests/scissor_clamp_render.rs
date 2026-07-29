@@ -99,6 +99,7 @@ fn oversized_scissors_are_clamped_not_validated() {
             },
             damage: &Damage::Full,
             decoration_damage: &no_decoration,
+            scrolled_rows: 0,
         },
     );
     renderer.composite_pool(

@@ -1515,6 +1515,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                 },
                                 damage: &sb_damage,
                                 decoration_damage: &sb_damage,
+                                scrolled_rows: 0,
                             },
                         );
                         false
@@ -1550,6 +1551,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                 },
                                 damage: &damage,
                                 decoration_damage: &decoration_damage,
+                                scrolled_rows: 0,
                             },
                         );
                         easing
@@ -1673,6 +1675,7 @@ impl ApplicationHandler<PtyEvent> for App {
                             },
                             damage: &damage,
                             decoration_damage: &decoration_damage,
+                            scrolled_rows: 0,
                         },
                         &composites,
                         cursor_scissor,
@@ -2690,6 +2693,7 @@ fn redraw_aux(
             },
             damage: &damage,
             decoration_damage: &damage,
+            scrolled_rows: 0,
         },
         &composites,
         None,

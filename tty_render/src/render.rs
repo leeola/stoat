@@ -71,6 +71,13 @@ pub struct Frame<'a> {
     /// [`Self::damage`]. The cell-decoration passes gate their per-row rebuilds
     /// on it so an unchanged decoration is not re-uploaded every frame.
     pub decoration_damage: &'a Damage,
+    /// Rows the grid's content scrolled up by since the previous frame.
+    ///
+    /// A scroll moves every row's content without changing most of it, so the
+    /// passes that cache per row slide those caches by this instead of
+    /// rebuilding them. Zero for a frame that did not scroll, and for any grid
+    /// whose caller does not track it.
+    pub scrolled_rows: usize,
 }
 
 /// Cell layout metrics in physical pixels, derived from the configured logical

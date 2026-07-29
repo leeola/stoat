@@ -102,6 +102,7 @@ fn pool_composite_keeps_live_instances() {
         },
         damage,
         decoration_damage: &no_decoration,
+        scrolled_rows: 0,
     };
 
     // A full live frame establishes the cached instances.
@@ -238,6 +239,7 @@ fn shift_only_composite_reuses_prior_rows() {
         },
         damage,
         decoration_damage: &no_decoration,
+        scrolled_rows: 0,
     };
     let full_surface = [0, 0, width, height];
 
@@ -421,6 +423,7 @@ fn pool_grow_heals_live_instances() {
         },
         damage,
         decoration_damage: &no_decoration,
+        scrolled_rows: 0,
     };
 
     renderer.render_into(&device, &queue, &view, &live, frame(&Damage::Full));

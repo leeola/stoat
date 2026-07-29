@@ -92,6 +92,7 @@ fn timestamp_queries_yield_a_nonzero_gpu_duration() {
                 },
                 damage: &full,
                 decoration_damage: &empty,
+                scrolled_rows: 0,
             },
         );
         let _ = device.poll(PollType::wait_indefinitely());
