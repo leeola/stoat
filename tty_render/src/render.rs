@@ -186,9 +186,14 @@ pub(crate) fn rotate_row_cache<T>(cache: &mut [Vec<T>], by: isize, mut repair: i
     }
 }
 
-/// One occluder per panel, in declaration order.
-pub(crate) fn build_occluders(panels: &[Panel]) -> Vec<Occluder> {
-    panels.iter().map(panel_occluder).collect()
+/// Build into `out` one occluder per panel, in declaration order.
+///
+/// Every pass that occludes reads the same list off the same panels, so a frame
+/// builds it once and lends it around. `out` is cleared first, so the frame's
+/// scratch holds only this frame's panels.
+pub(crate) fn build_occluders_into(panels: &[Panel], out: &mut Vec<Occluder>) {
+    out.clear();
+    out.extend(panels.iter().map(panel_occluder));
 }
 
 /// The occluders a pool composite uploads, given the panels on the live grid.

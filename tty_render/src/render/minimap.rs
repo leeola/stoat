@@ -10,7 +10,7 @@
 //! ([`minimap_top`], [`thumb_geometry`], [`build_strip`]) is unit-tested without a
 //! GPU.
 
-use crate::render::{build_occluders, CellMetrics, Occluder};
+use crate::render::{CellMetrics, Occluder};
 use bytemuck::{Pod, Zeroable};
 use stoatty_protocol::command::{LineSummary, MinimapCommand};
 use stoatty_term::grid::{Grid, Minimap, MinimapView};
@@ -214,15 +214,24 @@ impl MinimapPass {
     /// each strip's visible line slice. Reallocates a buffer only when its count
     /// outgrows the current capacity.
     ///
+    /// `occluders` are the live panels' rects, built once per frame and shared
+    /// with the other passes that occlude.
+    ///
     /// The panel occluders and the globals uniform are rewritten every frame,
     /// since panels move independently of the strips. The strip instances rebuild
     /// only when the grid's minimap epoch or the resolution changed. The epoch
     /// bumps whenever the projection re-applies the strip list or their content
     /// ([`Grid::minimap_epoch`]), so an unchanged epoch means the strips would
     /// build byte-for-byte identically, and the reused buffer still holds.
-    pub fn prepare(&mut self, device: &Device, queue: &Queue, grid: &Grid, resolution: [f32; 2]) {
-        let occluders = build_occluders(grid.panels());
-        self.upload_occluders(device, queue, &occluders);
+    pub(crate) fn prepare(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        occluders: &[Occluder],
+        resolution: [f32; 2],
+    ) {
+        self.upload_occluders(device, queue, occluders);
 
         let globals = Globals {
             resolution,
@@ -689,20 +698,20 @@ mod tests {
         )]));
 
         let resolution = [640.0, 480.0];
-        pass.prepare(&device, &queue, &grid, resolution);
+        pass.prepare(&device, &queue, &grid, &[], resolution);
         assert_eq!(pass.strips.len(), 1, "the declared strip builds one draw");
 
         // set_minimaps outside projection does not bump the epoch, so a grid
         // change the epoch does not reflect is skipped and the prior strips stay.
         grid.set_minimaps(Vec::new());
-        pass.prepare(&device, &queue, &grid, resolution);
+        pass.prepare(&device, &queue, &grid, &[], resolution);
         assert_eq!(
             pass.strips.len(),
             1,
             "an unchanged epoch skips the rebuild and keeps the prior strips"
         );
 
-        pass.prepare(&device, &queue, &grid, [800.0, 600.0]);
+        pass.prepare(&device, &queue, &grid, &[], [800.0, 600.0]);
         assert!(
             pass.strips.is_empty(),
             "a resolution change rebuilds the strips against the current grid"

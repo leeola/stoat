@@ -10,7 +10,7 @@
 
 use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
-    render::{build_occluders, occlusion_globals, pool_occluders, CellMetrics, Frame, Occluder},
+    render::{occlusion_globals, pool_occluders, CellMetrics, Frame, Occluder},
 };
 use bytemuck::{Pod, Zeroable};
 use cosmic_text::{
@@ -757,18 +757,22 @@ impl TextPass {
     /// `scroll.region`, clipped to the region by the scissor
     /// [`Self::draw_region_text`] applies, so the region scrolls independently.
     ///
+    /// `occluders` are the live panels' rects, built once per frame and shared
+    /// with the other passes that occlude.
+    ///
     /// Runs in two phases: every visible glyph is rasterized first (which may
     /// grow the atlas), then each glyph's atlas sub-rect is read once the atlas
     /// has reached its final size, so normalized coordinates stay valid.
     /// Reallocates the instance buffer only when the glyph count outgrows the
     /// current capacity.
-    pub fn prepare(
+    pub(crate) fn prepare(
         &mut self,
         device: &Device,
         queue: &Queue,
         grid: &Grid,
         resolution: [f32; 2],
         frame: &Frame<'_>,
+        occluders: &[Occluder],
     ) {
         let cursor = frame.cursor;
         let scroll = frame.scroll;
@@ -780,8 +784,7 @@ impl TextPass {
         // Upload one occluder per live panel, shared by the three globals bind
         // groups. Only the static globals carry a non-zero panel count, so only
         // the screen-anchored text-run draws occlude against these.
-        let occluders = build_occluders(grid.panels());
-        self.upload_occluders(device, queue, &occluders);
+        self.upload_occluders(device, queue, occluders);
         let panel_count = occluders.len() as u32;
 
         // Write each globals buffer with its own scroll: grid scroll for the
@@ -3974,7 +3977,14 @@ mod tests {
         // slides up and only the last row is new.
         let mut grid = Grid::new(rows, 20);
         fill(&mut grid, rows, &lines, 0);
-        pass.prepare(&device, &queue, &grid, resolution, &frame(&Damage::Full, 0));
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            resolution,
+            &frame(&Damage::Full, 0),
+            &[],
+        );
 
         let mut scrolled = Grid::new(rows, 20);
         fill(&mut scrolled, rows, &lines, 1);
@@ -3986,6 +3996,7 @@ mod tests {
             &scrolled,
             resolution,
             &frame(&Damage::Partial(last_row_only), 1),
+            &[],
         );
         let rotated = pass.collect_grid_glyphs();
 
@@ -3999,6 +4010,7 @@ mod tests {
             &scrolled,
             resolution,
             &frame(&Damage::Full, 0),
+            &[],
         );
         let fresh = fresh_pass.collect_grid_glyphs();
 
@@ -4056,7 +4068,14 @@ mod tests {
             }
         }
 
-        pass.prepare(&device, &queue, &grid, resolution, &frame(&idle, &[0.0]));
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            resolution,
+            &frame(&idle, &[0.0]),
+            &[],
+        );
         assert_eq!(
             pass.overlay_count, 2,
             "one two-glyph overlay builds two instances"
@@ -4068,14 +4087,28 @@ mod tests {
         );
         let scissor = pass.overlay_draws[0].scissor;
 
-        pass.prepare(&device, &queue, &grid, resolution, &frame(&idle, &[0.0]));
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            resolution,
+            &frame(&idle, &[0.0]),
+            &[],
+        );
         assert_eq!(
             pass.overlay_count, 2,
             "an unchanged frame reuses the cached bases"
         );
         assert_eq!(pass.overlay_draws.len(), 1);
 
-        pass.prepare(&device, &queue, &grid, resolution, &frame(&idle, &[5.0]));
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            resolution,
+            &frame(&idle, &[5.0]),
+            &[],
+        );
         assert_eq!(
             pass.overlay_count, 2,
             "a scroll-only frame re-shifts rather than rebuilds"
@@ -4093,6 +4126,7 @@ mod tests {
             &grid,
             resolution,
             &frame(&idle, &[0.0, 0.0]),
+            &[],
         );
         assert_eq!(
             pass.overlay_count, 4,
@@ -4150,7 +4184,14 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        pass.prepare(&device, &queue, &grid, resolution, &frame(&idle, &[0.0]));
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            resolution,
+            &frame(&idle, &[0.0]),
+            &[],
+        );
         let unscrolled = tops(&pass);
         assert_eq!(
             unscrolled.len(),
@@ -4161,7 +4202,14 @@ mod tests {
         // Three scroll frames in a row, so the buffers the second and third
         // build into are ones an earlier frame already filled.
         for scroll in [1.0, 2.0, 3.0] {
-            pass.prepare(&device, &queue, &grid, resolution, &frame(&idle, &[scroll]));
+            pass.prepare(
+                &device,
+                &queue,
+                &grid,
+                resolution,
+                &frame(&idle, &[scroll]),
+                &[],
+            );
         }
 
         assert_eq!(
@@ -4288,18 +4336,39 @@ mod tests {
         };
 
         // Warm the cache and atlas.
-        pass.prepare(&device, &queue, &grid, resolution, &frame(&full_damage));
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            resolution,
+            &frame(&full_damage),
+            &[],
+        );
 
         let iterations = 50;
         let full_start = std::time::Instant::now();
         for _ in 0..iterations {
-            pass.prepare(&device, &queue, &grid, resolution, &frame(&full_damage));
+            pass.prepare(
+                &device,
+                &queue,
+                &grid,
+                resolution,
+                &frame(&full_damage),
+                &[],
+            );
         }
         let full = full_start.elapsed();
 
         let idle_start = std::time::Instant::now();
         for _ in 0..iterations {
-            pass.prepare(&device, &queue, &grid, resolution, &frame(&idle_damage));
+            pass.prepare(
+                &device,
+                &queue,
+                &grid,
+                resolution,
+                &frame(&idle_damage),
+                &[],
+            );
         }
         let idle = idle_start.elapsed();
 
@@ -4349,6 +4418,7 @@ mod tests {
             &grid,
             resolution,
             &frame(no_scroll, &Damage::Full),
+            &[],
         );
 
         // A changing scroll forces the full grid-glyph build -- every glyph's atlas
@@ -4370,6 +4440,7 @@ mod tests {
                 &grid,
                 resolution,
                 &frame(scroll, &idle_damage),
+                &[],
             );
         }
         let per_call = start.elapsed() / iterations;

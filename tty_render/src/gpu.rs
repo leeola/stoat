@@ -22,7 +22,7 @@ use crate::{
         panel::PanelPass,
         polyline::PolylinePass,
         text::TextPass,
-        CellMetrics,
+        CellMetrics, Occluder,
     },
 };
 use cosmic_text::FontSystem;
@@ -258,6 +258,9 @@ pub struct Renderer {
     /// Cursor block color. The cursor pass applies its own blend alpha, so this
     /// is the opaque RGB only.
     cursor_color: Rgb,
+    /// The frame's panel occluders, lent to every pass that occludes. Held here
+    /// so a frame builds the list once and reuses the allocation across frames.
+    occluders: Vec<Occluder>,
     /// GPU frame timer, created lazily on the first render when the device was
     /// built with `TIMESTAMP_QUERY`. `None` until then or when unsupported.
     #[cfg(feature = "perf")]
@@ -306,6 +309,7 @@ impl Renderer {
             metrics,
             clear_color: rgb_to_color(background),
             cursor_color: cursor,
+            occluders: Vec::new(),
             #[cfg(feature = "perf")]
             gpu_timer: None,
             #[cfg(feature = "perf")]
@@ -392,19 +396,22 @@ impl Renderer {
             frame.decoration_damage,
             frame.scrolled_rows,
         );
-        self.text.prepare(device, queue, grid, resolution, &frame);
+        // Built once here rather than per pass, since every pass that occludes
+        // derives the same list from the same panels.
+        crate::render::build_occluders_into(grid.panels(), &mut self.occluders);
+
+        self.text
+            .prepare(device, queue, grid, resolution, &frame, &self.occluders);
         self.panel.prepare(device, queue, grid, resolution);
         self.overlay.prepare(device, queue, grid, resolution);
-        // Built once here rather than per pass, since both derive the same
-        // list from the same panels.
-        let occluders = crate::render::build_occluders(grid.panels());
         self.icon
-            .prepare(device, queue, grid.icons(), &occluders, resolution);
+            .prepare(device, queue, grid.icons(), &self.occluders, resolution);
         self.bar
-            .prepare(device, queue, grid.bars(), &occluders, resolution);
+            .prepare(device, queue, grid.bars(), &self.occluders, resolution);
         self.polyline
-            .prepare(device, queue, grid.polylines(), &occluders, resolution);
-        self.minimap.prepare(device, queue, grid, resolution);
+            .prepare(device, queue, grid.polylines(), &self.occluders, resolution);
+        self.minimap
+            .prepare(device, queue, grid, &self.occluders, resolution);
 
         // Time this frame's GPU work when the timer's current slot is free.
         #[cfg(feature = "perf")]
