@@ -240,7 +240,7 @@ pub struct DisplayMap {
     text_highlights: TextHighlights,
     semantic_token_highlights: SemanticTokensHighlights,
     lsp_token_highlights: SemanticTokensHighlights,
-    inlay_highlights: InlayHighlights,
+    inlay_highlights: Arc<InlayHighlights>,
     companion: Option<Companion>,
     lsp_folding_crease_ids: HashMap<BufferId, Vec<CreaseId>>,
     masked: bool,
@@ -322,7 +322,7 @@ impl DisplayMap {
             text_highlights: Arc::new(HashMap::new()),
             semantic_token_highlights: Arc::new(HashMap::new()),
             lsp_token_highlights: Arc::new(HashMap::new()),
-            inlay_highlights: BTreeMap::new(),
+            inlay_highlights: Arc::new(BTreeMap::new()),
             companion: None,
             lsp_folding_crease_ids: HashMap::new(),
             masked: false,
@@ -528,7 +528,12 @@ impl DisplayMap {
                 .is_some();
         }
 
-        cleared |= self.inlay_highlights.remove(&key).is_some();
+        if self.inlay_highlights.contains_key(&key) {
+            cleared |= Arc::make_mut(&mut self.inlay_highlights)
+                .remove(&key)
+                .is_some();
+        }
+
         if cleared {
             self.highlights_dirty = true;
         }
@@ -631,7 +636,9 @@ impl DisplayMap {
         highlights: Vec<InlayHighlight>,
         style: HighlightStyle,
     ) {
-        let entry = self.inlay_highlights.entry(key).or_default();
+        let entry = Arc::make_mut(&mut self.inlay_highlights)
+            .entry(key)
+            .or_default();
         for highlight in highlights {
             entry.insert(highlight.inlay, (style.clone(), highlight));
         }
@@ -873,7 +880,7 @@ pub struct DisplaySnapshot {
     text_highlights: TextHighlights,
     semantic_token_highlights: SemanticTokensHighlights,
     lsp_token_highlights: SemanticTokensHighlights,
-    inlay_highlights: InlayHighlights,
+    inlay_highlights: Arc<InlayHighlights>,
     crease_snapshot: CreaseSnapshot,
     fold_placeholder: FoldPlaceholder,
     masked: bool,
@@ -931,7 +938,10 @@ impl DisplaySnapshot {
         &self.lsp_token_highlights
     }
 
-    pub fn inlay_highlights(&self) -> &InlayHighlights {
+    /// The inlay highlights, as the shared handle rather than the map behind
+    /// it. Two snapshots taken without an intervening highlight change hold the
+    /// same allocation, which is what a caller comparing them is asking about.
+    pub fn inlay_highlights(&self) -> &Arc<InlayHighlights> {
         &self.inlay_highlights
     }
 
@@ -997,7 +1007,7 @@ impl DisplaySnapshot {
     ) -> Arc<[highlights::HighlightEndpoint]> {
         let highlights = Highlights {
             text_highlights: Some(&self.text_highlights),
-            inlay_highlights: Some(&self.inlay_highlights),
+            inlay_highlights: Some(self.inlay_highlights.as_ref()),
             semantic_token_highlights: self.syntax_token_highlights(),
             lsp_token_highlights: self.lsp_syntax_token_highlights(),
         };
@@ -1021,7 +1031,7 @@ impl DisplaySnapshot {
     ) -> Arc<[highlights::HighlightEndpoint]> {
         let highlights = Highlights {
             text_highlights: Some(&self.text_highlights),
-            inlay_highlights: Some(&self.inlay_highlights),
+            inlay_highlights: Some(self.inlay_highlights.as_ref()),
             semantic_token_highlights: self.syntax_token_highlights(),
             lsp_token_highlights: self.lsp_syntax_token_highlights(),
         };
@@ -1055,7 +1065,7 @@ impl DisplaySnapshot {
     ) -> block_map::BlockChunks<'_> {
         let highlights = Highlights {
             text_highlights: Some(&self.text_highlights),
-            inlay_highlights: Some(&self.inlay_highlights),
+            inlay_highlights: Some(self.inlay_highlights.as_ref()),
             semantic_token_highlights: self.syntax_token_highlights(),
             lsp_token_highlights: self.lsp_syntax_token_highlights(),
         };
@@ -2678,6 +2688,74 @@ mod tests {
             "the stored key still clears",
         );
         assert!(display_map.highlights_dirty, "a real clear marks dirty");
+    }
+
+    /// A keystroke takes six to eight snapshots, and each one used to walk and
+    /// reallocate the whole nested inlay-highlight map. Sharing it makes a
+    /// snapshot a refcount bump, and a highlight change still takes its own
+    /// copy so no snapshot already handed out sees the mutation.
+    #[test]
+    fn snapshots_share_the_inlay_highlight_map_until_it_changes() {
+        use super::highlights::{HighlightKey, HighlightLayer, HighlightStyle, InlayHighlight};
+        use stoat_text::Bias;
+
+        let mut display_map = create_display_map("fn alpha() {}\n");
+        let anchor = display_map
+            .multi_buffer
+            .snapshot()
+            .anchor_at(3, Bias::Right);
+        let ids = display_map.splice_inlays(
+            Vec::new(),
+            vec![(anchor, ": u32".to_string(), InlayKind::Hint)],
+        );
+        let inlay = *ids.first().expect("the splice added an inlay");
+
+        let key = HighlightKey::layer(HighlightLayer::DocumentHighlightRead);
+        display_map.highlight_inlays(
+            key,
+            vec![InlayHighlight { inlay, range: 0..5 }],
+            HighlightStyle::default(),
+        );
+
+        let first = display_map.snapshot();
+        assert_eq!(first.inlay_highlights().len(), 1, "the fixture stored one");
+        assert!(
+            Arc::ptr_eq(
+                first.inlay_highlights(),
+                display_map.snapshot().inlay_highlights()
+            ),
+            "a snapshot served from the cache shares the map rather than copying it",
+        );
+
+        // Splicing an inlay invalidates the cache without touching a highlight,
+        // so the rebuild has to carry the same map forward rather than mint one.
+        display_map.splice_inlays(
+            Vec::new(),
+            vec![(anchor, ": u8".to_string(), InlayKind::Hint)],
+        );
+        assert!(
+            Arc::ptr_eq(
+                first.inlay_highlights(),
+                display_map.snapshot().inlay_highlights()
+            ),
+            "a rebuild that changed no highlight shares the map too",
+        );
+
+        assert!(display_map.clear_highlights(key), "the key was stored");
+        let third = display_map.snapshot();
+        assert!(
+            !Arc::ptr_eq(first.inlay_highlights(), third.inlay_highlights()),
+            "a highlight change copies rather than mutating a shared map",
+        );
+        assert_eq!(
+            first.inlay_highlights().len(),
+            1,
+            "so a snapshot taken before the clear still sees the highlight",
+        );
+        assert!(
+            third.inlay_highlights().is_empty(),
+            "and one taken after sees it gone",
+        );
     }
 
     #[test]
