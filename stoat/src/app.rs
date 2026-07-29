@@ -7033,27 +7033,29 @@ impl Stoat {
 
         // Each cursor lands after its own inserted text. The k-th insertion in
         // offset order is shifted by the k insertions before it plus its own,
-        // so its text ends at offset + (k + 1) * text.len().
+        // so its text ends at offset + (k + 1) * text.len(). Shifting in place
+        // keeps that arithmetic on the offset ordering it depends on.
         let text_len = text.len();
-        let new_offsets: std::collections::HashMap<usize, usize> = inserts
-            .iter()
-            .enumerate()
-            .map(|(k, (id, offset))| (*id, offset + (k + 1) * text_len))
-            .collect();
+        for (k, (_, offset)) in inserts.iter_mut().enumerate() {
+            *offset += (k + 1) * text_len;
+        }
+        // Re-keyed by id, which is what the closure below looks up. A binary
+        // search over a list already in hand beats hashing a fresh map into
+        // existence for every typed character.
+        inserts.sort_unstable_by_key(|(id, _)| *id);
 
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
         editor.selections.transform(new_buf, |s| {
-            if let Some(&new_offset) = new_offsets.get(&s.id) {
-                action_handlers::movement::forward_block_cursor(
+            match inserts.binary_search_by_key(&s.id, |(id, _)| *id) {
+                Ok(found) => action_handlers::movement::forward_block_cursor(
                     s.id,
-                    new_offset,
+                    inserts[found].1,
                     stoat_text::SelectionGoal::None,
                     new_buf.rope(),
                     new_buf,
-                )
-            } else {
-                s.clone()
+                ),
+                Err(_) => s.clone(),
             }
         });
     }
@@ -7316,18 +7318,38 @@ impl Stoat {
             }
         }
 
-        let new_offsets: std::collections::HashMap<usize, usize> = per_sel
+        // Bytes deleted by everything before each range, computed once for the
+        // whole selection set rather than re-accumulated per selection.
+        let mut deleted_before = Vec::with_capacity(merged.len() + 1);
+        let mut running = 0;
+        for (start, end) in &merged {
+            deleted_before.push(running);
+            running += end - start;
+        }
+        deleted_before.push(running);
+
+        let mut new_offsets: Vec<(usize, usize)> = per_sel
             .iter()
-            .map(|&(id, start, _)| (id, Self::offset_after_deletions(start, &merged)))
+            .map(|&(id, start, _)| {
+                (
+                    id,
+                    Self::offset_after_deletions(start, &merged, &deleted_before),
+                )
+            })
             .collect();
+        // Sorted so the closure can binary-search rather than hash a map built
+        // for one pass over the selections.
+        new_offsets.sort_unstable_by_key(|(id, _)| *id);
 
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
         editor.selections.transform(new_buf, |s| {
-            let offset = new_offsets[&s.id];
+            let found = new_offsets
+                .binary_search_by_key(&s.id, |(id, _)| *id)
+                .expect("every selection was measured before the delete");
             action_handlers::movement::forward_block_cursor(
                 s.id,
-                offset,
+                new_offsets[found].1,
                 stoat_text::SelectionGoal::None,
                 new_buf.rope(),
                 new_buf,
@@ -7337,18 +7359,24 @@ impl Stoat {
 
     /// New offset of `target` after deleting the ascending, disjoint `ranges`.
     /// A target inside a deleted range collapses to that range's start.
-    fn offset_after_deletions(target: usize, ranges: &[(usize, usize)]) -> usize {
-        let mut deleted_before = 0;
-        for &(start, end) in ranges {
-            if end <= target {
-                deleted_before += end - start;
-            } else if start < target {
-                return start - deleted_before;
-            } else {
-                break;
-            }
+    ///
+    /// `deleted_before[i]` is the total bytes `ranges[..i]` remove, with one
+    /// trailing entry for the whole list. The caller builds it once for every
+    /// selection it has to move, which is what keeps a delete over many cursors
+    /// from walking the range list per cursor.
+    fn offset_after_deletions(
+        target: usize,
+        ranges: &[(usize, usize)],
+        deleted_before: &[usize],
+    ) -> usize {
+        // Ends ascend, so this is the count of ranges lying entirely before
+        // `target`, and the first range that could straddle it.
+        let ix = ranges.partition_point(|&(_, end)| end <= target);
+        let deleted = deleted_before[ix];
+        match ranges.get(ix) {
+            Some(&(start, _)) if start < target => start - deleted,
+            _ => target - deleted,
         }
-        target - deleted_before
     }
 
     /// Apply one agent hook event to the workspace whose session matches
@@ -14593,6 +14621,26 @@ mod tests {
             !h.stoat.minimap_build_pending,
             "a one-row recolor must not leave a multi-sync sweep outstanding",
         );
+    }
+
+    /// Every cursor a multi-cursor delete moves is carried through the same
+    /// merged range list, so the answer is a binary search over a prefix sum
+    /// rather than a walk per cursor. The four positions a target can occupy
+    /// relative to the ranges are what that search has to get right.
+    #[test]
+    fn an_offset_moves_back_by_the_deletions_before_it() {
+        // Deleting 2..5 and 10..14 removes three bytes then four.
+        let ranges = [(2usize, 5usize), (10, 14)];
+        let deleted_before = [0usize, 3, 7];
+        let moved = |target| Stoat::offset_after_deletions(target, &ranges, &deleted_before);
+
+        assert_eq!(moved(1), 1, "ahead of every range, nothing shifts it");
+        assert_eq!(moved(3), 2, "inside a range, it collapses to that start");
+        assert_eq!(moved(7), 4, "between ranges, only the first has passed");
+        assert_eq!(moved(20), 13, "past both, both have passed");
+
+        assert_eq!(moved(2), 2, "a target on a range's start is not inside it");
+        assert_eq!(moved(5), 2, "a target on a range's end sits after it");
     }
 
     /// Without a prior parse to diff against there is no row information, and
