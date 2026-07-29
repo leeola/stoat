@@ -51,6 +51,13 @@ pub(crate) struct LspRegistry {
     spawn_attempted: HashSet<String>,
     sole: Option<Arc<dyn LspHost>>,
     noop: Arc<dyn LspHost>,
+    /// Bumped by every change to the set of servers, so a consumer caching a
+    /// derived view of it can tell that view is stale without re-deriving it.
+    ///
+    /// Covers [`Self::clients`] and [`Self::languages`], the two the server set
+    /// is read out of. A method touching neither leaves it alone, since a bump
+    /// costs every cache keyed on it a rebuild.
+    generation: u64,
 }
 
 impl LspRegistry {
@@ -61,12 +68,23 @@ impl LspRegistry {
             spawn_attempted: HashSet::new(),
             sole: None,
             noop: Arc::new(NoopLsp),
+            generation: 0,
         }
+    }
+
+    /// How many times the server set has changed, for invalidating a cache of
+    /// anything derived from it.
+    ///
+    /// Read-only on purpose. A writer outside the registry could stale a cache
+    /// keyed on this without the registry having changed at all.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Register `host` under server `name`, replacing any prior host for it.
     pub(crate) fn insert(&mut self, name: String, host: Arc<dyn LspHost>) {
         self.clients.insert(name, host);
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Map `language` to a single default-feature server named `name`.
@@ -77,11 +95,13 @@ impl LspRegistry {
     pub(crate) fn set_language(&mut self, language: String, name: String) {
         self.languages
             .insert(language, vec![ServerSelector::all(name)]);
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Set `language`'s ordered server selectors, replacing any prior list.
     pub(crate) fn set_selectors(&mut self, language: String, selectors: Vec<ServerSelector>) {
         self.languages.insert(language, selectors);
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Append `selector` to `language`'s ordered server list, creating the list
@@ -96,6 +116,7 @@ impl LspRegistry {
             .entry(language.to_string())
             .or_default()
             .push(selector);
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Inject a single host that serves every language, replacing all
@@ -109,6 +130,7 @@ impl LspRegistry {
         self.clients.clear();
         self.languages.clear();
         self.sole = Some(host);
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// The up client for `language`'s primary (first selector's) server, if any.
@@ -334,6 +356,38 @@ mod tests {
         let lsp = FakeLsp::new();
         lsp.set_capabilities(caps);
         Arc::new(lsp)
+    }
+
+    /// A consumer caching what the server set resolves to only rebuilds when the
+    /// generation moves, so every method that can change that set has to move it.
+    /// One that does not would leave the cache painting a stale answer.
+    #[test]
+    fn every_change_to_the_server_set_moves_the_generation() {
+        let mut registry = LspRegistry::new();
+        let mut seen = registry.generation();
+        let mut moved = |registry: &LspRegistry, what: &str| {
+            let now = registry.generation();
+            assert_ne!(now, seen, "{what} left the generation where it was");
+            seen = now;
+        };
+
+        registry.insert("ra".to_string(), fake());
+        moved(&registry, "insert");
+
+        registry.set_language("rust".to_string(), "ra".to_string());
+        moved(&registry, "set_language");
+
+        registry.set_selectors(
+            "rust".to_string(),
+            vec![ServerSelector::all("ra".to_string())],
+        );
+        moved(&registry, "set_selectors");
+
+        registry.push_selector("rust", ServerSelector::all("second".to_string()));
+        moved(&registry, "push_selector");
+
+        registry.set_sole_client(fake());
+        moved(&registry, "set_sole_client");
     }
 
     fn hover_caps() -> ServerCapabilities {

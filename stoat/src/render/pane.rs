@@ -212,7 +212,7 @@ pub(crate) fn render_pane(
             rows = frame
                 .lsp_servers
                 .iter()
-                .map(|(short, _)| format!(" {short} idle "))
+                .map(|server| format!(" {} idle ", server.short))
                 .collect();
         }
         rows.truncate(6);
@@ -690,11 +690,14 @@ fn status_segments(
     }
     if is_focused {
         let badge_right = right_anchor;
-        for (short, busy) in frame.lsp_servers {
-            if !*busy {
+        for server in frame.lsp_servers {
+            if !server.busy {
                 continue;
             }
-            let text = format!(" {} {short} ", SPINNER_FRAMES[frame.spinner_phase as usize]);
+            let text = format!(
+                " {} {} ",
+                SPINNER_FRAMES[frame.spinner_phase as usize], server.short
+            );
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
             if start >= cursor {
@@ -1235,6 +1238,48 @@ mod tests {
         assert!(
             !bar.contains("diff"),
             "the segment clears once the warm finishes:\n{bar}"
+        );
+    }
+
+    /// The server list is held across frames, so installing a server has to
+    /// invalidate it. Without that the bar would keep painting the list it
+    /// derived before the server existed.
+    #[test]
+    fn a_server_installed_after_a_paint_reaches_the_bar() {
+        let mut h = Stoat::test();
+        open_rust(&mut h);
+
+        let bar = bar_row(&h.render_composited());
+        assert!(!bar.contains("RA"), "no server is up yet:\n{bar}");
+
+        let fake = h.install_lsp_server("rust", "rust-analyzer");
+        mark_busy(&mut h, &fake);
+        let bar = bar_row(&h.render_composited());
+        assert!(
+            bar.contains("RA"),
+            "the newly installed server badges on the next paint:\n{bar}"
+        );
+    }
+
+    /// The names are held across frames but the busy flags are not, since only
+    /// they can move without the focus or the registry moving.
+    #[test]
+    fn a_server_going_busy_after_a_paint_shows_its_spinner() {
+        let mut h = Stoat::test();
+        let fake = h.install_lsp_server("rust", "rust-analyzer");
+        open_rust(&mut h);
+
+        let bar = bar_row(&h.render_composited());
+        assert!(
+            !bar.contains("RA"),
+            "an idle server paints no badge:\n{bar}"
+        );
+
+        mark_busy(&mut h, &fake);
+        let bar = bar_row(&h.render_composited());
+        assert!(
+            bar.contains("RA"),
+            "the flag refreshes without the names being rebuilt:\n{bar}"
         );
     }
 

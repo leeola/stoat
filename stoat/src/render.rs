@@ -48,6 +48,7 @@ use crate::{
         active_modal, binding_display_desc, cursor_token, focus_flags, ActiveModal, Flags,
         FocusFlags, StoatKeymapState,
     },
+    lsp::{progress::LspProgressMap, registry::LspRegistry},
     minimap::MinimapContent,
     pane::{DockVisibility, FocusTarget, View},
     rebase::RebasePause,
@@ -109,6 +110,77 @@ pub(crate) struct MinimapChrome<'a> {
     pub(crate) thumb: [u8; 4],
 }
 
+/// One language server as the status bar shows it.
+pub(crate) struct StatusServer {
+    /// The abbreviation the badge paints, from [`pane::lsp_short_name`].
+    pub(crate) short: String,
+    /// The server's own name. Kept because the busy lookup is keyed by it while
+    /// the bar paints the abbreviation, so refreshing the flag needs both.
+    name: String,
+    /// Whether the server has work-done progress in flight, which drives the
+    /// badge's spinner glyph.
+    pub(crate) busy: bool,
+}
+
+/// The status bar's server list for the focused buffer, held across frames.
+///
+/// Deriving it costs a string for the language, a vector of server names, and
+/// three allocations per server for the abbreviation, none of which moves unless
+/// the focus or the registry's server set does. Only [`StatusServer::busy`]
+/// changes per frame, and that is a map lookup.
+#[derive(Default)]
+pub(crate) struct LspServerList {
+    /// Focused buffer the names were derived for, `None` when the focused pane
+    /// holds no editor.
+    buffer: Option<BufferId>,
+    /// [`LspRegistry::generation`] the names were derived at.
+    generation: u64,
+    servers: Vec<StatusServer>,
+}
+
+impl LspServerList {
+    /// Bring the list up to date for `buffer` and hand back what the bar paints.
+    ///
+    /// Rebuilds the names only when the focus or the server set has moved since
+    /// the last call, then refreshes every busy flag, which is the only part a
+    /// steady frame can change.
+    fn refresh(
+        &mut self,
+        buffer: Option<BufferId>,
+        buffers: &BufferRegistry,
+        registry: &LspRegistry,
+        progress: &LspProgressMap,
+    ) -> &[StatusServer] {
+        let generation = registry.generation();
+        if self.buffer != buffer || self.generation != generation {
+            self.buffer = buffer;
+            self.generation = generation;
+            self.servers.clear();
+
+            let language = buffer
+                .and_then(|buffer| crate::action_handlers::lsp::lsp_language_name(buffers, buffer));
+            if let Some(language) = language {
+                self.servers
+                    .extend(
+                        registry
+                            .names_for_language(&language)
+                            .into_iter()
+                            .map(|name| StatusServer {
+                                short: pane::lsp_short_name(&name),
+                                name,
+                                busy: false,
+                            }),
+                    );
+            }
+        }
+
+        for server in &mut self.servers {
+            server.busy = progress.server_busy(&server.name);
+        }
+        &self.servers
+    }
+}
+
 /// Ambient workspace and frame state shared across render functions. Bundled
 /// so individual render functions stay under the `clippy::too_many_arguments`
 /// threshold; every field is a cheap borrow or `Copy`.
@@ -140,12 +212,10 @@ pub(crate) struct FrameCtx<'a> {
     /// Braille spinner glyph index for the [`lsp_progress`](Self::lsp_progress)
     /// popout, advanced by the frame tick so the spinner animates.
     pub(crate) spinner_phase: u8,
-    /// The focused buffer's running language servers as `(short name, busy)`,
-    /// painted as compact badges at the focused pane's bar right edge. `busy` is
-    /// true while the server has work-done progress in flight, driving the badge's
-    /// spinner glyph. Empty for an unfocused pane or a buffer with no named
-    /// server.
-    pub(crate) lsp_servers: &'a [(String, bool)],
+    /// The focused buffer's running language servers, painted as compact badges
+    /// at the focused pane's bar right edge. Empty for an unfocused pane or a
+    /// buffer with no named server.
+    pub(crate) lsp_servers: &'a [StatusServer],
     /// True while a background diff warm runs, driving the focused pane's
     /// transient ` <spinner> diff ` status-bar segment. False when idle.
     pub(crate) diff_warm_busy: bool,
@@ -182,7 +252,7 @@ pub(crate) struct FrameCtx<'a> {
     /// column of a multibyte line. Held as the registry rather than a prebuilt
     /// map so the encodings are resolved only when the diagnostic span cache
     /// rebuilds, not on every frame.
-    pub(crate) lsp_registry: &'a crate::lsp::registry::LspRegistry,
+    pub(crate) lsp_registry: &'a LspRegistry,
     /// Most-recently submitted in-buffer search query. When `Some`,
     /// every editor pane paints visible matches with the
     /// `ui.search.match` style so users see all hits at once.
@@ -447,29 +517,21 @@ pub(crate) fn frame(
             .to_string()
     };
 
-    let focused_language = {
+    // Reading which buffer is focused costs nothing, so the server list settles
+    // from that rather than re-deriving its names every frame.
+    let focused_buffer = {
         let focused = ws.panes.pane(ws.panes.focus());
-        if let View::Editor(editor_id) = &focused.view {
-            ws.editors.get(*editor_id).and_then(|editor| {
-                crate::action_handlers::lsp::lsp_language_name(&ws.buffers, editor.buffer_id)
-            })
-        } else {
-            None
+        match &focused.view {
+            View::Editor(editor_id) => ws.editors.get(*editor_id).map(|editor| editor.buffer_id),
+            _ => None,
         }
     };
-    let lsp_servers: Vec<(String, bool)> = focused_language
-        .map(|language| {
-            stoat
-                .lsp_registry
-                .names_for_language(&language)
-                .into_iter()
-                .map(|name| {
-                    let busy = stoat.lsp_progress.server_busy(&name);
-                    (pane::lsp_short_name(&name), busy)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let lsp_servers = stoat.lsp_server_list.refresh(
+        focused_buffer,
+        &ws.buffers,
+        &stoat.lsp_registry,
+        &stoat.lsp_progress,
+    );
 
     let lsp_progress_entries = stoat.lsp_progress.entries_by_freshness();
 
@@ -488,7 +550,7 @@ pub(crate) fn frame(
         lsp_status_open: stoat.lsp_status_pinned || stoat.lsp_badge_hovered,
         lsp_progress_entries: &lsp_progress_entries,
         spinner_phase: app::spinner_phase(stoat.spinner_clock),
-        lsp_servers: &lsp_servers,
+        lsp_servers,
         diff_warm_busy,
         lsp_pending,
         lsp_message: stoat

@@ -1224,6 +1224,10 @@ pub struct Stoat {
     /// [`crate::host::LspHost::try_recv_notification`] inside
     /// [`Stoat::update`].
     pub(crate) lsp_progress: crate::lsp::progress::LspProgressMap,
+    /// The status bar's server list for the focused buffer, held across frames
+    /// so a steady frame refreshes the busy flags rather than re-deriving the
+    /// names. Transient render state, not persisted.
+    pub(crate) lsp_server_list: crate::render::LspServerList,
     /// Freshest `window/showMessage` text from the language server,
     /// shown in the status line until the next key press. Set by
     /// [`Self::drain_lsp_notifications`] and cleared at the top of
@@ -1878,6 +1882,7 @@ impl Stoat {
                 crate::workspace::BaseHighlightMemo::default(),
             )),
             lsp_progress: crate::lsp::progress::LspProgressMap::new(),
+            lsp_server_list: crate::render::LspServerList::default(),
             lsp_message: None,
             pending_lsp_jump: None,
             pending_hover_request: None,
