@@ -1475,6 +1475,12 @@ pub(crate) struct ParseJobOutput {
     /// viewing the buffer. It owns the token list, so the search index inside
     /// it cannot drift from the tokens it indexes.
     pub(crate) token_channel: BufferSemanticTokens,
+    /// Buffer rows whose tokens this parse changed, or `None` when that could
+    /// not be determined and every row must be treated as changed.
+    ///
+    /// Lets a consumer holding per-row derived state, currently the minimap
+    /// strip, recolor only what moved instead of the whole file per keystroke.
+    pub(crate) changed_token_rows: Option<Range<u32>>,
 }
 
 impl Stoat {
@@ -7557,22 +7563,35 @@ impl Stoat {
             .settings
             .highlight_retention
             .unwrap_or(DEFAULT_HIGHLIGHT_RETENTION) as usize;
-        let Self {
-            workspaces,
-            active_workspace,
-            executor,
-            syntax_styles,
-            redraw_notify,
-            index_update_tx,
-            ..
-        } = self;
-        workspaces[*active_workspace].drive_parse_jobs(
-            executor,
-            syntax_styles,
-            redraw_notify,
-            index_update_tx,
-            retention,
-        );
+        let installed = {
+            let Self {
+                workspaces,
+                active_workspace,
+                executor,
+                syntax_styles,
+                redraw_notify,
+                index_update_tx,
+                ..
+            } = self;
+            workspaces[*active_workspace].drive_parse_jobs(
+                executor,
+                syntax_styles,
+                redraw_notify,
+                index_update_tx,
+                retention,
+            )
+        };
+
+        // Tell each strip which rows the parse restained, so its recolor sweep
+        // covers those instead of re-summarizing the whole file. A buffer with
+        // no strip yet needs nothing, since a strip's initial build reads
+        // whatever tokens are current by the time it runs.
+        let ws_id = self.active_workspace;
+        for (buffer_id, rows) in installed {
+            if let Some(content) = self.minimap_content.get_mut(&(ws_id, buffer_id)) {
+                content.note_syntax_rows(rows);
+            }
+        }
     }
 
     /// Populate the active workspace's visible git-tracked buffers' diff maps.
@@ -8188,6 +8207,8 @@ impl Stoat {
             buffer_syntax_version,
             lsp_token_version,
         );
+        let syntax_other_version =
+            minimap_syntax_other_version(self.syntax_highlight, lsp_token_version);
 
         let syntax_on = self.syntax_highlight;
         let class_table = &self.minimap_class_table;
@@ -8211,6 +8232,7 @@ impl Stoat {
             crate::minimap::SyncVersions {
                 decoration: decoration_version,
                 syntax: syntax_version,
+                syntax_other: syntax_other_version,
             },
             tokens_for,
             edge_of,
@@ -9602,6 +9624,18 @@ fn minimap_syntax_version(syntax_on: bool, parse: Option<u64>, lsp: Option<u64>)
     hasher.finish()
 }
 
+/// The part of [`minimap_syntax_version`] the parse does not contribute.
+///
+/// Only the parse reports which rows its tokens changed, so the strip needs to
+/// tell a bump it has row information for from one it does not. A change here
+/// puts the recolor sweep back to covering every built row.
+fn minimap_syntax_other_version(syntax_on: bool, lsp: Option<u64>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    syntax_on.hash(&mut hasher);
+    lsp.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// The viewport's top and span in buffer lines, for a minimap view emit.
 ///
 /// A minimap strip is one row per buffer line, but the editor scrolls in display
@@ -10135,6 +10169,8 @@ pub(crate) fn parse_buffer_step(
         },
         syntax_map,
         token_channel,
+        // FIXME: always a full recolor until the span diff lands.
+        changed_token_rows: None,
     })
 }
 

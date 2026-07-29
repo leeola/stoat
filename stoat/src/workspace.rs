@@ -689,6 +689,12 @@ impl Workspace {
     /// after the old one completes. Anchors in the result are computed using
     /// the parsed snapshot, so they remain valid even if the buffer has been
     /// edited further while the parse was running.
+    ///
+    /// Returns each buffer whose tokens were installed, paired with the rows
+    /// the parse changed, or `None` where that is unknown. Callers holding
+    /// per-buffer views of the tokens use it to bound their own re-coloring;
+    /// [`crate::minimap::MinimapContent::note_syntax_rows`] is the one that
+    /// does today.
     pub(crate) fn drive_parse_jobs(
         &mut self,
         executor: &Executor,
@@ -696,7 +702,8 @@ impl Workspace {
         redraw_notify: &Arc<Notify>,
         index_update_tx: &UnboundedSender<IndexUpdate>,
         retention: usize,
-    ) {
+    ) -> Vec<(BufferId, Option<Range<u32>>)> {
+        let mut installed: Vec<(BufferId, Option<Range<u32>>)> = Vec::new();
         let waker = futures::task::noop_waker();
         let mut completed: Vec<ParseJobOutput> = Vec::new();
         self.parse_jobs.retain(|_, job| {
@@ -711,6 +718,7 @@ impl Workspace {
             }
         });
         for out in completed {
+            installed.push((out.buffer_id, out.changed_token_rows.clone()));
             self.buffers.store_syntax(out.buffer_id, out.syntax);
             self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
             self.buffers.store_tokens(
@@ -792,6 +800,7 @@ impl Workspace {
                 })
                 .flatten();
             if let Some(out) = sync_out {
+                installed.push((out.buffer_id, out.changed_token_rows.clone()));
                 self.buffers.store_syntax(out.buffer_id, out.syntax);
                 self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
                 self.buffers.store_tokens(
@@ -857,6 +866,8 @@ impl Workspace {
                 "evicted hidden highlight state"
             );
         }
+
+        installed
     }
 
     /// Buffer ids currently shown in a split-pane editor or held as a preview,
