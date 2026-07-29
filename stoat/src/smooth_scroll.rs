@@ -970,10 +970,10 @@ pub(crate) fn render_commits_page(
 /// included, starting at row `page * region_height`.
 ///
 /// `lanes` is the graph's lane count from
-/// [`crate::render::commit_picker::graph_lanes`], or `None` when the column is
-/// hidden. The page splits its own region by that count rather than taking the
-/// live rects, since a page sits at the origin and would have to translate them
-/// back anyway.
+/// [`CommitPicker::graph_lanes`](crate::commit_picker::CommitPicker::graph_lanes),
+/// or `None` when the column is hidden. The page splits its own region by that
+/// count rather than taking the live rects, since a page sits at the origin and
+/// would have to translate them back anyway.
 ///
 /// The graph's stroked lines ride as APC frames appended after the serialized
 /// cells, the same way the diff gutter's rich components reach a page. That is

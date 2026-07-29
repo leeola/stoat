@@ -81,17 +81,6 @@ pub(crate) fn graph_width(lanes: u16) -> u16 {
     lanes.min(MAX_DRAWN_LANES) * LANE_CELLS + 1
 }
 
-/// Lanes the graph column should draw for `picker`, or `None` when it hides.
-///
-/// The graph is laid out over `commits`, so it only lines up while the visible
-/// list is that same sequence in that same order. A fuzzy filter both drops and
-/// reorders rows, and edges drawn across the survivors would claim an adjacency
-/// the history does not have, so the column collapses rather than lie.
-pub(crate) fn graph_lanes(picker: &CommitPicker) -> Option<u16> {
-    let unfiltered = picker.filtered.iter().copied().eq(0..picker.commits.len());
-    unfiltered.then_some(picker.graph.1)
-}
-
 /// Lay out the commit picker within `area`, or `None` when `area` is too small
 /// to host it.
 ///
@@ -99,9 +88,10 @@ pub(crate) fn graph_lanes(picker: &CommitPicker) -> Option<u16> {
 /// like the rest of the modal family, then splits the body horizontally rather
 /// than using that layout's side-by-side split.
 ///
-/// `lanes` reserves the graph column, and comes from [`graph_lanes`] so every
-/// caller agrees on whether it is showing. `list_percent` is the share of the
-/// body the table takes, from [`modal_split`](crate::app::Stoat::modal_split).
+/// `lanes` reserves the graph column, and comes from
+/// [`CommitPicker::graph_lanes`] so every caller agrees on whether it is
+/// showing. `list_percent` is the share of the body the table takes, from
+/// [`modal_split`](crate::app::Stoat::modal_split).
 pub(crate) fn commit_picker_layout(
     area: Rect,
     lanes: Option<u16>,
@@ -172,7 +162,7 @@ pub(crate) fn render_commit_picker(
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    let Some(layout) = commit_picker_layout(area, graph_lanes(picker), zoom, list_percent) else {
+    let Some(layout) = commit_picker_layout(area, picker.graph_lanes, zoom, list_percent) else {
         return;
     };
 

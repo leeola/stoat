@@ -4387,7 +4387,7 @@ impl Stoat {
                 let picker = self.commit_picker.as_ref()?;
                 crate::render::commit_picker::commit_picker_layout(
                     size,
-                    crate::render::commit_picker::graph_lanes(picker),
+                    picker.graph_lanes,
                     zoom,
                     split,
                 )?
@@ -4439,7 +4439,7 @@ impl Stoat {
         if let Some(picker) = self.commit_picker.as_ref() {
             let layout = crate::render::commit_picker::commit_picker_layout(
                 size,
-                crate::render::commit_picker::graph_lanes(picker),
+                picker.graph_lanes,
                 modal_zoom_steps(&self.modal_zoom, ModalKind::CommitPicker),
                 modal_split_percent(&self.modal_split, ModalKind::CommitPicker),
             )?;
@@ -4981,10 +4981,7 @@ impl Stoat {
                 _ => return UpdateEffect::None,
             };
 
-            let lanes = self
-                .commit_picker
-                .as_ref()
-                .and_then(crate::render::commit_picker::graph_lanes);
+            let lanes = self.commit_picker.as_ref().and_then(|p| p.graph_lanes);
             let preview = crate::render::commit_picker::commit_picker_layout(
                 self.size(),
                 lanes,
@@ -8484,7 +8481,7 @@ impl Stoat {
             .and_then(|picker| {
                 crate::render::commit_picker::commit_picker_layout(
                     self.size(),
-                    crate::render::commit_picker::graph_lanes(picker),
+                    picker.graph_lanes,
                     modal_zoom_steps(&self.modal_zoom, ModalKind::CommitPicker),
                     modal_split_percent(&self.modal_split, ModalKind::CommitPicker),
                 )
@@ -8506,7 +8503,7 @@ impl Stoat {
             .and_then(|picker| {
                 crate::render::commit_picker::commit_picker_layout(
                     self.size(),
-                    crate::render::commit_picker::graph_lanes(picker),
+                    picker.graph_lanes,
                     modal_zoom_steps(&self.modal_zoom, ModalKind::CommitPicker),
                     modal_split_percent(&self.modal_split, ModalKind::CommitPicker),
                 )
@@ -9081,7 +9078,7 @@ impl Stoat {
                 height: body.height,
                 window: 0,
             };
-            let lanes = crate::render::commit_picker::graph_lanes(picker);
+            let lanes = picker.graph_lanes;
             let scroll_row =
                 crate::render::picker::window_start(picker.selected, body.height as usize) as u32;
             // A refilter rewrites every row, the column scope recolors them, and

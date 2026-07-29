@@ -198,6 +198,21 @@ pub(crate) struct CommitPicker {
     /// empty. A filtered list is non-contiguous, and edges drawn between rows
     /// that are no longer adjacent would claim a history that does not exist.
     pub(crate) graph: (Vec<GraphRow>, u16),
+    /// Lanes the graph column should draw, or `None` while it hides.
+    ///
+    /// The graph is laid out over [`Self::commits`], so it only lines up while
+    /// the visible list is that same sequence in that same order. A fuzzy filter
+    /// both drops and reorders rows, and edges drawn across the survivors would
+    /// claim an adjacency the history does not have, so the column collapses
+    /// rather than lie.
+    ///
+    /// Stored rather than derived on demand, because deciding it means walking
+    /// the whole filtered list and the render asks four times a frame.
+    ///
+    /// [`Self::refilter`] maintains it, which covers every way the answer can
+    /// move. Nothing else writes [`Self::filtered`], and each assignment to
+    /// [`Self::graph`] is followed by a refilter.
+    pub(crate) graph_lanes: Option<u16>,
     /// Longest text in each column across every filtered row, in characters.
     ///
     /// Measured over the whole filtered list rather than the rows on screen,
@@ -258,6 +273,7 @@ impl CommitPicker {
             scope_stack: Vec::new(),
             scope_label: None,
             graph: (Vec::new(), 0),
+            graph_lanes: None,
             col_widest: [0; COMMIT_COLUMNS],
             filter_generation: 0,
             rows: Vec::new(),
@@ -443,6 +459,10 @@ impl CommitPicker {
         self.match_indices = match_indices;
         self.col_widest = measure_columns(&self.rows, &self.filtered);
         self.filter_generation = self.filter_generation.wrapping_add(1);
+
+        let unfiltered = self.filtered.iter().copied().eq(0..self.commits.len());
+        self.graph_lanes = unfiltered.then_some(self.graph.1);
+
         self.clamp_selected();
     }
 
@@ -637,6 +657,7 @@ mod tests {
             scope_stack: Vec::new(),
             scope_label: None,
             graph: (Vec::new(), 0),
+            graph_lanes: None,
             col_widest: [0; COMMIT_COLUMNS],
             filter_generation: 0,
             rows: Vec::new(),
@@ -1117,6 +1138,10 @@ mod tests {
 
         assert_eq!(p.pop_scope().as_deref(), Some("gadget"), "the typed query");
         assert_eq!(shown(&p), ["bbb2222"], "restored rows, refiltered by it");
+        assert_eq!(
+            p.graph_lanes, None,
+            "and the restored filter hides the graph, over the drilled scope's lanes"
+        );
         assert_eq!(p.selected, 0);
         assert_eq!(p.filter_column, Some(CommitColumn::Title));
         assert_eq!(p.scope_label, None, "back to the role-titled root");
@@ -1365,11 +1390,7 @@ mod tests {
     fn layout(
         h: &crate::test_harness::TestHarness,
     ) -> crate::render::commit_picker::CommitPickerLayout {
-        let lanes = h
-            .stoat
-            .commit_picker
-            .as_ref()
-            .and_then(crate::render::commit_picker::graph_lanes);
+        let lanes = h.stoat.commit_picker.as_ref().and_then(|p| p.graph_lanes);
         crate::render::commit_picker::commit_picker_layout(
             h.stoat.size(),
             lanes,
@@ -1540,7 +1561,7 @@ mod tests {
         let h = seeded_picker_harness();
         let picker = h.stoat.commit_picker.as_ref().expect("open");
         let body = layout(&h).body();
-        let lanes = crate::render::commit_picker::graph_lanes(picker);
+        let lanes = picker.graph_lanes;
 
         let pooled = crate::smooth_scroll::render_commit_picker_list_page(
             picker,
@@ -1603,25 +1624,16 @@ mod tests {
     #[test]
     fn the_graph_hides_as_soon_as_a_filter_reorders_the_list() {
         let mut p = picker(history(), &[], "ccc3333");
-        assert_eq!(
-            crate::render::commit_picker::graph_lanes(&p),
-            Some(1),
-            "a linear history lays out one lane"
-        );
+        assert_eq!(p.graph_lanes, Some(1), "a linear history lays out one lane");
 
         p.refilter("gadget");
         assert_eq!(
-            crate::render::commit_picker::graph_lanes(&p),
-            None,
+            p.graph_lanes, None,
             "a filtered list is no longer the sequence the graph indexes"
         );
 
         p.refilter("");
-        assert_eq!(
-            crate::render::commit_picker::graph_lanes(&p),
-            Some(1),
-            "clearing the query restores it"
-        );
+        assert_eq!(p.graph_lanes, Some(1), "clearing the query restores it");
     }
 
     #[test]
