@@ -525,11 +525,26 @@ impl DisplayMap {
         tokens: Arc<[SemanticTokenHighlight]>,
         interner: Arc<HighlightStyleInterner>,
     ) {
-        let channel = {
-            let snapshot = self.multi_buffer.snapshot();
-            BufferSemanticTokens::new(tokens, interner, |a| snapshot.resolve_anchor(a))
-        };
+        let channel = self.batched_token_channel(tokens, interner);
         self.set_semantic_token_channel(buffer_id, channel);
+    }
+
+    /// Build a token channel, resolving every token end in one batch.
+    ///
+    /// The channel's search index is an argmax over resolved ends, so building
+    /// it needs each end's offset. Taken one at a time that is a root descent
+    /// per token, which is what makes installing a large file's tokens
+    /// expensive.
+    fn batched_token_channel(
+        &self,
+        tokens: Arc<[SemanticTokenHighlight]>,
+        interner: Arc<HighlightStyleInterner>,
+    ) -> BufferSemanticTokens {
+        let snapshot = self.multi_buffer.snapshot();
+        let ends: Vec<Anchor> = tokens.iter().map(|token| token.range.end).collect();
+        let prefix_max_end = prefix_max_end_indices(&snapshot.resolve_anchors_batch(&ends));
+
+        BufferSemanticTokens::with_prefix_max_end(tokens, interner, prefix_max_end)
     }
 
     /// Install a channel the caller already built.
@@ -561,12 +576,7 @@ impl DisplayMap {
         tokens: Arc<[SemanticTokenHighlight]>,
         interner: Arc<HighlightStyleInterner>,
     ) {
-        let channel = {
-            let snapshot = self.multi_buffer.snapshot();
-            let ends: Vec<Anchor> = tokens.iter().map(|token| token.range.end).collect();
-            let prefix_max_end = prefix_max_end_indices(&snapshot.resolve_anchors_batch(&ends));
-            BufferSemanticTokens::with_prefix_max_end(tokens, interner, prefix_max_end)
-        };
+        let channel = self.batched_token_channel(tokens, interner);
         Arc::make_mut(&mut self.lsp_token_highlights).insert(buffer_id, channel);
         self.highlights_dirty = true;
     }
@@ -2611,5 +2621,77 @@ mod tests {
             vec![Color::Blue],
             "the cached endpoints are rebuilt against the new interner"
         );
+    }
+
+    #[test]
+    fn installing_tokens_indexes_them_like_a_per_anchor_build() {
+        use super::highlights::{
+            BufferSemanticTokens, HighlightStyle, HighlightStyleInterner, SemanticTokenHighlight,
+        };
+        use stoat_text::{Anchor, Bias};
+
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n",
+        )));
+        let mut display_map = DisplayMap::new(
+            MultiBuffer::singleton(BufferId::new(0), shared.clone()),
+            test_executor(),
+            crate::test_notify(),
+        );
+
+        let (tokens, interner) = {
+            let snap = display_map.multi_buffer.snapshot();
+            let mut interner = HighlightStyleInterner::default();
+            let style = interner.push(HighlightStyle::default());
+            // An enclosing token ahead of the three it contains, the order
+            // captures() emits an outer node and its children in. Without one
+            // the ends rise monotonically, the running argmax is the identity,
+            // and the index cannot distinguish a correct build from a wrong one.
+            let tokens: Arc<[SemanticTokenHighlight]> =
+                [(0usize, 40usize), (3, 8), (17, 21), (30, 35)]
+                    .iter()
+                    .map(|&(start, end)| SemanticTokenHighlight {
+                        range: snap.anchor_at(start, Bias::Right)..snap.anchor_at(end, Bias::Left),
+                        style,
+                    })
+                    .collect();
+            (tokens, Arc::new(interner))
+        };
+
+        // Fragment the buffer first. On an untouched one every anchor still
+        // resolves to the offset it was minted from, so any way of building the
+        // index agrees and the comparison below proves nothing.
+        {
+            let mut buf = shared.write().expect("poisoned");
+            buf.edit(0..0, "// header\n");
+            buf.edit(20..20, "  ");
+        }
+
+        display_map.set_semantic_token_highlights(
+            BufferId::new(0),
+            tokens.clone(),
+            interner.clone(),
+        );
+
+        let snapshot = display_map.multi_buffer.snapshot();
+        let resolve = |a: &Anchor| snapshot.resolve_anchor(a);
+        let per_anchor = BufferSemanticTokens::new(tokens, interner, resolve);
+        let installed = display_map
+            .semantic_token_highlights
+            .get(&BufferId::new(0))
+            .expect("the channel is installed under its buffer id");
+
+        let len = snapshot.rope().len();
+        for start in 0..=len {
+            for end in [start, start + 1, len] {
+                let end = end.min(len);
+                assert_eq!(
+                    installed.overlap_bounds(&(start..end), resolve),
+                    per_anchor.overlap_bounds(&(start..end), resolve),
+                    "bounds must agree for {start}..{end}",
+                );
+            }
+        }
     }
 }
