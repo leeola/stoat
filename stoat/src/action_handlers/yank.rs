@@ -1204,10 +1204,10 @@ mod tests {
     fn paste_search_register_pastes_last_search_query() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.stoat.last_search = Some(crate::action_handlers::search::LastSearch {
-            query: "needle".into(),
-            direction: crate::action_handlers::search::SearchDirection::Forward,
-        });
+        h.stoat.last_search = Some(crate::action_handlers::search::LastSearch::new(
+            "needle".into(),
+            crate::action_handlers::search::SearchDirection::Forward,
+        ));
         h.type_keys("escape");
         h.type_keys("\" / p");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);

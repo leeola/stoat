@@ -29,13 +29,31 @@ pub(crate) struct SearchInputState {
     pub(crate) direction: SearchDirection,
 }
 
-/// Persisted query + direction from the most recent submitted
-/// search. `SearchNext` / `SearchPrev` consume this; cleared when
-/// the search input is cancelled with empty submit.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Persisted query + direction from the most recent submitted search.
+///
+/// `SearchNext` and `SearchPrev` consume this. It clears when the search input
+/// is cancelled with an empty submit.
+#[derive(Clone, Debug)]
 pub(crate) struct LastSearch {
     pub(crate) query: String,
     pub(crate) direction: SearchDirection,
+    /// [`Self::query`] compiled, so repeating the search costs a refcount bump
+    /// rather than a rebuild on every press.
+    ///
+    /// `None` for a pattern that does not compile. The query is kept either
+    /// way, because it is also what the search register pastes and what the
+    /// highlight pass reads, neither of which needs it to be searchable.
+    regex: Option<regex::Regex>,
+}
+
+impl LastSearch {
+    pub(crate) fn new(query: String, direction: SearchDirection) -> Self {
+        Self {
+            regex: compile_search_regex(&query).ok(),
+            query,
+            direction,
+        }
+    }
 }
 
 pub(super) fn open_search_input(stoat: &mut Stoat) -> UpdateEffect {
@@ -74,13 +92,15 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
         return true;
     }
 
+    let last = LastSearch::new(query, direction);
     let origin = super::jump::live_entry(stoat);
-    if jump_to_match(stoat, &query, direction)
+    if let Some(regex) = last.regex.as_ref()
+        && jump_to_match(stoat, regex, direction)
         && let Some(entry) = origin
     {
         super::jump::push_entry(stoat, entry);
     }
-    stoat.last_search = Some(LastSearch { query, direction });
+    stoat.last_search = Some(last);
     true
 }
 
@@ -96,10 +116,10 @@ pub(crate) fn search_cancel(stoat: &mut Stoat) -> bool {
 }
 
 pub(super) fn search_next(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(last) = stoat.last_search.clone() else {
+    let Some((regex, direction)) = repeat_target(stoat) else {
         return UpdateEffect::None;
     };
-    if jump_to_match(stoat, &last.query, last.direction) {
+    if jump_to_match(stoat, &regex, direction) {
         UpdateEffect::Redraw
     } else {
         UpdateEffect::None
@@ -107,28 +127,37 @@ pub(super) fn search_next(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 pub(super) fn search_prev(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(last) = stoat.last_search.clone() else {
+    let Some((regex, direction)) = repeat_target(stoat) else {
         return UpdateEffect::None;
     };
-    if jump_to_match(stoat, &last.query, last.direction.flipped()) {
+    if jump_to_match(stoat, &regex, direction.flipped()) {
         UpdateEffect::Redraw
     } else {
         UpdateEffect::None
     }
 }
 
-/// Find the next regex match of `query` in the focused editor's
-/// buffer, starting from the primary cursor and walking in
-/// `direction` with wrap-around, then move every selection's primary
-/// cursor to the match start. Returns true when a match was found
-/// and the cursor moved. Invalid regex is treated as no match.
-fn jump_to_match(stoat: &mut Stoat, query: &str, direction: SearchDirection) -> bool {
+/// The pattern and direction a repeat press searches with, or `None` when
+/// nothing has been searched for or the stored pattern never compiled.
+///
+/// Clones the regex, which is a refcount bump, rather than the whole
+/// [`LastSearch`], which would copy the query text on every press.
+fn repeat_target(stoat: &Stoat) -> Option<(regex::Regex, SearchDirection)> {
+    let last = stoat.last_search.as_ref()?;
+    Some((last.regex.clone()?, last.direction))
+}
+
+/// Find the next match of `regex` in the focused editor's buffer,
+/// starting from the primary cursor and walking in `direction` with
+/// wrap-around, then move every selection's primary cursor to the match
+/// start. Returns true when a match was found and the cursor moved.
+///
+/// Takes the pattern already compiled, since `n` and `N` repeat one that
+/// [`LastSearch`] built when it was submitted.
+fn jump_to_match(stoat: &mut Stoat, regex: &regex::Regex, direction: SearchDirection) -> bool {
     use crate::pane::View;
     use stoat_text::SelectionGoal;
 
-    let Ok(regex) = compile_search_regex(query) else {
-        return false;
-    };
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -159,8 +188,8 @@ fn jump_to_match(stoat: &mut Stoat, query: &str, direction: SearchDirection) -> 
     let len = text.len();
 
     let target = match direction {
-        SearchDirection::Forward => find_forward(&regex, &text, cursor, len),
-        SearchDirection::Reverse => find_reverse(&regex, &text, cursor),
+        SearchDirection::Forward => find_forward(regex, &text, cursor, len),
+        SearchDirection::Reverse => find_reverse(regex, &text, cursor),
     };
     let Some(target) = target else { return false };
 
@@ -182,18 +211,26 @@ fn find_forward(regex: &regex::Regex, text: &str, head: usize, len: usize) -> Op
 /// The last match starting before `head`, or the last in the file when there is
 /// none, so a reverse search wraps around.
 ///
-/// One forward pass keeping the two candidates, since the file's other match
-/// starts are never consulted.
+/// One forward pass, stopping at the first match the cursor has already passed.
+/// `find_iter` is lazy, so an ordinary reverse search reads `head` bytes rather
+/// than the file. Only a search with nothing behind the cursor, which is the
+/// one that has to wrap, reads to the end.
 fn find_reverse(regex: &regex::Regex, text: &str, head: usize) -> Option<usize> {
+    let mut matches = regex.find_iter(text);
     let mut before = None;
-    let mut last = None;
-    for m in regex.find_iter(text) {
-        if m.start() < head {
-            before = Some(m.start());
+
+    let at_or_after = loop {
+        match matches.next() {
+            Some(m) if m.start() < head => before = Some(m.start()),
+            other => break other,
         }
-        last = Some(m.start());
+    };
+
+    if before.is_some() {
+        return before;
     }
-    before.or(last)
+    let first = at_or_after?;
+    Some(matches.last().map_or(first.start(), |m| m.start()))
 }
 
 /// Finds the first regex match whose start is at or after `at`.
@@ -399,6 +436,53 @@ mod tests {
         assert_eq!(cursor_offset(&mut h), 8);
         crate::action_handlers::dispatch(&mut h.stoat, &action::SearchPrev);
         assert_eq!(cursor_offset(&mut h), 0);
+    }
+
+    /// A reverse repeat with nothing behind the cursor wraps to the file's last
+    /// match. That is the one case reading past the cursor, so it is the one the
+    /// early stop could get wrong.
+    #[test]
+    fn search_prev_from_the_top_wraps_to_the_last_match() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc xyz abc\n");
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+        assert_eq!(cursor_offset(&mut h), 8);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchPrev);
+        assert_eq!(cursor_offset(&mut h), 0, "back to the first match");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchPrev);
+        assert_eq!(
+            cursor_offset(&mut h),
+            16,
+            "nothing lies before the top, so it wraps to the last match",
+        );
+    }
+
+    /// A pattern that does not compile finds nothing, but it is still what the
+    /// user typed, and the search register pastes it back.
+    #[test]
+    fn an_uncompilable_pattern_still_stores_its_query() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def\n");
+        let before = cursor_offset(&mut h);
+
+        h.type_keys("/");
+        h.type_text("[");
+        h.type_keys("enter");
+
+        assert_eq!(cursor_offset(&mut h), before, "no match, so no jump");
+        assert_eq!(
+            h.stoat.last_search.as_ref().map(|s| s.query.as_str()),
+            Some("["),
+        );
+        assert_eq!(
+            crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext),
+            crate::app::UpdateEffect::None,
+            "repeating a pattern that never compiled stays a no-op",
+        );
     }
 
     #[test]
