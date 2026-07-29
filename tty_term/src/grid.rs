@@ -301,6 +301,15 @@ impl Grid {
         self.text_runs.extend((0..count).map(&mut run));
     }
 
+    /// The run list, for a caller rewriting it from another grid's.
+    ///
+    /// A pool composite replaces the whole list every frame, so it wants to
+    /// overwrite what is here rather than hand over a freshly collected vector
+    /// and drop this one.
+    pub fn text_runs_mut(&mut self) -> &mut Vec<TextRun> {
+        &mut self.text_runs
+    }
+
     /// The off-grid color bars drawn above the cells, in draw order.
     pub fn bars(&self) -> &[Bar] {
         &self.bars
@@ -314,6 +323,12 @@ impl Grid {
         self.bars = bars;
     }
 
+    /// The bar list, for a caller rewriting it from another grid.s. See
+    /// [`Self::text_runs_mut`].
+    pub fn bars_mut(&mut self) -> &mut Vec<Bar> {
+        &mut self.bars
+    }
+
     /// The off-grid stroked paths drawn above the cells, in draw order.
     pub fn polylines(&self) -> &[Polyline] {
         &self.polylines
@@ -325,6 +340,12 @@ impl Grid {
     /// untouched and the caller sets the full list each frame it changes.
     pub fn set_polylines(&mut self, polylines: Vec<Polyline>) {
         self.polylines = polylines;
+    }
+
+    /// The path list, for a caller rewriting it from another grid.s. See
+    /// [`Self::text_runs_mut`].
+    pub fn polylines_mut(&mut self) -> &mut Vec<Polyline> {
+        &mut self.polylines
     }
 
     /// The declared minimap strips, each carrying its viewport thumb.

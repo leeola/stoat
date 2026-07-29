@@ -45,7 +45,7 @@ use stoatty_render::{
     render,
 };
 use stoatty_term::{
-    grid::{Bar, Grid, Overlay, Polyline, Rgb, TextRun},
+    grid::{Bar, Grid, Overlay, Rgb, TextRun},
     term::{Cursor, CursorShape, Damage, PoolView, TermEvent, Terminal},
     theme::Theme,
 };
@@ -2028,42 +2028,46 @@ fn copy_pool_region(
 
     let dx = region.left as i16 * 16;
     let dy = region.top as i16 * 16;
-    pool_grid.set_text_runs(
-        document_grid
-            .text_runs()
-            .iter()
-            .map(|run| TextRun {
-                col: run.col + dx,
-                row: run.row + dy,
-                ..run.clone()
-            })
-            .collect(),
+    copy_translated(
+        pool_grid.text_runs_mut(),
+        document_grid.text_runs(),
+        |run| {
+            run.col += dx;
+            run.row += dy;
+        },
     );
-    pool_grid.set_bars(
-        document_grid
-            .bars()
-            .iter()
-            .map(|bar| Bar {
-                x: bar.x + dx,
-                y: bar.y + dy,
-                ..*bar
-            })
-            .collect(),
+    copy_translated(pool_grid.bars_mut(), document_grid.bars(), |bar| {
+        bar.x += dx;
+        bar.y += dy;
+    });
+    copy_translated(
+        pool_grid.polylines_mut(),
+        document_grid.polylines(),
+        |polyline| {
+            for point in &mut polyline.points {
+                point[0] += dx;
+                point[1] += dy;
+            }
+        },
     );
-    pool_grid.set_polylines(
-        document_grid
-            .polylines()
-            .iter()
-            .map(|polyline| Polyline {
-                points: polyline
-                    .points
-                    .iter()
-                    .map(|&[x, y]| [x + dx, y + dy])
-                    .collect(),
-                ..polyline.clone()
-            })
-            .collect(),
-    );
+}
+
+/// Overwrite `dst` with `src`, then shift each entry into the pool's region.
+///
+/// A gliding pool rewrites these lists every frame, so the entries `dst`
+/// already holds are overwritten rather than dropped for freshly collected
+/// ones. `clone_from` is what carries that down into an entry's own
+/// allocations, keeping a path's point list off the allocator too.
+fn copy_translated<T: Clone>(dst: &mut Vec<T>, src: &[T], mut shift: impl FnMut(&mut T)) {
+    dst.truncate(src.len());
+    for (out, item) in dst.iter_mut().zip(src) {
+        out.clone_from(item);
+    }
+    dst.extend_from_slice(&src[dst.len()..]);
+
+    for item in dst {
+        shift(item);
+    }
 }
 
 /// The cursor's cell position for the renderer, or `None` when it is hidden.

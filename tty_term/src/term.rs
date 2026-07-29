@@ -2874,9 +2874,19 @@ fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, page_rows: 
     let first_page = top.div_euclid(page_rows as i64);
     let last_page = (top + out_rows - 1).div_euclid(page_rows as i64);
 
-    let mut text_runs = Vec::new();
-    let mut bars = Vec::new();
-    let mut polylines = Vec::new();
+    // Built straight into the target's own lists rather than into fresh ones it
+    // would then adopt. A gliding pool stamps every frame, so what is already
+    // here is exactly what would otherwise be dropped and reallocated.
+    let mut text_runs = mem::take(out.text_runs_mut());
+    let mut bars = mem::take(out.bars_mut());
+    let mut polylines = mem::take(out.polylines_mut());
+    text_runs.clear();
+    bars.clear();
+    // Paths keep their entries, so each one's point list is refilled rather than
+    // collected fresh. `kept` counts the survivors, and the tail is dropped once
+    // the pages are walked.
+    let mut kept = 0;
+
     for page in first_page..=last_page {
         let Some((page_runs, page_bars, page_polylines)) = pool.page_decorations(page as u64)
         else {
@@ -2910,27 +2920,45 @@ fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, page_rows: 
             // segment here would need its pixel geometry. A point that cannot
             // survive the shift drops the whole path, because a partial point
             // list would draw a wrong line rather than none.
-            let shifted: Option<Vec<[i16; 2]>> = polyline
+            if kept == polylines.len() {
+                polylines.push(Polyline {
+                    points: Vec::new(),
+                    width: 0,
+                    color: Rgb::new(0, 0, 0),
+                    seq: 0,
+                });
+            }
+            let slot = &mut polylines[kept];
+
+            slot.points.clear();
+            let shifted = polyline.points.iter().try_for_each(|&[x, y]| {
+                match i16::try_from(y as i64 + shift) {
+                    Ok(y) => {
+                        slot.points.push([x, y]);
+                        Ok(())
+                    },
+                    Err(_) => Err(()),
+                }
+            });
+            if shifted.is_err() {
+                continue;
+            }
+            if slot
                 .points
-                .iter()
-                .map(|&[x, y]| i16::try_from(y as i64 + shift).ok().map(|y| [x, y]))
-                .collect();
-            let Some(points) = shifted else { continue };
-            if points
                 .iter()
                 .all(|&[_, y]| (y as i64) < 0 || y as i64 >= out_rows_16)
             {
                 continue;
             }
-            polylines.push(Polyline {
-                points,
-                width: polyline.width,
-                color: polyline.color,
-                seq: polyline.seq,
-            });
+
+            slot.width = polyline.width;
+            slot.color = polyline.color;
+            slot.seq = polyline.seq;
+            kept += 1;
         }
     }
 
+    polylines.truncate(kept);
     out.set_text_runs(text_runs);
     out.set_bars(bars);
     out.set_polylines(polylines);
@@ -5458,6 +5486,66 @@ mod tests {
                 text: "bb".into(),
                 seq: 0,
             }]
+        );
+    }
+
+    /// A gliding pool stamps into the same grid every frame, and the lists it
+    /// writes are now the ones already there rather than fresh ones. A stamp
+    /// therefore has to replace what it finds, including a path list left
+    /// longer by the stamp before it.
+    #[test]
+    fn restamping_a_pool_replaces_what_the_last_stamp_left() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut out = Grid::new(3, 4);
+        declare_pool(&mut terminal, 0, 2, 4);
+
+        let path = |points: Vec<[i16; 2]>, width: u16| {
+            encode_polyline(&PolylineCommand {
+                points,
+                width,
+                color: [1, 2, 3],
+            })
+        };
+        // Page one is filled once and left alone, so the window always holds
+        // two paths and only page zero's changes shape between stamps.
+        let fill_page_zero = |terminal: &mut Terminal, points: Vec<[i16; 2]>| {
+            let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+            stream.extend_from_slice(&path(points, 8));
+            stream.extend_from_slice(&encode_fill_end());
+            terminal.advance(&stream);
+        };
+
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 1 });
+        stream.extend_from_slice(&path(vec![[48, 0]], 4));
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        fill_page_zero(&mut terminal, vec![[0, 0], [16, 0], [32, 0]]);
+        terminal.project_pool(0, &mut out, 0.0);
+        let long = out.polylines().to_vec();
+        assert_eq!(
+            long.iter().map(|p| p.points.len()).collect::<Vec<_>>(),
+            [3, 1],
+            "page zero's three points, then page one's single one",
+        );
+
+        // The shorter path refills the entry the longer one left, so a stale
+        // tail point would ride along into it.
+        fill_page_zero(&mut terminal, vec![[64, 0]]);
+        terminal.project_pool(0, &mut out, 0.0);
+        assert_eq!(
+            out.polylines()[0].points,
+            [[64, 0]],
+            "the shortened path holds only its own point",
+        );
+
+        // Back to the longer path, which must land what it did the first time.
+        fill_page_zero(&mut terminal, vec![[0, 0], [16, 0], [32, 0]]);
+        terminal.project_pool(0, &mut out, 0.0);
+        assert_eq!(
+            out.polylines(),
+            long,
+            "a restamp is unaffected by the reuse"
         );
     }
 
