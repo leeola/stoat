@@ -1048,7 +1048,7 @@ pub struct Stoat {
     /// remains the right basis for the next patch. Updated by the
     /// spawned dispatch task on success.
     pub(crate) lsp_last_delivered_text:
-        Arc<std::sync::Mutex<std::collections::HashMap<BufferId, Arc<String>>>>,
+        Arc<std::sync::Mutex<std::collections::HashMap<BufferId, Rope>>>,
     /// Buffer version at the last successful `did_open` /
     /// `did_change` delivery, paired with `lsp_last_delivered_text`.
     /// `Buffer::edits_since(this)` produces the patch the next

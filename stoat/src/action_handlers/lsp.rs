@@ -174,12 +174,11 @@ pub(crate) fn notify_buffer_opened(
         .unwrap_or(0);
     stoat.lsp_buffer_versions.insert(buffer_id, buffer_version);
     stoat.lsp_doc_versions.insert(buffer_id, 0);
-    let text_arc = Arc::new(text.to_string());
     stoat
         .lsp_last_delivered_text
         .lock()
         .expect("lsp text mutex")
-        .insert(buffer_id, Arc::clone(&text_arc));
+        .insert(buffer_id, Rope::from(text));
     stoat
         .lsp_last_delivered_buffer_version
         .lock()
@@ -191,7 +190,7 @@ pub(crate) fn notify_buffer_opened(
                 uri: uri.clone(),
                 language_id: language_id.clone(),
                 version: 0,
-                text: text_arc.as_ref().clone(),
+                text: text.to_string(),
             },
         };
         stoat
@@ -563,7 +562,7 @@ type HostSyncGroups = Vec<(
 struct DispatchPlan {
     uri: Uri,
     content_changes: Vec<TextDocumentContentChangeEvent>,
-    target_text: Arc<String>,
+    target_text: Rope,
     target_buffer_version: u64,
 }
 
@@ -583,14 +582,14 @@ fn build_dispatch_plan(
     }
     let path = workspace.buffers.path_for(id)?.to_path_buf();
     let uri = path_to_uri(&path)?;
-    let new_text = buffer_b.rope().to_string();
+    let new_rope = buffer_b.rope();
 
     let content_changes = match sync_kind {
         TextDocumentSyncKind::FULL => {
             vec![TextDocumentContentChangeEvent {
                 range: None,
                 range_length: None,
-                text: new_text.clone(),
+                text: new_rope.to_string(),
             }]
         },
         TextDocumentSyncKind::INCREMENTAL => {
@@ -607,9 +606,9 @@ fn build_dispatch_plan(
                 .expect("lsp text mutex")
                 .get(&id)
                 .cloned()
-                .unwrap_or_else(|| Arc::new(String::new()));
+                .unwrap_or_default();
             let patch = buffer_b.snapshot.edits_since(last_delivered_version);
-            patch_to_content_changes(&last_delivered_text, buffer_b.rope(), &patch, encoding)
+            patch_to_content_changes(&last_delivered_text, new_rope, &patch, encoding)
         },
         _ => return None,
     };
@@ -621,89 +620,53 @@ fn build_dispatch_plan(
     Some(DispatchPlan {
         uri,
         content_changes,
-        target_text: Arc::new(new_text),
+        target_text: new_rope.clone(),
         target_buffer_version: current_version,
     })
 }
 
-/// Translate a [`Patch`] of byte-range edits between `old_text` and
+/// Translate a [`Patch`] of byte-range edits between `old_rope` and
 /// `new_rope` into a sequence of [`TextDocumentContentChangeEvent`]s.
-/// LSP requires positions in the *sequential* state at the moment
-/// each change is applied -- after prior changes in the same call
-/// have been applied -- not in the original or final document. The
-/// walk below tracks `current_lsp` as the LSP position in the seq
-/// state: a retain advances both old and seq; an insertion advances
-/// seq by the inserted text's length; a deletion leaves seq alone
-/// because the deleted bytes are removed from seq before the next
-/// edit applies.
+///
+/// LSP applies the changes in order, each against the document the previous
+/// one left behind. Emitting them back to front satisfies that without
+/// tracking any running position. The rightmost edit goes first, and it can
+/// only move text after itself, so every edit still to come sits at an offset
+/// nothing has disturbed. Every range is therefore in the coordinates of
+/// `old_rope`, which is what lets
+/// [`byte_offset_to_lsp_pos`](crate::lsp::util::byte_offset_to_lsp_pos)
+/// answer each one in a seek instead of a walk from the start of the document.
+///
+/// Patch edits are disjoint and ascending, which is the property the argument
+/// above rests on.
+///
+/// One encoding covers all three edit shapes. The range spans what the edit
+/// replaced and the text is what it replaced it with, so a deletion carries an
+/// empty text, an insertion an empty range, and a replacement neither.
 fn patch_to_content_changes(
-    old_text: &str,
+    old_rope: &Rope,
     new_rope: &Rope,
     patch: &Patch<usize>,
     encoding: OffsetEncoding,
 ) -> Vec<TextDocumentContentChangeEvent> {
     let mut changes = Vec::new();
-    let mut old_pos: usize = 0;
-    let mut current_lsp = Position::new(0, 0);
 
-    for edit in patch {
-        if edit.old.start > old_pos {
-            let retain = &old_text[old_pos..edit.old.start];
-            current_lsp = advance_lsp_position(current_lsp, retain, encoding);
-            old_pos = edit.old.start;
+    for edit in patch.into_iter().rev() {
+        if edit.old.is_empty() && edit.new.is_empty() {
+            continue;
         }
 
-        let start = current_lsp;
-        let old_len = edit.old.end - edit.old.start;
-        let new_len = edit.new.end - edit.new.start;
+        let start = crate::lsp::util::byte_offset_to_lsp_pos(old_rope, edit.old.start, encoding);
+        let end = crate::lsp::util::byte_offset_to_lsp_pos(old_rope, edit.old.end, encoding);
 
-        if old_len > 0 {
-            let deleted = &old_text[edit.old.start..edit.old.end];
-            let end = advance_lsp_position(start, deleted, encoding);
-            changes.push(TextDocumentContentChangeEvent {
-                range: Some(Range::new(start, end)),
-                range_length: None,
-                text: String::new(),
-            });
-            old_pos = edit.old.end;
-        } else if new_len > 0 {
-            let inserted = new_rope.slice(edit.new.start..edit.new.end).to_string();
-            current_lsp = advance_lsp_position(current_lsp, &inserted, encoding);
-            changes.push(TextDocumentContentChangeEvent {
-                range: Some(Range::new(start, start)),
-                range_length: None,
-                text: inserted,
-            });
-        }
+        changes.push(TextDocumentContentChangeEvent {
+            range: Some(Range::new(start, end)),
+            range_length: None,
+            text: new_rope.slice(edit.new.start..edit.new.end).to_string(),
+        });
     }
 
     changes
-}
-
-/// Walk `text` from `start` and return the LSP position that lands
-/// at the end. Counts `\n`, `\r`, and `\r\n` as line breaks per LSP
-/// spec. Per-character column advance follows the negotiated
-/// encoding so positions match what the server expects.
-fn advance_lsp_position(start: Position, text: &str, encoding: OffsetEncoding) -> Position {
-    let mut line = start.line;
-    let mut character = start.character;
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\n' || ch == '\r' {
-            if ch == '\r' && chars.peek() == Some(&'\n') {
-                chars.next();
-            }
-            line += 1;
-            character = 0;
-        } else {
-            character += match encoding {
-                OffsetEncoding::Utf8 => ch.len_utf8() as u32,
-                OffsetEncoding::Utf16 => ch.len_utf16() as u32,
-                OffsetEncoding::Utf32 => 1,
-            };
-        }
-    }
-    Position::new(line, character)
 }
 
 fn resolve_sync_kind(cap: &Option<TextDocumentSyncCapability>) -> TextDocumentSyncKind {
@@ -5807,6 +5770,78 @@ mod tests {
             Some(lsp_types::Range::new(
                 lsp_types::Position::new(0, 4),
                 lsp_types::Position::new(0, 4),
+            )),
+        );
+    }
+
+    #[test]
+    fn did_change_incremental_replacement_carries_its_new_text() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.fake_lsp()
+            .set_text_document_sync(TextDocumentSyncKind::INCREMENTAL);
+        let root = seed(&mut h, &[("a.rs", "abcdef\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+        edit_buffer(&mut h, 2..4, "ZZ");
+        arm_change(&mut h);
+        h.advance_clock(Duration::from_millis(60));
+        let changes = h.fake_lsp().observed_changes();
+        assert_eq!(changes.len(), 1);
+        let cc = &changes[0].content_changes;
+        assert_eq!(cc.len(), 1, "a replacement is one content_change");
+        assert_eq!(
+            cc[0].text, "ZZ",
+            "the replacing text reaches the server, not a bare deletion",
+        );
+        assert_eq!(
+            cc[0].range,
+            Some(lsp_types::Range::new(
+                lsp_types::Position::new(0, 2),
+                lsp_types::Position::new(0, 4),
+            )),
+            "the range covers the bytes being replaced",
+        );
+    }
+
+    /// Two edits in one dispatch arrive back to front, each in the
+    /// coordinates of the document before any of them applied.
+    ///
+    /// The first edit inserts a line, so a scheme numbering the second against
+    /// the state the first leaves behind would place it a row lower. Fixing
+    /// both the order and the row is what distinguishes the two.
+    #[test]
+    fn did_change_incremental_emits_edits_back_to_front() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.fake_lsp()
+            .set_text_document_sync(TextDocumentSyncKind::INCREMENTAL);
+        let root = seed(&mut h, &[("a.rs", "aaa\nbbb\nccc\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+
+        edit_buffer(&mut h, 8..8, "Y");
+        edit_buffer(&mut h, 0..0, "X\n");
+        arm_change(&mut h);
+        h.advance_clock(Duration::from_millis(60));
+
+        let changes = h.fake_lsp().observed_changes();
+        assert_eq!(changes.len(), 1, "both edits ride one dispatch");
+        let cc = &changes[0].content_changes;
+        assert_eq!(cc.len(), 2);
+
+        assert_eq!(cc[0].text, "Y", "the later edit is delivered first");
+        assert_eq!(
+            cc[0].range,
+            Some(lsp_types::Range::new(
+                lsp_types::Position::new(2, 0),
+                lsp_types::Position::new(2, 0),
+            )),
+            "row 2 is where it sat before the line above was inserted",
+        );
+
+        assert_eq!(cc[1].text, "X\n");
+        assert_eq!(
+            cc[1].range,
+            Some(lsp_types::Range::new(
+                lsp_types::Position::new(0, 0),
+                lsp_types::Position::new(0, 0),
             )),
         );
     }
