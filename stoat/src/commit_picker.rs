@@ -7,7 +7,13 @@ use crate::{
     review_session::ReviewSession,
     workspace::Workspace,
 };
-use std::{collections::HashMap, mem, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
+    mem,
+    path::PathBuf,
+    sync::Arc,
+};
 use stoat_scheduler::Executor;
 
 /// What selecting a row in a [`CommitPicker`] does.
@@ -41,6 +47,7 @@ pub(crate) enum CommitColumn {
 pub(crate) const COMMIT_COLUMNS: usize = 5;
 
 /// One cell of a [`CommitRow`], and where it sits in the row's haystack.
+#[derive(Clone)]
 pub(crate) struct CommitCell {
     pub(crate) text: String,
     /// Character offset of this cell's first character within
@@ -56,6 +63,7 @@ pub(crate) struct CommitCell {
 /// row and a reported match offset is an offset into [`Self::text`]. The cells
 /// carry their own start offsets so the renderer can put that offset back on
 /// the column showing it. See [`CommitPicker::row`].
+#[derive(Clone)]
 pub(crate) struct CommitRow {
     pub(crate) text: String,
     pub(crate) cells: [CommitCell; COMMIT_COLUMNS],
@@ -200,6 +208,20 @@ pub(crate) struct CommitPicker {
     /// Bumped by every [`Self::refilter`], so a pool can tell that the rows it
     /// buffered are stale without hashing the whole filtered list.
     pub(crate) filter_generation: u64,
+    /// One built [`CommitRow`] per entry in [`Self::commits`], in the same
+    /// order.
+    ///
+    /// Building a row joins its branch names, formats an age against
+    /// [`Self::now_epoch`], and assembles the haystack, none of which changes
+    /// while the list stands. The filter runs every drive tick, so deriving
+    /// them per run would rebuild the whole list between keystrokes.
+    rows: Vec<CommitRow>,
+    /// Bumped whenever [`Self::commits`] is replaced, so the filter can tell a
+    /// new list from a re-run over the same one.
+    commits_generation: u64,
+    /// Hash of the inputs the last [`Self::refilter`] ran against, or `None`
+    /// before the first.
+    last_filter_key: Option<u64>,
 }
 
 impl CommitPicker {
@@ -238,7 +260,11 @@ impl CommitPicker {
             graph: (Vec::new(), 0),
             col_widest: [0; COMMIT_COLUMNS],
             filter_generation: 0,
+            rows: Vec::new(),
+            commits_generation: 0,
+            last_filter_key: None,
         };
+        picker.rebuild_rows();
         picker.graph = commit_graph::assign_lanes(&picker.commits);
         picker.refilter("");
         picker.selected = picker.default_selection();
@@ -267,6 +293,7 @@ impl CommitPicker {
         });
 
         self.selected = 0;
+        self.rebuild_rows();
         self.graph = commit_graph::assign_lanes(&self.commits);
         self.refilter("");
         self.preview_scroll = 0;
@@ -284,6 +311,7 @@ impl CommitPicker {
         self.commits = scope.commits;
         self.filter_column = scope.filter_column;
         self.selected = scope.selected;
+        self.rebuild_rows();
         self.graph = commit_graph::assign_lanes(&self.commits);
         self.refilter(&scope.query);
         self.preview_scroll = 0;
@@ -297,16 +325,30 @@ impl CommitPicker {
     /// with the table's columns. The join separates them with single spaces,
     /// which is what makes a match offset resolvable back to a cell.
     pub(crate) fn row(&self, idx: usize) -> CommitRow {
-        let Some(commit) = self.commits.get(idx) else {
-            return CommitRow {
+        self.rows.get(idx).cloned().unwrap_or_else(|| CommitRow {
+            text: String::new(),
+            cells: std::array::from_fn(|_| CommitCell {
                 text: String::new(),
-                cells: std::array::from_fn(|_| CommitCell {
-                    text: String::new(),
-                    start: 0,
-                }),
-            };
-        };
+                start: 0,
+            }),
+        })
+    }
 
+    /// Rebuild every row from the current commits and invalidate the filter.
+    ///
+    /// Must run wherever [`Self::commits`] is replaced. The generation bump is
+    /// what tells [`Self::refilter`] that an otherwise identical query is now
+    /// being asked of a different list.
+    fn rebuild_rows(&mut self) {
+        self.rows = self
+            .commits
+            .iter()
+            .map(|commit| self.build_row(commit))
+            .collect();
+        self.commits_generation = self.commits_generation.wrapping_add(1);
+    }
+
+    fn build_row(&self, commit: &CommitInfo) -> CommitRow {
         let branches = self
             .branch_tips
             .get(&commit.sha)
@@ -345,17 +387,25 @@ impl CommitPicker {
     /// no highlights.
     pub(crate) fn refilter(&mut self, query: &str) {
         let column = self.filter_column;
-        let rows: Vec<CommitRow> = (0..self.commits.len()).map(|idx| self.row(idx)).collect();
 
-        // A scoped query searches one cell, so the matcher reports offsets into
-        // that cell rather than into the join. Shifting them by the cell's own
-        // start puts them back in join space, which is the only offset space the
-        // renderer knows about.
-        let shift = |idx: usize| match column {
-            Some(column) => rows[idx].cells[column as usize].start as u32,
-            None => 0,
+        // The result is a pure function of these three, so an unchanged key
+        // means an identical outcome. The filter runs every drive tick, and
+        // bumping the generation is what makes a pool discard the pages it
+        // buffered, so an idle picker would otherwise refill them all forever.
+        let key = {
+            let mut hasher = DefaultHasher::new();
+            query.hash(&mut hasher);
+            column.map(|column| column as usize).hash(&mut hasher);
+            self.commits_generation.hash(&mut hasher);
+            hasher.finish()
         };
-        let items: Vec<(usize, String)> = rows
+        if self.last_filter_key == Some(key) {
+            return;
+        }
+        self.last_filter_key = Some(key);
+
+        let items: Vec<(usize, String)> = self
+            .rows
             .iter()
             .enumerate()
             .map(|(idx, row)| {
@@ -367,26 +417,36 @@ impl CommitPicker {
             })
             .collect();
 
-        match fuzzy::match_and_rank(query, items) {
-            None => {
-                self.filtered = (0..self.commits.len()).collect();
-                self.match_indices = vec![Vec::new(); self.commits.len()];
-            },
+        let (filtered, match_indices) = match fuzzy::match_and_rank(query, items) {
+            None => (
+                (0..self.commits.len()).collect(),
+                vec![Vec::new(); self.commits.len()],
+            ),
             Some(mut matches) => {
                 fuzzy::sort_ranked(&mut matches);
 
-                self.filtered = Vec::with_capacity(matches.len());
-                self.match_indices = Vec::with_capacity(matches.len());
+                let mut filtered = Vec::with_capacity(matches.len());
+                let mut match_indices = Vec::with_capacity(matches.len());
                 for m in matches {
-                    let shift = shift(m.item);
-                    self.match_indices
-                        .push(m.matched_indices.iter().map(|&i| i + shift).collect());
-                    self.filtered.push(m.item);
+                    // A scoped query searches one cell, so the matcher reports
+                    // offsets into that cell rather than into the join.
+                    // Shifting them by the cell's own start puts them back in
+                    // join space, which is the only offset space the renderer
+                    // knows about.
+                    let shift = match column {
+                        Some(column) => self.rows[m.item].cells[column as usize].start as u32,
+                        None => 0,
+                    };
+                    match_indices.push(m.matched_indices.iter().map(|&i| i + shift).collect());
+                    filtered.push(m.item);
                 }
+                (filtered, match_indices)
             },
-        }
+        };
 
-        self.col_widest = measure_columns(&rows, &self.filtered);
+        self.filtered = filtered;
+        self.match_indices = match_indices;
+        self.col_widest = measure_columns(&self.rows, &self.filtered);
         self.filter_generation = self.filter_generation.wrapping_add(1);
         self.clamp_selected();
     }
@@ -584,7 +644,11 @@ mod tests {
             graph: (Vec::new(), 0),
             col_widest: [0; COMMIT_COLUMNS],
             filter_generation: 0,
+            rows: Vec::new(),
+            commits_generation: 0,
+            last_filter_key: None,
         };
+        p.rebuild_rows();
         p.graph = commit_graph::assign_lanes(&p.commits);
         p.refilter("");
         p
@@ -960,6 +1024,64 @@ mod tests {
             commit("fff5555", "branch work"),
             commit("eee4444", "branch start"),
         ]
+    }
+
+    /// The filter runs every drive tick, so an idle picker must leave the
+    /// generation alone. A bump there tells the pool its buffered pages are
+    /// stale, and a per-tick bump refills every page while nothing changes.
+    #[test]
+    fn refiltering_the_same_inputs_leaves_the_generation_alone() {
+        let mut p = picker(history(), &[], "ccc3333");
+        let settled = p.filter_generation;
+
+        for _ in 0..5 {
+            p.refilter("widget");
+        }
+        let after_query = p.filter_generation;
+        assert_ne!(
+            after_query, settled,
+            "the first run with a new query filters"
+        );
+
+        for _ in 0..5 {
+            p.refilter("widget");
+        }
+        assert_eq!(
+            p.filter_generation, after_query,
+            "re-running an unchanged query changes nothing",
+        );
+
+        p.refilter("gadget");
+        assert_ne!(
+            p.filter_generation, after_query,
+            "a changed query filters again",
+        );
+    }
+
+    /// The gate keys on the commit generation, so a scope change has to refilter
+    /// even when the query it is asked for is the one already cached.
+    #[test]
+    fn a_scope_change_refilters_under_an_unchanged_query() {
+        let mut p = picker(history(), &[], "ccc3333");
+        p.refilter("");
+        let before = p.filter_generation;
+
+        p.push_scope(
+            "merge ccc3333".to_string(),
+            "fff5555".to_string(),
+            branch_history(),
+            String::new(),
+        );
+
+        assert_ne!(
+            p.filter_generation, before,
+            "the new list refilters despite the query staying empty",
+        );
+        assert_eq!(
+            shown(&p),
+            ["fff5555", "eee4444"],
+            "the filter ran against the scope's own rows",
+        );
     }
 
     #[test]
