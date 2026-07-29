@@ -497,21 +497,37 @@ impl DisplayMap {
         ranges: Vec<Range<Anchor>>,
         style: HighlightStyle,
     ) {
-        let buffer_snapshot = self.multi_buffer.snapshot();
-        let mut sorted_ranges = ranges;
-        sorted_ranges.sort_by(|a, b| {
-            buffer_snapshot
-                .resolve_anchor(&a.start)
-                .cmp(&buffer_snapshot.resolve_anchor(&b.start))
-        });
+        let sorted_ranges = {
+            let buffer_snapshot = self.multi_buffer.snapshot();
+            let starts: Vec<Anchor> = ranges.iter().map(|range| range.start).collect();
+
+            let mut by_start: Vec<(usize, Range<Anchor>)> = buffer_snapshot
+                .resolve_anchors_batch(&starts)
+                .into_iter()
+                .zip(ranges)
+                .collect();
+            by_start.sort_by_key(|(start, _)| *start);
+
+            by_start.into_iter().map(|(_, range)| range).collect()
+        };
+
         Arc::make_mut(&mut self.text_highlights).insert(key, Arc::new((style, sorted_ranges)));
         self.highlights_dirty = true;
     }
 
+    /// Remove `key`'s ranges, reporting whether anything was there to remove.
+    ///
+    /// Absent keys cost nothing. Every snapshot holds a clone of the text
+    /// highlight map, so taking a mutable borrow of it deep-clones, and the
+    /// callers that run per cursor motion mostly have nothing to clear.
     pub fn clear_highlights(&mut self, key: HighlightKey) -> bool {
-        let mut cleared = Arc::make_mut(&mut self.text_highlights)
-            .remove(&key)
-            .is_some();
+        let mut cleared = false;
+        if self.text_highlights.contains_key(&key) {
+            cleared = Arc::make_mut(&mut self.text_highlights)
+                .remove(&key)
+                .is_some();
+        }
+
         cleared |= self.inlay_highlights.remove(&key).is_some();
         if cleared {
             self.highlights_dirty = true;
@@ -2620,6 +2636,100 @@ mod tests {
             painted(&mut display_map, &mut cache),
             vec![Color::Blue],
             "the cached endpoints are rebuilt against the new interner"
+        );
+    }
+
+    #[test]
+    fn clearing_an_absent_highlight_key_leaves_the_map_alone() {
+        use super::highlights::{HighlightKey, HighlightLayer, HighlightStyle};
+        use stoat_text::Bias;
+
+        let mut display_map = create_display_map("fn alpha() {}\n");
+        let present = HighlightKey::layer(HighlightLayer::DocumentHighlightRead);
+        let absent = HighlightKey::layer(HighlightLayer::DocumentHighlightWrite);
+
+        let range = {
+            let snap = display_map.multi_buffer.snapshot();
+            snap.anchor_at(3, Bias::Right)..snap.anchor_at(8, Bias::Left)
+        };
+        display_map.highlight_text(present, vec![range], HighlightStyle::default());
+
+        // A live snapshot is what puts the map's refcount above one, which is
+        // the condition under which a mutable borrow would deep-clone it.
+        let _snapshot = display_map.snapshot();
+        display_map.highlights_dirty = false;
+        let before = display_map.text_highlights.clone();
+
+        assert!(
+            !display_map.clear_highlights(absent),
+            "nothing was stored under the absent key",
+        );
+        assert!(
+            Arc::ptr_eq(&before, &display_map.text_highlights),
+            "clearing an absent key must not rebuild the map",
+        );
+        assert!(
+            !display_map.highlights_dirty,
+            "a clear that removed nothing leaves the highlights clean",
+        );
+
+        assert!(
+            display_map.clear_highlights(present),
+            "the stored key still clears",
+        );
+        assert!(display_map.highlights_dirty, "a real clear marks dirty");
+    }
+
+    #[test]
+    fn highlight_text_orders_ranges_by_resolved_start() {
+        use super::highlights::{HighlightKey, HighlightLayer, HighlightStyle};
+        use stoat_text::{Anchor, Bias};
+
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "aaa\nbbb\nccc\nddd\n",
+        )));
+        let mut display_map = DisplayMap::new(
+            MultiBuffer::singleton(BufferId::new(0), shared.clone()),
+            test_executor(),
+            crate::test_notify(),
+        );
+
+        let ranges: Vec<Range<Anchor>> = {
+            let snap = display_map.multi_buffer.snapshot();
+            [(12usize, 15usize), (0, 3), (8, 11), (4, 7)]
+                .iter()
+                .map(|&(start, end)| {
+                    snap.anchor_at(start, Bias::Right)..snap.anchor_at(end, Bias::Left)
+                })
+                .collect()
+        };
+
+        // Edited after the anchors were minted, so their stored offsets are no
+        // longer where they resolve and the sort has to ask the buffer.
+        {
+            let mut buf = shared.write().expect("poisoned");
+            buf.edit(0..0, "// header\n");
+        }
+
+        let key = HighlightKey::layer(HighlightLayer::DocumentHighlightRead);
+        display_map.highlight_text(key, ranges, HighlightStyle::default());
+
+        let snapshot = display_map.multi_buffer.snapshot();
+        let stored = display_map
+            .text_highlights
+            .get(&key)
+            .expect("the ranges are stored under their key");
+        let starts: Vec<usize> = stored
+            .1
+            .iter()
+            .map(|range| snapshot.resolve_anchor(&range.start))
+            .collect();
+
+        assert_eq!(
+            starts,
+            vec![10, 14, 18, 22],
+            "ranges are stored ascending by resolved start, whatever order they arrived in",
         );
     }
 
