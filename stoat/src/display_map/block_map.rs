@@ -608,6 +608,78 @@ impl BlockMap {
         self.blocks_dirty = true;
     }
 
+    /// Move every custom block's placement across `buffer_row_edits`, so a
+    /// block goes on marking the row it was attached to.
+    ///
+    /// A placement is a plain buffer row. Without this an edit above a block
+    /// leaves it pointing at whatever text slid into that row, and only the
+    /// block's owner removing and re-inserting it can put it back. That
+    /// re-splice is what the diff view currently pays on every refresh.
+    ///
+    /// A block whose rows were replaced outright has nothing left to point at,
+    /// so it collapses to the start of the replacement.
+    fn carry_block_placements(&mut self, buffer_row_edits: &Patch<u32>) {
+        if buffer_row_edits.is_empty() || self.custom_blocks.is_empty() {
+            return;
+        }
+
+        // Blocks are ordered by start row, but a Replace block's end can sit
+        // past the next block's start, so the rows are visited in sorted order
+        // rather than read straight off the list.
+        let mut rows: Vec<u32> = self
+            .custom_blocks
+            .iter()
+            .flat_map(|b| [b.placement.start(), b.placement.end()])
+            .collect();
+        let mut order: Vec<usize> = (0..rows.len()).collect();
+        order.sort_unstable_by_key(|&i| rows[i]);
+
+        let mut ascending: Vec<u32> = order.iter().map(|&i| rows[i]).collect();
+        carry_rows(&mut ascending, buffer_row_edits);
+        for (&i, &row) in order.iter().zip(&ascending) {
+            rows[i] = row;
+        }
+
+        for (i, block) in self.custom_blocks.iter_mut().enumerate() {
+            let (start, end) = (rows[i * 2], rows[i * 2 + 1].max(rows[i * 2]));
+            let placement = match block.placement {
+                BlockPlacement::Above(_) => BlockPlacement::Above(start),
+                BlockPlacement::Below(_) => BlockPlacement::Below(start),
+                BlockPlacement::Near(_) => BlockPlacement::Near(start),
+                BlockPlacement::Replace { .. } => BlockPlacement::Replace { start, end },
+            };
+            if placement == block.placement {
+                continue;
+            }
+
+            // Resolving a placement happens when transforms are built, so a
+            // block that moved needs the tree rebuilt to land in its new place.
+            self.blocks_dirty = true;
+
+            let moved = Arc::new(CustomBlock {
+                id: block.id,
+                placement,
+                height: block.height,
+                render: block.render.clone(),
+                diff_status: block.diff_status,
+                style: block.style,
+                priority: block.priority,
+                // The closures behind this memo are pure over what they captured
+                // at construction, so moving the block does not stale it.
+                rendered: block.rendered.clone(),
+            });
+            *block = Arc::clone(&moved);
+            self.custom_blocks_by_id.insert(moved.id, moved);
+        }
+
+        debug_assert!(
+            self.custom_blocks
+                .windows(2)
+                .all(|pair| pair[0].placement.start_row() <= pair[1].placement.start_row()),
+            "carrying rows is monotone, so the stored order must survive it",
+        );
+    }
+
     pub fn folded_buffers(&self) -> &HashSet<BufferId> {
         &self.folded_buffers
     }
@@ -627,12 +699,17 @@ impl BlockMap {
         self.blocks_dirty = true;
     }
 
+    /// `buffer_row_edits` restates the same change as `wrap_edits` in buffer
+    /// rows, which is the space custom block placements live in.
     pub fn sync(
         &mut self,
         wrap_snapshot: Arc<WrapSnapshot>,
         wrap_edits: &Patch<u32>,
+        buffer_row_edits: &Patch<u32>,
         companion_view: Option<CompanionView<'_>>,
     ) -> BlockSnapshot {
+        self.carry_block_placements(buffer_row_edits);
+
         let mut edits = if self.deferred_edits.is_empty() {
             wrap_edits.clone()
         } else {
@@ -1362,6 +1439,36 @@ fn resolve_block_placement(
     }
 }
 
+/// Carry each row in `rows` across `edits`, collapsing a row inside a replaced
+/// range onto the start of what replaced it.
+///
+/// One forward pass over both ascending sequences, rather than re-shifting the
+/// whole trailing slice once per edit. A row ends up carrying the summed delta
+/// of every edit that ends at or before it.
+///
+/// `rows` must be ascending, and stays ascending: rows outside an edit all move
+/// by the same delta, and rows inside one collapse to a single value.
+fn carry_rows(rows: &mut [u32], edits: &Patch<u32>) {
+    let mut delta: i64 = 0;
+    let mut i = 0;
+
+    for edit in edits {
+        while i < rows.len() && rows[i] < edit.old.start {
+            rows[i] = (rows[i] as i64 + delta).max(0) as u32;
+            i += 1;
+        }
+        while i < rows.len() && rows[i] < edit.old.end {
+            rows[i] = edit.new.start;
+            i += 1;
+        }
+        delta += edit.new.end as i64 - edit.old.end as i64;
+    }
+
+    for row in &mut rows[i..] {
+        *row = (*row as i64 + delta).max(0) as u32;
+    }
+}
+
 fn sync_incremental(
     old_transforms: &SumTree<Transform>,
     wrap_line_count: u32,
@@ -1823,7 +1930,7 @@ mod tests {
             WrapMap::new(tab_snapshot, None, test_executor(), crate::test_notify());
         let mut block_map = BlockMap::new();
         block_map.insert(props.to_vec());
-        block_map.sync(wrap_snapshot, &Patch::empty(), None)
+        block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None)
     }
 
     fn text_block(placement: BlockPlacement, content: &str) -> BlockProperties {
@@ -2077,7 +2184,7 @@ mod tests {
         let (_, wrap_snapshot) =
             WrapMap::new(tab_snapshot, None, test_executor(), crate::test_notify());
         let mut block_map = BlockMap::new();
-        let snapshot = block_map.sync(wrap_snapshot, &Patch::empty(), None);
+        let snapshot = block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None);
 
         let buf = snapshot.block_to_buffer(BlockPoint::new(0, 5)).unwrap();
         assert_eq!(buf, Point::new(0, 2));
@@ -2178,8 +2285,13 @@ mod tests {
         let mut block_map = BlockMap::new();
         block_map.insert(vec![text_block(BlockPlacement::Below(0), "deleted")]);
 
-        let snap1 = block_map.sync(Arc::clone(&wrap_snapshot), &Patch::empty(), None);
-        let snap2 = block_map.sync(wrap_snapshot, &Patch::empty(), None);
+        let snap1 = block_map.sync(
+            Arc::clone(&wrap_snapshot),
+            &Patch::empty(),
+            &Patch::empty(),
+            None,
+        );
+        let snap2 = block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None);
 
         assert_eq!(snap1.total_lines(), snap2.total_lines());
         assert_eq!(snap1.longest_row(), snap2.longest_row());
@@ -2191,7 +2303,12 @@ mod tests {
         let mut block_map = BlockMap::new();
         let ids = block_map.insert(vec![text_block(BlockPlacement::Below(0), "deleted")]);
 
-        let snap1 = block_map.sync(Arc::clone(&wrap_snapshot), &Patch::empty(), None);
+        let snap1 = block_map.sync(
+            Arc::clone(&wrap_snapshot),
+            &Patch::empty(),
+            &Patch::empty(),
+            None,
+        );
         assert_eq!(snap1.total_lines(), 3);
 
         block_map.remove(&ids.into_iter().collect());
@@ -2200,7 +2317,7 @@ mod tests {
             "deleted\nextra line",
         )]);
 
-        let snap2 = block_map.sync(wrap_snapshot, &Patch::empty(), None);
+        let snap2 = block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None);
         assert_eq!(snap2.total_lines(), 4);
     }
 
@@ -2375,11 +2492,16 @@ mod tests {
         ]);
         assert_eq!(ids.len(), 2);
 
-        let snap = block_map.sync(Arc::clone(&wrap_snapshot), &Patch::empty(), None);
+        let snap = block_map.sync(
+            Arc::clone(&wrap_snapshot),
+            &Patch::empty(),
+            &Patch::empty(),
+            None,
+        );
         assert_eq!(snap.total_lines(), 5);
 
         block_map.remove(&[ids[0]].into_iter().collect());
-        let snap = block_map.sync(wrap_snapshot, &Patch::empty(), None);
+        let snap = block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None);
         assert_eq!(snap.total_lines(), 4);
     }
 }

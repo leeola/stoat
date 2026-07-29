@@ -55,6 +55,32 @@ pub(crate) fn display_width(ch: char) -> u32 {
     ch.width().unwrap_or(0) as u32
 }
 
+/// Restate `edits` in buffer rows, reading each side against the text that side
+/// indexes into.
+///
+/// Each range widens to the rows it touches, taking the row holding the last
+/// affected byte and adding one. That is the convention the inlay layer's row
+/// patch uses, so the two descriptions of one edit agree on how far the rows
+/// below it moved.
+fn buffer_row_patch(
+    edits: &Patch<usize>,
+    before: &MultiBufferSnapshot,
+    after: &MultiBufferSnapshot,
+) -> Patch<u32> {
+    let mut patch = Patch::empty();
+    for edit in edits {
+        let old_rope = before.rope();
+        let new_rope = after.rope();
+        patch.push(stoat_text::patch::Edit {
+            old: old_rope.offset_to_point(edit.old.start).row
+                ..old_rope.offset_to_point(edit.old.end).row + 1,
+            new: new_rope.offset_to_point(edit.new.start).row
+                ..new_rope.offset_to_point(edit.new.end).row + 1,
+        });
+    }
+    patch
+}
+
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DisplayPoint {
     pub row: u32,
@@ -225,6 +251,14 @@ pub struct DisplayMap {
     clip_at_line_ends: bool,
     diagnostics_max_severity: Option<DiagnosticSeverity>,
     last_buffer_version: u64,
+    /// The buffer as of the last sync, kept so an edit patch of offsets can be
+    /// restated in rows.
+    ///
+    /// An offset's row is only readable from the text that offset indexes into,
+    /// and the old side of a patch indexes into the buffer as it was. Block
+    /// placements are buffer rows, so without this the block map has no way to
+    /// learn how far an edit moved them.
+    last_buffer_snapshot: Option<MultiBufferSnapshot>,
     /// Buffer content version the crease map was last resolved against.
     ///
     /// The crease sync in [`Self::snapshot_with_companion`] is skipped while
@@ -262,7 +296,7 @@ impl DisplayMap {
     pub fn new(multi_buffer: MultiBuffer, executor: Executor, redraw: Arc<Notify>) -> Self {
         let buffer_snapshot = multi_buffer.snapshot();
         let version = buffer_snapshot.version();
-        let (inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot);
+        let (inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot);
         let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).expect("non-zero literal"));
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
@@ -289,6 +323,7 @@ impl DisplayMap {
             clip_at_line_ends: false,
             diagnostics_max_severity: None,
             last_buffer_version: version,
+            last_buffer_snapshot: Some(buffer_snapshot),
             last_crease_sync_version: version,
             inserted_diff_block_ids: Vec::new(),
             conflict_padding_block_ids: Vec::new(),
@@ -624,14 +659,28 @@ impl DisplayMap {
         self.lsp_folding_crease_ids.insert(buffer_id, ids);
     }
 
-    pub fn sync_through_wrap(&mut self) -> (Arc<WrapSnapshot>, Patch<u32>) {
+    /// Sync the layers up to wrapping, returning the wrap snapshot, the wrap
+    /// rows the sync changed, and the same edits restated in buffer rows.
+    ///
+    /// The buffer-row patch is what the block map needs. Block placements are
+    /// buffer rows, so a wrap-row patch cannot tell it how far an edit moved
+    /// them, and by the time the wrap layer has run the buffer patch is gone.
+    pub fn sync_through_wrap(&mut self) -> (Arc<WrapSnapshot>, Patch<u32>, Patch<u32>) {
         let buffer_snapshot = self.multi_buffer.snapshot();
         let buffer_edits = buffer_snapshot.edits_since(self.last_buffer_version);
+        let buffer_row_edits = match self.last_buffer_snapshot.take() {
+            Some(previous) => buffer_row_patch(&buffer_edits, &previous, &buffer_snapshot),
+            None => Patch::empty(),
+        };
+
         self.last_buffer_version = buffer_snapshot.version();
+        self.last_buffer_snapshot = Some(buffer_snapshot.clone());
+
         let (inlay_snapshot, inlay_edits) = self.inlay_map.sync(buffer_snapshot, &buffer_edits);
         let (fold_snapshot, fold_edits) = self.fold_map.sync(inlay_snapshot, &inlay_edits);
         let (tab_snapshot, tab_edits) = self.tab_map.sync(fold_snapshot, fold_edits);
-        self.wrap_map.sync(tab_snapshot, &tab_edits)
+        let (wrap_snapshot, wrap_edits) = self.wrap_map.sync(tab_snapshot, &tab_edits);
+        (wrap_snapshot, wrap_edits, buffer_row_edits)
     }
 
     pub fn snapshot(&mut self) -> DisplaySnapshot {
@@ -662,7 +711,7 @@ impl DisplayMap {
             return cached.clone();
         }
 
-        let (wrap_snapshot, wrap_edits) = self.sync_through_wrap();
+        let (wrap_snapshot, wrap_edits, buffer_row_edits) = self.sync_through_wrap();
         let diff_map = self.multi_buffer.snapshot().diff_map.clone();
         let diff_version = diff_map.as_ref().map(|dm| dm.version()).unwrap_or(0);
         if diff_version != self.last_diff_version
@@ -692,9 +741,12 @@ impl DisplayMap {
                     companion_wrap_edits: edits,
                     companion: c,
                 });
-        let block_snapshot = self
-            .block_map
-            .sync(wrap_snapshot, &wrap_edits, companion_view);
+        let block_snapshot = self.block_map.sync(
+            wrap_snapshot,
+            &wrap_edits,
+            &buffer_row_edits,
+            companion_view,
+        );
 
         if buffer_version != self.last_crease_sync_version {
             let buffer_snapshot_for_crease = self.multi_buffer.snapshot();
@@ -1342,6 +1394,108 @@ mod tests {
         )]);
 
         assert_eq!(display_map.snapshot().line_count(), 4);
+    }
+
+    /// A block marks a row, not a row number, so an edit that moves the text
+    /// under it has to move the block with it. Otherwise it stays where the
+    /// row used to be and marks whatever slid into its place, and only the
+    /// block's owner re-inserting it can put it back.
+    #[test]
+    fn blocks_follow_the_row_they_mark_across_an_edit() {
+        let text: String = (0..20).map(|i| format!("line{i}\n")).collect();
+        let buffer = TextBuffer::with_text(BufferId::new(0), &text);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
+
+        display_map.insert_blocks(vec![BlockProperties::from_text(
+            BlockPlacement::Below(10),
+            vec!["marker".to_string()],
+            BlockStyle::Fixed,
+        )]);
+
+        let block_row = |map: &mut DisplayMap| {
+            let snapshot = map.snapshot();
+            (0..snapshot.line_count())
+                .find(|row| {
+                    matches!(
+                        snapshot.classify_row(*row),
+                        BlockRowKind::Block { block, line_index }
+                            if block.get_line(line_index) == "marker"
+                    )
+                })
+                .expect("the marker block is rendered")
+        };
+
+        assert_eq!(
+            block_row(&mut display_map),
+            11,
+            "below line10 to begin with"
+        );
+
+        shared.write().expect("poisoned").edit(0..0, "a\nb\nc\n");
+
+        assert_eq!(
+            block_row(&mut display_map),
+            14,
+            "three rows inserted above it push the block down with line10",
+        );
+
+        // "a\nb\nc\n" back off the front again.
+        shared.write().expect("poisoned").edit(0..6, "");
+
+        assert_eq!(
+            block_row(&mut display_map),
+            11,
+            "deleting those rows pulls it back up",
+        );
+    }
+
+    /// The rows a block was attached to can be replaced wholesale, leaving it
+    /// nothing to point at. It collapses to the start of the replacement rather
+    /// than keeping a row number that now belongs to unrelated text.
+    #[test]
+    fn a_block_inside_a_replaced_range_lands_at_the_replacement() {
+        let text: String = (0..20).map(|i| format!("line{i}\n")).collect();
+        let buffer = TextBuffer::with_text(BufferId::new(0), &text);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let rows = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
+
+        display_map.insert_blocks(vec![BlockProperties::from_text(
+            BlockPlacement::Below(10),
+            vec!["marker".to_string()],
+            BlockStyle::Fixed,
+        )]);
+        assert_eq!(display_map.snapshot().line_count(), 22);
+
+        // Rows 8 through 12 replaced by a single line.
+        let (start, end) = {
+            let snapshot = rows.snapshot();
+            let rope = snapshot.rope();
+            (
+                rope.point_to_offset(Point::new(8, 0)),
+                rope.point_to_offset(Point::new(13, 0)),
+            )
+        };
+        shared.write().expect("poisoned").edit(start..end, "only\n");
+
+        let snapshot = display_map.snapshot();
+        let block_row = (0..snapshot.line_count())
+            .find(|row| {
+                matches!(
+                    snapshot.classify_row(*row),
+                    BlockRowKind::Block { block, line_index }
+                        if block.get_line(line_index) == "marker"
+                )
+            })
+            .expect("the marker block is still rendered");
+
+        assert_eq!(
+            block_row, 9,
+            "the block sits just below row 8, where its rows were replaced",
+        );
     }
 
     #[test]
