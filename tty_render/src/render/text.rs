@@ -361,6 +361,10 @@ pub struct TextPass {
     /// The grid width [`Self::glyph_row_cache`] was built at; a change invalidates
     /// every cached row since columns shift.
     glyph_cache_cols: usize,
+    /// Whether this frame slid the row caches, so every surviving instance
+    /// moved and the buffers rewrite from the top rather than from the first
+    /// rebuilt row.
+    rows_shifted: bool,
     /// The cursor cell at the previous frame, so a move can re-shape the row it
     /// left and the row it entered (the cursor breaks ligatures on its cell).
     last_cursor_cell: Option<(usize, usize)>,
@@ -642,6 +646,7 @@ impl TextPass {
             shape_cache: FxHashMap::default(),
             run_shape_cache: FxHashMap::default(),
             glyph_row_cache: Vec::new(),
+            rows_shifted: false,
             plain_row_instances: Vec::new(),
             underline_row_instances: Vec::new(),
             rebuilt_scratch: Vec::new(),
@@ -751,6 +756,8 @@ impl TextPass {
         let scroll = frame.scroll;
         let damage = frame.damage;
         let decoration_damage = frame.decoration_damage;
+
+        self.rotate_row_caches(frame.scrolled_rows);
 
         // Upload one occluder per live panel, shared by the three globals bind
         // groups. Only the static globals carry a non-zero panel count, so only
@@ -1427,7 +1434,9 @@ impl TextPass {
         }
 
         let build_all = matches!(damage, Damage::Full) || stale;
-        let mut first = None;
+        // A rotation moved every kept instance, so the buffer rewrites from the
+        // top even when no row rebuilt.
+        let mut first = self.rows_shifted.then_some(0);
         for row in 0..rows {
             if build_all || damage.is_dirty(row) {
                 let mut instances = mem::take(&mut self.underline_row_instances[row]);
@@ -1863,6 +1872,27 @@ impl TextPass {
         }
     }
 
+    /// Slide every per-row cache up by `rows` so a scrolled grid keeps the
+    /// shaping and rasterizing it already did for rows that only moved.
+    ///
+    /// The glyphs carry the row they were shaped for and the built instances
+    /// carry a baked pixel position, so each survivor is corrected for where it
+    /// now sits. Only the rows the scroll exposed are left to rebuild.
+    fn rotate_row_caches(&mut self, rows: usize) {
+        self.rows_shifted = rows > 0;
+        let dy = rows as f32 * self.metrics.height;
+
+        crate::render::rotate_row_cache(&mut self.glyph_row_cache, rows, |glyph| {
+            glyph.row -= rows;
+        });
+        crate::render::rotate_row_cache(&mut self.plain_row_instances, rows, |instance| {
+            instance.pos[1] -= dy;
+        });
+        crate::render::rotate_row_cache(&mut self.underline_row_instances, rows, |instance| {
+            instance.cell_pos[1] -= dy;
+        });
+    }
+
     /// Rebuild and re-upload only the changed rows' plain-glyph instances.
     ///
     /// Unchanged rows reuse last frame's [`Self::plain_row_instances`]; the rows
@@ -1895,7 +1925,13 @@ impl TextPass {
             for &row in rebuilt {
                 self.rebuild_plain_row(device, queue, row);
             }
-            rebuilt.first().copied()
+            // A rotation moved every kept instance, so the buffer rewrites from
+            // the top rather than from the first rebuilt row.
+            if self.rows_shifted {
+                (rows > 0).then_some(0)
+            } else {
+                rebuilt.first().copied()
+            }
         };
         let Some(first) = first else {
             return;
@@ -3849,6 +3885,86 @@ mod tests {
             matches!(glyph(2).source, GlyphSource::Font(_)) && glyph(2).cell_fill,
             "box-drawing stays on the font path and scales its glyph to the cell"
         );
+    }
+
+    /// A scroll moves the rows above it without changing them, so sliding the
+    /// caches has to leave those rows holding exactly what a full rebuild would
+    /// have produced for their new positions.
+    #[test]
+    fn a_rotated_frame_matches_one_built_from_scratch() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+        let resolution = [640.0, 480.0];
+        let rows = 5;
+        let lines = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+
+        fn fill(grid: &mut Grid, rows: usize, lines: &[&str], from: usize) {
+            for row in 0..rows {
+                fill_row(grid, row, lines[from + row]);
+            }
+        }
+        fn frame(damage: &Damage, scrolled_rows: usize) -> Frame<'_> {
+            Frame {
+                cursor: None,
+                cursor_corners: None,
+                scroll: Scroll {
+                    grid: 0.0,
+                    document: 0.0,
+                    scrollback: 0.0,
+                    region: 0.0,
+                    popovers: &[],
+                },
+                damage,
+                decoration_damage: damage,
+                scrolled_rows,
+            }
+        }
+
+        // Build the pre-scroll screen, then scroll it by one row: the content
+        // slides up and only the last row is new.
+        let mut grid = Grid::new(rows, 20);
+        fill(&mut grid, rows, &lines, 0);
+        pass.prepare(&device, &queue, &grid, resolution, &frame(&Damage::Full, 0));
+
+        let mut scrolled = Grid::new(rows, 20);
+        fill(&mut scrolled, rows, &lines, 1);
+        let mut last_row_only = vec![false; rows];
+        last_row_only[rows - 1] = true;
+        pass.prepare(
+            &device,
+            &queue,
+            &scrolled,
+            resolution,
+            &frame(&Damage::Partial(last_row_only), 1),
+        );
+        let rotated = pass.collect_grid_glyphs();
+
+        // The same screen reached without a scroll, every row rebuilt.
+        let Some((device, queue, mut fresh_pass)) = headless_text_pass() else {
+            return;
+        };
+        fresh_pass.prepare(
+            &device,
+            &queue,
+            &scrolled,
+            resolution,
+            &frame(&Damage::Full, 0),
+        );
+        let fresh = fresh_pass.collect_grid_glyphs();
+
+        assert_eq!(
+            rotated.len(),
+            fresh.len(),
+            "a rotated screen holds as many glyphs as a rebuilt one",
+        );
+        for (got, want) in rotated.iter().zip(&fresh) {
+            assert_eq!(
+                (got.row, got.col),
+                (want.row, want.col),
+                "every glyph lands on the cell a rebuild would put it on",
+            );
+        }
     }
 
     #[test]

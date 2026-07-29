@@ -139,6 +139,42 @@ pub(crate) fn upload_needed<T: PartialEq>(built: &[T], last: &[T]) -> bool {
     built != last
 }
 
+/// Move each row of `cache` up by `by`, repairing what survives and emptying
+/// what the move vacates.
+///
+/// The passes cache built instances per row, and a scroll moves a row's content
+/// without changing it, so sliding the cache keeps the shaping and building
+/// those rows already paid for. Every cached instance bakes where it sits,
+/// though, as a row index or a position, so `repair` corrects each survivor for
+/// the row it lands on.
+///
+/// The last `by` rows are cleared rather than left holding what the first rows
+/// held, so a caller that neglects to damage them draws nothing instead of the
+/// previous occupants. A scroll of at least the whole height leaves nothing to
+/// keep and empties every row.
+pub(crate) fn rotate_row_cache<T>(cache: &mut [Vec<T>], by: usize, mut repair: impl FnMut(&mut T)) {
+    if by == 0 {
+        return;
+    }
+    if by >= cache.len() {
+        for row in cache.iter_mut() {
+            row.clear();
+        }
+        return;
+    }
+
+    cache.rotate_left(by);
+    let kept = cache.len() - by;
+    for row in &mut cache[..kept] {
+        for instance in row.iter_mut() {
+            repair(instance);
+        }
+    }
+    for row in &mut cache[kept..] {
+        row.clear();
+    }
+}
+
 /// One occluder per panel, in declaration order.
 pub(crate) fn build_occluders(panels: &[Panel]) -> Vec<Occluder> {
     panels.iter().map(panel_occluder).collect()
@@ -202,8 +238,43 @@ pub fn cell_size(font_size: u32, scale_factor: f32) -> [f32; 2] {
 
 #[cfg(test)]
 mod tests {
-    use super::{occlusion_globals, pool_occluders, CellMetrics};
+    use super::{occlusion_globals, pool_occluders, rotate_row_cache, CellMetrics};
     use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
+
+    /// Rows keep the work already done for them, land repaired for where they
+    /// now sit, and the rows the scroll exposed come back empty.
+    #[test]
+    fn rotating_a_cache_moves_repairs_and_empties() {
+        // Five rows moved by two, so rotating the wrong way lands somewhere
+        // else. An even split would leave the two directions indistinguishable.
+        let mut cache = vec![vec![10, 11], vec![20], vec![30], vec![40], vec![50]];
+        rotate_row_cache(&mut cache, 2, |value| *value -= 20);
+
+        assert_eq!(
+            cache,
+            vec![vec![10], vec![20], vec![30], Vec::<i32>::new(), Vec::new()],
+            "the rows below the scroll move up repaired, and the rows they \
+             vacated are emptied",
+        );
+    }
+
+    #[test]
+    fn rotating_a_cache_by_nothing_leaves_it_alone() {
+        let mut cache = vec![vec![1], vec![2]];
+        rotate_row_cache(&mut cache, 0, |_: &mut i32| panic!("nothing is repaired"));
+
+        assert_eq!(cache, vec![vec![1], vec![2]]);
+    }
+
+    /// A scroll of at least the whole height leaves nothing that was on screen,
+    /// so every row has to come back empty rather than wrap around.
+    #[test]
+    fn rotating_a_cache_past_its_height_empties_every_row() {
+        let mut cache = vec![vec![1], vec![2], vec![3]];
+        rotate_row_cache(&mut cache, 3, |_: &mut i32| panic!("nothing survives"));
+
+        assert_eq!(cache, vec![Vec::<i32>::new(), Vec::new(), Vec::new()]);
+    }
 
     fn panel(seq: u32, above_pools: bool) -> Panel {
         Panel {
