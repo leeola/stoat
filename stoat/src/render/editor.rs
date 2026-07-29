@@ -864,8 +864,8 @@ pub(crate) fn build_diagnostic_span_cache(
 /// The collections [`paint_diagnostic_spans`] refills on every call.
 ///
 /// Lives on the editor rather than the paint so a frame reuses the capacity of
-/// the last one. Neither collection carries meaning across calls, and the paint
-/// clears both before use.
+/// the last one. None of them carries meaning across calls, and the paint clears
+/// each before use.
 #[derive(Default)]
 pub(crate) struct DiagnosticPaintScratch {
     /// The viewport's spans, least-severe first.
@@ -873,6 +873,9 @@ pub(crate) struct DiagnosticPaintScratch {
     /// Cells an `Unnecessary` span has already muted, so overlapping spans
     /// never blend a shared cell twice.
     muted_cells: HashSet<(u16, u16)>,
+    /// The cell runs one span painted, as `(x, y, len)`, on their way to
+    /// becoming undercurl spans. Refilled per span rather than per frame.
+    runs: Vec<(u16, u16, u16)>,
 }
 
 /// The running maximum of `spans`' ends, for [`DiagnosticSpanCache::prefix_max_end`].
@@ -1595,6 +1598,7 @@ fn paint_diagnostic_spans(
     let DiagnosticPaintScratch {
         ordered,
         muted_cells,
+        runs,
     } = scratch;
     muted_cells.clear();
 
@@ -1668,7 +1672,7 @@ fn paint_diagnostic_spans(
 
         // Collect the painted runs only when the undercurl overlay is live,
         // then re-stamp each as a severity-colored curl span.
-        let mut runs: Vec<(u16, u16, u16)> = Vec::new();
+        runs.clear();
         let collect = undercurls.is_some() && colors.is_some();
         paint_offset_range(
             rope,
@@ -1684,7 +1688,7 @@ fn paint_diagnostic_spans(
             right,
             bottom,
             buf,
-            collect.then_some(&mut runs),
+            collect.then_some(&mut *runs),
         );
         if let (Some(undercurls), Some(colors)) = (undercurls.as_deref_mut(), colors) {
             let base = severity_color(sev, colors);
@@ -1692,7 +1696,7 @@ fn paint_diagnostic_spans(
                 Some(bg) if dim > 0.0 => dim_rgb(base, bg, dim),
                 _ => base,
             };
-            for (x, y, len) in runs {
+            for &(x, y, len) in &*runs {
                 undercurls.push(x, y, len, color);
             }
         }
