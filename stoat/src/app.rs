@@ -1632,8 +1632,12 @@ impl Stoat {
         let language_registry = Arc::new(LanguageRegistry::standard());
         install_highlight_maps(&language_registry, &syntax_styles);
 
+        // Built before the first workspace, since an editor needs it at
+        // construction to wake the run loop when its background rewrap settles.
+        let redraw_notify = Arc::new(tokio::sync::Notify::new());
+
         let mut workspaces = SlotMap::with_key();
-        let workspace = Workspace::new(initial_git_root.clone(), &executor);
+        let workspace = Workspace::new(initial_git_root.clone(), &executor, redraw_notify.clone());
         let active_workspace = workspaces.insert(workspace);
         workspaces[active_workspace].id = active_workspace;
 
@@ -1709,7 +1713,7 @@ impl Stoat {
             aux_windows: std::collections::BTreeMap::new(),
             aux_cursor: None,
             _index_build_task: None,
-            redraw_notify: Arc::new(tokio::sync::Notify::new()),
+            redraw_notify,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             #[cfg(feature = "perf")]
             perf: crate::perf::PerfStats::default(),

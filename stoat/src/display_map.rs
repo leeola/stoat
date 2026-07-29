@@ -41,6 +41,7 @@ use std::{
 use stoat_scheduler::Executor;
 use stoat_text::{patch::Patch, Anchor, Bias, CharsAt, Point, ReversedCharsAt, Rope};
 pub use tab_map::{TabMap, TabPoint, TabRow, TabSnapshot};
+use tokio::sync::Notify;
 use unicode_width::UnicodeWidthChar;
 pub use wrap_map::{WrapMap, WrapPoint, WrapSnapshot};
 
@@ -255,14 +256,17 @@ pub struct DisplayMap {
 }
 
 impl DisplayMap {
-    pub fn new(multi_buffer: MultiBuffer, executor: Executor) -> Self {
+    /// `redraw` is woken when a background rewrap settles. Nothing else marks
+    /// that moment, so an editor built with a handle nobody listens to shows
+    /// its long lines unwrapped until the next unrelated event.
+    pub fn new(multi_buffer: MultiBuffer, executor: Executor, redraw: Arc<Notify>) -> Self {
         let buffer_snapshot = multi_buffer.snapshot();
         let version = buffer_snapshot.version();
         let (inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot);
         let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).expect("non-zero literal"));
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
-        let (wrap_map, _wrap_snapshot) = WrapMap::new(tab_snapshot, None, executor);
+        let (wrap_map, _wrap_snapshot) = WrapMap::new(tab_snapshot, None, executor, redraw);
         let block_map = BlockMap::new();
 
         Self {
@@ -644,10 +648,14 @@ impl DisplayMap {
         }
         let buffer_version = self.multi_buffer.buffer_version();
         let diff_version_now = self.multi_buffer.diff_version();
+        // A settled background rewrap moves none of these versions, so the
+        // cache would keep serving the interpolated wrapping. Re-syncing while
+        // one is outstanding is what lets it land.
         if buffer_version == self.last_buffer_version
             && diff_version_now == self.last_diff_version
             && self.fold_map.version_unchanged()
             && self.inlay_map.version_unchanged()
+            && !self.wrap_map.background_pending()
             && companion_wrap_data.is_none()
             && let Some(ref cached) = self.cached_snapshot
         {
@@ -1181,7 +1189,7 @@ mod tests {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
-        DisplayMap::new(multi_buffer, test_executor())
+        DisplayMap::new(multi_buffer, test_executor(), crate::test_notify())
     }
 
     fn create_display_map_with_diff(content: &str, diff_map: DiffMap) -> DisplayMap {
@@ -1189,7 +1197,7 @@ mod tests {
         buffer.diff_map = Some(diff_map);
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
-        let mut display_map = DisplayMap::new(multi_buffer, test_executor());
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
         display_map.set_show_deleted_blocks(true);
         display_map
     }
@@ -1227,7 +1235,7 @@ mod tests {
         let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\n");
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
-        let mut dm = DisplayMap::new(multi_buffer, test_executor());
+        let mut dm = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
 
         let range = {
             let snap = dm.multi_buffer.snapshot();
@@ -1281,7 +1289,7 @@ mod tests {
         let buffer = TextBuffer::with_text(BufferId::new(0), "aaaa\nbbbb\ncccc\ndddd\n");
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
-        let mut display_map = DisplayMap::new(multi_buffer, test_executor());
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
 
         let before = display_map.snapshot().line_count();
         assert_eq!(
@@ -1371,7 +1379,7 @@ mod tests {
         buffer.diff_map = Some(diff);
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
-        let mut display_map = DisplayMap::new(multi_buffer, test_executor());
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
         let snapshot = display_map.snapshot();
 
         assert_eq!(
@@ -1475,6 +1483,87 @@ mod tests {
         display_map.set_wrap_width(Some(40));
         let snapshot = display_map.snapshot();
         assert_eq!(snapshot.wrap_width(), Some(40));
+    }
+
+    /// A large edit batch hands its rewrap to the background and shows the
+    /// interpolated wrapping meanwhile, so long lines render unwrapped. The
+    /// settled result moves no buffer, fold, or inlay version, so it lands only
+    /// if the snapshot path re-syncs while the rewrap is outstanding.
+    #[test]
+    fn a_large_edit_settles_its_wrapping_without_another_edit() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = scheduler.executor();
+        let redraw = Arc::new(tokio::sync::Notify::new());
+
+        // Lines long enough to wrap several times each, and more than
+        // WRAP_SYNC_THRESHOLD of them, so the edit takes the background path.
+        let line = "the quick brown fox jumps over the lazy dog ".repeat(3);
+        let pasted: String = std::iter::repeat_n(line.as_str(), 150)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let buffer = TextBuffer::with_text(BufferId::new(0), "start\n");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut display_map = DisplayMap::new(multi_buffer, executor.clone(), redraw.clone());
+        display_map.set_wrap_width(Some(30));
+        let before = display_map.snapshot().max_point().row;
+
+        shared
+            .write()
+            .expect("poisoned")
+            .edit(6..6, pasted.as_str());
+        let interim = display_map.snapshot().max_point().row;
+        assert!(
+            display_map.wrap_map.background_pending(),
+            "a 150-row paste must hand its rewrap to the background",
+        );
+        assert!(
+            interim > before,
+            "the interpolated snapshot still grows by the pasted rows",
+        );
+
+        scheduler.run_until_parked();
+        assert!(
+            notified_now(&redraw),
+            "the settled rewrap must wake the run loop, since no version change will",
+        );
+
+        // No further edit arrives, so the next snapshot alone has to pick it up.
+        let settled = display_map.snapshot().max_point().row;
+        assert!(
+            !display_map.wrap_map.background_pending(),
+            "the finished rewrap must land on the next snapshot",
+        );
+
+        let mut fresh = {
+            let buffer = TextBuffer::with_text(BufferId::new(0), &format!("start\n{pasted}"));
+            let shared = Arc::new(RwLock::new(buffer));
+            let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+            DisplayMap::new(multi_buffer, executor, crate::test_notify())
+        };
+        fresh.set_wrap_width(Some(30));
+        assert_eq!(
+            settled,
+            fresh.snapshot().max_point().row,
+            "the settled wrapping must match a from-scratch build",
+        );
+        assert!(
+            settled > interim,
+            "wrapping the pasted long lines adds rows the interpolation lacked",
+        );
+    }
+
+    /// Whether `notify` is holding a permit, without awaiting one.
+    ///
+    /// `notify_one` stores a permit when nobody is waiting, so a `notified()`
+    /// future polled afterwards completes at once. Polling it a single time is
+    /// how a synchronous test observes that the wake happened.
+    fn notified_now(notify: &Arc<tokio::sync::Notify>) -> bool {
+        let mut fut = Box::pin(notify.notified());
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        fut.as_mut().poll(&mut cx).is_ready()
     }
 
     #[test]
@@ -1608,7 +1697,7 @@ mod tests {
         let buffer = TextBuffer::with_text(BufferId::new(0), "hello world");
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
-        let mut display_map = DisplayMap::new(multi_buffer, test_executor());
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
 
         let snap = display_map.multi_buffer.snapshot();
         let off = snap.rope().point_to_offset(Point::new(0, 5));
@@ -1640,7 +1729,7 @@ mod tests {
         let buffer = TextBuffer::with_text(BufferId::new(0), "let x = 1\n");
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
-        let mut display_map = DisplayMap::new(multi_buffer, test_executor());
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
 
         let anchor = {
             let snap = display_map.multi_buffer.snapshot();

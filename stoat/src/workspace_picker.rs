@@ -338,9 +338,17 @@ mod tests {
 
     fn slotmap_with_two(exec: &Executor) -> (SlotMap<WorkspaceId, Workspace>, WorkspaceId) {
         let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
-        let a = workspaces.insert(Workspace::new(PathBuf::from("/tmp/alpha"), exec));
+        let a = workspaces.insert(Workspace::new(
+            PathBuf::from("/tmp/alpha"),
+            exec,
+            crate::test_notify(),
+        ));
         workspaces[a].id = a;
-        let b = workspaces.insert(Workspace::new(PathBuf::from("/tmp/beta"), exec));
+        let b = workspaces.insert(Workspace::new(
+            PathBuf::from("/tmp/beta"),
+            exec,
+            crate::test_notify(),
+        ));
         workspaces[b].id = b;
         (workspaces, a)
     }
@@ -369,7 +377,11 @@ mod tests {
         let exec = executor();
         let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
         let mut insert = |root: &str, name: &str| {
-            let id = workspaces.insert(Workspace::new(PathBuf::from(root), &exec));
+            let id = workspaces.insert(Workspace::new(
+                PathBuf::from(root),
+                &exec,
+                crate::test_notify(),
+            ));
             workspaces[id].id = id;
             workspaces[id].name = name.into();
             id
@@ -428,7 +440,11 @@ mod tests {
 
         let exec = executor();
         let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
-        let a = workspaces.insert(Workspace::new(PathBuf::from("/tmp/alpha"), &exec));
+        let a = workspaces.insert(Workspace::new(
+            PathBuf::from("/tmp/alpha"),
+            &exec,
+            crate::test_notify(),
+        ));
         workspaces[a].id = a;
         let open_uid = workspaces[a].uid;
 
@@ -501,7 +517,11 @@ mod tests {
     fn single_workspace_picker_lists_only_current() {
         let exec = executor();
         let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
-        let a = workspaces.insert(Workspace::new(PathBuf::from("/tmp/alpha"), &exec));
+        let a = workspaces.insert(Workspace::new(
+            PathBuf::from("/tmp/alpha"),
+            &exec,
+            crate::test_notify(),
+        ));
         workspaces[a].id = a;
 
         let picker = WorkspacePicker::new(&workspaces, a, Vec::new(), dummy_input());
@@ -514,7 +534,11 @@ mod tests {
         let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
         let mut first = None;
         for root in roots {
-            let id = workspaces.insert(Workspace::new(PathBuf::from(*root), &exec));
+            let id = workspaces.insert(Workspace::new(
+                PathBuf::from(*root),
+                &exec,
+                crate::test_notify(),
+            ));
             workspaces[id].id = id;
             first.get_or_insert(id);
         }
@@ -549,7 +573,11 @@ mod tests {
         let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
         let mut active = None;
         for root in ["/tmp/alpha", "/tmp/beta", "/tmp/gamma"] {
-            let id = workspaces.insert(Workspace::new(PathBuf::from(root), &exec));
+            let id = workspaces.insert(Workspace::new(
+                PathBuf::from(root),
+                &exec,
+                crate::test_notify(),
+            ));
             workspaces[id].id = id;
             workspaces[id].name = String::new();
             active.get_or_insert(id);

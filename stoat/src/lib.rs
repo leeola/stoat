@@ -75,6 +75,16 @@ pub mod workspace_picker;
 pub use app::{Stoat, UpdateEffect};
 #[cfg(test)]
 mod test_harness;
+
+/// A redraw handle for tests, where nothing listens for the wake.
+///
+/// Constructors take one so no production site can be built without a live
+/// handle. A test that only inspects state has no run loop to wake, so it
+/// passes a fresh one rather than plumbing the app's.
+#[cfg(test)]
+pub(crate) fn test_notify() -> std::sync::Arc<tokio::sync::Notify> {
+    std::sync::Arc::new(tokio::sync::Notify::new())
+}
 pub use badge::{Anchor, BadgeId, BadgeSource, BadgeState};
 pub use buffer::{BufferId, SharedBuffer, TextBuffer, TextBufferSnapshot};
 pub use diff_map::{ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail};

@@ -968,7 +968,8 @@ pub(super) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
         let ws = stoat.active_workspace_mut();
         let (new_buffer_id, new_buffer) = ws.buffers.new_scratch();
         if let Some(slot) = ws.editors.get_mut(*editor_id) {
-            *slot = EditorState::new(new_buffer_id, new_buffer, executor.clone());
+            let redraw = ws.redraw_notify.clone();
+            *slot = EditorState::new(new_buffer_id, new_buffer, executor.clone(), redraw);
         }
     }
 

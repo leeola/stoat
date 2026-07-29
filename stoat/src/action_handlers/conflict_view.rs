@@ -165,7 +165,7 @@ fn prepare_file(
         })
         .collect();
 
-    let mut editor = EditorState::new(buffer_id, buffer, executor);
+    let mut editor = EditorState::new(buffer_id, buffer, executor, ws.redraw_notify.clone());
     editor.conflict_view = Some(ConflictViewState::new(
         doc.clone(),
         chunk_anchors.clone(),

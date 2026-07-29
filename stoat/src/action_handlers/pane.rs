@@ -198,9 +198,12 @@ pub(crate) fn restore_pane_after_term_exit(stoat: &mut Stoat, pane_id: PaneId) {
 
     let view = restored.unwrap_or_else(|| {
         let (buffer_id, buffer) = ws.buffers.new_scratch();
-        let editor_id = ws
-            .editors
-            .insert(EditorState::new(buffer_id, buffer, executor));
+        let editor_id = ws.editors.insert(EditorState::new(
+            buffer_id,
+            buffer,
+            executor,
+            ws.redraw_notify.clone(),
+        ));
         View::Editor(editor_id)
     });
     ws.panes.pane_mut(pane_id).view = view;
@@ -237,9 +240,12 @@ pub(super) fn split_pane_new(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
         _ => None,
     };
     let (buffer_id, buffer) = ws.buffers.new_scratch();
-    let new_editor_id = ws
-        .editors
-        .insert(EditorState::new(buffer_id, buffer, executor));
+    let new_editor_id = ws.editors.insert(EditorState::new(
+        buffer_id,
+        buffer,
+        executor,
+        ws.redraw_notify.clone(),
+    ));
     ws.panes.pane_mut(new_pane_id).view = View::Editor(new_editor_id);
     if let Some(source_editor_id) = source_editor_id {
         clear_split_source_mode(ws, source_editor_id);

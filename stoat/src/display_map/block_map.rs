@@ -1819,7 +1819,8 @@ mod tests {
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
         let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
-        let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, None, test_executor());
+        let (_, wrap_snapshot) =
+            WrapMap::new(tab_snapshot, None, test_executor(), crate::test_notify());
         let mut block_map = BlockMap::new();
         block_map.insert(props.to_vec());
         block_map.sync(wrap_snapshot, &Patch::empty(), None)
@@ -2073,7 +2074,8 @@ mod tests {
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
         let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
-        let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, None, test_executor());
+        let (_, wrap_snapshot) =
+            WrapMap::new(tab_snapshot, None, test_executor(), crate::test_notify());
         let mut block_map = BlockMap::new();
         let snapshot = block_map.sync(wrap_snapshot, &Patch::empty(), None);
 
@@ -2165,7 +2167,8 @@ mod tests {
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
         let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
-        let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, None, test_executor());
+        let (_, wrap_snapshot) =
+            WrapMap::new(tab_snapshot, None, test_executor(), crate::test_notify());
         wrap_snapshot
     }
 

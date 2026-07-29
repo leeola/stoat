@@ -674,7 +674,7 @@ mod tests {
 
         let scheduler = Arc::new(TestScheduler::new());
         let executor = scheduler.executor();
-        let workspace = Workspace::new(root.clone(), &executor);
+        let workspace = Workspace::new(root.clone(), &executor, crate::test_notify());
 
         let archive_path = PathBuf::from("/dumps/test.dump");
         let at = time::macros::datetime!(2026-04-19 14:23:11 UTC);

@@ -904,7 +904,12 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let (scratch_id, scratch_buffer) = ws.buffers.new_scratch();
-    let replacement = EditorState::new(scratch_id, scratch_buffer, executor);
+    let replacement = EditorState::new(
+        scratch_id,
+        scratch_buffer,
+        executor,
+        ws.redraw_notify.clone(),
+    );
     let replacement_id = ws.editors.insert(replacement);
 
     let focused = ws.panes.focus();
@@ -2075,7 +2080,7 @@ fn render_review_editor(stoat: &mut Stoat) {
         guard.mark_clean();
     }
 
-    let mut editor = EditorState::new(buffer_id, buffer, executor);
+    let mut editor = EditorState::new(buffer_id, buffer, executor, ws.redraw_notify.clone());
     editor.display_map.insert_blocks(blocks);
     editor.review_view = Some(view);
 

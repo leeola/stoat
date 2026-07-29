@@ -1685,7 +1685,7 @@ mod tests {
             text,
         ));
         let shared = Arc::new(RwLock::new(tb));
-        let mut editor = EditorState::new(BufferId::new(0), shared, executor);
+        let mut editor = EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
         editor.set_diff_view(true);
         editor
     }
@@ -1697,7 +1697,7 @@ mod tests {
         let mut tb = TextBuffer::with_text(BufferId::new(0), text);
         tb.diff_map = Some(dm);
         let shared = Arc::new(RwLock::new(tb));
-        let mut editor = EditorState::new(BufferId::new(0), shared, executor);
+        let mut editor = EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
         editor.set_diff_view(true);
         editor
     }
@@ -1736,7 +1736,7 @@ mod tests {
             &index_changed,
         ));
         let shared = Arc::new(RwLock::new(tb));
-        let mut editor = EditorState::new(BufferId::new(0), shared, executor);
+        let mut editor = EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
         editor.set_diff_view(true);
         editor
     }

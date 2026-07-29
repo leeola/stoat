@@ -331,6 +331,7 @@ impl Workspace {
     ///
     /// Requires `self.buffers` to already hold the restored registry.
     fn install_restored_parts(&mut self, state: WorkspaceStateV1, executor: &Executor) {
+        let redraw = self.redraw_notify.clone();
         let mut editors: SlotMap<EditorId, EditorState> = SlotMap::with_key();
         let mut editor_id_map: HashMap<EditorId, EditorId> = HashMap::new();
         for (old_id, snap) in state.editors {
@@ -341,7 +342,12 @@ impl Workspace {
                 );
                 continue;
             };
-            let new_id = editors.insert(EditorState::restore(snap, buffer, executor.clone()));
+            let new_id = editors.insert(EditorState::restore(
+                snap,
+                buffer,
+                executor.clone(),
+                redraw.clone(),
+            ));
             editor_id_map.insert(old_id, new_id);
         }
 
@@ -568,7 +574,7 @@ mod tests {
     }
 
     fn new_laid_out_workspace(git_root: PathBuf, exec: &Executor) -> Workspace {
-        let mut ws = Workspace::new(git_root, exec);
+        let mut ws = Workspace::new(git_root, exec, crate::test_notify());
         ws.layout(ratatui::layout::Rect::new(0, 0, 120, 40));
         ws
     }
@@ -601,15 +607,21 @@ mod tests {
         // cannot survive the restore unchanged and a tree that skipped the
         // remap would point at nothing rather than working by luck.
         let (id_hole, buf_hole) = ws.buffers.open(&ws_dir.join("hole.txt"), "hole\n");
-        let hole = ws
-            .editors
-            .insert(EditorState::new(id_hole, buf_hole, exec.clone()));
+        let hole = ws.editors.insert(EditorState::new(
+            id_hole,
+            buf_hole,
+            exec.clone(),
+            crate::test_notify(),
+        ));
         ws.editors.remove(hole);
 
         let (id_a, buf_a) = ws.buffers.open(&ws_dir.join("a.txt"), "alpha\n");
-        let editor_a = ws
-            .editors
-            .insert(EditorState::new(id_a, buf_a, exec.clone()));
+        let editor_a = ws.editors.insert(EditorState::new(
+            id_a,
+            buf_a,
+            exec.clone(),
+            crate::test_notify(),
+        ));
 
         let root = ws.panes.focus();
         ws.panes.pane_mut(root).view = View::Editor(editor_a);
@@ -622,7 +634,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec);
+        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec, crate::test_notify());
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         assert_eq!(fresh.tabs.len(), 2, "both tabs survive");
@@ -666,7 +678,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec);
+        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec, crate::test_notify());
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         assert_eq!(fresh.tab_title(0), "first", "the parked tab keeps its name");
@@ -694,7 +706,7 @@ mod tests {
         assert!(!body.contains("active_tab"), "no tab fields on the wire");
         fake.write(&state_path, body.as_bytes()).unwrap();
 
-        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec);
+        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec, crate::test_notify());
         fresh
             .restore_state(&state_path, &fake, &exec)
             .expect("a legacy file still parses");
@@ -715,12 +727,18 @@ mod tests {
         let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
         let (id_a, buf_a) = ws.buffers.open(&file_a, "alpha\n");
         let (id_b, buf_b) = ws.buffers.open(&file_b, "beta\n");
-        let editor_a = ws
-            .editors
-            .insert(EditorState::new(id_a, buf_a, exec.clone()));
-        let editor_b = ws
-            .editors
-            .insert(EditorState::new(id_b, buf_b, exec.clone()));
+        let editor_a = ws.editors.insert(EditorState::new(
+            id_a,
+            buf_a,
+            exec.clone(),
+            crate::test_notify(),
+        ));
+        let editor_b = ws.editors.insert(EditorState::new(
+            id_b,
+            buf_b,
+            exec.clone(),
+            crate::test_notify(),
+        ));
         ws.editors[editor_a].scroll_row = 7;
         ws.editors[editor_b].scroll_row = 3;
 
@@ -733,7 +751,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec);
+        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec, crate::test_notify());
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         assert_eq!(fresh.git_root, ws_dir);
@@ -794,7 +812,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         for id in fresh.panes.split_pane_ids() {
@@ -836,7 +854,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         for id in fresh.panes.split_pane_ids() {
@@ -867,7 +885,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         assert_eq!(fresh.panes.pane_count(), count_before);
@@ -891,7 +909,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         assert_eq!(fresh.panes.pane_count(), count_before);
@@ -935,7 +953,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         assert_eq!(buffer_text(&fresh, id), expected_text);
@@ -961,7 +979,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         let restored = fresh.buffers.get(id).expect("buffer missing");
@@ -984,9 +1002,12 @@ mod tests {
 
         let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
         let (id, buffer) = ws.buffers.open(&file, "abcdefghij\n");
-        let editor_id = ws
-            .editors
-            .insert(EditorState::new(id, buffer.clone(), exec.clone()));
+        let editor_id = ws.editors.insert(EditorState::new(
+            id,
+            buffer.clone(),
+            exec.clone(),
+            crate::test_notify(),
+        ));
 
         let multi = MultiBuffer::singleton(id, buffer.clone());
         let multi_snap = multi.snapshot();
@@ -1016,7 +1037,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         let restored_editor_id = fresh
@@ -1057,7 +1078,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         assert_eq!(buffer_text(&fresh, id), "hello world\n");
@@ -1094,7 +1115,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         assert_eq!(buffer_text(&fresh, scratch_id), "notes\nmore\n");
@@ -1152,7 +1173,7 @@ mod tests {
         ws.save_state(&state_path, &fake).unwrap();
 
         scheduler.advance_clock(Duration::from_nanos(1));
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
         assert_ne!(fresh.uid, original_uid, "new workspaces get distinct uids");
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
         assert_eq!(fresh.uid, original_uid);
@@ -1169,7 +1190,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
         assert_eq!(fresh.name, "my workspace");
     }
@@ -1185,7 +1206,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
         assert_eq!(
             fresh.last_finder_scope, None,
             "fresh workspace remembers nothing"
@@ -1205,7 +1226,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
         assert!(
             fresh.palette_history.entries().is_empty(),
             "fresh workspace remembers nothing"
@@ -1243,7 +1264,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
         assert_eq!(
             fresh.name,

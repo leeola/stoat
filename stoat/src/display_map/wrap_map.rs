@@ -37,6 +37,7 @@ use stoat_text::{
     patch::{Edit, Patch},
     Bias, ContextLessSummary, Cursor, Dimension, Dimensions, Item, SeekTarget, SumTree,
 };
+use tokio::sync::Notify;
 
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WrapPoint(pub TabPoint);
@@ -170,6 +171,13 @@ pub struct WrapMap {
     wrap_width: Option<u32>,
     background_task: Option<Task<(WrapSnapshot, Patch<u32>)>>,
     executor: Executor,
+    /// Woken when a background rewrap finishes.
+    ///
+    /// Nothing else moves when one lands. The buffer, fold, and inlay versions
+    /// are all unchanged, so without this the settled wrapping would wait for
+    /// whatever the user happened to do next while long lines rendered
+    /// unwrapped.
+    redraw: Arc<Notify>,
 }
 
 #[derive(Clone)]
@@ -195,6 +203,7 @@ impl WrapMap {
         tab_snapshot: TabSnapshot,
         wrap_width: Option<u32>,
         executor: Executor,
+        redraw: Arc<Notify>,
     ) -> (Self, Arc<WrapSnapshot>) {
         let snapshot = build_snapshot(tab_snapshot, wrap_width);
         let snapshot_arc = Arc::new(snapshot.clone());
@@ -206,8 +215,19 @@ impl WrapMap {
             wrap_width,
             background_task: None,
             executor,
+            redraw,
         };
         (map, snapshot_arc)
+    }
+
+    /// Whether the displayed wrapping is still provisional.
+    ///
+    /// True while a background rewrap is running, and while the snapshot only
+    /// carries interpolated edits, which is the state a large edit batch leaves
+    /// behind. Callers that cache a snapshot must re-sync while this holds,
+    /// since the settled wrapping arrives with no version change to notice.
+    pub fn background_pending(&self) -> bool {
+        self.background_task.is_some() || self.snapshot.interpolated
     }
 
     pub fn sync(
@@ -257,6 +277,11 @@ impl WrapMap {
                 .edits_since_sync
                 .compose(interpolated.edits().iter().cloned());
             self.snapshot.interpolated = false;
+        } else if self.background_pending() {
+            // A finished background rewrap is only picked up by flush_edits, and
+            // nothing new arrives to trigger it. Without this the settled
+            // wrapping would wait for the user's next edit.
+            self.flush_edits();
         }
 
         (
@@ -319,17 +344,24 @@ impl WrapMap {
 
                 let mut snapshot = self.snapshot.clone();
                 let pending = self.pending_edits.clone();
-                self.background_task = Some(self.executor.spawn(async move {
-                    let mut edits = Patch::empty();
-                    for (tab_snapshot, tab_edits) in pending {
-                        let (new_snap, wrap_edits) =
-                            sync_incremental(&snapshot, tab_snapshot, &tab_edits, Some(wrap_width));
-                        snapshot = new_snap;
-                        edits = edits.compose(wrap_edits.edits().iter().cloned());
-                        yield_now().await;
-                    }
-                    (snapshot, edits)
-                }));
+                let task = self
+                    .executor
+                    .spawn_with_redraw(self.redraw.clone(), async move {
+                        let mut edits = Patch::empty();
+                        for (tab_snapshot, tab_edits) in pending {
+                            let (new_snap, wrap_edits) = sync_incremental(
+                                &snapshot,
+                                tab_snapshot,
+                                &tab_edits,
+                                Some(wrap_width),
+                            );
+                            snapshot = new_snap;
+                            edits = edits.compose(wrap_edits.edits().iter().cloned());
+                            yield_now().await;
+                        }
+                        (snapshot, edits)
+                    });
+                self.background_task = Some(task);
             }
 
             // Apply interpolated edits for any remaining pending
@@ -1302,7 +1334,12 @@ mod tests {
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
         let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
-        let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, wrap_width, test_executor());
+        let (_, wrap_snapshot) = WrapMap::new(
+            tab_snapshot,
+            wrap_width,
+            test_executor(),
+            crate::test_notify(),
+        );
         wrap_snapshot
     }
 
@@ -1564,7 +1601,12 @@ mod tests {
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
         let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
-        let (wrap_map, wrap_snapshot) = WrapMap::new(tab_snapshot, wrap_width, test_executor());
+        let (wrap_map, wrap_snapshot) = WrapMap::new(
+            tab_snapshot,
+            wrap_width,
+            test_executor(),
+            crate::test_notify(),
+        );
         (wrap_map, wrap_snapshot, multi_buffer)
     }
 

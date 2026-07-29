@@ -219,6 +219,7 @@ mod tests {
             let id = workspaces.insert(Workspace::new(
                 PathBuf::from(format!("/tmp/ws{i:02}")),
                 &executor,
+                crate::test_notify(),
             ));
             workspaces[id].id = id;
             workspaces[id].name = format!("ws{i:02}");

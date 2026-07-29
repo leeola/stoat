@@ -10,8 +10,10 @@ use ratatui::layout::Rect;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use slotmap::new_key_type;
+use std::sync::Arc;
 use stoat_config::WrapMode;
 use stoat_scheduler::Executor;
+use tokio::sync::Notify;
 
 new_key_type! { pub struct EditorId; }
 
@@ -140,7 +142,7 @@ pub(crate) struct EditorState {
     /// copy of the whole file. Byte offsets in the string equal rope offsets, so
     /// a cached one is interchangeable with a fresh one. Transient, not
     /// persisted.
-    pub(crate) search_text_cache: Option<(u64, std::sync::Arc<String>)>,
+    pub(crate) search_text_cache: Option<(u64, Arc<String>)>,
     /// Cached visible syntax-highlight endpoints, keyed by buffer version,
     /// highlight identity, and visible byte range. Lets `render_editor` reuse
     /// resolved endpoints across repaints that change none of those. Transient
@@ -201,14 +203,19 @@ pub(crate) struct EditorStateSnapshot {
 }
 
 impl EditorState {
-    pub(crate) fn new(buffer_id: BufferId, buffer: SharedBuffer, executor: Executor) -> Self {
+    pub(crate) fn new(
+        buffer_id: BufferId,
+        buffer: SharedBuffer,
+        executor: Executor,
+        redraw: Arc<Notify>,
+    ) -> Self {
         let multi_buffer = MultiBuffer::singleton(buffer_id, buffer);
         let mut selections = SelectionsCollection::new();
         selections.seed_cursor(&multi_buffer.snapshot());
         Self {
             buffer_id,
             mode: "normal".into(),
-            display_map: DisplayMap::new(multi_buffer, executor),
+            display_map: DisplayMap::new(multi_buffer, executor, redraw),
             scroll_row: 0,
             scroll_offset: 0.0,
             scroll_glide: ScrollGlide::None,
@@ -240,13 +247,14 @@ impl EditorState {
         buffer_id: BufferId,
         multi_buffer: MultiBuffer,
         executor: Executor,
+        redraw: Arc<Notify>,
     ) -> Self {
         let mut selections = SelectionsCollection::new();
         selections.seed_cursor(&multi_buffer.snapshot());
         Self {
             buffer_id,
             mode: "normal".into(),
-            display_map: DisplayMap::new(multi_buffer, executor),
+            display_map: DisplayMap::new(multi_buffer, executor, redraw),
             scroll_row: 0,
             scroll_offset: 0.0,
             scroll_glide: ScrollGlide::None,
@@ -295,8 +303,9 @@ impl EditorState {
         snap: EditorStateSnapshot,
         buffer: SharedBuffer,
         executor: Executor,
+        redraw: Arc<Notify>,
     ) -> Self {
-        let mut state = Self::new(snap.buffer_id, buffer, executor);
+        let mut state = Self::new(snap.buffer_id, buffer, executor, redraw);
         state.scroll_row = snap.scroll_row;
         state.selections = snap.selections;
         state.move_source_cursor = snap.move_source_cursor;

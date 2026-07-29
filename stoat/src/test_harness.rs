@@ -976,8 +976,11 @@ impl TestHarness {
     /// The new workspace is not automatically made active; call
     /// [`Self::set_active_workspace`] to switch.
     pub(crate) fn create_workspace(&mut self) -> crate::workspace::WorkspaceId {
-        let mut ws =
-            crate::workspace::Workspace::new(std::path::PathBuf::new(), &self.stoat.executor);
+        let mut ws = crate::workspace::Workspace::new(
+            std::path::PathBuf::new(),
+            &self.stoat.executor,
+            crate::test_notify(),
+        );
         ws.name = String::new();
         let id = self.stoat.workspaces.insert(ws);
         self.stoat.workspaces[id].id = id;

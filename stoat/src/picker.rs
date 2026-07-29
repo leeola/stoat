@@ -509,7 +509,8 @@ impl Preview {
     /// Allocate the scratch preview buffer and its editor.
     pub(crate) fn new(ws: &mut Workspace, executor: Executor) -> Self {
         let (buffer, shared_buffer) = ws.buffers.new_scratch_preview();
-        let editor_state = EditorState::new(buffer, shared_buffer, executor);
+        let editor_state =
+            EditorState::new(buffer, shared_buffer, executor, ws.redraw_notify.clone());
         let editor = ws.editors.insert(editor_state);
         Self {
             editor,

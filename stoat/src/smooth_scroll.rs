@@ -1372,7 +1372,7 @@ mod tests {
         let shared = Arc::new(RwLock::new(tb));
         let multi = MultiBuffer::singleton(BufferId::new(0), shared);
         let executor = Executor::new(Arc::new(TestScheduler::new()));
-        let mut display_map = DisplayMap::new(multi, executor);
+        let mut display_map = DisplayMap::new(multi, executor, crate::test_notify());
         display_map.set_show_deleted_blocks(true);
         let snapshot = display_map.snapshot();
 

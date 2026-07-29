@@ -155,7 +155,7 @@ mod tests {
         let fake = FakeFs::new();
         let exec = Arc::new(TestScheduler::new()).executor();
         let git_root = PathBuf::from("/proj");
-        let ws = Workspace::new(git_root.clone(), &exec);
+        let ws = Workspace::new(git_root.clone(), &exec, crate::test_notify());
 
         let state_path = PathBuf::from("/state/hash/7.ron");
         ws.save_state(&state_path, &fake).unwrap();
@@ -179,12 +179,12 @@ mod tests {
         let dir = PathBuf::from("/state");
 
         let a = dir.join("hashA").join("1.ron");
-        Workspace::new(PathBuf::from("/proj-a"), &exec)
+        Workspace::new(PathBuf::from("/proj-a"), &exec, crate::test_notify())
             .save_state(&a, &fake)
             .unwrap();
 
         let b = dir.join("hashB").join("2.ron");
-        Workspace::new(PathBuf::from("/proj-b"), &exec)
+        Workspace::new(PathBuf::from("/proj-b"), &exec, crate::test_notify())
             .save_state(&b, &fake)
             .unwrap();
         fake.remove_file(&meta_path_for(&b)).unwrap();

@@ -8,7 +8,7 @@ pub(super) fn new_workspace(stoat: &mut Stoat) -> UpdateEffect {
     let git_root = stoat.active_workspace().git_root.clone();
     stoat.save_workspace(stoat.active_workspace());
 
-    let mut ws = Workspace::new(git_root, &stoat.executor);
+    let mut ws = Workspace::new(git_root, &stoat.executor, stoat.redraw_notify.clone());
     ws.layout(stoat.size());
     let id = stoat.workspaces.insert(ws);
     stoat.workspaces[id].id = id;
@@ -28,7 +28,7 @@ pub(super) fn copy_workspace(stoat: &mut Stoat) -> UpdateEffect {
 
     stoat.save_workspace(stoat.active_workspace());
 
-    let mut ws = Workspace::new(git_root, &stoat.executor);
+    let mut ws = Workspace::new(git_root, &stoat.executor, stoat.redraw_notify.clone());
     ws.apply_state(state, &stoat.executor);
     ws.layout(stoat.size());
     let id = stoat.workspaces.insert(ws);
@@ -202,7 +202,7 @@ fn activate_inactive_workspace(
 ) -> WorkspaceId {
     stoat.save_workspace(stoat.active_workspace());
 
-    let mut ws = Workspace::new(git_root, &stoat.executor);
+    let mut ws = Workspace::new(git_root, &stoat.executor, stoat.redraw_notify.clone());
     ws.uid = uid;
     ws.name = name;
     ws.layout(stoat.size());

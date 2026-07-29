@@ -68,7 +68,8 @@ impl InputView {
             let mut guard = shared_buffer.write().expect("buffer poisoned");
             guard.edit(0..0, seed);
         }
-        let mut editor_state = EditorState::new(buffer_id, shared_buffer, executor);
+        let mut editor_state =
+            EditorState::new(buffer_id, shared_buffer, executor, ws.redraw_notify.clone());
         editor_state.mode = start_mode.to_string();
         let editor_id = ws.editors.insert(editor_state);
 

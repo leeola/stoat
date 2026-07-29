@@ -169,6 +169,14 @@ pub struct Workspace {
     pub(crate) editors: SlotMap<EditorId, EditorState>,
     pub(crate) runs: SlotMap<RunId, RunState>,
     pub(crate) terms: SlotMap<TermId, TermSession>,
+    /// The app's redraw handle, so editors created after construction reach it.
+    ///
+    /// Held here rather than passed per call because the two places editors are
+    /// born, [`Self::new`]'s scratch tree and [`Self::seeded_editor`], have no
+    /// access to [`crate::app::Stoat`]. An editor's display map needs it to wake
+    /// the run loop when a background rewrap settles, which no version change
+    /// announces.
+    pub(crate) redraw_notify: Arc<Notify>,
     /// In-RAM symbol-and-call graph for this workspace, merged from the
     /// per-file shards the cold build and incremental reindex produce.
     pub(crate) code_graph: CodeGraph,
@@ -279,9 +287,15 @@ fn scratch_tree(
     buffers: &mut BufferRegistry,
     editors: &mut SlotMap<EditorId, EditorState>,
     executor: &Executor,
+    redraw: &Arc<Notify>,
 ) -> PaneTree {
     let (buffer_id, buffer) = buffers.new_scratch();
-    let editor_id = editors.insert(EditorState::new(buffer_id, buffer, executor.clone()));
+    let editor_id = editors.insert(EditorState::new(
+        buffer_id,
+        buffer,
+        executor.clone(),
+        redraw.clone(),
+    ));
     let mut panes = PaneTree::new(Rect::default());
     let focus = panes.focus();
     panes.pane_mut(focus).view = View::Editor(editor_id);
@@ -289,10 +303,10 @@ fn scratch_tree(
 }
 
 impl Workspace {
-    pub(crate) fn new(git_root: PathBuf, executor: &Executor) -> Self {
+    pub(crate) fn new(git_root: PathBuf, executor: &Executor, redraw: Arc<Notify>) -> Self {
         let mut buffers = BufferRegistry::new();
         let mut editors = SlotMap::with_key();
-        let panes = scratch_tree(&mut buffers, &mut editors, executor);
+        let panes = scratch_tree(&mut buffers, &mut editors, executor, &redraw);
 
         let uid = WorkspaceUid::now(executor);
         let name = name::default_workspace_name(uid);
@@ -319,6 +333,7 @@ impl Workspace {
             editors,
             runs: SlotMap::with_key(),
             terms: SlotMap::with_key(),
+            redraw_notify: redraw,
             code_graph: CodeGraph::new(),
             index_generation: 0,
             file_paths: HashMap::new(),
@@ -366,7 +381,8 @@ impl Workspace {
 
     /// Append a tab showing a fresh scratch buffer and switch to it.
     pub(crate) fn new_tab(&mut self, executor: &Executor) {
-        let tree = scratch_tree(&mut self.buffers, &mut self.editors, executor);
+        let redraw = self.redraw_notify.clone();
+        let tree = scratch_tree(&mut self.buffers, &mut self.editors, executor, &redraw);
         self.tabs.push(Tab {
             parked: Some(tree),
             name: None,
@@ -664,7 +680,7 @@ impl Workspace {
         executor: Executor,
     ) -> EditorState {
         let current_version = buffer.read().expect("buffer poisoned").snapshot.version;
-        let mut editor = EditorState::new(buffer_id, buffer, executor);
+        let mut editor = EditorState::new(buffer_id, buffer, executor, self.redraw_notify.clone());
         if let Some((tokens, interner)) = self.buffers.tokens_for(buffer_id) {
             editor
                 .display_map
@@ -1740,7 +1756,7 @@ mod tests {
     #[test]
     fn assign_languages_from_paths_detects_rust() {
         let executor = Arc::new(TestScheduler::new()).executor();
-        let mut ws = Workspace::new(PathBuf::new(), &executor);
+        let mut ws = Workspace::new(PathBuf::new(), &executor, crate::test_notify());
         let (id, _) = ws.buffers.open(Path::new("/repo/foo.rs"), "fn main() {}");
 
         assert_eq!(ws.buffers.language_for(id).map(|l| l.name), None);
@@ -1753,7 +1769,7 @@ mod tests {
     #[test]
     fn reset_preview_syntax_cancels_in_flight_parse() {
         let executor = Arc::new(TestScheduler::new()).executor();
-        let mut ws = Workspace::new(PathBuf::new(), &executor);
+        let mut ws = Workspace::new(PathBuf::new(), &executor, crate::test_notify());
         let (id, _) = ws.buffers.new_scratch_preview();
         ws.parse_jobs.insert(
             id,
