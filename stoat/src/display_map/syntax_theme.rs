@@ -4,7 +4,10 @@ use crate::{
     theme::Theme,
 };
 use ratatui::style::{Color, Modifier, Style};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use stoat_language::HighlightId;
 
 /// Canonical list of syntax scope stems this build recognizes. Each entry
@@ -107,6 +110,12 @@ pub(crate) fn highlight_id_for_key(key: &str) -> Option<HighlightId> {
 #[derive(Clone)]
 pub struct SyntaxStyles {
     pub interner: Arc<HighlightStyleInterner>,
+    /// Identifies this table for a consumer memoizing work derived from its
+    /// styles. Every [`Self::from_theme`] takes a fresh stamp, and a theme
+    /// change is the only thing that rebuilds the table, so an unchanged stamp
+    /// is exactly the signal that derived work can be reused. A clone keeps the
+    /// stamp, since it resolves every id identically.
+    pub generation: u64,
     /// Indexed by [`HighlightId`] (which is itself an index into
     /// [`THEME_KEYS`]). The host populates each language's
     /// [`stoat_language::Language::highlight_map`] using
@@ -121,6 +130,8 @@ impl SyntaxStyles {
     /// and the resulting [`Style`] is decomposed into a [`HighlightStyle`]
     /// for the merge-friendly display pipeline.
     pub fn from_theme(theme: &Theme) -> Self {
+        static GENERATION: AtomicU64 = AtomicU64::new(0);
+
         let mut interner = HighlightStyleInterner::default();
         let theme_table: Vec<HighlightStyleId> = THEME_KEYS
             .iter()
@@ -132,6 +143,7 @@ impl SyntaxStyles {
             .collect();
         Self {
             interner: Arc::new(interner),
+            generation: GENERATION.fetch_add(1, Ordering::Relaxed),
             theme_table,
         }
     }

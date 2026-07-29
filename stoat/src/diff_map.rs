@@ -635,7 +635,13 @@ fn ranges_overlap(a: &Range<u32>, b: &Range<u32>) -> bool {
     }
 }
 
-fn changes_to_hunks(
+/// Fold a structural diff's changes into hunks, in buffer-line order.
+///
+/// Also reachable on its own for a caller that wants the hunks and nothing
+/// else. Going through [`DiffMap::from_structural_changes`] to read them back
+/// would copy `lhs_text` and build the base change-span and staged maps, all of
+/// which such a caller drops.
+pub(crate) fn changes_to_hunks(
     changes: &[stoat_language::structural_diff::DiffChange],
     lhs_text: &str,
     rhs_text: &str,
@@ -1714,6 +1720,43 @@ mod tests {
             flags,
             vec![(1, true), (3, false)],
             "line-1 change staged, line-3 change unstaged"
+        );
+    }
+
+    /// With nothing staged the index holds HEAD's bytes, so the diff recompute
+    /// reads the changed-line set off the hunks it already has rather than
+    /// diffing the file a second time. If those two disagreed, every hunk's
+    /// staged flag would come out wrong.
+    #[test]
+    fn an_index_at_head_yields_the_lines_a_second_diff_would() {
+        let base = "a\nb\nc\nd\n";
+        let buffer = "a\nB\nc\nD\n";
+
+        let second_diff: Vec<std::ops::Range<u32>> = DiffMap::from_structural_changes(
+            stoat_language::structural_diff::diff(base, buffer),
+            base,
+            buffer,
+        )
+        .hunks_in_range(0..u32::MAX)
+        .iter()
+        .map(|h| h.buffer_line_range.clone())
+        .collect();
+
+        let result = stoat_language::structural_diff::diff(base, buffer);
+        let own_hunks: Vec<std::ops::Range<u32>> =
+            super::changes_to_hunks(&result.changes, base, buffer)
+                .into_iter()
+                .map(|h| h.buffer_line_range)
+                .collect();
+        assert_eq!(
+            own_hunks, second_diff,
+            "the hunks already in hand name the same lines the index diff would",
+        );
+
+        let dm = DiffMap::from_structural_changes_staged(result, base, buffer, &own_hunks);
+        assert!(
+            dm.hunks_in_range(0..u32::MAX).iter().all(|h| !h.staged()),
+            "an index sitting at HEAD leaves every hunk unstaged",
         );
     }
 

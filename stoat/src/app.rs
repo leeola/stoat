@@ -1840,9 +1840,9 @@ impl Stoat {
             diff_cache: Arc::new(std::sync::Mutex::new(crate::diff_cache::DiffCache::new(
                 256,
             ))),
-            base_highlights_cache: Arc::new(
-                std::sync::Mutex::new(std::collections::HashMap::new()),
-            ),
+            base_highlights_cache: Arc::new(std::sync::Mutex::new(
+                crate::workspace::BaseHighlightMemo::default(),
+            )),
             lsp_progress: crate::lsp::progress::LspProgressMap::new(),
             lsp_message: None,
             pending_lsp_jump: None,

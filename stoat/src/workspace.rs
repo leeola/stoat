@@ -16,7 +16,7 @@ use crate::{
     conflict_session::ConflictSession,
     diff,
     diff_cache::ContentHash,
-    diff_map::{line_starts, BaseHighlights, DiffMap},
+    diff_map::{changes_to_hunks, line_starts, BaseHighlights, DiffMap},
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
     host::{FsHost, GitHost},
@@ -1231,18 +1231,32 @@ impl Workspace {
     }
 }
 
+/// Memoized diff-view base-text work, shared across the blocking jobs that
+/// build diff maps.
+///
+/// Two layers, because they go stale on different inputs. Both grow without
+/// bound, which is what an editor session's finite set of base texts, languages,
+/// and themes makes acceptable.
+#[derive(Default)]
+pub(crate) struct BaseHighlightMemo {
+    /// Tree-sitter highlight spans for a base text, keyed by its content hash
+    /// and language name, so an unchanged base is parsed once across edits.
+    /// Theme-independent.
+    parses: HashMap<(ContentHash, String), Arc<Vec<HighlightSpan>>>,
+    /// Those spans resolved to styles and split per base line. Keyed
+    /// additionally by the [`SyntaxStyles`] generation, since the resolution is
+    /// what the theme changes.
+    buckets: HashMap<(ContentHash, String, u64), Arc<BaseHighlights>>,
+}
+
+pub(crate) type BaseHighlightCache = Arc<Mutex<BaseHighlightMemo>>;
+
 /// Compute a buffer's HEAD-vs-worktree [`DiffMap`], or [`None`] when the file
 /// is outside a repo or has no HEAD content to diff against.
 ///
 /// Both `discover` and `head_content` do git and filesystem IO, so this must
 /// run on a blocking thread. Uses the language-agnostic line diff, matching
 /// [`changed_byte_ranges`].
-/// Memoized tree-sitter parses of base texts for the diff view's left column,
-/// keyed by base content hash and language name so an unchanged base is parsed
-/// once across edits. Values are theme-independent, so styles resolve per build.
-pub(crate) type BaseHighlightCache =
-    Arc<Mutex<HashMap<(ContentHash, String), Arc<Vec<HighlightSpan>>>>>;
-
 fn compute_diff_map(
     git: &dyn GitHost,
     git_root: &Path,
@@ -1258,17 +1272,26 @@ fn compute_diff_map(
     let index_text = repo
         .index_content(path)
         .unwrap_or_else(|| base_text.clone());
+
+    let result = structural_diff::diff(&base_text, buffer_text);
+
+    // Which buffer lines the index and the buffer disagree on, which is what
+    // marks a hunk staged. With nothing staged the index holds HEAD's bytes, so
+    // that question has the same answer as the diff just run, and converting
+    // one result twice beats diffing the file twice.
     let index_changed: Vec<Range<u32>> = {
-        let index_result = structural_diff::diff(&index_text, buffer_text);
-        let index_map = DiffMap::from_structural_changes(index_result, &index_text, buffer_text);
-        index_map
-            .hunks_in_range(0..u32::MAX)
+        let hunks = if index_text == base_text {
+            changes_to_hunks(&result.changes, &base_text, buffer_text)
+        } else {
+            let index_result = structural_diff::diff(&index_text, buffer_text);
+            changes_to_hunks(&index_result.changes, &index_text, buffer_text)
+        };
+        hunks
             .into_iter()
-            .map(|hunk| hunk.buffer_line_range.clone())
+            .map(|hunk| hunk.buffer_line_range)
             .collect()
     };
 
-    let result = structural_diff::diff(&base_text, buffer_text);
     let mut diff_map =
         DiffMap::from_structural_changes_staged(result, &base_text, buffer_text, &index_changed);
     if let Some(language) = language {
@@ -1282,23 +1305,30 @@ fn compute_diff_map(
     Some(diff_map)
 }
 
-/// Highlight `base_text` for the diff view's left column, memoizing the parse in
-/// `cache`. Styles resolve against the current `syntax_styles` on every call so
-/// a theme change still takes effect on the next build.
+/// Highlight `base_text` for the diff view's left column, per base line.
+///
+/// Memoized against `cache` twice over. An unchanged base text is parsed once,
+/// and its spans are resolved and bucketed once per theme, so a keystroke burst
+/// that leaves the base alone costs two hash lookups rather than a walk over
+/// every span with a style clone per line it touches.
 fn compute_base_highlights(
     base_text: &str,
     language: &Arc<Language>,
     syntax_styles: &SyntaxStyles,
     cache: &BaseHighlightCache,
 ) -> Arc<BaseHighlights> {
-    let key = (
-        blake3::hash(base_text.as_bytes()).into(),
-        language.name.to_string(),
-    );
+    let content: ContentHash = blake3::hash(base_text.as_bytes()).into();
+    let name = language.name.to_string();
+    let bucket_key = (content, name.clone(), syntax_styles.generation);
+
     let spans = {
         let mut guard = cache.lock().expect("base highlight cache poisoned");
+        if let Some(bucketed) = guard.buckets.get(&bucket_key) {
+            return bucketed.clone();
+        }
         guard
-            .entry(key)
+            .parses
+            .entry((content, name))
             .or_insert_with(|| {
                 let spans = parse(language, base_text, None)
                     .map(|tree| extract_highlights(language, &tree, base_text))
@@ -1307,7 +1337,16 @@ fn compute_base_highlights(
             })
             .clone()
     };
-    Arc::new(bucket_base_highlights(&spans, base_text, syntax_styles))
+
+    // Bucketed outside the lock, so one job's O(spans) resolve does not hold up
+    // every other buffer's diff.
+    let bucketed = Arc::new(bucket_base_highlights(&spans, base_text, syntax_styles));
+    cache
+        .lock()
+        .expect("base highlight cache poisoned")
+        .buckets
+        .insert(bucket_key, bucketed.clone());
+    bucketed
 }
 
 /// Resolve highlight spans to styles and bucket them per base line as line-local
@@ -1381,17 +1420,52 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{changed_byte_ranges, ParseJob, Workspace, SYNC_PARSE_MAX_BYTES};
+    use super::{
+        changed_byte_ranges, compute_base_highlights, BaseHighlightMemo, ParseJob, Workspace,
+        SYNC_PARSE_MAX_BYTES,
+    };
     use crate::{
-        buffer::BufferId, host::DiffStatus, pane::View, review::ReviewFileInput,
-        test_harness::TestHarness,
+        buffer::BufferId, display_map::syntax_theme::SyntaxStyles, host::DiffStatus, pane::View,
+        review::ReviewFileInput, test_harness::TestHarness, theme::Theme,
     };
     use std::{
         path::{Path, PathBuf},
-        sync::Arc,
+        sync::{Arc, Mutex},
     };
     use stoat_language::LanguageRegistry;
     use stoat_scheduler::{Task, TestScheduler};
+
+    /// Bucketing the base spans is O(spans) with a style clone per line each
+    /// span touches, and it ran per recompute over a base text and a style
+    /// table that a keystroke burst leaves alone. Only a rebuilt style table
+    /// can change the answer, so only that may cost the walk again.
+    #[test]
+    fn base_highlights_reuse_the_bucketed_map_until_the_styles_are_rebuilt() {
+        let cache = Arc::new(Mutex::new(BaseHighlightMemo::default()));
+        let language = LanguageRegistry::standard()
+            .for_path(Path::new("a.rs"))
+            .expect("rust language");
+        let base = "fn main() {\n    let x = 1;\n}\n";
+        let styles = SyntaxStyles::from_theme(&Theme::empty());
+
+        let first = compute_base_highlights(base, &language, &styles, &cache);
+        let second = compute_base_highlights(base, &language, &styles, &cache);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the same style table serves the bucketed map it already built",
+        );
+
+        let rebuilt = SyntaxStyles::from_theme(&Theme::empty());
+        let third = compute_base_highlights(base, &language, &rebuilt, &cache);
+        assert!(
+            !Arc::ptr_eq(&first, &third),
+            "a rebuilt style table cannot reuse a resolve made against the old one",
+        );
+        assert_eq!(
+            *first, *third,
+            "and the miss is conservative: the same theme resolves the same way",
+        );
+    }
 
     fn input(base: &str, buffer: &str) -> ReviewFileInput {
         ReviewFileInput {
