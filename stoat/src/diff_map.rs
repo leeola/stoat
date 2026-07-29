@@ -415,18 +415,47 @@ impl DiffMap {
         before + partial
     }
 
+    /// What [`Self::deleted_blocks`] would produce, reduced to what tells one
+    /// refresh's set apart from the next.
+    ///
+    /// A diff recompute stamps a new version whether or not any hunk moved, so
+    /// a caller that re-splices on the version alone re-splices constantly.
+    /// Comparing the blocks themselves is not open to it, since
+    /// [`BlockProperties`] carries a render closure. These three fields are
+    /// every input the blocks are built from, so equal signatures mean an
+    /// identical set.
+    pub fn deleted_block_signature(&self) -> Vec<(DiffHunkStatus, u32, Range<usize>)> {
+        if self.base_text.is_none() {
+            return Vec::new();
+        }
+        self.deleted_block_hunks()
+            .map(|hunk| {
+                (
+                    hunk.status,
+                    hunk.buffer_start_line,
+                    hunk.base_byte_range.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// The hunks that render as deleted-line blocks, shared by
+    /// [`Self::deleted_blocks`] and [`Self::deleted_block_signature`] so the
+    /// signature cannot drift from the set it stands for.
+    fn deleted_block_hunks(&self) -> impl Iterator<Item = &DiffHunk> {
+        self.hunks.iter().filter(|h| {
+            matches!(h.status, DiffHunkStatus::Deleted | DiffHunkStatus::Modified)
+                && !h.base_byte_range.is_empty()
+        })
+    }
+
     pub fn deleted_blocks(&self) -> Vec<BlockProperties> {
         let base_text = match &self.base_text {
             Some(t) => t,
             None => return Vec::new(),
         };
 
-        self.hunks
-            .iter()
-            .filter(|h| {
-                matches!(h.status, DiffHunkStatus::Deleted | DiffHunkStatus::Modified)
-                    && !h.base_byte_range.is_empty()
-            })
+        self.deleted_block_hunks()
             .map(|hunk| {
                 let content = &base_text[hunk.base_byte_range.clone()];
                 let lines: Vec<String> = content.lines().map(String::from).collect();

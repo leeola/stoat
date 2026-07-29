@@ -10,7 +10,7 @@ mod wrap_map;
 
 use crate::{
     buffer::BufferId,
-    diff_map::{DiffMap, TokenDetail},
+    diff_map::{DiffHunkStatus, DiffMap, TokenDetail},
     host::DiffStatus,
     multi_buffer::{ExcerptId, MultiBuffer, MultiBufferSnapshot},
 };
@@ -33,6 +33,7 @@ pub use highlights::{
 pub use inlay_map::{InlayId, InlayKind, InlayMap, InlayOffset, InlayPoint, InlaySnapshot};
 use std::{
     collections::{BTreeMap, HashMap},
+    ops::Range,
     sync::{
         atomic::{AtomicU64, Ordering as AtomicOrdering},
         Arc, LazyLock,
@@ -117,9 +118,9 @@ pub type ConvertMultiBufferRows = fn(
 #[derive(Debug)]
 pub struct CompanionExcerptPatch {
     pub patch: Patch<Point>,
-    pub edited_range: std::ops::Range<Point>,
-    pub source_excerpt_range: std::ops::Range<Point>,
-    pub target_excerpt_range: std::ops::Range<Point>,
+    pub edited_range: Range<Point>,
+    pub source_excerpt_range: Range<Point>,
+    pub target_excerpt_range: Range<Point>,
 }
 
 #[allow(dead_code)]
@@ -163,7 +164,7 @@ impl Companion {
         our_snapshot: &MultiBufferSnapshot,
         companion_snapshot: &MultiBufferSnapshot,
         point: Point,
-    ) -> std::ops::Range<Point> {
+    ) -> Range<Point> {
         let convert_fn = self.rows_to_companion(display_map_id);
         let excerpt_map = self.excerpt_map(display_map_id);
         let patches = convert_fn(
@@ -268,6 +269,12 @@ pub struct DisplayMap {
     /// already resolved and a re-sync would reproduce the same offsets.
     last_crease_sync_version: u64,
     inserted_diff_block_ids: Vec<CustomBlockId>,
+    /// The hunks the currently installed deleted-line blocks were built from.
+    ///
+    /// A diff recompute stamps a new version even when it found exactly the
+    /// same hunks, so the version alone cannot say whether the blocks need
+    /// replacing. This can, and a refresh that matches it does nothing.
+    inserted_diff_block_signature: Vec<(DiffHunkStatus, u32, Range<usize>)>,
     /// Ids of the spacer blocks the conflict view installs to pad a picked
     /// chunk whose center shrank below its taller side, tracked so each refresh
     /// replaces the previous set rather than stacking duplicates.
@@ -326,6 +333,7 @@ impl DisplayMap {
             last_buffer_snapshot: Some(buffer_snapshot),
             last_crease_sync_version: version,
             inserted_diff_block_ids: Vec::new(),
+            inserted_diff_block_signature: Vec::new(),
             conflict_padding_block_ids: Vec::new(),
             last_diff_version: 0,
             show_deleted_blocks: false,
@@ -422,7 +430,7 @@ impl DisplayMap {
         self.cached_snapshot = None;
     }
 
-    pub fn fold(&mut self, ranges: Vec<std::ops::Range<Point>>) {
+    pub fn fold(&mut self, ranges: Vec<Range<Point>>) {
         let buffer_snapshot = self.multi_buffer.snapshot();
         let anchor_ranges = ranges
             .into_iter()
@@ -437,7 +445,7 @@ impl DisplayMap {
             .fold(anchor_ranges, FoldPlaceholder::default(), &buffer_snapshot);
     }
 
-    pub fn unfold(&mut self, ranges: Vec<std::ops::Range<Point>>) {
+    pub fn unfold(&mut self, ranges: Vec<Range<Point>>) {
         let buffer_snapshot = self.multi_buffer.snapshot();
         let offset_ranges = ranges
             .into_iter()
@@ -450,7 +458,7 @@ impl DisplayMap {
         self.fold_map.unfold(offset_ranges, &buffer_snapshot);
     }
 
-    pub fn toggle_fold(&mut self, ranges: Vec<std::ops::Range<Point>>) {
+    pub fn toggle_fold(&mut self, ranges: Vec<Range<Point>>) {
         let buffer_snapshot = self.multi_buffer.snapshot();
         let any_folded = ranges.iter().any(|r| {
             let offset = buffer_snapshot.rope().point_to_offset(r.start);
@@ -486,7 +494,7 @@ impl DisplayMap {
     pub fn highlight_text(
         &mut self,
         key: HighlightKey,
-        ranges: Vec<std::ops::Range<Anchor>>,
+        ranges: Vec<Range<Anchor>>,
         style: HighlightStyle,
     ) {
         let buffer_snapshot = self.multi_buffer.snapshot();
@@ -640,7 +648,7 @@ impl DisplayMap {
     pub fn set_lsp_folding_ranges(
         &mut self,
         buffer_id: BufferId,
-        ranges: Vec<(std::ops::Range<Anchor>, Option<String>)>,
+        ranges: Vec<(Range<Anchor>, Option<String>)>,
     ) {
         if let Some(old_ids) = self.lsp_folding_crease_ids.remove(&buffer_id) {
             self.crease_map.remove(old_ids);
@@ -717,17 +725,33 @@ impl DisplayMap {
         if diff_version != self.last_diff_version
             || self.show_deleted_blocks != self.last_show_deleted_blocks
         {
-            self.block_map
-                .remove(&self.inserted_diff_block_ids.drain(..).collect());
-            let props = if self.show_deleted_blocks {
+            let signature = if self.show_deleted_blocks {
                 diff_map
                     .as_ref()
-                    .map(|dm| dm.deleted_blocks())
+                    .map(|dm| dm.deleted_block_signature())
                     .unwrap_or_default()
             } else {
                 Vec::new()
             };
-            self.inserted_diff_block_ids = self.block_map.insert(props);
+
+            // A recompute that found the same hunks yields the same blocks, and
+            // re-splicing them would only mint new ids for identical content
+            // while forcing the transform tree to be rebuilt around them.
+            if signature != self.inserted_diff_block_signature {
+                self.block_map
+                    .remove(&self.inserted_diff_block_ids.drain(..).collect());
+                let props = if self.show_deleted_blocks {
+                    diff_map
+                        .as_ref()
+                        .map(|dm| dm.deleted_blocks())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                self.inserted_diff_block_ids = self.block_map.insert(props);
+                self.inserted_diff_block_signature = signature;
+            }
+
             self.last_diff_version = diff_version;
             self.last_show_deleted_blocks = self.show_deleted_blocks;
         }
@@ -863,7 +887,7 @@ impl DisplaySnapshot {
 
     pub fn chunks(
         &self,
-        display_rows: std::ops::Range<u32>,
+        display_rows: Range<u32>,
         highlights: Highlights<'_>,
     ) -> block_map::BlockChunks<'_> {
         let byte_range = self
@@ -890,10 +914,7 @@ impl DisplaySnapshot {
             .then_some(&self.lsp_token_highlights)
     }
 
-    pub fn highlighted_chunks(
-        &self,
-        display_rows: std::ops::Range<u32>,
-    ) -> block_map::BlockChunks<'_> {
+    pub fn highlighted_chunks(&self, display_rows: Range<u32>) -> block_map::BlockChunks<'_> {
         let endpoints = self.highlighted_endpoints(display_rows.clone());
         self.highlighted_chunks_with_endpoints(display_rows, endpoints)
     }
@@ -906,7 +927,7 @@ impl DisplaySnapshot {
     /// rather than rebuilding them per row.
     pub fn highlighted_endpoints(
         &self,
-        display_rows: std::ops::Range<u32>,
+        display_rows: Range<u32>,
     ) -> Arc<[highlights::HighlightEndpoint]> {
         let highlights = Highlights {
             text_highlights: Some(&self.text_highlights),
@@ -928,7 +949,7 @@ impl DisplaySnapshot {
     /// each row, so one set built for a viewport paints any single row within it.
     pub fn highlighted_chunks_with_endpoints(
         &self,
-        display_rows: std::ops::Range<u32>,
+        display_rows: Range<u32>,
         endpoints: Arc<[highlights::HighlightEndpoint]>,
     ) -> block_map::BlockChunks<'_> {
         self.block_snapshot.chunks(display_rows, endpoints)
@@ -939,7 +960,7 @@ impl DisplaySnapshot {
     /// visible byte range changes.
     pub fn highlighted_chunks_cached(
         &self,
-        display_rows: std::ops::Range<u32>,
+        display_rows: Range<u32>,
         cache: &mut Option<CachedHighlightEndpoints>,
     ) -> block_map::BlockChunks<'_> {
         let highlights = Highlights {
@@ -958,7 +979,7 @@ impl DisplaySnapshot {
     fn build_endpoints(
         &self,
         highlights: Highlights<'_>,
-        range: std::ops::Range<usize>,
+        range: Range<usize>,
     ) -> Arc<[highlights::HighlightEndpoint]> {
         let buffer = self.buffer_snapshot();
         let text_highlights_ref = highlights.text_highlights.unwrap_or(&EMPTY_TEXT_HIGHLIGHTS);
@@ -980,7 +1001,7 @@ impl DisplaySnapshot {
     fn build_endpoints_cached(
         &self,
         highlights: Highlights<'_>,
-        range: std::ops::Range<usize>,
+        range: Range<usize>,
         cache: &mut Option<CachedHighlightEndpoints>,
     ) -> Arc<[highlights::HighlightEndpoint]> {
         let buffer = self.buffer_snapshot();
@@ -1102,7 +1123,7 @@ impl DisplaySnapshot {
         result
     }
 
-    pub fn display_lines(&self, range: std::ops::Range<u32>) -> impl Iterator<Item = String> + '_ {
+    pub fn display_lines(&self, range: Range<u32>) -> impl Iterator<Item = String> + '_ {
         range.map(move |row| self.display_line(row))
     }
 
@@ -1272,6 +1293,36 @@ mod tests {
             token_detail: None,
         });
         dm
+    }
+
+    /// Recomputing a diff stamps a fresh version whether or not anything moved,
+    /// and every version bump used to drop and re-add every deleted-line block.
+    /// A keystroke that leaves the hunks alone should leave the blocks alone,
+    /// which the ids show directly since each insert mints a new one.
+    #[test]
+    fn a_diff_refresh_that_changes_no_hunk_keeps_the_same_blocks() {
+        let base = "line1\ndeleted\nline2";
+        let mut buffer = TextBuffer::with_text(BufferId::new(0), "line1\nline2");
+        buffer.diff_map = Some(make_diff_with_deletion(0, base, 6..13, 1));
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
+        display_map.set_show_deleted_blocks(true);
+
+        display_map.snapshot();
+        let first = display_map.inserted_diff_block_ids.clone();
+        assert_eq!(first.len(), 1, "the deleted hunk contributes one block");
+
+        // A re-diff after an edit elsewhere finds the same hunks and puts them
+        // in a map carrying a new version.
+        shared.write().expect("poisoned").diff_map =
+            Some(make_diff_with_deletion(0, base, 6..13, 1));
+        display_map.snapshot();
+
+        assert_eq!(
+            display_map.inserted_diff_block_ids, first,
+            "a refresh finding the same hunks re-splices nothing",
+        );
     }
 
     #[test]
