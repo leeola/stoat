@@ -26,6 +26,7 @@ use crate::{
         active_modal, debug_assert_modal_exclusivity, modal_predicate, normalize_shift_event,
         resolve_action, ActiveModal, StoatKeymapState,
     },
+    minimap::EdgeSource,
     pane::{DockId, DockVisibility, FocusTarget, NodeId, PaneId, PaneTree, Placement, View},
     quit_all_confirm::QuitAllConfirm,
     rebase::RebasePause,
@@ -8336,7 +8337,11 @@ impl Stoat {
         let tokens_for = |rows: Range<u32>| {
             minimap_line_tokens(&snapshot, buffer_id, syntax_on, class_table, rows)
         };
-        let edge_of = |row: u32| minimap_edge_class(&snapshot, &severity_map, class_table, row);
+        let marks = MinimapEdges {
+            snapshot: &snapshot,
+            severity_map: &severity_map,
+            class_table,
+        };
 
         let content = self
             .minimap_content
@@ -8352,7 +8357,7 @@ impl Stoat {
                 syntax_other: syntax_other_version,
             },
             tokens_for,
-            edge_of,
+            marks,
         );
 
         for splice in content.take_queued() {
@@ -9906,6 +9911,44 @@ fn minimap_line_tokens(
         tokens.sort_by_key(|token| token.range.start);
     }
     by_row
+}
+
+/// One editor's minimap edge-lane marks, sourced from its diagnostics and its
+/// diff.
+///
+/// Resolving a single row means a seek into the hunk tree, so the bulk answer
+/// matters as much as the per-row one. Both structures behind a mark are keyed
+/// by row, so which rows are markable at all comes out of one ordered walk
+/// rather than a seek per line of the file.
+struct MinimapEdges<'a> {
+    snapshot: &'a DisplaySnapshot,
+    severity_map: &'a std::collections::BTreeMap<u32, lsp_types::DiagnosticSeverity>,
+    class_table: &'a crate::minimap::ClassTable,
+}
+
+impl EdgeSource for MinimapEdges<'_> {
+    fn edge_of(&self, row: u32) -> Option<u8> {
+        minimap_edge_class(self.snapshot, self.severity_map, self.class_table, row)
+    }
+
+    fn marked_rows(&self, rows: Range<u32>) -> Vec<u32> {
+        let mut marked: Vec<u32> = self
+            .severity_map
+            .range(rows.clone())
+            .map(|(&row, _)| row)
+            .collect();
+
+        if let Some(diff) = self.snapshot.diff_map() {
+            for hunk in diff.hunks_in_range(rows.clone()) {
+                marked.extend(
+                    hunk.buffer_line_range.start.max(rows.start)
+                        ..hunk.buffer_line_range.end.min(rows.end),
+                );
+            }
+        }
+
+        marked
+    }
 }
 
 /// The minimap edge-lane class for buffer `row`, or `None` when the line carries
@@ -15797,7 +15840,7 @@ mod tests {
             "an error overrides the diff mark, got {errored:?}"
         );
 
-        h.stoat.diagnostics.replace_for_path(path, vec![]);
+        h.stoat.diagnostics.replace_for_path(path.clone(), vec![]);
         let _ = h.stoat.render();
         h.stoat.emit_minimap();
         let cleared = drain_apc(&mut rx);
@@ -15814,6 +15857,51 @@ mod tests {
             })
             .collect();
         assert_eq!(touched, vec![1], "only the formerly-marked line re-splices");
+
+        // A recomputed diff moves the hunk to line 2 with the buffer untouched,
+        // so line 2 has to pick up a mark it has never carried before.
+        {
+            let base = "keep\nnew\nold\n";
+            let text = "keep\nnew\ntail\n";
+            let dm = crate::diff_map::DiffMap::from_structural_changes(
+                stoat_language::structural_diff::diff(base, text),
+                base,
+                text,
+            );
+            h.stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer")
+                .write()
+                .expect("poisoned")
+                .diff_map = Some(dm);
+        }
+        let _ = h.stoat.render();
+        h.stoat.emit_minimap();
+        let moved = drain_apc(&mut rx);
+        assert_eq!(
+            line_lead(&moved, 2).map(|r| r.class),
+            Some(modified),
+            "the newly-differing line takes the modified mark, got {moved:?}"
+        );
+        assert_eq!(
+            line_lead(&moved, 1).map(|r| r.start_col),
+            Some(2),
+            "line 1 matches the base again, so its lane is empty, got {moved:?}"
+        );
+
+        h.stoat
+            .diagnostics
+            .replace_for_path(path, vec![diag(0, DiagnosticSeverity::ERROR)]);
+        let _ = h.stoat.render();
+        h.stoat.emit_minimap();
+        let on_clean = drain_apc(&mut rx);
+        assert_eq!(
+            line_lead(&on_clean, 0).map(|r| r.class),
+            Some(error),
+            "a diagnostic marks a line no hunk covers, got {on_clean:?}"
+        );
     }
 
     /// The style id and interner for the first `THEME_KEYS` scope, as the

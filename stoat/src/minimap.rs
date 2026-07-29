@@ -146,6 +146,37 @@ impl SweepRows {
     }
 }
 
+/// A buffer's diff and diagnostic marks, as the minimap needs them.
+///
+/// Resolving one row's mark is a seek into whatever the marks are stored in, so
+/// a pass that asked every built row would seek once per line of the file. The
+/// second method exists so such a pass can instead ask, in bulk, which rows are
+/// even capable of carrying a mark.
+///
+/// Any `Fn(u32) -> Option<u8>` is an edge source, answering the bulk question
+/// with the conservative every-row answer.
+pub trait EdgeSource {
+    /// The edge-lane class of `row`, or `None` when it carries no mark.
+    fn edge_of(&self, row: u32) -> Option<u8>;
+
+    /// The rows of `rows` that can carry a mark, in any order and without
+    /// having to be deduplicated.
+    ///
+    /// A superset is correct and only costs time, so an implementation is free
+    /// to answer from whatever ranges it has to hand rather than resolving each
+    /// row. Omitting a row that does carry a mark is not: callers take the
+    /// answer as settling that every other row is unmarked.
+    fn marked_rows(&self, rows: Range<u32>) -> Vec<u32> {
+        rows.collect()
+    }
+}
+
+impl<F: Fn(u32) -> Option<u8>> EdgeSource for F {
+    fn edge_of(&self, row: u32) -> Option<u8> {
+        self(row)
+    }
+}
+
 /// The run summaries of one buffer, plus the incremental-sync bookkeeping.
 ///
 /// Mirrors the terminal's content store: one entry per line, spliced as the
@@ -155,9 +186,15 @@ impl SweepRows {
 pub struct MinimapContent {
     content_id: u32,
     lines: Vec<Vec<Run>>,
-    /// Edge-lane class per built line, kept parallel to [`Self::lines`] so a diff
-    /// or diagnostic change re-summarizes only the lines whose mark changed.
-    edges: Vec<Option<u8>>,
+    /// The built rows carrying a mark and the edge-lane class each carries,
+    /// ascending by row. A row absent from it is unmarked.
+    ///
+    /// Sparse rather than one entry per built line so it doubles as the index of
+    /// what is marked. A diff or diagnostic change re-summarizes the rows whose
+    /// mark moved, and finding those means visiting what is marked now together
+    /// with what [`EdgeSource::marked_rows`] says could become marked, neither
+    /// of which is a walk of the file.
+    edges: Vec<(u32, u8)>,
     synced_version: u64,
     synced_rope: Rope,
     built_upto: u32,
@@ -254,7 +291,7 @@ impl MinimapContent {
     /// `edits` is the buffer's `edits_since(self.synced_version())`. `tokens_for`
     /// resolves the syntax tokens of a row range, queried once per range each
     /// branch touches so a small edit never resolves the whole buffer, and
-    /// `edge_of` a row's diff/diagnostic mark. [`SyncVersions::decoration`]
+    /// `marks` a row's diff/diagnostic mark. [`SyncVersions::decoration`]
     /// changing re-checks the built lines' edge marks and [`SyncVersions::syntax`]
     /// changing re-summarizes their content, each without a buffer edit.
     ///
@@ -268,7 +305,7 @@ impl MinimapContent {
         edits: &Patch<usize>,
         versions: SyncVersions,
         tokens_for: impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
-        edge_of: impl Fn(u32) -> Option<u8>,
+        marks: impl EdgeSource,
     ) {
         if self.disabled {
             return;
@@ -290,7 +327,7 @@ impl MinimapContent {
 
         if version != self.synced_version {
             for edit in edits.edits() {
-                self.apply_edit(edit, new_rope, &tokens_for, &edge_of);
+                self.apply_edit(edit, new_rope, &tokens_for, &marks);
             }
             self.synced_version = version;
             self.synced_rope = new_rope.clone();
@@ -300,13 +337,14 @@ impl MinimapContent {
             let end = (self.built_upto + BUILD_CHUNK).min(total);
             let tokens = tokens_for(self.built_upto..end);
             let line_tokens = |row: u32, _: &str| tokens.get(&row).cloned().unwrap_or_default();
-            let lines = summarize_rows(new_rope, self.built_upto..end, &line_tokens, &edge_of);
+            let lines = summarize_rows(new_rope, self.built_upto..end, &line_tokens, &marks);
             self.queue_splice(Splice {
                 start: self.built_upto,
                 removed: 0,
                 lines: lines.clone(),
             });
-            self.edges.extend((self.built_upto..end).map(&edge_of));
+            self.edges
+                .extend((self.built_upto..end).filter_map(|row| Some((row, marks.edge_of(row)?))));
             self.lines.extend(lines);
             self.built_upto = end;
         }
@@ -357,7 +395,7 @@ impl MinimapContent {
                 .min(self.built_upto);
             let from = from.min(end);
             let to = from.saturating_add(RESYNC_CHUNK).min(end);
-            self.resync_chunk(new_rope, from..to, &tokens_for, &edge_of);
+            self.resync_chunk(new_rope, from..to, &tokens_for, &marks);
             if to >= end {
                 self.resync_upto = None;
                 self.synced_syntax_version = self.resync_target;
@@ -370,7 +408,7 @@ impl MinimapContent {
         // independent of the content sweep. A row the sweep just re-summarized
         // already carries the current edge, so resync_edges skips it.
         if versions.decoration != self.synced_decoration_version {
-            self.resync_edges(new_rope, &tokens_for, &edge_of);
+            self.resync_edges(new_rope, &tokens_for, &marks);
             self.synced_decoration_version = versions.decoration;
         }
     }
@@ -386,19 +424,19 @@ impl MinimapContent {
         new_rope: &Rope,
         range: Range<u32>,
         tokens_for: &impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
-        edge_of: &impl Fn(u32) -> Option<u8>,
+        marks: &impl EdgeSource,
     ) {
         let tokens = tokens_for(range.clone());
         let line_tokens = |row: u32, _: &str| tokens.get(&row).cloned().unwrap_or_default();
         for row in range {
-            let edge = edge_of(row);
+            let edge = marks.edge_of(row);
             let text = line_text(new_rope, row);
             let summary = summarize_line(&text, &line_tokens(row, &text), edge);
             if self.lines[row as usize] == summary {
                 continue;
             }
             self.lines[row as usize] = summary.clone();
-            self.edges[row as usize] = edge;
+            self.set_edge(row, edge);
             self.queue_splice(Splice {
                 start: row,
                 removed: 1,
@@ -413,22 +451,36 @@ impl MinimapContent {
     /// The syntax content is unaffected by a diff or diagnostic change, so only
     /// the changed lines pay for a re-summarize.
     ///
-    /// Which rows changed is settled first, from `edge_of` alone, so
-    /// `tokens_for` is called only over the runs that actually need
-    /// re-summarizing. This runs on every decoration bump, and a diff recompute
-    /// or diagnostic batch usually moves no mark at all, so resolving tokens for
-    /// the whole built range up front would be the dominant cost of doing
-    /// nothing.
+    /// Which rows changed is settled first, from `marks` alone, so `tokens_for`
+    /// is called only over the runs that actually need re-summarizing. This runs
+    /// on every decoration bump, and a diff recompute or diagnostic batch
+    /// usually moves no mark at all, so resolving tokens for the whole built
+    /// range up front would be the dominant cost of doing nothing.
+    ///
+    /// A row that carries a mark now can have changed, and so can one
+    /// [`EdgeSource::marked_rows`] says could come to carry one. Every other row
+    /// was unmarked and stays unmarked, so the pass costs the marks rather than
+    /// the file.
     fn resync_edges(
         &mut self,
         new_rope: &Rope,
         tokens_for: &impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
-        edge_of: &impl Fn(u32) -> Option<u8>,
+        marks: &impl EdgeSource,
     ) {
-        let changed: Vec<(u32, Option<u8>)> = (0..self.built_upto)
+        let suspect = {
+            let mut rows = marks.marked_rows(0..self.built_upto);
+            rows.extend(self.edges.iter().map(|&(row, _)| row));
+            rows.retain(|&row| row < self.built_upto);
+            rows.sort_unstable();
+            rows.dedup();
+            rows
+        };
+
+        let changed: Vec<(u32, Option<u8>)> = suspect
+            .into_iter()
             .filter_map(|row| {
-                let new_edge = edge_of(row);
-                (self.edges[row as usize] != new_edge).then_some((row, new_edge))
+                let new_edge = marks.edge_of(row);
+                (self.edge_at(row) != new_edge).then_some((row, new_edge))
             })
             .collect();
         if changed.is_empty() {
@@ -446,7 +498,7 @@ impl MinimapContent {
                 let text = line_text(new_rope, row);
                 let summary = summarize_line(&text, &line_tokens(row, &text), new_edge);
                 self.lines[row as usize] = summary.clone();
-                self.edges[row as usize] = new_edge;
+                self.set_edge(row, new_edge);
                 self.queue_splice(Splice {
                     start: row,
                     removed: 1,
@@ -466,7 +518,7 @@ impl MinimapContent {
         edit: &Edit<usize>,
         new_rope: &Rope,
         tokens_for: &impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
-        edge_of: &impl Fn(u32) -> Option<u8>,
+        marks: &impl EdgeSource,
     ) {
         let old_start_row = self.synced_rope.offset_to_point(edit.old.start).row;
         if old_start_row >= self.built_upto {
@@ -485,16 +537,16 @@ impl MinimapContent {
             new_rope,
             new_start_row..new_end_row + 1,
             &line_tokens,
-            edge_of,
+            marks,
         );
-        let inserted_edges: Vec<Option<u8>> =
-            (new_start_row..new_end_row + 1).map(edge_of).collect();
+        let inserted_edges: Vec<Option<u8>> = (new_start_row..new_end_row + 1)
+            .map(|row| marks.edge_of(row))
+            .collect();
 
         let start = old_start_row as usize;
         let end = (start + removed as usize).min(self.lines.len());
         self.lines.splice(start..end, inserted.iter().cloned());
-        let edge_end = end.min(self.edges.len());
-        self.edges.splice(start..edge_end, inserted_edges);
+        self.splice_edges(old_start_row..end as u32, &inserted_edges);
 
         let delta = inserted.len() as i64 - removed as i64;
         self.built_upto = (self.built_upto as i64 + delta).max(0) as u32;
@@ -530,6 +582,48 @@ impl MinimapContent {
             removed,
             lines: inserted,
         });
+    }
+
+    /// The edge-lane class `row` carries, or `None` when it is unmarked.
+    fn edge_at(&self, row: u32) -> Option<u8> {
+        let at = self.edges.binary_search_by_key(&row, |&(r, _)| r).ok()?;
+        Some(self.edges[at].1)
+    }
+
+    /// Record that `row` now carries `edge`, dropping it from the marked rows
+    /// when that is `None`.
+    fn set_edge(&mut self, row: u32, edge: Option<u8>) {
+        let at = self.edges.binary_search_by_key(&row, |&(r, _)| r);
+        match (at, edge) {
+            (Ok(at), Some(class)) => self.edges[at].1 = class,
+            (Ok(at), None) => {
+                self.edges.remove(at);
+            },
+            (Err(at), Some(class)) => self.edges.insert(at, (row, class)),
+            (Err(_), None) => {},
+        }
+    }
+
+    /// Replace the marks of `rows` with `inserted`'s, one entry per row from
+    /// `rows.start`, sliding the rows after `rows` by the line delta.
+    ///
+    /// Mirrors the splice [`Self::lines`] takes for the same edit, so the two
+    /// keep agreeing on which row is which.
+    fn splice_edges(&mut self, rows: Range<u32>, inserted: &[Option<u8>]) {
+        let delta = inserted.len() as i64 - (rows.end - rows.start) as i64;
+        let from = self.edges.partition_point(|&(row, _)| row < rows.start);
+        let to = self.edges.partition_point(|&(row, _)| row < rows.end);
+
+        for (row, _) in &mut self.edges[to..] {
+            *row = (*row as i64 + delta).max(0) as u32;
+        }
+        self.edges.splice(
+            from..to,
+            inserted
+                .iter()
+                .enumerate()
+                .filter_map(|(i, edge)| Some((rows.start + i as u32, (*edge)?))),
+        );
     }
 
     /// Queue `splice`, folding it into the pending tail when the two describe
@@ -582,16 +676,16 @@ fn contiguous_runs(changed: &[(u32, Option<u8>)]) -> Vec<Range<usize>> {
 }
 
 /// Summarize each row in `rows`, one [`LineToken`] set per row from `line_tokens`
-/// and its edge mark from `edge_of`.
+/// and its edge mark from `marks`.
 fn summarize_rows(
     rope: &Rope,
     rows: Range<u32>,
     line_tokens: &impl Fn(u32, &str) -> Vec<LineToken>,
-    edge_of: &impl Fn(u32) -> Option<u8>,
+    marks: &impl EdgeSource,
 ) -> Vec<Vec<Run>> {
     rows.map(|row| {
         let text = line_text(rope, row);
-        summarize_line(&text, &line_tokens(row, &text), edge_of(row))
+        summarize_line(&text, &line_tokens(row, &text), marks.edge_of(row))
     })
     .collect()
 }
@@ -821,10 +915,10 @@ pub(crate) fn color_to_rgb(color: Color) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::{
-        summarize_line, LineToken, MinimapContent, Run, Splice, SyncVersions, BUILD_CHUNK,
-        MAX_LINES, RESYNC_CHUNK,
+        summarize_line, EdgeSource, LineToken, MinimapContent, Run, Splice, SyncVersions,
+        BUILD_CHUNK, MAX_LINES, RESYNC_CHUNK,
     };
-    use std::{collections::HashMap, ops::Range};
+    use std::{cell::RefCell, collections::HashMap, ops::Range};
     use stoat_text::{
         patch::{Edit, Patch},
         Rope,
@@ -840,6 +934,29 @@ mod tests {
 
     fn no_edges(_: u32) -> Option<u8> {
         None
+    }
+
+    /// An edge source that marks a fixed set of rows and records every row it
+    /// is asked about, so how far a pass reaches can be asserted directly.
+    #[derive(Clone, Copy)]
+    struct RecordingEdges<'a> {
+        marked: &'a [u32],
+        asked: &'a RefCell<Vec<u32>>,
+    }
+
+    impl EdgeSource for RecordingEdges<'_> {
+        fn edge_of(&self, row: u32) -> Option<u8> {
+            self.asked.borrow_mut().push(row);
+            self.marked.contains(&row).then_some(40)
+        }
+
+        fn marked_rows(&self, rows: Range<u32>) -> Vec<u32> {
+            self.marked
+                .iter()
+                .copied()
+                .filter(|row| rows.contains(row))
+                .collect()
+        }
     }
 
     /// A bump carrying no row information, so the sweep covers every built row.
@@ -1779,7 +1896,7 @@ mod tests {
         );
         let _ = content.take_queued();
 
-        let spans = std::cell::RefCell::new(Vec::new());
+        let spans = RefCell::new(Vec::new());
         let counting = |rows: Range<u32>| {
             spans.borrow_mut().push(rows.clone());
             no_tokens(rows)
@@ -1798,6 +1915,200 @@ mod tests {
             queued.iter().map(|s| s.start).collect::<Vec<_>>(),
             vec![1, 4],
             "1 and 2 coalesce into one splice, 4 stands alone",
+        );
+    }
+
+    /// Resolving one row's mark seeks the diff hunks, so a bump on a large file
+    /// must not ask about rows no mark can reach.
+    #[test]
+    fn an_edge_resync_asks_only_about_markable_rows() {
+        let total = 4000u32;
+        let text = rope(&vec!["line"; total as usize].join("\n"));
+        let mut content = MinimapContent::new(1);
+
+        let asked = RefCell::new(Vec::new());
+        let marked = [1000u32, 1001, 1002];
+        let source = RecordingEdges {
+            marked: &marked,
+            asked: &asked,
+        };
+
+        content.sync(&text, 1, &Patch::empty(), versions(0, 0), no_tokens, source);
+        let _ = content.take_queued();
+        asked.borrow_mut().clear();
+
+        content.sync(&text, 1, &Patch::empty(), versions(1, 0), no_tokens, source);
+
+        assert_eq!(
+            *asked.borrow(),
+            vec![1000, 1001, 1002],
+            "the markable rows, not the {total} built ones",
+        );
+        assert!(
+            content.take_queued().is_empty(),
+            "no mark moved, so nothing splices"
+        );
+    }
+
+    /// An edit above a marked row moves that row, and the marks are keyed by
+    /// row, so they have to move with it or the next bump re-splices two lines
+    /// to put a mark back where it already was.
+    #[test]
+    fn an_edit_slides_the_marks_below_it() {
+        let before = rope("alpha\nbravo\ncharlie\ndelta");
+        let mut content = MinimapContent::new(1);
+        let asked = RefCell::new(Vec::new());
+
+        content.sync(
+            &before,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            RecordingEdges {
+                marked: &[3],
+                asked: &asked,
+            },
+        );
+        let _ = content.take_queued();
+
+        // Open a line above everything, sliding the marked row from 3 to 4.
+        let after = rope("new\nalpha\nbravo\ncharlie\ndelta");
+        let edit = Patch::new(vec![Edit {
+            old: 0..0,
+            new: 0..4,
+        }]);
+        content.sync(
+            &after,
+            2,
+            &edit,
+            versions(0, 0),
+            no_tokens,
+            RecordingEdges {
+                marked: &[4],
+                asked: &asked,
+            },
+        );
+        let _ = content.take_queued();
+        asked.borrow_mut().clear();
+
+        content.sync(
+            &after,
+            2,
+            &Patch::empty(),
+            versions(1, 0),
+            no_tokens,
+            RecordingEdges {
+                marked: &[4],
+                asked: &asked,
+            },
+        );
+
+        assert_eq!(*asked.borrow(), vec![4], "row 3 no longer holds the mark");
+        assert!(
+            content.take_queued().is_empty(),
+            "the mark already sits on row 4, so nothing re-splices"
+        );
+    }
+
+    /// An edit that deletes a marked row has to take its mark with it, or the
+    /// row sliding up into its place inherits a mark it never had.
+    #[test]
+    fn an_edit_drops_the_marks_of_the_rows_it_deletes() {
+        let before = rope("alpha\nbravo\ncharlie");
+        let mut content = MinimapContent::new(1);
+        let asked = RefCell::new(Vec::new());
+
+        content.sync(
+            &before,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            RecordingEdges {
+                marked: &[1],
+                asked: &asked,
+            },
+        );
+        let _ = content.take_queued();
+
+        let after = rope("alpha\ncharlie");
+        let edit = Patch::new(vec![Edit {
+            old: 6..12,
+            new: 6..6,
+        }]);
+        let unmarked = RecordingEdges {
+            marked: &[],
+            asked: &asked,
+        };
+        content.sync(&after, 2, &edit, versions(0, 0), no_tokens, unmarked);
+        let _ = content.take_queued();
+        asked.borrow_mut().clear();
+
+        content.sync(
+            &after,
+            2,
+            &Patch::empty(),
+            versions(1, 0),
+            no_tokens,
+            unmarked,
+        );
+
+        assert!(
+            asked.borrow().is_empty(),
+            "the deleted row took its mark with it, got {:?}",
+            asked.borrow(),
+        );
+        assert!(content.take_queued().is_empty(), "nothing left to unmark");
+    }
+
+    /// The rows that can carry a mark do not cover the rows that already do, so
+    /// a mark the source stops reporting would otherwise stay painted forever.
+    #[test]
+    fn a_mark_the_source_drops_is_cleared() {
+        let text = rope("alpha\nbravo\ncharlie");
+        let mut content = MinimapContent::new(1);
+        let asked = RefCell::new(Vec::new());
+
+        content.sync(
+            &text,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            RecordingEdges {
+                marked: &[1],
+                asked: &asked,
+            },
+        );
+        let _ = content.take_queued();
+        asked.borrow_mut().clear();
+
+        content.sync(
+            &text,
+            1,
+            &Patch::empty(),
+            versions(1, 0),
+            no_tokens,
+            RecordingEdges {
+                marked: &[],
+                asked: &asked,
+            },
+        );
+
+        assert_eq!(*asked.borrow(), vec![1], "the row still holding a mark");
+        let queued = content.take_queued();
+        assert_eq!(
+            queued
+                .iter()
+                .map(|s| (s.start, s.removed))
+                .collect::<Vec<_>>(),
+            vec![(1, 1)],
+        );
+        assert_eq!(
+            queued[0].lines[0],
+            summarize_line("bravo", &[], None),
+            "the line re-summarizes without its lane",
         );
     }
 
