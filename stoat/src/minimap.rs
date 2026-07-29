@@ -336,8 +336,7 @@ impl MinimapContent {
         if self.built_upto < total {
             let end = (self.built_upto + BUILD_CHUNK).min(total);
             let tokens = tokens_for(self.built_upto..end);
-            let line_tokens = |row: u32, _: &str| tokens.get(&row).cloned().unwrap_or_default();
-            let lines = summarize_rows(new_rope, self.built_upto..end, &line_tokens, &marks);
+            let lines = summarize_rows(new_rope, self.built_upto..end, &tokens, &marks);
             self.queue_splice(Splice {
                 start: self.built_upto,
                 removed: 0,
@@ -427,21 +426,16 @@ impl MinimapContent {
         marks: &impl EdgeSource,
     ) {
         let tokens = tokens_for(range.clone());
-        let line_tokens = |row: u32, _: &str| tokens.get(&row).cloned().unwrap_or_default();
+        let mut text = String::new();
         for row in range {
             let edge = marks.edge_of(row);
-            let text = line_text(new_rope, row);
-            let summary = summarize_line(&text, &line_tokens(row, &text), edge);
+            write_line_text(new_rope, row, &mut text);
+            let summary = summarize_line(&text, row_tokens(&tokens, row), edge);
             if self.lines[row as usize] == summary {
                 continue;
             }
-            self.lines[row as usize] = summary.clone();
             self.set_edge(row, edge);
-            self.queue_splice(Splice {
-                start: row,
-                removed: 1,
-                lines: vec![summary],
-            });
+            self.replace_line(row, summary);
         }
     }
 
@@ -487,23 +481,18 @@ impl MinimapContent {
             return;
         }
 
+        let mut text = String::new();
         for run in contiguous_runs(&changed) {
             let rows = changed[run].iter();
             let span = rows.clone().next().expect("a run is non-empty").0
                 ..rows.clone().next_back().expect("a run is non-empty").0 + 1;
             let tokens = tokens_for(span);
-            let line_tokens = |row: u32, _: &str| tokens.get(&row).cloned().unwrap_or_default();
 
             for &(row, new_edge) in rows {
-                let text = line_text(new_rope, row);
-                let summary = summarize_line(&text, &line_tokens(row, &text), new_edge);
-                self.lines[row as usize] = summary.clone();
+                write_line_text(new_rope, row, &mut text);
+                let summary = summarize_line(&text, row_tokens(&tokens, row), new_edge);
                 self.set_edge(row, new_edge);
-                self.queue_splice(Splice {
-                    start: row,
-                    removed: 1,
-                    lines: vec![summary],
-                });
+                self.replace_line(row, summary);
             }
         }
     }
@@ -530,15 +519,9 @@ impl MinimapContent {
         let new_end_row = new_rope.offset_to_point(edit.new.end).row;
 
         let tokens = tokens_for(new_start_row..new_end_row + 1);
-        let line_tokens = |row: u32, _: &str| tokens.get(&row).cloned().unwrap_or_default();
 
         let removed = (old_end_row + 1).min(self.built_upto) - old_start_row;
-        let inserted = summarize_rows(
-            new_rope,
-            new_start_row..new_end_row + 1,
-            &line_tokens,
-            marks,
-        );
+        let inserted = summarize_rows(new_rope, new_start_row..new_end_row + 1, &tokens, marks);
         let inserted_edges: Vec<Option<u8>> = (new_start_row..new_end_row + 1)
             .map(|row| marks.edge_of(row))
             .collect();
@@ -581,6 +564,23 @@ impl MinimapContent {
             start: old_start_row,
             removed,
             lines: inserted,
+        });
+    }
+
+    /// Store `summary` as `row`'s and queue the one-line splice carrying it.
+    ///
+    /// The summary `row` held supplies the splice's payload allocation, since it
+    /// is dead the moment the new one replaces it. The store and the payload
+    /// remain two owned copies of the runs. The wire replay consumes the
+    /// payload, while the store stays to answer the next sync's comparison.
+    fn replace_line(&mut self, row: u32, summary: Vec<Run>) {
+        let mut payload = std::mem::replace(&mut self.lines[row as usize], summary);
+        payload.clone_from(&self.lines[row as usize]);
+
+        self.queue_splice(Splice {
+            start: row,
+            removed: 1,
+            lines: vec![payload],
         });
     }
 
@@ -675,26 +675,37 @@ fn contiguous_runs(changed: &[(u32, Option<u8>)]) -> Vec<Range<usize>> {
     runs
 }
 
-/// Summarize each row in `rows`, one [`LineToken`] set per row from `line_tokens`
-/// and its edge mark from `marks`.
+/// Summarize each row in `rows`, its tokens from `tokens` and its edge mark from
+/// `marks`.
 fn summarize_rows(
     rope: &Rope,
     rows: Range<u32>,
-    line_tokens: &impl Fn(u32, &str) -> Vec<LineToken>,
+    tokens: &HashMap<u32, Vec<LineToken>>,
     marks: &impl EdgeSource,
 ) -> Vec<Vec<Run>> {
+    let mut text = String::new();
     rows.map(|row| {
-        let text = line_text(rope, row);
-        summarize_line(&text, &line_tokens(row, &text), marks.edge_of(row))
+        write_line_text(rope, row, &mut text);
+        summarize_line(&text, row_tokens(tokens, row), marks.edge_of(row))
     })
     .collect()
 }
 
-/// The text of `row`, without its line terminator.
-fn line_text(rope: &Rope, row: u32) -> String {
+/// The tokens covering `row`, empty for a row the resolver reported none for.
+fn row_tokens(tokens: &HashMap<u32, Vec<LineToken>>, row: u32) -> &[LineToken] {
+    tokens.get(&row).map_or(&[], Vec::as_slice)
+}
+
+/// Replace `out` with the text of `row`, without its line terminator.
+///
+/// Takes the buffer to write into because the chunk loops summarize thousands of
+/// rows per tick, and a row's text is read once and thrown away.
+fn write_line_text(rope: &Rope, row: u32, out: &mut String) {
     let start = rope.point_to_offset(Point::new(row, 0));
     let end = rope.point_to_offset(Point::new(row, rope.line_len(row)));
-    rope.slice(start..end).to_string()
+
+    out.clear();
+    out.extend(rope.chunks_in_range(start..end));
 }
 
 /// Total line count of `rope`, counting a trailing empty line.
