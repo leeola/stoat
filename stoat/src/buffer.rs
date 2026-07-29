@@ -583,9 +583,7 @@ impl TextBuffer {
             return None;
         }
         let group = self.edit_history.pop()?;
-        for &edit_timestamp in group.edits.iter().rev() {
-            self.apply_undo_toggle(edit_timestamp, BufferOp::Undo);
-        }
+        self.apply_undo_toggles(group.edits.iter().rev().copied(), BufferOp::Undo);
         let selections = group.selections_before.clone();
         self.redo_history.push(group);
         self.recompute_dirty();
@@ -597,9 +595,7 @@ impl TextBuffer {
     /// when there is nothing to redo.
     pub fn redo(&mut self) -> Option<Vec<Selection<Anchor>>> {
         let group = self.redo_history.pop()?;
-        for &edit_timestamp in &group.edits {
-            self.apply_undo_toggle(edit_timestamp, BufferOp::Redo);
-        }
+        self.apply_undo_toggles(group.edits.iter().copied(), BufferOp::Redo);
         let selections = group.selections_after.clone();
         self.edit_history.push(group);
         self.recompute_dirty();
@@ -625,17 +621,46 @@ impl TextBuffer {
         &self.checkpoints
     }
 
-    fn apply_undo_toggle(&mut self, edit_timestamp: u64, op: BufferOp) {
-        self.ops.push(op);
-        let undo_timestamp = self.next_timestamp;
-        self.next_timestamp += 1;
+    /// Toggle every edit in `timestamps` between undone and applied, rebuilding
+    /// the buffer once for the whole batch.
+    ///
+    /// Each timestamp still gets its own op-log entry, its own undo timestamp,
+    /// and its own [`UndoMap`] entry. [`Self::from_history`] replays each
+    /// [`BufferOp::Undo`] as a singleton-group undo, so the op stream has to
+    /// stay one entry per edit for a restored buffer to match, and the frontier
+    /// and dirty tracking read the timestamp stream. The expensive half is what
+    /// stops repeating. The fragment walk and the two rope rebuilds run once
+    /// against the finished undo map instead of once per edit, so undoing a
+    /// typing run is one pass over the buffer rather than one per typed
+    /// character.
+    ///
+    /// A fragment the batch toggled is stamped with the batch's last undo
+    /// timestamp rather than the one that flipped it. The stamp only has to
+    /// exceed any `since_version` a caller can hold, and no snapshot is taken
+    /// between the toggles of one call, so no version inside the batch is
+    /// observable. A fragment that flips and flips back within the batch, which
+    /// one group inserting and then deleting the same text produces, ends
+    /// unstamped because its net visibility never changed.
+    fn apply_undo_toggles(&mut self, timestamps: impl Iterator<Item = u64>, op: BufferOp) {
+        let mut last_undo_timestamp = None;
+        for edit_timestamp in timestamps {
+            self.ops.push(op.clone());
+            let undo_timestamp = self.next_timestamp;
+            self.next_timestamp += 1;
+            last_undo_timestamp = Some(undo_timestamp);
 
-        let new_count = self.snapshot.undo_map.undo_count(edit_timestamp) + 1;
+            let new_count = self.snapshot.undo_map.undo_count(edit_timestamp) + 1;
+            self.snapshot.undo_map.insert(&UndoOperation {
+                timestamp: undo_timestamp,
+                counts: HashMap::from([(edit_timestamp, new_count)]),
+            });
+        }
 
-        self.snapshot.undo_map.insert(&UndoOperation {
-            timestamp: undo_timestamp,
-            counts: HashMap::from([(edit_timestamp, new_count)]),
-        });
+        // An empty group never materialized, so there is nothing to rebuild and
+        // no timestamp to stamp the result with.
+        let Some(undo_timestamp) = last_undo_timestamp else {
+            return;
+        };
 
         let cx = &None;
         let old_fragments = std::mem::replace(&mut self.snapshot.fragments, SumTree::new(cx));
@@ -1666,6 +1691,70 @@ mod tests {
             b.snapshot.visible_text.to_string(),
             "abc",
             "one redo restores the whole group"
+        );
+    }
+
+    /// Undoing a group rebuilds the buffer once rather than once per edit in
+    /// it, so what one pass produces has to be what the per-edit passes
+    /// produced. Text alone is not enough of a check: the op stream and
+    /// timestamps are what a restored buffer replays, and the patch is what
+    /// every consumer diffing across the undo reads.
+    ///
+    /// The third edit deletes text the first one inserted, which is the case
+    /// the collapse changes most. Per-edit passes flip that fragment visible
+    /// and back again. One pass sees only that it ended where it started.
+    #[test]
+    fn a_group_undo_lands_where_edit_by_edit_undos_land() {
+        let edits: [(Range<usize>, &str); 3] = [(0..0, "abc"), (3..3, "def"), (1..2, "")];
+
+        let mut grouped = buf("");
+        grouped.begin_group(Vec::new());
+        for (range, text) in &edits {
+            grouped.edit(range.clone(), text);
+        }
+        grouped.seal_group(Vec::new());
+
+        let mut separate = buf("");
+        for (range, text) in &edits {
+            separate.edit(range.clone(), text);
+        }
+
+        let before_undo = grouped.version();
+        assert_eq!(
+            before_undo,
+            separate.version(),
+            "the two fixtures must reach the same state to be comparable",
+        );
+
+        grouped.undo();
+        for _ in 0..edits.len() {
+            separate.undo();
+        }
+
+        assert_eq!(
+            grouped.snapshot.visible_text.to_string(),
+            separate.snapshot.visible_text.to_string(),
+            "one rebuild must restore the text three rebuilds restore",
+        );
+        assert_eq!(
+            grouped.snapshot.deleted_text.to_string(),
+            separate.snapshot.deleted_text.to_string(),
+            "and park the same bytes as deleted",
+        );
+        assert_eq!(
+            grouped.version(),
+            separate.version(),
+            "the batch consumes one timestamp per edit, same as the loop",
+        );
+        assert_eq!(
+            format!("{:?}", grouped.history().ops),
+            format!("{:?}", separate.history().ops),
+            "from_history replays the op stream, so it must stay one op per edit",
+        );
+        assert_eq!(
+            grouped.snapshot.edits_since(before_undo).edits(),
+            separate.snapshot.edits_since(before_undo).edits(),
+            "consumers diffing across the undo must see the same patch",
         );
     }
 
