@@ -1,7 +1,7 @@
 use super::{
     fold_map::FoldOffset,
     highlights::{Chunk, HighlightEndpoint},
-    tab_map::{TabChunks, TabPoint, TabSnapshot},
+    tab_map::{self, TabChunks, TabPoint, TabSnapshot},
 };
 use std::{
     borrow::Cow,
@@ -541,21 +541,39 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
     let tab_line_count = tab_snapshot.line_count();
     let mut transforms = SumTree::new(());
 
+    // A row's characters are wanted twice, to expand its tabs and to place its
+    // wrap breaks, and each want opened its own cursor over the same line.
+    // Decoding once into a buffer the loop reuses leaves one cursor walk per
+    // row and two reads of a slice. This runs over the whole file on open, on
+    // resize, and on every wrap-width change.
+    let mut chars: Vec<char> = Vec::new();
+
     for tab_row in 0..tab_line_count {
-        let tab_line_len = tab_snapshot.line_len(tab_row);
+        chars.clear();
+        // `FoldLineChars` ends at the row's newline, so this stops there.
+        chars.extend(tab_snapshot.fold_snapshot().fold_line_chars(tab_row));
+
+        // Not the decoded chars' own byte sum, which can come out short of
+        // this. `expand_column` bounds itself by the fold layer's measure, so
+        // taking any other number here would change where it stops.
+        let fold_line_len = tab_snapshot.fold_snapshot().line_len(tab_row);
+
+        let tab_line_len = tab_map::expand_column(
+            chars.iter().copied(),
+            fold_line_len,
+            tab_snapshot.tab_size(),
+            tab_snapshot.max_expansion_column(),
+        );
 
         let (wrap_columns, indent) = match wrap_width {
             None => (Vec::new(), 0),
-            Some(width) => {
-                let chars = tab_snapshot.fold_snapshot().fold_line_chars(tab_row);
-                compute_wrap_columns(
-                    chars,
-                    tab_line_len,
-                    width,
-                    tab_snapshot.tab_size(),
-                    tab_snapshot.max_expansion_column(),
-                )
-            },
+            Some(width) => compute_wrap_columns(
+                chars.iter().copied(),
+                tab_line_len,
+                width,
+                tab_snapshot.tab_size(),
+                tab_snapshot.max_expansion_column(),
+            ),
         };
 
         let output_rows = wrap_columns.len().max(1) as u32;
@@ -1254,7 +1272,7 @@ impl<'a> WrappedChunksInner<'a> {
                 let indent = state.indent;
                 state.indent = 0;
                 return Some(Chunk {
-                    text: match super::tab_map::spaces(indent) {
+                    text: match tab_map::spaces(indent) {
                         Some(shared) => Cow::Borrowed(shared),
                         None => Cow::Owned(" ".repeat(indent as usize)),
                     },
@@ -1790,6 +1808,26 @@ mod tests {
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         let (wrap_snapshot, _) = wrap_map.sync(tab_snapshot, &Patch::empty());
         wrap_snapshot
+    }
+
+    /// The decoded characters are held in one buffer reused down the rows, so
+    /// each row must see only its own. A tab that follows a longer plain row is
+    /// where a stale buffer would show, since the expansion would land on the
+    /// letters above instead of the tab.
+    #[test]
+    fn each_row_expands_only_its_own_characters() {
+        let (_, snapshot, _) = make_wrap_map("aaaaaaaa\n\tb", Some(100));
+
+        assert_eq!(
+            snapshot.line_len(0),
+            8,
+            "the plain row measures its own width",
+        );
+        assert_eq!(
+            snapshot.line_len(1),
+            5,
+            "the tab row expands its tab to the next stop, then its letter",
+        );
     }
 
     #[test]

@@ -536,7 +536,7 @@ pub(crate) fn advance_column_for_char(
     }
 }
 
-fn expand_column(
+pub(super) fn expand_column(
     chars: impl Iterator<Item = char>,
     fold_column: u32,
     tab_size: u32,
