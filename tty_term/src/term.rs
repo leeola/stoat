@@ -132,7 +132,7 @@ pub struct Terminal {
     /// Text runs set by `Gstoatty;text_run` frames, applied to the grid's
     /// text-run list by [`Self::project`]. Off-grid components, accumulated and
     /// grid-level like the icons.
-    text_runs: Vec<TextRunCommand>,
+    text_runs: Vec<StoredTextRun>,
     /// Color bars set by `Gstoatty;bar` frames, applied to the grid's bar list
     /// by [`Self::project`]. Off-grid components, accumulated and grid-level
     /// like the icons.
@@ -202,6 +202,12 @@ pub struct Terminal {
     /// written back. Reusing it keeps that comparison from allocating a row per
     /// row per frame.
     row_scratch: Vec<Cell>,
+    /// The byte buffer an open content capture streams into, held here between
+    /// captures so a run of them shares one allocation.
+    ///
+    /// A gutter emits a text run per visible line and each opens its own
+    /// capture, so allocating per capture would allocate per line per frame.
+    capture_scratch: Vec<u8>,
     /// The inclusive viewport row span the selection covered at the previous
     /// [`Self::project`], so a growing or shrinking drag can damage the rows it
     /// entered or left and repaint their INVERSE overlay. `None` when there was
@@ -504,6 +510,34 @@ struct ContentCapture {
     content: Vec<u8>,
 }
 
+/// A declared text run as the terminal holds it between projections.
+///
+/// Mirrors [`TextRunCommand`], the wire shape, but shares its text rather than
+/// owning a `String`. Every dirty projection hands the whole run list to the
+/// grid, so an owned string would be rebuilt into the grid's shared text once
+/// per frame per run, and a gutter declares one run per visible line.
+struct StoredTextRun {
+    col: i16,
+    row: i16,
+    scale: u16,
+    color: [u8; 3],
+    bg: Option<[u8; 3]>,
+    text: Arc<str>,
+}
+
+impl From<TextRunCommand> for StoredTextRun {
+    fn from(command: TextRunCommand) -> Self {
+        StoredTextRun {
+            col: command.col,
+            row: command.row,
+            scale: command.scale,
+            color: command.color,
+            bg: command.bg,
+            text: Arc::from(command.text),
+        }
+    }
+}
+
 /// The command awaiting its streamed text in an open [`ContentCapture`].
 enum CaptureTarget {
     Popover(PopoverCommand),
@@ -560,6 +594,7 @@ impl Terminal {
             last_decoration_footprint: Vec::new(),
             footprint_scratch: Vec::new(),
             row_scratch: Vec::new(),
+            capture_scratch: Vec::new(),
             last_selection_span: None,
             decoration_damage: Vec::new(),
             last_history: 0,
@@ -1171,7 +1206,7 @@ impl Terminal {
                 self.decorations_dirty.popovers = true;
             },
             Command::TextRun(text_run) => {
-                self.text_runs.push(text_run);
+                self.text_runs.push(text_run.into());
                 self.text_run_seq.push(self.decoration_seq);
                 self.decoration_seq += 1;
                 self.decorations_dirty.text_runs = true;
@@ -1488,10 +1523,12 @@ impl Terminal {
     /// [`Self::commit_capture`].
     fn begin_capture(&mut self, target: CaptureTarget) {
         self.commit_capture();
-        self.capture = Some(ContentCapture {
-            target,
-            content: Vec::new(),
-        });
+        // A gutter opens one capture per visible line, so the byte buffer is
+        // borrowed from the terminal and handed back on commit rather than
+        // allocated per run.
+        let mut content = mem::take(&mut self.capture_scratch);
+        content.clear();
+        self.capture = Some(ContentCapture { target, content });
     }
 
     /// Commit the open content capture onto its decoration list with the streamed
@@ -1514,7 +1551,14 @@ impl Terminal {
             .unwrap_or(capture.content.len());
         capture.content.truncate(content_end);
 
-        let text = String::from_utf8_lossy(&capture.content).into_owned();
+        // Valid UTF-8 is the ordinary case and borrows, so it builds the string
+        // straight from the bytes. Only malformed input needs rebuilding around
+        // replacement characters.
+        let text = match std::str::from_utf8(&capture.content) {
+            Ok(text) => text.to_owned(),
+            Err(_) => String::from_utf8_lossy(&capture.content).into_owned(),
+        };
+
         match capture.target {
             CaptureTarget::Popover(mut command) => {
                 command.content = text;
@@ -1528,6 +1572,8 @@ impl Terminal {
                 }
             },
         }
+
+        self.capture_scratch = capture.content;
     }
 
     /// Route a run of VT bytes to the active write target.
@@ -2896,21 +2942,24 @@ fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, page_rows: 
 /// than stamped per cell. The declared row is a logical row resolved through the
 /// line layout, so a run tracks expansions above it. The renderer clamps an
 /// out-of-grid anchor, so wire coordinates need no guard here.
-fn apply_text_runs(grid: &mut Grid, commands: &[TextRunCommand], seqs: &[u32]) {
-    let text_runs = commands
+fn apply_text_runs(grid: &mut Grid, runs: &[StoredTextRun], seqs: &[u32]) {
+    let rows: Vec<i16> = runs
         .iter()
-        .zip(seqs)
-        .map(|(command, &seq)| TextRun {
-            col: command.col,
-            row: resolve_logical_row(grid, command.row),
-            scale: command.scale,
-            color: Rgb::new(command.color[0], command.color[1], command.color[2]),
-            bg: command.bg.map(|b| Rgb::new(b[0], b[1], b[2])),
-            text: Arc::from(command.text.as_str()),
-            seq,
-        })
+        .map(|run| resolve_logical_row(grid, run.row))
         .collect();
-    grid.set_text_runs(text_runs);
+
+    grid.fill_text_runs(runs.len(), |index| {
+        let run = &runs[index];
+        TextRun {
+            col: run.col,
+            row: rows[index],
+            scale: run.scale,
+            color: Rgb::new(run.color[0], run.color[1], run.color[2]),
+            bg: run.bg.map(|b| Rgb::new(b[0], b[1], b[2])),
+            text: Arc::clone(&run.text),
+            seq: seqs[index],
+        }
+    });
 }
 
 /// Replace the grid's bar list with each stored bar command's rectangle.
@@ -4599,6 +4648,69 @@ mod tests {
                 text: "42".into(),
                 seq: 1,
             }]
+        );
+    }
+
+    /// The capture buffer is handed back and reused, so a run must not read
+    /// what an earlier one left in it, and a shorter run must not trail the
+    /// longer one before it.
+    #[test]
+    fn runs_captured_through_one_buffer_keep_their_own_text() {
+        let run = |text: &str| {
+            encode_text_run(&TextRunCommand {
+                col: 0,
+                row: 0,
+                scale: 256,
+                color: [1, 2, 3],
+                bg: None,
+                text: text.to_owned(),
+            })
+        };
+
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&run("a long first run"));
+        terminal.advance(&run("short"));
+        terminal.advance(&run(""));
+        terminal.project(&mut grid);
+
+        let texts: Vec<&str> = grid
+            .text_runs()
+            .iter()
+            .map(|run| run.text.as_ref())
+            .collect();
+        assert_eq!(texts, ["a long first run", "short", ""]);
+    }
+
+    /// Valid bytes take a path that skips the lossy rebuild, so the malformed
+    /// case has to keep working through the fallback.
+    #[test]
+    fn a_run_of_invalid_bytes_still_captures_lossily() {
+        let mut frame = encode_text_run(&TextRunCommand {
+            col: 0,
+            row: 0,
+            scale: 256,
+            color: [1, 2, 3],
+            bg: None,
+            text: "ok".to_owned(),
+        });
+        // Replace the payload's second byte with a lone continuation byte,
+        // which no valid sequence can start with.
+        let at = frame
+            .windows(2)
+            .position(|pair| pair == b"ok")
+            .expect("the payload is in the frame");
+        frame[at + 1] = 0x80;
+
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&frame);
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.text_runs()[0].text.as_ref(),
+            "o\u{fffd}",
+            "the invalid byte becomes a replacement character",
         );
     }
 

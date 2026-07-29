@@ -288,6 +288,19 @@ impl Grid {
         self.text_runs = text_runs;
     }
 
+    /// Replace the run list with `count` runs built by `run`, reusing the
+    /// vector already there.
+    ///
+    /// The projection rebuilds this list whenever the runs are dirty, and a
+    /// gutter declares one run per visible line, so collecting into a fresh
+    /// vector would allocate one per frame. `run` is called once per index in
+    /// order.
+    pub fn fill_text_runs(&mut self, count: usize, mut run: impl FnMut(usize) -> TextRun) {
+        self.text_runs.clear();
+        self.text_runs.reserve(count);
+        self.text_runs.extend((0..count).map(&mut run));
+    }
+
     /// The off-grid color bars drawn above the cells, in draw order.
     pub fn bars(&self) -> &[Bar] {
         &self.bars
