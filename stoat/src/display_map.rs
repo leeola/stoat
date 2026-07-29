@@ -621,7 +621,8 @@ impl DisplayMap {
         remove: Vec<InlayId>,
         insert: Vec<(Anchor, String, InlayKind)>,
     ) -> Vec<InlayId> {
-        self.inlay_map.splice(remove, insert)
+        let buffer_snapshot = self.multi_buffer.snapshot();
+        self.inlay_map.splice(&buffer_snapshot, remove, insert)
     }
 
     pub fn insert_creases(
@@ -2102,6 +2103,7 @@ mod tests {
         let off = snap.rope().point_to_offset(Point::new(0, 5));
         let anchor = snap.anchor_at(off, stoat_text::Bias::Right);
         display_map.inlay_map.splice(
+            &snap,
             Vec::new(),
             vec![(anchor, ": str".to_string(), InlayKind::Hint)],
         );
@@ -2135,10 +2137,14 @@ mod tests {
             let off = snap.rope().point_to_offset(Point::new(0, 5));
             snap.anchor_at(off, stoat_text::Bias::Left)
         };
-        display_map.inlay_map.splice(
-            Vec::new(),
-            vec![(anchor, ": u32".to_string(), InlayKind::Hint)],
-        );
+        {
+            let snap = display_map.multi_buffer.snapshot();
+            display_map.inlay_map.splice(
+                &snap,
+                Vec::new(),
+                vec![(anchor, ": u32".to_string(), InlayKind::Hint)],
+            );
+        }
 
         let snapshot = display_map.snapshot();
         let chunks: Vec<_> = snapshot.highlighted_chunks(0..1).collect();

@@ -371,30 +371,80 @@ impl InlayMap {
         self.version == self.last_self_version
     }
 
+    /// Remove the inlays named by `remove`, add `insert`, and return the ids of
+    /// what was added.
+    ///
+    /// `buffer_snapshot` is what the inserted anchors resolve against, which is
+    /// how the set stays ordered by offset. Leaving it unordered would cost the
+    /// next sync a full re-resolve of every anchor.
     pub fn splice(
         &mut self,
+        buffer_snapshot: &MultiBufferSnapshot,
         remove: Vec<InlayId>,
         insert: Vec<(Anchor, String, InlayKind)>,
     ) -> Vec<InlayId> {
+        // The offsets are only in step with the set once a sync has resolved
+        // them, so before then there is nothing to place against.
+        let offsets_usable = self.inlays_sorted && self.cached_offsets.len() == self.inlays.len();
+
         if !remove.is_empty() {
             let remove_set: HashSet<InlayId> = remove.into_iter().collect();
-            self.inlays.retain(|inlay| !remove_set.contains(&inlay.id));
+            if offsets_usable {
+                let mut kept = 0;
+                for i in 0..self.inlays.len() {
+                    if remove_set.contains(&self.inlays[i].id) {
+                        continue;
+                    }
+                    self.inlays.swap(kept, i);
+                    self.cached_offsets.swap(kept, i);
+                    kept += 1;
+                }
+                self.inlays.truncate(kept);
+                self.cached_offsets.truncate(kept);
+            } else {
+                self.inlays.retain(|inlay| !remove_set.contains(&inlay.id));
+            }
         }
 
         let mut new_ids = Vec::with_capacity(insert.len());
-        for (position, text, kind) in insert {
+        if insert.is_empty() {
+            self.version += 1;
+            return new_ids;
+        }
+
+        let text_len = buffer_snapshot.rope().len();
+        let offsets: Vec<usize> = {
+            let anchors: Vec<Anchor> = insert.iter().map(|(anchor, _, _)| *anchor).collect();
+            buffer_snapshot
+                .resolve_anchors_batch(&anchors)
+                .into_iter()
+                .map(|offset| offset.min(text_len))
+                .collect()
+        };
+
+        for ((position, text, kind), offset) in insert.into_iter().zip(offsets) {
             let id = InlayId(self.next_id);
             self.next_id += 1;
-            self.inlays.push(AnchoredInlay {
+            let inlay = AnchoredInlay {
                 id,
                 position,
                 text: Arc::from(text),
                 kind,
-            });
+            };
+
+            if offsets_usable {
+                // After any inlay already at this offset, so a batch arriving
+                // together keeps the order it was handed over in.
+                let at = self.cached_offsets.partition_point(|&o| o <= offset);
+                self.inlays.insert(at, inlay);
+                self.cached_offsets.insert(at, offset);
+            } else {
+                self.inlays.push(inlay);
+            }
             new_ids.push(id);
         }
 
-        self.inlays_sorted = false;
+        self.inlays_sorted = offsets_usable;
         self.version += 1;
         new_ids
     }
@@ -998,7 +1048,7 @@ mod tests {
                 )
             })
             .collect();
-        map.splice(Vec::new(), anchored_inlays);
+        map.splice(&buffer_snapshot, Vec::new(), anchored_inlays);
         let (snapshot, _) = map.sync(buffer_snapshot, &Patch::empty());
         snapshot
     }
@@ -1098,6 +1148,7 @@ mod tests {
         let off = buffer_snapshot.rope().point_to_offset(Point::new(0, 5));
         let anchor = buffer_snapshot.anchor_at(off, stoat_text::Bias::Right);
         let ids = map.splice(
+            &buffer_snapshot,
             Vec::new(),
             vec![(anchor, ": str".to_string(), super::InlayKind::Hint)],
         );
@@ -1107,9 +1158,62 @@ mod tests {
             InlayPoint::new(0, 10)
         );
 
-        map.splice(ids, Vec::new());
+        map.splice(&buffer_snapshot, ids, Vec::new());
         let (snap, _) = map.sync(buffer_snapshot, &Patch::empty());
         assert_eq!(snap.to_inlay_point(Point::new(0, 5)), InlayPoint::new(0, 5));
+    }
+
+    /// Splicing places new inlays rather than appending them, so the set stays
+    /// ordered by offset with its cached offsets in step. A sync reading either
+    /// one out of order would carry the wrong anchor across an edit.
+    #[test]
+    fn splicing_keeps_the_inlay_set_ordered() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "0123456789\nabcdefghij");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (mut map, _) = InlayMap::new(buffer_snapshot.clone());
+
+        let hint = |column: u32, text: &str| {
+            let off = buffer_snapshot
+                .rope()
+                .point_to_offset(Point::new(0, column));
+            (
+                buffer_snapshot.anchor_at(off, stoat_text::Bias::Right),
+                text.to_string(),
+                super::InlayKind::Hint,
+            )
+        };
+
+        // Deliberately out of order, and a sync to resolve them.
+        let ids = map.splice(
+            &buffer_snapshot,
+            Vec::new(),
+            vec![hint(8, "h"), hint(2, "b"), hint(5, "e")],
+        );
+        map.sync(buffer_snapshot.clone(), &Patch::empty());
+
+        // Now placed rather than appended, since the offsets are resolved.
+        map.splice(
+            &buffer_snapshot,
+            vec![ids[2]],
+            vec![hint(1, "a"), hint(9, "i")],
+        );
+
+        assert_eq!(
+            map.cached_offsets,
+            vec![1, 2, 8, 9],
+            "offsets stay ascending across a splice",
+        );
+        assert_eq!(
+            map.inlays
+                .iter()
+                .map(|inlay| inlay.text.to_string())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "h", "i"],
+            "the set follows its offsets, and the removed hint is gone",
+        );
+        assert!(map.inlays_sorted);
     }
 
     #[test]
@@ -1152,6 +1256,7 @@ mod tests {
         let off = snap.rope().point_to_offset(Point::new(0, 5));
         let anchor = snap.anchor_at(off, stoat_text::Bias::Right);
         map.splice(
+            &snap,
             Vec::new(),
             vec![(anchor, ": str".to_string(), super::InlayKind::Hint)],
         );

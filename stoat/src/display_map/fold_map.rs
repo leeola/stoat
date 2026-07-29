@@ -2956,6 +2956,7 @@ mod tests {
             .rope()
             .point_to_offset(stoat_text::Point::new(0, 5));
         inlay_map.splice(
+            &buffer_snapshot,
             Vec::new(),
             vec![(
                 buffer_snapshot.anchor_at(hint_at, Bias::Right),
@@ -3044,6 +3045,7 @@ mod tests {
             .point_to_offset(stoat_text::Point::new(0, 5));
         let anchor = buffer_snapshot.anchor_at(off, Bias::Right);
         inlay_map.splice(
+            &buffer_snapshot,
             Vec::new(),
             vec![(anchor, ": str".to_string(), InlayKind::Hint)],
         );
