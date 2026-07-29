@@ -203,7 +203,12 @@ pub struct SyntaxMapCapture<'a> {
 /// Mutable container around [`SyntaxSnapshot`]. Held by the host
 /// editor per buffer alongside [`crate::SyntaxState`] until callers
 /// migrate from the single-tree highlight path.
-#[derive(Default)]
+///
+/// Cloning costs a handful of refcount bumps, since the layer [`SumTree`]
+/// is `Arc`-backed and cloning a [`Tree`] only retains its root subtree.
+/// A caller whose reparse may fail can therefore clone the prior map, work
+/// on the clone, and commit it only once the reparse succeeds.
+#[derive(Clone, Default)]
 pub struct SyntaxMap {
     snapshot: SyntaxSnapshot,
 }
@@ -234,17 +239,24 @@ impl SyntaxMap {
         };
     }
 
-    /// Apply tree-sitter edits to every layer's underlying [`Tree`].
-    /// After this call each layer's tree is positioned to act as
-    /// `old_tree` for an incremental [`reparse`](Self::reparse).
+    /// Replay `edits` onto every layer so the map describes `new_rope`.
     ///
-    /// Walks every layer and forwards `edits` to [`crate::edit_tree`].
+    /// Each layer's [`Tree`] is edited via [`crate::edit_tree`], leaving it
+    /// positioned to act as `old_tree` for an incremental
+    /// [`reparse`](Self::reparse), and its `start_offset`/`end_offset` are
+    /// moved to the same text's new position. Both halves matter: the tree
+    /// alone would leave the layer record pointing at whatever text now
+    /// occupies its old byte range, which
+    /// [`SyntaxSnapshot::captures`] reads to decide whether a layer covers
+    /// the requested range, and which
+    /// [`Self::reparse_within_changed_ranges`] reads to decide which layers
+    /// its filtered walk is responsible for re-discovering.
+    ///
+    /// A layer whose bounds fall inside replaced text collapses onto that
+    /// replacement's start, so it becomes empty rather than spanning
+    /// unrelated text. The following reparse then drops it, since a layer
+    /// inside an edit is one the injection walk must re-find to keep.
     pub fn interpolate(&mut self, edits: &[PatchEdit<usize>], old_rope: &Rope, new_rope: &Rope) {
-        // FIXME: layer start_offset/end_offset are not translated through
-        // `edits`. A layer that covers bytes 50..100 stays at 50..100 even
-        // when edits insert or delete bytes before byte 50. Reparse rebuilds
-        // the layer set from scratch, so this is only visible to callers
-        // that read offsets between interpolate and reparse.
         if edits.is_empty() {
             return;
         }
@@ -252,6 +264,11 @@ impl SyntaxMap {
         for layer in self.snapshot.layers.iter() {
             let mut next = layer.clone();
             edit_tree(&mut next.tree, edits, old_rope, new_rope);
+
+            next.start_offset = translate_offset(edits, layer.start_offset as usize) as u32;
+            next.end_offset =
+                (translate_offset(edits, layer.end_offset as usize) as u32).max(next.start_offset);
+
             new_layers.push(next);
         }
         self.install_layers(new_layers, self.snapshot.parsed_version);
@@ -343,7 +360,7 @@ impl SyntaxMap {
             .find(|l| l.depth == 0)
             .map(|l| l.tree.clone());
 
-        // Snapshot prior injection trees keyed by (host_range, language_name)
+        // Snapshot prior injection layers keyed by (host_range, language name)
         // so we can reuse them when the same host node still exists.
         let prior_injections: Vec<PriorInjection> = self
             .snapshot
@@ -351,9 +368,10 @@ impl SyntaxMap {
             .iter()
             .filter(|l| l.depth >= 1)
             .map(|l| PriorInjection {
+                depth: l.depth,
                 start_offset: l.start_offset,
                 end_offset: l.end_offset,
-                language_name: l.language.name,
+                language: l.language.clone(),
                 tree: l.tree.clone(),
             })
             .collect();
@@ -466,7 +484,7 @@ impl SyntaxMap {
                             let prior = prior_injections.iter().find(|p| {
                                 p.start_offset == content.start as u32
                                     && p.end_offset == content.end as u32
-                                    && p.language_name == inner_lang.name
+                                    && p.language.name == inner_lang.name
                             });
                             let Some(inner_tree) = parse_rope_range(
                                 &inner_lang,
@@ -500,7 +518,7 @@ impl SyntaxMap {
                     let prior = prior_injections.iter().find(|p| {
                         p.start_offset == r.start as u32
                             && p.end_offset == r.end as u32
-                            && p.language_name == inner_lang.name
+                            && p.language.name == inner_lang.name
                     });
                     let Some(inner_tree) =
                         parse_rope_range(&inner_lang, rope, r.clone(), prior.map(|p| &p.tree))
@@ -538,20 +556,109 @@ impl SyntaxMap {
             }
         }
 
+        if let Some(filter) = injection_filter_ranges.filter(|ranges| !ranges.is_empty()) {
+            carry_unvisited_injections(&mut new_layers, &prior_injections, filter);
+        }
+
         self.install_layers(new_layers, version);
         Some(())
     }
 }
 
-/// Per-host injection tree from the previous parse, used as
-/// `old_tree` for incremental reparse when the same host range
-/// reappears in this parse.
+/// Per-host injection layer from the previous parse.
+///
+/// A reparse reuses prior work two ways. It hands the tree to tree-sitter
+/// as `old_tree` when the same host range reappears in this parse, and it
+/// keeps the whole layer when a filtered walk never visits the region and
+/// so cannot re-find it.
 #[derive(Clone)]
 struct PriorInjection {
+    depth: u32,
     start_offset: u32,
     end_offset: u32,
-    language_name: &'static str,
+    language: Arc<Language>,
     tree: Tree,
+}
+
+/// Re-add the prior injection layers a filtered walk could not have found.
+///
+/// A filtered reparse only queries host nodes intersecting `filter`, so it
+/// re-discovers the injections near the edit and nothing else. Left alone,
+/// every other injection would disappear from the layer set and its text
+/// would lose all highlighting until the next unfiltered parse. Prior
+/// layers outside `filter` are therefore still live and are restored here.
+///
+/// A prior layer intersecting `filter` is deliberately not restored. That
+/// region *was* re-walked, so the walk's answer is authoritative and its
+/// absence means the injection is gone (a deleted code fence, a changed
+/// info string). Restoring it would resurrect highlighting for text that
+/// no longer holds that language.
+///
+/// `prior` bounds must already be in `rope` coordinates, which
+/// [`SyntaxMap::interpolate`] is responsible for.
+fn carry_unvisited_injections(
+    layers: &mut Vec<SyntaxLayer>,
+    prior: &[PriorInjection],
+    filter: &[Range<usize>],
+) {
+    let overlaps = |a: Range<usize>, b: &Range<usize>| a.start < b.end && b.start < a.end;
+
+    for layer in prior {
+        let span = layer.start_offset as usize..layer.end_offset as usize;
+
+        // An empty span is a layer whose text the edit replaced outright,
+        // collapsed by [`SyntaxMap::interpolate`]. It covers nothing to
+        // highlight, and it would never intersect `filter`, so it has to be
+        // dropped here rather than by the intersection test below.
+        if span.is_empty() {
+            continue;
+        }
+
+        if filter.iter().any(|r| overlaps(span.clone(), r)) {
+            continue;
+        }
+
+        // A combined injection merges several host ranges into one layer
+        // spanning all of them, so a fresh layer can cover a prior one at a
+        // different offset. Matching on overlap rather than equality keeps
+        // that from producing two layers over the same text.
+        let superseded = layers.iter().any(|l| {
+            l.depth == layer.depth
+                && l.language.name == layer.language.name
+                && overlaps(l.start_offset as usize..l.end_offset as usize, &span)
+        });
+        if superseded {
+            continue;
+        }
+
+        layers.push(SyntaxLayer {
+            depth: layer.depth,
+            start_offset: layer.start_offset,
+            end_offset: layer.end_offset,
+            language: layer.language.clone(),
+            tree: layer.tree.clone(),
+        });
+    }
+}
+
+/// Map a byte offset from pre-edit into post-edit coordinates.
+///
+/// `edits` must be sorted by `old.start` and non-overlapping, the shape
+/// [`stoat_text::patch::Patch`] maintains. An offset inside a replaced
+/// region collapses onto that region's new start, matching
+/// [`stoat_text::patch::Patch::old_to_new`] so carried offsets and patch
+/// arithmetic elsewhere agree.
+fn translate_offset(edits: &[PatchEdit<usize>], offset: usize) -> usize {
+    let ix = match edits.binary_search_by(|probe| probe.old.start.cmp(&offset)) {
+        Ok(ix) => ix,
+        Err(0) => return offset,
+        Err(ix) => ix - 1,
+    };
+    match edits.get(ix) {
+        Some(edit) if offset >= edit.old.end => edit.new.end + (offset - edit.old.end),
+        Some(edit) => edit.new.start,
+        None => offset,
+    }
 }
 
 /// Parse `rope` restricted to a list of byte ranges via
@@ -1147,6 +1254,132 @@ mod tests {
         assert!(
             !inline_layers.is_empty(),
             "filtered reparse should still produce at least one inline layer, got {inline_layers:?}"
+        );
+    }
+
+    #[test]
+    fn filtered_reparse_keeps_injections_outside_the_changed_range() {
+        // A filtered reparse re-walks only the edited region, so an
+        // injection far from the edit is never rediscovered by the
+        // query. It must be carried over from the prior layer set
+        // instead of vanishing, or every keystroke would strip
+        // highlighting from the rest of the file.
+        let lang = markdown_lang();
+        let source = "```rust\nfn a() {}\n```\n\ntail text\n";
+        let rope = Rope::from(source);
+        let mut map = SyntaxMap::new();
+        map.reparse(&rope, lang.clone(), 1).unwrap();
+        assert!(
+            map.snapshot()
+                .iter_layers()
+                .any(|l| l.depth == 1 && l.language.name == "rust"),
+            "fixture must start with a rust fence layer"
+        );
+
+        let tail = source.find("tail").unwrap();
+        #[allow(clippy::single_range_in_vec_init)]
+        let changed = vec![tail..source.len()];
+        map.reparse_within_changed_ranges(&rope, lang.clone(), 2, Some(&changed))
+            .unwrap();
+
+        let fence_layers: Vec<(u32, u32)> = map
+            .snapshot()
+            .iter_layers()
+            .filter(|l| l.language.name == "rust")
+            .map(|l| (l.start_offset, l.end_offset))
+            .collect();
+        let fn_start = source.find("fn").unwrap() as u32;
+        assert_eq!(
+            fence_layers,
+            vec![(fn_start, fn_start + "fn a() {}\n".len() as u32)],
+            "the untouched rust fence must survive a filtered reparse exactly once"
+        );
+    }
+
+    #[test]
+    fn filtered_reparse_drops_an_injection_deleted_inside_the_changed_range() {
+        // The carry-over must not resurrect an injection the edit
+        // removed. A layer intersecting the filter is the walk's
+        // responsibility, and the walk not finding it means it is gone.
+        use stoat_text::patch::Edit as PatchEdit;
+        let lang = markdown_lang();
+        let old_source = "```rust\nfn a() {}\n```\n";
+        let old_rope = Rope::from(old_source);
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang.clone(), 1).unwrap();
+        assert!(
+            map.snapshot()
+                .iter_layers()
+                .any(|l| l.language.name == "rust"),
+            "fixture must start with a rust fence layer"
+        );
+
+        let new_source = "plain text\n";
+        let new_rope = Rope::from(new_source);
+        let edits = vec![PatchEdit {
+            old: 0..old_source.len(),
+            new: 0..new_source.len(),
+        }];
+        map.interpolate(&edits, &old_rope, &new_rope);
+        #[allow(clippy::single_range_in_vec_init)]
+        let changed = vec![0..new_source.len()];
+        map.reparse_within_changed_ranges(&new_rope, lang.clone(), 2, Some(&changed))
+            .unwrap();
+
+        assert!(
+            map.snapshot()
+                .iter_layers()
+                .all(|l| l.language.name != "rust"),
+            "the deleted fence must not be carried over, got {:?}",
+            map.snapshot()
+                .iter_layers()
+                .map(|l| (l.depth, l.language.name))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn interpolate_shifts_layer_offsets_through_the_edit() {
+        // Layer bounds are read between interpolate and reparse (to
+        // decide which layers a filtered reparse may carry over, and by
+        // `captures` to skip layers outside the requested range), so
+        // they must follow the text the way each layer's tree does.
+        use stoat_text::patch::Edit as PatchEdit;
+        let lang = markdown_lang();
+        let old_source = "```rust\nfn a() {}\n```\n";
+        let old_rope = Rope::from(old_source);
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang.clone(), 1).unwrap();
+        let before: Vec<(u32, u32)> = map
+            .snapshot()
+            .iter_layers()
+            .filter(|l| l.language.name == "rust")
+            .map(|l| (l.start_offset, l.end_offset))
+            .collect();
+
+        let prefix = "# Heading\n";
+        let new_source = format!("{prefix}{old_source}");
+        let new_rope = Rope::from(new_source.as_str());
+        let edits = vec![PatchEdit {
+            old: 0..0,
+            new: 0..prefix.len(),
+        }];
+        map.interpolate(&edits, &old_rope, &new_rope);
+
+        let after: Vec<(u32, u32)> = map
+            .snapshot()
+            .iter_layers()
+            .filter(|l| l.language.name == "rust")
+            .map(|l| (l.start_offset, l.end_offset))
+            .collect();
+        let shift = prefix.len() as u32;
+        assert_eq!(
+            after,
+            before
+                .iter()
+                .map(|&(s, e)| (s + shift, e + shift))
+                .collect::<Vec<_>>(),
+            "inserting before a layer must move its bounds by the insertion length"
         );
     }
 

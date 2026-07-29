@@ -10014,14 +10014,15 @@ pub(crate) fn parse_buffer_step(
     // tree_sitter::Tree::clone is O(1) (refcount bump on the root subtree),
     // and tree.edit goes through ts_subtree_edit which is copy-on-write, so
     // editing the clone leaves the original untouched.
-    let edited_tree = prior.as_ref().map(|prev| {
+    let edited = prior.as_ref().map(|prev| {
         let mut tree = prev.tree.clone();
         let edits = snapshot.edits_since(prev.version);
         language::edit_tree(&mut tree, edits.edits(), &prev.rope_snapshot, &new_rope);
-        tree
+        (tree, edits)
     });
+    let edited_tree = edited.as_ref().map(|(tree, _)| tree);
 
-    let tree = match edited_tree.as_ref() {
+    let tree = match edited_tree {
         Some(old_tree) => match deadline {
             Some((dl, exec)) => {
                 language::parse_rope_within(lang, &new_rope, Some(old_tree), dl, exec)?
@@ -10034,19 +10035,35 @@ pub(crate) fn parse_buffer_step(
         },
     };
 
-    prior.take();
+    // Advance the multi-layer SyntaxMap the highlights are read from. With a
+    // prior map this rides the interpolate-then-reparse contract. Interpolate
+    // replays this version's edits onto every layer, leaving each tree
+    // positioned as tree-sitter's `old_tree` and each layer's bounds on the
+    // text it still covers. The reparse then re-walks only the edited rows
+    // for injection changes, keeping the layers elsewhere. Working on a clone
+    // means a reparse that fails leaves the caller's prior map intact for the
+    // fallback below rather than half-interpolated.
+    let incremental = match (prior_syntax_map.as_ref(), prior.as_ref(), edited.as_ref()) {
+        (Some(prior_map), Some(prev), Some((_, edits))) => {
+            let mut map = prior_map.clone();
+            map.interpolate(edits.edits(), &prev.rope_snapshot, &new_rope);
 
-    // Rebuild the multi-layer SyntaxMap from scratch, then read highlights from
-    // its captures. There is no host-side interpolation pass to replay this
-    // version's edits onto the prior layers, so reusing the prior map would
-    // reparse incrementally against a stale, un-edited tree and drop every
-    // highlight past the edit. Drop the prior map and parse fresh.
-    //
-    // FIXME: full-parses every keystroke. A host-side interpolation pass would
-    // let the prior layers be reused for incremental reparse.
+            let changed: Vec<Range<usize>> =
+                edits.edits().iter().map(|edit| edit.new.clone()).collect();
+            map.reparse_within_changed_ranges(&new_rope, lang.clone(), cur_version, Some(&changed))
+                .map(|()| map)
+        },
+        _ => None,
+    };
+
+    prior.take();
     prior_syntax_map.take();
-    let mut syntax_map = stoat_language::SyntaxMap::default();
-    let _ = syntax_map.reparse(&new_rope, lang.clone(), cur_version);
+
+    let syntax_map = incremental.unwrap_or_else(|| {
+        let mut map = stoat_language::SyntaxMap::default();
+        let _ = map.reparse(&new_rope, lang.clone(), cur_version);
+        map
+    });
 
     // A capture resolves to a theme key index through its originating layer's
     // highlight_map(). A DEFAULT id (capture absent from the active theme)
@@ -10103,6 +10120,7 @@ mod tests {
         action_handlers::lsp::RenameInputState,
         agent_status::AgentHookEvent,
         buffer::TextBuffer,
+        display_map::highlights::HighlightStyleId,
         input_view::{InputView, SubmitTarget},
         test_harness::apc::decode_apc_stream,
     };
@@ -13295,6 +13313,129 @@ mod tests {
         );
     }
 
+    /// Parse `path`'s `original`, apply one edit, then reparse both ways:
+    /// once carrying the first parse's state forward, once from nothing.
+    /// Returns `(incremental, from_scratch)` token lists as resolved
+    /// `(start, end, style)` triples against the post-edit snapshot.
+    #[allow(clippy::type_complexity)]
+    fn tokens_incremental_vs_fresh(
+        path: &str,
+        original: &str,
+        edit_at: usize,
+        inserted: &str,
+    ) -> (
+        Vec<(usize, usize, HighlightStyleId)>,
+        Vec<(usize, usize, HighlightStyleId)>,
+    ) {
+        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
+        let registry = LanguageRegistry::standard();
+        // Without this every capture resolves to HighlightId::DEFAULT and both
+        // token lists come back empty, comparing equal for the wrong reason.
+        install_highlight_maps(&registry, &styles);
+        let lang = registry.for_path(Path::new(path)).unwrap();
+        let buffer_id = BufferId::new(1);
+
+        let mut buf = TextBuffer::with_text(buffer_id, original);
+        let first = {
+            let mut prior = None;
+            let mut prior_map = None;
+            parse_buffer_step(
+                buffer_id,
+                buf.snapshot.clone(),
+                &lang,
+                &mut prior,
+                &mut prior_map,
+                &styles,
+                None,
+            )
+            .expect("first parse should succeed")
+        };
+
+        buf.edit(edit_at..edit_at, inserted);
+        let edited = buf.snapshot.clone();
+
+        let incremental = {
+            let mut prior = Some(first.syntax);
+            let mut prior_map = Some(first.syntax_map);
+            parse_buffer_step(
+                buffer_id,
+                edited.clone(),
+                &lang,
+                &mut prior,
+                &mut prior_map,
+                &styles,
+                None,
+            )
+            .expect("incremental parse should succeed")
+        };
+        let fresh = {
+            let mut prior = None;
+            let mut prior_map = None;
+            parse_buffer_step(
+                buffer_id,
+                edited.clone(),
+                &lang,
+                &mut prior,
+                &mut prior_map,
+                &styles,
+                None,
+            )
+            .expect("from-scratch parse should succeed")
+        };
+
+        let resolve = |out: &ParseJobOutput| {
+            out.tokens
+                .iter()
+                .map(|t| {
+                    (
+                        edited.resolve_anchor(&t.range.start),
+                        edited.resolve_anchor(&t.range.end),
+                        t.style,
+                    )
+                })
+                .collect()
+        };
+        (resolve(&incremental), resolve(&fresh))
+    }
+
+    /// Reusing the prior [`stoat_language::SyntaxMap`] is only sound if it
+    /// produces the highlights a full parse would. The incremental path
+    /// re-walks just the edited rows for injection changes, so a divergence
+    /// here means highlights outside that window were lost or went stale.
+    #[test]
+    fn incremental_parse_tokens_match_a_fresh_parse() {
+        let original = "fn a() -> u32 {\n    let x = 1;\n    x\n}\n";
+        let (incremental, fresh) =
+            tokens_incremental_vs_fresh("a.rs", original, original.len(), "// tail\n");
+        assert_eq!(
+            incremental, fresh,
+            "incremental tokens must equal a from-scratch parse",
+        );
+        assert!(!fresh.is_empty(), "fixture must produce tokens at all");
+    }
+
+    /// The injection layers are what the old drop-and-rebuild protected.
+    /// A filtered reparse never re-walks the fence, so its rust highlights
+    /// survive only if the layer is carried across the edit.
+    #[test]
+    fn incremental_parse_keeps_fenced_injection_tokens() {
+        let original = "# Title\n\n```rust\nfn a() -> u32 { 1 }\n```\n\ntail\n";
+        let (incremental, fresh) =
+            tokens_incremental_vs_fresh("a.md", original, original.len(), "more tail\n");
+        assert_eq!(
+            incremental, fresh,
+            "incremental tokens must equal a from-scratch parse across an injection",
+        );
+
+        let fence_body = original.find("fn a()").unwrap();
+        assert!(
+            fresh
+                .iter()
+                .any(|&(start, _, _)| start >= fence_body && start < fence_body + 20),
+            "fixture must produce tokens inside the rust fence, got {fresh:?}",
+        );
+    }
+
     #[test]
     fn minimap_emits_declare_and_line_summaries() {
         use stoatty_protocol::command::Command;
@@ -14278,7 +14419,7 @@ mod tests {
     fn first_scope_style(
         stoat: &Stoat,
     ) -> (
-        crate::display_map::highlights::HighlightStyleId,
+        HighlightStyleId,
         Arc<crate::display_map::highlights::HighlightStyleInterner>,
     ) {
         let style = stoat
