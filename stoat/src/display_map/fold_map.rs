@@ -423,6 +423,12 @@ impl FoldMap {
                 .map(|s| s.line_count())
                 .unwrap_or(0);
             let transforms = build_fold_transforms(&inlay_snapshot, &resolved_tree);
+            debug_assert_eq!(
+                transforms.summary().input.len,
+                inlay_snapshot.total_summary().len,
+                "a full rebuild walks the inlay text end to end, so its transforms \
+                 must account for every byte exactly once",
+            );
             let new_line_count = if transforms.is_empty() {
                 1
             } else {
@@ -500,7 +506,6 @@ impl FoldMap {
         let edits: Vec<Edit<AnchoredFold>> = new_folds.into_iter().map(Edit::Insert).collect();
         self.folds.edit(edits, ());
 
-        self.merge_overlapping_presorted(buffer_snapshot);
         self.version += 1;
         new_ids
     }
@@ -548,53 +553,56 @@ impl FoldMap {
     pub fn version_unchanged(&self) -> bool {
         self.version == self.last_self_version
     }
+}
 
-    fn merge_overlapping_presorted(&mut self, buffer_snapshot: &MultiBufferSnapshot) {
-        let resolve = |a: &Anchor| buffer_snapshot.resolve_anchor(a);
-        let all: Vec<AnchoredFold> = self.folds.iter().cloned().collect();
-        if all.len() <= 1 {
-            return;
+/// The placeholder regions `folds` paint, with overlapping and
+/// mergeable-adjacent folds collapsed into one.
+///
+/// Folds are stored as the caller asked for them, so two can cover the same
+/// text. Emitting a placeholder for each would give the transform tree more
+/// input than the inlay text holds, so they are collapsed here instead of in
+/// the stored set, where collapsing would destroy a record.
+///
+/// The first fold of a region carries its placeholder and id, which is what
+/// the chunk stream and [`FoldSnapshot::fold_id_at_point`] answer with.
+///
+/// `folds` must be ordered by `range.start`, which is how the resolved tree is
+/// built.
+fn merged_fold_regions<'a>(
+    folds: impl IntoIterator<Item = &'a Fold>,
+) -> Vec<(&'a Fold, Range<InlayPoint>)> {
+    let mut regions: Vec<(&'a Fold, Range<InlayPoint>)> = Vec::new();
+    for fold in folds {
+        match regions.last_mut() {
+            Some((first, region))
+                if fold.range.start < region.end
+                    || (fold.range.start == region.end
+                        && first.placeholder.merge_adjacent
+                        && fold.placeholder.merge_adjacent) =>
+            {
+                region.end = region.end.max(fold.range.end);
+            },
+            _ => regions.push((fold, fold.range.clone())),
         }
-
-        let has_overlap = all.windows(2).any(|w| {
-            let end = resolve(&w[0].range.end);
-            let start = resolve(&w[1].range.start);
-            start <= end
-        });
-
-        if !has_overlap {
-            return;
-        }
-
-        let mut merged: Vec<AnchoredFold> = Vec::with_capacity(all.len());
-        let mut last_end = 0usize;
-        for fold in all {
-            let fold_range = fold.range.to_offset_range(&resolve);
-            if !merged.is_empty() {
-                let overlaps = fold_range.start < last_end;
-                let adjacent_and_mergeable = fold_range.start == last_end
-                    && merged
-                        .last()
-                        .expect("guarded by !merged.is_empty()")
-                        .placeholder
-                        .merge_adjacent
-                    && fold.placeholder.merge_adjacent;
-                if overlaps || adjacent_and_mergeable {
-                    if fold_range.end > last_end {
-                        let last: &mut AnchoredFold =
-                            merged.last_mut().expect("guarded by !merged.is_empty()");
-                        last.range.end = fold.range.end;
-                        last.resolved_end = fold_range.end;
-                        last_end = fold_range.end;
-                    }
-                    continue;
-                }
-            }
-            last_end = fold_range.end;
-            merged.push(fold);
-        }
-        self.folds = SumTree::from_iter(merged, ());
     }
+
+    // Both emission sites walk these regions carrying a cursor, so a region
+    // starting before the previous one ended would emit the shared text twice
+    // and leave the transform tree describing more input than exists. That is
+    // silent at every layer above, which is why it is caught here rather than
+    // waited on.
+    if cfg!(debug_assertions) {
+        for pair in regions.windows(2) {
+            assert!(
+                pair[0].1.end <= pair[1].1.start,
+                "fold regions {:?} and {:?} overlap after merging",
+                pair[0].1,
+                pair[1].1,
+            );
+        }
+    }
+
+    regions
 }
 
 fn build_fold_transforms(
@@ -632,17 +640,17 @@ fn build_fold_transforms(
     let mut scanner = inlay_text.map(|text| PointScanner::new(text.as_bytes()));
     let mut cursor = 0usize;
 
-    for fold in folds.iter() {
+    for (fold, region) in merged_fold_regions(folds.iter()) {
         let fold_start = if let Some(scanner) = scanner.as_mut() {
-            scanner.advance_to(&fold.range.start)
+            scanner.advance_to(&region.start)
         } else {
-            let buf_point = inlay_snapshot.to_buffer_point(fold.range.start);
+            let buf_point = inlay_snapshot.to_buffer_point(region.start);
             rope.point_to_offset(buf_point).min(rope.len())
         };
         let fold_end = if let Some(scanner) = scanner.as_mut() {
-            scanner.advance_to(&fold.range.end)
+            scanner.advance_to(&region.end)
         } else {
-            let buf_point = inlay_snapshot.to_buffer_point(fold.range.end);
+            let buf_point = inlay_snapshot.to_buffer_point(region.end);
             rope.point_to_offset(buf_point).min(rope.len())
         };
 
@@ -869,9 +877,9 @@ fn resolve_fold_points(
 /// A fold toggle moves no inlay row, so the caller's edit patch says nothing
 /// about it and the rows have to come from the sets themselves. Reading them
 /// here rather than recording them when `fold` and `unfold` run is what covers
-/// the cases no caller names. Folding over an existing fold merges the two (see
-/// [`FoldMap::merge_overlapping_presorted`]), and a sync drops folds whose
-/// anchors have collapsed.
+/// the cases no caller names. A sync drops folds whose anchors have collapsed,
+/// and a fold overlapping another changes the region both paint even though
+/// only one of them was added.
 ///
 /// Both sides must be in the same row space, which holds only while the inlay
 /// text is unchanged. That is the sole caller's condition.
@@ -1047,13 +1055,13 @@ fn sync_fold_incremental(
             }
         } else {
             let mut region_cursor = new_transforms.summary().input.len;
-            for fold in &folds_in_range {
+            for (fold, region) in merged_fold_regions(folds_in_range.iter().copied()) {
                 let fold_start_offset = inlay_snapshot
-                    .inlay_point_to_offset(fold.range.start)
+                    .inlay_point_to_offset(region.start)
                     .0
                     .min(text_len);
                 let fold_end_offset = inlay_snapshot
-                    .inlay_point_to_offset(fold.range.end)
+                    .inlay_point_to_offset(region.end)
                     .0
                     .min(text_len);
 
@@ -1771,8 +1779,11 @@ mod tests {
         display_map::inlay_map::{InlayKind, InlayMap, InlayPoint},
         multi_buffer::MultiBuffer,
     };
-    use std::sync::{Arc, RwLock};
-    use stoat_text::{patch::Patch, Bias};
+    use std::{
+        ops::Range,
+        sync::{Arc, RwLock},
+    };
+    use stoat_text::{patch::Patch, Anchor, Bias};
 
     fn make_snapshot(content: &str) -> Arc<super::FoldSnapshot> {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
@@ -1815,7 +1826,7 @@ mod tests {
     /// text length in bytes.
     fn fold_snapshot_after_edit(
         content: &str,
-        edit: std::ops::Range<usize>,
+        edit: Range<usize>,
         insert: &str,
     ) -> (Arc<super::FoldSnapshot>, usize) {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
@@ -2210,7 +2221,7 @@ mod tests {
                 fold_map.sync(inlay_snapshot, &inlay_edits);
             }
 
-            let carried: Vec<(FoldId, std::ops::Range<usize>)> = fold_map
+            let carried: Vec<(FoldId, Range<usize>)> = fold_map
                 .folds
                 .iter()
                 .map(|f| (f.id, f.resolved_start..f.resolved_end))
@@ -2220,7 +2231,7 @@ mod tests {
             let final_snapshot = multi_buffer.snapshot();
             let all: Vec<super::AnchoredFold> = fold_map.folds.iter().cloned().collect();
             let points = super::resolve_fold_points(&all, &final_snapshot, None);
-            let full: Vec<(FoldId, std::ops::Range<usize>)> = all
+            let full: Vec<(FoldId, Range<usize>)> = all
                 .iter()
                 .enumerate()
                 .map(|(i, af)| {
@@ -2266,8 +2277,7 @@ mod tests {
             &buffer_snapshot,
         );
         let (_, edits) = fold_map.sync(inlay_snapshot.clone(), &Patch::empty());
-        let covered: Vec<std::ops::Range<u32>> =
-            edits.edits().iter().map(|e| e.old.clone()).collect();
+        let covered: Vec<Range<u32>> = edits.edits().iter().map(|e| e.old.clone()).collect();
         assert_eq!(
             covered,
             vec![100..103],
@@ -2277,8 +2287,7 @@ mod tests {
         #[allow(clippy::single_range_in_vec_init)]
         fold_map.unfold(vec![start_off..end_off], &buffer_snapshot);
         let (_, edits) = fold_map.sync(inlay_snapshot, &Patch::empty());
-        let covered: Vec<std::ops::Range<u32>> =
-            edits.edits().iter().map(|e| e.old.clone()).collect();
+        let covered: Vec<Range<u32>> = edits.edits().iter().map(|e| e.old.clone()).collect();
         assert_eq!(
             covered.len(),
             1,
@@ -2422,6 +2431,147 @@ mod tests {
         let (snap, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
         // 4 rows - 2 rows folded = 2 rows
         assert_eq!(snap.line_count(), 2);
+    }
+
+    /// Folding over an existing fold must not consume the one already there.
+    /// Both are records a caller can still address, and the outer fold's own
+    /// anchors have to keep describing the range that was asked for.
+    #[test]
+    fn a_fold_over_another_leaves_both_records_intact() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\nline3");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+
+        let to_anchor = |row: u32, col: u32, bias: Bias| {
+            let off = buffer_snapshot
+                .rope()
+                .point_to_offset(stoat_text::Point::new(row, col));
+            buffer_snapshot.anchor_at(off, bias)
+        };
+        let offset = |row: u32, col: u32| {
+            buffer_snapshot
+                .rope()
+                .point_to_offset(stoat_text::Point::new(row, col))
+        };
+
+        // An inner fold inside row 1, then an outer one starting before it and
+        // running through row 2.
+        let inner = fold_map.fold(
+            vec![to_anchor(1, 2, Bias::Right)..to_anchor(1, 5, Bias::Left)],
+            FoldPlaceholder::default(),
+            &buffer_snapshot,
+        );
+        let outer = fold_map.fold(
+            vec![to_anchor(1, 0, Bias::Right)..to_anchor(2, 5, Bias::Left)],
+            FoldPlaceholder::default(),
+            &buffer_snapshot,
+        );
+        let (snap, _) = fold_map.sync(inlay_snapshot.clone(), &Patch::empty());
+
+        for id in inner.iter().chain(&outer) {
+            assert!(
+                snap.fold_metadata(id).is_some(),
+                "both folds stay addressable, {id:?} did not",
+            );
+        }
+        // Rows 1 and 2 collapse together, leaving row 0, the placeholder row,
+        // and row 3.
+        assert_eq!(snap.line_count(), 3);
+
+        // Unfolding a range touching only the outer fold's tail leaves the
+        // inner one in place, which it cannot do if the two share one record.
+        #[allow(clippy::single_range_in_vec_init)]
+        fold_map.unfold(vec![offset(2, 0)..offset(2, 5)], &buffer_snapshot);
+        let (snap, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
+        assert!(
+            snap.is_line_folded(1),
+            "the inner fold survives unfolding the outer",
+        );
+        assert!(!snap.is_line_folded(2), "and the outer one is gone");
+    }
+
+    /// Overlap arises from ordinary use, not just from folds written to overlap.
+    /// Edits drag fold anchors toward each other, so two folds made disjoint can
+    /// come to share text later. Every sync below runs the region merge and, on
+    /// a full rebuild, the input-length check.
+    #[test]
+    fn folding_unfolding_and_editing_keeps_every_fold_addressable() {
+        for seed in 0..40u64 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+
+            let text: String = (0..24).map(|i| format!("line{i} with words\n")).collect();
+            let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
+            let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+            let (mut inlay_map, mut inlay_snapshot) = InlayMap::new(multi_buffer.snapshot());
+            let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+
+            // Each fold's own anchors, held outside the map so liveness is
+            // decided without consulting the set under test. Asking the map
+            // which folds it still holds would excuse the very loss this checks
+            // for.
+            let mut live: Vec<(FoldId, Range<Anchor>)> = Vec::new();
+
+            for _ in 0..12 {
+                let snapshot = multi_buffer.snapshot();
+                let len = snapshot.rope().len();
+
+                match lcg(&mut state) % 3 {
+                    0 => {
+                        let start = (lcg(&mut state) as usize) % len;
+                        let end = start + 1 + (lcg(&mut state) as usize) % (len - start);
+                        let range = snapshot.anchor_at(start, Bias::Right)
+                            ..snapshot.anchor_at(end, Bias::Left);
+                        let ids = fold_map.fold(
+                            vec![range.clone()],
+                            FoldPlaceholder::default(),
+                            &snapshot,
+                        );
+                        live.extend(ids.into_iter().map(|id| (id, range.clone())));
+                    },
+                    1 => {
+                        let start = (lcg(&mut state) as usize) % len;
+                        let end = start + 1 + (lcg(&mut state) as usize) % (len - start);
+                        #[allow(clippy::single_range_in_vec_init)]
+                        fold_map.unfold(vec![start..end], &snapshot);
+
+                        // Unfolding drops folds by design, and no merge has run
+                        // yet, so the stored set is authoritative here alone.
+                        live.retain(|(id, _)| fold_map.folds.iter().any(|f| f.id == *id));
+                    },
+                    _ => {
+                        let at = (lcg(&mut state) as usize) % (len + 1);
+                        if lcg(&mut state).is_multiple_of(3) && at + 6 <= len {
+                            shared.write().expect("poisoned").edit(at..at + 6, "");
+                        } else {
+                            shared.write().expect("poisoned").edit(at..at, "inserted\n");
+                        }
+                    },
+                }
+
+                let after = multi_buffer.snapshot();
+                let buffer_edits = after.edits_since(snapshot.version());
+                let inlay_edits;
+                (inlay_snapshot, inlay_edits) = inlay_map.sync(after, &buffer_edits);
+                let (snap, _) = fold_map.sync(inlay_snapshot.clone(), &inlay_edits);
+
+                // An edit can delete everything a fold covered, which drops it
+                // for real. Every fold still spanning text keeps a record of its
+                // own, which is what a merge rewriting the stored set destroys.
+                let current = multi_buffer.snapshot();
+                live.retain(|(_, range)| {
+                    current.resolve_anchor(&range.start) < current.resolve_anchor(&range.end)
+                });
+                for (id, _) in &live {
+                    assert!(
+                        snap.fold_metadata(id).is_some(),
+                        "seed {seed}: {id:?} lost its record",
+                    );
+                }
+            }
+        }
     }
 
     #[test]
