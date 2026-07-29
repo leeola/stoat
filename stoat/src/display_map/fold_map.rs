@@ -1423,15 +1423,10 @@ impl FoldSnapshot {
     /// Inlay-expanded byte length of `fold_row`'s content, excluding the
     /// trailing newline.
     ///
-    /// [`Self::line_len`] measures only buffer text and fold placeholders, so a
-    /// row carrying a mid-row inlay reads shorter than it renders. A caller
-    /// bounding a rendered row by that shorter length clips the buffer content
-    /// sitting after the inlay. This counts the inlay text too, matching the
-    /// width the chunk stream actually produces.
-    ///
-    /// With no folds a fold offset equals an inlay offset, so the inlay layer's
-    /// own length is exact. Rows containing folds fall back to
-    /// [`Self::line_len`].
+    /// Answers the same width as [`Self::line_len`], which also counts inlay
+    /// text. Without folds a fold offset equals an inlay offset, so the inlay
+    /// layer's own length is exact and cheaper than seeking the transform tree
+    /// twice.
     pub fn output_line_len(&self, fold_row: u32) -> u32 {
         if self.fold_count() == 0 {
             return self.inlay_snapshot.line_len(fold_row);
@@ -1439,10 +1434,25 @@ impl FoldSnapshot {
         self.line_len(fold_row)
     }
 
+    /// Byte length of `fold_row`'s painted content, excluding its newline.
+    ///
+    /// Measures the span between two row starts rather than decoding the row's
+    /// characters, so it costs two O(log n) tree seeks however long the row is
+    /// and however many folds it crosses.
+    ///
+    /// Fold transforms are summarized over the inlay-expanded text, so this
+    /// counts hint text the way the chunk stream paints it. Walking the
+    /// characters could not. They come from the buffer rope, which no inlay
+    /// appears in.
     pub fn line_len(&self, fold_row: u32) -> u32 {
-        self.fold_line_chars(fold_row)
-            .map(|ch| ch.len_utf8() as u32)
-            .sum()
+        let start = self.row_start_offset(fold_row).0;
+        let end = if fold_row + 1 < self.line_count() {
+            // The next row starts one past the newline that ends this one.
+            self.row_start_offset(fold_row + 1).0.saturating_sub(1)
+        } else {
+            self.len().0
+        };
+        end.saturating_sub(start) as u32
     }
 
     pub fn folds_in_range(&self, range: Range<InlayPoint>) -> Vec<&Fold> {
@@ -2678,6 +2688,98 @@ mod tests {
         let inlay2 = InlayMap::new(snap2).1;
         let (fold_snap, _) = fold_map.sync(inlay2, &Patch::empty());
         assert_eq!(fold_snap.fold_line(2), "...");
+    }
+
+    /// A row's measured width has to be the width the chunk stream paints,
+    /// including any inlay text on it. A caller bounding a rendered row by a
+    /// short measurement clips the buffer content sitting after the hint.
+    #[test]
+    fn line_len_counts_inlay_text_on_a_folded_buffer() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "hello world\nsecond line");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (mut inlay_map, inlay_snap) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snap);
+
+        // A hint on row 0, and a fold on row 1 so `output_line_len` cannot take
+        // its no-fold shortcut past the fold layer.
+        let hint_at = buffer_snapshot
+            .rope()
+            .point_to_offset(stoat_text::Point::new(0, 5));
+        inlay_map.splice(
+            Vec::new(),
+            vec![(
+                buffer_snapshot.anchor_at(hint_at, Bias::Right),
+                ": str".to_string(),
+                InlayKind::Hint,
+            )],
+        );
+        let fold_start = buffer_snapshot
+            .rope()
+            .point_to_offset(stoat_text::Point::new(1, 0));
+        let fold_end = buffer_snapshot
+            .rope()
+            .point_to_offset(stoat_text::Point::new(1, 6));
+        fold_map.fold(
+            vec![
+                buffer_snapshot.anchor_at(fold_start, Bias::Right)
+                    ..buffer_snapshot.anchor_at(fold_end, Bias::Left),
+            ],
+            FoldPlaceholder::default(),
+            &buffer_snapshot,
+        );
+
+        let (inlay_snap, _) = inlay_map.sync(buffer_snapshot, &Patch::empty());
+        let (snap, _) = fold_map.sync(inlay_snap, &Patch::empty());
+
+        for row in 0..snap.line_count() {
+            let painted: usize = snap
+                .chunks(
+                    snap.row_start_offset(row)..snap.row_start_offset(row + 1),
+                    Arc::from(Vec::new()),
+                )
+                .map(|chunk| chunk.text.trim_end_matches('\n').len())
+                .sum();
+            assert_eq!(
+                snap.line_len(row) as usize,
+                painted,
+                "row {row} measures what it paints",
+            );
+        }
+    }
+
+    /// Measuring a byte span rather than counting characters has to hold for
+    /// multi-byte text too, on both sides of a fold.
+    #[test]
+    fn line_len_matches_the_painted_width_across_wide_characters() {
+        // Row 0 mixes ASCII with three-byte CJK. Row 1 carries a fold, so the
+        // measurement goes through the transform tree.
+        let snap = make_snapshot_with_folds(
+            "ab \u{4f60}\u{597d} cd\nhello world",
+            vec![(InlayPoint::new(1, 5), InlayPoint::new(1, 11))],
+        );
+
+        for row in 0..snap.line_count() {
+            let painted: usize = snap
+                .chunks(
+                    snap.row_start_offset(row)..snap.row_start_offset(row + 1),
+                    Arc::from(Vec::new()),
+                )
+                .map(|chunk| chunk.text.trim_end_matches('\n').len())
+                .sum();
+            assert_eq!(
+                snap.line_len(row) as usize,
+                painted,
+                "row {row} measures what it paints",
+            );
+        }
+
+        // Spelled out, so a change to either side of the comparison above is
+        // still measured against something fixed. Row 0 is twelve bytes across
+        // eight characters, and row 1 paints "hello..." with " world" folded.
+        assert_eq!(snap.line_len(0), 12);
+        assert_eq!(snap.line_len(1), 8);
     }
 
     #[test]
