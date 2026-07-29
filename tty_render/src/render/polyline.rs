@@ -8,6 +8,7 @@
 
 use crate::render::{occlusion_globals, pool_occluders, CellMetrics, Occluder};
 use bytemuck::{Pod, Zeroable};
+use std::mem;
 use stoatty_term::grid::{Panel, Polyline, Rgb};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
@@ -66,6 +67,11 @@ pub struct PolylinePass {
     capacity: usize,
     /// The instances last uploaded, so an unchanged frame skips the write.
     last_instances: Vec<PolylineInstance>,
+    /// Where each frame's instances are built, before being compared against
+    /// [`Self::last_instances`] and traded with it. Chrome rebuilds every frame
+    /// and changes on almost none of them, so building into a buffer the pass
+    /// keeps spares an allocation the frame would otherwise discard.
+    built: Vec<PolylineInstance>,
     count: u32,
     /// Segments of a pool grid being composited over the live grid, built by
     /// [`Self::prepare_composite`] into a buffer separate from
@@ -181,6 +187,7 @@ impl PolylinePass {
             bind_group,
             instances,
             last_instances: Vec::new(),
+            built: Vec::new(),
             capacity: INITIAL_CAPACITY,
             count: 0,
             composite_instances,
@@ -224,22 +231,22 @@ impl PolylinePass {
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
-        let instances = build_polyline_instances(polylines, 0.0);
-        self.count = instances.len() as u32;
-        if instances.is_empty() {
+        build_polyline_instances_into(polylines, 0.0, &mut self.built);
+        self.count = self.built.len() as u32;
+        if self.built.is_empty() {
             return;
         }
 
-        if !crate::render::upload_needed(&instances, &self.last_instances) {
+        if !crate::render::upload_needed(&self.built, &self.last_instances) {
             return;
         }
 
-        if instances.len() > self.capacity {
-            self.capacity = instances.len().next_power_of_two();
+        if self.built.len() > self.capacity {
+            self.capacity = self.built.len().next_power_of_two();
             self.instances = alloc_instances(device, self.capacity);
         }
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
-        self.last_instances = instances;
+        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.built));
+        mem::swap(&mut self.built, &mut self.last_instances);
     }
 
     /// Upload the panel occluders, reallocating the buffer and rebuilding the
@@ -401,7 +408,19 @@ fn make_bind_group(
 /// so slot-bound paths glide with the page, since the shader carries no scroll
 /// uniform of its own.
 fn build_polyline_instances(polylines: &[Polyline], shift_rows: f32) -> Vec<PolylineInstance> {
-    let mut out = Vec::new();
+    let mut instances = Vec::new();
+    build_polyline_instances_into(polylines, shift_rows, &mut instances);
+    instances
+}
+
+/// Build the segment instances into `out`, clearing it first so a reused scratch
+/// buffer holds only this frame's segments.
+fn build_polyline_instances_into(
+    polylines: &[Polyline],
+    shift_rows: f32,
+    out: &mut Vec<PolylineInstance>,
+) {
+    out.clear();
     for polyline in polylines {
         let point = |[x, y]: [i16; 2]| {
             [
@@ -430,7 +449,6 @@ fn build_polyline_instances(polylines: &[Polyline], shift_rows: f32) -> Vec<Poly
             })),
         }
     }
-    out
 }
 
 fn rgb_f32(color: Rgb) -> [f32; 3] {
@@ -443,7 +461,7 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::build_polyline_instances;
+    use super::{build_polyline_instances, build_polyline_instances_into, PolylineInstance};
     use stoatty_term::grid::{Polyline, Rgb};
     use wgpu::naga::{
         front::wgsl,
@@ -466,6 +484,21 @@ mod tests {
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate polyline");
+    }
+
+    #[test]
+    fn a_reused_polyline_scratch_holds_only_this_frame_s_segments() {
+        let paths = [path(&[[0, 0], [0, 16], [16, 32]])];
+
+        let mut scratch = build_polyline_instances(&paths, 0.0);
+        scratch.extend(build_polyline_instances(&paths, 0.0));
+        build_polyline_instances_into(&paths, 0.0, &mut scratch);
+
+        assert_eq!(
+            bytemuck::cast_slice::<PolylineInstance, u8>(&scratch),
+            bytemuck::cast_slice::<PolylineInstance, u8>(&build_polyline_instances(&paths, 0.0)),
+            "reuse clears the stale segments and rebuilds only the frame's own"
+        );
     }
 
     #[test]

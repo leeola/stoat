@@ -9,6 +9,7 @@
 
 use crate::render::CellMetrics;
 use bytemuck::{Pod, Zeroable};
+use std::mem;
 use stoatty_term::grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
@@ -82,6 +83,11 @@ pub struct PanelPass {
     capacity: usize,
     /// The instances last uploaded, so an unchanged frame skips the write.
     last_instances: Vec<PanelInstance>,
+    /// Where each frame's instances are built, before being compared against
+    /// [`Self::last_instances`] and traded with it. Chrome rebuilds every frame
+    /// and changes on almost none of them, so building into a buffer the pass
+    /// keeps spares an allocation the frame would otherwise discard.
+    built: Vec<PanelInstance>,
     count: u32,
     metrics: CellMetrics,
 }
@@ -187,6 +193,7 @@ impl PanelPass {
             capacity: INITIAL_CAPACITY,
             count: 0,
             last_instances: Vec::new(),
+            built: Vec::new(),
             metrics,
         }
     }
@@ -201,8 +208,8 @@ impl PanelPass {
     /// `resolution` is the surface size in physical pixels. Reallocates the
     /// instance buffer only when the panel count outgrows the current capacity.
     pub fn prepare(&mut self, device: &Device, queue: &Queue, grid: &Grid, resolution: [f32; 2]) {
-        let instances = build_panel_instances(grid.panels());
-        self.count = instances.len() as u32;
+        build_panel_instances_into(grid.panels(), &mut self.built);
+        self.count = self.built.len() as u32;
 
         let globals = Globals {
             resolution,
@@ -212,16 +219,16 @@ impl PanelPass {
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
-        if instances.is_empty() {
+        if self.built.is_empty() {
             return;
         }
 
-        if !crate::render::upload_needed(&instances, &self.last_instances) {
+        if !crate::render::upload_needed(&self.built, &self.last_instances) {
             return;
         }
 
-        if instances.len() > self.capacity {
-            self.capacity = instances.len().next_power_of_two();
+        if self.built.len() > self.capacity {
+            self.capacity = self.built.len().next_power_of_two();
             self.instances = alloc_instances(device, self.capacity);
             self.bind_group = make_bind_group(
                 device,
@@ -230,8 +237,8 @@ impl PanelPass {
                 &self.instances,
             );
         }
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
-        self.last_instances = instances;
+        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.built));
+        mem::swap(&mut self.built, &mut self.last_instances);
     }
 
     /// Record the panel draw into `render_pass`.
@@ -286,34 +293,44 @@ fn make_bind_group(
     })
 }
 
-/// One instance per panel, in draw order. A panel with no fill leaves the
-/// interior transparent. A panel with no shadow zeroes the shadow, so the pass
-/// draws only the stroke.
+/// One instance per panel, in draw order, into a vector of the caller's.
+#[cfg(test)]
 fn build_panel_instances(panels: &[Panel]) -> Vec<PanelInstance> {
-    panels
-        .iter()
-        .map(|panel| {
-            let (shadow_offset, shadow_margin, shadow_mode) = match panel.shadow {
-                PanelShadow::Drop => (SHADOW_OFFSET, SHADOW_MARGIN, 0.0),
-                PanelShadow::Tucked => ([0.0, 0.0], SHADOW_MARGIN_TUCKED, 1.0),
-                PanelShadow::Overhang => ([0.0, 0.0], SHADOW_MARGIN_OVERHANG, 2.0),
-                PanelShadow::None_ => ([0.0, 0.0], 0.0, 0.0),
-            };
-            PanelInstance {
-                cell: [panel.left as f32, panel.top as f32],
-                size: [panel.width as f32, panel.height as f32],
-                fill: panel.fill.map(rgb_f32).unwrap_or([0.0, 0.0, 0.0]),
-                border: rgb_f32(panel.border),
-                shadow_offset,
-                shadow_margin,
-                corner_radius: panel.corner_radius as f32,
-                fill_flag: if panel.fill.is_some() { 1.0 } else { 0.0 },
-                style: style_code(panel.style),
-                inset_x: panel.inset_x as f32,
-                shadow_mode,
-            }
-        })
-        .collect()
+    let mut instances = Vec::new();
+    build_panel_instances_into(panels, &mut instances);
+    instances
+}
+
+/// Build into `out` one instance per panel, in draw order.
+///
+/// A panel with no fill leaves the interior transparent. A panel with no shadow
+/// zeroes the shadow, so the pass draws only the stroke.
+///
+/// `out` is cleared first, so a reused scratch buffer holds only this frame's
+/// panels.
+fn build_panel_instances_into(panels: &[Panel], out: &mut Vec<PanelInstance>) {
+    out.clear();
+    out.extend(panels.iter().map(|panel| {
+        let (shadow_offset, shadow_margin, shadow_mode) = match panel.shadow {
+            PanelShadow::Drop => (SHADOW_OFFSET, SHADOW_MARGIN, 0.0),
+            PanelShadow::Tucked => ([0.0, 0.0], SHADOW_MARGIN_TUCKED, 1.0),
+            PanelShadow::Overhang => ([0.0, 0.0], SHADOW_MARGIN_OVERHANG, 2.0),
+            PanelShadow::None_ => ([0.0, 0.0], 0.0, 0.0),
+        };
+        PanelInstance {
+            cell: [panel.left as f32, panel.top as f32],
+            size: [panel.width as f32, panel.height as f32],
+            fill: panel.fill.map(rgb_f32).unwrap_or([0.0, 0.0, 0.0]),
+            border: rgb_f32(panel.border),
+            shadow_offset,
+            shadow_margin,
+            corner_radius: panel.corner_radius as f32,
+            fill_flag: if panel.fill.is_some() { 1.0 } else { 0.0 },
+            style: style_code(panel.style),
+            inset_x: panel.inset_x as f32,
+            shadow_mode,
+        }
+    }));
 }
 
 fn style_code(style: BorderStyle) -> u32 {
@@ -335,7 +352,7 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_panel_instances, style_code};
+    use super::{build_panel_instances, build_panel_instances_into, style_code, PanelInstance};
     use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
     use wgpu::naga::{
         front::wgsl,
@@ -348,6 +365,34 @@ mod tests {
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate panel");
+    }
+
+    #[test]
+    fn a_reused_panel_scratch_holds_only_this_frame_s_panels() {
+        let panels = [Panel {
+            top: 3,
+            left: 5,
+            width: 8,
+            height: 4,
+            style: BorderStyle::Heavy,
+            border: Rgb::new(0, 255, 0),
+            corner_radius: 6,
+            fill: Some(Rgb::new(255, 0, 0)),
+            shadow: PanelShadow::Drop,
+            inset_x: 0,
+            above_pools: false,
+            seq: 0,
+        }];
+
+        let mut scratch = build_panel_instances(&panels);
+        scratch.extend(build_panel_instances(&panels));
+        build_panel_instances_into(&panels, &mut scratch);
+
+        assert_eq!(
+            bytemuck::cast_slice::<PanelInstance, u8>(&scratch),
+            bytemuck::cast_slice::<PanelInstance, u8>(&build_panel_instances(&panels)),
+            "reuse clears the stale panels and rebuilds only the frame's own"
+        );
     }
 
     /// The pass skips its GPU write when the rebuilt instances match the last

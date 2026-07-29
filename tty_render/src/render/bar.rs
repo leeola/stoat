@@ -9,6 +9,7 @@
 
 use crate::render::{occlusion_globals, pool_occluders, CellMetrics, Occluder};
 use bytemuck::{Pod, Zeroable};
+use std::mem;
 use stoatty_term::grid::{Bar, Panel, Rgb};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
@@ -63,6 +64,11 @@ pub struct BarPass {
     capacity: usize,
     /// The instances last uploaded, so an unchanged frame skips the write.
     last_instances: Vec<BarInstance>,
+    /// Where each frame's instances are built, before being compared against
+    /// [`Self::last_instances`] and traded with it. Chrome rebuilds every frame
+    /// and changes on almost none of them, so building into a buffer the pass
+    /// keeps spares an allocation the frame would otherwise discard.
+    built: Vec<BarInstance>,
     count: u32,
     /// Bars of a pool grid being composited over the live grid, built by
     /// [`Self::prepare_composite`] into a buffer separate from
@@ -173,6 +179,7 @@ impl BarPass {
             bind_group,
             instances,
             last_instances: Vec::new(),
+            built: Vec::new(),
             capacity: INITIAL_CAPACITY,
             count: 0,
             composite_instances,
@@ -216,22 +223,22 @@ impl BarPass {
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
-        let instances = build_bar_instances(bars, 0.0);
-        self.count = instances.len() as u32;
-        if instances.is_empty() {
+        build_bar_instances_into(bars, 0.0, &mut self.built);
+        self.count = self.built.len() as u32;
+        if self.built.is_empty() {
             return;
         }
 
-        if !crate::render::upload_needed(&instances, &self.last_instances) {
+        if !crate::render::upload_needed(&self.built, &self.last_instances) {
             return;
         }
 
-        if instances.len() > self.capacity {
-            self.capacity = instances.len().next_power_of_two();
+        if self.built.len() > self.capacity {
+            self.capacity = self.built.len().next_power_of_two();
             self.instances = alloc_instances(device, self.capacity);
         }
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
-        self.last_instances = instances;
+        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.built));
+        mem::swap(&mut self.built, &mut self.last_instances);
     }
 
     /// Upload the panel occluders, reallocating the buffer and rebuilding the
@@ -389,20 +396,27 @@ fn make_bind_group(
 /// so slot-bound bars glide with the page, since the bar shader carries no
 /// scroll uniform of its own.
 fn build_bar_instances(bars: &[Bar], shift_rows: f32) -> Vec<BarInstance> {
-    bars.iter()
-        .map(|bar| BarInstance {
-            origin: [
-                f32::from(bar.x) / SIXTEENTHS,
-                f32::from(bar.y) / SIXTEENTHS + shift_rows,
-            ],
-            size: [
-                f32::from(bar.width) / SIXTEENTHS,
-                f32::from(bar.height) / SIXTEENTHS,
-            ],
-            color: rgb_f32(bar.color),
-            seq: bar.seq,
-        })
-        .collect()
+    let mut instances = Vec::new();
+    build_bar_instances_into(bars, shift_rows, &mut instances);
+    instances
+}
+
+/// Build the bar instances into `out`, clearing it first so a reused scratch
+/// buffer holds only this frame's bars.
+fn build_bar_instances_into(bars: &[Bar], shift_rows: f32, out: &mut Vec<BarInstance>) {
+    out.clear();
+    out.extend(bars.iter().map(|bar| BarInstance {
+        origin: [
+            f32::from(bar.x) / SIXTEENTHS,
+            f32::from(bar.y) / SIXTEENTHS + shift_rows,
+        ],
+        size: [
+            f32::from(bar.width) / SIXTEENTHS,
+            f32::from(bar.height) / SIXTEENTHS,
+        ],
+        color: rgb_f32(bar.color),
+        seq: bar.seq,
+    }));
 }
 
 fn rgb_f32(color: Rgb) -> [f32; 3] {
@@ -415,7 +429,7 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::build_bar_instances;
+    use super::{build_bar_instances, build_bar_instances_into, BarInstance};
     use stoatty_term::grid::{Bar, Rgb};
     use wgpu::naga::{
         front::wgsl,
@@ -428,6 +442,28 @@ mod tests {
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate bar");
+    }
+
+    #[test]
+    fn a_reused_bar_scratch_holds_only_this_frame_s_bars() {
+        let bars = [Bar {
+            x: 8,
+            y: 16,
+            width: 3,
+            height: 24,
+            color: Rgb::new(220, 50, 47),
+            seq: 7,
+        }];
+
+        let mut scratch = build_bar_instances(&bars, 0.0);
+        scratch.extend(build_bar_instances(&bars, 0.0));
+        build_bar_instances_into(&bars, 0.0, &mut scratch);
+
+        assert_eq!(
+            bytemuck::cast_slice::<BarInstance, u8>(&scratch),
+            bytemuck::cast_slice::<BarInstance, u8>(&build_bar_instances(&bars, 0.0)),
+            "reuse clears the stale bars and rebuilds only the frame's own"
+        );
     }
 
     /// The pass skips its GPU write when the rebuilt instances match the last

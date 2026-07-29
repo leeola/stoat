@@ -10,6 +10,7 @@
 
 use crate::render::CellMetrics;
 use bytemuck::{Pod, Zeroable};
+use std::mem;
 use stoatty_term::grid::{Grid, Overlay, Rgb};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
@@ -69,6 +70,11 @@ pub struct OverlayPass {
     capacity: usize,
     /// The instances last uploaded, so an unchanged frame skips the write.
     last_instances: Vec<OverlayInstance>,
+    /// Where each frame's instances are built, before being compared against
+    /// [`Self::last_instances`] and traded with it. Chrome rebuilds every frame
+    /// and changes on almost none of them, so building into a buffer the pass
+    /// keeps spares an allocation the frame would otherwise discard.
+    built: Vec<OverlayInstance>,
     count: u32,
     metrics: CellMetrics,
 }
@@ -166,6 +172,7 @@ impl OverlayPass {
             capacity: INITIAL_CAPACITY,
             count: 0,
             last_instances: Vec::new(),
+            built: Vec::new(),
             metrics,
         }
     }
@@ -187,22 +194,22 @@ impl OverlayPass {
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
-        let instances = build_overlay_instances(grid.overlays());
-        self.count = instances.len() as u32;
-        if instances.is_empty() {
+        build_overlay_instances_into(grid.overlays(), &mut self.built);
+        self.count = self.built.len() as u32;
+        if self.built.is_empty() {
             return;
         }
 
-        if !crate::render::upload_needed(&instances, &self.last_instances) {
+        if !crate::render::upload_needed(&self.built, &self.last_instances) {
             return;
         }
 
-        if instances.len() > self.capacity {
-            self.capacity = instances.len().next_power_of_two();
+        if self.built.len() > self.capacity {
+            self.capacity = self.built.len().next_power_of_two();
             self.instances = alloc_instances(device, self.capacity);
         }
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
-        self.last_instances = instances;
+        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.built));
+        mem::swap(&mut self.built, &mut self.last_instances);
     }
 
     /// Record the overlay draw into `render_pass`.
@@ -230,21 +237,30 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
     })
 }
 
-/// One instance per overlay, in draw order.
+/// One instance per overlay, in draw order, into a vector of the caller's.
+#[cfg(test)]
 fn build_overlay_instances(overlays: &[Overlay]) -> Vec<OverlayInstance> {
-    overlays
-        .iter()
-        .map(|overlay| OverlayInstance {
-            cell: [overlay.left as f32, overlay.top as f32],
-            size: [overlay.width as f32, overlay.height as f32],
-            fill: rgb_f32(overlay.fill),
-            border: rgb_f32(overlay.border),
-            shadow_offset: SHADOW_OFFSET,
-            shadow_margin: SHADOW_MARGIN,
-            corner_radius: CORNER_RADIUS,
-            anchor_offset: [overlay.offset[0] as f32, overlay.offset[1] as f32],
-        })
-        .collect()
+    let mut instances = Vec::new();
+    build_overlay_instances_into(overlays, &mut instances);
+    instances
+}
+
+/// Build into `out` one instance per overlay, in draw order.
+///
+/// `out` is cleared first, so a reused scratch buffer holds only this frame's
+/// overlays.
+fn build_overlay_instances_into(overlays: &[Overlay], out: &mut Vec<OverlayInstance>) {
+    out.clear();
+    out.extend(overlays.iter().map(|overlay| OverlayInstance {
+        cell: [overlay.left as f32, overlay.top as f32],
+        size: [overlay.width as f32, overlay.height as f32],
+        fill: rgb_f32(overlay.fill),
+        border: rgb_f32(overlay.border),
+        shadow_offset: SHADOW_OFFSET,
+        shadow_margin: SHADOW_MARGIN,
+        corner_radius: CORNER_RADIUS,
+        anchor_offset: [overlay.offset[0] as f32, overlay.offset[1] as f32],
+    }));
 }
 
 fn rgb_f32(color: Rgb) -> [f32; 3] {
@@ -257,7 +273,7 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::build_overlay_instances;
+    use super::{build_overlay_instances, build_overlay_instances_into, OverlayInstance};
     use stoatty_term::grid::{Overlay, Rgb};
     use wgpu::naga::{
         front::wgsl,
@@ -271,6 +287,33 @@ mod tests {
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate overlay");
+    }
+
+    #[test]
+    fn a_reused_overlay_scratch_holds_only_this_frame_s_overlays() {
+        let overlays = [Overlay {
+            top: 3,
+            left: 5,
+            width: 8,
+            height: 4,
+            fill: Rgb::new(255, 0, 0),
+            border: Rgb::new(0, 255, 0),
+            content_fg: Rgb::new(0, 0, 255),
+            scale: 1,
+            offset: [-4, 6],
+            bold: false,
+            content: "x".to_owned(),
+        }];
+
+        let mut scratch = build_overlay_instances(&overlays);
+        scratch.extend(build_overlay_instances(&overlays));
+        build_overlay_instances_into(&overlays, &mut scratch);
+
+        assert_eq!(
+            bytemuck::cast_slice::<OverlayInstance, u8>(&scratch),
+            bytemuck::cast_slice::<OverlayInstance, u8>(&build_overlay_instances(&overlays)),
+            "reuse clears the stale overlays and rebuilds only the frame's own"
+        );
     }
 
     #[test]

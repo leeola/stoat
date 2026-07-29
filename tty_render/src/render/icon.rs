@@ -7,6 +7,7 @@
 
 use crate::render::{CellMetrics, Occluder};
 use bytemuck::{Pod, Zeroable};
+use std::mem;
 use stoatty_term::grid::{Icon, IconKind, Rgb};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
@@ -63,6 +64,11 @@ pub struct IconPass {
     capacity: usize,
     /// The instances last uploaded, so an unchanged frame skips the write.
     last_instances: Vec<IconInstance>,
+    /// Where each frame's instances are built, before being compared against
+    /// [`Self::last_instances`] and traded with it. Chrome rebuilds every frame
+    /// and changes on almost none of them, so building into a buffer the pass
+    /// keeps spares an allocation the frame would otherwise discard.
+    built: Vec<IconInstance>,
     count: u32,
     /// One occluder per live panel, read by the fragment shader to discard icon
     /// fragments a later box covers. Bound alongside the globals, and rebuilt
@@ -170,6 +176,7 @@ impl IconPass {
             capacity: INITIAL_CAPACITY,
             count: 0,
             last_instances: Vec::new(),
+            built: Vec::new(),
             occluders,
             occluder_capacity: INITIAL_CAPACITY,
             metrics,
@@ -207,22 +214,22 @@ impl IconPass {
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
-        let instances = build_icon_instances(icons);
-        self.count = instances.len() as u32;
-        if instances.is_empty() {
+        build_icon_instances_into(icons, &mut self.built);
+        self.count = self.built.len() as u32;
+        if self.built.is_empty() {
             return;
         }
 
-        if !crate::render::upload_needed(&instances, &self.last_instances) {
+        if !crate::render::upload_needed(&self.built, &self.last_instances) {
             return;
         }
 
-        if instances.len() > self.capacity {
-            self.capacity = instances.len().next_power_of_two();
+        if self.built.len() > self.capacity {
+            self.capacity = self.built.len().next_power_of_two();
             self.instances = alloc_instances(device, self.capacity);
         }
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
-        self.last_instances = instances;
+        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.built));
+        mem::swap(&mut self.built, &mut self.last_instances);
     }
 
     /// Upload the panel occluders, reallocating the buffer and rebuilding the
@@ -303,19 +310,28 @@ fn make_bind_group(
     })
 }
 
-/// One instance per icon, in draw order.
+/// One instance per icon, in draw order, into a vector of the caller's.
+#[cfg(test)]
 fn build_icon_instances(icons: &[Icon]) -> Vec<IconInstance> {
-    icons
-        .iter()
-        .map(|icon| IconInstance {
-            cell: [icon.left as f32, icon.top as f32],
-            size: icon.size.max(1) as f32,
-            color: rgb_f32(icon.color),
-            kind: kind_code(icon.kind),
-            offset: [icon.offset[0] as f32, icon.offset[1] as f32],
-            seq: icon.seq,
-        })
-        .collect()
+    let mut instances = Vec::new();
+    build_icon_instances_into(icons, &mut instances);
+    instances
+}
+
+/// Build into `out` one instance per icon, in draw order.
+///
+/// `out` is cleared first, so a reused scratch buffer holds only this frame's
+/// icons.
+fn build_icon_instances_into(icons: &[Icon], out: &mut Vec<IconInstance>) {
+    out.clear();
+    out.extend(icons.iter().map(|icon| IconInstance {
+        cell: [icon.left as f32, icon.top as f32],
+        size: icon.size.max(1) as f32,
+        color: rgb_f32(icon.color),
+        kind: kind_code(icon.kind),
+        offset: [icon.offset[0] as f32, icon.offset[1] as f32],
+        seq: icon.seq,
+    }));
 }
 
 fn kind_code(kind: IconKind) -> u32 {
@@ -336,7 +352,7 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_icon_instances, KIND_WARNING};
+    use super::{build_icon_instances, build_icon_instances_into, IconInstance, KIND_WARNING};
     use stoatty_term::grid::{Icon, IconKind, Rgb};
     use wgpu::naga::{
         front::wgsl,
@@ -349,6 +365,29 @@ mod tests {
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate icon");
+    }
+
+    #[test]
+    fn a_reused_icon_scratch_holds_only_this_frame_s_icons() {
+        let icons = [Icon {
+            top: 3,
+            left: 5,
+            kind: IconKind::Warning,
+            color: Rgb::new(255, 200, 0),
+            size: 2,
+            offset: [3, 6],
+            seq: 9,
+        }];
+
+        let mut scratch = build_icon_instances(&icons);
+        scratch.extend(build_icon_instances(&icons));
+        build_icon_instances_into(&icons, &mut scratch);
+
+        assert_eq!(
+            bytemuck::cast_slice::<IconInstance, u8>(&scratch),
+            bytemuck::cast_slice::<IconInstance, u8>(&build_icon_instances(&icons)),
+            "reuse clears the stale icons and rebuilds only the frame's own"
+        );
     }
 
     #[test]
