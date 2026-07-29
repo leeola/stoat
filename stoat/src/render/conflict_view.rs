@@ -1,6 +1,6 @@
 use crate::{
     conflict_session::ConflictViewState,
-    display_map::{BlockRowKind, DisplaySnapshot},
+    display_map::{BlockRowKind, CachedHighlightEndpoints, DisplaySnapshot},
     editor_state::EditorState,
     merge_view::{AlignRow, ChunkState, MergeDoc},
     render::review::{
@@ -105,6 +105,9 @@ pub(crate) fn render_conflict_view(
     let snapshot = editor.display_map.snapshot();
     let scroll_row = editor.scroll_row;
 
+    // Held aside for the paint, since the view state below borrows the editor
+    // and a sibling field cannot be borrowed alongside it.
+    let mut endpoint_cache = editor.highlight_endpoint_cache.take();
     if let Some(state) = editor.conflict_view.as_mut() {
         render_conflict_rows(
             &snapshot,
@@ -114,8 +117,10 @@ pub(crate) fn render_conflict_view(
             fallback_style,
             theme,
             buf,
+            Some(&mut endpoint_cache),
         );
     }
+    editor.highlight_endpoint_cache = endpoint_cache;
 
     render_review_cursor(
         editor,
@@ -138,6 +143,10 @@ pub(crate) fn render_conflict_view(
 ///
 /// Paints rows only. The cursor belongs to the live grid alone, since a pooled
 /// page never carries one.
+///
+/// `endpoint_cache` is the editor's, when this paint has one behind it. A pooled
+/// page has no editor at all and passes `None`, resolving its endpoints fresh.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_conflict_rows(
     snapshot: &DisplaySnapshot,
     state: &mut ConflictViewState,
@@ -146,6 +155,7 @@ pub(crate) fn render_conflict_rows(
     fallback_style: Style,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    endpoint_cache: Option<&mut Option<CachedHighlightEndpoints>>,
 ) {
     let cols = ConflictColumns::compute(inner);
     let (doc, derived) = state.derived(snapshot);
@@ -160,6 +170,7 @@ pub(crate) fn render_conflict_rows(
         fallback_style,
         theme,
         buf,
+        endpoint_cache,
     );
 }
 
@@ -188,6 +199,7 @@ fn paint_conflict_rows(
     fallback_style: Style,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    endpoint_cache: Option<&mut Option<CachedHighlightEndpoints>>,
 ) {
     use crate::theme::scope as s;
     let dim = theme.get(s::UI_TEXT_MUTED);
@@ -210,7 +222,10 @@ fn paint_conflict_rows(
     if end_row <= scroll_row {
         return;
     }
-    let endpoints = snapshot.highlighted_endpoints(scroll_row..end_row);
+    let endpoints = match endpoint_cache {
+        Some(cache) => snapshot.highlighted_endpoints_cached(scroll_row..end_row, cache),
+        None => snapshot.highlighted_endpoints(scroll_row..end_row),
+    };
 
     for display_row in scroll_row..end_row {
         let y = inner.y + (display_row - scroll_row) as u16;

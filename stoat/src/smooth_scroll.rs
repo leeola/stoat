@@ -469,6 +469,7 @@ pub(crate) fn render_page_from_snapshot(
             &mut buf,
             scene.as_mut(),
             dim,
+            None,
         );
         dim_page(&mut buf, area, gutter.theme(), dim);
         let mut bytes = serialize_buffer(&mut buf, gutter.theme());
@@ -750,6 +751,7 @@ pub(crate) fn render_conflict_page_from_parts(
         fallback_style,
         theme,
         &mut buf,
+        None,
     );
     let bytes = serialize_buffer(&mut buf, theme);
 
@@ -1475,6 +1477,7 @@ mod tests {
             &mut expected,
             None,
             0.0,
+            None,
         );
         let expected = serialize_buffer(&mut expected, &theme);
 
@@ -1541,6 +1544,7 @@ mod tests {
             fallback,
             &theme,
             &mut expected,
+            None,
         );
         let expected = serialize_buffer(&mut expected, &theme);
 

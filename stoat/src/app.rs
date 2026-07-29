@@ -17587,6 +17587,7 @@ mod tests {
             fallback,
             &theme,
             &mut expected,
+            None,
         );
         let expected = crate::smooth_scroll::serialize_buffer(&mut expected, &theme);
 

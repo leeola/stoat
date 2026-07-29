@@ -981,6 +981,30 @@ impl DisplaySnapshot {
         self.build_endpoints(highlights, byte_range)
     }
 
+    /// Like [`Self::highlighted_endpoints`] but memoizes the result in `cache`,
+    /// rebuilding only when the buffer version, the identity of a highlight
+    /// collection, or the byte range changes.
+    ///
+    /// A repaint that changed none of those, which is what a cursor blink or a
+    /// glide frame is, gets the previous resolve back rather than walking the
+    /// highlight maps again.
+    pub fn highlighted_endpoints_cached(
+        &self,
+        display_rows: Range<u32>,
+        cache: &mut Option<CachedHighlightEndpoints>,
+    ) -> Arc<[highlights::HighlightEndpoint]> {
+        let highlights = Highlights {
+            text_highlights: Some(&self.text_highlights),
+            inlay_highlights: Some(&self.inlay_highlights),
+            semantic_token_highlights: self.syntax_token_highlights(),
+            lsp_token_highlights: self.lsp_syntax_token_highlights(),
+        };
+        let byte_range = self
+            .block_snapshot
+            .row_range_to_buffer_byte_range(display_rows);
+        self.build_endpoints_cached(highlights, byte_range, cache)
+    }
+
     /// Chunk `display_rows` using endpoints already resolved by
     /// [`Self::highlighted_endpoints`], skipping the per-call endpoint build.
     ///
@@ -1505,6 +1529,46 @@ mod tests {
             frame.content.contains("delta"),
             "the last line stays rendered while typing mid-buffer:\n{}",
             frame.content,
+        );
+    }
+
+    /// The review and conflict paints resolve endpoints once per frame and
+    /// chunk each row against them, so what a repaint costs turns on whether
+    /// that resolve is reused. A hit hands back the same allocation, which is
+    /// the only way to see the difference from outside.
+    #[test]
+    fn a_repaint_that_changed_nothing_reuses_its_endpoints() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "let x = 1\nlet y = 2\n");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
+
+        let mut cache = None;
+        let first = display_map
+            .snapshot()
+            .highlighted_endpoints_cached(0..2, &mut cache);
+        let second = display_map
+            .snapshot()
+            .highlighted_endpoints_cached(0..2, &mut cache);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "an unchanged frame reuses the resolve",
+        );
+
+        // A different range describes different bytes, so it cannot answer from
+        // the same set.
+        let narrower = display_map
+            .snapshot()
+            .highlighted_endpoints_cached(0..1, &mut cache);
+        assert!(!Arc::ptr_eq(&first, &narrower), "a new range rebuilds");
+
+        shared.write().expect("poisoned").edit(0..0, "// edit\n");
+        let after_edit = display_map
+            .snapshot()
+            .highlighted_endpoints_cached(0..1, &mut cache);
+        assert!(
+            !Arc::ptr_eq(&narrower, &after_edit),
+            "a buffer edit rebuilds",
         );
     }
 

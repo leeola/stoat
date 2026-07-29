@@ -3,7 +3,7 @@ use crate::{
     diff_map::ChangeKind,
     display_map::{
         highlights::{HighlightEndpoint, HighlightStyle},
-        BlockRowKind, DisplaySnapshot,
+        BlockRowKind, CachedHighlightEndpoints, DisplaySnapshot,
     },
     editor_state::EditorState,
     host::DiffStatus,
@@ -110,6 +110,7 @@ pub(crate) fn render_diff_view(
         buf,
         scene,
         0.0,
+        Some(&mut editor.highlight_endpoint_cache),
     );
     render_review_cursor(
         editor,
@@ -207,6 +208,9 @@ impl DiffColumns {
 /// Shared by the live [`render_diff_view`] and the off-loop smooth-scroll page
 /// so both paint an identical grid. It takes owned parts and paints no cursor,
 /// letting a pooled page render it on a blocking worker.
+///
+/// `endpoint_cache` is the editor's, when this paint has one behind it. A pooled
+/// page has no editor at all and passes `None`, resolving its endpoints fresh.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_diff_rows(
     snapshot: &DisplaySnapshot,
@@ -217,6 +221,7 @@ pub(crate) fn paint_diff_rows(
     buf: &mut Buffer,
     scene: Option<&mut ApcScene>,
     dim: f32,
+    endpoint_cache: Option<&mut Option<CachedHighlightEndpoints>>,
 ) {
     let total_rows = snapshot.line_count();
     let visible = inner.height as u32;
@@ -261,7 +266,10 @@ pub(crate) fn paint_diff_rows(
         .unwrap_or_default();
 
     let mut base_line = base_line_at(snapshot, scroll_row);
-    let row_endpoints = snapshot.highlighted_endpoints(scroll_row..end_row);
+    let row_endpoints = match endpoint_cache {
+        Some(cache) => snapshot.highlighted_endpoints_cached(scroll_row..end_row, cache),
+        None => snapshot.highlighted_endpoints(scroll_row..end_row),
+    };
     let mut line_buf = String::new();
 
     for display_row in scroll_row..end_row {
