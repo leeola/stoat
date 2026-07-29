@@ -778,8 +778,31 @@ impl InlaySnapshot {
         }
     }
 
-    pub fn clip_point(&self, point: InlayPoint, _bias: Bias) -> InlayPoint {
-        let buf = self.to_buffer_point(point);
+    /// Move `point` to the nearest position a caret can occupy, preferring the
+    /// side `bias` names.
+    ///
+    /// The two positions bracketing a hint answer to one buffer point, so
+    /// resolving through the buffer would fold them together and leave a caret
+    /// unable to cross. A point landing inside a hint is sent to whichever edge
+    /// the bias asks for instead, the way a fold placeholder is treated. A point
+    /// already on an edge is a position in its own right and stays there.
+    pub fn clip_point(&self, point: InlayPoint, bias: Bias) -> InlayPoint {
+        let (start, end, item) =
+            self.transforms
+                .find::<Dimensions<Point, InlayPoint>, _>((), &point, Bias::Right);
+
+        if let Some(Transform::Inlay(_)) = item {
+            return if bias == Bias::Left || point == start.1 {
+                start.1
+            } else {
+                end.1
+            };
+        }
+
+        let buf = {
+            let overshoot = point_overshoot(start.1 .0, point.0);
+            start.0 + overshoot
+        };
         let max_row = self.buffer.line_count().saturating_sub(1);
         let row = buf.row.min(max_row);
         let line_len = self.buffer.rope().line_len(row);
@@ -1067,7 +1090,7 @@ mod tests {
         multi_buffer::MultiBuffer,
     };
     use std::sync::{Arc, RwLock};
-    use stoat_text::{patch::Patch, Point};
+    use stoat_text::{patch::Patch, Bias, Point};
 
     fn make_snapshot(content: &str) -> Arc<super::InlaySnapshot> {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
@@ -1092,7 +1115,7 @@ mod tests {
             .map(|(pos, text)| {
                 let off = buffer_snapshot.rope().point_to_offset(pos);
                 (
-                    buffer_snapshot.anchor_at(off, stoat_text::Bias::Right),
+                    buffer_snapshot.anchor_at(off, Bias::Right),
                     text,
                     super::InlayKind::Hint,
                 )
@@ -1196,7 +1219,7 @@ mod tests {
         let (mut map, _) = InlayMap::new(buffer_snapshot.clone());
 
         let off = buffer_snapshot.rope().point_to_offset(Point::new(0, 5));
-        let anchor = buffer_snapshot.anchor_at(off, stoat_text::Bias::Right);
+        let anchor = buffer_snapshot.anchor_at(off, Bias::Right);
         let ids = map.splice(
             &buffer_snapshot,
             Vec::new(),
@@ -1229,7 +1252,7 @@ mod tests {
                 .rope()
                 .point_to_offset(Point::new(0, column));
             (
-                buffer_snapshot.anchor_at(off, stoat_text::Bias::Right),
+                buffer_snapshot.anchor_at(off, Bias::Right),
                 text.to_string(),
                 super::InlayKind::Hint,
             )
@@ -1280,7 +1303,7 @@ mod tests {
         map.sync(buffer_snapshot.clone(), &Patch::empty());
 
         let off = buffer_snapshot.rope().point_to_offset(Point::new(100, 0));
-        let anchor = buffer_snapshot.anchor_at(off, stoat_text::Bias::Right);
+        let anchor = buffer_snapshot.anchor_at(off, Bias::Right);
         map.splice(
             &buffer_snapshot,
             Vec::new(),
@@ -1318,7 +1341,7 @@ mod tests {
                 .rope()
                 .point_to_offset(Point::new(row, column));
             (
-                buffer_snapshot.anchor_at(off, stoat_text::Bias::Right),
+                buffer_snapshot.anchor_at(off, Bias::Right),
                 text.to_string(),
                 super::InlayKind::Hint,
             )
@@ -1363,6 +1386,59 @@ mod tests {
         assert_eq!(snap.line_len(1), 5);
     }
 
+    /// A hint sits between two buffer positions that are really one, so the
+    /// only thing telling the two sides apart is the bias. Clipping both to the
+    /// same place leaves a caret unable to cross a hint.
+    #[test]
+    fn clipping_a_point_inside_a_hint_follows_the_bias() {
+        // "hello: str world", with the hint filling columns 5 through 10.
+        let snap =
+            make_snapshot_with_inlays("hello world", vec![(Point::new(0, 5), ": str".to_string())]);
+
+        assert_eq!(
+            snap.clip_point(InlayPoint::new(0, 7), Bias::Left),
+            InlayPoint::new(0, 5),
+            "leftward, to the position before the hint",
+        );
+        assert_eq!(
+            snap.clip_point(InlayPoint::new(0, 7), Bias::Right),
+            InlayPoint::new(0, 10),
+            "rightward, to the position after it",
+        );
+
+        for bias in [Bias::Left, Bias::Right] {
+            assert_eq!(
+                snap.clip_point(InlayPoint::new(0, 5), bias),
+                InlayPoint::new(0, 5),
+                "the position before the hint is already a real one, {bias:?}",
+            );
+            assert_eq!(
+                snap.clip_point(InlayPoint::new(0, 10), bias),
+                InlayPoint::new(0, 10),
+                "so is the position after it, {bias:?}",
+            );
+        }
+    }
+
+    /// Clipping also holds a point inside the buffer, which the bias handling
+    /// must not cost.
+    #[test]
+    fn clipping_still_clamps_past_the_end() {
+        let snap =
+            make_snapshot_with_inlays("hello world", vec![(Point::new(0, 5), ": str".to_string())]);
+
+        assert_eq!(
+            snap.clip_point(InlayPoint::new(0, 400), Bias::Left),
+            InlayPoint::new(0, 16),
+            "a column past the end lands on it",
+        );
+        assert_eq!(
+            snap.clip_point(InlayPoint::new(9, 0), Bias::Left),
+            InlayPoint::new(0, 0),
+            "so does a row past the end",
+        );
+    }
+
     #[test]
     fn line_len_with_inlay() {
         let snap =
@@ -1394,7 +1470,7 @@ mod tests {
         let (mut map, _) = InlayMap::new(snap.clone());
 
         let off = snap.rope().point_to_offset(Point::new(0, 5));
-        let anchor = snap.anchor_at(off, stoat_text::Bias::Right);
+        let anchor = snap.anchor_at(off, Bias::Right);
         map.splice(
             &snap,
             Vec::new(),
