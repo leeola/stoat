@@ -1017,6 +1017,14 @@ pub struct Stoat {
     /// notification must fire exactly once per buffer over its
     /// lifetime.
     pub(crate) lsp_opened: std::collections::HashSet<BufferId>,
+    /// Scratch the per-event LSP drains refill instead of allocating.
+    ///
+    /// Both drains need the whole `&mut Stoat` in their loop bodies, so neither
+    /// can walk what it is iterating borrowed. Reusing one buffer across events
+    /// keeps that allocation off the keystroke path. Each is emptied before it
+    /// is parked, so only its capacity carries over.
+    lsp_drain_hosts: Vec<Arc<dyn LspHost>>,
+    pub(crate) lsp_drain_buffers: Vec<BufferId>,
     /// Last buffer version a `did_change` debounce has been
     /// scheduled for. Bumped synchronously on the edit-detection
     /// tick so a buffer is never enqueued twice for the same
@@ -1805,6 +1813,8 @@ impl Stoat {
             modal_separator_drag: None,
             minimap_drag: None,
             lsp_opened: std::collections::HashSet::new(),
+            lsp_drain_hosts: Vec::new(),
+            lsp_drain_buffers: Vec::new(),
             lsp_buffer_versions: std::collections::HashMap::new(),
             lsp_pending_changes: std::collections::HashMap::new(),
             auto_reload_poll: None,
@@ -3975,66 +3985,30 @@ impl Stoat {
     /// the event loop on a pathological notification burst; the
     /// remainder drains on the next update.
     pub(crate) fn drain_lsp_notifications(&mut self) {
-        for (server, host) in self.lsp_registry.named_hosts() {
-            self.drain_notifications_from(&server, &host);
+        // Borrowed rather than collected, since this runs on every event and
+        // the owned form clones a name string per server each time. The fields
+        // the drain writes are disjoint from the registry it walks.
+        let Self {
+            lsp_registry,
+            lsp_progress,
+            diagnostics,
+            lsp_message,
+            ..
+        } = self;
+        for (server, host) in lsp_registry.named_hosts_iter() {
+            drain_notifications_from(server, host, lsp_progress, diagnostics, lsp_message);
         }
     }
 
+    #[cfg(test)]
     fn drain_notifications_from(&mut self, server: &str, host: &Arc<dyn LspHost>) {
-        use crate::host::LspNotification;
-        use futures::FutureExt;
-        for _ in 0..256 {
-            // try_recv_notification is implemented on top of a
-            // non-blocking channel poll, so its future resolves
-            // synchronously; now_or_never returns Some immediately.
-            // Any host that breaks that contract returns None here
-            // and the drain ends safely.
-            let Some(slot) = host.try_recv_notification().now_or_never() else {
-                break;
-            };
-            let Some(notification) = slot else {
-                break;
-            };
-            if self.lsp_progress.update(server, &notification) {
-                continue;
-            }
-            match notification {
-                LspNotification::Diagnostics {
-                    uri, diagnostics, ..
-                } => {
-                    if let Some(path) = lsp_uri_to_path(&uri) {
-                        let count = diagnostics.len();
-                        self.diagnostics.replace_from_server(
-                            path.clone(),
-                            server.to_string(),
-                            diagnostics,
-                        );
-                        tracing::info!(
-                            target: "stoat::lsp",
-                            path = %path.display(),
-                            count,
-                            "diagnostics applied",
-                        );
-                    } else {
-                        tracing::debug!(
-                            target: "stoat::app",
-                            uri = uri.as_str(),
-                            "diagnostics arrived for non-file URI; dropped",
-                        );
-                    }
-                },
-                LspNotification::ShowMessage { typ, message } => {
-                    self.lsp_message = Some((typ, format!("{server}: {message}")));
-                },
-                other => {
-                    tracing::debug!(
-                        target: "stoat::app",
-                        ?other,
-                        "unhandled LSP notification"
-                    );
-                },
-            }
-        }
+        drain_notifications_from(
+            server,
+            host,
+            &mut self.lsp_progress,
+            &mut self.diagnostics,
+            &mut self.lsp_message,
+        );
     }
 
     /// Drain and answer server-to-client requests the LSP host has
@@ -4049,9 +4023,20 @@ impl Stoat {
     /// mutates buffers synchronously here because it needs `&mut self`. Only
     /// the reply is deferred.
     pub(crate) fn drain_lsp_incoming_requests(&mut self) {
-        for host in self.lsp_registry.hosts() {
-            self.drain_incoming_requests_from(&host);
+        // Copied into a reused buffer rather than walked borrowed, because
+        // answering a workspace/applyEdit needs the whole `&mut self` and may
+        // reach the registry. Refilling keeps the allocation off this per-event
+        // path, and the handles themselves are refcount bumps.
+        let mut hosts = std::mem::take(&mut self.lsp_drain_hosts);
+        hosts.clear();
+        hosts.extend(self.lsp_registry.hosts_iter().cloned());
+        for host in &hosts {
+            self.drain_incoming_requests_from(host);
         }
+        // Emptied before it is parked, so a server that shuts down is not held
+        // alive by a handle sitting in the scratch until the next event.
+        hosts.clear();
+        self.lsp_drain_hosts = hosts;
     }
 
     fn drain_incoming_requests_from(&mut self, host: &Arc<dyn LspHost>) {
@@ -10137,6 +10122,76 @@ async fn connect_window_ipc(path: PathBuf, tx: UnboundedSender<WindowIpc>) {
     }
 
     let _ = tx.send(WindowIpc::Disconnected);
+}
+
+/// Dispatch every notification `host` has queued, up to a per-tick cap.
+///
+/// `Progress` updates the [`crate::lsp::progress::LspProgressMap`]. Other
+/// variants log via tracing for now and become future per-feature consumer
+/// hooks. The cap keeps a pathological notification burst from starving the
+/// event loop, and the remainder drains on the next update.
+///
+/// Takes the three fields it writes rather than the whole [`Stoat`], so
+/// [`Stoat::drain_lsp_notifications`] can walk the registry borrowed instead of
+/// collecting it per event.
+fn drain_notifications_from(
+    server: &str,
+    host: &Arc<dyn LspHost>,
+    progress: &mut crate::lsp::progress::LspProgressMap,
+    diagnostics: &mut crate::diagnostics::DiagnosticSet,
+    message: &mut Option<(lsp_types::MessageType, String)>,
+) {
+    use crate::host::LspNotification;
+    use futures::FutureExt;
+    for _ in 0..256 {
+        // try_recv_notification is implemented on top of a non-blocking channel
+        // poll, so its future resolves synchronously and now_or_never returns
+        // Some immediately. Any host that breaks that contract returns None
+        // here and the drain ends safely.
+        let Some(slot) = host.try_recv_notification().now_or_never() else {
+            break;
+        };
+        let Some(notification) = slot else {
+            break;
+        };
+        if progress.update(server, &notification) {
+            continue;
+        }
+        match notification {
+            LspNotification::Diagnostics {
+                uri,
+                diagnostics: published,
+                ..
+            } => {
+                if let Some(path) = lsp_uri_to_path(&uri) {
+                    let count = published.len();
+                    diagnostics.replace_from_server(path.clone(), server.to_string(), published);
+                    tracing::info!(
+                        target: "stoat::lsp",
+                        path = %path.display(),
+                        count,
+                        "diagnostics applied",
+                    );
+                } else {
+                    tracing::debug!(
+                        target: "stoat::app",
+                        uri = uri.as_str(),
+                        "diagnostics arrived for non-file URI; dropped",
+                    );
+                }
+            },
+            LspNotification::ShowMessage { typ, message: text } => {
+                *message = Some((typ, format!("{server}: {text}")));
+            },
+            other => {
+                tracing::debug!(
+                    target: "stoat::app",
+                    ?other,
+                    "unhandled LSP notification"
+                );
+            },
+        }
+    }
 }
 
 pub(crate) fn lsp_uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {

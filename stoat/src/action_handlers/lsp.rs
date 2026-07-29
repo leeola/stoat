@@ -439,7 +439,13 @@ fn report_lsp_unavailable(stoat: &mut Stoat, what: &str) -> UpdateEffect {
 /// [`TextDocumentSyncKind::INCREMENTAL`] (per-edit ranges via
 /// [`patch_to_content_changes`]). `NONE` skips silently.
 pub(crate) fn notify_buffer_changes_pending(stoat: &mut Stoat) {
-    for id in stoat.lsp_opened.iter().copied().collect::<Vec<_>>() {
+    // Refilled rather than collected fresh, since the loop body needs `stoat`
+    // mutably and this runs on every event.
+    let mut opened = std::mem::take(&mut stoat.lsp_drain_buffers);
+    opened.clear();
+    opened.extend(stoat.lsp_opened.iter().copied());
+
+    for id in opened.iter().copied() {
         // Skip buffers unchanged since the last sync before grouping hosts and
         // building plans. build_dispatch_plan would return empty plans anyway,
         // and the version write-back below would rewrite the same value.
@@ -550,6 +556,9 @@ pub(crate) fn notify_buffer_changes_pending(stoat: &mut Stoat) {
         });
         stoat.lsp_pending_changes.insert(id, task);
     }
+
+    opened.clear();
+    stoat.lsp_drain_buffers = opened;
 }
 
 /// A buffer's fanned-out hosts grouped by the sync kind and encoding each

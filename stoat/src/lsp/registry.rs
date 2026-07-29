@@ -258,27 +258,37 @@ impl LspRegistry {
 
     /// Returns every host that can emit server-initiated traffic, the
     /// per-language clients plus any injected sole client.
+    ///
+    /// Owned, for a caller that outlives the borrow. A caller that does not
+    /// wants [`Self::hosts_iter`], which allocates nothing.
     pub(crate) fn hosts(&self) -> Vec<Arc<dyn LspHost>> {
-        let mut hosts: Vec<Arc<dyn LspHost>> = self.clients.values().cloned().collect();
-        if let Some(sole) = &self.sole {
-            hosts.push(sole.clone());
-        }
-        hosts
+        self.hosts_iter().cloned().collect()
+    }
+
+    /// [`Self::hosts`] without the vector.
+    pub(crate) fn hosts_iter(&self) -> impl Iterator<Item = &Arc<dyn LspHost>> {
+        self.clients.values().chain(self.sole.as_ref())
     }
 
     /// Returns every host paired with its server name, for traffic that must
     /// attribute progress or diagnostics to the reporting server. The injected
     /// sole client is named `default`.
+    ///
+    /// Owned, for a caller that outlives the borrow. A caller that does not
+    /// wants [`Self::named_hosts_iter`], which skips a string clone per server
+    /// as well as the vector.
     pub(crate) fn named_hosts(&self) -> Vec<(String, Arc<dyn LspHost>)> {
-        let mut hosts: Vec<(String, Arc<dyn LspHost>)> = self
-            .clients
+        self.named_hosts_iter()
+            .map(|(name, host)| (name.to_string(), host.clone()))
+            .collect()
+    }
+
+    /// [`Self::named_hosts`] without the vector or the name clones.
+    pub(crate) fn named_hosts_iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn LspHost>)> {
+        self.clients
             .iter()
-            .map(|(name, host)| (name.clone(), host.clone()))
-            .collect();
-        if let Some(sole) = &self.sole {
-            hosts.push((String::from("default"), sole.clone()));
-        }
-        hosts
+            .map(|(name, host)| (name.as_str(), host))
+            .chain(self.sole.as_ref().map(|sole| ("default", sole)))
     }
 
     /// Map each server name to the offset encoding it negotiated.
