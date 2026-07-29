@@ -140,10 +140,9 @@ pub struct FileFinder {
     /// Config-defined named scopes, compiled at open time in alphabetical
     /// (BTreeMap) order. Shift-Tab cycles through them after Modified.
     pub(crate) named_scopes: Vec<(String, GlobSet)>,
-    /// Cached glob-filtered base for the active [`FinderScope::Named`] scope,
-    /// keyed by scope name. Rebuilt when the walk grows or the scope changes,
-    /// so a stable Named query does not re-run the globset over `all_paths`.
-    pub(crate) named_cache: Option<(String, Vec<PathBuf>)>,
+    /// Glob-filtered base for the active [`FinderScope::Named`] scope, or
+    /// `None` before one is built.
+    pub(crate) named_cache: Option<NamedCache>,
     /// Cells the modal would need to show the whole unfiltered list, which the
     /// renderer sizes the box against.
     ///
@@ -152,6 +151,26 @@ pub struct FileFinder {
     /// The base grows while the background walk streams in, so a large workspace
     /// settles at its full size over the first frames after opening.
     pub(crate) content_size: (u16, u16),
+}
+
+/// The walked paths a named scope's globset accepted, and how much of the walk
+/// has been tested.
+///
+/// The walk streams in batches. Re-globbing everything collected so far on each
+/// one would cost the whole list per batch, so matches accumulate and only the
+/// paths past [`Self::consumed`] are tested.
+pub(crate) struct NamedCache {
+    /// Scope name these matches belong to. A different name means a different
+    /// globset, so the cache starts over.
+    name: String,
+    /// Paths accepted so far, in walk order.
+    filtered: Vec<PathBuf>,
+    /// How many entries of the walk have been tested.
+    ///
+    /// Only meaningful while the walk grows by appending. A re-root clears the
+    /// walked paths, which is why a count past the end forces a rebuild rather
+    /// than slicing past the list.
+    consumed: usize,
 }
 
 impl FileFinder {
@@ -285,27 +304,18 @@ impl FileFinder {
             self.remeasure_content();
             return;
         }
-        let pumped = self.core.pump_walk();
+        self.core.pump_walk();
         let text = self.input.text(ws);
         match self.scope.clone() {
             FinderScope::All | FinderScope::AllWorkspaces => self.core.refilter(&text),
             FinderScope::Modified => self.core.refilter_with_base(&text, &self.modified_paths),
             FinderScope::Buffers => self.core.refilter_with_base(&text, &self.buffer_paths),
             FinderScope::Named(name) => {
-                let stale = pumped
-                    || self
-                        .named_cache
-                        .as_ref()
-                        .map(|(n, _)| *n != name)
-                        .unwrap_or(true);
-                if stale {
-                    let filtered = self.filter_by_named_scope(&name);
-                    self.named_cache = Some((name.clone(), filtered));
-                }
+                self.sync_named_cache(&name);
                 // `named_cache` and `core` are disjoint fields, so the matcher
                 // reads the cached base in place rather than cloning it.
-                if let Some((_, base)) = &self.named_cache {
-                    self.core.refilter_with_base(&text, base);
+                if let Some(cache) = &self.named_cache {
+                    self.core.refilter_with_base(&text, &cache.filtered);
                 }
             },
         }
@@ -323,18 +333,47 @@ impl FileFinder {
         self.content_size = (FINDER_CONTENT_COLS, rows.saturating_add(FINDER_CHROME_ROWS));
     }
 
-    /// The subset of the walked `all_paths` whose repo-relative display matches
-    /// the named scope's globset. Empty for a scope name with no compiled set.
-    fn filter_by_named_scope(&self, name: &str) -> Vec<PathBuf> {
+    /// Bring [`Self::named_cache`] up to date with the walk under `name`.
+    ///
+    /// Tests only the paths the cache has not seen, so a streaming walk costs
+    /// each path once across every batch rather than the whole list per batch.
+    /// A scope name with no compiled globset matches nothing, and still marks
+    /// its paths seen so they are not retested.
+    fn sync_named_cache(&mut self, name: &str) {
+        let walked = self.core.all_paths.len();
+        let reusable = self
+            .named_cache
+            .as_ref()
+            .is_some_and(|cache| cache.name == name && cache.consumed <= walked);
+        if !reusable {
+            self.named_cache = Some(NamedCache {
+                name: name.to_string(),
+                filtered: Vec::new(),
+                consumed: 0,
+            });
+        }
+
+        let cache = self.named_cache.as_mut().expect("built above when absent");
+        if cache.consumed == walked {
+            return;
+        }
+
         let Some((_, globset)) = self.named_scopes.iter().find(|(n, _)| n == name) else {
-            return Vec::new();
+            cache.consumed = walked;
+            return;
         };
-        self.core
-            .all_paths
-            .iter()
-            .filter(|path| globset.is_match(paths::display_relative(path, &self.core.git_root)))
-            .cloned()
-            .collect()
+
+        // Resolved once for the batch. `display_relative` reads the environment
+        // and allocates for the home directory on every call.
+        let home = paths::home_dir();
+        let git_root = &self.core.git_root;
+        for path in &self.core.all_paths[cache.consumed..] {
+            let display = paths::display_relative_with_home(path, git_root, home.as_deref());
+            if globset.is_match(display) {
+                cache.filtered.push(path.clone());
+            }
+        }
+        cache.consumed = walked;
     }
 
     /// Sync the preview pane to the current selection. Clears the pane when
@@ -965,6 +1004,92 @@ mod tests {
         let base: Vec<PathBuf> = finder.core.picklist.base.to_vec();
         assert_eq!(base.len(), 1, "code scope should list only src/a.rs");
         assert!(base[0].ends_with("src/a.rs"));
+    }
+
+    /// Repo-relative paths in the finder's candidate base, sorted.
+    fn base_paths(h: &TestHarness) -> Vec<String> {
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        let mut base: Vec<String> = finder
+            .core
+            .picklist
+            .base
+            .iter()
+            .map(|path| paths::display_relative(path, &finder.core.git_root))
+            .collect();
+        base.sort();
+        base
+    }
+
+    /// Land `rel` on the finder the way a walk batch does, then let it refilter.
+    ///
+    /// Stands in for `PathPicker::pump_walk` without a live channel, so it has
+    /// to reproduce both of its effects. The paths are appended, and the query
+    /// cache is invalidated so the matcher re-runs over the grown base.
+    fn deliver_walk_batch(h: &mut TestHarness, rel: &[&str]) {
+        {
+            let finder = h.stoat.file_finder.as_mut().expect("finder open");
+            let root = finder.core.git_root.clone();
+            finder
+                .core
+                .all_paths
+                .extend(rel.iter().map(|r| root.join(r)));
+            finder.core.invalidate();
+        }
+        crate::action_handlers::sync_file_finder_preview(&mut h.stoat);
+    }
+
+    /// A walk streams in batches, so the scope's matches accumulate across them.
+    /// Testing only the new tail is what keeps that from costing the whole list
+    /// per batch, and the earlier batches' matches have to survive it.
+    #[test]
+    fn a_named_scope_keeps_matches_from_every_walk_batch() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("src/a.rs", ""), ("docs/x.md", "")]);
+        h.stoat.settings.finder_scopes =
+            BTreeMap::from([("code".to_string(), vec!["src/**".to_string()])]);
+
+        h.type_keys("space p");
+        h.type_keys("backtab");
+        h.type_keys("backtab");
+        assert_eq!(base_paths(&h), vec!["src/a.rs"], "the first batch matched");
+
+        deliver_walk_batch(&mut h, &["src/b.rs", "docs/y.md"]);
+        assert_eq!(
+            base_paths(&h),
+            vec!["src/a.rs", "src/b.rs"],
+            "the later batch adds its match without losing or repeating the earlier one",
+        );
+
+        deliver_walk_batch(&mut h, &["docs/z.md"]);
+        assert_eq!(
+            base_paths(&h),
+            vec!["src/a.rs", "src/b.rs"],
+            "a batch matching nothing leaves the accumulated matches alone",
+        );
+    }
+
+    /// A different name is a different globset, so its matches cannot be
+    /// appended to what the previous scope accumulated.
+    #[test]
+    fn switching_named_scopes_rebuilds_rather_than_appending() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("src/a.rs", ""), ("docs/b.md", "")]);
+        h.stoat.settings.finder_scopes = BTreeMap::from([
+            ("code".to_string(), vec!["src/**".to_string()]),
+            ("prose".to_string(), vec!["docs/**".to_string()]),
+        ]);
+
+        h.type_keys("space p");
+        h.type_keys("backtab");
+        h.type_keys("backtab");
+        assert_eq!(base_paths(&h), vec!["src/a.rs"], "the code scope");
+
+        h.type_keys("backtab");
+        assert_eq!(
+            base_paths(&h),
+            vec!["docs/b.md"],
+            "the prose scope lists its own matches, not both scopes'",
+        );
     }
 
     /// Displayed rows of the finder's current filtered list, through the same
