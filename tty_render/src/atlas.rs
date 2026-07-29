@@ -15,7 +15,6 @@ use cosmic_text::{CacheKey, FontSystem, SwashCache, SwashImage};
 use etagere::{size2, AllocId, Allocation, BucketedAtlasAllocator};
 use lru::LruCache;
 use rustc_hash::FxBuildHasher;
-use std::collections::HashSet;
 use swash::scale::image::Content;
 use wgpu::{
     CommandEncoderDescriptor, Device, Extent3d, Origin3d, Queue, TexelCopyBufferLayout,
@@ -79,8 +78,8 @@ impl GlyphAtlas {
     /// eviction. Call before the frame's [`Self::get_or_insert`] calls so a
     /// glyph drawn this frame is never evicted to make room for another.
     pub fn begin_frame(&mut self) {
-        self.mask.in_use.clear();
-        self.color.in_use.clear();
+        self.mask.frame = self.mask.frame.wrapping_add(1);
+        self.color.frame = self.color.frame.wrapping_add(1);
     }
 
     /// Look up `key`, rasterizing and caching it on first use.
@@ -175,7 +174,10 @@ struct Atlas {
     size: u32,
     max_dim: u32,
     cache: LruCache<CacheId, CachedGlyph, FxBuildHasher>,
-    in_use: HashSet<CacheId, FxBuildHasher>,
+    /// Frame this atlas is packing, bumped once per frame. A glyph counts as
+    /// this frame's when its stamp matches, which is what protects it from
+    /// eviction, so nothing has to be reset between frames.
+    frame: u64,
     /// Bumped whenever a packed glyph's UV changes: a grow rescales every
     /// normalized coordinate, and an eviction frees a slot another glyph then
     /// reuses. A caller reusing glyph instances across frames compares it to
@@ -197,7 +199,7 @@ impl Atlas {
             size,
             max_dim,
             cache: LruCache::unbounded_with_hasher(FxBuildHasher),
-            in_use: HashSet::default(),
+            frame: 0,
             epoch: 0,
         }
     }
@@ -205,10 +207,10 @@ impl Atlas {
     /// `Some` if `id` is cached (inner value `None` for an empty glyph),
     /// `None` if it must be rasterized.
     fn lookup(&mut self, id: CacheId) -> Option<Option<GlyphInfo>> {
-        let cached = self.cache.get(&id)?;
-        let info = glyph_info(cached, self.kind, self.size);
-        self.in_use.insert(id);
-        Some(info)
+        let (kind, size, frame) = (self.kind, self.size, self.frame);
+        let cached = self.cache.get_mut(&id)?;
+        cached.used_frame = frame;
+        Some(glyph_info(cached, kind, size))
     }
 
     /// Pack and cache a font glyph's swash bitmap. A later grow copies it
@@ -226,9 +228,8 @@ impl Atlas {
         if width == 0 || height == 0 {
             self.cache.put(
                 id,
-                CachedGlyph::empty(image.placement.left, image.placement.top),
+                CachedGlyph::empty(image.placement.left, image.placement.top, self.frame),
             );
-            self.in_use.insert(id);
             return None;
         }
 
@@ -252,10 +253,10 @@ impl Atlas {
             height,
             left: image.placement.left,
             top: image.placement.top,
+            used_frame: self.frame,
         };
         let info = glyph_info(&cached, self.kind, self.size);
         self.cache.put(id, cached);
-        self.in_use.insert(id);
 
         info
     }
@@ -296,10 +297,10 @@ impl Atlas {
             height,
             left: 0,
             top: 0,
+            used_frame: self.frame,
         };
         let info = glyph_info(&cached, self.kind, self.size);
         self.cache.put(id, cached);
-        self.in_use.insert(id);
 
         info
     }
@@ -335,16 +336,16 @@ impl Atlas {
                 return Some(allocation);
             }
 
-            let (mut key, mut glyph) = self.cache.peek_lru()?;
+            let (_, mut glyph) = self.cache.peek_lru()?;
             while glyph.alloc.is_none() {
-                if self.in_use.contains(key) {
+                if glyph.used_frame == self.frame {
                     return None;
                 }
                 let _ = self.cache.pop_lru();
-                (key, glyph) = self.cache.peek_lru()?;
+                (_, glyph) = self.cache.peek_lru()?;
             }
 
-            if self.in_use.contains(key) {
+            if glyph.used_frame == self.frame {
                 return None;
             }
 
@@ -404,10 +405,14 @@ struct CachedGlyph {
     height: u32,
     left: i32,
     top: i32,
+    /// Frame this glyph was last looked up or inserted on. It equals the
+    /// atlas's own counter exactly while the glyph is this frame's, which is
+    /// what keeps it from being evicted to make room for another.
+    used_frame: u64,
 }
 
 impl CachedGlyph {
-    fn empty(left: i32, top: i32) -> CachedGlyph {
+    fn empty(left: i32, top: i32, used_frame: u64) -> CachedGlyph {
         CachedGlyph {
             alloc: None,
             x: 0,
@@ -416,6 +421,7 @@ impl CachedGlyph {
             height: 0,
             left,
             top,
+            used_frame,
         }
     }
 }
@@ -530,6 +536,49 @@ mod tests {
     fn uv_rect_normalizes_to_atlas_size() {
         assert_eq!(uv_rect(64, 32, 16, 8, 256), [0.25, 0.125, 0.3125, 0.15625]);
         assert_eq!(uv_rect(0, 0, 256, 256, 256), [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    /// Residency is a stamp compared against the atlas's frame counter, so what
+    /// protects a glyph is having been touched since the last `begin_frame`.
+    /// Packing the same glyphs within one frame must grow the texture, since
+    /// none of them may be evicted, while packing them a frame apart must evict
+    /// instead and leave the texture where it was.
+    #[test]
+    fn only_this_frame_s_glyphs_are_safe_from_eviction() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("atlas eviction test: no wgpu adapter, skipping");
+            return;
+        };
+
+        let glyph = 20u32;
+        let coverage = (glyph * glyph) as usize;
+        let pack = |atlas: &mut GlyphAtlas, per_frame: bool| {
+            for cp in 0..300u32 {
+                if per_frame {
+                    atlas.begin_frame();
+                }
+                atlas.get_or_insert_procedural(&device, &queue, cp, glyph, glyph, || {
+                    vec![255u8; coverage]
+                });
+            }
+        };
+
+        let mut within_one_frame = GlyphAtlas::new(&device);
+        let (initial, _) = within_one_frame.texture_dims();
+        within_one_frame.begin_frame();
+        pack(&mut within_one_frame, false);
+        assert!(
+            within_one_frame.texture_dims().0 > initial,
+            "glyphs packed in one frame are all protected, so the atlas grows",
+        );
+
+        let mut a_frame_apart = GlyphAtlas::new(&device);
+        pack(&mut a_frame_apart, true);
+        assert_eq!(
+            a_frame_apart.texture_dims().0,
+            initial,
+            "a glyph left over from an earlier frame is evicted rather than grown around",
+        );
     }
 
     #[test]

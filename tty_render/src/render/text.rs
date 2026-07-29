@@ -811,10 +811,11 @@ impl TextPass {
         );
         // Overlay glyphs are shaped and packed here, in the same packing phase
         // as the grid and run glyphs. While the popovers epoch holds, the shaped
-        // groups are reused, but each glyph is still re-touched against the atlas
-        // so it stays marked in use this frame. The run packing below and the
-        // next frame's grid packing evict anything not touched this frame, which
-        // would otherwise move a reused overlay's UV out from under it.
+        // groups are reused, but each glyph is still re-touched against the
+        // atlas. The touch both stamps it as this frame's and moves it back to
+        // the head of the eviction order. The run packing below and the next
+        // frame's grid packing evict what neither protects, which would
+        // otherwise move a reused overlay's UV out from under it.
         let popovers_epoch = grid.popovers_epoch();
         let pending_reused = popovers_epoch == self.last_popovers_epoch
             && self.overlay_pending.len() == grid.overlays().len();
