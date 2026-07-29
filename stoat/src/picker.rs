@@ -106,6 +106,36 @@ pub(crate) struct PickList {
     /// single `git_root`. Set for the cross-workspace scope. `None` leaves every
     /// existing finder git-root-relative.
     pub(crate) display_roots: Option<Vec<PathBuf>>,
+    /// Rendered display string per base path, or `None` before the first
+    /// [`Self::refilter`].
+    ///
+    /// Derived state. [`Self::refilter`] rebuilds it whenever its inputs move,
+    /// so clearing it is safe and setting it is not possible from outside this
+    /// module.
+    pub(crate) display: Option<DisplayCache>,
+}
+
+/// The display string of every base path, and the order an unfiltered list
+/// shows them in.
+///
+/// Deriving one relativizes the path, substitutes the home directory, and
+/// builds a `String`. The filter needs all of them on every keystroke while the
+/// renderer formats only the rows on screen, so a large repo would spend most
+/// of a keystroke rebuilding strings that did not change.
+pub(crate) struct DisplayCache {
+    /// Everything [`row_display`] reads, so a cache hit is equivalent to
+    /// deriving the strings again.
+    base: Arc<[PathBuf]>,
+    git_root: PathBuf,
+    display_roots: Option<Vec<PathBuf>>,
+    home: Option<PathBuf>,
+    /// One string per [`Self::base`] entry, in the same order.
+    rows: Vec<String>,
+    /// Indices into [`Self::rows`], ordered by the string each names, which is
+    /// the order an empty query lists them in.
+    sorted: Vec<usize>,
+    /// Bumped on each rebuild, so a test can tell a reuse from a rebuild.
+    generation: u64,
 }
 
 impl Default for PickList {
@@ -118,6 +148,7 @@ impl Default for PickList {
             viewport_rows: None,
             filter_generation: next_generation(),
             display_roots: None,
+            display: None,
         }
     }
 }
@@ -163,31 +194,29 @@ impl PickList {
         let (anchor, pattern) = split_root_anchor(query);
         let anchor_len = anchor.map_or(0, |a| a.chars().count()) as u32;
 
-        let display_roots = self.display_roots.as_deref();
-        // Resolve the home directory once for the whole list rather than per
-        // path, since `row_display`'s git-root-relative branch would otherwise
-        // hit the env for every candidate.
-        let home = paths::home_dir();
-        let home = home.as_deref();
-        let items = self
-            .base
+        self.ensure_display(git_root);
+        let cache = self.display.as_ref().expect("ensure_display builds one");
+        let keeps = |display: &str| anchor.is_none_or(|a| display.starts_with(a));
+
+        let items = cache
+            .rows
             .iter()
             .enumerate()
-            .map(|(idx, path)| (idx, row_display(path, git_root, display_roots, home)))
-            .filter(|(_, display)| anchor.is_none_or(|a| display.starts_with(a)));
+            .filter(|(_, display)| keeps(display))
+            .map(|(idx, display)| (idx, display.clone()));
+
         let Some(mut matches) = fuzzy::match_and_rank(pattern, items) else {
-            let mut rows: Vec<(usize, String)> = self
-                .base
+            // Pre-sorted at cache build, so an unfiltered list is a walk rather
+            // than a sort over freshly derived strings.
+            let listed: Vec<usize> = cache
+                .sorted
                 .iter()
-                .enumerate()
-                .map(|(idx, path)| (idx, row_display(path, git_root, display_roots, home)))
-                .filter(|(_, display)| anchor.is_none_or(|a| display.starts_with(a)))
+                .copied()
+                .filter(|&idx| keeps(&cache.rows[idx]))
                 .collect();
-            rows.sort_by(|a, b| a.1.cmp(&b.1));
-            for (idx, _) in &rows {
-                self.filtered.push(*idx);
-                self.match_indices.push((0..anchor_len).collect());
-            }
+
+            self.match_indices = vec![(0..anchor_len).collect(); listed.len()];
+            self.filtered = listed;
             self.clamp_selected();
             return;
         };
@@ -200,6 +229,49 @@ impl PickList {
         }
         self.clamp_selected();
         self.filter_generation = next_generation();
+    }
+
+    /// Build the display strings for the current base, reusing them when
+    /// nothing [`row_display`] reads has moved.
+    fn ensure_display(&mut self, git_root: &Path) {
+        // Resolved once for the whole list rather than per path, since
+        // `row_display`'s git-root-relative branch would otherwise hit the env
+        // for every candidate.
+        let home = paths::home_dir();
+
+        let reusable = self.display.as_ref().is_some_and(|cache| {
+            Arc::ptr_eq(&cache.base, &self.base)
+                && cache.git_root == git_root
+                && cache.display_roots == self.display_roots
+                && cache.home == home
+        });
+        if reusable {
+            return;
+        }
+
+        let display_roots = self.display_roots.as_deref();
+        let rows: Vec<String> = self
+            .base
+            .iter()
+            .map(|path| row_display(path, git_root, display_roots, home.as_deref()))
+            .collect();
+
+        let mut sorted: Vec<usize> = (0..rows.len()).collect();
+        sorted.sort_by(|&a, &b| rows[a].cmp(&rows[b]));
+
+        let generation = self
+            .display
+            .as_ref()
+            .map_or(0, |cache| cache.generation + 1);
+        self.display = Some(DisplayCache {
+            base: Arc::clone(&self.base),
+            git_root: git_root.to_path_buf(),
+            display_roots: self.display_roots.clone(),
+            home,
+            rows,
+            sorted,
+            generation,
+        });
     }
 
     fn clamp_selected(&mut self) {
@@ -315,6 +387,10 @@ pub(crate) struct PathPicker {
     /// than a non-empty result keeps a zero-match query cached instead of
     /// refiltering the whole list every render tick.
     filter_valid: bool,
+    /// The base handed to [`Self::picklist`], kept so an unchanged walk reuses
+    /// it. Dropped by [`PathPicker::invalidate`], which every caller that moves
+    /// [`Self::all_paths`] already goes through.
+    built_base: Option<Arc<[PathBuf]>>,
     pub(crate) preview: Preview,
 }
 
@@ -340,6 +416,7 @@ impl PathPicker {
             picklist: PickList::default(),
             last_filter_text: String::new(),
             filter_valid: false,
+            built_base: None,
             preview,
         }
     }
@@ -389,6 +466,7 @@ impl PathPicker {
     pub(crate) fn invalidate(&mut self) {
         self.last_filter_text.clear();
         self.filter_valid = false;
+        self.built_base = None;
         self.picklist.filtered.clear();
         self.picklist.match_indices.clear();
     }
@@ -419,7 +497,19 @@ impl PathPicker {
         if query == self.last_filter_text && self.filter_valid {
             return;
         }
-        let base: Arc<[PathBuf]> = Arc::from(self.all_paths.as_slice());
+
+        // Rebuilt only when the walk moved the paths under it. Copying every
+        // path per keystroke would also hand the pick list a base it cannot
+        // recognise, discarding its display strings along with it.
+        let base = match &self.built_base {
+            Some(base) => Arc::clone(base),
+            None => {
+                let base: Arc<[PathBuf]> = Arc::from(self.all_paths.as_slice());
+                self.built_base = Some(Arc::clone(&base));
+                base
+            },
+        };
+
         self.set_base_and_refilter(query, base);
     }
 
@@ -792,6 +882,77 @@ mod tests {
         list.filtered
             .iter()
             .map(|i| paths::display_relative(&list.base[*i], git_root))
+            .collect()
+    }
+
+    /// The generation of the cache backing `list`, or `None` before one is
+    /// built.
+    fn display_generation(list: &PickList) -> Option<u64> {
+        list.display.as_ref().map(|cache| cache.generation)
+    }
+
+    /// Deriving a display string relativizes a path and allocates, and the
+    /// filter needs every one of them per keystroke, so typing must reuse them.
+    #[test]
+    fn refiltering_an_unchanged_base_reuses_the_display_strings() {
+        let git_root = p("/r");
+        let mut list = PickList {
+            base: vec![p("/r/b.rs"), p("/r/a.rs"), p("/r/sub/c.rs")].into(),
+            ..PickList::default()
+        };
+
+        list.refilter("", &git_root);
+        let built = display_generation(&list).expect("the first refilter builds a cache");
+
+        for query in ["a", "a.", "a.r", "a.rs", ""] {
+            list.refilter(query, &git_root);
+            assert_eq!(
+                display_generation(&list),
+                Some(built),
+                "typing {query:?} over the same base must not rebuild the strings",
+            );
+        }
+    }
+
+    /// The cross-workspace scope re-roots how a path renders without touching
+    /// the path list, so the cache cannot key on the base alone.
+    #[test]
+    fn flipping_display_roots_rebuilds_the_display_strings() {
+        let git_root = p("/r");
+        let mut list = PickList {
+            base: vec![p("/r/a.rs")].into(),
+            ..PickList::default()
+        };
+
+        list.refilter("", &git_root);
+        let built = display_generation(&list).expect("the first refilter builds a cache");
+        assert_eq!(
+            names_of(&list),
+            vec!["a.rs"],
+            "rendered against the git root"
+        );
+
+        list.display_roots = Some(vec![p("/r")]);
+        list.refilter("", &git_root);
+
+        assert_ne!(
+            display_generation(&list),
+            Some(built),
+            "a re-rooted list renders differently and must be rebuilt",
+        );
+        assert_eq!(
+            names_of(&list),
+            vec!["r/a.rs"],
+            "rows now carry their owning root's basename",
+        );
+    }
+
+    /// The display strings the filtered rows would paint, in filtered order.
+    fn names_of(list: &PickList) -> Vec<String> {
+        let cache = list.display.as_ref().expect("a cache is built");
+        list.filtered
+            .iter()
+            .map(|&idx| cache.rows[idx].clone())
             .collect()
     }
 
