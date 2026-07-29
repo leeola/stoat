@@ -77,9 +77,17 @@ pub struct FoldPlaceholder {
 }
 
 impl FoldPlaceholder {
-    #[allow(dead_code)]
-    fn display_text(&self) -> &str {
-        self.collapsed_text.as_deref().unwrap_or(self.text.as_ref())
+    /// The string this fold renders as.
+    ///
+    /// Every consumer must resolve the two strings the same way. The
+    /// transform's output summary is what fold-offset and fold-point
+    /// conversions measure the fold by, and the char iterators behind
+    /// [`FoldSnapshot::line_len`] are what a row's width is summed from, so a
+    /// collapsed text of a different length than the ellipsis would otherwise
+    /// paint one width and measure another, putting everything to its right on
+    /// the row at the wrong column.
+    fn display_text(&self) -> &Arc<str> {
+        self.collapsed_text.as_ref().unwrap_or(&self.text)
     }
 }
 
@@ -164,7 +172,12 @@ impl<'a> Dimension<'a, FoldSummary> for FoldStart {
 #[derive(Clone, Debug)]
 struct Transform {
     summary: TransformSummary,
-    placeholder: Option<FoldPlaceholder>,
+    /// The string a fold transform renders as, already resolved by
+    /// [`FoldPlaceholder::display_text`]. `None` marks an isomorphic segment.
+    ///
+    /// Resolved once here rather than carrying the whole placeholder, so no
+    /// consumer downstream can measure one string and emit another.
+    placeholder_text: Option<Arc<str>>,
     fold_id: Option<FoldId>,
 }
 
@@ -555,7 +568,7 @@ fn build_fold_transforms(
                         input: summary.clone(),
                         output: summary,
                     },
-                    placeholder: None,
+                    placeholder_text: None,
                     fold_id: None,
                 },
                 (),
@@ -601,7 +614,7 @@ fn build_fold_transforms(
                         input: summary.clone(),
                         output: summary,
                     },
-                    placeholder: None,
+                    placeholder_text: None,
                     fold_id: None,
                 },
                 (),
@@ -613,14 +626,15 @@ fn build_fold_transforms(
         } else {
             rope.text_summary_for_range(fold_start..fold_end)
         };
-        let output_summary = TextSummary::from_str(&fold.placeholder.text);
+        let placeholder_text = fold.placeholder.display_text().clone();
+        let output_summary = TextSummary::from_str(&placeholder_text);
         transforms.push(
             Transform {
                 summary: TransformSummary {
                     input: input_summary,
                     output: output_summary,
                 },
-                placeholder: Some(fold.placeholder.clone()),
+                placeholder_text: Some(placeholder_text),
                 fold_id: Some(fold.id),
             },
             (),
@@ -641,7 +655,7 @@ fn build_fold_transforms(
                     input: summary.clone(),
                     output: summary,
                 },
-                placeholder: None,
+                placeholder_text: None,
                 fold_id: None,
             },
             (),
@@ -681,7 +695,7 @@ fn push_fold_isomorphic(tree: &mut SumTree<Transform>, summary: TransformSummary
     let mut summary = Some(summary);
     tree.update_last(
         |t| {
-            if t.placeholder.is_none() {
+            if t.placeholder_text.is_none() {
                 ContextLessSummary::add_summary(
                     &mut t.summary,
                     &summary.take().expect("set on entry"),
@@ -694,7 +708,7 @@ fn push_fold_isomorphic(tree: &mut SumTree<Transform>, summary: TransformSummary
         tree.push(
             Transform {
                 summary: s,
-                placeholder: None,
+                placeholder_text: None,
                 fold_id: None,
             },
             (),
@@ -766,7 +780,7 @@ fn sync_fold_incremental(
 
         // If cursor item ends exactly at edit start, merge it with prefix
         if let Some(item) = cursor.item()
-            && item.placeholder.is_none()
+            && item.placeholder_text.is_none()
             && cursor.start().0 + item.summary.input.len == old_start_offset
         {
             push_fold_isomorphic(&mut new_transforms, item.summary.clone());
@@ -860,14 +874,15 @@ fn sync_fold_incremental(
                 }
 
                 let input_summary = text_summary(fold_start_offset, fold_end_offset);
-                let output_summary = TextSummary::from_str(&fold.placeholder.text);
+                let placeholder_text = fold.placeholder.display_text().clone();
+                let output_summary = TextSummary::from_str(&placeholder_text);
                 new_transforms.push(
                     Transform {
                         summary: TransformSummary {
                             input: input_summary,
                             output: output_summary,
                         },
-                        placeholder: Some(fold.placeholder.clone()),
+                        placeholder_text: Some(placeholder_text),
                         fold_id: Some(fold.id),
                     },
                     (),
@@ -938,7 +953,7 @@ fn sync_fold_incremental(
                     input: summary.clone(),
                     output: summary,
                 },
-                placeholder: None,
+                placeholder_text: None,
                 fold_id: None,
             },
             (),
@@ -1021,7 +1036,7 @@ impl FoldSnapshot {
             .transforms
             .find::<Dimensions<InlayPoint, FoldPoint>, _>((), &inlay_point, bias);
         match item {
-            Some(t) if t.placeholder.is_some() => {
+            Some(t) if t.placeholder_text.is_some() => {
                 if inlay_point.0 == start.0 .0 {
                     start.1
                 } else {
@@ -1040,7 +1055,7 @@ impl FoldSnapshot {
             .transforms
             .find::<Dimensions<InlayPoint, FoldPoint>, _>((), &fold_point, Bias::Right);
         match item {
-            Some(t) if t.placeholder.is_some() => start.0,
+            Some(t) if t.placeholder_text.is_some() => start.0,
             Some(_) | None => {
                 let overshoot = point_overshoot(start.1 .0, fold_point.0);
                 InlayPoint(start.0 .0 + overshoot)
@@ -1091,7 +1106,7 @@ impl FoldSnapshot {
         if overshoot != Point::zero() {
             let transform = item.expect("a fold row within range sits in a transform");
             assert!(
-                transform.placeholder.is_none(),
+                transform.placeholder_text.is_none(),
                 "a column-0 fold point with row overshoot cannot fall inside a placeholder",
             );
             let inlay_point = InlayPoint(start.1.input.lines + overshoot);
@@ -1339,14 +1354,11 @@ impl<'a> FoldChunksInner<'a> {
                 return None;
             }
 
-            if let Some(placeholder) = transform.placeholder.as_ref() {
+            if let Some(placeholder_text) = transform.placeholder_text.as_ref() {
                 // Emit placeholder text as a single chunk. Placeholders span the
                 // entire transform in fold-offset space regardless of how many
                 // inlay-side bytes they collapse.
-                let text: &'a str = placeholder
-                    .collapsed_text
-                    .as_deref()
-                    .unwrap_or(placeholder.text.as_ref());
+                let text: &'a str = placeholder_text;
                 let fold_id = transform.fold_id;
                 let trans_end = trans_end_fold;
                 self.cursor.next();
@@ -1388,7 +1400,7 @@ impl FoldPointCursor<'_> {
         }
         let start = self.cursor.start();
         match self.cursor.item() {
-            Some(t) if t.placeholder.is_some() => {
+            Some(t) if t.placeholder_text.is_some() => {
                 if inlay_point.0 == start.0 .0 {
                     start.1
                 } else {
@@ -1428,7 +1440,7 @@ impl Iterator for FoldChars<'_> {
             let fold = self.folds.item().expect("fold present at its start offset");
             let end = self.inlay_snapshot.to_buffer_point(fold.range.end);
             let end_off = self.rope.point_to_offset(end);
-            let placeholder_chars: Vec<char> = fold.placeholder.text.chars().collect();
+            let placeholder_chars: Vec<char> = fold.placeholder.display_text().chars().collect();
             self.folds.next();
             self.next_fold_start_offset = self.folds.item().map_or(usize::MAX, |f| {
                 self.rope
@@ -1471,7 +1483,8 @@ impl Iterator for ReversedFoldChars<'_> {
             let fold = self.folds.item().expect("fold present at its end offset");
             let start = self.inlay_snapshot.to_buffer_point(fold.range.start);
             let start_off = self.rope.point_to_offset(start);
-            let placeholder_chars: Vec<char> = fold.placeholder.text.chars().rev().collect();
+            let placeholder_chars: Vec<char> =
+                fold.placeholder.display_text().chars().rev().collect();
             self.folds.prev();
             self.next_fold_end_offset = self.folds.item().map_or(0, |f| {
                 self.rope
@@ -1777,6 +1790,84 @@ mod tests {
             snap.to_fold_point(InlayPoint::new(1, 3), Bias::Right),
             FoldPoint::new(1, 3)
         );
+    }
+
+    /// Fold `line1`'s five columns behind `placeholder` and report the row's
+    /// measured width, the text the chunk stream paints, and where the column
+    /// just past the fold converts to and back.
+    fn folded_row_geometry(placeholder: FoldPlaceholder) -> (u32, String, FoldPoint, InlayPoint) {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+
+        let start_off = buffer_snapshot
+            .rope()
+            .point_to_offset(stoat_text::Point::new(1, 0));
+        let end_off = buffer_snapshot
+            .rope()
+            .point_to_offset(stoat_text::Point::new(1, 5));
+        let anchor_range = buffer_snapshot.anchor_at(start_off, Bias::Right)
+            ..buffer_snapshot.anchor_at(end_off, Bias::Left);
+        fold_map.fold(vec![anchor_range], placeholder, &buffer_snapshot);
+        let (snap, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
+
+        let painted: String = snap
+            .chunks(
+                snap.row_start_offset(1)..snap.row_start_offset(2),
+                Arc::from(Vec::new()),
+            )
+            .map(|chunk| chunk.text.to_string())
+            .collect();
+
+        // The inlay point just past the folded span, which is where the
+        // transform's measured width decides the fold row's column.
+        let past_fold = InlayPoint::new(1, 5);
+        let fold_point = snap.to_fold_point(past_fold, Bias::Right);
+        (
+            snap.line_len(1),
+            painted,
+            fold_point,
+            snap.to_inlay_point(fold_point),
+        )
+    }
+
+    /// An LSP folding range can name its own collapsed text, and the fold's
+    /// measured width has to agree with the width painted. When they disagree
+    /// every column right of the fold on that row lands in the wrong place.
+    #[test]
+    fn a_collapsed_text_fold_measures_the_width_it_paints() {
+        let (width, painted, fold_point, back) = folded_row_geometry(FoldPlaceholder {
+            collapsed_text: Some(Arc::from("{ 3 lines }")),
+            ..FoldPlaceholder::default()
+        });
+
+        assert_eq!(painted.trim_end_matches('\n'), "{ 3 lines }");
+        assert_eq!(
+            width,
+            "{ 3 lines }".len() as u32,
+            "the row's width is the collapsed text, not the ellipsis it replaced",
+        );
+        assert_eq!(
+            fold_point,
+            FoldPoint::new(1, "{ 3 lines }".len() as u32),
+            "the column past the fold sits at the collapsed text's end",
+        );
+        assert_eq!(back, InlayPoint::new(1, 5), "and converts back to the fold");
+    }
+
+    /// The default ellipsis path must be untouched by resolving the two
+    /// strings in one place.
+    #[test]
+    fn an_ellipsis_fold_keeps_its_geometry() {
+        let (width, painted, fold_point, back) = folded_row_geometry(FoldPlaceholder::default());
+
+        assert_eq!(painted.trim_end_matches('\n'), "...");
+        assert_eq!(width, 3);
+        assert_eq!(fold_point, FoldPoint::new(1, 3));
+        assert_eq!(back, InlayPoint::new(1, 5));
     }
 
     #[test]
