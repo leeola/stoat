@@ -1878,12 +1878,12 @@ impl TextPass {
     /// The glyphs carry the row they were shaped for and the built instances
     /// carry a baked pixel position, so each survivor is corrected for where it
     /// now sits. Only the rows the scroll exposed are left to rebuild.
-    fn rotate_row_caches(&mut self, rows: usize) {
-        self.rows_shifted = rows > 0;
+    fn rotate_row_caches(&mut self, rows: isize) {
+        self.rows_shifted = rows != 0;
         let dy = rows as f32 * self.metrics.height;
 
         crate::render::rotate_row_cache(&mut self.glyph_row_cache, rows, |glyph| {
-            glyph.row -= rows;
+            glyph.row = glyph.row.saturating_add_signed(-rows);
         });
         crate::render::rotate_row_cache(&mut self.plain_row_instances, rows, |instance| {
             instance.pos[1] -= dy;
@@ -3904,7 +3904,7 @@ mod tests {
                 fill_row(grid, row, lines[from + row]);
             }
         }
-        fn frame(damage: &Damage, scrolled_rows: usize) -> Frame<'_> {
+        fn frame(damage: &Damage, scrolled_rows: isize) -> Frame<'_> {
             Frame {
                 cursor: None,
                 cursor_corners: None,

@@ -71,13 +71,16 @@ pub struct Frame<'a> {
     /// [`Self::damage`]. The cell-decoration passes gate their per-row rebuilds
     /// on it so an unchanged decoration is not re-uploaded every frame.
     pub decoration_damage: &'a Damage,
-    /// Rows the grid's content scrolled up by since the previous frame.
+    /// Rows the grid's content moved since the previous frame, positive for a
+    /// move up the screen.
     ///
     /// A scroll moves every row's content without changing most of it, so the
     /// passes that cache per row slide those caches by this instead of
-    /// rebuilding them. Zero for a frame that did not scroll, and for any grid
-    /// whose caller does not track it.
-    pub scrolled_rows: usize,
+    /// rebuilding them. Live output only ever moves content up. Gliding back
+    /// through scrollback moves it down, which is what the sign carries. Zero
+    /// for a frame that did not scroll, and for any grid whose caller does not
+    /// track it.
+    pub scrolled_rows: isize,
 }
 
 /// Cell layout metrics in physical pixels, derived from the configured logical
@@ -139,8 +142,8 @@ pub(crate) fn upload_needed<T: PartialEq>(built: &[T], last: &[T]) -> bool {
     built != last
 }
 
-/// Move each row of `cache` up by `by`, repairing what survives and emptying
-/// what the move vacates.
+/// Move each row of `cache` by `by`, up the screen when positive and down when
+/// negative, repairing what survives and emptying what the move vacates.
 ///
 /// The passes cache built instances per row, and a scroll moves a row's content
 /// without changing it, so sliding the cache keeps the shaping and building
@@ -148,29 +151,37 @@ pub(crate) fn upload_needed<T: PartialEq>(built: &[T], last: &[T]) -> bool {
 /// though, as a row index or a position, so `repair` corrects each survivor for
 /// the row it lands on.
 ///
-/// The last `by` rows are cleared rather than left holding what the first rows
-/// held, so a caller that neglects to damage them draws nothing instead of the
-/// previous occupants. A scroll of at least the whole height leaves nothing to
-/// keep and empties every row.
-pub(crate) fn rotate_row_cache<T>(cache: &mut [Vec<T>], by: usize, mut repair: impl FnMut(&mut T)) {
+/// The rows the move vacates are cleared rather than left holding what wrapped
+/// around into them, so a caller that neglects to damage them draws nothing
+/// instead of the wrong thing. A move of at least the whole height leaves
+/// nothing to keep and empties every row.
+pub(crate) fn rotate_row_cache<T>(cache: &mut [Vec<T>], by: isize, mut repair: impl FnMut(&mut T)) {
     if by == 0 {
         return;
     }
-    if by >= cache.len() {
+    let magnitude = by.unsigned_abs();
+    if magnitude >= cache.len() {
         for row in cache.iter_mut() {
             row.clear();
         }
         return;
     }
 
-    cache.rotate_left(by);
-    let kept = cache.len() - by;
-    for row in &mut cache[..kept] {
+    let (repaired, vacated) = if by > 0 {
+        cache.rotate_left(magnitude);
+        cache.split_at_mut(cache.len() - magnitude)
+    } else {
+        cache.rotate_right(magnitude);
+        let (vacated, repaired) = cache.split_at_mut(magnitude);
+        (repaired, vacated)
+    };
+
+    for row in repaired {
         for instance in row.iter_mut() {
             repair(instance);
         }
     }
-    for row in &mut cache[kept..] {
+    for row in vacated {
         row.clear();
     }
 }
@@ -254,6 +265,27 @@ mod tests {
             cache,
             vec![vec![10], vec![20], vec![30], Vec::<i32>::new(), Vec::new()],
             "the rows below the scroll move up repaired, and the rows they \
+             vacated are emptied",
+        );
+    }
+
+    /// Gliding back through scrollback moves content down the screen, so the
+    /// slide has to run the other way and empty the rows it vacates at the top.
+    #[test]
+    fn rotating_a_cache_downward_moves_rows_the_other_way() {
+        let mut cache = vec![vec![10, 11], vec![20], vec![30], vec![40], vec![50]];
+        rotate_row_cache(&mut cache, -2, |value| *value += 20);
+
+        assert_eq!(
+            cache,
+            vec![
+                Vec::<i32>::new(),
+                Vec::new(),
+                vec![30, 31],
+                vec![40],
+                vec![50]
+            ],
+            "the rows above the scroll move down repaired, and the rows they \
              vacated are emptied",
         );
     }

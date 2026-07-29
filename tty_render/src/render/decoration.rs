@@ -215,7 +215,7 @@ impl DecorationPass {
         resolution: [f32; 2],
         grid_scroll: f32,
         decoration_damage: &Damage,
-        scrolled_rows: usize,
+        scrolled_rows: isize,
     ) {
         let globals = Globals {
             resolution,
@@ -246,7 +246,7 @@ impl DecorationPass {
         };
         // A rotation moved every kept instance, so the buffer rewrites from the
         // top even on a frame that rebuilt no row.
-        let first = if scrolled_rows > 0 {
+        let first = if scrolled_rows != 0 {
             0
         } else {
             let Some(&first) = rows_to_build.iter().min() else {

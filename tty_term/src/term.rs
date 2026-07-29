@@ -1354,7 +1354,20 @@ impl Terminal {
     /// Returns `None` at the live bottom (`visual` at or below zero), so the
     /// renderer shows the live grid -- the cursor- and decoration-bearing
     /// projection -- rather than a history snapshot.
-    pub fn project_scrollback(&self, out: &mut Grid, visual: f32) -> Option<f32> {
+    ///
+    /// `moved_rows` is how far the window's content moved since the last
+    /// compose, positive when it moved up the screen. A non-zero move slides
+    /// `out` by it and rewrites only the rows that then differ, reporting them
+    /// through `damage`. Zero, or a move clearing the whole window, rewrites
+    /// every row and reports [`Damage::Full`].
+    pub fn project_scrollback(
+        &mut self,
+        out: &mut Grid,
+        visual: f32,
+        moved_rows: isize,
+        damage: &mut Damage,
+    ) -> Option<f32> {
+        *damage = Damage::Full;
         if visual <= 0.0 {
             return None;
         }
@@ -1377,21 +1390,42 @@ impl Terminal {
         let topmost = grid.topmost_line().0;
         let bottommost = grid.bottommost_line().0;
 
+        // Sliding the window by what the caller says it moved leaves most rows
+        // already holding the right content, so the compare below finds only the
+        // rows the move revealed. A move clearing the window keeps nothing worth
+        // comparing against.
+        let out_rows = out.rows();
+        let sliding = moved_rows != 0 && moved_rows.unsigned_abs() < out_rows;
+        if sliding {
+            out.scroll_by(moved_rows);
+            *damage = Damage::Partial(vec![false; out_rows]);
+        }
+
         // Row 0 is the straddle row one line older than the offset's top, so a
         // downward sub-cell shift always has an older row to reveal at the top.
         let top_line = -offset - 1;
-        for out_row in 0..out.rows() {
+        let mut projected = mem::take(&mut self.row_scratch);
+        for out_row in 0..out_rows {
             let line = top_line + out_row as i32;
             let source = (line >= topmost && line <= bottommost).then(|| &grid[Line(line)]);
-            for col in 0..cols {
-                *out.get_mut(out_row, col) = match source {
-                    Some(row) => {
-                        project_cell(&row[Column(col)], colors, &self.theme, &self.palette)
-                    },
-                    None => Cell::default(),
-                };
+
+            projected.clear();
+            projected.extend((0..cols).map(|col| match source {
+                Some(row) => project_cell(&row[Column(col)], colors, &self.theme, &self.palette),
+                None => Cell::default(),
+            }));
+
+            if sliding {
+                if out.row(out_row) == projected.as_slice() {
+                    continue;
+                }
+                if let Damage::Partial(rows_dirty) = damage {
+                    rows_dirty[out_row] = true;
+                }
             }
+            out.row_mut(out_row).copy_from_slice(&projected);
         }
+        self.row_scratch = projected;
 
         // The window begins one row above the offset's top, so it rests shifted
         // up a full row with that straddle hidden above the viewport; as the
@@ -1752,7 +1786,7 @@ impl Terminal {
         let sliding =
             matches!(dirty, Damage::Full) && !resized && offset == 0 && grew > 0 && grew < rows;
         if sliding {
-            grid.scroll_up(grew);
+            grid.scroll_by(grew as isize);
             dirty = Damage::Partial(vec![false; rows]);
         }
 
@@ -5533,6 +5567,42 @@ mod tests {
         assert!(untouched, "a degraded projection leaves out untouched");
     }
 
+    /// Stepping one row deeper into history moves the whole window down by a
+    /// row, so only the older line revealed at the top is actually new.
+    #[test]
+    fn a_scrollback_step_reports_only_the_row_it_revealed() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        // a, b, c, d scroll into history; e, f stay on the live screen.
+        terminal.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
+
+        let mut out = Grid::new(0, 0);
+        let mut damage = Damage::Full;
+
+        terminal.project_scrollback(&mut out, 1.0, 0, &mut damage);
+        assert_eq!(
+            [out.get(0, 0).ch, out.get(1, 0).ch, out.get(2, 0).ch],
+            ['c', 'd', 'e'],
+        );
+
+        // One row deeper. The window slides down, so c and d keep their content
+        // at rows one and two, and only the newly revealed b is written.
+        terminal.project_scrollback(&mut out, 2.0, -1, &mut damage);
+
+        let Damage::Partial(rows) = &damage else {
+            panic!("a one-row step must not report the whole window damaged");
+        };
+        assert_eq!(
+            rows,
+            &vec![true, false, false],
+            "only the row the step revealed at the top is rewritten",
+        );
+        assert_eq!(
+            [out.get(0, 0).ch, out.get(1, 0).ch, out.get(2, 0).ch],
+            ['b', 'c', 'd'],
+            "and the window shows the older line above what it already held",
+        );
+    }
+
     #[test]
     fn project_scrollback_composes_a_straddled_history_window() {
         let mut terminal = Terminal::new(2, 4, Theme::default());
@@ -5542,11 +5612,17 @@ mod tests {
         let mut out = Grid::new(0, 0);
 
         // At the live bottom nothing is scrolled back: fall back to the live grid.
-        assert_eq!(terminal.project_scrollback(&mut out, 0.0), None);
+        assert_eq!(
+            terminal.project_scrollback(&mut out, 0.0, 0, &mut Damage::Full),
+            None
+        );
 
         // One row back: the window is the older straddle row (b) above the
         // offset-1 view (c, d), shifted up a whole row so the straddle hides.
-        assert_eq!(terminal.project_scrollback(&mut out, 1.0), Some(-1.0));
+        assert_eq!(
+            terminal.project_scrollback(&mut out, 1.0, 0, &mut Damage::Full),
+            Some(-1.0)
+        );
         assert_eq!(
             (out.rows(), out.cols()),
             (3, 4),
@@ -5558,14 +5634,20 @@ mod tests {
         );
 
         // Half a row deeper keeps the same window, shifted by the sub-cell frac.
-        assert_eq!(terminal.project_scrollback(&mut out, 1.5), Some(-0.5));
+        assert_eq!(
+            terminal.project_scrollback(&mut out, 1.5, 0, &mut Damage::Full),
+            Some(-0.5)
+        );
         assert_eq!(
             [out.get(0, 0).ch, out.get(1, 0).ch, out.get(2, 0).ch],
             ['b', 'c', 'd'],
         );
 
         // At the oldest line the straddle falls above history and stays blank.
-        assert_eq!(terminal.project_scrollback(&mut out, 3.0), Some(-1.0));
+        assert_eq!(
+            terminal.project_scrollback(&mut out, 3.0, 0, &mut Damage::Full),
+            Some(-1.0)
+        );
         assert_eq!(*out.get(0, 0), Cell::default(), "no row older than the top");
         assert_eq!([out.get(1, 0).ch, out.get(2, 0).ch], ['a', 'b']);
     }

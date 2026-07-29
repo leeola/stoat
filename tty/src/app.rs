@@ -1480,21 +1480,28 @@ impl ApplicationHandler<PtyEvent> for App {
                         let vt_changed = matches!(&damage, Damage::Full)
                             || matches!(&damage, Damage::Partial(rows) if rows.iter().any(|&d| d));
                         let rebuild = state.last_scrollback_offset != Some(offset) || vt_changed;
+                        // A larger offset reaches further back, which pushes the
+                        // window's content down the screen, so the rows the
+                        // content moved is the previous offset less this one.
+                        // Live output landing mid-glide invalidates that, since
+                        // the window then holds rows the slide cannot account
+                        // for.
+                        let moved_rows = match state.last_scrollback_offset {
+                            Some(last) if !vt_changed => (last - offset) as isize,
+                            _ => 0,
+                        };
                         state.last_scrollback_offset = Some(offset);
 
+                        let mut sb_damage = Damage::Partial(Vec::new());
                         if rebuild {
-                            let terminal = state.terminal.lock();
+                            let mut terminal = state.terminal.lock();
                             terminal.project_scrollback(
                                 &mut state.scrollback_grid,
                                 state.scrollback_visual,
+                                moved_rows,
+                                &mut sb_damage,
                             );
                         }
-
-                        let sb_damage = if rebuild {
-                            Damage::Full
-                        } else {
-                            Damage::Partial(Vec::new())
-                        };
 
                         // The sub-cell shift project_scrollback returns, recomputed
                         // locally so a fraction-only frame needs no lock or compose.
@@ -1515,7 +1522,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                 },
                                 damage: &sb_damage,
                                 decoration_damage: &sb_damage,
-                                scrolled_rows: 0,
+                                scrolled_rows: moved_rows,
                             },
                         );
                         false
@@ -1675,7 +1682,7 @@ impl ApplicationHandler<PtyEvent> for App {
                             },
                             damage: &damage,
                             decoration_damage: &decoration_damage,
-                            scrolled_rows: scroll_delta,
+                            scrolled_rows: scroll_delta as isize,
                         },
                         &composites,
                         cursor_scissor,

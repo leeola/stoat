@@ -255,7 +255,7 @@ impl BackgroundPass {
         cursor: CursorState,
         grid_scroll: f32,
         damage: &Damage,
-        scrolled_rows: usize,
+        scrolled_rows: isize,
     ) {
         let c = cursor.corners.unwrap_or([[0.0; 2]; 4]);
         let globals = Globals {
@@ -290,7 +290,7 @@ impl BackgroundPass {
         // background row is one colour lookup per cell, and every instance bakes
         // its row, so a slide would have to rewrite the same bytes it moved.
         let full = matches!(damage, Damage::Full)
-            || scrolled_rows > 0
+            || scrolled_rows != 0
             || total != self.count as usize
             || total > self.capacity;
         if full {
