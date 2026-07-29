@@ -1,6 +1,6 @@
-// Instanced per-cell background fill. One instance per grid cell; the six
-// quad corners are generated from the vertex index, so the only vertex buffer
-// is the per-cell instance stream.
+// Instanced per-cell background fill. One instance per grid cell, carrying only
+// a packed color. The six quad corners come from the vertex index and the cell
+// coordinate from the instance index, so nothing but the color is uploaded.
 
 struct Globals {
     resolution: vec2<f32>,
@@ -13,7 +13,9 @@ struct Globals {
     // so the live cell fill and the cursor leave panel_count zero and never loop.
     panel_count: u32,
     occlude_all: u32,
-    pad3: f32,
+    // Grid width, which vs_main divides the instance index by to recover the
+    // cell coordinate. The cursor draw carries no grid and leaves it zero.
+    cols: u32,
     cursor_color: vec4<f32>,
 }
 
@@ -61,8 +63,8 @@ struct VsOut {
 @vertex
 fn vs_main(
     @builtin(vertex_index) vertex_index: u32,
-    @location(0) cell: vec2<f32>,
-    @location(1) color: vec3<f32>,
+    @builtin(instance_index) instance_index: u32,
+    @location(0) color: vec4<f32>,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -71,6 +73,14 @@ fn vs_main(
         vec2<f32>(0.0, 1.0),
         vec2<f32>(1.0, 0.0),
         vec2<f32>(1.0, 1.0)
+    );
+
+    // The instance stream is exactly row-major over the grid and both draws start
+    // at instance zero, so the coordinate the quad needs is the index itself
+    // rather than 8 bytes per cell uploaded to say the same thing.
+    let cell = vec2<f32>(
+        f32(instance_index % globals.cols),
+        f32(instance_index / globals.cols)
     );
 
     // Snap each cell edge to a whole pixel so consecutive cells share an exact
@@ -86,7 +96,7 @@ fn vs_main(
 
     var out: VsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
-    out.color = color;
+    out.color = color.rgb;
     return out;
 }
 

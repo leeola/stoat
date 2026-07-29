@@ -1,10 +1,11 @@
 //! Instanced per-cell background fill.
 //!
 //! Draws one solid colored quad per grid cell, reading each [`Cell`]'s
-//! background from [`stoatty_term`]'s [`Grid`]. The quad corners are generated
-//! in the vertex shader from the vertex index, so the only vertex buffer is
-//! the per-cell instance stream; a uniform supplies the screen resolution and
-//! cell size used to map cells to clip space.
+//! background from [`stoatty_term`]'s [`Grid`]. The vertex shader derives the
+//! quad corners from the vertex index and the cell coordinate from the instance
+//! index, so the instance stream carries nothing but each cell's packed color.
+//! A uniform supplies the screen resolution, cell size, and column count used to
+//! map cells to clip space.
 //!
 //! [`Cell`]: stoatty_term::grid::Cell
 
@@ -31,12 +32,20 @@ const INITIAL_CAPACITY: usize = 2048;
 /// translucency is renderer policy so the block tints the cell beneath it.
 const CURSOR_ALPHA: f32 = 0.55;
 
-/// Per-cell instance: grid coordinate and normalized background color.
+/// One grid cell's background color, as the bytes the GPU normalizes.
+///
+/// Carries no grid coordinate. The buffer is exactly row-major over the whole
+/// grid and both draws bind it from instance zero, so the shader recovers the
+/// coordinate by dividing the instance index by the column count. Every full or
+/// scrolled frame re-uploads the whole buffer, and a coordinate is the one thing
+/// in it the GPU can derive for free.
+///
+/// Alpha is always 255, since the cell fill is opaque. The field exists because
+/// a 3-byte vertex format is not one the GPU offers.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct BgInstance {
-    cell: [f32; 2],
-    color: [f32; 3],
+    color: [u8; 4],
 }
 
 /// Uniform shared by the cell and cursor pipelines.
@@ -46,12 +55,15 @@ struct BgInstance {
 /// [TL, TR] then [BL, BR] in fractional cell coordinates), the cursor color,
 /// and the grid's eased vertical scroll offset in pixels.
 ///
-/// `scroll_y`, `panel_count`, `occlude_all`, and `pad3` fill one 16-byte slot
+/// `scroll_y`, `panel_count`, `occlude_all`, and `cols` fill one 16-byte slot
 /// so the following `cursor_color` lands on the 16-byte offset the uniform
 /// layout requires. The `vec4` corner pairs already sit on 16-byte boundaries.
 ///
-/// `panel_count` and `occlude_all` are non-zero only on an occludable pool
-/// composite, so the live cell fill and the cursor draw skip the occluder loop.
+/// Two pipelines share this uniform, so each write site zeroes the fields its own
+/// pipeline does not read. `panel_count` and `occlude_all` are non-zero only on an
+/// occludable pool composite, so the live cell fill and the cursor draw skip the
+/// occluder loop. `cols` is read only by the cell fill, which divides the instance
+/// index by it to recover the cell coordinate, so the cursor writes zero.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Globals {
@@ -62,7 +74,7 @@ struct Globals {
     scroll_y: f32,
     panel_count: u32,
     occlude_all: u32,
-    pad3: f32,
+    cols: u32,
     cursor_color: [f32; 4],
 }
 
@@ -159,7 +171,7 @@ impl BackgroundPass {
                 buffers: &[VertexBufferLayout {
                     array_stride: size_of::<BgInstance>() as u64,
                     step_mode: VertexStepMode::Instance,
-                    attributes: &vertex_attr_array![0 => Float32x2, 1 => Float32x3],
+                    attributes: &vertex_attr_array![0 => Unorm8x4],
                 }],
             },
             fragment: Some(FragmentState {
@@ -257,6 +269,7 @@ impl BackgroundPass {
         damage: &Damage,
         scrolled_rows: isize,
     ) {
+        let cols = grid.cols();
         let c = cursor.corners.unwrap_or([[0.0; 2]; 4]);
         let globals = Globals {
             resolution,
@@ -266,7 +279,7 @@ impl BackgroundPass {
             scroll_y: grid_scroll * self.metrics.height,
             panel_count: 0,
             occlude_all: 0,
-            pad3: 0.0,
+            cols: cols as u32,
             cursor_color: [
                 cursor.color.r as f32 / 255.0,
                 cursor.color.g as f32 / 255.0,
@@ -277,7 +290,6 @@ impl BackgroundPass {
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
         self.cursor_visible = cursor.corners.is_some();
 
-        let cols = grid.cols();
         let total = grid.rows() * cols;
 
         // A resize changes the cell count and a grow reallocates (dropping the
@@ -371,7 +383,7 @@ impl BackgroundPass {
             scroll_y: grid_scroll * self.metrics.height,
             panel_count,
             occlude_all,
-            pad3: 0.0,
+            cols: grid.cols() as u32,
             cursor_color: [0.0; 4],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
@@ -422,7 +434,8 @@ impl BackgroundPass {
             scroll_y: grid_scroll * self.metrics.height,
             panel_count: 0,
             occlude_all: 0,
-            pad3: 0.0,
+            // Written by a cursor-only draw, which never reads it.
+            cols: 0,
             cursor_color: [
                 cursor.color.r as f32 / 255.0,
                 cursor.color.g as f32 / 255.0,
@@ -575,23 +588,22 @@ fn build_row_instances(grid: &Grid, row: usize, out: &mut Vec<BgInstance>) {
     out.extend((0..grid.cols()).map(|col| {
         let (_, bg) = grid.get(row, col).draw_colors();
         BgInstance {
-            cell: [col as f32, row as f32],
-            color: [
-                bg.r as f32 / 255.0,
-                bg.g as f32 / 255.0,
-                bg.b as f32 / 255.0,
-            ],
+            color: [bg.r, bg.g, bg.b, 255],
         }
     }));
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_instances;
+    use super::{build_instances, build_row_instances, BackgroundPass, BgInstance};
+    use crate::{gpu::headless_device, render::CellMetrics};
     use stoatty_term::grid::{Flags, Grid, Rgb};
-    use wgpu::naga::{
-        front::wgsl,
-        valid::{Capabilities, ValidationFlags, Validator},
+    use wgpu::{
+        naga::{
+            front::wgsl,
+            valid::{Capabilities, ValidationFlags, Validator},
+        },
+        TextureFormat,
     };
 
     #[test]
@@ -603,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn instances_cover_every_cell_with_normalized_bg() {
+    fn instances_cover_every_cell_with_its_opaque_bg() {
         let mut grid = Grid::new(2, 2);
         grid.get_mut(0, 0).bg = Rgb::new(255, 0, 0);
         grid.get_mut(1, 1).bg = Rgb::new(0, 0, 255);
@@ -612,10 +624,8 @@ mod tests {
         build_instances(&grid, &mut instances);
 
         assert_eq!(instances.len(), 4);
-        assert_eq!(instances[0].cell, [0.0, 0.0]);
-        assert_eq!(instances[0].color, [1.0, 0.0, 0.0]);
-        assert_eq!(instances[3].cell, [1.0, 1.0]);
-        assert_eq!(instances[3].color, [0.0, 0.0, 1.0]);
+        assert_eq!(instances[0].color, [255, 0, 0, 255]);
+        assert_eq!(instances[3].color, [0, 0, 255, 255]);
     }
 
     #[test]
@@ -628,6 +638,76 @@ mod tests {
         let mut instances = Vec::new();
         build_instances(&grid, &mut instances);
 
-        assert_eq!(instances[0].color, [1.0, 0.0, 0.0]);
+        assert_eq!(instances[0].color, [255, 0, 0, 255]);
+    }
+
+    /// The instances carry no coordinate, so the shader recovers each cell's from
+    /// `instance_index % cols` and `instance_index / cols`. That only holds while
+    /// the build stays row-major over the whole grid with no gaps, which nothing
+    /// else here would catch if it changed.
+    #[test]
+    fn instances_are_row_major_over_the_whole_grid() {
+        let (rows, cols) = (3, 4);
+        let mut grid = Grid::new(rows, cols);
+        for row in 0..rows {
+            for col in 0..cols {
+                grid.get_mut(row, col).bg = Rgb::new(row as u8, col as u8, 0);
+            }
+        }
+
+        let mut instances = Vec::new();
+        build_instances(&grid, &mut instances);
+
+        let coords: Vec<[u8; 2]> = instances
+            .iter()
+            .map(|inst| [inst.color[0], inst.color[1]])
+            .collect();
+        let expected: Vec<[u8; 2]> = (0..rows * cols)
+            .map(|i| [(i / cols) as u8, (i % cols) as u8])
+            .collect();
+        assert_eq!(
+            coords, expected,
+            "instance i holds cell (i / cols, i % cols)"
+        );
+    }
+
+    /// The instance stream declares one 4-byte `Unorm8x4` attribute where the
+    /// shader takes a `vec4<f32>`, an agreement only pipeline creation checks.
+    /// Validating the WGSL alone would not catch a stride or format that no longer
+    /// matches what `vs_main` reads.
+    #[test]
+    fn the_pipeline_accepts_the_packed_instance_layout() {
+        let Some((device, _queue)) = headless_device() else {
+            eprintln!("background pipeline test: no wgpu adapter, skipping");
+            return;
+        };
+
+        BackgroundPass::new(
+            &device,
+            TextureFormat::Rgba8Unorm,
+            CellMetrics {
+                font_size: 10.0,
+                width: 6.0,
+                height: 12.0,
+            },
+        );
+    }
+
+    /// A damaged row is patched in place at `row * cols * size_of::<BgInstance>()`,
+    /// so the row's instances have to be exactly the slice that offset names.
+    #[test]
+    fn a_row_patch_covers_exactly_its_row_of_the_buffer() {
+        let (rows, cols) = (4, 5);
+        let grid = Grid::new(rows, cols);
+
+        let mut instances = Vec::new();
+        build_row_instances(&grid, 2, &mut instances);
+
+        let bytes = size_of::<BgInstance>();
+        assert_eq!(
+            (instances.len() * bytes, 2 * cols * bytes),
+            (cols * 4, 40),
+            "a row spans 4 bytes per cell, at four times its row-major start",
+        );
     }
 }
