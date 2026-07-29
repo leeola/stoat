@@ -52,6 +52,7 @@ use ratatui::{
 };
 use slotmap::SlotMap;
 use std::{
+    borrow::Cow,
     collections::hash_map::DefaultHasher,
     ffi::OsStr,
     hash::{Hash, Hasher},
@@ -62,7 +63,9 @@ use std::{
 };
 use stoat_action::{Conflict, Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
 use stoat_config::{LineNumbers, MinimapMode, Settings, Spanned, TabBarMode, ThemeBlock, WrapMode};
-use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
+use stoat_language::{
+    self as language, Language, LanguageRegistry, SyntaxMapCapture, SyntaxSnapshot, SyntaxState,
+};
 use stoat_scheduler::Executor;
 use stoat_text::{patch::Patch, Anchor, Bias, IndentStyle, Rope, Selection};
 use stoatty_protocol::window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent};
@@ -10069,6 +10072,13 @@ pub(crate) fn lsp_uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {
 /// signalling that the caller should fall back to the background path.
 /// `None` is also returned for ordinary parse failures (unsupported
 /// language, etc.); the difference does not matter for the call sites.
+///
+/// `prior_token_spans` and `prior_token_anchors` are the previous parse's
+/// tokens in its own byte coordinates and as anchors in the buffer. They must
+/// be index-aligned, which they are when both come from the same parse's
+/// output. Supplying both unlocks the incremental highlight path, which
+/// re-queries only the byte ranges the edit could have restyled. Spans alone
+/// still bound [`ParseJobOutput::changed_token_rows`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_buffer_step(
     buffer_id: BufferId,
@@ -10077,11 +10087,19 @@ pub(crate) fn parse_buffer_step(
     prior: &mut Option<SyntaxState>,
     prior_syntax_map: &mut Option<stoat_language::SyntaxMap>,
     prior_token_spans: Option<&[(Range<usize>, HighlightStyleId)]>,
+    prior_token_anchors: Option<&[SemanticTokenHighlight]>,
     styles: &SyntaxStyles,
     deadline: Option<(std::time::Instant, &Executor)>,
 ) -> Option<ParseJobOutput> {
     let cur_version = snapshot.version;
     let new_rope = snapshot.visible_text.clone();
+
+    // An injection layer can restyle without any change to the host tree, so
+    // the changed-range narrowing below only holds for a file that had, and
+    // still has, nothing but its root grammar.
+    let prior_single_layer = prior_syntax_map
+        .as_ref()
+        .is_some_and(|map| map.snapshot().layer_count() == 1);
 
     // Edit a clone of the prior tree rather than mutating it in place. If
     // the parse aborts (deadline exceeded, etc.) the caller's prior must
@@ -10138,57 +10156,58 @@ pub(crate) fn parse_buffer_step(
     prior.take();
     prior_syntax_map.take();
 
+    let incremental_reparse = incremental.is_some();
     let syntax_map = incremental.unwrap_or_else(|| {
         let mut map = stoat_language::SyntaxMap::default();
         let _ = map.reparse(&new_rope, lang.clone(), cur_version);
         map
     });
 
-    // A capture resolves to a theme key index through its originating layer's
-    // highlight_map(). A DEFAULT id (capture absent from the active theme)
-    // carries no style and is skipped. captures() document order
-    // (start, Reverse(end), depth) is kept so deeper injection layers land later
-    // and win under the display map's endpoint precedence. highlight_map() clones
-    // a locked map, so memoize it per layer language.
-    let styled: Vec<(Range<usize>, HighlightStyleId)> = {
-        use std::collections::HashMap;
+    // Re-query only what the edit could have restyled. The prior tokens carry
+    // across the edit and keep their anchors, so a keystroke costs a query over
+    // the edited region rather than one over the file. A map that had to be
+    // rebuilt from nothing leaves no prior tree to compare against, and either
+    // side of the edit having an injection layer puts restyles outside the
+    // changed ranges, so both drop back to the full walk below.
+    let recaptured =
+        if incremental_reparse && prior_single_layer && syntax_map.snapshot().layer_count() == 1 {
+            // A carried span takes its anchor by index, so both halves of the prior
+            // parse's tokens have to be present and line up one for one.
+            prior_token_spans
+                .zip(prior_token_anchors)
+                .filter(|(spans, anchors)| spans.len() == anchors.len())
+                .zip(edited.as_ref())
+                .and_then(|((spans, _), (old_tree, edits))| {
+                    recapture_edited_ranges(
+                        syntax_map.snapshot(),
+                        &new_rope,
+                        spans,
+                        edits,
+                        invalidated_ranges(old_tree, &tree, edits, new_rope.len()),
+                        styles,
+                    )
+                })
+        } else {
+            None
+        };
 
-        let mut highlight_maps = HashMap::new();
-        syntax_map
-            .snapshot()
-            .captures(0..new_rope.len(), &new_rope, |l| Some(&l.highlight_query))
-            .into_iter()
-            .filter_map(|cap| {
-                let range = cap.node.byte_range();
-                if range.start == range.end {
-                    return None;
-                }
-                let map = highlight_maps
-                    .entry(cap.language as *const Language as usize)
-                    .or_insert_with(|| cap.language.highlight_map());
-                let style_id = styles.id_for_highlight(map.get(cap.index))?;
-                Some((range, style_id))
-            })
-            .collect()
+    // Borrowed rather than moved out, since the recapture still owns the two
+    // short lists the changed-row report reads below.
+    let styled: Cow<'_, [(Range<usize>, HighlightStyleId)]> = match &recaptured {
+        Some(recaptured) => Cow::Borrowed(&recaptured.spans),
+        None => Cow::Owned(styled_capture_spans(
+            syntax_map
+                .snapshot()
+                .captures(0..new_rope.len(), &new_rope, |l| Some(&l.highlight_query)),
+            styles,
+        )),
     };
 
-    // Anchor the whole batch with two cursor walks rather than a root descent
-    // per endpoint. The two ends take opposite biases, so an insertion at a
-    // token's start attaches to the previous span and one at its end attaches
-    // to the next. That keeps a typed character from silently extending a
-    // keyword or string into neighboring text.
-    let starts: Vec<usize> = styled.iter().map(|(range, _)| range.start).collect();
     let ends: Vec<usize> = styled.iter().map(|(range, _)| range.end).collect();
-    let tokens: Arc<[SemanticTokenHighlight]> = styled
-        .iter()
-        .map(|(_, style)| *style)
-        .zip(snapshot.anchors_at_batch(&starts, Bias::Right))
-        .zip(snapshot.anchors_at_batch(&ends, Bias::Left))
-        .map(|((style, start), end)| SemanticTokenHighlight {
-            range: start..end,
-            style,
-        })
-        .collect();
+    let tokens = match (&recaptured, prior_token_anchors) {
+        (Some(recaptured), Some(prior)) => recaptured.anchor_against(prior, &snapshot),
+        _ => anchor_spans(&styled, &ends, &snapshot),
+    };
 
     // The search index is an argmax over resolved token ends, and each anchor
     // above resolves to the offset it was just built from, so the byte ends
@@ -10201,10 +10220,19 @@ pub(crate) fn parse_buffer_step(
 
     // Which rows this parse restained, for consumers that colour per row. It
     // needs the prior parse's spans and the patch that carries them forward;
-    // without either, callers must assume the whole file.
-    let changed_token_rows = prior_token_spans
-        .zip(edits)
-        .map(|(prior, edits)| changed_token_rows(prior, &styled, edits, &new_rope));
+    // without either, callers must assume the whole file. A recapture compares
+    // only the tokens it replaced against the ones it queried, since every
+    // other token was carried across the edit and so cannot have moved.
+    let changed_token_rows = match (&recaptured, prior_token_spans.zip(edits)) {
+        (Some(recaptured), Some((_, edits))) => Some(changed_token_rows(
+            &recaptured.replaced,
+            &recaptured.fresh,
+            edits,
+            &new_rope,
+        )),
+        (_, Some((prior, edits))) => Some(changed_token_rows(prior, &styled, edits, &new_rope)),
+        (_, None) => None,
+    };
 
     Some(ParseJobOutput {
         buffer_id,
@@ -10218,6 +10246,304 @@ pub(crate) fn parse_buffer_step(
         token_spans: Arc::from(styled),
         changed_token_rows,
     })
+}
+
+/// How many times a recapture may widen its query ranges before giving up and
+/// letting the caller walk the whole file.
+///
+/// Each round re-queries the ranges the previous round's captures spilled out
+/// of, so it settles as soon as no capture crosses a range boundary. Two
+/// rounds cover the ordinary case of an edit inside one enclosing node. The
+/// rest of the budget is for deeply nested captures, and exhausting it means
+/// the narrowing was not paying for itself anyway.
+const RECAPTURE_ROUNDS: usize = 8;
+
+/// One parse's tokens, assembled from the previous parse's tokens plus a
+/// re-query of the byte ranges an edit could have restyled.
+struct Recaptured {
+    /// Every token in document order, as byte spans in the new rope.
+    spans: Vec<(Range<usize>, HighlightStyleId)>,
+    /// Per entry of [`Self::spans`], the index of the prior token it was
+    /// carried from, or `None` for one this parse queried afresh.
+    carried_from: Vec<Option<usize>>,
+    /// The prior tokens the re-query replaced, in the prior parse's byte
+    /// coordinates and document order.
+    replaced: Vec<(Range<usize>, HighlightStyleId)>,
+    /// The tokens the re-query produced, in document order.
+    ///
+    /// Every token not in here was carried across the edit unchanged, so this
+    /// and [`Self::replaced`] are between them the whole difference between the
+    /// two parses. That is what lets the changed-row report be a comparison of
+    /// two short lists rather than of the file.
+    fresh: Vec<(Range<usize>, HighlightStyleId)>,
+}
+
+impl Recaptured {
+    /// Anchor the tokens, reusing `prior`'s anchors for every carried one.
+    ///
+    /// A carried token names the same text as the prior token it came from,
+    /// and an anchor already follows text across edits, so re-anchoring it
+    /// would only recompute what it already holds. Only the re-queried tokens
+    /// are minted, through the same batched pair the full walk uses.
+    fn anchor_against(
+        &self,
+        prior: &[SemanticTokenHighlight],
+        snapshot: &TextBufferSnapshot,
+    ) -> Arc<[SemanticTokenHighlight]> {
+        let fresh: Vec<usize> = self
+            .carried_from
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, from)| from.is_none().then_some(ix))
+            .collect();
+
+        let starts: Vec<usize> = fresh.iter().map(|&ix| self.spans[ix].0.start).collect();
+        let ends: Vec<usize> = fresh.iter().map(|&ix| self.spans[ix].0.end).collect();
+        let mut minted = snapshot
+            .anchors_at_batch(&starts, Bias::Right)
+            .into_iter()
+            .zip(snapshot.anchors_at_batch(&ends, Bias::Left));
+
+        self.spans
+            .iter()
+            .zip(&self.carried_from)
+            .map(|((_, style), from)| SemanticTokenHighlight {
+                range: match from {
+                    Some(ix) => prior[*ix].range.clone(),
+                    None => {
+                        let (start, end) = minted.next().expect("one mint per fresh token");
+                        start..end
+                    },
+                },
+                style: *style,
+            })
+            .collect()
+    }
+}
+
+/// The styled byte spans a merged capture list resolves to under `styles`.
+///
+/// A capture reaches a theme key through its originating layer's
+/// `highlight_map()`, and a DEFAULT id means the active theme has no entry for
+/// it, so it carries no style and is dropped along with empty ranges. The
+/// captures' document order (start, Reverse(end), depth) is kept, so deeper
+/// injection layers land later and win under the display map's endpoint
+/// precedence.
+fn styled_capture_spans(
+    captures: Vec<SyntaxMapCapture<'_>>,
+    styles: &SyntaxStyles,
+) -> Vec<(Range<usize>, HighlightStyleId)> {
+    // highlight_map() clones a locked map, so memoize it per layer language.
+    let mut highlight_maps = std::collections::HashMap::new();
+    captures
+        .into_iter()
+        .filter_map(|cap| {
+            let range = cap.node.byte_range();
+            if range.start == range.end {
+                return None;
+            }
+            let map = highlight_maps
+                .entry(cap.language as *const Language as usize)
+                .or_insert_with(|| cap.language.highlight_map());
+            let style_id = styles.id_for_highlight(map.get(cap.index))?;
+            Some((range, style_id))
+        })
+        .collect()
+}
+
+/// Anchor a whole span list with two cursor walks rather than a root descent
+/// per endpoint.
+///
+/// The two ends take opposite biases, so an insertion at a token's start
+/// attaches to the previous span and one at its end attaches to the next. That
+/// keeps a typed character from silently extending a keyword or string into
+/// neighboring text.
+fn anchor_spans(
+    styled: &[(Range<usize>, HighlightStyleId)],
+    ends: &[usize],
+    snapshot: &TextBufferSnapshot,
+) -> Arc<[SemanticTokenHighlight]> {
+    let starts: Vec<usize> = styled.iter().map(|(range, _)| range.start).collect();
+    styled
+        .iter()
+        .map(|(_, style)| *style)
+        .zip(snapshot.anchors_at_batch(&starts, Bias::Right))
+        .zip(snapshot.anchors_at_batch(ends, Bias::Left))
+        .map(|((style, start), end)| SemanticTokenHighlight {
+            range: start..end,
+            style,
+        })
+        .collect()
+}
+
+/// The byte ranges of `new_tree` an edit could have restyled.
+///
+/// Two sources, both in `new_tree`'s coordinates. The edits name the text that
+/// actually changed, and `old_tree.changed_ranges(new_tree)` names the regions
+/// whose syntax differs, which is what catches a restyle far from the caret
+/// such as an unclosed quote swallowing the rest of a file.
+///
+/// Every range is widened by a byte on each side, which is load-bearing rather
+/// than slack. A `Bias::Left` end anchor at an insertion point resolves to the
+/// insertion point while [`Patch::old_to_new`] carries the same offset past the
+/// inserted text, so a token abutting an edit has to be re-queried rather than
+/// carried with an anchor that disagrees with its span. The widening is what
+/// puts it strictly inside a range.
+fn invalidated_ranges(
+    old_tree: &language::Tree,
+    new_tree: &language::Tree,
+    edits: &Patch<usize>,
+    len: usize,
+) -> Vec<Range<usize>> {
+    let widen = |start: usize, end: usize| {
+        start.saturating_sub(1)..end.saturating_add(1).min(len).max(start)
+    };
+    let mut ranges: Vec<Range<usize>> = edits
+        .edits()
+        .iter()
+        .map(|edit| widen(edit.new.start, edit.new.end))
+        .chain(
+            old_tree
+                .changed_ranges(new_tree)
+                .map(|r| widen(r.start_byte.min(len), r.end_byte.min(len))),
+        )
+        .collect();
+    ranges.sort_unstable_by_key(|r| r.start);
+    merge_ranges(&mut ranges);
+    ranges
+}
+
+/// Collapse a start-sorted range list in place so no two entries overlap or
+/// touch.
+///
+/// Touching entries merge because the tokens crossing a shared boundary are the
+/// same set either way, and one wider query beats two adjacent ones.
+fn merge_ranges(ranges: &mut Vec<Range<usize>>) {
+    let mut write = 0;
+    for read in 0..ranges.len() {
+        if write > 0 && ranges[read].start <= ranges[write - 1].end {
+            ranges[write - 1].end = ranges[write - 1].end.max(ranges[read].end);
+            continue;
+        }
+        ranges[write] = ranges[read].clone();
+        write += 1;
+    }
+    ranges.truncate(write);
+}
+
+/// Rebuild a parse's tokens by re-querying `invalidated` and carrying `prior`
+/// across `edits` everywhere else.
+///
+/// `prior` is the previous parse's spans in its own byte coordinates, which
+/// `edits` carries into `rope`'s. Returns `None` when the re-query never
+/// settles, leaving the caller the full walk it would otherwise have done.
+///
+/// A query range is grown until every capture it returns lies inside it, since
+/// tree-sitter answers with each capture strictly intersecting the range and a
+/// capture may extend well past it. That fixpoint is what makes the splice
+/// exact. Once a range equals its cover, the captures it returns are precisely
+/// the tokens strictly intersecting that cover, which is precisely the set of
+/// carried tokens the cover replaces.
+fn recapture_edited_ranges(
+    snapshot: &SyntaxSnapshot,
+    rope: &Rope,
+    prior: &[(Range<usize>, HighlightStyleId)],
+    edits: &Patch<usize>,
+    invalidated: Vec<Range<usize>>,
+    styles: &SyntaxStyles,
+) -> Option<Recaptured> {
+    let mut covers = invalidated;
+    for _ in 0..RECAPTURE_ROUNDS {
+        let fresh: Vec<Vec<(Range<usize>, HighlightStyleId)>> = covers
+            .iter()
+            .map(|cover| {
+                styled_capture_spans(
+                    snapshot.captures(cover.clone(), rope, |l| Some(&l.highlight_query)),
+                    styles,
+                )
+            })
+            .collect();
+
+        let mut grown: Vec<Range<usize>> = covers
+            .iter()
+            .zip(&fresh)
+            .map(|(cover, spans)| {
+                spans.iter().fold(cover.clone(), |acc, (span, _)| {
+                    acc.start.min(span.start)..acc.end.max(span.end)
+                })
+            })
+            .collect();
+        merge_ranges(&mut grown);
+
+        if grown == covers {
+            return Some(splice_recaptured(prior, edits, &covers, fresh));
+        }
+        covers = grown;
+    }
+    None
+}
+
+/// Interleave the carried and re-queried tokens into one document-ordered list.
+///
+/// `fresh[i]` holds the tokens `covers[i]` returned, and a carried token that
+/// strictly intersects any cover is dropped because the fresh list already
+/// holds its replacement. What survives never intersects a cover, so flushing
+/// each cover's tokens once the walk passes it produces a list already sorted
+/// by `(start, Reverse(end))` with no re-sort.
+fn splice_recaptured(
+    prior: &[(Range<usize>, HighlightStyleId)],
+    edits: &Patch<usize>,
+    covers: &[Range<usize>],
+    fresh: Vec<Vec<(Range<usize>, HighlightStyleId)>>,
+) -> Recaptured {
+    let total = prior.len() + fresh.iter().map(Vec::len).sum::<usize>();
+    let mut spans = Vec::with_capacity(total);
+    let mut carried_from = Vec::with_capacity(total);
+    let mut replaced = Vec::new();
+    let mut next_cover = 0;
+
+    for (ix, (span, style)) in prior.iter().enumerate() {
+        let carried = edits.old_to_new(span.start)..edits.old_to_new(span.end);
+
+        // A span the edit replaced outright collapses onto a point. The full
+        // walk emits no empty token, so neither may this path.
+        if carried.start >= carried.end {
+            replaced.push((span.clone(), *style));
+            continue;
+        }
+
+        while next_cover < covers.len() && covers[next_cover].end <= carried.start {
+            spans.extend_from_slice(&fresh[next_cover]);
+            carried_from.resize(spans.len(), None);
+            next_cover += 1;
+        }
+
+        // Covers are sorted and disjoint and the loop above passed every one
+        // ending at or before this token, so only the next cover can still
+        // intersect it.
+        let intersects_cover = covers
+            .get(next_cover)
+            .is_some_and(|cover| cover.start < carried.end);
+        if intersects_cover {
+            replaced.push((span.clone(), *style));
+            continue;
+        }
+
+        spans.push((carried, *style));
+        carried_from.push(Some(ix));
+    }
+
+    for cover in &fresh[next_cover..] {
+        spans.extend_from_slice(cover);
+        carried_from.resize(spans.len(), None);
+    }
+
+    Recaptured {
+        spans,
+        carried_from,
+        replaced,
+        fresh: fresh.concat(),
+    }
 }
 
 /// The buffer rows whose tokens differ between the parse that produced `prior`
@@ -13443,6 +13769,7 @@ mod tests {
             &mut prior,
             &mut prior_map,
             None,
+            None,
             &styles,
             None,
         )
@@ -13461,6 +13788,7 @@ mod tests {
             &lang,
             &mut prior,
             &mut prior_map,
+            None,
             None,
             &styles,
             Some((deadline, &executor)),
@@ -13484,6 +13812,7 @@ mod tests {
             &lang,
             &mut prior,
             &mut prior_map,
+            None,
             None,
             &styles,
             None,
@@ -13521,6 +13850,7 @@ mod tests {
             &mut prior,
             &mut prior_map,
             None,
+            None,
             &styles,
             None,
         )
@@ -13538,6 +13868,7 @@ mod tests {
             &lang,
             &mut prior,
             &mut prior_map,
+            None,
             None,
             &styles,
             Some((deadline, &executor)),
@@ -13557,6 +13888,7 @@ mod tests {
             &lang,
             &mut prior,
             &mut prior_map,
+            None,
             None,
             &styles,
             Some((deadline, &executor)),
@@ -13600,6 +13932,7 @@ mod tests {
                 &mut prior,
                 &mut prior_map,
                 None,
+                None,
                 &styles,
                 None,
             )
@@ -13619,6 +13952,7 @@ mod tests {
                 &mut prior,
                 &mut prior_map,
                 None,
+                None,
                 &styles,
                 None,
             )
@@ -13633,6 +13967,7 @@ mod tests {
                 &lang,
                 &mut prior,
                 &mut prior_map,
+                None,
                 None,
                 &styles,
                 None,
@@ -13694,6 +14029,363 @@ mod tests {
         );
     }
 
+    /// The state one parse hands the next so it can carry tokens across an
+    /// edit rather than re-querying the file.
+    struct CarriedParse {
+        buffer_id: BufferId,
+        syntax: Option<SyntaxState>,
+        map: Option<stoat_language::SyntaxMap>,
+        spans: Option<SemanticTokenSpans>,
+        anchors: Option<Arc<[SemanticTokenHighlight]>>,
+    }
+
+    impl CarriedParse {
+        fn new(buffer_id: BufferId) -> Self {
+            Self {
+                buffer_id,
+                syntax: None,
+                map: None,
+                spans: None,
+                anchors: None,
+            }
+        }
+    }
+
+    /// Parse `snapshot` twice, once carrying `state` forward and once from
+    /// nothing, and assert the two agree on both the styled byte spans and the
+    /// offsets every anchor resolves to. Leaves `state` holding the carried
+    /// parse, ready for the next edit. Returns its layer count, which is the
+    /// guard that decides whether the carry could narrow its query at all.
+    fn assert_carried_parse_matches_fresh(
+        state: &mut CarriedParse,
+        snapshot: &TextBufferSnapshot,
+        lang: &Arc<Language>,
+        styles: &SyntaxStyles,
+        step: &str,
+    ) -> usize {
+        let buffer_id = state.buffer_id;
+        let carried = parse_buffer_step(
+            buffer_id,
+            snapshot.clone(),
+            lang,
+            &mut state.syntax,
+            &mut state.map,
+            state.spans.as_deref(),
+            state.anchors.as_deref(),
+            styles,
+            None,
+        )
+        .expect("carried parse should succeed");
+
+        let fresh = {
+            let mut syntax = None;
+            let mut map = None;
+            parse_buffer_step(
+                buffer_id,
+                snapshot.clone(),
+                lang,
+                &mut syntax,
+                &mut map,
+                None,
+                None,
+                styles,
+                None,
+            )
+            .expect("from-scratch parse should succeed")
+        };
+
+        assert_eq!(
+            carried.token_spans, fresh.token_spans,
+            "{step}: carried spans must equal a from-scratch parse",
+        );
+        let resolved = |out: &ParseJobOutput| -> Vec<(usize, usize, HighlightStyleId)> {
+            out.token_channel
+                .tokens
+                .iter()
+                .map(|t| {
+                    (
+                        snapshot.resolve_anchor(&t.range.start),
+                        snapshot.resolve_anchor(&t.range.end),
+                        t.style,
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            resolved(&carried),
+            resolved(&fresh),
+            "{step}: carried anchors must resolve where a from-scratch parse anchored",
+        );
+
+        let layers = carried.syntax_map.snapshot().layer_count();
+        state.syntax = Some(carried.syntax);
+        state.map = Some(carried.syntax_map);
+        state.spans = Some(carried.token_spans);
+        state.anchors = Some(carried.token_channel.tokens);
+        layers
+    }
+
+    /// The theme-installed styles and language every carried-parse test parses
+    /// against. Without the highlight maps every capture resolves to
+    /// `HighlightId::DEFAULT` and both token lists come back empty, comparing
+    /// equal for the wrong reason.
+    fn carried_parse_fixture(path: &str) -> (SyntaxStyles, Arc<Language>) {
+        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
+        let registry = LanguageRegistry::standard();
+        install_highlight_maps(&registry, &styles);
+        let lang = registry.for_path(Path::new(path)).unwrap();
+        (styles, lang)
+    }
+
+    /// Narrowing the capture walk to the edited ranges is only sound if the
+    /// result is what walking the file would have produced. Randomized edits
+    /// are the check, because the ways a narrowing goes wrong (a capture
+    /// reaching past its query range, a token abutting an insertion, a token
+    /// deleted outright) are all boundary cases no hand-picked edit hits by
+    /// accident.
+    #[test]
+    fn a_carried_parse_tracks_a_fresh_parse_through_random_edits() {
+        let (styles, lang) = carried_parse_fixture("a.rs");
+        let buffer_id = BufferId::new(1);
+        let mut buf = TextBuffer::with_text(
+            buffer_id,
+            "fn main() {\n    let name = \"hello\";\n    let n = 1 + 2;\n\
+             \n    println!(\"{name} {n}\");\n}\n\nfn other(x: u32) -> u32 {\n    x * 2\n}\n",
+        );
+
+        // Snippets chosen to move token boundaries rather than plain text:
+        // quotes and comment markers restyle text far from where they land.
+        let snippets = [
+            "\"", "//", "let ", "fn ", "*/", "/*", "x", " ", "\n", "'", "}", "{",
+        ];
+        let mut state = CarriedParse::new(buffer_id);
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        for step in 0..80 {
+            let len = buf.snapshot.visible_text.len();
+            let at = (next() as usize) % (len + 1);
+            let at = buf.snapshot.visible_text.clip_offset(at, Bias::Left);
+            if next() % 3 == 0 {
+                let end = buf
+                    .snapshot
+                    .visible_text
+                    .clip_offset((at + 1 + (next() as usize) % 4).min(len), Bias::Right);
+                buf.edit(at..end, "");
+            } else {
+                buf.edit(at..at, snippets[(next() as usize) % snippets.len()]);
+            }
+
+            let layers = assert_carried_parse_matches_fresh(
+                &mut state,
+                &buf.snapshot.clone(),
+                &lang,
+                &styles,
+                &format!("step {step}"),
+            );
+            assert_eq!(layers, 1, "step {step}: a rust buffer stays single-layer");
+        }
+    }
+
+    /// An opened quote restyles every line after it until it closes, which no
+    /// edit range names. Only the tree's own changed ranges reach that far, so
+    /// this is the case a narrowing built on edit ranges alone gets wrong.
+    #[test]
+    fn a_carried_parse_follows_a_quote_opened_far_from_the_restyled_text() {
+        let (styles, lang) = carried_parse_fixture("a.rs");
+        let buffer_id = BufferId::new(1);
+        let body = "fn a() { let x = 1; }\n".repeat(20);
+        let mut buf = TextBuffer::with_text(buffer_id, &body);
+
+        let mut state = CarriedParse::new(buffer_id);
+        assert_carried_parse_matches_fresh(
+            &mut state,
+            &buf.snapshot.clone(),
+            &lang,
+            &styles,
+            "first parse",
+        );
+
+        // A lone quote near the top swallows the rest of the file into one
+        // string, restaining every row below an edit that touched one byte.
+        buf.edit(9..9, "\"");
+        assert_carried_parse_matches_fresh(
+            &mut state,
+            &buf.snapshot.clone(),
+            &lang,
+            &styles,
+            "quote opened",
+        );
+
+        // Closing it hands all that text back to the code highlighting, the
+        // same restyle in reverse.
+        buf.edit(30..30, "\"");
+        assert_carried_parse_matches_fresh(
+            &mut state,
+            &buf.snapshot.clone(),
+            &lang,
+            &styles,
+            "quote closed",
+        );
+    }
+
+    /// A capture can reach far outside the range that returned it, and the
+    /// tokens nested inside it between there and the edit were never queried.
+    /// Widening the query to what came back and asking again is what keeps
+    /// them, so this is the case a single-pass narrowing silently drops.
+    #[test]
+    fn a_carried_parse_keeps_tokens_nested_inside_a_capture_the_edit_reached() {
+        let (styles, lang) = carried_parse_fixture("a.rs");
+        let buffer_id = BufferId::new(1);
+        // Escape sequences are captured inside the string literal enclosing
+        // them, so an edit at the string's tail pulls the whole literal into
+        // the query's answer while leaving every escape before it unqueried.
+        let source = "fn a() {\n    let s = \"\\n\\t\\n\\t\\n\\t padding tail\";\n}\n";
+        let mut buf = TextBuffer::with_text(buffer_id, source);
+
+        let mut state = CarriedParse::new(buffer_id);
+        assert_carried_parse_matches_fresh(
+            &mut state,
+            &buf.snapshot.clone(),
+            &lang,
+            &styles,
+            "first parse",
+        );
+
+        let at = source.find("tail").expect("fixture has a tail");
+        buf.edit(at..at, "x");
+        assert_carried_parse_matches_fresh(
+            &mut state,
+            &buf.snapshot.clone(),
+            &lang,
+            &styles,
+            "edit inside the string's tail",
+        );
+    }
+
+    /// An injection layer can restyle its whole range without the host tree
+    /// changing at all, so the narrowing has nothing to key on and the parse
+    /// has to walk the file. The fallback is what keeps a fenced buffer
+    /// correct, and it must stay correct across edits like any other.
+    #[test]
+    fn a_multi_layer_buffer_still_matches_a_fresh_parse() {
+        let (styles, lang) = carried_parse_fixture("a.md");
+        let buffer_id = BufferId::new(1);
+        let source = "# Title\n\n```rust\nfn a() -> u32 { 1 }\n```\n\ntail text\n";
+        let mut buf = TextBuffer::with_text(buffer_id, source);
+
+        let mut state = CarriedParse::new(buffer_id);
+        let layers = assert_carried_parse_matches_fresh(
+            &mut state,
+            &buf.snapshot.clone(),
+            &lang,
+            &styles,
+            "first parse",
+        );
+        assert!(
+            layers > 1,
+            "fixture must inject a layer so the fallback is what runs, got {layers}",
+        );
+
+        let tail = source.find("tail").expect("fixture has a tail");
+        buf.edit(tail..tail, "more ");
+        assert_carried_parse_matches_fresh(
+            &mut state,
+            &buf.snapshot.clone(),
+            &lang,
+            &styles,
+            "edit outside the fence",
+        );
+    }
+
+    /// The narrowing has to actually engage, not just agree with the full walk
+    /// by falling back to it. This drives it directly, so a guard that quietly
+    /// stopped admitting ordinary edits would show up here rather than as a
+    /// silent return to per-keystroke full walks.
+    #[test]
+    fn a_local_edit_recaptures_rather_than_walking_the_file() {
+        let (styles, lang) = carried_parse_fixture("a.rs");
+        let buffer_id = BufferId::new(1);
+        let body = "fn a() { let x = 1; }\n".repeat(20);
+        let mut buf = TextBuffer::with_text(buffer_id, &body);
+
+        let first = {
+            let mut syntax = None;
+            let mut map = None;
+            parse_buffer_step(
+                buffer_id,
+                buf.snapshot.clone(),
+                &lang,
+                &mut syntax,
+                &mut map,
+                None,
+                None,
+                &styles,
+                None,
+            )
+            .expect("first parse should succeed")
+        };
+
+        let at = body.find("let x").expect("fixture has a binding");
+        buf.edit(at..at, "mut ");
+        let snapshot = buf.snapshot.clone();
+        let rope = snapshot.visible_text.clone();
+        let edits = snapshot.edits_since(first.syntax.version);
+
+        let mut edited_tree = first.syntax.tree.clone();
+        language::edit_tree(
+            &mut edited_tree,
+            edits.edits(),
+            &first.syntax.rope_snapshot,
+            &rope,
+        );
+        let mut map = first.syntax_map.clone();
+        map.interpolate(edits.edits(), &first.syntax.rope_snapshot, &rope);
+        map.reparse(&rope, lang.clone(), snapshot.version)
+            .expect("reparse should succeed");
+        let tree = map
+            .snapshot()
+            .iter_layers()
+            .next()
+            .expect("a root layer")
+            .tree
+            .clone();
+
+        let invalidated = invalidated_ranges(&edited_tree, &tree, &edits, rope.len());
+        assert!(
+            invalidated.iter().map(|r| r.end - r.start).sum::<usize>() < rope.len() / 2,
+            "an edit to one line must invalidate a fraction of the file, got {invalidated:?}",
+        );
+
+        let recaptured = recapture_edited_ranges(
+            map.snapshot(),
+            &rope,
+            &first.token_spans,
+            &edits,
+            invalidated,
+            &styles,
+        )
+        .expect("a single-layer local edit must recapture");
+        assert!(
+            recaptured.carried_from.iter().any(Option::is_some),
+            "a local edit must carry tokens rather than re-query them all",
+        );
+        assert_eq!(
+            recaptured.spans,
+            styled_capture_spans(
+                map.snapshot()
+                    .captures(0..rope.len(), &rope, |l| Some(&l.highlight_query)),
+                &styles,
+            ),
+            "recaptured spans must equal the full capture walk",
+        );
+    }
+
     /// Parse `original`, apply one edit, parse again carrying the first
     /// parse's spans forward, and return the second parse's changed rows.
     fn changed_rows_after_edit(
@@ -13719,6 +14411,7 @@ mod tests {
                 &mut prior,
                 &mut prior_map,
                 None,
+                None,
                 &styles,
                 None,
             )
@@ -13735,6 +14428,7 @@ mod tests {
             &mut prior,
             &mut prior_map,
             Some(&first.token_spans),
+            Some(&first.token_channel.tokens),
             &styles,
             None,
         )
@@ -13886,6 +14580,7 @@ mod tests {
             &mut prior,
             &mut prior_map,
             None,
+            None,
             &styles,
             None,
         )
@@ -13925,6 +14620,7 @@ mod tests {
                 &lang,
                 &mut prior,
                 &mut prior_map,
+                None,
                 None,
                 &styles,
                 None,

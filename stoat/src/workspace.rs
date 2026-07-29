@@ -804,6 +804,9 @@ impl Workspace {
             let mut prior = self.buffers.take_syntax(buffer_id);
             let mut prior_map = self.buffers.take_syntax_map(buffer_id);
             let prior_spans = self.buffers.take_token_spans(buffer_id);
+            // The same parse's anchored tokens, index-aligned with the spans,
+            // so the incremental path can hand a carried token back its anchor.
+            let prior_anchors = self.buffers.tokens_for(buffer_id).map(|(tokens, _)| tokens);
 
             // Only the tree-sitter step honors the deadline. The full reparse
             // and captures walk that follow it are unbounded O(file), so a
@@ -820,6 +823,7 @@ impl Workspace {
                         &mut prior,
                         &mut prior_map,
                         prior_spans.as_deref(),
+                        prior_anchors.as_deref(),
                         syntax_styles,
                         Some((deadline, executor)),
                     )
@@ -862,6 +866,7 @@ impl Workspace {
                     &mut prior,
                     &mut prior_map,
                     prior_spans.as_deref(),
+                    prior_anchors.as_deref(),
                     &styles,
                     None,
                 )

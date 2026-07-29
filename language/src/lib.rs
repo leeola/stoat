@@ -19,6 +19,6 @@ pub use highlight_map::{HighlightId, HighlightMap};
 pub use indent::{line_leading_whitespace, newline_indent, suggested_indent};
 pub use language::{language_for_fence_token, Language, LanguageRegistry};
 pub use symbols::{extract_references, extract_symbols, RefKind, RefSite, SymbolDef, SymbolKind};
-pub use syntax_map::{LayerKey, SyntaxLayer, SyntaxMap, SyntaxSnapshot};
+pub use syntax_map::{LayerKey, SyntaxLayer, SyntaxMap, SyntaxMapCapture, SyntaxSnapshot};
 pub use textobject::{collect_capture_starts, find_smallest_capture_at};
 pub use tree_sitter::{Node, Tree};
