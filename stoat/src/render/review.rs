@@ -360,9 +360,13 @@ pub(crate) fn paint_diff_rows(
                 let staged = snapshot
                     .diff_map()
                     .and_then(|dm| dm.staged_for_line(buffer_row));
+                // Reading this seeks the hunk tree, and the tint, the move chip,
+                // the status glyph, and the unchanged branch below all want the
+                // same answer for the same row.
+                let status = snapshot.line_diff_status(buffer_row);
                 let side = tints.as_ref().map(|t| t.side(staged.unwrap_or(false)));
                 if let Some(side) = side {
-                    let line_tint = match snapshot.line_diff_status(buffer_row) {
+                    let line_tint = match status {
                         DiffStatus::Added | DiffStatus::Modified => Some(side.added_line),
                         DiffStatus::Moved => Some(side.moved_line),
                         DiffStatus::Unchanged => None,
@@ -385,7 +389,7 @@ pub(crate) fn paint_diff_rows(
                     side.map(|c| c.moved_span),
                     &row_endpoints,
                 );
-                if snapshot.line_diff_status(buffer_row) == DiffStatus::Moved
+                if status == DiffStatus::Moved
                     && let Some((path, line)) = move_chip_source(snapshot, buffer_row)
                 {
                     line_buf.clear();
@@ -402,7 +406,7 @@ pub(crate) fn paint_diff_rows(
                     );
                 }
                 if let Some(staged) = staged {
-                    let change_scope = match snapshot.line_diff_status(buffer_row) {
+                    let change_scope = match status {
                         DiffStatus::Added => s::DIFF_ADDED,
                         DiffStatus::Modified => s::DIFF_MODIFIED,
                         DiffStatus::Moved => s::DIFF_MOVED,
@@ -419,7 +423,7 @@ pub(crate) fn paint_diff_rows(
                         theme,
                     );
                 }
-                if snapshot.line_diff_status(buffer_row) == DiffStatus::Unchanged {
+                if status == DiffStatus::Unchanged {
                     line_buf.clear();
                     snapshot.write_display_line(&mut line_buf, display_row);
                     draw_diff_num(
