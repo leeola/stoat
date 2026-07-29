@@ -742,7 +742,7 @@ pub(crate) struct ResolvedDiag {
 pub(crate) struct DiagnosticSpanCache {
     set_version: u64,
     buffer_version: u64,
-    spans: Vec<ResolvedDiag>,
+    pub(crate) spans: Vec<ResolvedDiag>,
 }
 
 /// Resolve every diagnostic for `path` to byte offsets, sorted by start.
@@ -785,7 +785,11 @@ pub(crate) fn resolve_diagnostic_spans(
 
 /// Rebuild `editor.diagnostic_span_cache` when the diagnostic set or buffer
 /// version has moved since it was last resolved.
-fn build_diagnostic_span_cache(
+///
+/// The paint is not the only caller. Mouse motion warms the same cache to
+/// answer what the pointer is over, so a sweep across a diagnostic-heavy
+/// buffer resolves the spans once rather than once per motion event.
+pub(crate) fn build_diagnostic_span_cache(
     editor: &mut EditorState,
     set: &crate::diagnostics::DiagnosticSet,
     path: &Path,

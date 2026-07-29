@@ -5177,6 +5177,11 @@ impl Stoat {
     /// Index of the diagnostic under the terminal cell `(column, row)` in the
     /// focused editor pane, or `None` when the pointer is off a diagnostic or
     /// off the focused editor.
+    ///
+    /// Answers from the same version-keyed span cache the paint reads, so a
+    /// sweep across a diagnostic-heavy buffer resolves the set once instead of
+    /// once per motion event, and leaves the cache warm for the paint that
+    /// follows.
     fn resolve_hover_diagnostic(&mut self, column: u16, row: u16) -> Option<usize> {
         let (col, row) = self.translate_mouse_to_focused(column, row)?;
         let (editor_id, area) = self.focused_editor_target()?;
@@ -5187,28 +5192,49 @@ impl Stoat {
             let editor = ws.editors.get(editor_id)?;
             ws.buffers.path_for(editor.buffer_id)?.to_owned()
         };
-        let snapshot = {
-            let ws = self.active_workspace_mut();
-            ws.editors.get_mut(editor_id)?.display_map.snapshot()
-        };
-        let rope = snapshot.buffer_snapshot().rope();
-        // This runs per mouse-motion (deduped in handle_hover), not per frame,
-        // so it resolves a local span list rather than the render-side cache.
-        let encodings = self.lsp_registry.offset_encodings();
-        let spans = crate::render::editor::resolve_diagnostic_spans(
-            &self.diagnostics,
+
+        let Self {
+            workspaces,
+            active_workspace,
+            diagnostics,
+            lsp_registry,
+            ..
+        } = self;
+        let editor = workspaces[*active_workspace].editors.get_mut(editor_id)?;
+        let snapshot = editor.display_map.snapshot();
+        let buffer = snapshot.buffer_snapshot();
+        crate::render::editor::build_diagnostic_span_cache(
+            editor,
+            diagnostics,
             &path,
-            rope,
-            &encodings,
+            buffer.rope(),
+            lsp_registry,
+            buffer.version(),
         );
-        crate::render::editor::diagnostic_at_offset(&spans, offset)
+        let spans = editor
+            .diagnostic_span_cache
+            .as_ref()
+            .map_or(&[][..], |cache| cache.spans.as_slice());
+        crate::render::editor::diagnostic_at_offset(spans, offset)
     }
 
     /// Track the hovered cell and redraw only when the diagnostic under it
     /// changes, so mouse motion within one span does not repaint every event.
+    ///
+    /// Motion that stays inside one cell reuses the last answer rather than
+    /// resolving again. That answer only drives the redraw decision, and the
+    /// paint recomputes the hovered diagnostic from the cell every frame, so a
+    /// diagnostic set arriving from a server still reaches the screen through
+    /// its own redraw. The badge hit test is two comparisons and reruns
+    /// regardless, since the badge rect moves under a pointer that has not.
     fn handle_hover(&mut self, column: u16, row: u16) -> UpdateEffect {
+        let moved = self.hover_cell != Some((column, row));
         self.hover_cell = Some((column, row));
-        let resolved = self.resolve_hover_diagnostic(column, row);
+        let resolved = if moved {
+            self.resolve_hover_diagnostic(column, row)
+        } else {
+            self.hover_diag
+        };
         let badge_hovered = self.lsp_badge_rect.is_some_and(|rect| {
             column >= rect.x
                 && column < rect.x + rect.width
@@ -18824,6 +18850,100 @@ mod tests {
         h.drain_lsp();
         dispatch(&mut h.stoat, &stoat_action::ToggleLspStatus);
         h.assert_snapshot("lsp_progress_indexing");
+    }
+
+    /// A buffer with `count` single-line diagnostics on consecutive rows,
+    /// painted once so the pane areas and the render's span cache exist.
+    fn hover_diagnostics_harness(count: u32) -> (crate::test_harness::TestHarness, EditorId) {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/diag-hover");
+        let path = root.join("a.txt");
+        h.fake_fs()
+            .insert_file(&path, b"alpha bravo\ncharlie delta\necho foxtrot\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+
+        set_hover_diagnostics(&mut h, &path, count);
+        let _ = h.stoat.render();
+        let (editor_id, _) = h.stoat.focused_editor_ids().expect("a focused editor");
+        (h, editor_id)
+    }
+
+    fn set_hover_diagnostics(h: &mut crate::test_harness::TestHarness, path: &Path, count: u32) {
+        let diagnostics = (0..count)
+            .map(|line| lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: lsp_types::Position { line, character: 0 },
+                    end: lsp_types::Position { line, character: 5 },
+                },
+                severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                ..Default::default()
+            })
+            .collect();
+        h.stoat
+            .diagnostics
+            .replace_for_path(path.to_owned(), diagnostics);
+    }
+
+    fn cached_span_count(h: &crate::test_harness::TestHarness, editor_id: EditorId) -> usize {
+        h.stoat
+            .active_workspace()
+            .editors
+            .get(editor_id)
+            .expect("editor exists")
+            .diagnostic_span_cache
+            .as_ref()
+            .expect("a painted editor has a span cache")
+            .spans
+            .len()
+    }
+
+    /// Mouse motion used to resolve every diagnostic in the file per event,
+    /// ahead of the changed-dedupe. It now answers from the version-keyed cache
+    /// the paint reads, so a sweep resolves the set once and the paint that
+    /// follows finds it already built.
+    #[test]
+    fn hovering_rebuilds_the_shared_diagnostic_span_cache() {
+        let (mut h, editor_id) = hover_diagnostics_harness(1);
+        assert_eq!(
+            cached_span_count(&h, editor_id),
+            1,
+            "the paint resolved the file's one diagnostic",
+        );
+
+        // A second diagnostic moves the set version, leaving the cache stale.
+        set_hover_diagnostics(&mut h, &PathBuf::from("/diag-hover/a.txt"), 2);
+        h.stoat.handle_hover(8, 0);
+
+        assert_eq!(
+            cached_span_count(&h, editor_id),
+            2,
+            "the hover refreshed the shared cache rather than resolving its own list",
+        );
+    }
+
+    /// A pointer resting inside one cell reports motion repeatedly. The
+    /// diagnostic under a cell that has not moved is the one already found, so
+    /// the repeat answers from it and never reaches the resolve.
+    #[test]
+    fn a_repeat_hover_on_the_same_cell_resolves_nothing() {
+        let (mut h, editor_id) = hover_diagnostics_harness(1);
+        h.stoat.handle_hover(8, 0);
+        assert_eq!(cached_span_count(&h, editor_id), 1);
+
+        set_hover_diagnostics(&mut h, &PathBuf::from("/diag-hover/a.txt"), 3);
+
+        assert_eq!(
+            h.stoat.handle_hover(8, 0),
+            UpdateEffect::None,
+            "an unmoved pointer reports the diagnostic it already resolved",
+        );
+        assert_eq!(
+            cached_span_count(&h, editor_id),
+            1,
+            "and leaves the cache for the next paint to refresh",
+        );
     }
 
     #[test]
