@@ -14,7 +14,7 @@ use ratatui::text::Line;
 use std::{
     cmp::Ordering,
     collections::HashSet,
-    ops::Deref,
+    ops::{Deref, Range},
     sync::{
         atomic::{AtomicUsize, Ordering::SeqCst},
         Arc, OnceLock,
@@ -537,6 +537,15 @@ pub struct BlockMap {
     transforms: Option<SumTree<Transform>>,
     total_rows: u32,
     blocks_dirty: bool,
+    /// Placements whose block changed since the last sync.
+    ///
+    /// Adding, removing, or moving a block only changes the transforms where
+    /// that block sits, so `sync` turns these into identity wrap-row edits and
+    /// patches those rows rather than rebuilding the file. Whole placements are
+    /// kept rather than bare rows because a `Below` block anchors a row past
+    /// the one it names, and the wrap snapshot that settles which rows those
+    /// are does not exist until `sync`.
+    touched_placements: Vec<BlockPlacement>,
     deferred_edits: Patch<u32>,
     buffer_header_height: u32,
     excerpt_header_height: u32,
@@ -560,6 +569,7 @@ impl BlockMap {
             transforms: None,
             total_rows: 0,
             blocks_dirty: true,
+            touched_placements: Vec::new(),
             deferred_edits: Patch::empty(),
             buffer_header_height: 1,
             excerpt_header_height: 1,
@@ -573,7 +583,12 @@ impl BlockMap {
     }
 
     pub fn insert(&mut self, blocks: Vec<BlockProperties>) -> Vec<CustomBlockId> {
+        if blocks.is_empty() {
+            return Vec::new();
+        }
+
         let mut ids = Vec::with_capacity(blocks.len());
+        let mut added: Vec<Arc<CustomBlock>> = Vec::with_capacity(blocks.len());
         for props in blocks {
             let id = CustomBlockId(self.next_block_id.fetch_add(1, SeqCst));
             let block = Arc::new(CustomBlock {
@@ -586,14 +601,19 @@ impl BlockMap {
                 priority: props.priority,
                 rendered: OnceLock::new(),
             });
-            let ix = self
-                .custom_blocks
-                .partition_point(|b| b.placement.start_row() <= props.placement.start_row());
-            self.custom_blocks.insert(ix, block.clone());
-            self.custom_blocks_by_id.insert(id, block);
+            self.touched_placements.push(block.placement);
+            self.custom_blocks_by_id.insert(id, block.clone());
+            added.push(block);
             ids.push(id);
         }
-        self.blocks_dirty = true;
+
+        // Merged in one pass. Placing each block with its own `Vec::insert`
+        // reshuffles the tail once per block, which a diff view splicing every
+        // hunk at once pays quadratically.
+        added.sort_by_key(|b| b.placement.start_row());
+        let merged = merge_by_start_row(std::mem::take(&mut self.custom_blocks), added);
+        self.custom_blocks = merged;
+
         ids
     }
 
@@ -601,11 +621,13 @@ impl BlockMap {
         if ids.is_empty() {
             return;
         }
+        for block in self.custom_blocks.iter().filter(|b| ids.contains(&b.id)) {
+            self.touched_placements.push(block.placement);
+        }
         self.custom_blocks.retain(|b| !ids.contains(&b.id));
         for id in ids {
             self.custom_blocks_by_id.remove(id);
         }
-        self.blocks_dirty = true;
     }
 
     /// Move every custom block's placement across `buffer_row_edits`, so a
@@ -652,9 +674,7 @@ impl BlockMap {
                 continue;
             }
 
-            // Resolving a placement happens when transforms are built, so a
-            // block that moved needs the tree rebuilt to land in its new place.
-            self.blocks_dirty = true;
+            self.touched_placements.push(placement);
 
             let moved = Arc::new(CustomBlock {
                 id: block.id,
@@ -755,6 +775,38 @@ impl BlockMap {
             if !merged.is_empty() {
                 edits = edits.compose(merged.into_inner());
             }
+        }
+
+        // Rows whose block set changed, marked for rebuild the same way. These
+        // placements name the post-edit buffer, so they compose onto the wrap
+        // patch rather than into it.
+        if !self.touched_placements.is_empty() {
+            let mut ranges: Vec<Range<u32>> = std::mem::take(&mut self.touched_placements)
+                .iter()
+                .map(|placement| {
+                    // Widened by a row on each side. A block transform consumes
+                    // no input rows, so one whose row merely bounds the edit
+                    // gets kept by the unchanged prefix instead of rebuilt, and
+                    // the stale block survives beside its replacement. The end
+                    // stays inside the wrap text, which the sync walks by
+                    // seeking and would otherwise run off.
+                    let rows = placement_wrap_rows(placement, &wrap_snapshot);
+                    let line_count = wrap_snapshot.line_count();
+                    rows.start.min(line_count).saturating_sub(1)..(rows.end + 1).min(line_count)
+                })
+                .filter(|rows| rows.start < rows.end)
+                .collect();
+            ranges.sort_unstable_by_key(|r| r.start);
+            ranges.dedup();
+
+            let mut touched = Patch::empty();
+            for range in ranges {
+                touched.push(stoat_text::patch::Edit {
+                    old: range.clone(),
+                    new: range,
+                });
+            }
+            edits = edits.compose(touched.into_inner());
         }
 
         if edits.is_empty()
@@ -1243,11 +1295,7 @@ impl BlockSnapshot {
         result
     }
 
-    pub fn chunks(
-        &self,
-        rows: std::ops::Range<u32>,
-        endpoints: Arc<[HighlightEndpoint]>,
-    ) -> BlockChunks<'_> {
+    pub fn chunks(&self, rows: Range<u32>, endpoints: Arc<[HighlightEndpoint]>) -> BlockChunks<'_> {
         BlockChunks {
             snapshot: self,
             endpoints,
@@ -1269,10 +1317,7 @@ impl BlockSnapshot {
     /// Used by [`crate::display_map::DisplayMap::build_endpoints`] to bound
     /// highlight endpoint construction to the viewport instead of the whole
     /// rope.
-    pub fn row_range_to_buffer_byte_range(
-        &self,
-        rows: std::ops::Range<u32>,
-    ) -> std::ops::Range<usize> {
+    pub fn row_range_to_buffer_byte_range(&self, rows: Range<u32>) -> Range<usize> {
         let buffer = self.buffer_snapshot();
         let rope = buffer.rope();
         let total = rope.len();
@@ -1439,6 +1484,60 @@ fn resolve_block_placement(
     }
 }
 
+/// The wrap rows a placement's block occupies, matching where
+/// [`resolve_block_placement`] puts it.
+///
+/// A `Below` or `Near` block anchors the row after the one it names, so an edit
+/// marking the named row alone would leave the block out of the region it
+/// rebuilds and the block would be dropped rather than replaced.
+fn placement_wrap_rows(placement: &BlockPlacement, wrap_snapshot: &WrapSnapshot) -> Range<u32> {
+    match placement {
+        BlockPlacement::Above(row) => {
+            let wrap_row = buffer_row_to_wrap_row(*row, wrap_snapshot);
+            wrap_row..wrap_row + 1
+        },
+        BlockPlacement::Below(row) | BlockPlacement::Near(row) => {
+            let wrap_row = buffer_row_to_wrap_row(*row, wrap_snapshot) + 1;
+            wrap_row..wrap_row + 1
+        },
+        BlockPlacement::Replace { start, end } => {
+            let start_wrap = buffer_row_to_wrap_row(*start, wrap_snapshot);
+            let end_wrap = buffer_row_to_wrap_row(*end, wrap_snapshot);
+            start_wrap..end_wrap.max(start_wrap) + 1
+        },
+    }
+}
+
+/// Merge two lists already ordered by placement start row into one.
+///
+/// Ties keep `existing` ahead of `added`, matching where the old per-block
+/// `partition_point` placed a new block among equal start rows.
+fn merge_by_start_row(
+    existing: Vec<Arc<CustomBlock>>,
+    added: Vec<Arc<CustomBlock>>,
+) -> Vec<Arc<CustomBlock>> {
+    let mut merged = Vec::with_capacity(existing.len() + added.len());
+    let mut existing = existing.into_iter().peekable();
+    let mut added = added.into_iter().peekable();
+
+    loop {
+        let take_added = match (existing.peek(), added.peek()) {
+            (Some(a), Some(b)) => b.placement.start_row() < a.placement.start_row(),
+            (None, Some(_)) => true,
+            (_, None) => false,
+        };
+        let next = if take_added {
+            added.next()
+        } else {
+            existing.next()
+        };
+        match next {
+            Some(block) => merged.push(block),
+            None => return merged,
+        }
+    }
+}
+
 /// Carry each row in `rows` across `edits`, collapsing a row inside a replaced
 /// range onto the start of what replaced it.
 ///
@@ -1500,6 +1599,7 @@ fn sync_incremental(
         new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Left), ());
 
         // Preserve transforms ending exactly at edit start (matching Zed lines 902-920)
+        let mut kept_below_blocks_at_start = false;
         if let Some(item) = cursor.item() {
             let item_end = cursor.start().0 + item.summary.input_rows;
             if item.summary.input_rows > 0
@@ -1513,6 +1613,7 @@ fn sync_incremental(
                     if item.block.as_ref().is_some_and(|b| b.place_below()) {
                         new_transforms.push(item.clone(), ());
                         cursor.next();
+                        kept_below_blocks_at_start = true;
                     } else {
                         break;
                     }
@@ -1613,7 +1714,17 @@ fn sync_incremental(
                         ResolvedPlacement::Replace { end, .. } => end,
                         _ => block_start,
                     };
-                    if block_start < edit_end && block_end >= edit.new.start {
+                    // A below block sitting on the edit's first row was already
+                    // carried over from the old tree above. The search deliberately
+                    // reaches a buffer row back to find below blocks anchored
+                    // outside the edit, so without this it finds that one too and
+                    // emits it a second time.
+                    let first_row = if kept_below_blocks_at_start {
+                        edit.new.start + 1
+                    } else {
+                        edit.new.start
+                    };
+                    if block_start < edit_end && block_end >= first_row {
                         Some((placement, b))
                     } else {
                         None
@@ -2319,6 +2430,50 @@ mod tests {
 
         let snap2 = block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None);
         assert_eq!(snap2.total_lines(), 4);
+    }
+
+    /// Splicing a block no longer rebuilds the file, so the patched tree has to
+    /// be held against the one a rebuild would have produced. The ways the two
+    /// come apart are quiet ones. A stale block left beside its replacement and
+    /// a new block dropped both read as a plausible number of rows.
+    #[test]
+    fn an_incremental_splice_agrees_with_a_full_rebuild() {
+        let content: String = (0..12).map(|i| format!("line{i}\n")).collect();
+        let wrap_snapshot = create_wrap_snapshot(&content);
+        let sync = |map: &mut BlockMap| {
+            map.sync(
+                Arc::clone(&wrap_snapshot),
+                &Patch::empty(),
+                &Patch::empty(),
+                None,
+            )
+        };
+
+        let mut block_map = BlockMap::new();
+        let ids = block_map.insert(vec![
+            text_block(BlockPlacement::Below(2), "below two"),
+            text_block(BlockPlacement::Above(7), "above seven"),
+            text_block(BlockPlacement::Below(9), "below nine\nsecond"),
+        ]);
+        sync(&mut block_map);
+
+        block_map.remove(&[ids[1]].into_iter().collect());
+        block_map.insert(vec![
+            text_block(BlockPlacement::Above(4), "above four"),
+            text_block(BlockPlacement::Below(9), "another below nine"),
+        ]);
+        let patched = sync(&mut block_map);
+        let patched_rows: Vec<String> = (0..patched.total_lines())
+            .map(|row| patched.display_line(row))
+            .collect();
+
+        block_map.mark_dirty();
+        let rebuilt = sync(&mut block_map);
+        let rebuilt_rows: Vec<String> = (0..rebuilt.total_lines())
+            .map(|row| rebuilt.display_line(row))
+            .collect();
+
+        assert_eq!(patched_rows, rebuilt_rows);
     }
 
     #[test]
