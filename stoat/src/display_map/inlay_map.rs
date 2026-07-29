@@ -158,6 +158,13 @@ pub struct InlayMap {
     last_self_version: usize,
     inlays_sorted: bool,
     cached_offsets: Vec<usize>,
+    /// Buffer offsets where [`Self::splice`] added or dropped an inlay since
+    /// the last sync.
+    ///
+    /// These are what let the next sync rebuild the rows a hint batch touched
+    /// instead of the file. Left empty when a splice could not keep the set
+    /// ordered, which is what routes that sync back to the full rebuild.
+    spliced_offsets: Vec<usize>,
 }
 
 pub struct InlaySnapshot {
@@ -195,6 +202,7 @@ impl InlayMap {
             last_self_version: 0,
             inlays_sorted: true,
             cached_offsets: Vec::new(),
+            spliced_offsets: Vec::new(),
         };
         (map, snapshot)
     }
@@ -213,14 +221,25 @@ impl InlayMap {
 
         let inlay_count = self.inlays.len();
         let inlays_changed = self.version != self.last_self_version;
-        let can_incremental = !buffer_edits.is_empty()
-            && !inlays_changed
+
+        // A splice resolved its offsets against the buffer as it stood then, so
+        // they only describe this one while the text has not moved. Only the
+        // version says that. An empty edit patch does not, since a caller can
+        // hand over a newer buffer without one.
+        let spliced = std::mem::take(&mut self.spliced_offsets);
+        let text_still_matches = buffer_snapshot.version() == self.last_buffer_version;
+        let splice_edits = (!spliced.is_empty() && text_still_matches)
+            .then(|| splice_patch(spliced, buffer_snapshot.rope().len()));
+        let edits_in = splice_edits.as_ref().unwrap_or(buffer_edits);
+
+        let can_incremental = !edits_in.is_empty()
+            && (!inlays_changed || splice_edits.is_some())
             && self.cached_snapshot.is_some()
             && self.inlays_sorted
             && self.cached_offsets.len() == self.inlays.len();
 
         let (resolved, inlay_offsets) = if can_incremental {
-            self.resolve_incremental(&buffer_snapshot, buffer_edits)
+            self.resolve_incremental(&buffer_snapshot, edits_in)
         } else {
             self.resolve_all(&buffer_snapshot)
         };
@@ -233,7 +252,7 @@ impl InlayMap {
             sync_incremental(
                 old_snapshot,
                 &buffer_snapshot,
-                buffer_edits,
+                edits_in,
                 &resolved,
                 &inlay_offsets,
             )
@@ -393,6 +412,7 @@ impl InlayMap {
                 let mut kept = 0;
                 for i in 0..self.inlays.len() {
                     if remove_set.contains(&self.inlays[i].id) {
+                        self.spliced_offsets.push(self.cached_offsets[i]);
                         continue;
                     }
                     self.inlays.swap(kept, i);
@@ -438,16 +458,46 @@ impl InlayMap {
                 let at = self.cached_offsets.partition_point(|&o| o <= offset);
                 self.inlays.insert(at, inlay);
                 self.cached_offsets.insert(at, offset);
+                self.spliced_offsets.push(offset);
             } else {
                 self.inlays.push(inlay);
             }
             new_ids.push(id);
         }
 
+        if !offsets_usable {
+            // The set is being rebuilt wholesale, so naming rows would only
+            // describe part of what changed.
+            self.spliced_offsets.clear();
+        }
         self.inlays_sorted = offsets_usable;
         self.version += 1;
         new_ids
     }
+}
+
+/// The offsets a splice touched, as a patch marking each for rebuild.
+///
+/// An inlay stands for no buffer text, so nothing here replaces anything and
+/// every range maps to itself. They span a byte rather than nothing only
+/// because [`Patch::push`] drops an empty edit, which would leave the sync
+/// nothing to act on.
+fn splice_patch(mut offsets: Vec<usize>, text_len: usize) -> Patch<usize> {
+    offsets.sort_unstable();
+    offsets.dedup();
+
+    let mut patch = Patch::empty();
+    for offset in offsets {
+        let start = offset.min(text_len);
+        let end = (offset + 1).min(text_len);
+        if start < end {
+            patch.push(stoat_text::patch::Edit {
+                old: start..end,
+                new: start..end,
+            });
+        }
+    }
+    patch
 }
 
 /// Carry each offset in `offsets` across `edits`, flagging in `needs_resolve`
@@ -1214,6 +1264,96 @@ mod tests {
             "the set follows its offsets, and the removed hint is gone",
         );
         assert!(map.inlays_sorted);
+    }
+
+    /// Hints arrive in batches while typing, and a patch spanning the file
+    /// makes every layer below rebuild for a few rows of change. What the
+    /// splice actually touched is the row the hint landed on.
+    #[test]
+    fn splicing_one_hint_emits_a_patch_covering_only_its_row() {
+        let text: String = (0..200).map(|i| format!("line{i}\n")).collect();
+        let buffer = TextBuffer::with_text(BufferId::new(0), &text);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (mut map, _) = InlayMap::new(buffer_snapshot.clone());
+        map.sync(buffer_snapshot.clone(), &Patch::empty());
+
+        let off = buffer_snapshot.rope().point_to_offset(Point::new(100, 0));
+        let anchor = buffer_snapshot.anchor_at(off, stoat_text::Bias::Right);
+        map.splice(
+            &buffer_snapshot,
+            Vec::new(),
+            vec![(anchor, ": str".to_string(), super::InlayKind::Hint)],
+        );
+
+        let (snapshot, edits) = map.sync(buffer_snapshot, &Patch::empty());
+        assert_eq!(
+            edits
+                .edits()
+                .iter()
+                .map(|edit| (edit.old.clone(), edit.new.clone()))
+                .collect::<Vec<_>>(),
+            vec![(100..101, 100..101)],
+            "only the hint's row changed",
+        );
+        assert_eq!(
+            snapshot.line_len(100),
+            "line100".len() as u32 + ": str".len() as u32,
+        );
+    }
+
+    /// A splice now patches the rows it touched rather than rebuilding, so the
+    /// patched text has to be held against what a rebuild produces. A dropped
+    /// hint and one left beside its replacement both read as ordinary text.
+    #[test]
+    fn a_spliced_sync_agrees_with_a_full_rebuild() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "alpha beta\ngamma delta\nepsilon");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+
+        let hint = |row: u32, column: u32, text: &str| {
+            let off = buffer_snapshot
+                .rope()
+                .point_to_offset(Point::new(row, column));
+            (
+                buffer_snapshot.anchor_at(off, stoat_text::Bias::Right),
+                text.to_string(),
+                super::InlayKind::Hint,
+            )
+        };
+
+        let mut patched = InlayMap::new(buffer_snapshot.clone()).0;
+        patched.sync(buffer_snapshot.clone(), &Patch::empty());
+        let ids = patched.splice(
+            &buffer_snapshot,
+            Vec::new(),
+            vec![hint(0, 5, ": a"), hint(1, 5, ": b"), hint(2, 3, ": c")],
+        );
+        patched.sync(buffer_snapshot.clone(), &Patch::empty());
+        patched.splice(
+            &buffer_snapshot,
+            vec![ids[1]],
+            vec![hint(0, 10, ": d"), hint(1, 0, ": e")],
+        );
+        let (patched_snapshot, _) = patched.sync(buffer_snapshot.clone(), &Patch::empty());
+
+        // The same set, built with nothing to patch against.
+        let mut rebuilt = InlayMap::new(buffer_snapshot.clone()).0;
+        rebuilt.splice(
+            &buffer_snapshot,
+            Vec::new(),
+            vec![
+                hint(0, 5, ": a"),
+                hint(2, 3, ": c"),
+                hint(0, 10, ": d"),
+                hint(1, 0, ": e"),
+            ],
+        );
+        let (rebuilt_snapshot, _) = rebuilt.sync(buffer_snapshot, &Patch::empty());
+
+        assert_eq!(patched_snapshot.inlay_text(), rebuilt_snapshot.inlay_text());
     }
 
     #[test]
