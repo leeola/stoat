@@ -381,6 +381,7 @@ impl Renderer {
             },
             frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback,
             frame.damage,
+            frame.scrolled_rows,
         );
         self.decoration.prepare(
             device,
@@ -389,6 +390,7 @@ impl Renderer {
             resolution,
             frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback,
             frame.decoration_damage,
+            frame.scrolled_rows,
         );
         self.text.prepare(device, queue, grid, resolution, &frame);
         self.panel.prepare(device, queue, grid, resolution);

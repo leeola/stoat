@@ -206,6 +206,7 @@ impl DecorationPass {
     /// frame: only those rows rebuild (every row when the cache is stale or the
     /// damage is `Full`), and the upload runs from the first changed row to the
     /// end. A frame that marks no rows reuses the buffer untouched.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
         device: &Device,
@@ -214,6 +215,7 @@ impl DecorationPass {
         resolution: [f32; 2],
         grid_scroll: f32,
         decoration_damage: &Damage,
+        scrolled_rows: usize,
     ) {
         let globals = Globals {
             resolution,
@@ -229,6 +231,12 @@ impl DecorationPass {
             self.border_row_instances = vec![Vec::new(); rows];
         }
 
+        crate::render::rotate_row_cache(
+            &mut self.border_row_instances,
+            scrolled_rows,
+            |instance| instance.cell[1] -= scrolled_rows as f32,
+        );
+
         let rows_to_build: Vec<usize> = if matches!(decoration_damage, Damage::Full) || stale {
             (0..rows).collect()
         } else {
@@ -236,8 +244,15 @@ impl DecorationPass {
                 .filter(|&row| decoration_damage.is_dirty(row))
                 .collect()
         };
-        let Some(&first) = rows_to_build.iter().min() else {
-            return;
+        // A rotation moved every kept instance, so the buffer rewrites from the
+        // top even on a frame that rebuilt no row.
+        let first = if scrolled_rows > 0 {
+            0
+        } else {
+            let Some(&first) = rows_to_build.iter().min() else {
+                return;
+            };
+            first
         };
 
         for &row in &rows_to_build {

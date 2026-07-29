@@ -255,6 +255,7 @@ impl BackgroundPass {
         cursor: CursorState,
         grid_scroll: f32,
         damage: &Damage,
+        scrolled_rows: usize,
     ) {
         let c = cursor.corners.unwrap_or([[0.0; 2]; 4]);
         let globals = Globals {
@@ -283,8 +284,15 @@ impl BackgroundPass {
         // buffer's contents), so both rebuild every cell; otherwise rewrite only
         // the damaged rows. Each cell is one instance, so row r is the fixed slice
         // [r*cols, (r+1)*cols) and can be patched in place.
-        let full =
-            matches!(damage, Damage::Full) || total != self.count as usize || total > self.capacity;
+        //
+        // A scroll rebuilds whole rather than sliding the buffer the way the
+        // glyph passes slide theirs. There is nothing here worth keeping: a
+        // background row is one colour lookup per cell, and every instance bakes
+        // its row, so a slide would have to rewrite the same bytes it moved.
+        let full = matches!(damage, Damage::Full)
+            || scrolled_rows > 0
+            || total != self.count as usize
+            || total > self.capacity;
         if full {
             self.scratch.clear();
             build_instances(grid, &mut self.scratch);

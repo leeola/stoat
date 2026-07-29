@@ -1675,7 +1675,7 @@ impl ApplicationHandler<PtyEvent> for App {
                             },
                             damage: &damage,
                             decoration_damage: &decoration_damage,
-                            scrolled_rows: 0,
+                            scrolled_rows: scroll_delta,
                         },
                         &composites,
                         cursor_scissor,
