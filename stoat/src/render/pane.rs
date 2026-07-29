@@ -95,6 +95,7 @@ pub(crate) fn render_pane(
                     content_area,
                     text_style,
                     theme,
+                    frame.chrome,
                     buf,
                     is_focused,
                     frame.minimap_enabled,

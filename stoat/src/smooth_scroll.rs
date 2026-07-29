@@ -1134,6 +1134,7 @@ mod tests {
 
         let theme = Theme::empty();
         let fallback = theme.get(scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
 
         // With line numbers on in fallback mode, the page's degraded cell gutter
@@ -1156,6 +1157,7 @@ mod tests {
                 area,
                 fallback,
                 &theme,
+                &chrome,
                 &mut expected,
                 false,
                 false,
@@ -1214,6 +1216,7 @@ mod tests {
         h.settle();
 
         let theme = Theme::empty();
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
         let fallback = theme.get(scope::UI_TEXT);
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let gutter = PageGutter::new(
@@ -1231,6 +1234,7 @@ mod tests {
             area,
             fallback,
             &theme,
+            &chrome,
             &mut expected,
             false,
             false,
@@ -1300,6 +1304,7 @@ mod tests {
 
         let theme = Theme::empty();
         let fallback = theme.get(scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let gutter = PageGutter::new(
             true,
@@ -1316,6 +1321,7 @@ mod tests {
             area,
             fallback,
             &theme,
+            &chrome,
             &mut expected,
             false,
             false,

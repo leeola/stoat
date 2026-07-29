@@ -1463,6 +1463,16 @@ pub struct Stoat {
     /// hash this in, which is what makes a `:theme` switch refill them instead of
     /// gliding old-theme pixels back onto the screen.
     pub(crate) theme_epoch: u64,
+    /// The editor chrome resolved from [`Self::theme`], rebuilt by
+    /// [`Self::refresh_chrome`] when the theme has been replaced.
+    ///
+    /// Keyed on the theme's identity rather than [`Self::theme_epoch`], because
+    /// the epoch tracks pooled-surface staleness rather than the theme itself
+    /// and a config reload replaces the theme without bumping it.
+    pub(crate) chrome: Option<(
+        Arc<crate::theme::Theme>,
+        crate::render::editor::ResolvedChrome,
+    )>,
     /// Smooth-scroll pool emit state for the focused editor. Tracks the
     /// last-declared pool region, filled page window, and emitted scroll row
     /// so each frame emits only the deltas.
@@ -1900,6 +1910,7 @@ impl Stoat {
             apc_scene: ApcScene::new(),
             pending_undercurls: Vec::new(),
             theme_epoch: 0,
+            chrome: None,
             smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
             minimap_content: std::collections::HashMap::new(),
             minimap_next_content_id: 0,
@@ -2497,6 +2508,24 @@ impl Stoat {
 
     pub fn active_workspace_mut(&mut self) -> &mut Workspace {
         &mut self.workspaces[self.active_workspace]
+    }
+
+    /// Resolve [`Self::chrome`] against the active theme when it has not been.
+    ///
+    /// Separate from reading it, so a caller that goes on to borrow the rest of
+    /// the state it paints from can settle the rebuild first.
+    pub(crate) fn refresh_chrome(&mut self) {
+        // Keyed on the theme handle rather than its contents, and the handle is
+        // retained so its allocation cannot be freed and reused by a later
+        // theme that would then read as unchanged.
+        let fresh = self
+            .chrome
+            .as_ref()
+            .is_some_and(|(theme, _)| Arc::ptr_eq(theme, &self.theme));
+        if !fresh {
+            let chrome = crate::render::editor::ResolvedChrome::resolve(&self.theme);
+            self.chrome = Some((self.theme.clone(), chrome));
+        }
     }
 
     pub(crate) fn size(&self) -> Rect {
@@ -7948,6 +7977,7 @@ impl Stoat {
     fn emit_window_content(&mut self, out: &mut Vec<u8>) {
         let mode = self.focused_mode().to_string();
         let lsp_pending = self.lsp_pending_label();
+        self.refresh_chrome();
         let ws = &mut self.workspaces[self.active_workspace];
         let windowed = ws.panes.windowed_panes();
         if windowed.is_empty() {
@@ -7973,6 +8003,7 @@ impl Stoat {
             mode: &mode,
             screen,
             theme: &self.theme,
+            chrome: &self.chrome.as_ref().expect("refresh_chrome ran above").1,
             pending_count: self.pending_count,
             lsp_status_open: false,
             lsp_progress_entries: &[],
@@ -8360,6 +8391,7 @@ impl Stoat {
         let Some(apc_tx) = self.apc_tx.clone().filter(|_| self.stoatty) else {
             return;
         };
+        self.refresh_chrome();
 
         // A full-screen overlay screen hides every editor, so nothing is pooled
         // this frame and any live pools are retired. The diff screen renders in
@@ -8624,7 +8656,11 @@ impl Stoat {
         let ws = &mut self.workspaces[self.active_workspace];
         let theme = &self.theme;
         let fallback_style = theme.get(crate::theme::scope::UI_TEXT);
-        let base_rich = crate::render::editor::resolve_rich_gutter(theme, fallback_style);
+        // Resolved once for the theme rather than per pane per frame.
+        let base_rich = self
+            .chrome
+            .as_ref()
+            .and_then(|(_, chrome)| chrome.rich_gutter.clone());
         for (_, editor_id, region) in &panes {
             let region = *region;
             let Some(editor) = ws.editors.get_mut(*editor_id) else {

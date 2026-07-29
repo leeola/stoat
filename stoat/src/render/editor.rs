@@ -66,11 +66,16 @@ pub(crate) fn render_editor(
     buf: &mut Buffer,
     is_focused: bool,
 ) {
+    // A modal, dock, or preview editor paints no gutter and no diagnostics, so
+    // nothing here reads the cached chrome the pane path shares. Resolving one
+    // costs what the overlay path resolved for itself before.
+    let chrome = ResolvedChrome::resolve(theme);
     render_editor_with_overlay(
         editor,
         inner,
         fallback_style,
         theme,
+        &chrome,
         buf,
         is_focused,
         false,
@@ -94,6 +99,7 @@ pub(crate) fn render_editor_with_overlay(
     inner: Rect,
     fallback_style: Style,
     theme: &crate::theme::Theme,
+    chrome: &ResolvedChrome,
     buf: &mut Buffer,
     is_focused: bool,
     minimap_enabled: bool,
@@ -138,8 +144,7 @@ pub(crate) fn render_editor_with_overlay(
     // questions, so they run off a buffer snapshot. A display snapshot taken
     // here would be wasted work, since set_wrap_width below invalidates it and
     // the one the gutter and text paint from re-syncs the wrap from scratch.
-    let rich_gutter_colors = resolve_rich_gutter(theme, fallback_style);
-    let gutter_is_rich = scene.is_some() && rich_gutter_colors.is_some();
+    let gutter_is_rich = scene.is_some() && chrome.rich_gutter.is_some();
     let measured_gutter_w = if line_numbers != LineNumbers::Off {
         let buffer = editor.display_map.buffer_snapshot();
         measure_gutter_width(
@@ -198,7 +203,7 @@ pub(crate) fn render_editor_with_overlay(
         },
         None => &empty_severity,
     };
-    let severity = severity_colors(theme);
+    let severity = chrome.severity.clone();
     // The pane content area before the gutter inset below, used to resolve a
     // mouse hover cell back to a buffer offset for the diagnostic popover.
     let content_area = inner;
@@ -228,9 +233,8 @@ pub(crate) fn render_editor_with_overlay(
             inner,
             end_row,
             row_severity,
-            severity.as_ref(),
-            fallback_style,
             theme,
+            chrome,
             current_line,
             severity_version,
             &mut editor.gutter_geometry_cache,
@@ -1015,6 +1019,48 @@ pub(crate) fn resolve_rich_gutter(
     })
 }
 
+/// The theme colors the editor chrome paints from, resolved once per theme.
+///
+/// Every field costs a walk over progressively broadening scopes, and the
+/// gutter alone asks about thirty of those questions. They are all pure
+/// functions of the theme, so a frame that did not change it can read the
+/// previous answers.
+///
+/// Pane-local shading is not baked in. An unfocused pane dims these toward
+/// [`Self::gutter_bg`] at paint time, since the dim varies per pane while the
+/// colors do not.
+pub(crate) struct ResolvedChrome {
+    /// `None` when a gutter color is not RGB, which drops the pane to the
+    /// fallback glyph gutter rather than mixing the two.
+    pub(crate) rich_gutter: Option<RichGutterColors>,
+    /// `None` when a diagnostic color is missing or not RGB.
+    pub(crate) severity: Option<SeverityColors>,
+    pub(crate) diff_marks: DiffMarkColors,
+    /// Background the rich gutter fills, and what its foregrounds dim toward.
+    pub(crate) gutter_bg: Option<[u8; 3]>,
+}
+
+impl ResolvedChrome {
+    pub(crate) fn resolve(theme: &crate::theme::Theme) -> Self {
+        let fallback_style = theme.get(crate::theme::scope::UI_TEXT);
+        Self {
+            rich_gutter: resolve_rich_gutter(theme, fallback_style),
+            severity: severity_colors(theme),
+            diff_marks: DiffMarkColors::resolve(theme),
+            gutter_bg: gutter_background(theme, fallback_style),
+        }
+    }
+}
+
+/// The background the gutter fills, preferring the pane's own over the theme's.
+fn gutter_background(theme: &crate::theme::Theme, fallback_style: Style) -> Option<[u8; 3]> {
+    style_rgb(fallback_style.bg.or_else(|| {
+        theme
+            .try_get(crate::theme::scope::UI_BACKGROUND)
+            .and_then(|st| st.bg)
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_diagnostic_gutter(
     row_severity: &BTreeMap<u32, DiagnosticSeverity>,
@@ -1308,9 +1354,8 @@ fn draw_line_number_gutter(
     inner: Rect,
     end_row: u32,
     row_severity: &BTreeMap<u32, DiagnosticSeverity>,
-    severity: Option<&SeverityColors>,
-    fallback_style: Style,
     theme: &crate::theme::Theme,
+    chrome: &ResolvedChrome,
     current_line: Option<u32>,
     severity_version: u64,
     cache: &mut Option<GutterGeometryCache>,
@@ -1318,47 +1363,23 @@ fn draw_line_number_gutter(
     buf: &mut Buffer,
     dim: f32,
 ) -> u16 {
-    use crate::theme::scope as s;
-
     let visible = end_row.saturating_sub(scroll_row).min(inner.height as u32);
-
-    // Background the rich gutter fills, and the target its foregrounds dim toward
-    // so an unfocused pane's gutter fades with its text (`dim == 0.0` is identity).
-    let rich_bg = style_rgb(
-        fallback_style
-            .bg
-            .or_else(|| theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg)),
-    );
 
     // Dimmed owned gutter colors, borrowed by the Copy `gutter_rgb` tuple and the
     // geometry key below. The key hashes them, so a dim change refills the cache.
-    let diff_colors = {
-        let base = DiffMarkColors::resolve(theme);
-        match rich_bg {
-            Some(bg) => base.dim(bg, dim),
-            None => base,
-        }
+    // The undimmed colors come from the chrome, which resolved them once for
+    // the theme. Only the per-pane shading happens here.
+    let diff_colors = match chrome.gutter_bg {
+        Some(bg) => chrome.diff_marks.dim(bg, dim),
+        None => chrome.diff_marks,
     };
-    let dimmed_severity = match (severity, rich_bg) {
-        (Some(colors), Some(bg)) => Some(colors.dim(bg, dim)),
-        _ => None,
-    };
+    let dimmed = chrome.rich_gutter.as_ref().map(|rich| rich.dim(dim));
 
-    // Rich mode needs a scene and every gutter color as RGB. The colors resolve
-    // here, ahead of the scene, so the same values feed both the cache key and
-    // the component-line rebuild.
-    let gutter_rgb = (|| {
-        let colors = dimmed_severity.as_ref()?;
-        let number_fg = style_rgb(theme.get(s::UI_TEXT_MUTED).fg)?;
-        let separator = style_rgb(theme.get(s::UI_BORDER_INACTIVE).fg).unwrap_or(number_fg);
-        let bg = rich_bg?;
-        Some((
-            colors,
-            dim_rgb(number_fg, bg, dim),
-            dim_rgb(separator, bg, dim),
-            bg,
-        ))
-    })();
+    // Rich mode needs a scene and every gutter color as RGB, which is exactly
+    // when the chrome resolved a rich set at all.
+    let gutter_rgb = dimmed
+        .as_ref()
+        .map(|rich| (&rich.colors, rich.number_fg, rich.separator, rich.bg));
     let rich = scene.zip(gutter_rgb);
 
     let key = gutter_geometry_key(
@@ -2147,6 +2168,7 @@ mod tests {
     fn render_search(stoat: &mut Stoat, area: Rect, query: &str) -> Vec<(usize, usize)> {
         let theme = crate::theme::Theme::empty();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
         let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
         let mut buf = Buffer::empty(area);
         super::render_editor_with_overlay(
@@ -2154,6 +2176,7 @@ mod tests {
             area,
             fallback,
             &theme,
+            &chrome,
             &mut buf,
             true,
             false,
@@ -2228,6 +2251,7 @@ mod tests {
         open_search_buffer(&mut h, "let x = 1");
         let theme = h.stoat.theme.clone();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
         let inlay_bg = theme
             .get(crate::theme::scope::UI_VIRTUAL_INLAY)
             .bg
@@ -2252,6 +2276,7 @@ mod tests {
             area,
             fallback,
             &theme,
+            &chrome,
             &mut buf,
             true,
             false,
@@ -2294,6 +2319,7 @@ mod tests {
             open_search_buffer(&mut h, "let x = 1\nlet y = 2");
             let theme = h.stoat.theme.clone();
             let fallback = theme.get(crate::theme::scope::UI_TEXT);
+            let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
 
             if with_inlay {
                 let editor =
@@ -2324,6 +2350,7 @@ mod tests {
                 area,
                 fallback,
                 &theme,
+                &chrome,
                 &mut buf,
                 true,
                 false,
@@ -2650,6 +2677,7 @@ mod tests {
     ) -> (Option<u32>, u32, u32) {
         let theme = crate::theme::Theme::empty();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
         let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
         let mut buf = Buffer::empty(area);
         super::render_editor_with_overlay(
@@ -2657,6 +2685,7 @@ mod tests {
             area,
             fallback,
             &theme,
+            &chrome,
             &mut buf,
             true,
             false,
@@ -2781,6 +2810,7 @@ mod tests {
 
         let theme = crate::theme::Theme::empty();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
         {
@@ -2790,6 +2820,7 @@ mod tests {
                 area,
                 fallback,
                 &theme,
+                &chrome,
                 &mut buf,
                 true,
                 false,
@@ -2824,6 +2855,7 @@ mod tests {
     fn paint_gutter_key(stoat: &mut Stoat, rows: u16) -> u64 {
         let theme = crate::theme::Theme::empty();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
         let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
         let area = Rect::new(0, 0, 12, rows);
         let mut buf = Buffer::empty(area);
@@ -2832,6 +2864,7 @@ mod tests {
             area,
             fallback,
             &theme,
+            &chrome,
             &mut buf,
             true,
             false,
@@ -2921,6 +2954,7 @@ mod tests {
     ) -> Vec<String> {
         let theme = crate::theme::Theme::empty();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
         let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
         let area = Rect::new(0, 0, 12, rows);
         let mut buf = Buffer::empty(area);
@@ -2929,6 +2963,7 @@ mod tests {
             area,
             fallback,
             &theme,
+            &chrome,
             &mut buf,
             is_focused,
             false,
@@ -2967,6 +3002,7 @@ mod tests {
     ) -> (Option<Rect>, Vec<String>) {
         let theme = crate::theme::Theme::empty();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
         let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
         let area = Rect::new(0, 0, width, rows);
         let mut buf = Buffer::empty(area);
@@ -2975,6 +3011,7 @@ mod tests {
             area,
             fallback,
             &theme,
+            &chrome,
             &mut buf,
             true,
             minimap_enabled,
@@ -3076,6 +3113,7 @@ mod tests {
     fn gutter_mark_cells(stoat: &mut Stoat, rows: u16) -> Vec<(String, ratatui::style::Color)> {
         let theme = stoat.theme.clone();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
         let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
         let area = Rect::new(0, 0, 12, rows);
         let mut buf = Buffer::empty(area);
@@ -3084,6 +3122,7 @@ mod tests {
             area,
             fallback,
             &theme,
+            &chrome,
             &mut buf,
             true,
             false,
@@ -3462,6 +3501,43 @@ mod tests {
             super::severity_colors(&h.stoat.theme).is_some(),
             "the shipped default theme must resolve every diagnostic severity \
              to RGB so the sub-cell gutter engages under stoatty",
+        );
+    }
+
+    /// The chrome is resolved once and reused across frames, so it has to
+    /// notice a theme replacement. Not every replacement bumps `theme_epoch`,
+    /// which is why the cache keys on the theme handle instead.
+    #[test]
+    fn the_chrome_resolves_once_and_refreshes_on_a_new_theme() {
+        let mut h = Stoat::test();
+        h.stoat.refresh_chrome();
+        let first = h
+            .stoat
+            .chrome
+            .as_ref()
+            .expect("resolved above")
+            .1
+            .diff_marks;
+
+        h.stoat.refresh_chrome();
+        assert_eq!(
+            h.stoat.chrome.as_ref().expect("still resolved").0.as_ref() as *const _,
+            h.stoat.theme.as_ref() as *const _,
+            "an unchanged theme reuses what was already resolved",
+        );
+
+        // A theme replacement that leaves theme_epoch alone, which is what
+        // reloading the config does.
+        let epoch = h.stoat.theme_epoch;
+        h.stoat.theme = std::sync::Arc::new(crate::theme::Theme::empty());
+        h.stoat.refresh_chrome();
+        assert_eq!(h.stoat.theme_epoch, epoch, "the epoch did not move");
+
+        let after = h.stoat.chrome.as_ref().expect("re-resolved").1.diff_marks;
+        assert_ne!(
+            (first.added, first.deleted),
+            (after.added, after.deleted),
+            "the new theme's diff colors replaced the old ones",
         );
     }
 

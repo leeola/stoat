@@ -122,6 +122,10 @@ pub(crate) struct FrameCtx<'a> {
     /// editor with no screen over it.
     pub(crate) screen: Option<&'static str>,
     pub(crate) theme: &'a crate::theme::Theme,
+    /// The gutter, severity, and diff-mark colors already resolved from
+    /// [`Self::theme`], so each pane paints from them rather than re-walking
+    /// the scope table for every one.
+    pub(crate) chrome: &'a editor::ResolvedChrome,
     /// Mid-typing count prefix waiting on a motion (e.g. `4` between
     /// keypresses on the way to `4j`). The status bar shows it so the
     /// user knows a partial count is in flight; cleared after every
@@ -358,6 +362,10 @@ pub(crate) fn frame(
 ) {
     let full = stoat.size();
 
+    // Settled before the frame borrows the rest of the state it paints from,
+    // since every pane reads these and only a theme change moves them.
+    stoat.refresh_chrome();
+
     if let Some(deadline) = stoat.pending_message_deadline
         && stoat.executor.now() >= deadline
     {
@@ -471,6 +479,11 @@ pub(crate) fn frame(
         mode: &mode,
         screen,
         theme: &stoat.theme,
+        chrome: &stoat
+            .chrome
+            .as_ref()
+            .expect("refresh_chrome ran at the top of the frame")
+            .1,
         pending_count: stoat.pending_count,
         lsp_status_open: stoat.lsp_status_pinned || stoat.lsp_badge_hovered,
         lsp_progress_entries: &lsp_progress_entries,
