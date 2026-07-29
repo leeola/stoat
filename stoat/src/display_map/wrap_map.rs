@@ -170,6 +170,13 @@ pub struct WrapMap {
     edits_since_sync: Patch<u32>,
     wrap_width: Option<u32>,
     background_task: Option<Task<(WrapSnapshot, Patch<u32>)>>,
+    /// How many entries [`Self::pending_edits`] held when the running task was
+    /// spawned, which is exactly what it will have applied when it finishes.
+    ///
+    /// The queue keeps growing while the task runs, so its result covers only
+    /// this prefix. Dropping the rest would strand an edit, or a wrap-width
+    /// change queued in the same call that polled the task to completion.
+    background_edits_taken: usize,
     executor: Executor,
     /// Woken when a background rewrap finishes.
     ///
@@ -214,6 +221,7 @@ impl WrapMap {
             edits_since_sync: Patch::empty(),
             wrap_width,
             background_task: None,
+            background_edits_taken: 0,
             executor,
             redraw,
         };
@@ -258,7 +266,18 @@ impl WrapMap {
 
         let needs_full_rebuild = wrap_width_changed || (version_changed && tab_edits.is_empty());
 
-        if needs_full_rebuild {
+        if self.should_defer_rewrap() {
+            if self.background_task.is_none() {
+                self.queue_rewrap(tab_snapshot);
+            } else if !tab_edits.is_empty() {
+                // A rewrap is already running for an earlier width. Its result
+                // will be re-checked against the current one when it lands, but
+                // any text edited meanwhile still has to be carried.
+                self.pending_edits
+                    .push_back((tab_snapshot, tab_edits.clone()));
+            }
+            self.flush_edits();
+        } else if needs_full_rebuild {
             let old_line_count = self.snapshot.line_count();
             self.snapshot = build_snapshot(tab_snapshot, self.wrap_width);
             let new_line_count = self.snapshot.line_count();
@@ -288,6 +307,50 @@ impl WrapMap {
             Arc::new(self.snapshot.clone()),
             mem::take(&mut self.edits_since_sync),
         )
+    }
+
+    /// Whether the wanted width differs from the snapshot's by enough work to
+    /// be worth deferring.
+    ///
+    /// Rewrapping a large file is the same O(file) walk a large edit batch
+    /// already hands to the background, and a pane drag emits a width change
+    /// per resize event, so running it inline stalls the UI thread repeatedly.
+    ///
+    /// Only a change between two widths qualifies. Turning wrapping on or off
+    /// is a one-off rather than a per-event stream, and deferring the first
+    /// width would show a freshly opened file unwrapped for a beat before it
+    /// snapped into shape. Wrapping off could not defer in any case, since
+    /// [`Self::flush_edits`] does nothing without a width and would leave the
+    /// snapshot interpolated forever.
+    fn should_defer_rewrap(&self) -> bool {
+        self.wrap_width != self.snapshot.wrap_width
+            && self.wrap_width.is_some()
+            && self.snapshot.wrap_width.is_some()
+            && self.snapshot.tab_snapshot.line_count() >= WRAP_SYNC_THRESHOLD
+    }
+
+    /// Queue a full rebuild at the wanted width as an ordinary pending edit.
+    ///
+    /// A full-range identity patch makes `sync_incremental` rebuild every row
+    /// at the width [`Self::flush_edits`] passes it, which is transform for
+    /// transform what [`build_snapshot`] would produce.
+    ///
+    /// The snapshot's own width is deliberately left alone. It describes the
+    /// wrapping the transforms actually carry, and claiming the new one early
+    /// would hide the change if this entry were ever dropped. Marking the
+    /// snapshot interpolated is what keeps [`Self::flush_edits`] from draining
+    /// the entry as already-applied, since a width change moves no version.
+    fn queue_rewrap(&mut self, tab_snapshot: TabSnapshot) {
+        let old_tab_rows = self.snapshot.tab_snapshot.line_count();
+        let new_tab_rows = tab_snapshot.line_count();
+        self.snapshot.interpolated = true;
+        self.pending_edits.push_back((
+            tab_snapshot,
+            Patch::new(vec![Edit {
+                old: 0..old_tab_rows,
+                new: 0..new_tab_rows,
+            }]),
+        ));
     }
 
     fn flush_edits(&mut self) {
@@ -344,6 +407,7 @@ impl WrapMap {
 
                 let mut snapshot = self.snapshot.clone();
                 let pending = self.pending_edits.clone();
+                self.background_edits_taken = pending.len();
                 let task = self
                     .executor
                     .spawn_with_redraw(self.redraw.clone(), async move {
@@ -401,7 +465,18 @@ impl WrapMap {
                     .compose(edits.edits().iter().cloned());
                 self.snapshot = snapshot;
                 self.background_task = None;
-                self.pending_edits.clear();
+                let taken = self.background_edits_taken.min(self.pending_edits.len());
+                self.pending_edits.drain(..taken);
+                self.background_edits_taken = 0;
+
+                // The result carries the width the task was spawned with, which
+                // a drag may already have moved past. Re-queue against the
+                // wanted width rather than settling on one the user left behind.
+                if self.should_defer_rewrap() {
+                    let tab_snapshot = self.snapshot.tab_snapshot.clone();
+                    self.queue_rewrap(tab_snapshot);
+                }
+
                 self.flush_edits();
             }
         }

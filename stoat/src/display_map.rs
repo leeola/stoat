@@ -1554,6 +1554,123 @@ mod tests {
         );
     }
 
+    /// A display map over `lines` copies of a line long enough to wrap, plus
+    /// the scheduler driving its background work.
+    fn wrappable_display_map(lines: usize) -> (Arc<TestScheduler>, DisplayMap) {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = scheduler.executor();
+        let line = "the quick brown fox jumps over the lazy dog ".repeat(3);
+        let text: String = std::iter::repeat_n(line.as_str(), lines)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let buffer = TextBuffer::with_text(BufferId::new(0), &text);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        (
+            scheduler,
+            DisplayMap::new(multi_buffer, executor, crate::test_notify()),
+        )
+    }
+
+    /// Rows the same content wraps to at `width`, built from nothing.
+    fn rows_at_width(lines: usize, width: u32) -> u32 {
+        let (_scheduler, mut display_map) = wrappable_display_map(lines);
+        display_map.set_wrap_width(Some(width));
+        display_map.snapshot().max_point().row
+    }
+
+    /// Dragging a pane edge emits a width change per resize event, and
+    /// rewrapping a large file is the same O(file) walk a large edit batch
+    /// already defers, so it must not run on the UI thread either.
+    #[test]
+    fn a_wide_files_width_change_rewraps_in_the_background() {
+        const LINES: usize = 150;
+        let (scheduler, mut display_map) = wrappable_display_map(LINES);
+        display_map.set_wrap_width(Some(60));
+        let at_60 = display_map.snapshot().max_point().row;
+
+        display_map.set_wrap_width(Some(20));
+        let interim = display_map.snapshot().max_point().row;
+        assert!(
+            display_map.wrap_map.background_pending(),
+            "a large file's width change must not rewrap on the UI thread",
+        );
+        assert_eq!(
+            interim, at_60,
+            "the immediate snapshot still carries the previous width's wrapping",
+        );
+
+        scheduler.run_until_parked();
+        let settled = display_map.snapshot().max_point().row;
+        assert!(
+            !display_map.wrap_map.background_pending(),
+            "the finished rewrap lands on the next snapshot",
+        );
+        assert_eq!(
+            settled,
+            rows_at_width(LINES, 20),
+            "the settled wrapping matches a from-scratch build at the new width",
+        );
+        assert!(settled > at_60, "a narrower width wraps into more rows");
+    }
+
+    /// Below the threshold the inline rebuild is cheaper than a task, so the
+    /// new width has to be on screen the moment it is set.
+    #[test]
+    fn a_small_files_width_change_rewraps_synchronously() {
+        const LINES: usize = 4;
+        let (_scheduler, mut display_map) = wrappable_display_map(LINES);
+        display_map.set_wrap_width(Some(60));
+        display_map.snapshot();
+
+        display_map.set_wrap_width(Some(20));
+        let rows = display_map.snapshot().max_point().row;
+        assert!(
+            !display_map.wrap_map.background_pending(),
+            "a small file rewraps inline, leaving nothing outstanding",
+        );
+        assert_eq!(
+            rows,
+            rows_at_width(LINES, 20),
+            "and the new width is already in the first snapshot after the change",
+        );
+    }
+
+    /// A drag emits many widths in a row. Each intermediate one may be
+    /// abandoned, but the last must be what the display settles on.
+    #[test]
+    fn successive_width_changes_settle_on_the_last() {
+        const LINES: usize = 150;
+        let (scheduler, mut display_map) = wrappable_display_map(LINES);
+        display_map.set_wrap_width(Some(60));
+        display_map.snapshot();
+
+        for width in [50, 40, 30, 20] {
+            display_map.set_wrap_width(Some(width));
+            display_map.snapshot();
+        }
+
+        // Successive rewraps chain through the pending queue, so drain and
+        // re-sync until nothing is outstanding rather than assuming one pass.
+        for _ in 0..10 {
+            scheduler.run_until_parked();
+            display_map.snapshot();
+            if !display_map.wrap_map.background_pending() {
+                break;
+            }
+        }
+
+        assert!(
+            !display_map.wrap_map.background_pending(),
+            "the chain of width changes must converge",
+        );
+        assert_eq!(
+            display_map.snapshot().max_point().row,
+            rows_at_width(LINES, 20),
+            "the display settles on the last width, not an abandoned one",
+        );
+    }
+
     /// Whether `notify` is holding a permit, without awaiting one.
     ///
     /// `notify_one` stores a permit when nobody is waiting, so a `notified()`
