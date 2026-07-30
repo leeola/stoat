@@ -28,14 +28,14 @@ const INITIAL_SIZE: u32 = 256;
 
 /// Which of the two atlases a glyph lives in, so the text pass can bind the
 /// matching texture and choose mask-vs-color blending.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AtlasKind {
     Mask,
     Color,
 }
 
 /// Where a rasterized glyph sits in its atlas, for the text pass to draw it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlyphInfo {
     pub kind: AtlasKind,
     /// Atlas texture coordinates as `[u_min, v_min, u_max, v_max]`.

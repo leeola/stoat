@@ -1275,8 +1275,17 @@ impl TextPass {
     ) {
         out.clear();
         out.reserve(pending.len());
+        let epoch = self.atlas.content_epoch();
         for glyph in pending {
-            let Some(info) = self.resolve_glyph(device, queue, glyph.source) else {
+            // Rasterizing the glyph already read where it landed, so an atlas that
+            // has not moved since makes a second lookup pure cost. A grow or an
+            // eviction moves every sub-rect and bumps the epoch, and a cached row's
+            // glyphs can be older still, so a mismatch re-resolves.
+            let info = if glyph.resolved_epoch == epoch {
+                glyph.info
+            } else if let Some(info) = self.resolve_glyph(device, queue, glyph.source) {
+                info
+            } else {
                 continue;
             };
 
@@ -2154,17 +2163,13 @@ impl TextPass {
                 let Some(&glyph_col) = run_cols.get(offset) else {
                     continue;
                 };
-                if self
-                    .atlas
-                    .get_or_insert(
-                        device,
-                        queue,
-                        &mut self.font_system,
-                        &mut self.swash_cache,
-                        key,
-                    )
-                    .is_some()
-                {
+                if let Some(info) = self.atlas.get_or_insert(
+                    device,
+                    queue,
+                    &mut self.font_system,
+                    &mut self.swash_cache,
+                    key,
+                ) {
                     pending.push(PendingGlyph {
                         row,
                         col: glyph_col,
@@ -2172,6 +2177,8 @@ impl TextPass {
                         fg,
                         scale: 1.0,
                         cell_fill: false,
+                        info,
+                        resolved_epoch: self.atlas.content_epoch(),
                     });
                 }
             }
@@ -2202,10 +2209,11 @@ impl TextPass {
         let cp = u32::from(cell.ch);
         if powerline::is_geometric(cp) {
             let (width, height) = cell_fill_pixels(scale, self.metrics);
-            self.atlas
-                .get_or_insert_procedural(device, queue, cp, width, height, || {
-                    powerline::rasterize(cp, width, height).unwrap_or_default()
-                })?;
+            let info =
+                self.atlas
+                    .get_or_insert_procedural(device, queue, cp, width, height, || {
+                        powerline::rasterize(cp, width, height).unwrap_or_default()
+                    })?;
             return Some(PendingGlyph {
                 row,
                 col,
@@ -2213,11 +2221,13 @@ impl TextPass {
                 fg,
                 scale,
                 cell_fill: false,
+                info,
+                resolved_epoch: self.atlas.content_epoch(),
             });
         }
 
         let key = self.glyph_key(cell.ch, scale, Weight::NORMAL)?;
-        self.atlas.get_or_insert(
+        let info = self.atlas.get_or_insert(
             device,
             queue,
             &mut self.font_system,
@@ -2231,6 +2241,8 @@ impl TextPass {
             fg,
             scale,
             cell_fill: is_cell_fill(cell.ch),
+            info,
+            resolved_epoch: self.atlas.content_epoch(),
         })
     }
 
@@ -2268,17 +2280,13 @@ impl TextPass {
                     continue;
                 };
 
-                if self
-                    .atlas
-                    .get_or_insert(
-                        device,
-                        queue,
-                        &mut self.font_system,
-                        &mut self.swash_cache,
-                        key,
-                    )
-                    .is_some()
-                {
+                if let Some(info) = self.atlas.get_or_insert(
+                    device,
+                    queue,
+                    &mut self.font_system,
+                    &mut self.swash_cache,
+                    key,
+                ) {
                     group.push(PendingGlyph {
                         row,
                         col,
@@ -2286,6 +2294,8 @@ impl TextPass {
                         fg: overlay.content_fg,
                         scale: f32::from(scale),
                         cell_fill: false,
+                        info,
+                        resolved_epoch: self.atlas.content_epoch(),
                     });
                 }
             }
@@ -2356,6 +2366,18 @@ struct PendingGlyph {
     /// than drawn at its bitmap size. A [`GlyphSource::Procedural`] glyph already
     /// fills its cell, so this stays false for one.
     cell_fill: bool,
+    /// Where the glyph landed in the atlas when it was rasterized, so building its
+    /// instance needs no second lookup.
+    ///
+    /// Only good while [`Self::resolved_epoch`] still matches the atlas, since a
+    /// grow or an eviction moves every glyph's sub-rect.
+    info: GlyphInfo,
+    /// The atlas content epoch [`Self::info`] was read at. A build compares it
+    /// before trusting the placement.
+    ///
+    /// Carried per glyph rather than per build because [`TextPass::glyph_row_cache`]
+    /// holds these across frames, so one list can mix placements of different ages.
+    resolved_epoch: u64,
 }
 
 /// One overlay's scissored slice of the shared overlay-content instance buffer.
@@ -3197,10 +3219,11 @@ mod tests {
         fill_cell_box, font_covers, glyph_family, glyph_origin, grid_build, is_cell_fill,
         load_bundled_fonts, overlay_content_cells, resolve_primary_family, resolve_primary_font,
         run_text_and_columns_into, shape_char, shape_family, shape_run, shape_run_cached,
-        text_run_origin, GlyphSource, GridBuild, RectInstance, RunShapeCache, TextInstance,
-        TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
+        text_run_origin, GlyphSource, GridBuild, PendingGlyph, RectInstance, RowShaping,
+        RunShapeCache, TextInstance, TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
     };
     use crate::{
+        atlas::{AtlasKind, GlyphInfo},
         gpu::headless_device,
         render::{CellMetrics, Frame, Scroll},
     };
@@ -3736,6 +3759,98 @@ mod tests {
         for (col, ch) in text.chars().enumerate() {
             grid.get_mut(row, col).ch = ch;
         }
+    }
+
+    /// A glyph's stored placement builds the same instance a fresh lookup would,
+    /// and a stale epoch is what makes the build go and look again.
+    ///
+    /// The first half is the whole premise. Rasterizing already read where the glyph
+    /// landed, so building from that must agree with asking the atlas a second time.
+    ///
+    /// The second half shows the epoch guard is load-bearing rather than decorative,
+    /// by poisoning a placement and watching each epoch decide whether it is used.
+    #[test]
+    fn a_stored_placement_builds_what_a_fresh_lookup_would() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("stored placement test: no wgpu adapter available, skipping");
+            return;
+        };
+        let mut grid = Grid::new(2, 12);
+        fill_row(&mut grid, 0, "glyphs");
+
+        let mut pending = Vec::new();
+        let covers = |_: char| true;
+        let family = Some("JetBrains Mono".to_owned());
+        let shaping = RowShaping {
+            primary: shape_family(&family),
+            covers: &covers,
+            cursor_cell: None,
+        };
+        pass.rasterize_row(&device, &queue, &grid, 0, &shaping, &mut pending);
+        assert!(!pending.is_empty(), "the row rasterized some glyphs");
+
+        let mut from_stored = Vec::new();
+        pass.build_text_instances_into(&device, &queue, &pending, &mut from_stored);
+
+        // A mismatched epoch sends every glyph back to the atlas, so this build
+        // ignores what is stored and resolves each one.
+        let stale: Vec<PendingGlyph> = pending
+            .iter()
+            .map(|glyph| PendingGlyph {
+                resolved_epoch: glyph.resolved_epoch.wrapping_add(1),
+                ..*glyph
+            })
+            .collect();
+        let mut from_lookup = Vec::new();
+        pass.build_text_instances_into(&device, &queue, &stale, &mut from_lookup);
+
+        let bytes = |instances: &[TextInstance]| {
+            bytemuck::cast_slice::<TextInstance, u8>(instances).to_vec()
+        };
+        assert_eq!(
+            bytes(&from_stored),
+            bytes(&from_lookup),
+            "the placement read at rasterize time matches what a second lookup gives"
+        );
+
+        // Poisoning a placement changes the instance only while its epoch still
+        // matches, which is what the guard decides.
+        let poison = GlyphInfo {
+            kind: AtlasKind::Mask,
+            uv: [0.25, 0.5, 0.75, 1.0],
+            size: [3, 4],
+            placement: [5, 6],
+        };
+        let poisoned: Vec<PendingGlyph> = pending
+            .iter()
+            .map(|glyph| PendingGlyph {
+                info: poison,
+                ..*glyph
+            })
+            .collect();
+        let mut trusted = Vec::new();
+        pass.build_text_instances_into(&device, &queue, &poisoned, &mut trusted);
+
+        let poisoned_stale: Vec<PendingGlyph> = poisoned
+            .iter()
+            .map(|glyph| PendingGlyph {
+                resolved_epoch: glyph.resolved_epoch.wrapping_add(1),
+                ..*glyph
+            })
+            .collect();
+        let mut refused = Vec::new();
+        pass.build_text_instances_into(&device, &queue, &poisoned_stale, &mut refused);
+
+        assert_ne!(
+            bytes(&trusted),
+            bytes(&from_stored),
+            "a matching epoch means the stored placement is the one used"
+        );
+        assert_eq!(
+            bytes(&refused),
+            bytes(&from_stored),
+            "a moved epoch means it is looked up again instead"
+        );
     }
 
     #[test]
