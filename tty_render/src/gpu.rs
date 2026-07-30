@@ -31,11 +31,11 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{thread, time::Instant};
 use stoatty_term::grid::{Grid, Panel, Rgb};
 use wgpu::{
-    Adapter, Color, CommandEncoderDescriptor, CompositeAlphaMode, CurrentSurfaceTexture, Device,
-    DeviceDescriptor, Instance, InstanceDescriptor, LoadOp, Operations, PowerPreference,
-    PresentMode, Queue, RenderPassColorAttachment, RenderPassDescriptor, RequestAdapterOptions,
-    StoreOp, Surface, SurfaceConfiguration, TextureFormat, TextureUsages, TextureView,
-    TextureViewDescriptor,
+    Adapter, Color, CommandEncoder, CommandEncoderDescriptor, CompositeAlphaMode,
+    CurrentSurfaceTexture, Device, DeviceDescriptor, Instance, InstanceDescriptor, LoadOp,
+    Operations, PowerPreference, PresentMode, Queue, RenderPass, RenderPassColorAttachment,
+    RenderPassDescriptor, RequestAdapterOptions, StoreOp, Surface, SurfaceConfiguration,
+    TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
 #[cfg(feature = "perf")]
 use {
@@ -51,8 +51,8 @@ use {
         time::Duration,
     },
     wgpu::{
-        Buffer, BufferDescriptor, BufferUsages, CommandEncoder, Features, MapMode, PollType,
-        QuerySet, QuerySetDescriptor, QueryType, RenderPassTimestampWrites,
+        Buffer, BufferDescriptor, BufferUsages, Features, MapMode, PollType, QuerySet,
+        QuerySetDescriptor, QueryType, RenderPassTimestampWrites,
     },
 };
 
@@ -373,6 +373,35 @@ impl Renderer {
         grid: &Grid,
         frame: Frame<'_>,
     ) {
+        self.prepare_frame(device, queue, grid, &frame);
+
+        // Time this frame's GPU work when the timer's current slot is free.
+        #[cfg(feature = "perf")]
+        let timing = self.prepare_gpu_timing(device, queue);
+        #[cfg(not(feature = "perf"))]
+        let timing = false;
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        {
+            let mut render_pass = self.begin_frame_pass(&mut encoder, view, timing);
+            self.record_frame(&mut render_pass);
+        }
+        self.finish_frame(device, queue, encoder, timing);
+    }
+
+    /// Upload every live-grid pass's buffers for `frame`, touching no encoder.
+    ///
+    /// Split from the recording so a caller compositing pools can prepare the live
+    /// grid and the pools before any of them draws, which is what lets the whole
+    /// frame share one render pass. [`Self::record_frame`] issues the draws these
+    /// buffers back, and must run before the next prepare overwrites them.
+    pub(crate) fn prepare_frame(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        frame: &Frame<'_>,
+    ) {
         let resolution = [self.width as f32, self.height as f32];
         self.background.prepare(
             device,
@@ -401,7 +430,7 @@ impl Renderer {
         crate::render::build_occluders_into(grid.panels(), &mut self.occluders);
 
         self.text
-            .prepare(device, queue, grid, resolution, &frame, &self.occluders);
+            .prepare(device, queue, grid, resolution, frame, &self.occluders);
         self.panel.prepare(device, queue, grid, resolution);
         self.overlay.prepare(device, queue, grid, resolution);
         self.icon
@@ -412,68 +441,98 @@ impl Renderer {
             .prepare(device, queue, grid.polylines(), &self.occluders, resolution);
         self.minimap
             .prepare(device, queue, grid, &self.occluders, resolution);
+    }
 
-        // Time this frame's GPU work when the timer's current slot is free.
+    /// Open the frame's render pass on `encoder`, clearing `view` to the theme
+    /// background and hanging this frame's timestamp writes on it when `timing`.
+    ///
+    /// The only pass a frame opens, so everything drawn over the live grid records
+    /// into it rather than reloading the attachment in a pass of its own.
+    fn begin_frame_pass<'pass>(
+        &self,
+        encoder: &'pass mut CommandEncoder,
+        view: &'pass TextureView,
+        timing: bool,
+    ) -> RenderPass<'pass> {
+        let _ = timing;
+        encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("frame"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations {
+                    load: LoadOp::Clear(self.clear_color),
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            #[cfg(feature = "perf")]
+            timestamp_writes: timing.then(|| {
+                self.gpu_timer
+                    .as_ref()
+                    .expect("timer present when timing")
+                    .timestamp_writes()
+            }),
+            #[cfg(not(feature = "perf"))]
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        })
+    }
+
+    /// Issue the live grid's draws into `render_pass`, in layer order.
+    ///
+    /// Leaves the full-surface scissor set, so whatever records next starts from a
+    /// clean clip rather than the last scissored draw's.
+    pub(crate) fn record_frame(&self, render_pass: &mut RenderPass<'_>) {
+        self.background.draw(render_pass);
+        self.panel.draw(render_pass);
+        self.decoration.draw(render_pass);
+        self.text.draw(render_pass);
+        self.text.draw_region_text(render_pass);
+        // The region draw leaves its scissor set, so restore the full
+        // surface before the cursor and overlay draws that follow.
+        render_pass.set_scissor_rect(0, 0, self.width, self.height);
+        // Off-grid color bars and text runs sit above the grid text but
+        // below floating popovers and icons, like a gutter beneath a
+        // tooltip. The bars fill behind the runs.
+        self.bar.draw(render_pass);
+        // Stroked paths draw over the bars they share a layer with, so a
+        // commit graph's lines sit above any gutter fill behind them.
+        self.polyline.draw(render_pass);
+        // The minimap strip sits over the bars and below the cursor. It
+        // scissors to each strip, so restore the full surface before the
+        // text runs and cursor that follow.
+        self.minimap.draw(render_pass);
+        render_pass.set_scissor_rect(0, 0, self.width, self.height);
+        self.text.draw_text_runs(render_pass);
+        self.background.draw_cursor(render_pass);
+        self.overlay.draw(render_pass);
+        self.text.draw_overlay_text(render_pass);
+        // The overlay-content draw leaves its scissor set, so restore the
+        // full surface before the icons draw on top of the overlays.
+        render_pass.set_scissor_rect(0, 0, self.width, self.height);
+        self.icon.draw(render_pass);
+    }
+
+    /// Resolve this frame's timestamps, submit `encoder`, and advance the timer.
+    ///
+    /// `timing` must be what [`Self::begin_frame_pass`] was given, since the
+    /// resolve is only valid for a pass that carried the writes.
+    fn finish_frame(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        encoder: CommandEncoder,
+        timing: bool,
+    ) {
+        // Only the perf build reads these, discarded here rather than threading a
+        // cfg through the signature.
+        let _ = (device, timing);
+
         #[cfg(feature = "perf")]
-        let timing = self.prepare_gpu_timing(device, queue);
-
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("frame"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations {
-                        load: LoadOp::Clear(self.clear_color),
-                        store: StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                #[cfg(feature = "perf")]
-                timestamp_writes: timing.then(|| {
-                    self.gpu_timer
-                        .as_ref()
-                        .expect("timer present when timing")
-                        .timestamp_writes()
-                }),
-                #[cfg(not(feature = "perf"))]
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            self.background.draw(&mut render_pass);
-            self.panel.draw(&mut render_pass);
-            self.decoration.draw(&mut render_pass);
-            self.text.draw(&mut render_pass);
-            self.text.draw_region_text(&mut render_pass);
-            // The region draw leaves its scissor set, so restore the full
-            // surface before the cursor and overlay draws that follow.
-            render_pass.set_scissor_rect(0, 0, self.width, self.height);
-            // Off-grid color bars and text runs sit above the grid text but
-            // below floating popovers and icons, like a gutter beneath a
-            // tooltip; the bars fill behind the runs.
-            self.bar.draw(&mut render_pass);
-            // Stroked paths draw over the bars they share a layer with, so a
-            // commit graph's lines sit above any gutter fill behind them.
-            self.polyline.draw(&mut render_pass);
-            // The minimap strip sits over the bars and below the cursor. It
-            // scissors to each strip, so restore the full surface before the
-            // text runs and cursor that follow.
-            self.minimap.draw(&mut render_pass);
-            render_pass.set_scissor_rect(0, 0, self.width, self.height);
-            self.text.draw_text_runs(&mut render_pass);
-            self.background.draw_cursor(&mut render_pass);
-            self.overlay.draw(&mut render_pass);
-            self.text.draw_overlay_text(&mut render_pass);
-            // The overlay-content draw leaves its scissor set, so restore the
-            // full surface before the icons draw on top of the overlays.
-            render_pass.set_scissor_rect(0, 0, self.width, self.height);
-            self.icon.draw(&mut render_pass);
-        }
+        let mut encoder = encoder;
 
         #[cfg(feature = "perf")]
         if timing {
@@ -569,6 +628,61 @@ impl Renderer {
             return;
         };
 
+        self.prepare_pool(
+            device,
+            queue,
+            pool_grid,
+            panels,
+            shift_rows,
+            content_changed,
+            occludable,
+            pool,
+            slot,
+        );
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("pool composite"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Load,
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.record_pool(&mut render_pass, scissor, pool, slot);
+        }
+
+        queue.submit([encoder.finish()]);
+    }
+
+    /// Upload every composite pass's buffers for one pool, touching no encoder.
+    ///
+    /// Split from the recording for the same reason as [`Self::prepare_frame`]: a
+    /// frame compositing several pools prepares them all before any draws, so they
+    /// can share one render pass. The buffers a pool prepares are its own, keyed by
+    /// `pool`, so preparing the next one does not disturb them.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_pool(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        pool_grid: &Grid,
+        panels: &[Panel],
+        shift_rows: f32,
+        content_changed: bool,
+        occludable: bool,
+        pool: u32,
+        slot: usize,
+    ) {
         let resolution = [self.width as f32, self.height as f32];
         self.background.prepare_composite(
             device,
@@ -616,39 +730,28 @@ impl Renderer {
             pool,
             slot,
         );
+    }
 
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("pool composite"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations {
-                        load: LoadOp::Load,
-                        store: StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            render_pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
-            self.background.draw_composite(&mut render_pass, pool, slot);
-            self.text.draw_composite(&mut render_pass, pool, slot);
-            // Off-grid gutter chrome sits above the page glyphs but below the
-            // cursor. Bars fill behind the scaled run text.
-            self.bar.draw_composite(&mut render_pass, pool, slot);
-            self.polyline.draw_composite(&mut render_pass, pool, slot);
-            self.text
-                .draw_composite_text_runs(&mut render_pass, pool, slot);
-        }
-
-        queue.submit([encoder.finish()]);
+    /// Issue one pool's composite draws into `render_pass`, clipped to `scissor`.
+    ///
+    /// `scissor` must already be clamped to the render target, and `pool` and `slot`
+    /// must be what [`Self::prepare_pool`] was given. Leaves the scissor set, so a
+    /// caller recording anything else afterward restores the full surface first.
+    pub(crate) fn record_pool(
+        &self,
+        render_pass: &mut RenderPass<'_>,
+        scissor: [u32; 4],
+        pool: u32,
+        slot: usize,
+    ) {
+        render_pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
+        self.background.draw_composite(render_pass, pool, slot);
+        self.text.draw_composite(render_pass, pool, slot);
+        // Off-grid gutter chrome sits above the page glyphs but below the
+        // cursor. Bars fill behind the scaled run text.
+        self.bar.draw_composite(render_pass, pool, slot);
+        self.polyline.draw_composite(render_pass, pool, slot);
+        self.text.draw_composite_text_runs(render_pass, pool, slot);
     }
 
     /// Draw the cursor block over an already-composited `view`, clipped to
@@ -679,18 +782,9 @@ impl Renderer {
             None
         };
 
-        self.background.prepare_cursor(
-            queue,
-            resolution,
-            CursorState {
-                corners,
-                color: self.cursor_color,
-            },
-            grid_scroll,
-        );
+        self.prepare_cursor_over(queue, resolution, corners, grid_scroll);
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
-
         {
             let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("cursor over pools"),
@@ -708,14 +802,45 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-
-            if let Some(s) = scissor {
-                render_pass.set_scissor_rect(s[0], s[1], s[2], s[3]);
-            }
-            self.background.draw_cursor(&mut render_pass);
+            self.record_cursor_over(&mut render_pass, scissor);
         }
 
         queue.submit([encoder.finish()]);
+    }
+
+    /// Upload the cursor block's globals, touching no encoder.
+    ///
+    /// Writes the same globals slot the live grid's draws read, so it must run after
+    /// the live prepare rather than before it.
+    pub(crate) fn prepare_cursor_over(
+        &mut self,
+        queue: &Queue,
+        resolution: [f32; 2],
+        corners: Option<[[f32; 2]; 4]>,
+        grid_scroll: f32,
+    ) {
+        self.background.prepare_cursor(
+            queue,
+            resolution,
+            CursorState {
+                corners,
+                color: self.cursor_color,
+            },
+            grid_scroll,
+        );
+    }
+
+    /// Issue the cursor block's draw into `render_pass`, clipped to `scissor` when
+    /// one is given. Already-clamped, as [`Self::draw_cursor_over`] leaves it.
+    pub(crate) fn record_cursor_over(
+        &self,
+        render_pass: &mut RenderPass<'_>,
+        scissor: Option<[u32; 4]>,
+    ) {
+        if let Some(s) = scissor {
+            render_pass.set_scissor_rect(s[0], s[1], s[2], s[3]);
+        }
+        self.background.draw_cursor(render_pass);
     }
 
     /// Composite the perf HUD topmost via a load-not-clear pass.
@@ -733,14 +858,7 @@ impl Renderer {
         samples: &[FrameSample],
         resolution: [f32; 2],
     ) {
-        self.hud.prepare(device, queue, samples, resolution);
-        self.text.set_hud_text(
-            device,
-            queue,
-            hud::readout_anchor(resolution),
-            hud::READOUT_SCALE,
-            &hud::readout_lines(stats),
-        );
+        self.prepare_hud_over(device, queue, stats, samples, resolution);
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
         {
@@ -760,11 +878,37 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.hud.draw(&mut render_pass);
-            self.text.draw_hud_text(&mut render_pass);
+            self.record_hud_over(&mut render_pass);
         }
 
         queue.submit([encoder.finish()]);
+    }
+
+    /// Upload the HUD's series and readout text, touching no encoder.
+    #[cfg(feature = "perf")]
+    pub(crate) fn prepare_hud_over(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        stats: &FrameStats,
+        samples: &[FrameSample],
+        resolution: [f32; 2],
+    ) {
+        self.hud.prepare(device, queue, samples, resolution);
+        self.text.set_hud_text(
+            device,
+            queue,
+            hud::readout_anchor(resolution),
+            hud::READOUT_SCALE,
+            &hud::readout_lines(stats),
+        );
+    }
+
+    /// Issue the HUD's draws into `render_pass`, over whatever it already holds.
+    #[cfg(feature = "perf")]
+    pub(crate) fn record_hud_over(&self, render_pass: &mut RenderPass<'_>) {
+        self.hud.draw(render_pass);
+        self.text.draw_hud_text(render_pass);
     }
 
     fn set_size(&mut self, width: u32, height: u32) {
