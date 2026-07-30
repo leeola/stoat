@@ -87,6 +87,9 @@ pub struct MinimapPass {
     instances: Buffer,
     capacity: usize,
     strips: Vec<StripDraw>,
+    /// Where a rebuild gathers every strip's instances before the single upload,
+    /// reused so a rebuild does not open a fresh list and discard it.
+    instance_scratch: Vec<MinimapInstance>,
     occluders: Buffer,
     /// The occluder list last written to [`Self::occluders`], so a frame whose
     /// panels have not moved skips the upload. Panels change on layout events, not
@@ -200,6 +203,7 @@ impl MinimapPass {
             occluders,
             last_occluders: Vec::new(),
             last_globals: None,
+            instance_scratch: Vec::new(),
             occluder_capacity: INITIAL_CAPACITY,
             metrics,
             last_build: None,
@@ -264,7 +268,8 @@ impl MinimapPass {
         }
         self.last_build = Some((grid.minimap_epoch(), resolution));
 
-        let mut instances = Vec::new();
+        let instances = &mut self.instance_scratch;
+        instances.clear();
         self.strips.clear();
         for strip in grid.minimaps() {
             let content = grid.minimap_content(strip.command.content_id);
@@ -287,7 +292,11 @@ impl MinimapPass {
             self.capacity = instances.len().next_power_of_two();
             self.instances = alloc_instances(device, self.capacity);
         }
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+        queue.write_buffer(
+            &self.instances,
+            0,
+            bytemuck::cast_slice(instances.as_slice()),
+        );
     }
 
     /// Upload the panel occluders, reallocating and rebuilding the bind group when
