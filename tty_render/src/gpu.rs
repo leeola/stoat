@@ -29,7 +29,10 @@ use cosmic_text::FontSystem;
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{thread, time::Instant};
-use stoatty_term::grid::{Grid, Panel, Rgb};
+use stoatty_term::{
+    grid::{Grid, Panel, Rgb},
+    term::Damage,
+};
 use wgpu::{
     Adapter, Color, CommandEncoder, CommandEncoderDescriptor, CompositeAlphaMode,
     CurrentSurfaceTexture, Device, DeviceDescriptor, Instance, InstanceDescriptor, LoadOp,
@@ -192,6 +195,19 @@ impl GpuTimer {
     fn advance(&mut self) {
         self.frame += 1;
     }
+}
+
+/// Where a frame's cursor block draws.
+///
+/// A plain frame draws it among the grid's layers, beneath the overlays. A frame
+/// compositing pools cannot, because the pools paint over the cursor's cell. The
+/// block has to follow them, so it is recorded after the pools instead.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum CursorLayer {
+    /// Among the grid's layers, below the overlays and icons.
+    Inline,
+    /// Not at all, leaving the caller to record it once the pools are down.
+    Deferred,
 }
 
 /// The device descriptor for `adapter`. Under the `perf` feature, requests
@@ -384,7 +400,7 @@ impl Renderer {
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
         {
             let mut render_pass = self.begin_frame_pass(&mut encoder, view, timing);
-            self.record_frame(&mut render_pass);
+            self.record_frame(&mut render_pass, CursorLayer::Inline);
         }
         self.finish_frame(device, queue, encoder, timing);
     }
@@ -485,7 +501,7 @@ impl Renderer {
     ///
     /// Leaves the full-surface scissor set, so whatever records next starts from a
     /// clean clip rather than the last scissored draw's.
-    pub(crate) fn record_frame(&self, render_pass: &mut RenderPass<'_>) {
+    pub(crate) fn record_frame(&self, render_pass: &mut RenderPass<'_>, cursor: CursorLayer) {
         self.background.draw(render_pass);
         self.panel.draw(render_pass);
         self.decoration.draw(render_pass);
@@ -507,7 +523,9 @@ impl Renderer {
         self.minimap.draw(render_pass);
         render_pass.set_scissor_rect(0, 0, self.width, self.height);
         self.text.draw_text_runs(render_pass);
-        self.background.draw_cursor(render_pass);
+        if cursor == CursorLayer::Inline {
+            self.background.draw_cursor(render_pass);
+        }
         self.overlay.draw(render_pass);
         self.text.draw_overlay_text(render_pass);
         // The overlay-content draw leaves its scissor set, so restore the
@@ -730,6 +748,12 @@ impl Renderer {
             pool,
             slot,
         );
+    }
+
+    /// A pool's clip rectangle trimmed to the render target, or `None` when it
+    /// falls entirely outside and the pool has nothing to draw.
+    pub(crate) fn pool_scissor(&self, scissor: [u32; 4]) -> Option<[u32; 4]> {
+        clamp_scissor(scissor, self.width, self.height)
     }
 
     /// Issue one pool's composite draws into `render_pass`, clipped to `scissor`.
@@ -1275,23 +1299,28 @@ impl GpuContext {
     /// Draw `live_grid` to the window surface, then composite each pool in
     /// `pools` over its scissor sub-rectangle, in one presented frame.
     ///
-    /// `live_grid` and `frame` render exactly as [`Self::render`] does -- the
-    /// static chrome and its cursor. Each [`PoolComposite`] then drives
-    /// [`Renderer::composite_pool`] over the same view in slice order, so several
-    /// eased pools (split panes, a modal over an editor) each overwrite only
-    /// their own region and stack earlier-under-later. Every pass loads rather
-    /// than clears, so the live grid is drawn first and the pools over it; an
-    /// empty slice renders just the live grid.
+    /// `live_grid` and `frame` render as [`Self::render`] does, the static chrome
+    /// and its cursor. Each [`PoolComposite`] is then composited over its scissor
+    /// sub-rectangle in slice order, so several eased pools (split panes, a modal
+    /// over an editor) each overwrite only their own region and stack
+    /// earlier-under-later. An empty slice renders just the live grid.
+    ///
+    /// The whole frame is one encoder and one submit. Every pass prepares its
+    /// buffers first, then the live grid, the pools, and the cursor all record into
+    /// a single render pass, so the surface is cleared once rather than reloaded per
+    /// pool. The perf HUD keeps a pass of its own inside that encoder, to stay out
+    /// of the timed one.
     ///
     /// Skips and re-configures on the same transient surface states as
     /// [`Self::render`], and adopts the acquired drawable's size the same way,
     /// so its pool and cursor scissors stay within the render target during a
     /// live resize.
     ///
-    /// Returns `true` when a pool composite grew or evicted from the glyph atlas
-    /// after the live grid was drawn, so the live buffers just presented hold
-    /// stale UVs. The caller should schedule another frame, on which the live
-    /// prepare rebuilds them. Without it, an idle screen keeps the stale frame.
+    /// Returns `true` when the glyph atlas was still moving as the frame was
+    /// recorded, leaving the buffers just presented with stale UVs. A pool that
+    /// grows the atlas is healed within the frame by a second prepare sweep, so this
+    /// reports only a grow during that sweep. The caller should schedule another
+    /// frame, since without it an idle screen keeps the stale one.
     pub fn render_with_pools(
         &mut self,
         live_grid: &Grid,
@@ -1328,75 +1357,117 @@ impl GpuContext {
         let cursor_corners = frame.cursor_corners;
         let cursor_scroll = frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback;
 
-        // The pool composites paint over the cursor's cell, so the base draws
-        // without its cursor block and the block is drawn on top afterward. The
+        // The pool composites paint over the cursor's cell, so the base prepares
+        // without its cursor block and the block is recorded after the pools. The
         // ligature-break cell (`frame.cursor`) stays, keeping the live grid's
         // glyph under a chrome cursor broken out of any ligature.
-        self.renderer.render_into(
-            &self.device,
-            &self.queue,
-            &view,
-            live_grid,
-            Frame {
-                cursor_corners: None,
-                ..frame
-            },
-        );
-        // The live build above heals any atlas movement it caused before it
-        // returns, so its buffers are settled here. Capture the epoch now, after
-        // that draw, so the compare below reports pool-composite movement alone
-        // rather than firing on every frame that packs a new live glyph.
+        let base = Frame {
+            cursor_corners: None,
+            ..frame
+        };
+
+        // Every pass prepares before anything draws, so the whole frame shares one
+        // render pass. A pool that grows the atlas partway through moves the UVs the
+        // live grid and the pools before it already resolved, so the sweep runs
+        // again when the epoch moved. Both prepare paths rebuild rather than reuse
+        // on an epoch mismatch, so the second sweep re-resolves exactly what went
+        // stale.
         let epoch_before = self.renderer.content_epoch();
-
-        let panels = live_grid.panels();
-        for (slot, pool) in pools.iter().enumerate() {
-            self.renderer.composite_pool(
-                &self.device,
-                &self.queue,
-                &view,
-                pool.grid,
-                panels,
-                pool.scissor,
-                pool.shift_rows,
-                pool.content_changed,
-                pool.occludable,
-                pool.id,
-                slot,
-            );
-        }
-
-        // The pool loop is the only atlas-touching work after the live draw, so
-        // a moved epoch here means the live buffers predate the change. The
-        // cursor and HUD draws below never grow the atlas the same way, so they
-        // stay outside this compare.
-        let atlas_changed = self.renderer.content_epoch() != epoch_before;
+        self.prepare_pool_frame(live_grid, &base, pools);
+        let settled = self.renderer.content_epoch();
+        let atlas_changed = if settled == epoch_before {
+            false
+        } else {
+            // The heal rebuilds against the settled atlas rather than repeating the
+            // first sweep. Full damage with no slide, because the passes that cache
+            // per row already rotated those caches by this frame's scroll and must
+            // not rotate them a second time.
+            let full = Damage::Full;
+            let heal = Frame {
+                cursor: base.cursor,
+                cursor_corners: None,
+                scroll: base.scroll,
+                damage: &full,
+                decoration_damage: &full,
+                scrolled_rows: 0,
+            };
+            self.prepare_pool_frame(live_grid, &heal, pools);
+            // A grow during the healing sweep leaves it stale in turn, and the
+            // caller's extra frame is the backstop for that.
+            self.renderer.content_epoch() != settled
+        };
 
         if cursor_corners.is_some() {
-            self.renderer.draw_cursor_over(
-                &self.device,
+            self.renderer.prepare_cursor_over(
                 &self.queue,
-                &view,
                 resolution,
                 cursor_corners,
                 cursor_scroll,
-                cursor_scissor,
             );
+        }
+        let cursor_scissor = cursor_scissor.and_then(|s| self.renderer.pool_scissor(s));
+
+        #[cfg(feature = "perf")]
+        let hud = self.show_perf_hud.then(|| self.perf.stats()).flatten();
+        #[cfg(feature = "perf")]
+        if let Some(stats) = hud.as_ref() {
+            let samples = self.perf.samples();
+            self.renderer
+                .prepare_hud_over(&self.device, &self.queue, stats, &samples, resolution);
         }
 
         #[cfg(feature = "perf")]
-        if self.show_perf_hud
-            && let Some(stats) = self.perf.stats()
+        let timing = self.renderer.prepare_gpu_timing(&self.device, &self.queue);
+        #[cfg(not(feature = "perf"))]
+        let timing = false;
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor::default());
         {
-            let samples = self.perf.samples();
-            self.renderer.draw_hud_over(
-                &self.device,
-                &self.queue,
-                &view,
-                &stats,
-                &samples,
-                resolution,
-            );
+            let mut render_pass = self.renderer.begin_frame_pass(&mut encoder, &view, timing);
+
+            self.renderer
+                .record_frame(&mut render_pass, CursorLayer::Deferred);
+            for (slot, pool) in pools.iter().enumerate() {
+                if let Some(scissor) = self.renderer.pool_scissor(pool.scissor) {
+                    self.renderer
+                        .record_pool(&mut render_pass, scissor, pool.id, slot);
+                }
+            }
+
+            // A pool leaves its own scissor set, so the cursor starts from the full
+            // surface and applies its own.
+            render_pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            self.renderer
+                .record_cursor_over(&mut render_pass, cursor_scissor);
         }
+
+        // The HUD keeps a pass of its own, inside this encoder, so its cost lands
+        // outside the timed one rather than inflating the numbers it reports.
+        #[cfg(feature = "perf")]
+        if hud.is_some() {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("perf hud"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Load,
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.renderer.record_hud_over(&mut render_pass);
+        }
+
+        self.renderer
+            .finish_frame(&self.device, &self.queue, encoder, timing);
 
         self.perf.mark_submitted();
         surface_frame.present();
@@ -1407,6 +1478,43 @@ impl GpuContext {
         }
 
         atlas_changed
+    }
+
+    /// Upload the live grid's buffers and every pool's, in the order they draw.
+    ///
+    /// Run twice by [`Self::render_with_pools`] when a pool grew the atlas during
+    /// the first sweep, since that moves the UVs everything prepared before it
+    /// resolved. Idempotent apart from that healing, because each pass reuses what
+    /// it built when neither its content nor the atlas has moved.
+    ///
+    /// A pool whose clip rectangle falls outside the render target is skipped, so
+    /// the recording pass can skip the same ones by the same test.
+    fn prepare_pool_frame(
+        &mut self,
+        live_grid: &Grid,
+        frame: &Frame<'_>,
+        pools: &[PoolComposite<'_>],
+    ) {
+        self.renderer
+            .prepare_frame(&self.device, &self.queue, live_grid, frame);
+
+        let panels = live_grid.panels();
+        for (slot, pool) in pools.iter().enumerate() {
+            if self.renderer.pool_scissor(pool.scissor).is_none() {
+                continue;
+            }
+            self.renderer.prepare_pool(
+                &self.device,
+                &self.queue,
+                pool.grid,
+                panels,
+                pool.shift_rows,
+                pool.content_changed,
+                pool.occludable,
+                pool.id,
+                slot,
+            );
+        }
     }
 
     /// Adopt a drawable's `width`x`height` when it disagrees with the
@@ -1500,8 +1608,225 @@ pub fn headless_device() -> Option<(Device, Queue)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_scissor, grid_dims, surface_formats, TextureFormat};
+    use super::{
+        build_font_system, clamp_scissor, grid_dims, headless_device, surface_formats,
+        CommandEncoderDescriptor, CursorLayer, FontConfig, Frame, PoolComposite, Renderer, Scroll,
+        TextureFormat,
+    };
     use crate::render::CellMetrics;
+    use stoatty_term::{
+        grid::{Grid, Rgb},
+        term::Damage,
+    };
+    use wgpu::{
+        BufferDescriptor, BufferUsages, Extent3d, MapMode, Origin3d, PollType, TexelCopyBufferInfo,
+        TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect, TextureDescriptor,
+        TextureDimension, TextureUsages, TextureViewDescriptor,
+    };
+
+    /// The live grid and every pool land in their own regions from a single render
+    /// pass, which is the sequence [`GpuContext::render_with_pools`] records.
+    ///
+    /// That method needs a window surface, so it cannot be driven here. This drives
+    /// the [`Renderer`] halves it is built from, in the same order, which covers the
+    /// merge's own risks. One pass clears once, and each recorded region still lands
+    /// where its scissor says.
+    #[test]
+    fn one_pass_lands_the_live_grid_and_every_pool_in_its_own_region() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("single-pass frame test: no wgpu adapter available, skipping");
+            return;
+        };
+
+        let format = TextureFormat::Rgba8Unorm;
+        let font_size = 30;
+        let cell_h = crate::render::cell_size(font_size, 1.0)[1].round() as u32;
+        let band = cell_h * 2;
+        let (width, height) = (128u32, band * 3);
+        let (live_bg, gray, white) = (
+            Rgb::new(0, 0, 90),
+            Rgb::new(80, 80, 80),
+            Rgb::new(255, 255, 255),
+        );
+
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("single pass frame target"),
+            size: Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&TextureViewDescriptor::default());
+
+        let mut renderer = Renderer::new(
+            &device,
+            format,
+            [width, height],
+            build_font_system(),
+            FontConfig {
+                size: font_size,
+                scale_factor: 1.0,
+                family: &["JetBrains Mono".to_owned()],
+                ligatures: true,
+            },
+            live_bg,
+            white,
+        );
+
+        let (rows, cols) = renderer.grid_size();
+        let filled = |color: Rgb| {
+            let mut grid = Grid::new(rows, cols);
+            for r in 0..rows {
+                for c in 0..cols {
+                    grid.get_mut(r, c).bg = color;
+                }
+            }
+            grid
+        };
+        let live = filled(live_bg);
+        let gray_pool = filled(gray);
+        let white_pool = filled(white);
+
+        let no_decoration = Damage::Partial(Vec::new());
+        let frame = Frame {
+            cursor: None,
+            cursor_corners: None,
+            scroll: Scroll {
+                grid: 0.0,
+                document: 0.0,
+                scrollback: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage: &Damage::Full,
+            decoration_damage: &no_decoration,
+            scrolled_rows: 0,
+        };
+
+        // The two pools take the lower bands, leaving the top one to the live grid.
+        let pools = [
+            PoolComposite {
+                id: 7,
+                grid: &gray_pool,
+                scissor: [0, band, width, band],
+                shift_rows: 0.0,
+                content_changed: true,
+                occludable: true,
+            },
+            PoolComposite {
+                id: 4,
+                grid: &white_pool,
+                scissor: [0, band * 2, width, band],
+                shift_rows: 0.0,
+                content_changed: true,
+                occludable: true,
+            },
+        ];
+
+        renderer.prepare_frame(&device, &queue, &live, &frame);
+        for (slot, pool) in pools.iter().enumerate() {
+            renderer.prepare_pool(
+                &device,
+                &queue,
+                pool.grid,
+                &[],
+                pool.shift_rows,
+                pool.content_changed,
+                pool.occludable,
+                pool.id,
+                slot,
+            );
+        }
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        {
+            let mut render_pass = renderer.begin_frame_pass(&mut encoder, &view, false);
+            renderer.record_frame(&mut render_pass, CursorLayer::Deferred);
+            for (slot, pool) in pools.iter().enumerate() {
+                let scissor = renderer
+                    .pool_scissor(pool.scissor)
+                    .expect("pool scissor is inside the target");
+                renderer.record_pool(&mut render_pass, scissor, pool.id, slot);
+            }
+        }
+        renderer.finish_frame(&device, &queue, encoder, false);
+
+        let shot = read_back(&device, &queue, &target, width, height);
+        let pixel = |y: u32| {
+            let at = ((y * width + width / 2) * 4) as usize;
+            (shot[at], shot[at + 1], shot[at + 2])
+        };
+        let bands = (
+            pixel(band / 2),
+            pixel(band + band / 2),
+            pixel(band * 2 + band / 2),
+        );
+
+        let near = |got: (u8, u8, u8), want: Rgb| {
+            let close = |a: u8, b: u8| i16::from(a).abs_diff(i16::from(b)) <= 12;
+            close(got.0, want.r) && close(got.1, want.g) && close(got.2, want.b)
+        };
+        assert!(
+            near(bands.0, live_bg) && near(bands.1, gray) && near(bands.2, white),
+            "one pass must leave the live grid where no pool covers it and each pool \
+             inside its own scissor: got {bands:?}"
+        );
+    }
+
+    /// Copy `texture` into a mappable buffer and return its RGBA bytes, row-major
+    /// with no padding, so the caller must size the texture so `4 * width` is
+    /// 256-aligned.
+    fn read_back(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Vec<u8> {
+        let buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("single pass readback"),
+            size: u64::from(width * height * 4),
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_buffer(
+            TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: None,
+                },
+            },
+            Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+
+        buffer.slice(..).map_async(MapMode::Read, |_| {});
+        device
+            .poll(PollType::wait_indefinitely())
+            .expect("poll readback");
+        buffer.slice(..).get_mapped_range().to_vec()
+    }
 
     #[test]
     fn grid_dims_shrink_as_font_grows() {

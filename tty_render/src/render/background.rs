@@ -35,6 +35,18 @@ const INITIAL_CAPACITY: usize = 2048;
 /// translucency is renderer policy so the block tints the cell beneath it.
 const CURSOR_ALPHA: f32 = 0.55;
 
+/// Byte offset of the cursor pipeline's globals, one slot past the pool slots.
+///
+/// The cursor needs a slot of its own because a frame compositing pools draws it
+/// after them, over the cell they cover, and so rewrites its corners after the
+/// live cell globals are already in slot 0. Sharing that slot would leave the
+/// cell draws reading the cursor's write, whose column count is zero.
+const CURSOR_GLOBALS_OFFSET: u32 = (GLOBALS_SLOTS as u64 * GLOBALS_SLOT_STRIDE) as u32;
+
+/// Slots this pass's globals buffer holds: the shared per-pool set plus the
+/// cursor's.
+const BG_GLOBALS_SLOTS: usize = GLOBALS_SLOTS + 1;
+
 /// One grid cell's background color, as the bytes the GPU normalizes.
 ///
 /// Carries no grid coordinate. The buffer is exactly row-major over the whole
@@ -202,7 +214,7 @@ impl BackgroundPass {
 
         let globals = device.create_buffer(&BufferDescriptor {
             label: Some("background globals"),
-            size: GLOBALS_SLOTS as u64 * GLOBALS_SLOT_STRIDE,
+            size: BG_GLOBALS_SLOTS as u64 * GLOBALS_SLOT_STRIDE,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -292,6 +304,14 @@ impl BackgroundPass {
             ],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        // The cursor reads its own slot, so a live frame seeds it here with the same
+        // globals. A pool frame overwrites it via [`Self::prepare_cursor`] after the
+        // pools have their slots, leaving slot 0's column count intact.
+        queue.write_buffer(
+            &self.globals,
+            u64::from(CURSOR_GLOBALS_OFFSET),
+            bytemuck::bytes_of(&globals),
+        );
         self.cursor_visible = cursor.corners.is_some();
 
         let total = grid.rows() * cols;
@@ -457,7 +477,13 @@ impl BackgroundPass {
                 CURSOR_ALPHA,
             ],
         };
-        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        // The cursor's own slot, so this can run after the cell globals are placed
+        // without disturbing them.
+        queue.write_buffer(
+            &self.globals,
+            u64::from(CURSOR_GLOBALS_OFFSET),
+            bytemuck::bytes_of(&globals),
+        );
         self.cursor_visible = cursor.corners.is_some();
     }
 
@@ -505,7 +531,7 @@ impl BackgroundPass {
         }
 
         render_pass.set_pipeline(&self.cursor_pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[0]);
+        render_pass.set_bind_group(0, &self.bind_group, &[CURSOR_GLOBALS_OFFSET]);
         render_pass.draw(0..6, 0..1);
     }
 }
