@@ -1481,14 +1481,17 @@ impl ApplicationHandler<PtyEvent> for App {
                             || matches!(&damage, Damage::Partial(rows) if rows.iter().any(|&d| d));
                         let rebuild = state.last_scrollback_offset != Some(offset) || vt_changed;
                         // A larger offset reaches further back, which pushes the
-                        // window's content down the screen, so the rows the
-                        // content moved is the previous offset less this one.
-                        // Live output landing mid-glide invalidates that, since
-                        // the window then holds rows the slide cannot account
-                        // for.
+                        // window's content down the screen, so the rows the content
+                        // moved is the previous offset less this one.
+                        //
+                        // Growing history raises the offset too, through the pin
+                        // above, but that only keeps the window on the content it
+                        // already showed. Adding the pin back leaves the movement a
+                        // wheel actually made, which is zero while the window holds
+                        // still under output.
                         let moved_rows = match state.last_scrollback_offset {
-                            Some(last) if !vt_changed => (last - offset) as isize,
-                            _ => 0,
+                            Some(last) => (last - offset) as isize + pin as isize,
+                            None => 0,
                         };
                         state.last_scrollback_offset = Some(offset);
 

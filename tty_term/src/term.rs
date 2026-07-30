@@ -1432,11 +1432,18 @@ impl Terminal {
     /// renderer shows the live grid -- the cursor- and decoration-bearing
     /// projection -- rather than a history snapshot.
     ///
-    /// `moved_rows` is how far the window's content moved since the last
-    /// compose, positive when it moved up the screen. A non-zero move slides
-    /// `out` by it and rewrites only the rows that then differ, reporting them
-    /// through `damage`. Zero, or a move clearing the whole window, rewrites
-    /// every row and reports [`Damage::Full`].
+    /// `moved_rows` is how far the window's content moved since the last compose,
+    /// positive when it moved up the screen. `out` slides by it, and only the rows
+    /// that then differ from the history are rewritten and reported through
+    /// `damage`. A move clearing the whole window leaves nothing worth comparing
+    /// against, so it rewrites every row and reports [`Damage::Full`].
+    ///
+    /// A wrong `moved_rows` costs redundant dirty rows, never a wrong window. Every
+    /// row is projected and compared whatever it says.
+    ///
+    /// Zero is the ordinary value for live output arriving while the window holds
+    /// still, since the view is pinned to its content. Those frames leave almost
+    /// every row clean.
     pub fn project_scrollback(
         &mut self,
         out: &mut Grid,
@@ -1470,10 +1477,14 @@ impl Terminal {
         // Sliding the window by what the caller says it moved leaves most rows
         // already holding the right content, so the compare below finds only the
         // rows the move revealed. A move clearing the window keeps nothing worth
-        // comparing against.
+        // comparing against, and reprojects whole.
+        //
+        // A move of nothing still compares. Live output arriving while the window
+        // holds still is pinned to its content, so it reports a zero move, and those
+        // are the frames where the fewest rows differ.
         let out_rows = out.rows();
-        let sliding = moved_rows != 0 && moved_rows.unsigned_abs() < out_rows;
-        if sliding {
+        let diffing = moved_rows.unsigned_abs() < out_rows;
+        if diffing {
             out.scroll_by(moved_rows);
             *damage = Damage::Partial(vec![false; out_rows]);
         }
@@ -1492,7 +1503,7 @@ impl Terminal {
                 None => Cell::default(),
             }));
 
-            if sliding {
+            if diffing {
                 if out.row(out_row) == projected.as_slice() {
                     continue;
                 }
@@ -6009,6 +6020,40 @@ mod tests {
             [out.get(0, 0).ch, out.get(1, 0).ch, out.get(2, 0).ch],
             ['b', 'c', 'd'],
             "and the window shows the older line above what it already held",
+        );
+    }
+
+    /// Live output arriving while the window holds still leaves every row clean.
+    ///
+    /// The view is pinned to its content as history grows, so the caller raises the
+    /// offset by the appended rows and reports no movement. Those frames are the
+    /// common case while a child streams and the user reads back, and reprojecting
+    /// the window on each would re-upload it at output rate.
+    #[test]
+    fn output_under_a_still_window_dirties_nothing() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        // a, b, c, d scroll into history; e, f stay on the live screen.
+        terminal.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
+
+        let mut out = Grid::new(0, 0);
+        let mut damage = Damage::Full;
+
+        terminal.project_scrollback(&mut out, 1.0, 0, &mut damage);
+        let window = |out: &Grid| [out.get(0, 0).ch, out.get(1, 0).ch, out.get(2, 0).ch];
+        assert_eq!(window(&out), ['c', 'd', 'e']);
+
+        // One more line of output pushes e into history. The offset rises with it,
+        // which is the pin keeping the window on the rows it already showed.
+        terminal.advance(b"\r\ng");
+        terminal.project_scrollback(&mut out, 2.0, 0, &mut damage);
+
+        let Damage::Partial(rows) = &damage else {
+            panic!("a still window must not report itself wholly damaged");
+        };
+        assert_eq!(
+            (rows, window(&out)),
+            (&vec![false, false, false], ['c', 'd', 'e']),
+            "the window holds the same rows, so none is dirty",
         );
     }
 
