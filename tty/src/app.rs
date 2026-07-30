@@ -386,6 +386,10 @@ struct AuxWindowConfig<'a> {
 
 struct State {
     window: Arc<Window>,
+    /// The title last pushed to [`Self::window`], so a repeated one costs no platform
+    /// write. `None` until the first title lands, which leaves the window showing the
+    /// title it was created with.
+    last_title: Option<String>,
     /// Process-start instant, taken once when the first frame is presented to
     /// log the total cold-start time. `None` after that first frame.
     first_frame_start: Option<Instant>,
@@ -893,6 +897,7 @@ impl ApplicationHandler<PtyEvent> for App {
         window.request_redraw();
         self.state = Some(State {
             window,
+            last_title: None,
             first_frame_start: Some(self.start),
             gpu,
             terminal,
@@ -2467,8 +2472,12 @@ fn handle_term_events(
 ) {
     for event in events {
         match event {
-            TermEvent::Title(title) => state.window.set_title(&title),
-            TermEvent::ResetTitle => state.window.set_title(DEFAULT_TITLE),
+            TermEvent::Title(title) => {
+                set_window_title(&state.window, &mut state.last_title, &title)
+            },
+            TermEvent::ResetTitle => {
+                set_window_title(&state.window, &mut state.last_title, DEFAULT_TITLE)
+            },
             TermEvent::ClipboardStore(text) => copy_to_clipboard(state, &text),
             TermEvent::Bell => ring_bell(state, Instant::now()),
             TermEvent::Notification { title, body } => {
@@ -2500,6 +2509,22 @@ fn handle_term_events(
             TermEvent::FontStep(delta) => apply_font_step(state, delta),
         }
     }
+}
+
+/// Give `window` the title `title`, skipping the platform write when it already
+/// carries it.
+///
+/// A shell's prompt hook emits the title on every prompt and the terminal forwards
+/// each one, so most arrivals repeat what the window already shows. `last` records
+/// what was pushed, and is updated here rather than by the caller so a write cannot
+/// land without the record moving with it.
+fn set_window_title(window: &Window, last: &mut Option<String>, title: &str) {
+    if last.as_deref() == Some(title) {
+        return;
+    }
+
+    window.set_title(title);
+    *last = Some(title.to_owned());
 }
 
 /// Create the aux OS window a [`WindowOpenCommand`] asks for and start building
