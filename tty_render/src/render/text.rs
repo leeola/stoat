@@ -313,7 +313,7 @@ pub struct TextPass {
     /// Keyed on text alone because runs only group same-scale primary-covered
     /// cells in the constant primary family, matching [`Self::shape_cache`]'s
     /// family-blind invariant. Flushed whole past [`RUN_SHAPE_CACHE_CAP`].
-    run_shape_cache: FxHashMap<String, Vec<(usize, CacheKey)>>,
+    run_shape_cache: RunShapeCache,
     /// The shaped glyphs of each grid row from the previous frame, indexed by
     /// row, so an unchanged row reuses them instead of re-shaping. Rebuilt for
     /// damaged rows, the cursor's old and new rows, and (wholesale) on resize or
@@ -647,7 +647,7 @@ impl TextPass {
             ligatures,
             swash_cache,
             shape_cache: FxHashMap::default(),
-            run_shape_cache: FxHashMap::default(),
+            run_shape_cache: RunShapeCache::default(),
             glyph_row_cache: Vec::new(),
             rows_shifted: false,
             plain_row_instances: Vec::new(),
@@ -1188,11 +1188,8 @@ impl TextPass {
             let primary_name = self.family.clone();
             let primary = shape_family(&primary_name);
             let primary_font = self.primary_font.clone();
-            let covers = |ch: char| {
-                primary_font
-                    .as_ref()
-                    .is_some_and(|font| font_covers(font, ch))
-            };
+            let charmap = primary_font.as_ref().map(|font| font.as_swash().charmap());
+            let covers = |ch: char| charmap.as_ref().is_some_and(|map| map.map(ch) != 0);
             let shaping = RowShaping {
                 primary,
                 covers: &covers,
@@ -1818,14 +1815,13 @@ impl TextPass {
 
         // Reuse the face resolved once at construction, so each cell's coverage
         // check is a charmap lookup rather than a per-frame font-database query.
+        // The charmap is built once here as well. Constructing one parses the
+        // font's cmap table directory, which is far more work than the lookup.
         let primary_name = self.family.clone();
         let primary = shape_family(&primary_name);
         let primary_font = self.primary_font.clone();
-        let covers = |ch: char| {
-            primary_font
-                .as_ref()
-                .is_some_and(|font| font_covers(font, ch))
-        };
+        let charmap = primary_font.as_ref().map(|font| font.as_swash().charmap());
+        let covers = |ch: char| charmap.as_ref().is_some_and(|map| map.map(ch) != 0);
 
         // The per-row cache holds the previous frame's glyphs. Every row rebuilds
         // when the grid was resized or the terminal reported full damage;
@@ -2756,20 +2752,45 @@ const RUN_SHAPE_CACHE_CAP: usize = 65_536;
 /// flushed whole once it reaches [`RUN_SHAPE_CACHE_CAP`], before the new entry
 /// lands so the current run survives.
 fn shape_run_cached<'a>(
-    cache: &'a mut FxHashMap<String, Vec<(usize, CacheKey)>>,
+    cache: &'a mut RunShapeCache,
     font_system: &mut FontSystem,
     text: &str,
     metrics: CellMetrics,
     family: Family<'_>,
 ) -> &'a [(usize, CacheKey)] {
-    if !cache.contains_key(text) {
-        let shaped = shape_run(font_system, text, metrics, family);
-        if cache.len() >= RUN_SHAPE_CACHE_CAP {
-            cache.clear();
-        }
-        cache.insert(text.to_string(), shaped);
+    // The position copies out, so the lookup's borrow ends before the miss path
+    // needs the cache mutably. A map holding the glyphs themselves cannot do that,
+    // and pays a second hash to read what the first already found.
+    if let Some(&at) = cache.at.get(text) {
+        return &cache.runs[at];
     }
-    &cache[text]
+
+    let shaped = shape_run(font_system, text, metrics, family);
+    if cache.at.len() >= RUN_SHAPE_CACHE_CAP {
+        cache.clear();
+    }
+    cache.at.insert(text.to_string(), cache.runs.len());
+    cache.runs.push(shaped);
+    cache.runs.last().expect("just pushed")
+}
+
+/// Shaped glyphs of each ligature run, found by the run's text.
+///
+/// The glyphs live in a Vec and the map holds positions into it, so a hit costs one
+/// hash and an index. Holding the glyphs in the map instead would cost a second hash
+/// on every hit, to read what the first lookup already proved was there.
+#[derive(Default)]
+struct RunShapeCache {
+    at: FxHashMap<String, usize>,
+    runs: Vec<Vec<(usize, CacheKey)>>,
+}
+
+impl RunShapeCache {
+    /// Drop every shaped run, so the two halves cannot disagree about what is here.
+    fn clear(&mut self) {
+        self.at.clear();
+        self.runs.clear();
+    }
 }
 
 /// Fill `text` and `col_of_byte` with the run's shaping string and a per-byte
@@ -3173,10 +3194,11 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 mod tests {
     use super::{
         build_font_system, build_underline_row, cell_glyph_scale, cell_rect_scissor, cursor_cell,
-        fill_cell_box, glyph_family, glyph_origin, grid_build, is_cell_fill, load_bundled_fonts,
-        overlay_content_cells, resolve_primary_family, run_text_and_columns_into, shape_char,
-        shape_family, shape_run, shape_run_cached, text_run_origin, FxHashMap, GlyphSource,
-        GridBuild, RectInstance, TextInstance, TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
+        fill_cell_box, font_covers, glyph_family, glyph_origin, grid_build, is_cell_fill,
+        load_bundled_fonts, overlay_content_cells, resolve_primary_family, resolve_primary_font,
+        run_text_and_columns_into, shape_char, shape_family, shape_run, shape_run_cached,
+        text_run_origin, GlyphSource, GridBuild, RectInstance, RunShapeCache, TextInstance,
+        TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
     };
     use crate::{
         gpu::headless_device,
@@ -3551,6 +3573,38 @@ mod tests {
         );
     }
 
+    /// A charmap held across lookups answers coverage the way a fresh one does.
+    ///
+    /// The shaping paths build one per pass and map every cell through it, since
+    /// constructing one parses the font's cmap table directory. That is only sound
+    /// if a held charmap is not order-dependent or otherwise single-use.
+    #[test]
+    fn a_held_charmap_answers_coverage_like_a_fresh_one() {
+        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
+        load_bundled_fonts(&mut font_system);
+        let font = resolve_primary_font(&mut font_system, &Some("JetBrains Mono".to_owned()))
+            .expect("the bundled primary family resolves");
+
+        let charmap = font.as_swash().charmap();
+        let held: Vec<bool> = "a=→\u{1F600} z"
+            .chars()
+            .map(|ch| charmap.map(ch) != 0)
+            .collect();
+        let fresh: Vec<bool> = "a=→\u{1F600} z"
+            .chars()
+            .map(|ch| font_covers(&font, ch))
+            .collect();
+
+        assert_eq!(
+            held, fresh,
+            "one charmap answers every lookup as a per-call one would"
+        );
+        assert!(
+            held.iter().any(|&covered| covered) && held.iter().any(|&covered| !covered),
+            "the sample must span covered and uncovered characters to mean anything: {held:?}"
+        );
+    }
+
     #[test]
     fn shape_run_cached_returns_the_cached_run_without_reshaping() {
         let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
@@ -3558,26 +3612,34 @@ mod tests {
         let metrics = CellMetrics::from_font_size(16, 1.0);
         let jbm = Family::Name("JetBrains Mono");
 
-        let mut cache = FxHashMap::default();
+        let mut cache = RunShapeCache::default();
         let fresh = shape_run_cached(&mut cache, &mut font_system, "==", metrics, jbm).to_vec();
         assert_eq!(
             fresh,
             shape_run(&mut font_system, "==", metrics, jbm),
             "the miss stores the same glyphs a direct shape produces"
         );
-        assert_eq!(cache.len(), 1, "the miss shaped and stored one run");
+        assert_eq!(
+            (cache.at.len(), cache.runs.len()),
+            (1, 1),
+            "the miss shaped and stored one run"
+        );
 
-        // Poison the entry with another run's glyphs. A reshape would overwrite
-        // it, so getting the poisoned glyphs back proves the hit read the cache.
+        // Poison the stored glyphs with another run's. A reshape would overwrite
+        // them, so getting the poisoned glyphs back proves the hit read the cache.
         let poison = shape_run(&mut font_system, "ab", metrics, jbm);
-        cache.insert("==".to_string(), poison.clone());
+        cache.runs[cache.at["=="]] = poison.clone();
         let hit = shape_run_cached(&mut cache, &mut font_system, "==", metrics, jbm);
         assert_eq!(
             hit,
             poison.as_slice(),
             "a hit returns the stored run, not a reshape"
         );
-        assert_eq!(cache.len(), 1, "a hit adds no entry");
+        assert_eq!(
+            (cache.at.len(), cache.runs.len()),
+            (1, 1),
+            "a hit adds no entry"
+        );
     }
 
     #[test]
