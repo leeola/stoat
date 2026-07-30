@@ -11,8 +11,8 @@
 use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
     render::{
-        occlusion_globals, pool_occluders, row_len, row_uploads, CellMetrics, CompositeSlot, Frame,
-        Occluder,
+        occlusion_globals, pool_occluders, row_len, row_uploads, CellMetrics, CompositeSlot,
+        CompositeSlots, Frame, Occluder,
     },
 };
 use bytemuck::{Pod, Zeroable};
@@ -207,7 +207,7 @@ pub struct TextPass {
     /// separate from the live buffers so a pool draw leaves the live grid's
     /// damage-tracked rows intact. Indexed by the pool's position in the frame's
     /// slice and grown on demand, so a renderer that never composites holds none.
-    composite_slots: Vec<TextCompositeSlot>,
+    composite_slots: CompositeSlots<TextCompositeSlot>,
     /// The [`Grid::text_runs_epoch`] and [`Atlas::content_epoch`] the live text
     /// runs and rects were last built against. `prepare` reuses those instances
     /// while both still match, since the runs are unchanged and their atlas UVs
@@ -584,7 +584,7 @@ impl TextPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
-            composite_slots: Vec::new(),
+            composite_slots: CompositeSlots::new(),
             last_text_run_epoch: 0,
             last_atlas_epoch: 0,
             // Never a real content epoch, so the first prepare always builds.
@@ -1067,7 +1067,7 @@ impl TextPass {
         shift_rows: f32,
         content_changed: bool,
         occludable: bool,
-        slot: usize,
+        pool: u32,
     ) {
         // An occludable pane pool sits under every box, so its composite draws
         // discard inside any panel rect with the seq test bypassed. A non-pane
@@ -1097,7 +1097,7 @@ impl TextPass {
         if !content_changed
             && self
                 .composite_slots
-                .get(slot)
+                .get(pool)
                 .is_some_and(|target| target.epoch == self.atlas.content_epoch())
         {
             return;
@@ -1108,7 +1108,7 @@ impl TextPass {
         for row in 0..grid.rows() {
             build_underline_row_into(grid, row, metrics, &mut self.underline_upload_scratch);
         }
-        let target = composite_slot(&mut self.composite_slots, device, slot);
+        let target = self.composite_slots.entry(pool, || new_slot(device));
         target.underlines.count = self.underline_upload_scratch.len() as u32;
         if !self.underline_upload_scratch.is_empty() {
             if self.underline_upload_scratch.len() > target.underlines.capacity {
@@ -1144,7 +1144,7 @@ impl TextPass {
 
         let mut run_rects = mem::take(&mut self.composite_rect_scratch);
         self.build_run_rects_into(grid, &mut run_rects);
-        let target = composite_slot(&mut self.composite_slots, device, slot);
+        let target = self.composite_slots.entry(pool, || new_slot(device));
         target.rects.count = run_rects.len() as u32;
         upload_instances(
             device,
@@ -1190,7 +1190,7 @@ impl TextPass {
         if self.atlas.texture_dims() != atlas_dims {
             self.build_text_run_instances_into(device, queue, grid, &mut run_instances);
         }
-        let target = composite_slot(&mut self.composite_slots, device, slot);
+        let target = self.composite_slots.entry(pool, || new_slot(device));
         target.text_runs.count = run_instances.len() as u32;
         upload_instances(
             device,
@@ -1204,7 +1204,7 @@ impl TextPass {
 
         let mut instances = mem::take(&mut self.composite_upload_scratch);
         self.build_text_instances_into(device, queue, &pending, &mut instances);
-        let target = composite_slot(&mut self.composite_slots, device, slot);
+        let target = self.composite_slots.entry(pool, || new_slot(device));
         target.glyphs.count = instances.len() as u32;
         upload_instances(
             device,
@@ -1230,7 +1230,7 @@ impl TextPass {
         // Record the atlas state these instances resolved against, so a later
         // shift-only frame can tell whether their UVs still hold.
         let epoch = self.atlas.content_epoch();
-        composite_slot(&mut self.composite_slots, device, slot).epoch = epoch;
+        self.composite_slots.entry(pool, || new_slot(device)).epoch = epoch;
     }
 
     /// Build the glyph instances for `pending`, reading each glyph's final atlas
@@ -1558,8 +1558,8 @@ impl TextPass {
     /// instances a prior [`Self::prepare`] uploaded and the other pools' slots
     /// untouched. Binds the grid-scroll globals [`Self::prepare_composite`] wrote,
     /// so the pool scrolls by its shift.
-    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>, slot: usize) {
-        let Some(target) = self.composite_slots.get(slot) else {
+    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>, pool: u32) {
+        let Some(target) = self.composite_slots.get(pool) else {
             return;
         };
 
@@ -1587,8 +1587,8 @@ impl TextPass {
     /// slots untouched. Binds the grid-scroll globals [`Self::prepare_composite`]
     /// wrote, so the runs glide with the page rather than staying screen-anchored
     /// like [`Self::draw_text_runs`].
-    pub fn draw_composite_text_runs(&self, render_pass: &mut RenderPass<'_>, slot: usize) {
-        let Some(target) = self.composite_slots.get(slot) else {
+    pub fn draw_composite_text_runs(&self, render_pass: &mut RenderPass<'_>, pool: u32) {
+        let Some(target) = self.composite_slots.get(pool) else {
             return;
         };
 
@@ -2405,25 +2405,15 @@ fn instance_bytes<T>(capacity: usize) -> u64 {
     (capacity * size_of::<T>()) as u64
 }
 
-/// Slot `slot` of `slots`, allocating every slot up to it on first use.
-///
-/// Takes the Vec rather than the whole pass so a caller can keep reading its build
-/// scratch while it writes the slot.
-fn composite_slot<'a>(
-    slots: &'a mut Vec<TextCompositeSlot>,
-    device: &Device,
-    slot: usize,
-) -> &'a mut TextCompositeSlot {
-    while slots.len() <= slot {
-        slots.push(TextCompositeSlot {
-            glyphs: alloc_slot::<TextInstance>(device, "composite text instances"),
-            underlines: alloc_slot::<UnderlineInstance>(device, "composite underline instances"),
-            text_runs: alloc_slot::<TextInstance>(device, "composite text run instances"),
-            rects: alloc_slot::<RectInstance>(device, "composite text run rect instances"),
-            epoch: 0,
-        });
+/// Empty buffers for a pool being composited for the first time.
+fn new_slot(device: &Device) -> TextCompositeSlot {
+    TextCompositeSlot {
+        glyphs: alloc_slot::<TextInstance>(device, "composite text instances"),
+        underlines: alloc_slot::<UnderlineInstance>(device, "composite underline instances"),
+        text_runs: alloc_slot::<TextInstance>(device, "composite text run instances"),
+        rects: alloc_slot::<RectInstance>(device, "composite text run rect instances"),
+        epoch: 0,
     }
-    &mut slots[slot]
 }
 
 fn alloc_slot<T>(device: &Device, label: &str) -> CompositeSlot {

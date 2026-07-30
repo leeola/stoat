@@ -9,7 +9,9 @@
 //!
 //! [`Cell`]: stoatty_term::grid::Cell
 
-use crate::render::{occlusion_globals, pool_occluders, CellMetrics, CompositeSlot, Occluder};
+use crate::render::{
+    occlusion_globals, pool_occluders, CellMetrics, CompositeSlot, CompositeSlots, Occluder,
+};
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::{
     grid::{Grid, Panel, Rgb},
@@ -104,7 +106,7 @@ pub struct BackgroundPass {
     /// slot per pool so a pool reusing last frame's instances cannot read a
     /// sibling's. Separate from [`Self::instances`] so a pool draw leaves the live
     /// grid's damage-tracked instances intact.
-    composite_slots: Vec<CompositeSlot>,
+    composite_slots: CompositeSlots<CompositeSlot>,
     /// One occluder per live panel at binding 1, read by the cell fragment
     /// shader on an occludable pool composite to discard a page cell a box
     /// covers. Unused by the live cell fill and the cursor, which leave the
@@ -215,7 +217,7 @@ impl BackgroundPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
-            composite_slots: Vec::new(),
+            composite_slots: CompositeSlots::new(),
             occluders,
             occluder_capacity: INITIAL_CAPACITY,
             cursor_pipeline,
@@ -372,7 +374,7 @@ impl BackgroundPass {
         grid_scroll: f32,
         content_changed: bool,
         occludable: bool,
-        slot: usize,
+        pool: u32,
     ) {
         let occluders = pool_occluders(occludable, panels);
         self.upload_occluders(device, queue, &occluders);
@@ -401,7 +403,7 @@ impl BackgroundPass {
         self.scratch.clear();
         build_instances(grid, &mut self.scratch);
 
-        let target = composite_slot(&mut self.composite_slots, device, slot);
+        let target = self.composite_slots.entry(pool, || new_slot(device));
         target.count = self.scratch.len() as u32;
         if self.scratch.is_empty() {
             return;
@@ -469,8 +471,8 @@ impl BackgroundPass {
     /// non-empty grid. Reads that slot's buffer, so drawing a pool leaves both the
     /// live cell instances a prior [`Self::prepare`] uploaded and the other pools'
     /// slots untouched.
-    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>, slot: usize) {
-        let Some(target) = self.composite_slots.get(slot).filter(|s| s.count > 0) else {
+    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>, pool: u32) {
+        let Some(target) = self.composite_slots.get(pool).filter(|s| s.count > 0) else {
             return;
         };
 
@@ -495,23 +497,14 @@ impl BackgroundPass {
     }
 }
 
-/// Slot `slot` of `slots`, allocating every slot up to it on first use.
-///
-/// Takes the Vec rather than the whole pass so a caller can keep reading its build
-/// scratch while it writes the slot.
-fn composite_slot<'a>(
-    slots: &'a mut Vec<CompositeSlot>,
-    device: &Device,
-    slot: usize,
-) -> &'a mut CompositeSlot {
-    while slots.len() <= slot {
-        slots.push(CompositeSlot {
-            instances: alloc_instances(device, INITIAL_CAPACITY),
-            capacity: INITIAL_CAPACITY,
-            count: 0,
-        });
+/// An empty composite slot at the initial capacity, for a pool being composited
+/// for the first time.
+fn new_slot(device: &Device) -> CompositeSlot {
+    CompositeSlot {
+        instances: alloc_instances(device, INITIAL_CAPACITY),
+        capacity: INITIAL_CAPACITY,
+        count: 0,
     }
-    &mut slots[slot]
 }
 
 fn alloc_instances(device: &Device, capacity: usize) -> Buffer {

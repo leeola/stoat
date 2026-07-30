@@ -139,13 +139,69 @@ pub(crate) struct Occluder {
 /// buffer so every pool can be prepared before any of them draws. With one buffer
 /// per pass, a pool that reuses last frame's instances reads whatever pool was
 /// prepared after it, so the draws have to be separated by a submit.
-///
-/// A pass holds these in a Vec indexed by the pool's position in the frame's
-/// slice, grown on demand, so a renderer that never composites allocates none.
 pub(crate) struct CompositeSlot {
     pub(crate) instances: Buffer,
     pub(crate) capacity: usize,
     pub(crate) count: u32,
+}
+
+/// Distinct pools a pass keeps composite buffers for.
+///
+/// Sized past what a window reaches in practice, which is a pane and a status-row
+/// pool per pane plus the fixed modal pools. The cap bounds the renderer's own
+/// memory rather than limiting a working set, so exceeding it costs a rebuild
+/// rather than correctness.
+const MAX_COMPOSITE_POOLS: usize = 32;
+
+/// A pass's per-pool composite state, keyed by pool id.
+///
+/// Keyed by id rather than by the pool's position in the frame, because pools
+/// appear in a frame only while they glide. One settling shifts the rest down a
+/// position, and a pool that reuses last frame's instances would then read a
+/// sibling's and paint them inside its own scissor.
+///
+/// Holds at most [`MAX_COMPOSITE_POOLS`] pools, taking over the least recently
+/// requested when a new one arrives, so the buffers stay bounded by the renderer
+/// itself rather than by how many distinct ids its callers happen to use.
+pub(crate) struct CompositeSlots<T> {
+    /// Least-recently-requested first, so the front is the one to take over.
+    entries: Vec<(u32, T)>,
+}
+
+impl<T> CompositeSlots<T> {
+    pub(crate) fn new() -> CompositeSlots<T> {
+        CompositeSlots {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Pool `pool`'s slot, built by `make` when it has none.
+    ///
+    /// Marks the slot most recently requested, so a frame that composites the same
+    /// pools as the last never takes one over.
+    pub(crate) fn entry(&mut self, pool: u32, make: impl FnOnce() -> T) -> &mut T {
+        if let Some(at) = self.entries.iter().position(|(id, _)| *id == pool) {
+            self.entries[at..].rotate_left(1);
+        } else if self.entries.len() == MAX_COMPOSITE_POOLS {
+            self.entries[0] = (pool, make());
+            self.entries.rotate_left(1);
+        } else {
+            self.entries.push((pool, make()));
+        }
+
+        &mut self.entries.last_mut().expect("just placed").1
+    }
+
+    /// Pool `pool`'s slot, or `None` when it has none.
+    ///
+    /// Leaves the order alone, so a draw reading a slot cannot change which pool is
+    /// next to be taken over.
+    pub(crate) fn get(&self, pool: u32) -> Option<&T> {
+        self.entries
+            .iter()
+            .find(|(id, _)| *id == pool)
+            .map(|(_, slot)| slot)
+    }
 }
 
 /// Whether `built` differs from what was last uploaded, and so has to be sent
@@ -359,8 +415,72 @@ pub fn cell_size(font_size: u32, scale_factor: f32) -> [f32; 2] {
 mod tests {
     use super::{
         occlusion_globals, pool_occluders, rotate_row_cache, row_runs, row_uploads, CellMetrics,
+        CompositeSlots, MAX_COMPOSITE_POOLS,
     };
     use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
+
+    /// A pool keeps its own slot across frames whose pool set changes shape, which
+    /// is what keying by id buys over keying by position in the frame.
+    #[test]
+    fn a_slot_follows_its_pool_id_not_its_position() {
+        let mut slots: CompositeSlots<u32> = CompositeSlots::new();
+        for pool in [7, 4, 9] {
+            *slots.entry(pool, || 0) = pool * 10;
+        }
+
+        // Pool 7 settles and drops out, so 4 and 9 shift down a position.
+        let seen: Vec<Option<&u32>> = [4, 9].iter().map(|p| slots.get(*p)).collect();
+        assert_eq!(
+            seen,
+            [Some(&40), Some(&90)],
+            "each surviving pool reads back what it built, not its new neighbour's"
+        );
+        assert_eq!(slots.get(3), None, "a pool never prepared has no slot");
+    }
+
+    /// A repeat request hands back that pool's own slot, and consumes none.
+    ///
+    /// Two pools are needed to catch it. With one, the pool's slot and the most
+    /// recently requested slot are the same entry.
+    #[test]
+    fn requesting_a_held_pool_reuses_its_own_slot() {
+        let mut slots: CompositeSlots<u32> = CompositeSlots::new();
+        *slots.entry(1, || 0) = 11;
+        *slots.entry(2, || 0) = 22;
+        *slots.entry(1, || 0) += 100;
+
+        assert_eq!(
+            (slots.entries.len(), slots.get(1), slots.get(2)),
+            (2, Some(&111), Some(&22)),
+            "the repeat request reached pool 1's slot without building or touching another"
+        );
+    }
+
+    /// Past the cap the least recently requested pool gives up its slot, so a
+    /// renderer's buffers stay bounded however many pool ids pass through it.
+    #[test]
+    fn a_pool_past_the_cap_takes_over_the_least_recently_requested_slot() {
+        let mut slots: CompositeSlots<u32> = CompositeSlots::new();
+        for pool in 0..MAX_COMPOSITE_POOLS as u32 {
+            *slots.entry(pool, || 0) = pool;
+        }
+
+        // Touching pool 0 leaves pool 1 as the oldest request.
+        slots.entry(0, || 0);
+        let overflow = MAX_COMPOSITE_POOLS as u32;
+        *slots.entry(overflow, || 0) = overflow;
+
+        assert_eq!(
+            (
+                slots.entries.len(),
+                slots.get(1),
+                slots.get(0),
+                slots.get(overflow)
+            ),
+            (MAX_COMPOSITE_POOLS, None, Some(&0), Some(&overflow)),
+            "the untouched pool lost its slot, the touched one kept it"
+        );
+    }
 
     /// Rows of uneven length, so a run's offset can only come out right by
     /// summing the rows before it rather than multiplying by a fixed width.

@@ -547,9 +547,9 @@ impl Renderer {
     /// regions, overlays, icons, or bars, since the pool carries plain composed
     /// page rows.
     ///
-    /// `slot` identifies this pool among the frame's, so each pass builds into its
-    /// own buffers. Two pools sharing a slot would have the later one's instances
-    /// drawn for both, so callers pass each pool a distinct index.
+    /// `pool` is the terminal's id for this pool, under which each pass keeps its
+    /// composite buffers. Two entries sharing an id would have the later one's
+    /// instances drawn for both, so callers pass each pool its own.
     #[allow(clippy::too_many_arguments)]
     pub fn composite_pool(
         &mut self,
@@ -562,7 +562,7 @@ impl Renderer {
         shift_rows: f32,
         content_changed: bool,
         occludable: bool,
-        slot: usize,
+        pool: u32,
     ) {
         let Some(scissor) = clamp_scissor(scissor, self.width, self.height) else {
             return;
@@ -578,7 +578,7 @@ impl Renderer {
             shift_rows,
             content_changed,
             occludable,
-            slot,
+            pool,
         );
         self.text.prepare_composite(
             device,
@@ -589,7 +589,7 @@ impl Renderer {
             shift_rows,
             content_changed,
             occludable,
-            slot,
+            pool,
         );
         self.bar.prepare_composite(
             device,
@@ -599,7 +599,7 @@ impl Renderer {
             resolution,
             shift_rows,
             occludable,
-            slot,
+            pool,
         );
         self.polyline.prepare_composite(
             device,
@@ -609,7 +609,7 @@ impl Renderer {
             resolution,
             shift_rows,
             occludable,
-            slot,
+            pool,
         );
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
@@ -633,13 +633,13 @@ impl Renderer {
             });
 
             render_pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
-            self.background.draw_composite(&mut render_pass, slot);
-            self.text.draw_composite(&mut render_pass, slot);
+            self.background.draw_composite(&mut render_pass, pool);
+            self.text.draw_composite(&mut render_pass, pool);
             // Off-grid gutter chrome sits above the page glyphs but below the
             // cursor. Bars fill behind the scaled run text.
-            self.bar.draw_composite(&mut render_pass, slot);
-            self.polyline.draw_composite(&mut render_pass, slot);
-            self.text.draw_composite_text_runs(&mut render_pass, slot);
+            self.bar.draw_composite(&mut render_pass, pool);
+            self.polyline.draw_composite(&mut render_pass, pool);
+            self.text.draw_composite_text_runs(&mut render_pass, pool);
         }
 
         queue.submit([encoder.finish()]);
@@ -773,6 +773,10 @@ impl Renderer {
 /// [`GpuContext::render_with_pools`] composites these over the live grid in
 /// slice order, so an earlier entry sits beneath a later one.
 pub struct PoolComposite<'a> {
+    /// The pool this entry draws, as the terminal declared it. Identifies the
+    /// pool's composite buffers across frames, whose set of gliding pools changes
+    /// shape as pools settle and start.
+    pub id: u32,
     /// The viewport-sized grid whose region cells hold the pool's composed page
     /// rows; only the [`Self::scissor`] rectangle is drawn.
     pub grid: &'a Grid,
@@ -1195,7 +1199,7 @@ impl GpuContext {
         let epoch_before = self.renderer.content_epoch();
 
         let panels = live_grid.panels();
-        for (slot, pool) in pools.iter().enumerate() {
+        for pool in pools {
             self.renderer.composite_pool(
                 &self.device,
                 &self.queue,
@@ -1206,7 +1210,7 @@ impl GpuContext {
                 pool.shift_rows,
                 pool.content_changed,
                 pool.occludable,
-                slot,
+                pool.id,
             );
         }
 

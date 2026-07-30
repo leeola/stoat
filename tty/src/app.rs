@@ -1617,6 +1617,7 @@ impl ApplicationHandler<PtyEvent> for App {
                             let x1 = ((region.left as f32 + region.width as f32) * cw) as u32;
                             let y1 = ((region.top as f32 + region.height as f32) * ch) as u32;
                             PoolComposite {
+                                id: pool.id,
                                 grid: &state.pool_anims[&pool.id].pool_grid,
                                 scissor: [x0, y0, x1 - x0, y1 - y0],
                                 shift_rows: -pool.frac,
@@ -2680,6 +2681,7 @@ fn redraw_aux(
     let composites = active
         .iter()
         .map(|pool| PoolComposite {
+            id: pool.id,
             grid: &aux.pool_anims[&pool.id].pool_grid,
             scissor: region_scissor(pool.region, cw, ch),
             shift_rows: -pool.frac,

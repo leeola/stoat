@@ -6,7 +6,9 @@
 //! ride in cell-fraction units and the vertex shader scales them by the live
 //! cell size, so a path tracks font zoom.
 
-use crate::render::{occlusion_globals, pool_occluders, CellMetrics, CompositeSlot, Occluder};
+use crate::render::{
+    occlusion_globals, pool_occluders, CellMetrics, CompositeSlot, CompositeSlots, Occluder,
+};
 use bytemuck::{Pod, Zeroable};
 use std::mem;
 use stoatty_term::grid::{Panel, Polyline, Rgb};
@@ -76,7 +78,7 @@ pub struct PolylinePass {
     /// Per-pool segments of the pools composited over the live grid, one slot per
     /// pool so every pool can be prepared before any of them draws. Separate from
     /// [`Self::instances`] so a pool draw leaves the live paths intact.
-    composite_slots: Vec<CompositeSlot>,
+    composite_slots: CompositeSlots<CompositeSlot>,
     /// One occluder per live panel, read by the fragment shader to discard path
     /// fragments a later box covers. Bound alongside the globals, and rebuilt
     /// into a new bind group whenever it reallocates.
@@ -187,7 +189,7 @@ impl PolylinePass {
             built: Vec::new(),
             capacity: INITIAL_CAPACITY,
             count: 0,
-            composite_slots: Vec::new(),
+            composite_slots: CompositeSlots::new(),
             occluders,
             occluder_capacity: INITIAL_CAPACITY,
             metrics,
@@ -285,7 +287,7 @@ impl PolylinePass {
         resolution: [f32; 2],
         shift_rows: f32,
         occludable: bool,
-        slot: usize,
+        pool: u32,
     ) {
         let occluders = pool_occluders(occludable, panels);
         self.upload_occluders(device, queue, &occluders);
@@ -301,7 +303,7 @@ impl PolylinePass {
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
         let instances = build_polyline_instances(polylines, shift_rows);
-        let target = composite_slot(&mut self.composite_slots, device, slot);
+        let target = self.composite_slots.entry(pool, || new_slot(device));
         target.count = instances.len() as u32;
         if instances.is_empty() {
             return;
@@ -336,8 +338,8 @@ impl PolylinePass {
     /// slot's buffer, so a pool draw leaves both the live paths a prior
     /// [`Self::prepare`] uploaded and the other pools' slots untouched. Inherits
     /// the pool pass's scissor.
-    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>, slot: usize) {
-        let Some(target) = self.composite_slots.get(slot).filter(|s| s.count > 0) else {
+    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>, pool: u32) {
+        let Some(target) = self.composite_slots.get(pool).filter(|s| s.count > 0) else {
             return;
         };
 
@@ -348,23 +350,14 @@ impl PolylinePass {
     }
 }
 
-/// Slot `slot` of `slots`, allocating every slot up to it on first use.
-///
-/// Takes the Vec rather than the whole pass so a caller can keep reading its build
-/// scratch while it writes the slot.
-fn composite_slot<'a>(
-    slots: &'a mut Vec<CompositeSlot>,
-    device: &Device,
-    slot: usize,
-) -> &'a mut CompositeSlot {
-    while slots.len() <= slot {
-        slots.push(CompositeSlot {
-            instances: alloc_instances(device, INITIAL_CAPACITY),
-            capacity: INITIAL_CAPACITY,
-            count: 0,
-        });
+/// An empty composite slot at the initial capacity, for a pool being composited
+/// for the first time.
+fn new_slot(device: &Device) -> CompositeSlot {
+    CompositeSlot {
+        instances: alloc_instances(device, INITIAL_CAPACITY),
+        capacity: INITIAL_CAPACITY,
+        count: 0,
     }
-    &mut slots[slot]
 }
 
 fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
