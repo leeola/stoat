@@ -1294,9 +1294,19 @@ impl Terminal {
         if self.syncing() || self.sync_staged.is_empty() {
             return;
         }
-        for command in mem::take(&mut self.sync_staged) {
+
+        // Drained rather than consumed so the list keeps its allocation for the
+        // next update, since an editor opens one update per frame.
+        //
+        // Restoring by assignment cannot lose a staged command. The only push
+        // site stages solely while `syncing()` holds, and `syncing()` is false
+        // for the whole drain. The early return above establishes that, and
+        // `syncing()` reads parser state that only feeding bytes can move.
+        let mut staged = mem::take(&mut self.sync_staged);
+        for command in staged.drain(..) {
             self.apply_decoration(command);
         }
+        self.sync_staged = staged;
     }
 
     /// Snapshots of every declared smooth-scroll pool, in ascending-id (z) order.
@@ -5235,6 +5245,20 @@ mod tests {
             run_labels(&grid),
             ["B"],
             "the timeout flush commits the staged scene"
+        );
+    }
+
+    #[test]
+    fn a_committed_update_keeps_its_staging_capacity() {
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        stage_reset_and_run_under_sync(&mut terminal, &mut grid);
+
+        terminal.flush_synchronized_update();
+
+        assert!(
+            terminal.sync_staged.capacity() > 0,
+            "the committed list keeps its allocation for the next update"
         );
     }
 
