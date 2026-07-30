@@ -323,9 +323,26 @@ pub struct TextPass {
     /// The built plain-glyph instances of each row from the previous frame, so a
     /// damaged frame rebuilds and re-uploads only the rows that changed rather
     /// than every glyph on screen. Holds resolved atlas rects, so an atlas grow
-    /// (which moves every UV) rebuilds all rows. Used only when no scroll region
-    /// is active; a region falls back to the whole-grid build and clears this.
+    /// (which moves every UV) rebuilds all rows.
+    ///
+    /// A row's glyphs inside an active scroll region go to
+    /// [`Self::region_row_instances`] instead, since the two are drawn from
+    /// separate buffers under separate globals.
     plain_row_instances: Vec<Vec<TextInstance>>,
+    /// The region-side half of [`Self::plain_row_instances`], holding each row's
+    /// glyphs that fall inside the active scroll region.
+    ///
+    /// Empty for every row while no region is declared. A region is active for as
+    /// long as a full-screen program is on screen, so its rows are patched the same
+    /// way rather than rebuilt whole.
+    region_row_instances: Vec<Vec<TextInstance>>,
+    /// The scroll region's rectangle as the row caches were split against, so a
+    /// moved rectangle rebuilds them.
+    ///
+    /// The rectangle rather than the whole [`ScrollRegion`], because its `offset`
+    /// moves on every scroll tick and rides the globals uniform. It shifts where the
+    /// region's rows are drawn without changing which cells fall inside it.
+    region_split: Option<[u16; 4]>,
     /// The built underline instances of each row from the previous frame, so a
     /// damaged frame rebuilds and re-uploads only the changed rows. Underline is
     /// a VT cell attribute, so VT damage tracks it; scroll rides the globals
@@ -335,14 +352,14 @@ pub struct TextPass {
     /// `rasterize_visible` allocates no per-frame temporary.
     rebuilt_scratch: Vec<usize>,
     /// Scratch reused each frame to flatten the row instances into a contiguous
-    /// upload slice, so `patch_plain_rows` allocates no per-frame temporary.
+    /// upload slice, so `patch_rows` allocates no per-frame temporary. Shared by
+    /// both row buffers, which upload one after the other.
     plain_upload_scratch: Vec<TextInstance>,
     /// Scratch reused each frame for the underline upload slice, shared by
     /// `prepare_underlines` and `prepare_composite`.
     underline_upload_scratch: Vec<UnderlineInstance>,
-    /// Scratch reused each frame to partition the grid's cached glyphs into the
-    /// scroll-region and plain buffers, so an active region scroll allocates no
-    /// per-frame temporary.
+    /// Scratch reused to partition one row's cached glyphs into the scroll-region
+    /// and plain halves, so a region frame allocates no per-row temporary.
     plain_pending_scratch: Vec<PendingGlyph>,
     /// Region-side half of the [`Self::plain_pending_scratch`] split.
     region_pending_scratch: Vec<PendingGlyph>,
@@ -651,6 +668,8 @@ impl TextPass {
             glyph_row_cache: Vec::new(),
             rows_shifted: false,
             plain_row_instances: Vec::new(),
+            region_row_instances: Vec::new(),
+            region_split: None,
             underline_row_instances: Vec::new(),
             rebuilt_scratch: Vec::new(),
             plain_upload_scratch: Vec::new(),
@@ -1887,8 +1906,8 @@ impl TextPass {
     /// it currently stands.
     ///
     /// Idempotent, so `prepare` can run it a second time when the resolve itself
-    /// moved the atlas. `rebuild_all` reaches only the region-free arm. A region
-    /// splits every row across two buffers, so that arm always rebuilds whole.
+    /// moved the atlas. A `region` splits each row's glyphs across the two buffers,
+    /// which are patched per row the same way an unsplit one is.
     fn build_grid_instances(
         &mut self,
         device: &Device,
@@ -1897,51 +1916,7 @@ impl TextPass {
         rebuilt: &[usize],
         rebuild_all: bool,
     ) {
-        match region {
-            // A scroll region splits each row's glyphs across the plain and
-            // region buffers, so build the whole grid and drop the per-row
-            // cache; the next region-free frame rebuilds it. Regions are rare,
-            // so this falls back rather than tracking the split per row.
-            Some(region) => {
-                let mut plain_pending = mem::take(&mut self.plain_pending_scratch);
-                let mut region_pending = mem::take(&mut self.region_pending_scratch);
-                plain_pending.clear();
-                region_pending.clear();
-                for glyph in self.glyph_row_cache.iter().flatten() {
-                    if region.contains(glyph.row, glyph.col) {
-                        region_pending.push(*glyph);
-                    } else {
-                        plain_pending.push(*glyph);
-                    }
-                }
-
-                let plain_instances = self.build_text_instances(device, queue, &plain_pending);
-                let region_instances = self.build_text_instances(device, queue, &region_pending);
-
-                self.count = plain_instances.len() as u32;
-                self.region_count = region_instances.len() as u32;
-                upload_instances(
-                    device,
-                    queue,
-                    &plain_instances,
-                    &mut self.instances,
-                    &mut self.capacity,
-                    "text instances",
-                );
-                upload_instances(
-                    device,
-                    queue,
-                    &region_instances,
-                    &mut self.region_instances,
-                    &mut self.region_capacity,
-                    "scroll region text instances",
-                );
-                self.plain_row_instances.clear();
-                self.plain_pending_scratch = plain_pending;
-                self.region_pending_scratch = region_pending;
-            },
-            None => self.patch_plain_rows(device, queue, rebuilt, rebuild_all),
-        }
+        self.patch_rows(device, queue, region, rebuilt, rebuild_all);
     }
 
     /// Slide every per-row cache up by `rows` so a scrolled grid keeps the
@@ -1960,104 +1935,174 @@ impl TextPass {
         crate::render::rotate_row_cache(&mut self.plain_row_instances, rows, |instance| {
             instance.pos[1] -= dy;
         });
+        crate::render::rotate_row_cache(&mut self.region_row_instances, rows, |instance| {
+            instance.pos[1] -= dy;
+        });
         crate::render::rotate_row_cache(&mut self.underline_row_instances, rows, |instance| {
             instance.cell_pos[1] -= dy;
         });
     }
 
-    /// Rebuild and re-upload only the changed rows' plain-glyph instances.
+    /// Rebuild and re-upload only the changed rows' glyph instances.
     ///
-    /// Unchanged rows reuse last frame's [`Self::plain_row_instances`]. The rows
-    /// in `rebuilt` rebuild from their cached glyphs, and `rebuild_all` rebuilds
-    /// every row (an atlas grow moved every UV, or text runs may grow it). A
-    /// buffer that must grow is fully re-uploaded.
+    /// Unchanged rows reuse last frame's [`Self::plain_row_instances`] and
+    /// [`Self::region_row_instances`]. The rows in `rebuilt` rebuild from their
+    /// cached glyphs, and `rebuild_all` rebuilds every row (an atlas grow moved
+    /// every UV, or text runs may grow it). A buffer that must grow is fully
+    /// re-uploaded.
     ///
     /// Rows are patched where they sit, contiguous ones sharing a write, up to
     /// the first row that came back a different length. That row moved every
     /// later row's place in the buffer, so from there on the rest is rewritten
-    /// as one span.
+    /// as one span. Each buffer finds that row for itself.
     ///
-    /// Used only with no scroll region, so every glyph is plain.
-    fn patch_plain_rows(
+    /// A `region` whose rectangle differs from the one the caches were split
+    /// against rebuilds every row, since the split moved.
+    fn patch_rows(
         &mut self,
         device: &Device,
         queue: &Queue,
+        region: Option<ScrollRegion>,
         rebuilt: &[usize],
         rebuild_all: bool,
     ) {
-        self.region_count = 0;
-
         let rows = self.glyph_row_cache.len();
-        let stale = self.plain_row_instances.len() != rows;
+        let split = region_split(region);
+        let stale = self.plain_row_instances.len() != rows
+            || self.region_row_instances.len() != rows
+            || self.region_split != split;
         if stale {
             self.plain_row_instances = vec![Vec::new(); rows];
+            self.region_row_instances = vec![Vec::new(); rows];
+            self.region_split = split;
         }
 
-        let rewrite_from = if rebuild_all || stale {
+        let (plain_from, region_from) = if rebuild_all || stale {
             for row in 0..rows {
-                self.rebuild_plain_row(device, queue, row);
+                self.rebuild_plain_row(device, queue, row, region);
             }
-            (rows > 0).then_some(0)
+            let all = (rows > 0).then_some(0);
+            (all, all)
         } else {
-            let mut resized = None;
+            let mut plain_from = None;
+            let mut region_from = None;
             for &row in rebuilt {
-                if self.rebuild_plain_row(device, queue, row) && resized.is_none() {
-                    resized = Some(row);
+                let resized = self.rebuild_plain_row(device, queue, row, region);
+                if resized.plain && plain_from.is_none() {
+                    plain_from = Some(row);
+                }
+                if resized.region && region_from.is_none() {
+                    region_from = Some(row);
                 }
             }
-            // A rotation moved every kept instance, so the buffer rewrites from
-            // the top rather than from the first row that changed length.
+            // A rotation moved every kept instance, so a buffer rewrites from the
+            // top rather than from the first row that changed length.
             if self.rows_shifted {
-                (rows > 0).then_some(0)
+                let all = (rows > 0).then_some(0);
+                (all, all)
             } else {
-                resized
+                (plain_from, region_from)
             }
         };
-        if rewrite_from.is_none() && rebuilt.is_empty() {
-            return;
-        }
-
-        let total = row_len(&self.plain_row_instances);
-        self.count = total as u32;
-        if total == 0 {
+        if plain_from.is_none() && region_from.is_none() && rebuilt.is_empty() {
             return;
         }
 
         let mut scratch = mem::take(&mut self.plain_upload_scratch);
-        if total > self.capacity {
-            // Growing the buffer drops its contents, so re-upload every row.
-            self.capacity = total.next_power_of_two();
-            self.instances = alloc_instances(
-                device,
-                "text instances",
-                instance_bytes::<TextInstance>(self.capacity),
-            );
-            self.upload_plain_rows(queue, &mut scratch, 0, 0..rows);
-        } else {
-            for (offset, run) in row_uploads(&self.plain_row_instances, rebuilt, rewrite_from) {
-                self.upload_plain_rows(queue, &mut scratch, offset, run);
-            }
-        }
+        self.upload_row_buffer(device, queue, &mut scratch, rebuilt, plain_from, false);
+        self.upload_row_buffer(device, queue, &mut scratch, rebuilt, region_from, true);
         self.plain_upload_scratch = scratch;
     }
 
-    /// Write rows `range` of the per-row cache into the instance buffer, at
-    /// `offset` instances from its start.
-    fn upload_plain_rows(
+    /// Upload one of the two row buffers, growing it when its rows outgrow it.
+    ///
+    /// `into_region` picks which buffer, since the two are patched identically and
+    /// differ only in which rows and which GPU buffer they touch.
+    fn upload_row_buffer(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        scratch: &mut Vec<TextInstance>,
+        rebuilt: &[usize],
+        rewrite_from: Option<usize>,
+        into_region: bool,
+    ) {
+        let rows = if into_region {
+            &self.region_row_instances
+        } else {
+            &self.plain_row_instances
+        };
+        let total = row_len(rows);
+        let row_count = rows.len();
+
+        if into_region {
+            self.region_count = total as u32;
+        } else {
+            self.count = total as u32;
+        }
+        if total == 0 {
+            return;
+        }
+
+        let capacity = if into_region {
+            self.region_capacity
+        } else {
+            self.capacity
+        };
+        if total > capacity {
+            // Growing the buffer drops its contents, so re-upload every row.
+            let grown = total.next_power_of_two();
+            let label = if into_region {
+                "scroll region text instances"
+            } else {
+                "text instances"
+            };
+            let buffer = alloc_instances(device, label, instance_bytes::<TextInstance>(grown));
+            if into_region {
+                self.region_capacity = grown;
+                self.region_instances = buffer;
+            } else {
+                self.capacity = grown;
+                self.instances = buffer;
+            }
+            self.upload_rows(queue, scratch, 0, 0..row_count, into_region);
+            return;
+        }
+
+        let rows = if into_region {
+            &self.region_row_instances
+        } else {
+            &self.plain_row_instances
+        };
+        for (offset, run) in row_uploads(rows, rebuilt, rewrite_from) {
+            self.upload_rows(queue, scratch, offset, run, into_region);
+        }
+    }
+
+    /// Write rows `range` of one per-row cache into its instance buffer, at
+    /// `offset` instances from the buffer's start.
+    fn upload_rows(
         &self,
         queue: &Queue,
         scratch: &mut Vec<TextInstance>,
         offset: usize,
         range: Range<usize>,
+        into_region: bool,
     ) {
+        let (rows, buffer) = if into_region {
+            (&self.region_row_instances, &self.region_instances)
+        } else {
+            (&self.plain_row_instances, &self.instances)
+        };
+
         scratch.clear();
-        scratch.extend(self.plain_row_instances[range].iter().flatten().copied());
+        scratch.extend(rows[range].iter().flatten().copied());
         if scratch.is_empty() {
             return;
         }
 
         queue.write_buffer(
-            &self.instances,
+            buffer,
             (offset * size_of::<TextInstance>()) as u64,
             bytemuck::cast_slice(scratch),
         );
@@ -2069,14 +2114,51 @@ impl TextPass {
     /// Reports whether the row's instance count changed. A row that grew or
     /// shrank displaces every later row in the buffer, so the caller can no
     /// longer patch those rows where they were.
-    fn rebuild_plain_row(&mut self, device: &Device, queue: &Queue, row: usize) -> bool {
+    fn rebuild_plain_row(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        row: usize,
+        region: Option<ScrollRegion>,
+    ) -> RowResized {
         let glyphs = mem::take(&mut self.glyph_row_cache[row]);
-        let mut instances = mem::take(&mut self.plain_row_instances[row]);
-        let held = instances.len();
-        self.build_text_instances_into(device, queue, &glyphs, &mut instances);
+        let mut plain = mem::take(&mut self.plain_row_instances[row]);
+        let mut inside = mem::take(&mut self.region_row_instances[row]);
+        let (held_plain, held_region) = (plain.len(), inside.len());
 
-        let resized = instances.len() != held;
-        self.plain_row_instances[row] = instances;
+        match region {
+            // Splitting the row is what lets a region frame patch rows like any
+            // other, rather than rebuilding every glyph on screen.
+            Some(region) => {
+                let mut outside_pending = mem::take(&mut self.plain_pending_scratch);
+                let mut inside_pending = mem::take(&mut self.region_pending_scratch);
+                outside_pending.clear();
+                inside_pending.clear();
+                for glyph in &glyphs {
+                    if region.contains(glyph.row, glyph.col) {
+                        inside_pending.push(*glyph);
+                    } else {
+                        outside_pending.push(*glyph);
+                    }
+                }
+
+                self.build_text_instances_into(device, queue, &outside_pending, &mut plain);
+                self.build_text_instances_into(device, queue, &inside_pending, &mut inside);
+                self.plain_pending_scratch = outside_pending;
+                self.region_pending_scratch = inside_pending;
+            },
+            None => {
+                self.build_text_instances_into(device, queue, &glyphs, &mut plain);
+                inside.clear();
+            },
+        }
+
+        let resized = RowResized {
+            plain: plain.len() != held_plain,
+            region: inside.len() != held_region,
+        };
+        self.plain_row_instances[row] = plain;
+        self.region_row_instances[row] = inside;
         self.glyph_row_cache[row] = glyphs;
         resized
     }
@@ -2378,6 +2460,27 @@ struct PendingGlyph {
     /// Carried per glyph rather than per build because [`TextPass::glyph_row_cache`]
     /// holds these across frames, so one list can mix placements of different ages.
     resolved_epoch: u64,
+}
+
+/// What a scroll region's split of the row caches depends on, or `None` for no
+/// region.
+///
+/// The rectangle alone. A region's `offset` moves on every scroll tick and rides the
+/// globals uniform, shifting where the region's rows are drawn without changing which
+/// cells fall inside it, so folding the offset in here would rebuild every row on
+/// every tick for nothing.
+fn region_split(region: Option<ScrollRegion>) -> Option<[u16; 4]> {
+    region.map(|region| [region.top, region.left, region.width, region.height])
+}
+
+/// Which of a row's two instance lists changed length when it was rebuilt.
+///
+/// A row that grew or shrank displaces every later row in that buffer, so each
+/// buffer's rewrite point is found independently. A row can change on one side
+/// alone, when a glyph crosses the region's edge.
+struct RowResized {
+    plain: bool,
+    region: bool,
 }
 
 /// One overlay's scissored slice of the shared overlay-content instance buffer.
@@ -3217,10 +3320,11 @@ mod tests {
     use super::{
         build_font_system, build_underline_row, cell_glyph_scale, cell_rect_scissor, cursor_cell,
         fill_cell_box, font_covers, glyph_family, glyph_origin, grid_build, is_cell_fill,
-        load_bundled_fonts, overlay_content_cells, resolve_primary_family, resolve_primary_font,
-        run_text_and_columns_into, shape_char, shape_family, shape_run, shape_run_cached,
-        text_run_origin, GlyphSource, GridBuild, PendingGlyph, RectInstance, RowShaping,
-        RunShapeCache, TextInstance, TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
+        load_bundled_fonts, overlay_content_cells, region_split, resolve_primary_family,
+        resolve_primary_font, row_len, run_text_and_columns_into, shape_char, shape_family,
+        shape_run, shape_run_cached, text_run_origin, GlyphSource, GridBuild, PendingGlyph,
+        RectInstance, RowShaping, RunShapeCache, TextInstance, TextPass, STYLE_DOTTED,
+        SYMBOLS_FAMILY,
     };
     use crate::{
         atlas::{AtlasKind, GlyphInfo},
@@ -3232,7 +3336,7 @@ mod tests {
         Family, FontSystem,
     };
     use stoatty_term::{
-        grid::{Cell, Grid, Overlay, Rgb, Scale, TextRun, UnderlineStyle},
+        grid::{Cell, Grid, Overlay, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle},
         term::Damage,
     };
     use wgpu::{
@@ -4186,6 +4290,220 @@ mod tests {
         assert!(
             matches!(glyph(2).source, GlyphSource::Font(_)) && glyph(2).cell_fill,
             "box-drawing stays on the font path and scales its glyph to the cell"
+        );
+    }
+
+    /// One damaged row under an active region leaves both buffers holding what a
+    /// full rebuild would have produced.
+    ///
+    /// A region is active for as long as a full-screen program is on screen, so
+    /// patching its rows is the common path rather than a rare one. Patching splits
+    /// each row across the two buffers, and a row's glyphs have to land on the same
+    /// side and in the same order a from-scratch split puts them.
+    #[test]
+    fn a_patched_region_frame_matches_one_built_from_scratch() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("region patch test: no wgpu adapter available, skipping");
+            return;
+        };
+        let resolution = [640.0, 480.0];
+        let rows = 5;
+
+        let region = ScrollRegion {
+            top: 1,
+            left: 2,
+            width: 6,
+            height: 3,
+            offset: 0,
+        };
+        let build = |text: &str| {
+            let mut grid = Grid::new(rows, 20);
+            for row in 0..rows {
+                fill_row(&mut grid, row, text);
+            }
+            grid.set_scroll_region(Some(region));
+            grid
+        };
+        fn frame(damage: &Damage) -> Frame<'_> {
+            Frame {
+                cursor: None,
+                cursor_corners: None,
+                scroll: Scroll {
+                    grid: 0.0,
+                    document: 0.0,
+                    scrollback: 0.0,
+                    region: 0.0,
+                    popovers: &[],
+                },
+                damage,
+                decoration_damage: damage,
+                scrolled_rows: 0,
+            }
+        }
+
+        // A full frame, then one row changed and only that row damaged.
+        let first = build("aaaaaaaaaa");
+        pass.prepare(
+            &device,
+            &queue,
+            &first,
+            resolution,
+            &frame(&Damage::Full),
+            &[],
+        );
+
+        let mut second = build("aaaaaaaaaa");
+        fill_row(&mut second, 2, "bbbbbbbbbb");
+        let mut row_two = vec![false; rows];
+        row_two[2] = true;
+        pass.prepare(
+            &device,
+            &queue,
+            &second,
+            resolution,
+            &frame(&Damage::Partial(row_two)),
+            &[],
+        );
+        let patched = (
+            pass.count,
+            pass.region_count,
+            row_len(&pass.plain_row_instances),
+            row_len(&pass.region_row_instances),
+        );
+
+        // The same screen reached in one full frame, every row split from scratch.
+        let Some((device, queue, mut fresh)) = headless_text_pass() else {
+            return;
+        };
+        fresh.prepare(
+            &device,
+            &queue,
+            &second,
+            resolution,
+            &frame(&Damage::Full),
+            &[],
+        );
+
+        assert_eq!(
+            patched,
+            (
+                fresh.count,
+                fresh.region_count,
+                row_len(&fresh.plain_row_instances),
+                row_len(&fresh.region_row_instances),
+            ),
+            "a patched region frame splits into the same two buffers a rebuild does",
+        );
+        assert!(
+            patched.1 > 0 && patched.0 > 0,
+            "the region has to hold some glyphs and leave some outside: {patched:?}"
+        );
+    }
+
+    /// The split the row caches are keyed on tracks the rectangle and ignores the
+    /// offset.
+    ///
+    /// This is what keeps a scrolling region from rebuilding every row each tick.
+    /// The offset moves constantly and rides the globals uniform, so it changes where
+    /// the region's rows are drawn, not which cells belong to it.
+    #[test]
+    fn a_region_split_follows_the_rectangle_not_the_offset() {
+        let rect = ScrollRegion {
+            top: 1,
+            left: 2,
+            width: 3,
+            height: 4,
+            offset: 0,
+        };
+
+        assert_eq!(
+            region_split(Some(ScrollRegion { offset: 99, ..rect })),
+            region_split(Some(rect)),
+            "a scrolled region keeps the split its rows were built against"
+        );
+        assert_ne!(
+            region_split(Some(ScrollRegion { width: 4, ..rect })),
+            region_split(Some(rect)),
+            "a resized region does not"
+        );
+        assert_eq!(region_split(None), None, "no region has no split");
+    }
+
+    /// A moved region rectangle re-splits the rows. A moved offset does not.
+    ///
+    /// The offset changes on every scroll tick and rides the globals uniform, so
+    /// invalidating on it would rebuild every row constantly and gain nothing. The
+    /// rectangle is what decides which buffer a cell's glyph goes to.
+    #[test]
+    fn only_a_moved_region_rectangle_resplits_the_rows() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("region split test: no wgpu adapter available, skipping");
+            return;
+        };
+        let resolution = [640.0, 480.0];
+        let frame = Frame {
+            cursor: None,
+            cursor_corners: None,
+            scroll: Scroll {
+                grid: 0.0,
+                document: 0.0,
+                scrollback: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage: &Damage::Partial(vec![false; 4]),
+            decoration_damage: &Damage::Partial(vec![false; 4]),
+            scrolled_rows: 0,
+        };
+        let build = |region: ScrollRegion| {
+            let mut grid = Grid::new(4, 20);
+            for row in 0..4 {
+                fill_row(&mut grid, row, "cells");
+            }
+            grid.set_scroll_region(Some(region));
+            grid
+        };
+        let rect = ScrollRegion {
+            top: 1,
+            left: 0,
+            width: 3,
+            height: 2,
+            offset: 0,
+        };
+
+        let full = Frame {
+            damage: &Damage::Full,
+            decoration_damage: &Damage::Full,
+            ..frame
+        };
+        pass.prepare(&device, &queue, &build(rect), resolution, &full, &[]);
+        let split = (
+            row_len(&pass.plain_row_instances),
+            row_len(&pass.region_row_instances),
+        );
+
+        // An idle frame whose region only scrolled keeps the split it had.
+        let scrolled = ScrollRegion { offset: 5, ..rect };
+        pass.prepare(&device, &queue, &build(scrolled), resolution, &frame, &[]);
+        assert_eq!(
+            (
+                row_len(&pass.plain_row_instances),
+                row_len(&pass.region_row_instances)
+            ),
+            split,
+            "a moved offset leaves the split alone"
+        );
+
+        // A wider rectangle takes cells from the plain side.
+        let wider = ScrollRegion { width: 5, ..rect };
+        pass.prepare(&device, &queue, &build(wider), resolution, &frame, &[]);
+        let resplit = (
+            row_len(&pass.plain_row_instances),
+            row_len(&pass.region_row_instances),
+        );
+        assert!(
+            resplit.1 > split.1 && resplit.0 < split.0,
+            "a moved rectangle re-splits even on an idle frame: {split:?} then {resplit:?}"
         );
     }
 
