@@ -302,10 +302,14 @@ pub struct TextPass {
     rect_count: u32,
     atlas: GlyphAtlas,
     font_system: FontSystem,
-    /// The resolved primary shaping family: the first configured `font_family`
-    /// entry present in the font db, or `None` to shape with the generic
-    /// monospace fallback.
-    family: Option<String>,
+    /// The resolved primary shaping family, being the first configured `font_family`
+    /// entry present in the font db, or `None` to shape with the generic monospace
+    /// fallback.
+    ///
+    /// Shared rather than owned because the shaping paths need the name while holding
+    /// a mutable borrow of this pass for the font system, so they take a copy of it
+    /// every frame and once per composited pool.
+    family: Option<Arc<str>>,
     /// The face [`Self::family`] resolves to, looked up once at construction and
     /// reused so a frame's per-cell coverage test is a charmap lookup, not a
     /// font-database query. `None` when no family resolves, so coverage falls
@@ -437,8 +441,8 @@ impl TextPass {
         ligatures: bool,
     ) -> TextPass {
         let family = resolve_primary_family(&font_system, font_family);
-        let baseline = probe_baseline(&mut font_system, metrics, shape_family(&family));
-        let primary_font = resolve_primary_font(&mut font_system, &family);
+        let baseline = probe_baseline(&mut font_system, metrics, shape_family(family.as_deref()));
+        let primary_font = resolve_primary_font(&mut font_system, family.as_deref());
         let swash_cache = SwashCache::new();
         let atlas = GlyphAtlas::new(device);
 
@@ -723,7 +727,11 @@ impl TextPass {
     /// the old size.
     pub(crate) fn set_metrics(&mut self, metrics: CellMetrics) {
         self.metrics = metrics;
-        self.baseline = probe_baseline(&mut self.font_system, metrics, shape_family(&self.family));
+        self.baseline = probe_baseline(
+            &mut self.font_system,
+            metrics,
+            shape_family(self.family.as_deref()),
+        );
         self.shape_cache.clear();
         self.run_shape_cache.clear();
     }
@@ -1268,7 +1276,7 @@ impl TextPass {
         pending.clear();
         {
             let primary_name = self.family.clone();
-            let primary = shape_family(&primary_name);
+            let primary = shape_family(primary_name.as_deref());
             let primary_font = self.primary_font.clone();
             let charmap = primary_font.as_ref().map(|font| font.as_swash().charmap());
             let covers = |ch: char| charmap.as_ref().is_some_and(|map| map.map(ch) != 0);
@@ -1926,7 +1934,7 @@ impl TextPass {
         // The charmap is built once here as well. Constructing one parses the
         // font's cmap table directory, which is far more work than the lookup.
         let primary_name = self.family.clone();
-        let primary = shape_family(&primary_name);
+        let primary = shape_family(primary_name.as_deref());
         let primary_font = self.primary_font.clone();
         let charmap = primary_font.as_ref().map(|font| font.as_swash().charmap());
         let covers = |ch: char| charmap.as_ref().is_some_and(|map| map.map(ch) != 0);
@@ -2496,7 +2504,7 @@ impl TextPass {
             ch,
             scale,
             self.metrics,
-            shape_family(&self.family),
+            shape_family(self.family.as_deref()),
             weight,
         );
         self.shape_cache.insert(cache_key, key);
@@ -3107,10 +3115,7 @@ fn font_covers(font: &Font, ch: char) -> bool {
 /// test. `None` when no family resolves, so coverage falls through to the
 /// fallback font. Looked up once when the family is set, since it is fixed for
 /// the pass's lifetime.
-fn resolve_primary_font(
-    font_system: &mut FontSystem,
-    family: &Option<String>,
-) -> Option<Arc<Font>> {
+fn resolve_primary_font(font_system: &mut FontSystem, family: Option<&str>) -> Option<Arc<Font>> {
     let id = font_system.db().query(&Query {
         families: &[shape_family(family)],
         ..Default::default()
@@ -3151,7 +3156,10 @@ fn load_bundled_fonts(font_system: &mut FontSystem) {
 
 /// The first family in `cascade` present in `font_system`'s db, or `None` when
 /// none are installed so shaping falls back to the generic monospace.
-fn resolve_primary_family(font_system: &FontSystem, cascade: &[String]) -> Option<String> {
+///
+/// Shared rather than owned, since the shaping paths need the name alongside a
+/// mutable borrow of the pass and so take a copy on every frame.
+fn resolve_primary_family(font_system: &FontSystem, cascade: &[String]) -> Option<Arc<str>> {
     let db = font_system.db();
     cascade
         .iter()
@@ -3162,13 +3170,16 @@ fn resolve_primary_family(font_system: &FontSystem, cascade: &[String]) -> Optio
             })
             .is_some()
         })
-        .cloned()
+        .map(|name| Arc::from(name.as_str()))
 }
 
-/// The cosmic-text family to shape with: the resolved primary by name, or the
+/// The cosmic-text family to shape with, being the resolved primary by name, or the
 /// generic monospace when no configured family was present.
-fn shape_family(family: &Option<String>) -> Family<'_> {
-    family.as_deref().map_or(Family::Monospace, Family::Name)
+///
+/// Takes the name rather than the option the caller stores it in, so how the pass
+/// holds it is free to change.
+fn shape_family(family: Option<&str>) -> Family<'_> {
+    family.map_or(Family::Monospace, Family::Name)
 }
 
 /// Baseline offset from a cell's top, in physical pixels, measured once from the
@@ -3935,7 +3946,7 @@ mod tests {
     fn a_held_charmap_answers_coverage_like_a_fresh_one() {
         let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
         load_bundled_fonts(&mut font_system);
-        let font = resolve_primary_font(&mut font_system, &Some("JetBrains Mono".to_owned()))
+        let font = resolve_primary_font(&mut font_system, Some("JetBrains Mono"))
             .expect("the bundled primary family resolves");
 
         let charmap = font.as_swash().charmap();
@@ -4022,8 +4033,9 @@ mod tests {
             resolve_primary_family(
                 &font_system,
                 &["Nonexistent Face".to_owned(), "JetBrains Mono".to_owned()],
-            ),
-            Some("JetBrains Mono".to_owned()),
+            )
+            .as_deref(),
+            Some("JetBrains Mono"),
             "skips the missing family and resolves the first present one"
         );
         assert_eq!(
@@ -4041,10 +4053,10 @@ mod tests {
     #[test]
     fn shape_family_maps_resolved_name_else_monospace() {
         assert_eq!(
-            shape_family(&Some("JetBrains Mono".to_owned())),
+            shape_family(Some("JetBrains Mono")),
             Family::Name("JetBrains Mono")
         );
-        assert_eq!(shape_family(&None), Family::Monospace);
+        assert_eq!(shape_family(None), Family::Monospace);
     }
 
     #[test]
@@ -4119,7 +4131,7 @@ mod tests {
         let covers = |_: char| true;
         let family = Some("JetBrains Mono".to_owned());
         let shaping = RowShaping {
-            primary: shape_family(&family),
+            primary: shape_family(family.as_deref()),
             covers: &covers,
             cursor_cell: None,
         };
