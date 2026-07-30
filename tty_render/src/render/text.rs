@@ -11,8 +11,8 @@
 use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
     render::{
-        globals_offset, occlusion_globals, pool_occluders, row_len, row_uploads, CellMetrics,
-        CompositeSlot, CompositeSlots, Frame, Occluder, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+        globals_offset, occlusion_globals, row_len, row_uploads, CellMetrics, CompositeSlot,
+        CompositeSlots, Frame, Occluder, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
     },
 };
 use bytemuck::{Pod, Zeroable};
@@ -24,7 +24,7 @@ use cosmic_text::{
 use rustc_hash::FxHashMap;
 use std::{mem, ops::Range, sync::Arc};
 use stoatty_term::{
-    grid::{Cell, Grid, Overlay, Panel, Rgb, Scale, ScrollRegion, UnderlineStyle},
+    grid::{Cell, Grid, Overlay, Rgb, Scale, ScrollRegion, UnderlineStyle},
     term::Damage,
 };
 use wgpu::{
@@ -1148,27 +1148,22 @@ impl TextPass {
     /// Covers only plain glyphs and underlines, the two buffers [`Self::draw`]
     /// reads.
     #[allow(clippy::too_many_arguments)]
-    pub fn prepare_composite(
+    pub(crate) fn prepare_composite(
         &mut self,
         device: &Device,
         queue: &Queue,
         grid: &Grid,
-        panels: &[Panel],
+        occluders: &[Occluder],
         resolution: [f32; 2],
         shift_rows: f32,
         content_changed: bool,
-        occludable: bool,
         pool: u32,
         slot: usize,
     ) {
-        // An occludable pane pool sits under every box, so its composite draws
-        // discard inside any panel rect with the seq test bypassed. A non-pane
-        // pool is box content and keeps only the panels floating above every
-        // pooled surface. The composite draws bind self.globals, so the occlusion
-        // rides that buffer alone.
-        let occluders = pool_occluders(occludable, panels);
-        self.upload_occluders(device, queue, &occluders);
-        let (panel_count, occlude_all) = occlusion_globals(&occluders);
+        // The composite draws bind self.globals, so the occlusion rides that buffer
+        // alone.
+        self.upload_occluders(device, queue, occluders);
+        let (panel_count, occlude_all) = occlusion_globals(occluders);
         queue.write_buffer(
             &self.globals,
             u64::from(globals_offset(slot)),
@@ -4301,18 +4296,7 @@ mod tests {
         grid.set_text_runs(vec![ascii_burst_run()]);
 
         let (initial, _) = pass.atlas.texture_dims();
-        pass.prepare_composite(
-            &device,
-            &queue,
-            &grid,
-            &[],
-            [640.0, 480.0],
-            0.0,
-            true,
-            false,
-            0,
-            0,
-        );
+        pass.prepare_composite(&device, &queue, &grid, &[], [640.0, 480.0], 0.0, true, 0, 0);
         let (grown, _) = pass.atlas.texture_dims();
         assert!(
             grown > initial,
@@ -4330,7 +4314,6 @@ mod tests {
             &[],
             [640.0, 480.0],
             0.0,
-            false,
             false,
             0,
             0,
@@ -4369,18 +4352,7 @@ mod tests {
         }]);
 
         let (initial, _) = pass.atlas.texture_dims();
-        pass.prepare_composite(
-            &device,
-            &queue,
-            &grid,
-            &[],
-            [640.0, 480.0],
-            0.0,
-            true,
-            false,
-            0,
-            0,
-        );
+        pass.prepare_composite(&device, &queue, &grid, &[], [640.0, 480.0], 0.0, true, 0, 0);
         let (grown, _) = pass.atlas.texture_dims();
         assert!(
             grown > initial,

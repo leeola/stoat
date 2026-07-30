@@ -277,6 +277,11 @@ pub struct Renderer {
     /// The frame's panel occluders, lent to every pass that occludes. Held here
     /// so a frame builds the list once and reuses the allocation across frames.
     occluders: Vec<Occluder>,
+    /// The occluders of the pool being composited, lent to all four of its composite
+    /// passes. Separate from [`Self::occluders`] because a pool's list is filtered to
+    /// what covers that pool, while the live grid's is every panel, and a frame that
+    /// composites pools prepares the live grid too.
+    pool_occluders: Vec<Occluder>,
     /// GPU frame timer, created lazily on the first render when the device was
     /// built with `TIMESTAMP_QUERY`. `None` until then or when unsupported.
     #[cfg(feature = "perf")]
@@ -326,6 +331,7 @@ impl Renderer {
             clear_color: rgb_to_color(background),
             cursor_color: cursor,
             occluders: Vec::new(),
+            pool_occluders: Vec::new(),
             #[cfg(feature = "perf")]
             gpu_timer: None,
             #[cfg(feature = "perf")]
@@ -702,15 +708,21 @@ impl Renderer {
         slot: usize,
     ) {
         let resolution = [self.width as f32, self.height as f32];
+
+        // All four passes occlude this pool against the same panels, so the list is
+        // built once here rather than in each of them. It cannot share
+        // `self.occluders`: that holds the live grid's unfiltered list, which the live
+        // passes still read on a frame that also composites pools.
+        crate::render::pool_occluders_into(occludable, panels, &mut self.pool_occluders);
+
         self.background.prepare_composite(
             device,
             queue,
             pool_grid,
-            panels,
+            &self.pool_occluders,
             resolution,
             shift_rows,
             content_changed,
-            occludable,
             pool,
             slot,
         );
@@ -718,11 +730,10 @@ impl Renderer {
             device,
             queue,
             pool_grid,
-            panels,
+            &self.pool_occluders,
             resolution,
             shift_rows,
             content_changed,
-            occludable,
             pool,
             slot,
         );
@@ -730,10 +741,9 @@ impl Renderer {
             device,
             queue,
             pool_grid.bars(),
-            panels,
+            &self.pool_occluders,
             resolution,
             shift_rows,
-            occludable,
             pool,
             slot,
         );
@@ -741,10 +751,9 @@ impl Renderer {
             device,
             queue,
             pool_grid.polylines(),
-            panels,
+            &self.pool_occluders,
             resolution,
             shift_rows,
-            occludable,
             pool,
             slot,
         );

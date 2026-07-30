@@ -10,12 +10,12 @@
 //! [`Cell`]: stoatty_term::grid::Cell
 
 use crate::render::{
-    globals_offset, occlusion_globals, pool_occluders, CellMetrics, CompositeSlot, CompositeSlots,
-    Occluder, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+    globals_offset, occlusion_globals, CellMetrics, CompositeSlot, CompositeSlots, Occluder,
+    GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::{
-    grid::{Grid, Panel, Rgb},
+    grid::{Grid, Rgb},
     term::Damage,
 };
 use wgpu::{
@@ -383,28 +383,29 @@ impl BackgroundPass {
     /// wholesale each frame, so every cell is rebuilt with no per-row damage
     /// path. No cursor draws over a composite, so the shared globals carry none.
     ///
-    /// `occludable` marks a pane pool that sits under every box. Its page cells
-    /// are then occluded against all of `panels` with the seq test bypassed, so a
-    /// pooled cell gliding beneath a modal is hidden by it. A non-pane pool passes
-    /// `false` and its cells occlude only against the panels that float above
-    /// every pooled surface, since they are box content themselves.
+    /// The page cells are occluded against `occluders` with the seq test bypassed,
+    /// so a pooled cell gliding beneath a modal is hidden by it. Which panels reach
+    /// that list is the caller's decision, since all four of a pool's composite
+    /// passes share it.
+    ///
+    /// See also:
+    /// - [`pool_occluders_into`](crate::render::pool_occluders_into) for how a pool's list is
+    ///   narrowed.
     #[allow(clippy::too_many_arguments)]
-    pub fn prepare_composite(
+    pub(crate) fn prepare_composite(
         &mut self,
         device: &Device,
         queue: &Queue,
         grid: &Grid,
-        panels: &[Panel],
+        occluders: &[Occluder],
         resolution: [f32; 2],
         grid_scroll: f32,
         content_changed: bool,
-        occludable: bool,
         pool: u32,
         slot: usize,
     ) {
-        let occluders = pool_occluders(occludable, panels);
-        self.upload_occluders(device, queue, &occluders);
-        let (panel_count, occlude_all) = occlusion_globals(&occluders);
+        self.upload_occluders(device, queue, occluders);
+        let (panel_count, occlude_all) = occlusion_globals(occluders);
 
         let globals = Globals {
             resolution,

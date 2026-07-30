@@ -381,7 +381,8 @@ pub(crate) fn build_occluders_into(panels: &[Panel], out: &mut Vec<Occluder>) {
     out.extend(panels.iter().map(panel_occluder));
 }
 
-/// The occluders a pool composite uploads, given the panels on the live grid.
+/// Collect into `out` the occluders a pool composite uploads, given the panels on
+/// the live grid.
 ///
 /// A pane pool sits beneath every box, so an occludable pool takes all `panels`.
 /// A non-pane pool is box content itself, drawn where a box already sits, so
@@ -389,14 +390,19 @@ pub(crate) fn build_occluders_into(panels: &[Panel], out: &mut Vec<Occluder>) {
 /// Those are exactly the panels flagged [`Panel::above_pools`], and the rest are
 /// filtered out.
 ///
+/// All four of a pool's composite passes want the same list, so the caller holds the
+/// buffer and builds once per pool rather than once per pass.
+///
 /// See also:
 /// - [`occlusion_globals`] for the count the composite shaders read off this list.
-pub(crate) fn pool_occluders(occludable: bool, panels: &[Panel]) -> Vec<Occluder> {
-    panels
-        .iter()
-        .filter(|panel| occludable || panel.above_pools)
-        .map(panel_occluder)
-        .collect()
+pub(crate) fn pool_occluders_into(occludable: bool, panels: &[Panel], out: &mut Vec<Occluder>) {
+    out.clear();
+    out.extend(
+        panels
+            .iter()
+            .filter(|panel| occludable || panel.above_pools)
+            .map(panel_occluder),
+    );
 }
 
 /// The `(panel_count, occlude_all)` a pool composite writes into its globals
@@ -440,8 +446,9 @@ pub fn cell_size(font_size: u32, scale_factor: f32) -> [f32; 2] {
 #[cfg(test)]
 mod tests {
     use super::{
-        globals_offset, occlusion_globals, pool_occluders, rotate_row_cache, row_runs, row_uploads,
-        CellMetrics, CompositeSlots, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
+        globals_offset, occlusion_globals, pool_occluders_into, rotate_row_cache, row_runs,
+        row_uploads, CellMetrics, CompositeSlots, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+        MAX_COMPOSITE_POOLS,
     };
     use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
 
@@ -733,7 +740,8 @@ mod tests {
 
     #[test]
     fn occludable_pool_occludes_all_panels_without_a_seq_test() {
-        let occluders = pool_occluders(true, &[panel(1, false), panel(2, true)]);
+        let mut occluders = Vec::new();
+        pool_occluders_into(true, &[panel(1, false), panel(2, true)], &mut occluders);
 
         assert_eq!(
             occluders.iter().map(|o| o.seq).collect::<Vec<_>>(),
@@ -749,7 +757,8 @@ mod tests {
 
     #[test]
     fn non_pane_pool_occludes_only_against_panels_above_pools() {
-        let occluders = pool_occluders(false, &[panel(1, false), panel(2, true)]);
+        let mut occluders = Vec::new();
+        pool_occluders_into(false, &[panel(1, false), panel(2, true)], &mut occluders);
 
         assert_eq!(
             occluders.iter().map(|o| o.seq).collect::<Vec<_>>(),
@@ -760,9 +769,31 @@ mod tests {
         assert_eq!(occlusion_globals(&occluders), (1, 1));
     }
 
+    /// One buffer is filled once per pool per frame, so it has to hold only the pool
+    /// it was last filled for. A leftover panel from the pool before would occlude
+    /// this one against a box that does not cover it.
+    #[test]
+    fn a_reused_occluder_buffer_holds_only_the_pool_it_was_filled_for() {
+        let mut occluders = Vec::new();
+        pool_occluders_into(true, &[panel(1, false), panel(2, true)], &mut occluders);
+        pool_occluders_into(false, &[panel(3, false), panel(4, true)], &mut occluders);
+
+        assert_eq!(
+            occluders.iter().map(|o| o.seq).collect::<Vec<_>>(),
+            [4],
+            "only the second pool's panel, and only the one above pools"
+        );
+        assert_eq!(
+            occlusion_globals(&occluders),
+            (1, 1),
+            "the count the shader reads follows the refilled list"
+        );
+    }
+
     #[test]
     fn non_pane_pool_with_no_panel_above_pools_occludes_nothing() {
-        let occluders = pool_occluders(false, &[panel(1, false), panel(2, false)]);
+        let mut occluders = Vec::new();
+        pool_occluders_into(false, &[panel(1, false), panel(2, false)], &mut occluders);
 
         assert_eq!(occluders.len(), 0, "no panel floats above the pool");
         assert_eq!(
