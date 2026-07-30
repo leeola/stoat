@@ -125,7 +125,7 @@ impl CellMetrics {
 /// (seq above their panel) survive. Padded to 32 bytes so the storage-array
 /// stride matches the 8-byte-aligned `vec2` layout WGSL computes.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Pod, Zeroable, PartialEq)]
 pub(crate) struct Occluder {
     cell: [f32; 2],
     size: [f32; 2],
@@ -446,9 +446,9 @@ pub fn cell_size(font_size: u32, scale_factor: f32) -> [f32; 2] {
 #[cfg(test)]
 mod tests {
     use super::{
-        globals_offset, occlusion_globals, pool_occluders_into, rotate_row_cache, row_runs,
-        row_uploads, CellMetrics, CompositeSlots, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
-        MAX_COMPOSITE_POOLS,
+        build_occluders_into, globals_offset, occlusion_globals, pool_occluders_into,
+        rotate_row_cache, row_runs, row_uploads, upload_needed, CellMetrics, CompositeSlots,
+        GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
     };
     use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
 
@@ -767,6 +767,48 @@ mod tests {
              surface covers it"
         );
         assert_eq!(occlusion_globals(&occluders), (1, 1));
+    }
+
+    /// An occluder list is compared against the last one uploaded to decide whether to
+    /// upload at all, so the comparison has to see through an unchanged frame and catch
+    /// a moved panel.
+    ///
+    /// The consequence of getting this wrong runs one way only. Reporting a difference
+    /// that is not there costs an upload. Missing a real one leaves the GPU occluding
+    /// against where a box used to be.
+    #[test]
+    fn an_occluder_list_compares_equal_only_while_the_panels_hold() {
+        let mut held = Vec::new();
+        build_occluders_into(&[panel(1, false), panel(2, true)], &mut held);
+
+        let mut again = Vec::new();
+        build_occluders_into(&[panel(1, false), panel(2, true)], &mut again);
+        assert!(
+            !upload_needed(&again, &held),
+            "an unchanged frame's panels build a list equal to the one held"
+        );
+
+        let mut moved = Vec::new();
+        build_occluders_into(&[panel(1, false), panel(2, true)], &mut moved);
+        moved[1].cell[0] += 1.0;
+        assert!(
+            upload_needed(&moved, &held),
+            "a panel that slid one cell across has to be re-sent"
+        );
+
+        let mut resequenced = Vec::new();
+        build_occluders_into(&[panel(1, false), panel(9, true)], &mut resequenced);
+        assert!(
+            upload_needed(&resequenced, &held),
+            "a panel's seq decides what it hides, so a new seq has to be re-sent"
+        );
+
+        let mut fewer = Vec::new();
+        build_occluders_into(&[panel(1, false)], &mut fewer);
+        assert!(
+            upload_needed(&fewer, &held),
+            "a closed box leaves a shorter list"
+        );
     }
 
     /// One buffer is filled once per pool per frame, so it has to hold only the pool

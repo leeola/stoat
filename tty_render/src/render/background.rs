@@ -125,6 +125,10 @@ pub struct BackgroundPass {
     /// covers. Unused by the live cell fill and the cursor, which leave the
     /// panel count at zero.
     occluders: Buffer,
+    /// The occluder list last written to [`Self::occluders`], so a frame whose
+    /// panels have not moved skips the upload. Panels change on layout events, not
+    /// per frame, so most frames match.
+    last_occluders: Vec<Occluder>,
     occluder_capacity: usize,
     cursor_pipeline: RenderPipeline,
     cursor_visible: bool,
@@ -234,6 +238,7 @@ impl BackgroundPass {
             count: 0,
             composite_slots: CompositeSlots::new(),
             occluders,
+            last_occluders: Vec::new(),
             occluder_capacity: INITIAL_CAPACITY,
             cursor_pipeline,
             cursor_visible: false,
@@ -249,7 +254,15 @@ impl BackgroundPass {
 
     /// Upload the panel occluders, reallocating the buffer and rebuilding the
     /// globals bind group when the panel count outgrows the current capacity.
+    ///
+    /// A list matching the one already in the buffer is not re-sent. Panels move on
+    /// layout events rather than per frame, so most frames land here, including the
+    /// idle ones a blinking cursor drives.
     fn upload_occluders(&mut self, device: &Device, queue: &Queue, occluders: &[Occluder]) {
+        if !crate::render::upload_needed(occluders, &self.last_occluders) {
+            return;
+        }
+
         if occluders.len() > self.occluder_capacity {
             self.occluder_capacity = occluders.len().next_power_of_two();
             self.occluders = alloc_occluders(device, self.occluder_capacity);
@@ -263,6 +276,9 @@ impl BackgroundPass {
         if !occluders.is_empty() {
             queue.write_buffer(&self.occluders, 0, bytemuck::cast_slice(occluders));
         }
+
+        self.last_occluders.clear();
+        self.last_occluders.extend_from_slice(occluders);
     }
 
     /// Upload the frame's uniform and per-cell instances for `grid`.
