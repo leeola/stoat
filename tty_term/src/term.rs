@@ -1496,20 +1496,28 @@ impl Terminal {
         for out_row in 0..out_rows {
             let line = top_line + out_row as i32;
             let source = (line >= topmost && line <= bottommost).then(|| &grid[Line(line)]);
-
-            projected.clear();
-            projected.extend((0..cols).map(|col| match source {
+            let project = |col: usize| match source {
                 Some(row) => project_cell(&row[Column(col)], colors, &self.theme, &self.palette),
                 None => Cell::default(),
-            }));
+            };
 
-            if diffing {
-                if out.row(out_row) == projected.as_slice() {
-                    continue;
+            // Without a compare to make, the row goes straight into the window
+            // rather than through the scratch and out again.
+            if !diffing {
+                for (col, out) in out.row_mut(out_row).iter_mut().enumerate() {
+                    *out = project(col);
                 }
-                if let Damage::Partial(rows_dirty) = damage {
-                    rows_dirty[out_row] = true;
-                }
+                continue;
+            }
+
+            projected.clear();
+            projected.extend((0..cols).map(project));
+
+            if out.row(out_row) == projected.as_slice() {
+                continue;
+            }
+            if let Damage::Partial(rows_dirty) = damage {
+                rows_dirty[out_row] = true;
             }
             out.row_mut(out_row).copy_from_slice(&projected);
         }
@@ -1931,9 +1939,7 @@ impl Terminal {
             }
             let line = Line(row as i32 - offset);
             let source = &term_grid[line];
-
-            projected.clear();
-            projected.extend((0..cols).map(|col| {
+            let project = |col: usize| {
                 let mut cell = project_cell(
                     &source[Column(col)],
                     content.colors,
@@ -1944,15 +1950,25 @@ impl Terminal {
                     cell.flags = cell.flags.toggle(Flags::INVERSE);
                 }
                 cell
-            }));
+            };
 
-            if sliding {
-                if grid.row(row) == projected.as_slice() {
-                    continue;
+            // Without a slide nothing compares the row before it lands, so it goes
+            // straight into the grid rather than through the scratch and out again.
+            if !sliding {
+                for (col, out) in grid.row_mut(row).iter_mut().enumerate() {
+                    *out = project(col);
                 }
-                if let Damage::Partial(rows_dirty) = &mut dirty {
-                    rows_dirty[row] = true;
-                }
+                continue;
+            }
+
+            projected.clear();
+            projected.extend((0..cols).map(project));
+
+            if grid.row(row) == projected.as_slice() {
+                continue;
+            }
+            if let Damage::Partial(rows_dirty) = &mut dirty {
+                rows_dirty[row] = true;
             }
             grid.row_mut(row).copy_from_slice(&projected);
         }
@@ -6054,6 +6070,30 @@ mod tests {
             (rows, window(&out)),
             (&vec![false, false, false], ['c', 'd', 'e']),
             "the window holds the same rows, so none is dirty",
+        );
+    }
+
+    /// A move at or past the window height leaves nothing worth comparing against,
+    /// so the window is reprojected whole and reported wholly damaged.
+    #[test]
+    fn a_move_clearing_the_window_reprojects_it_whole() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        terminal.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
+
+        let mut out = Grid::new(0, 0);
+        let mut damage = Damage::Partial(vec![false; 3]);
+
+        // Three rows of window, so a move of three has nothing left to keep.
+        terminal.project_scrollback(&mut out, 1.0, 3, &mut damage);
+
+        assert!(
+            matches!(damage, Damage::Full),
+            "a cleared window cannot report rows it kept"
+        );
+        assert_eq!(
+            [out.get(0, 0).ch, out.get(1, 0).ch, out.get(2, 0).ch],
+            ['c', 'd', 'e'],
+            "and it still holds the rows the offset names",
         );
     }
 
