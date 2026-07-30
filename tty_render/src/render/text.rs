@@ -235,10 +235,18 @@ pub struct TextPass {
     overlay_draws: Vec<OverlayDraw>,
     /// The shaped overlay glyphs per overlay, reused while
     /// [`Self::last_popovers_epoch`] holds so an unchanged frame skips the
-    /// content walk and shape-cache lookups. They are still re-touched against
-    /// the atlas every frame to keep the glyphs resident, since the packing
-    /// phase evicts anything not marked in use this frame.
-    overlay_pending: Vec<Vec<PendingGlyph>>,
+    /// content walk and shape-cache lookups. The glyphs inside the box's current
+    /// window are re-touched against the atlas every frame to keep them resident,
+    /// since the packing phase evicts anything not marked in use this frame.
+    overlay_pending: Vec<OverlayContent>,
+    /// The content-line window each overlay's bases were built for. A base holds only
+    /// the window's glyphs, so a scroll that moves the window past a line boundary has
+    /// to rebuild while one within a line does not.
+    overlay_windows: Vec<Range<usize>>,
+    /// Reused buffers for the content walk in [`Self::rasterize_overlays`], which runs
+    /// per popovers epoch over every line of every overlay.
+    overlay_cell_scratch: Vec<(usize, usize, char)>,
+    overlay_cell_line_scratch: Vec<u32>,
     /// The overlay instances before the per-frame anchor and scroll shift,
     /// embedding the atlas UVs. Reused while [`Self::last_popovers_epoch`] and
     /// [`Self::last_overlay_atlas_epoch`] both hold, so a scroll-only frame
@@ -631,6 +639,9 @@ impl TextPass {
             overlay_count: 0,
             overlay_draws: Vec::new(),
             overlay_pending: Vec::new(),
+            overlay_windows: Vec::new(),
+            overlay_cell_scratch: Vec::new(),
+            overlay_cell_line_scratch: Vec::new(),
             overlay_bases: Vec::new(),
             overlay_base_scissors: Vec::new(),
             last_popovers_epoch: 0,
@@ -840,18 +851,26 @@ impl TextPass {
         );
         // Overlay glyphs are shaped and packed here, in the same packing phase
         // as the grid and run glyphs. While the popovers epoch holds, the shaped
-        // groups are reused, but each glyph is still re-touched against the
-        // atlas. The touch both stamps it as this frame's and moves it back to
+        // groups are reused, but the glyphs are still re-touched against the
+        // atlas. The touch both stamps one as this frame's and moves it back to
         // the head of the eviction order. The run packing below and the next
         // frame's grid packing evict what neither protects, which would
         // otherwise move a reused overlay's UV out from under it.
+        //
+        // Only the box's current window is touched, matching the bases built
+        // below, which hold that same window. A glyph scrolled out of the box can
+        // therefore be evicted, which is what the bases' atlas-epoch check covers.
+        // An eviction bumps the epoch, so the window is rebuilt against the atlas
+        // before it is drawn from again.
+        let scroll_at = |index: usize| scroll.popovers.get(index).copied().unwrap_or(0.0);
         let popovers_epoch = grid.popovers_epoch();
         let pending_reused = popovers_epoch == self.last_popovers_epoch
             && self.overlay_pending.len() == grid.overlays().len();
         if pending_reused {
             let pending = mem::take(&mut self.overlay_pending);
-            for group in &pending {
-                for glyph in group {
+            for (index, (overlay, content)) in grid.overlays().iter().zip(&pending).enumerate() {
+                let window = overlay_window(overlay, scroll_at(index), content);
+                for glyph in content.window(window) {
                     self.resolve_glyph(device, queue, glyph.source);
                 }
             }
@@ -950,18 +969,46 @@ impl TextPass {
         // epoch, so the check also catches an overlay glyph re-inserted by the
         // touch above. Each overlay's scissor depends only on its geometry, so it
         // rides the same cache.
+        //
+        // A base spans only the lines its box can show, so the window it was built
+        // for is part of what has to hold. Scrolling within a line keeps the same
+        // window and reuses the base. Crossing a line boundary rebuilds one box's
+        // worth of instances rather than all of its content.
         let metrics = self.metrics;
         let overlays = grid.overlays();
         let content_epoch = self.atlas.content_epoch();
         let bases_reused = pending_reused
             && content_epoch == self.last_overlay_atlas_epoch
-            && self.overlay_bases.len() == overlays.len();
+            && self.overlay_bases.len() == overlays.len()
+            && self.overlay_windows.len() == overlays.len()
+            && (0..overlays.len()).all(|index| {
+                self.overlay_windows[index]
+                    == overlay_window(
+                        &overlays[index],
+                        scroll_at(index),
+                        &self.overlay_pending[index],
+                    )
+            });
         if !bases_reused {
             let pending = mem::take(&mut self.overlay_pending);
-            let mut bases = Vec::with_capacity(pending.len());
-            let mut scissors = Vec::with_capacity(pending.len());
-            for (overlay, group) in overlays.iter().zip(&pending) {
-                bases.push(self.build_text_instances(device, queue, group));
+            let mut bases = mem::take(&mut self.overlay_bases);
+            let mut scissors = mem::take(&mut self.overlay_base_scissors);
+
+            bases.resize_with(pending.len(), Vec::new);
+            scissors.clear();
+            self.overlay_windows.clear();
+
+            for (index, ((overlay, content), base)) in
+                overlays.iter().zip(&pending).zip(&mut bases).enumerate()
+            {
+                let window = overlay_window(overlay, scroll_at(index), content);
+
+                // Built into the base's own buffer, since a scroll that crosses a
+                // line boundary reaches here on the frame it crosses.
+                base.clear();
+                self.build_text_instances_into(device, queue, content.window(window.clone()), base);
+                self.overlay_windows.push(window);
+
                 let anchor = [overlay.offset[0] as f32, overlay.offset[1] as f32];
                 scissors.push(cell_rect_scissor(
                     overlay.top,
@@ -973,6 +1020,7 @@ impl TextPass {
                     metrics,
                 ));
             }
+
             self.overlay_pending = pending;
             self.overlay_bases = bases;
             self.overlay_base_scissors = scissors;
@@ -987,7 +1035,6 @@ impl TextPass {
         // The offsets are compared one at a time. An autoscrolling popover
         // reaches here on every frame it moves, and gathering them into a vector
         // just to compare it would allocate on each of those frames.
-        let scroll_at = |index: usize| scroll.popovers.get(index).copied().unwrap_or(0.0);
         let scrolls_moved = self.last_popover_scrolls.len() != overlays.len()
             || (0..overlays.len())
                 .any(|index| self.last_popover_scrolls[index] != scroll_at(index));
@@ -1268,19 +1315,6 @@ impl TextPass {
         // shift-only frame can tell whether their UVs still hold.
         let epoch = self.atlas.content_epoch();
         self.composite_slots.entry(pool, || new_slot(device)).epoch = epoch;
-    }
-
-    /// Build the glyph instances for `pending`, reading each glyph's final atlas
-    /// sub-rect. Shared by the grid and overlay-content glyph paths.
-    fn build_text_instances(
-        &mut self,
-        device: &Device,
-        queue: &Queue,
-        pending: &[PendingGlyph],
-    ) -> Vec<TextInstance> {
-        let mut instances = Vec::new();
-        self.build_text_instances_into(device, queue, pending, &mut instances);
-        instances
     }
 
     /// Build the glyph instances for `pending` into `out`, clearing it first so a
@@ -2341,8 +2375,10 @@ impl TextPass {
         device: &Device,
         queue: &Queue,
         grid: &Grid,
-    ) -> Vec<Vec<PendingGlyph>> {
+    ) -> Vec<OverlayContent> {
         let mut groups = Vec::with_capacity(grid.overlays().len());
+        let mut cells = mem::take(&mut self.overlay_cell_scratch);
+        let mut cell_lines = mem::take(&mut self.overlay_cell_line_scratch);
 
         for overlay in grid.overlays() {
             let scale = overlay.scale.max(1);
@@ -2351,40 +2387,52 @@ impl TextPass {
             } else {
                 Weight::NORMAL
             };
-            let mut group = Vec::new();
+            let mut content = OverlayContent::default();
 
-            for (col, row, ch) in overlay_content_cells(overlay, scale as usize) {
-                if row >= grid.rows() || col >= grid.cols() || ch == ' ' {
-                    continue;
-                }
+            overlay_content_cells(overlay, scale as usize, &mut cells, &mut cell_lines);
 
-                let Some(key) = self.glyph_key(ch, f32::from(scale), weight) else {
-                    continue;
-                };
+            // The cell index a line starts at is not the glyph index it starts at,
+            // since blanks and off-grid cells shape to nothing. So the line index is
+            // rebuilt against the glyphs as they are pushed.
+            for line in cell_lines.windows(2) {
+                content.starts.push(content.glyphs.len() as u32);
 
-                if let Some(info) = self.atlas.get_or_insert(
-                    device,
-                    queue,
-                    &mut self.font_system,
-                    &mut self.swash_cache,
-                    key,
-                ) {
-                    group.push(PendingGlyph {
-                        row,
-                        col,
-                        source: GlyphSource::Font(key),
-                        fg: overlay.content_fg,
-                        scale: f32::from(scale),
-                        cell_fill: false,
-                        info,
-                        resolved_epoch: self.atlas.content_epoch(),
-                    });
+                for &(col, row, ch) in &cells[line[0] as usize..line[1] as usize] {
+                    if row >= grid.rows() || col >= grid.cols() || ch == ' ' {
+                        continue;
+                    }
+
+                    let Some(key) = self.glyph_key(ch, f32::from(scale), weight) else {
+                        continue;
+                    };
+
+                    if let Some(info) = self.atlas.get_or_insert(
+                        device,
+                        queue,
+                        &mut self.font_system,
+                        &mut self.swash_cache,
+                        key,
+                    ) {
+                        content.glyphs.push(PendingGlyph {
+                            row,
+                            col,
+                            source: GlyphSource::Font(key),
+                            fg: overlay.content_fg,
+                            scale: f32::from(scale),
+                            cell_fill: false,
+                            info,
+                            resolved_epoch: self.atlas.content_epoch(),
+                        });
+                    }
                 }
             }
 
-            groups.push(group);
+            content.starts.push(content.glyphs.len() as u32);
+            groups.push(content);
         }
 
+        self.overlay_cell_scratch = cells;
+        self.overlay_cell_line_scratch = cell_lines;
         groups
     }
 
@@ -2430,6 +2478,43 @@ struct RowShaping<'a> {
 enum GlyphSource {
     Font(CacheKey),
     Procedural { cp: u32, width: u32, height: u32 },
+}
+
+/// One overlay's shaped glyphs, indexed by the content line they came from.
+///
+/// A box shows a window of its content rather than all of it, and the window moves
+/// as the popover scrolls. Keeping the line index alongside the glyphs lets a frame
+/// slice out the window it needs without walking or re-shaping the rest, which is
+/// what makes the per-frame cost follow the box instead of the content.
+#[derive(Default)]
+struct OverlayContent {
+    glyphs: Vec<PendingGlyph>,
+    /// Where each content line's glyphs start in [`Self::glyphs`], with a trailing
+    /// entry holding the end. The extra entry is what lets a line range slice
+    /// directly, with no branch on the last line.
+    starts: Vec<u32>,
+}
+
+impl OverlayContent {
+    fn lines(&self) -> usize {
+        self.starts.len().saturating_sub(1)
+    }
+
+    /// The glyphs belonging to a range of content lines.
+    ///
+    /// A window computed against a line count that has since changed yields fewer
+    /// glyphs rather than panicking.
+    fn window(&self, lines: Range<usize>) -> &[PendingGlyph] {
+        // A start past the index means the window has fallen off the end entirely.
+        // Returning here is also what leaves the end's clamp well-ordered below, by
+        // bounding it from beneath with a start already known to be in range.
+        let Some(&start) = self.starts.get(lines.start) else {
+            return &[];
+        };
+        let end = self.starts[lines.end.clamp(lines.start, self.lines())] as usize;
+
+        &self.glyphs[start as usize..end]
+    }
 }
 
 /// A glyph that has been rasterized into the atlas, awaiting its final atlas
@@ -3228,22 +3313,72 @@ fn cursor_cell(cursor: Option<[f32; 2]>) -> Option<(usize, usize)> {
 /// Every line is emitted, including those past the box height, so they can
 /// scroll into view. The overlay-text draw scissors to the box to clip the
 /// vertical overflow. `scale` must be at least 1.
-fn overlay_content_cells(overlay: &Overlay, scale: usize) -> Vec<(usize, usize, char)> {
+///
+/// `cells` and `line_starts` are cleared and refilled, so a caller holding them
+/// across calls walks the content without allocating. `line_starts` carries where
+/// each line begins in `cells`, plus a trailing entry for the end.
+fn overlay_content_cells(
+    overlay: &Overlay,
+    scale: usize,
+    cells: &mut Vec<(usize, usize, char)>,
+    line_starts: &mut Vec<u32>,
+) {
+    cells.clear();
+    line_starts.clear();
+
     let left = overlay.left as usize + 1;
     let top = overlay.top as usize + 1;
     let cols = (overlay.width as usize).saturating_sub(2) / scale;
 
-    overlay
-        .content
-        .lines()
-        .enumerate()
-        .flat_map(|(row, line)| {
+    for (row, line) in overlay.content.lines().enumerate() {
+        line_starts.push(cells.len() as u32);
+        cells.extend(
             line.chars()
                 .take(cols)
                 .enumerate()
-                .map(move |(col, ch)| (left + col * scale, top + row * scale, ch))
-        })
-        .collect()
+                .map(|(col, ch)| (left + col * scale, top + row * scale, ch)),
+        );
+    }
+
+    line_starts.push(cells.len() as u32);
+}
+
+/// The content lines `overlay`'s box can show at `scroll`, as a range over
+/// `content`'s lines.
+fn overlay_window(overlay: &Overlay, scroll: f32, content: &OverlayContent) -> Range<usize> {
+    visible_lines(
+        overlay.height,
+        overlay.scale.max(1) as usize,
+        scroll,
+        content.lines(),
+    )
+}
+
+/// The content lines an overlay's box can show, as a range over its `lines`.
+///
+/// A bound on work, not a clip. The scissor is what hides a glyph outside the box, so
+/// this only has to cover every line that can show. It takes a line of slack on each
+/// side, since a fractional `scroll` or a glyph `scale` cells tall can straddle an
+/// edge, and a line included needlessly costs one line of work where a line left out
+/// would go missing mid-scroll.
+///
+/// `scroll` is the content's offset in cells, growing as the box scrolls down.
+fn visible_lines(height: u16, scale: usize, scroll: f32, lines: usize) -> Range<usize> {
+    let scale = (scale.max(1)) as f32;
+    let rows = f32::from(height);
+
+    // Line `n`'s glyphs are drawn `1 + n * scale - scroll` cells below the box's top,
+    // inset by the top border, and stand `scale` cells tall. They show when that span
+    // meets the box's own `rows`, which bounds `n` from both sides. Both bounds are
+    // strict, so the low one steps past its floor and the high one rounds up.
+    let first = ((scroll - 1.0 - scale) / scale).floor() + 1.0;
+    let end = ((rows - 1.0 + scroll) / scale).ceil();
+
+    let first = if first > 0.0 { first as usize } else { 0 };
+    let end = if end > 0.0 { end as usize } else { 0 };
+
+    let first = first.min(lines);
+    first..end.clamp(first, lines)
 }
 
 /// The pixel rect `[x, y, w, h]` to scissor a draw to a `width` by `height` cell
@@ -3322,9 +3457,9 @@ mod tests {
         fill_cell_box, font_covers, glyph_family, glyph_origin, grid_build, is_cell_fill,
         load_bundled_fonts, overlay_content_cells, region_split, resolve_primary_family,
         resolve_primary_font, row_len, run_text_and_columns_into, shape_char, shape_family,
-        shape_run, shape_run_cached, text_run_origin, GlyphSource, GridBuild, PendingGlyph,
-        RectInstance, RowShaping, RunShapeCache, TextInstance, TextPass, STYLE_DOTTED,
-        SYMBOLS_FAMILY,
+        shape_run, shape_run_cached, text_run_origin, visible_lines, GlyphSource, GridBuild,
+        OverlayContent, PendingGlyph, RectInstance, RowShaping, RunShapeCache, TextInstance,
+        TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
     };
     use crate::{
         atlas::{AtlasKind, GlyphInfo},
@@ -3527,7 +3662,7 @@ mod tests {
 
         // Inset one cell to (6, 3), and the 3-wide box holds one char after the
         // inset trims a cell from each side.
-        assert_eq!(overlay_content_cells(&overlay, 1), [(6, 3, 'H')]);
+        assert_eq!(content_cells(&overlay, 1).0, [(6, 3, 'H')]);
     }
 
     #[test]
@@ -3550,7 +3685,7 @@ mod tests {
         // and lines advance two rows. Inset one cell to (5, 3), the 6-cell box
         // holds two chars once the inset trims a cell from each side.
         assert_eq!(
-            overlay_content_cells(&overlay, 2),
+            content_cells(&overlay, 2).0,
             [(5, 3, 'a'), (7, 3, 'b'), (5, 5, 'e'), (7, 5, 'f')]
         );
     }
@@ -3574,10 +3709,38 @@ mod tests {
         // Every line is emitted and width-clipped. Inset one cell to (6, 3), the
         // 3-wide box holds one char per line, and all three lines still emit
         // since the scissor clips vertical overflow rather than the box height.
-        assert_eq!(
-            overlay_content_cells(&overlay, 1),
-            [(6, 3, 'a'), (6, 4, 'e'), (6, 5, 'X')]
-        );
+        let (cells, starts) = content_cells(&overlay, 1);
+        assert_eq!(cells, [(6, 3, 'a'), (6, 4, 'e'), (6, 5, 'X')]);
+
+        // One start per line plus the trailing end, so a line range slices the
+        // cells directly.
+        assert_eq!(starts, [0, 1, 2, 3], "each line's start, then the end");
+    }
+
+    /// The buffers are refilled rather than appended to, so a caller holding them
+    /// across overlays sees only the overlay it asked about.
+    #[test]
+    fn overlay_content_cells_refill_the_buffers_they_are_given() {
+        let overlay = |content: &str| Overlay {
+            top: 2,
+            left: 5,
+            width: 4,
+            height: 2,
+            fill: Rgb::new(0, 0, 0),
+            border: Rgb::new(0, 0, 0),
+            content_fg: Rgb::new(255, 255, 255),
+            scale: 1,
+            offset: [0, 0],
+            bold: false,
+            content: content.to_owned(),
+        };
+
+        let (mut cells, mut starts) = (Vec::new(), Vec::new());
+        overlay_content_cells(&overlay("ab\ncd\nef"), 1, &mut cells, &mut starts);
+        overlay_content_cells(&overlay("xy"), 1, &mut cells, &mut starts);
+
+        assert_eq!(cells, [(6, 3, 'x'), (7, 3, 'y')], "only the second overlay");
+        assert_eq!(starts, [0, 2], "one line, so one start and the end");
     }
 
     #[test]
@@ -3836,6 +3999,13 @@ mod tests {
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate bg.wgsl");
+    }
+
+    /// [`overlay_content_cells`] into fresh buffers, as (cells, line starts).
+    fn content_cells(overlay: &Overlay, scale: usize) -> (Vec<(usize, usize, char)>, Vec<u32>) {
+        let (mut cells, mut starts) = (Vec::new(), Vec::new());
+        overlay_content_cells(overlay, scale, &mut cells, &mut starts);
+        (cells, starts)
     }
 
     /// A text pass on the headless device, or `None` when no adapter is present.
@@ -4400,6 +4570,144 @@ mod tests {
         );
     }
 
+    /// A line range slices straight to its glyphs, and a range past the end clamps
+    /// rather than indexing off the end of the index.
+    ///
+    /// The lines here hold two, zero, and one glyph, since a blank or off-grid line
+    /// shapes to nothing while still occupying a line. A slice that assumed a glyph
+    /// per line, or that let an empty line collapse, would return the wrong rows.
+    #[test]
+    fn overlay_content_slices_a_range_of_lines() {
+        let glyph = |row: usize| PendingGlyph {
+            row,
+            col: 0,
+            source: GlyphSource::Procedural {
+                cp: 0,
+                width: 1,
+                height: 1,
+            },
+            fg: Rgb::new(0, 0, 0),
+            scale: 1.0,
+            cell_fill: false,
+            info: GlyphInfo {
+                kind: AtlasKind::Mask,
+                uv: [0.0; 4],
+                size: [0; 2],
+                placement: [0; 2],
+            },
+            resolved_epoch: 0,
+        };
+        let content = OverlayContent {
+            glyphs: vec![glyph(0), glyph(1), glyph(2)],
+            starts: vec![0, 2, 2, 3],
+        };
+        let rows = |start, end| {
+            content
+                .window(start..end)
+                .iter()
+                .map(|glyph| glyph.row)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(content.lines(), 3, "the trailing entry is not a line");
+        assert_eq!(rows(0, 1), [0, 1], "the first line's two glyphs");
+        assert_eq!(rows(1, 2), [0usize; 0], "the line that shaped to nothing");
+        assert_eq!(rows(1, 3), [2], "spanning the empty line and the last");
+        assert_eq!(rows(0, 3), [0, 1, 2], "every line");
+        assert_eq!(rows(2, 9), [2], "an end past the last line clamps to it");
+        assert_eq!(
+            rows(9, 9),
+            [0usize; 0],
+            "a start past the last line is empty"
+        );
+        assert_eq!(
+            rows(2, 0),
+            [0usize; 0],
+            "an end below the start is empty, not an inverted slice"
+        );
+
+        let empty = OverlayContent::default();
+        assert_eq!(empty.lines(), 0, "no lines are held");
+        assert!(
+            empty.window(0..4).is_empty(),
+            "an overlay with no line index at all yields no glyphs"
+        );
+    }
+
+    /// The window never leaves out a line the box can show, at any scroll or scale.
+    ///
+    /// Brute-forced rather than spot-checked. The failure this guards is an off-by-one
+    /// at a box edge during a smooth scroll, where a glyph that should have drawn goes
+    /// missing for the few frames it straddles the boundary. Every scroll offset in
+    /// quarter cells is checked against where each line actually lands.
+    #[test]
+    fn the_visible_window_covers_every_line_the_box_can_show() {
+        let lines = 40;
+
+        for scale in [1usize, 2, 4] {
+            for height in [3u16, 10, 25] {
+                for step in 0..(lines * scale * 4) {
+                    let scroll = step as f32 / 4.0;
+                    let window = visible_lines(height, scale, scroll, lines);
+
+                    for line in 0..lines {
+                        // The line's glyphs are drawn this many cells below the box's
+                        // top, being its content offset inset past the border and
+                        // shifted by the scroll. They show when that span meets the
+                        // box's rows.
+                        let top = 1.0 + (line * scale) as f32 - scroll;
+                        let shows = top + scale as f32 > 0.0 && top < f32::from(height);
+                        assert!(
+                            !shows || window.contains(&line),
+                            "line {line} shows at scroll {scroll} (scale {scale}, \
+                             height {height}) but the window is {window:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The window stays close to the box's own size however much content sits behind
+    /// it, which is the whole point of computing one.
+    ///
+    /// The bound is asserted tightly, within a line or two of what the box holds. The
+    /// coverage test above can only catch a window that came out too narrow, since a
+    /// wider one still contains every line that shows, so it takes an upper bound to
+    /// notice a stray `scale` term or a missing divide.
+    #[test]
+    fn the_visible_window_is_sized_by_the_box_not_the_content() {
+        for scale in [1usize, 2, 4] {
+            for height in [3u16, 10, 25] {
+                for step in 0..80 {
+                    let window = visible_lines(height, scale, step as f32 / 4.0, 4000);
+                    let holds = (height as usize / scale) + 2;
+                    assert!(
+                        window.len() <= holds,
+                        "a {height}-row box at scale {scale} reads at most {holds} of \
+                         4000 lines, not {}",
+                        window.len()
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            visible_lines(10, 1, 0.0, 6),
+            0..6,
+            "content shorter than its box is read whole"
+        );
+        assert_eq!(
+            visible_lines(10, 1, 0.0, 0),
+            0..0,
+            "an empty overlay yields an empty window"
+        );
+        assert!(
+            visible_lines(10, 1, 9_999.0, 20).is_empty(),
+            "scrolled past the end there is nothing to read"
+        );
+    }
+
     /// The split the row caches are keyed on tracks the rectangle and ignores the
     /// offset.
     ///
@@ -4707,6 +5015,106 @@ mod tests {
         );
     }
 
+    /// An overlay taller than its box builds the box's worth of instances, not the
+    /// content's.
+    ///
+    /// Asserted by growing the content behind an unchanged box and demanding the
+    /// instance count not follow, which holds regardless of how wide the window
+    /// rounds. Then the box is scrolled to a middle line, where the instances must
+    /// be different ones, since a window that stayed at the top would also be
+    /// small and would otherwise pass.
+    #[test]
+    fn an_overlay_taller_than_its_box_builds_only_the_visible_window() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+
+        let lines = |count: usize| {
+            (0..count)
+                .map(|line| char::from(b'a' + (line % 26) as u8).to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let overlay = |content: String| Overlay {
+            top: 0,
+            left: 0,
+            width: 4,
+            height: 5,
+            fill: Rgb::new(0, 0, 0),
+            border: Rgb::new(0, 0, 0),
+            content_fg: Rgb::new(255, 255, 255),
+            scale: 1,
+            offset: [0, 0],
+            bold: false,
+            content,
+        };
+
+        let resolution = [640.0, 480.0];
+        let idle = Damage::Partial(vec![false; 40]);
+        fn frame<'a>(idle: &'a Damage, popovers: &'a [f32]) -> Frame<'a> {
+            Frame {
+                cursor: None,
+                cursor_corners: None,
+                scroll: Scroll {
+                    grid: 0.0,
+                    document: 0.0,
+                    scrollback: 0.0,
+                    region: 0.0,
+                    popovers,
+                },
+                damage: idle,
+                decoration_damage: idle,
+                scrolled_rows: 0,
+            }
+        }
+
+        let built = |pass: &mut TextPass, count: usize, scroll: f32| {
+            let mut grid = Grid::new(40, 20);
+            grid.set_overlays(vec![overlay(lines(count))]);
+
+            let popovers = [scroll];
+            pass.prepare(
+                &device,
+                &queue,
+                &grid,
+                resolution,
+                &frame(&idle, &popovers),
+                &[],
+            );
+            pass.overlay_instance_scratch
+                .iter()
+                .map(|instance| instance.pos[1])
+                .collect::<Vec<_>>()
+        };
+
+        let short = built(&mut pass, 12, 0.0);
+        let long = built(&mut pass, 400, 0.0);
+
+        assert!(
+            short.len() < 12,
+            "a 5-row box reads fewer than the 12 lines behind it, not {}",
+            short.len()
+        );
+        assert_eq!(
+            long, short,
+            "400 lines behind the same box build what 12 did"
+        );
+
+        // A window that ignored the scroll would sit at the top and be just as
+        // small, so the instances have to have moved on as well as stayed few.
+        let scrolled = built(&mut pass, 400, 200.0);
+        assert_eq!(
+            scrolled.len(),
+            short.len(),
+            "the box reads the same number of lines wherever it sits"
+        );
+        assert!(
+            scrolled.iter().all(|top| !short.contains(top)),
+            "scrolled 200 lines down, the box draws different rows: {scrolled:?} \
+             against {short:?}"
+        );
+    }
+
     #[test]
     fn a_rescrolled_overlay_holds_only_this_frame_s_instances() {
         let Some((device, queue, mut pass)) = headless_text_pass() else {
@@ -4768,8 +5176,10 @@ mod tests {
         );
 
         // Three scroll frames in a row, so the buffers the second and third
-        // build into are ones an earlier frame already filled.
-        for scroll in [1.0, 2.0, 3.0] {
+        // build into are ones an earlier frame already filled. The offsets stay
+        // within a cell, keeping the one line inside the box's window, since a
+        // line scrolled out of the box builds no instances at all.
+        for scroll in [0.25, 0.5, 0.75] {
             pass.prepare(
                 &device,
                 &queue,
@@ -4797,7 +5207,7 @@ mod tests {
 
         let want: Vec<f32> = unscrolled
             .iter()
-            .map(|top| top - 3.0 * pass.metrics.height)
+            .map(|top| top - 0.75 * pass.metrics.height)
             .collect();
         assert_eq!(
             tops(&pass),
