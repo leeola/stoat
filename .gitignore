@@ -3,3 +3,4 @@ target
 .direnv
 bacon.toml
 .stoatignore
+.cargo
