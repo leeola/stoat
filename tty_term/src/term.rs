@@ -1987,11 +1987,20 @@ impl Terminal {
         };
         let layout_changed = self.decorations_dirty.line_layout || resized;
 
-        if self.decorations_dirty.borders || resized || vt_damaged {
-            apply_borders(grid, &self.borders);
+        // A stamp is only lost on the rows the projection rewrote, so those are the
+        // rows to restamp. A resize cleared every cell, and a changed command list
+        // leaves the grid holding regions that are no longer declared, so both have
+        // to stamp regardless of what the projection touched.
+        let all_rows = Damage::Full;
+        if self.decorations_dirty.borders || resized {
+            apply_borders(grid, &self.borders, &all_rows);
+        } else if vt_damaged {
+            apply_borders(grid, &self.borders, &dirty);
         }
-        if self.decorations_dirty.scales || resized || vt_damaged {
-            apply_scales(grid, &self.scales);
+        if self.decorations_dirty.scales || resized {
+            apply_scales(grid, &self.scales, &all_rows);
+        } else if vt_damaged {
+            apply_scales(grid, &self.scales, &dirty);
         }
         if self.decorations_dirty.popovers || resized {
             apply_popovers(grid, &self.popovers);
@@ -2801,17 +2810,35 @@ fn decoration_footprint(
     }
 }
 
-/// Stamp every stored border region's perimeter edges onto `grid`.
+/// Whether any row of the half-open span `top..end` is dirty in `rows_dirty`.
 ///
-/// Runs each projection because the cell projection resets borders to none;
-/// edges outside the grid are skipped so a region may extend past it.
-fn apply_borders(grid: &mut Grid, commands: &[BorderCommand]) {
+/// Clamped to `rows`, so a region declared past the screen tests only the part
+/// that lands on it. Wire coordinates are untrusted and may point anywhere.
+fn span_is_dirty(top: usize, end: usize, rows: usize, rows_dirty: &Damage) -> bool {
+    (top..end.min(rows)).any(|row| rows_dirty.is_dirty(row))
+}
+
+/// Stamp every stored border region's perimeter edges onto `grid`, over the rows
+/// `rows_dirty` marks.
+///
+/// The cell projection resets borders to none, so a stamped row has to be restamped
+/// after it. Only the projected rows lost theirs, which is what `rows_dirty` names.
+/// Pass [`Damage::Full`] to stamp regardless, for a resize that cleared the cells or
+/// a command list that no longer matches the grid.
+///
+/// Edges outside the grid are skipped, so a region may extend past it.
+fn apply_borders(grid: &mut Grid, commands: &[BorderCommand], rows_dirty: &Damage) {
+    let rows = grid.rows();
     for command in commands {
-        frame_region(grid, command);
+        let top = command.top as usize;
+        let end = top + command.height as usize;
+        if span_is_dirty(top, end, rows, rows_dirty) {
+            frame_region(grid, command, rows_dirty);
+        }
     }
 }
 
-fn frame_region(grid: &mut Grid, command: &BorderCommand) {
+fn frame_region(grid: &mut Grid, command: &BorderCommand, rows_dirty: &Damage) {
     if command.width == 0 || command.height == 0 {
         return;
     }
@@ -2827,17 +2854,27 @@ fn frame_region(grid: &mut Grid, command: &BorderCommand) {
     let left = command.left as usize;
     let bottom = top + command.height as usize - 1;
     let right = left + command.width as usize - 1;
+    let last_col = right.min(cols.saturating_sub(1));
 
-    for col in left..=right.min(cols.saturating_sub(1)) {
-        if top < rows {
-            grid.get_mut(top, col).borders.top = Some(border);
+    // A horizontal edge is one contiguous run, so it takes one bounds check for the
+    // row rather than one per column.
+    if left < cols {
+        if top < rows && rows_dirty.is_dirty(top) {
+            for cell in &mut grid.row_mut(top)[left..=last_col] {
+                cell.borders.top = Some(border);
+            }
         }
-        if bottom < rows {
-            grid.get_mut(bottom, col).borders.bottom = Some(border);
+        if bottom < rows && rows_dirty.is_dirty(bottom) {
+            for cell in &mut grid.row_mut(bottom)[left..=last_col] {
+                cell.borders.bottom = Some(border);
+            }
         }
     }
 
     for row in top..=bottom.min(rows.saturating_sub(1)) {
+        if !rows_dirty.is_dirty(row) {
+            continue;
+        }
         if left < cols {
             grid.get_mut(row, left).borders.left = Some(border);
         }
@@ -2865,15 +2902,26 @@ fn grid_panel_shadow(shadow: command::PanelShadow) -> PanelShadow {
     }
 }
 
-/// Claim each stored scale command's block on `grid`.
+/// Claim each stored scale command's block on `grid`, over the rows `rows_dirty`
+/// marks.
 ///
-/// Runs each projection because the cell projection resets every cell to
-/// [`Scale::Single`]. An origin outside the grid is skipped, since wire
-/// coordinates are untrusted and may point past the screen.
-fn apply_scales(grid: &mut Grid, commands: &[ScaleCommand]) {
+/// The cell projection resets every cell to [`Scale::Single`], so a claimed row has
+/// to be reclaimed after it, and only the projected rows lost theirs. Pass
+/// [`Damage::Full`] to claim regardless, as [`apply_borders`] documents.
+///
+/// An origin outside the grid is skipped, since wire coordinates are untrusted and
+/// may point past the screen. A block is claimed whole or not at all, since one call
+/// places all of it.
+fn apply_scales(grid: &mut Grid, commands: &[ScaleCommand], rows_dirty: &Damage) {
+    let rows = grid.rows();
     for command in commands {
         let (row, col) = (command.top as usize, command.left as usize);
-        if row < grid.rows() && col < grid.cols() {
+        if row >= rows || col >= grid.cols() {
+            continue;
+        }
+        // A scale below 2 claims the origin cell alone, anything above it a square.
+        let end = row + (command.scale as usize).max(1);
+        if span_is_dirty(row, end, rows, rows_dirty) {
             grid.place_scaled(row, col, command.scale);
         }
     }
@@ -4933,6 +4981,52 @@ mod tests {
             grid.get(0, 0).borders.top,
             edge,
             "border re-stamped on the damaged row"
+        );
+    }
+
+    /// A border over rows the projection left alone keeps its edges.
+    ///
+    /// Those rows were not reprojected, so nothing reset them and the stamp still
+    /// stands. Skipping them is what stops a keystroke re-stamping every region on
+    /// the grid, and the window must come out as a full re-stamp would leave it.
+    #[test]
+    fn a_border_clear_of_the_damaged_rows_keeps_its_edges() {
+        let frame = encode_border(&BorderCommand {
+            top: 2,
+            left: 0,
+            width: 3,
+            height: 2,
+            style: ProtoBorderStyle::Light,
+            color: [255, 0, 0],
+        });
+        let edge = Some(Border {
+            style: BorderStyle::Light,
+            color: Rgb::new(255, 0, 0),
+        });
+
+        let mut terminal = Terminal::new(4, 3, Theme::default());
+        let mut grid = Grid::new(4, 3);
+        terminal.advance(&frame);
+        terminal.project(&mut grid);
+        assert_eq!(
+            (grid.get(2, 0).borders.top, grid.get(3, 0).borders.bottom),
+            (edge, edge),
+            "the declared border stamps on arrival",
+        );
+
+        // Text on row 0 damages that row alone, well clear of the border's rows.
+        terminal.advance(b"X");
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            (
+                grid.get(0, 0).ch,
+                grid.get(2, 0).borders.top,
+                grid.get(3, 0).borders.bottom,
+                grid.get(2, 2).borders.right,
+            ),
+            ('X', edge, edge, edge),
+            "the border survives a projection that never touched its rows",
         );
     }
 
