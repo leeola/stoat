@@ -513,6 +513,10 @@ struct State {
     pools_scratch: Vec<PoolView>,
     active_scratch: Vec<ActivePool>,
     overflows_scratch: Vec<Option<f32>>,
+    /// The grid popovers epoch [`Self::overflows_scratch`] was filled against, so a
+    /// frame whose overlays were not re-applied keeps the answers already in it.
+    /// `None` until the first redraw fills it.
+    last_popovers_epoch: Option<u64>,
     /// Live aux OS windows, each hosting a detached pane's window-bound pools.
     /// Empty until a [`TermEvent::WindowOpen`] opens the first one.
     aux: Vec<AuxWindow>,
@@ -921,6 +925,7 @@ impl ApplicationHandler<PtyEvent> for App {
             pools_scratch: Vec::new(),
             active_scratch: Vec::new(),
             overflows_scratch: Vec::new(),
+            last_popovers_epoch: None,
             aux: Vec::new(),
             window_event_tx,
             wheel_pixels: 0.0,
@@ -1410,8 +1415,12 @@ impl ApplicationHandler<PtyEvent> for App {
                 }
 
                 let mut overflows = mem::take(&mut state.overflows_scratch);
-                overflows.clear();
-                overflows.extend(state.grid.overlays().iter().map(popover_overflow));
+                refresh_popover_overflows(
+                    state.grid.overlays(),
+                    state.grid.popovers_epoch(),
+                    &mut state.last_popovers_epoch,
+                    &mut overflows,
+                );
                 state.popover_scrolls.resize(overflows.len(), 0.0);
                 state.popover_scroll_downs.resize(overflows.len(), true);
 
@@ -3204,6 +3213,32 @@ fn popover_overflow(overlay: &Overlay) -> Option<f32> {
     (content_rows > height).then(|| (content_rows - height) as f32)
 }
 
+/// Refill `overflows` with one entry per overlay, reusing the previous answers while
+/// the overlay list has not been rebuilt.
+///
+/// `epoch` is the grid's popovers epoch, which advances exactly when that list is
+/// re-applied, so an unchanged epoch means every overlay's content, scale, and height
+/// still hold and the stored answers stand. Each answer costs a walk of the whole
+/// popover content, and an overflowing popover drives continuous redraws, so without
+/// this the walk repeats at frame rate for as long as a tooltip is on screen.
+///
+/// The reused length matters as much as the values, since the caller sizes its
+/// per-overlay scroll state from it.
+fn refresh_popover_overflows(
+    overlays: &[Overlay],
+    epoch: u64,
+    last_epoch: &mut Option<u64>,
+    overflows: &mut Vec<Option<f32>>,
+) {
+    if *last_epoch == Some(epoch) {
+        return;
+    }
+
+    *last_epoch = Some(epoch);
+    overflows.clear();
+    overflows.extend(overlays.iter().map(popover_overflow));
+}
+
 /// Advance the ping-pong popover scroll by the elapsed frame time `dt` toward
 /// its current end, reversing direction when it settles.
 ///
@@ -3348,10 +3383,11 @@ mod tests {
         alternate_scroll_bytes, anchored_cursor_pos, app_has_focus, bell_should_ring,
         block_corners, cell_at, copy_pool_region, cursor_in_region, ease, ease_corners, encode_key,
         font_step, forwards_zoom, ipc_button, modifier_bits, paste_bytes, popover_overflow,
-        reposition_scroll, seed_settle_flight, selection_copy_text, sgr_button_bytes,
-        sgr_motion_bytes, sgr_wheel_bytes, step_cursor, step_document_scroll, step_grid_scroll,
-        step_popover_scroll, step_region_scroll, step_scrollback_scroll, swallow_super_combo,
-        wheel_lines, CursorAnimation, EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
+        refresh_popover_overflows, reposition_scroll, seed_settle_flight, selection_copy_text,
+        sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes, step_cursor, step_document_scroll,
+        step_grid_scroll, step_popover_scroll, step_region_scroll, step_scrollback_scroll,
+        swallow_super_combo, wheel_lines, CursorAnimation, EASE_BASELINE_FRAME,
+        SCROLLBACK_MIN_STEP,
     };
     #[cfg(unix)]
     use super::{window_socket_path, PathBuf};
@@ -3839,6 +3875,54 @@ mod tests {
             bold: false,
             content: content.to_owned(),
         }
+    }
+
+    /// Counting a popover's lines is the per-frame cost worth avoiding, so the refresh
+    /// answers from the buffer while the grid's popovers epoch holds.
+    ///
+    /// The reuse case passes overlays that would compute differently, since a refresh
+    /// that recomputed anyway would agree with the cache on unchanged input and the
+    /// assertion would not distinguish the two.
+    #[test]
+    fn popover_overflows_refill_only_when_the_epoch_moves() {
+        let mut last_epoch = None;
+        let mut overflows = Vec::new();
+
+        refresh_popover_overflows(
+            &[popover(2, 1, "a\nb\nc\nd")],
+            7,
+            &mut last_epoch,
+            &mut overflows,
+        );
+        assert_eq!(overflows, [Some(2.0)], "the first refresh fills the buffer");
+
+        refresh_popover_overflows(&[popover(9, 1, "a")], 7, &mut last_epoch, &mut overflows);
+        assert_eq!(
+            overflows,
+            [Some(2.0)],
+            "the same epoch keeps the stored answer without walking the content"
+        );
+
+        refresh_popover_overflows(&[popover(9, 1, "a")], 8, &mut last_epoch, &mut overflows);
+        assert_eq!(overflows, [None], "a re-applied overlay list is recounted");
+    }
+
+    /// The caller sizes its per-overlay scroll state from this buffer's length, so a
+    /// shorter overlay list has to shorten it rather than leave stale trailing entries.
+    #[test]
+    fn a_shorter_overlay_list_shortens_the_overflows() {
+        let mut last_epoch = None;
+        let mut overflows = Vec::new();
+        let two = [popover(1, 1, "a\nb"), popover(1, 1, "c\nd")];
+
+        refresh_popover_overflows(&two, 1, &mut last_epoch, &mut overflows);
+        assert_eq!(overflows, [Some(1.0), Some(1.0)], "one entry per overlay");
+
+        refresh_popover_overflows(&two[..1], 2, &mut last_epoch, &mut overflows);
+        assert_eq!(overflows, [Some(1.0)], "a closed popover drops its entry");
+
+        refresh_popover_overflows(&[], 3, &mut last_epoch, &mut overflows);
+        assert_eq!(overflows, [], "no overlays leaves no entries");
     }
 
     #[test]
