@@ -3,7 +3,7 @@
 use bytemuck::{Pod, Zeroable};
 use std::ops::Range;
 use stoatty_term::{grid::Panel, term::Damage};
-use wgpu::Buffer;
+use wgpu::{Buffer, Queue};
 
 pub mod background;
 pub mod bar;
@@ -241,6 +241,42 @@ pub(crate) fn upload_needed<T: PartialEq>(built: &[T], last: &[T]) -> bool {
     built != last
 }
 
+/// Whether `globals` differs from the value last written to a uniform buffer, and
+/// so has to be sent to the GPU again.
+///
+/// A pass's uniform moves only on resize, metrics, scroll, or cursor change. Without
+/// this every pass rewrites its whole uniform on frames that changed nothing,
+/// including the idle ones a blinking cursor drives.
+///
+/// `last` tracks one buffer, never one pass. A pass writing several uniforms needs a
+/// cache each, since a shared one would report a sibling's value as already written
+/// and leave a buffer holding stale bytes.
+pub(crate) fn globals_upload_needed<T: PartialEq>(globals: &T, last: &Option<T>) -> bool {
+    last.as_ref() != Some(globals)
+}
+
+/// Write `globals` at `offset` in `buffer` when it differs from `last`, recording
+/// what was sent.
+///
+/// Sound only because a pass keeps its globals buffer for its whole lifetime. A
+/// reallocated buffer would come back zeroed with the cache still claiming the old
+/// value was present. Instance and occluder buffers do grow, but their bind-group
+/// rebuilds are handed the same globals buffer.
+pub(crate) fn upload_globals<T: Pod + PartialEq>(
+    queue: &Queue,
+    buffer: &Buffer,
+    offset: u64,
+    globals: T,
+    last: &mut Option<T>,
+) {
+    if !globals_upload_needed(&globals, last) {
+        return;
+    }
+
+    queue.write_buffer(buffer, offset, bytemuck::bytes_of(&globals));
+    *last = Some(globals);
+}
+
 /// Move each row of `cache` by `by`, up the screen when positive and down when
 /// negative, repairing what survives and emptying what the move vacates.
 ///
@@ -446,9 +482,9 @@ pub fn cell_size(font_size: u32, scale_factor: f32) -> [f32; 2] {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_occluders_into, globals_offset, occlusion_globals, pool_occluders_into,
-        rotate_row_cache, row_runs, row_uploads, upload_needed, CellMetrics, CompositeSlots,
-        GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
+        build_occluders_into, globals_offset, globals_upload_needed, occlusion_globals,
+        pool_occluders_into, rotate_row_cache, row_runs, row_uploads, upload_needed, CellMetrics,
+        CompositeSlots, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
     };
     use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
 
@@ -808,6 +844,89 @@ mod tests {
         assert!(
             upload_needed(&fewer, &held),
             "a closed box leaves a shorter list"
+        );
+    }
+
+    /// Stands in for a pass's globals struct, which are private to their own modules.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    struct Uniform {
+        resolution: [f32; 2],
+        scroll_y: f32,
+    }
+
+    /// A uniform is compared against the last value written to its buffer to decide
+    /// whether to write at all.
+    ///
+    /// The consequence of getting this wrong runs one way only, as with the occluder
+    /// list above. A difference that is not there costs a write. Missing a real one
+    /// leaves the pass drawing against a stale resolution, cell size, or scroll.
+    #[test]
+    fn a_uniform_writes_once_until_one_of_its_fields_moves() {
+        let idle = Uniform {
+            resolution: [800.0, 600.0],
+            scroll_y: 0.0,
+        };
+
+        let mut last = None;
+        assert!(
+            globals_upload_needed(&idle, &last),
+            "the first frame has nothing cached, so it writes"
+        );
+        last = Some(idle);
+
+        assert!(
+            !globals_upload_needed(&idle, &last),
+            "an idle frame rebuilds the same value and sends nothing"
+        );
+        assert!(
+            globals_upload_needed(
+                &Uniform {
+                    scroll_y: 3.0,
+                    ..idle
+                },
+                &last
+            ),
+            "a scrolled frame moves scroll_y, which the vertex shader reads"
+        );
+        assert!(
+            globals_upload_needed(
+                &Uniform {
+                    resolution: [1024.0, 600.0],
+                    ..idle
+                },
+                &last
+            ),
+            "a resize moves the resolution every position maps through"
+        );
+    }
+
+    /// The background pass writes a cell slot and a cursor slot, and the text pass
+    /// writes three buffers, so every buffer carries its own cache. A cache shared
+    /// across them would answer for a sibling and leave a buffer stale.
+    #[test]
+    fn two_buffers_holding_one_value_track_it_separately() {
+        let globals = Uniform {
+            resolution: [800.0, 600.0],
+            scroll_y: 0.0,
+        };
+
+        let mut cell = None;
+        let mut cursor = None;
+        assert!(
+            globals_upload_needed(&globals, &cell),
+            "the cell slot has not been written"
+        );
+        cell = Some(globals);
+
+        assert!(
+            globals_upload_needed(&globals, &cursor),
+            "the cursor slot needs the same value written to it in its own right"
+        );
+        cursor = Some(globals);
+
+        assert!(
+            !globals_upload_needed(&globals, &cell) && !globals_upload_needed(&globals, &cursor),
+            "both slots hold it once both have been written"
         );
     }
 

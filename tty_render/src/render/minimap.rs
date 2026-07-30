@@ -48,7 +48,7 @@ struct MinimapInstance {
 /// The uniform shared by every instance, matching the bar pass layout so the
 /// occluder test maps a panel's cell rect to pixels the same way.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
@@ -93,6 +93,8 @@ pub struct MinimapPass {
     /// per frame, so most frames match.
     last_occluders: Vec<Occluder>,
     occluder_capacity: usize,
+    /// The uniform last written, so an unchanged frame skips that write too.
+    last_globals: Option<Globals>,
     metrics: CellMetrics,
     /// The grid minimap epoch and resolution the current [`Self::strips`] and
     /// instance buffer were built against. While both hold, the strips are
@@ -197,6 +199,7 @@ impl MinimapPass {
             strips: Vec::new(),
             occluders,
             last_occluders: Vec::new(),
+            last_globals: None,
             occluder_capacity: INITIAL_CAPACITY,
             metrics,
             last_build: None,
@@ -245,7 +248,7 @@ impl MinimapPass {
             occlude_all: 0,
             _pad: [0; 2],
         };
-        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
         if self.last_build == Some((grid.minimap_epoch(), resolution)) {
             return;

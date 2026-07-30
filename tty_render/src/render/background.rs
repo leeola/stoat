@@ -80,7 +80,7 @@ struct BgInstance {
 /// occluder loop. `cols` is read only by the cell fill, which divides the instance
 /// index by it to recover the cell coordinate, so the cursor writes zero.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
@@ -132,6 +132,14 @@ pub struct BackgroundPass {
     occluder_capacity: usize,
     cursor_pipeline: RenderPipeline,
     cursor_visible: bool,
+    /// The value last written to the cell slot, so an unchanged frame skips that
+    /// write.
+    last_globals: Option<Globals>,
+    /// The value last written to the cursor slot, tracked apart from
+    /// [`Self::last_globals`] because the two slots hold different values. A live
+    /// frame seeds this slot with the cell globals, while a pool frame overwrites it
+    /// through [`Self::prepare_cursor`] with the column count zeroed.
+    last_cursor_globals: Option<Globals>,
     metrics: CellMetrics,
     /// Scratch reused each frame to build the cell instances for upload, so a
     /// full rebuild, a damaged row, and a composite frame each allocate none.
@@ -242,6 +250,8 @@ impl BackgroundPass {
             occluder_capacity: INITIAL_CAPACITY,
             cursor_pipeline,
             cursor_visible: false,
+            last_globals: None,
+            last_cursor_globals: None,
             metrics,
             scratch: Vec::new(),
         }
@@ -319,14 +329,16 @@ impl BackgroundPass {
                 CURSOR_ALPHA,
             ],
         };
-        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
         // The cursor reads its own slot, so a live frame seeds it here with the same
         // globals. A pool frame overwrites it via [`Self::prepare_cursor`] after the
         // pools have their slots, leaving slot 0's column count intact.
-        queue.write_buffer(
+        crate::render::upload_globals(
+            queue,
             &self.globals,
             u64::from(CURSOR_GLOBALS_OFFSET),
-            bytemuck::bytes_of(&globals),
+            globals,
+            &mut self.last_cursor_globals,
         );
         self.cursor_visible = cursor.corners.is_some();
 
@@ -496,10 +508,12 @@ impl BackgroundPass {
         };
         // The cursor's own slot, so this can run after the cell globals are placed
         // without disturbing them.
-        queue.write_buffer(
+        crate::render::upload_globals(
+            queue,
             &self.globals,
             u64::from(CURSOR_GLOBALS_OFFSET),
-            bytemuck::bytes_of(&globals),
+            globals,
+            &mut self.last_cursor_globals,
         );
         self.cursor_visible = cursor.corners.is_some();
     }

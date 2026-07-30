@@ -46,7 +46,7 @@ struct IconInstance {
 /// panel-occluder count the fragment shader loops over. Padded to 32 bytes to
 /// match the WGSL uniform layout.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
@@ -79,6 +79,8 @@ pub struct IconPass {
     /// per frame, so most frames match.
     last_occluders: Vec<Occluder>,
     occluder_capacity: usize,
+    /// The uniform last written, so an unchanged frame skips that write too.
+    last_globals: Option<Globals>,
     metrics: CellMetrics,
 }
 
@@ -183,6 +185,7 @@ impl IconPass {
             built: Vec::new(),
             occluders,
             last_occluders: Vec::new(),
+            last_globals: None,
             occluder_capacity: INITIAL_CAPACITY,
             metrics,
         }
@@ -217,7 +220,7 @@ impl IconPass {
             panel_count: occluders.len() as u32,
             _pad: [0; 3],
         };
-        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
         build_icon_instances_into(icons, &mut self.built);
         self.count = self.built.len() as u32;

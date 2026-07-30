@@ -65,7 +65,7 @@ struct PanelInstance {
 /// count the fragment shader loops over for self-occlusion. Padded to 32 bytes
 /// so the layout matches the WGSL uniform.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
@@ -89,6 +89,8 @@ pub struct PanelPass {
     /// keeps spares an allocation the frame would otherwise discard.
     built: Vec<PanelInstance>,
     count: u32,
+    /// The uniform last written, so an unchanged frame skips that write too.
+    last_globals: Option<Globals>,
     metrics: CellMetrics,
 }
 
@@ -193,6 +195,7 @@ impl PanelPass {
             capacity: INITIAL_CAPACITY,
             count: 0,
             last_instances: Vec::new(),
+            last_globals: None,
             built: Vec::new(),
             metrics,
         }
@@ -217,7 +220,7 @@ impl PanelPass {
             count: self.count,
             _pad: [0; 3],
         };
-        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
         if self.built.is_empty() {
             return;

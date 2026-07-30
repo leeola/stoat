@@ -66,7 +66,7 @@ struct BorderInstance {
 ///
 /// `pad` rounds the uniform up to a 16-byte multiple.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
@@ -93,6 +93,8 @@ pub struct DecorationPass {
     /// Where a run of rows is gathered before its upload, reused across frames
     /// for the same reason.
     upload_scratch: Vec<BorderInstance>,
+    /// The uniform last written, so an unchanged frame skips that write too.
+    last_globals: Option<Globals>,
     metrics: CellMetrics,
 }
 
@@ -196,6 +198,7 @@ impl DecorationPass {
             border_row_instances: Vec::new(),
             rows_to_build: Vec::new(),
             upload_scratch: Vec::new(),
+            last_globals: None,
             metrics,
         }
     }
@@ -236,7 +239,7 @@ impl DecorationPass {
             scroll_y: grid_scroll * self.metrics.height,
             pad: [0.0, 0.0, 0.0],
         };
-        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
         let rows = grid.rows();
         let stale = self.border_row_instances.len() != rows;

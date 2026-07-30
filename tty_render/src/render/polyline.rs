@@ -51,7 +51,7 @@ struct PolylineInstance {
 /// flag that bypasses the seq test for a pool composite beneath every box.
 /// Padded to 32 bytes to match the WGSL uniform layout.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
@@ -96,6 +96,8 @@ pub struct PolylinePass {
     /// per frame, so most frames match.
     last_occluders: Vec<Occluder>,
     occluder_capacity: usize,
+    /// The uniform last written, so an unchanged frame skips that write too.
+    last_globals: Option<Globals>,
     metrics: CellMetrics,
 }
 
@@ -207,6 +209,7 @@ impl PolylinePass {
             composite_slots: CompositeSlots::new(),
             occluders,
             last_occluders: Vec::new(),
+            last_globals: None,
             occluder_capacity: INITIAL_CAPACITY,
             metrics,
         }
@@ -242,7 +245,7 @@ impl PolylinePass {
             occlude_all: 0,
             _pad: [0; 2],
         };
-        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
         build_polyline_instances_into(polylines, 0.0, &mut self.built);
         self.count = self.built.len() as u32;

@@ -124,7 +124,7 @@ struct RectInstance {
 /// Uniform shared by every instance: the surface resolution the vertex shader
 /// maps pixel coordinates through, and the cell box the underline pass draws in.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct TextGlobals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
@@ -188,6 +188,15 @@ pub struct TextPass {
     /// overlay-content draws, which must not move with the grid.
     static_globals: Buffer,
     static_globals_bind_group: BindGroup,
+    /// The value last written to each of the three globals buffers, so a frame
+    /// that moved none of them skips all three writes.
+    ///
+    /// One cache per buffer, since the three hold different `scroll_y` and panel
+    /// counts. A shared cache would report a sibling's value as already written and
+    /// leave a buffer stale.
+    last_globals: Option<TextGlobals>,
+    last_region_globals: Option<TextGlobals>,
+    last_static_globals: Option<TextGlobals>,
     /// The group-0 layout the three globals bind groups share, kept so they can
     /// be rebuilt when [`Self::occluders`] reallocates.
     globals_layout: BindGroupLayout,
@@ -632,6 +641,9 @@ impl TextPass {
             region_globals_bind_group,
             static_globals,
             static_globals_bind_group,
+            last_globals: None,
+            last_region_globals: None,
+            last_static_globals: None,
             globals_layout,
             occluders,
             last_occluders: Vec::new(),
@@ -835,34 +847,46 @@ impl TextPass {
         self.upload_occluders(device, queue, occluders);
         let panel_count = occluders.len() as u32;
 
-        // Write each globals buffer with its own scroll: grid scroll for the
-        // plain glyphs, region scroll for the region glyphs, none for the
-        // screen-anchored runs and overlays. Done every frame so a scroll-only
-        // frame refreshes the uniforms without rebuilding instances.
+        // Each globals buffer carries its own scroll. The plain glyphs take the grid
+        // scroll, the region glyphs the region scroll, and the screen-anchored runs
+        // and overlays none. Each buffer is sent only when its value moved, so a
+        // scroll-only frame refreshes just the uniforms it changed without
+        // rebuilding instances, and an idle frame writes none of them.
         let cell_size = [self.metrics.width, self.metrics.height];
         // Live draws never bypass the seq test, so occlude_all stays zero. Only
         // the static globals' text-run draws occlude, and they do it by seq.
-        let write_globals = |buffer: &Buffer, scroll_y: f32, panel_count: u32| {
-            queue.write_buffer(
-                buffer,
-                0,
-                bytemuck::bytes_of(&TextGlobals {
-                    resolution,
-                    cell_size,
-                    scroll_y,
-                    panel_count,
-                    occlude_all: 0,
-                    _pad: 0.0,
-                }),
-            );
+        let globals_with = |scroll_y: f32, panel_count: u32| TextGlobals {
+            resolution,
+            cell_size,
+            scroll_y,
+            panel_count,
+            occlude_all: 0,
+            _pad: 0.0,
         };
-        write_globals(
+        let grid_scroll_y =
+            (scroll.grid + scroll.document + scroll.scrollback) * self.metrics.height;
+        let region_scroll_y = scroll.region * self.metrics.height;
+        crate::render::upload_globals(
+            queue,
             &self.globals,
-            (scroll.grid + scroll.document + scroll.scrollback) * self.metrics.height,
             0,
+            globals_with(grid_scroll_y, 0),
+            &mut self.last_globals,
         );
-        write_globals(&self.region_globals, scroll.region * self.metrics.height, 0);
-        write_globals(&self.static_globals, 0.0, panel_count);
+        crate::render::upload_globals(
+            queue,
+            &self.region_globals,
+            0,
+            globals_with(region_scroll_y, 0),
+            &mut self.last_region_globals,
+        );
+        crate::render::upload_globals(
+            queue,
+            &self.static_globals,
+            0,
+            globals_with(0.0, panel_count),
+            &mut self.last_static_globals,
+        );
 
         // Underlines are built first, before the glyph path can return early on
         // an all-blank grid: an underlined space has no glyph but still draws.

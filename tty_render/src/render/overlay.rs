@@ -55,7 +55,7 @@ struct OverlayInstance {
 /// Uniform shared by every instance: the surface resolution and cell size the
 /// vertex shader maps cell coordinates through.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
@@ -76,6 +76,8 @@ pub struct OverlayPass {
     /// keeps spares an allocation the frame would otherwise discard.
     built: Vec<OverlayInstance>,
     count: u32,
+    /// The uniform last written, so an unchanged frame skips that write too.
+    last_globals: Option<Globals>,
     metrics: CellMetrics,
 }
 
@@ -172,6 +174,7 @@ impl OverlayPass {
             capacity: INITIAL_CAPACITY,
             count: 0,
             last_instances: Vec::new(),
+            last_globals: None,
             built: Vec::new(),
             metrics,
         }
@@ -192,7 +195,7 @@ impl OverlayPass {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
         };
-        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
         build_overlay_instances_into(grid.overlays(), &mut self.built);
         self.count = self.built.len() as u32;
