@@ -11,8 +11,8 @@
 use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
     render::{
-        occlusion_globals, pool_occluders, row_len, row_uploads, CellMetrics, CompositeSlot,
-        CompositeSlots, Frame, Occluder,
+        globals_offset, occlusion_globals, pool_occluders, row_len, row_uploads, CellMetrics,
+        CompositeSlot, CompositeSlots, Frame, Occluder, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
     },
 };
 use bytemuck::{Pod, Zeroable};
@@ -30,11 +30,12 @@ use stoatty_term::{
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
-    Buffer, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites,
-    Device, FragmentState, PipelineLayoutDescriptor, Queue, RenderPass, RenderPipeline,
-    RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderModule,
-    ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat, TextureSampleType,
-    TextureView, TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode,
+    Buffer, BufferBinding, BufferBindingType, BufferDescriptor, BufferSize, BufferUsages,
+    ColorTargetState, ColorWrites, Device, FragmentState, PipelineLayoutDescriptor, Queue,
+    RenderPass, RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType,
+    SamplerDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages,
+    TextureFormat, TextureSampleType, TextureView, TextureViewDimension, VertexBufferLayout,
+    VertexState, VertexStepMode,
 };
 
 mod powerline;
@@ -424,7 +425,9 @@ impl TextPass {
                     visibility: ShaderStages::VERTEX_FRAGMENT,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
+                        // One slot per composited pool plus the live grid's, so
+                        // every pool's globals coexist and a draw selects its own.
+                        has_dynamic_offset: true,
                         min_binding_size: None,
                     },
                     count: None,
@@ -510,12 +513,29 @@ impl TextPass {
         // Three globals buffers share one layout but carry a different scroll_y,
         // so the plain, region, and screen-anchored draws each scroll correctly
         // within a single render pass.
-        let (globals, globals_bind_group) =
-            make_globals(device, &globals_layout, &occluders, "text globals");
-        let (region_globals, region_globals_bind_group) =
-            make_globals(device, &globals_layout, &occluders, "text region globals");
-        let (static_globals, static_globals_bind_group) =
-            make_globals(device, &globals_layout, &occluders, "text static globals");
+        // Only the plain buffer carries per-pool slots. The region and
+        // screen-anchored draws have no composite path, so they hold slot 0 alone.
+        let (globals, globals_bind_group) = make_globals(
+            device,
+            &globals_layout,
+            &occluders,
+            "text globals",
+            GLOBALS_SLOTS,
+        );
+        let (region_globals, region_globals_bind_group) = make_globals(
+            device,
+            &globals_layout,
+            &occluders,
+            "text region globals",
+            1,
+        );
+        let (static_globals, static_globals_bind_group) = make_globals(
+            device,
+            &globals_layout,
+            &occluders,
+            "text static globals",
+            1,
+        );
 
         let sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("text atlas"),
@@ -1068,6 +1088,7 @@ impl TextPass {
         content_changed: bool,
         occludable: bool,
         pool: u32,
+        slot: usize,
     ) {
         // An occludable pane pool sits under every box, so its composite draws
         // discard inside any panel rect with the seq test bypassed. A non-pane
@@ -1079,7 +1100,7 @@ impl TextPass {
         let (panel_count, occlude_all) = occlusion_globals(&occluders);
         queue.write_buffer(
             &self.globals,
-            0,
+            u64::from(globals_offset(slot)),
             bytemuck::bytes_of(&TextGlobals {
                 resolution,
                 cell_size: [self.metrics.width, self.metrics.height],
@@ -1536,7 +1557,7 @@ impl TextPass {
     pub fn draw(&self, render_pass: &mut RenderPass<'_>) {
         if self.count > 0 {
             render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+            render_pass.set_bind_group(0, &self.globals_bind_group, &[0]);
             render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.instances.slice(..));
             render_pass.draw(0..6, 0..self.count);
@@ -1544,7 +1565,7 @@ impl TextPass {
 
         if self.underline_count > 0 {
             render_pass.set_pipeline(&self.underline_pipeline);
-            render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+            render_pass.set_bind_group(0, &self.globals_bind_group, &[0]);
             render_pass.set_vertex_buffer(0, self.underline_instances.slice(..));
             render_pass.draw(0..6, 0..self.underline_count);
         }
@@ -1558,14 +1579,14 @@ impl TextPass {
     /// instances a prior [`Self::prepare`] uploaded and the other pools' slots
     /// untouched. Binds the grid-scroll globals [`Self::prepare_composite`] wrote,
     /// so the pool scrolls by its shift.
-    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>, pool: u32) {
+    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>, pool: u32, slot: usize) {
         let Some(target) = self.composite_slots.get(pool) else {
             return;
         };
 
         if target.glyphs.count > 0 {
             render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+            render_pass.set_bind_group(0, &self.globals_bind_group, &[globals_offset(slot)]);
             render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
             render_pass.set_vertex_buffer(0, target.glyphs.instances.slice(..));
             render_pass.draw(0..6, 0..target.glyphs.count);
@@ -1573,7 +1594,7 @@ impl TextPass {
 
         if target.underlines.count > 0 {
             render_pass.set_pipeline(&self.underline_pipeline);
-            render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+            render_pass.set_bind_group(0, &self.globals_bind_group, &[globals_offset(slot)]);
             render_pass.set_vertex_buffer(0, target.underlines.instances.slice(..));
             render_pass.draw(0..6, 0..target.underlines.count);
         }
@@ -1587,14 +1608,19 @@ impl TextPass {
     /// slots untouched. Binds the grid-scroll globals [`Self::prepare_composite`]
     /// wrote, so the runs glide with the page rather than staying screen-anchored
     /// like [`Self::draw_text_runs`].
-    pub fn draw_composite_text_runs(&self, render_pass: &mut RenderPass<'_>, pool: u32) {
+    pub fn draw_composite_text_runs(
+        &self,
+        render_pass: &mut RenderPass<'_>,
+        pool: u32,
+        slot: usize,
+    ) {
         let Some(target) = self.composite_slots.get(pool) else {
             return;
         };
 
         if target.rects.count > 0 {
             render_pass.set_pipeline(&self.rect_pipeline);
-            render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+            render_pass.set_bind_group(0, &self.globals_bind_group, &[globals_offset(slot)]);
             render_pass.set_vertex_buffer(0, target.rects.instances.slice(..));
             render_pass.draw(0..6, 0..target.rects.count);
         }
@@ -1604,7 +1630,7 @@ impl TextPass {
         }
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+        render_pass.set_bind_group(0, &self.globals_bind_group, &[globals_offset(slot)]);
         render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
         render_pass.set_vertex_buffer(0, target.text_runs.instances.slice(..));
         render_pass.draw(0..6, 0..target.text_runs.count);
@@ -1621,7 +1647,7 @@ impl TextPass {
         // glyphs to follow.
         if self.rect_count > 0 {
             render_pass.set_pipeline(&self.rect_pipeline);
-            render_pass.set_bind_group(0, &self.static_globals_bind_group, &[]);
+            render_pass.set_bind_group(0, &self.static_globals_bind_group, &[0]);
             render_pass.set_vertex_buffer(0, self.rect_instances.slice(..));
             render_pass.draw(0..6, 0..self.rect_count);
         }
@@ -1631,7 +1657,7 @@ impl TextPass {
         }
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.static_globals_bind_group, &[]);
+        render_pass.set_bind_group(0, &self.static_globals_bind_group, &[0]);
         render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.text_run_instances.slice(..));
         render_pass.draw(0..6, 0..self.text_run_count);
@@ -1709,7 +1735,7 @@ impl TextPass {
         }
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.static_globals_bind_group, &[]);
+        render_pass.set_bind_group(0, &self.static_globals_bind_group, &[0]);
         render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.hud_instances.slice(..));
         render_pass.draw(0..6, 0..self.hud_count);
@@ -1731,7 +1757,7 @@ impl TextPass {
         }
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.region_globals_bind_group, &[]);
+        render_pass.set_bind_group(0, &self.region_globals_bind_group, &[0]);
         render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.region_instances.slice(..));
         render_pass.draw(0..6, 0..self.region_count);
@@ -1751,7 +1777,7 @@ impl TextPass {
         }
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.static_globals_bind_group, &[]);
+        render_pass.set_bind_group(0, &self.static_globals_bind_group, &[0]);
         render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.overlay_instances.slice(..));
 
@@ -2558,10 +2584,11 @@ fn make_globals(
     layout: &BindGroupLayout,
     occluders: &Buffer,
     label: &str,
+    slots: usize,
 ) -> (Buffer, BindGroup) {
     let buffer = device.create_buffer(&BufferDescriptor {
         label: Some(label),
-        size: size_of::<TextGlobals>() as u64,
+        size: slots as u64 * GLOBALS_SLOT_STRIDE,
         usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -2585,7 +2612,13 @@ fn make_globals_bind_group(
         entries: &[
             BindGroupEntry {
                 binding: 0,
-                resource: globals.as_entire_binding(),
+                // Bound to one slot's worth, so a dynamic offset selects a slot
+                // rather than sliding a window over the whole buffer.
+                resource: BindingResource::Buffer(BufferBinding {
+                    buffer: globals,
+                    offset: 0,
+                    size: BufferSize::new(size_of::<TextGlobals>() as u64),
+                }),
             },
             BindGroupEntry {
                 binding: 1,
@@ -3775,6 +3808,7 @@ mod tests {
             true,
             false,
             0,
+            0,
         );
         let (grown, _) = pass.atlas.texture_dims();
         assert!(
@@ -3795,6 +3829,7 @@ mod tests {
             0.0,
             false,
             false,
+            0,
             0,
         );
         assert_eq!(
@@ -3840,6 +3875,7 @@ mod tests {
             0.0,
             true,
             false,
+            0,
             0,
         );
         let (grown, _) = pass.atlas.texture_dims();

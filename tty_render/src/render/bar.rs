@@ -8,18 +8,19 @@
 //! bars track font zoom.
 
 use crate::render::{
-    occlusion_globals, pool_occluders, CellMetrics, CompositeSlot, CompositeSlots, Occluder,
+    globals_offset, occlusion_globals, pool_occluders, CellMetrics, CompositeSlot, CompositeSlots,
+    Occluder, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use std::mem;
 use stoatty_term::grid::{Bar, Panel, Rgb};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
-    BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, Device,
-    FragmentState, PipelineLayoutDescriptor, Queue, RenderPass, RenderPipeline,
-    RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat,
-    VertexBufferLayout, VertexState, VertexStepMode,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
+    Buffer, BufferBinding, BufferBindingType, BufferDescriptor, BufferSize, BufferUsages,
+    ColorTargetState, ColorWrites, Device, FragmentState, PipelineLayoutDescriptor, Queue,
+    RenderPass, RenderPipeline, RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource,
+    ShaderStages, TextureFormat, VertexBufferLayout, VertexState, VertexStepMode,
 };
 
 /// Instance buffer capacity, in bars, allocated up front. Grows by doubling when
@@ -100,7 +101,9 @@ impl BarPass {
                     visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
+                        // One slot per composited pool plus the live grid's, so
+                        // every pool's globals coexist and a draw selects its own.
+                        has_dynamic_offset: true,
                         min_binding_size: None,
                     },
                     count: None,
@@ -161,7 +164,7 @@ impl BarPass {
 
         let globals = device.create_buffer(&BufferDescriptor {
             label: Some("bar globals"),
-            size: size_of::<Globals>() as u64,
+            size: GLOBALS_SLOTS as u64 * GLOBALS_SLOT_STRIDE,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -280,6 +283,7 @@ impl BarPass {
         shift_rows: f32,
         occludable: bool,
         pool: u32,
+        slot: usize,
     ) {
         let occluders = pool_occluders(occludable, panels);
         self.upload_occluders(device, queue, &occluders);
@@ -292,7 +296,11 @@ impl BarPass {
             occlude_all,
             _pad: [0; 2],
         };
-        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        queue.write_buffer(
+            &self.globals,
+            u64::from(globals_offset(slot)),
+            bytemuck::bytes_of(&globals),
+        );
 
         let instances = build_bar_instances(bars, shift_rows);
         let target = self.composite_slots.entry(pool, || new_slot(device));
@@ -319,7 +327,7 @@ impl BarPass {
         }
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_bind_group(0, &self.bind_group, &[0]);
         render_pass.set_vertex_buffer(0, self.instances.slice(..));
         render_pass.draw(0..6, 0..self.count);
     }
@@ -330,13 +338,13 @@ impl BarPass {
     /// slot's buffer, so a pool draw leaves both the live bars a prior
     /// [`Self::prepare`] uploaded and the other pools' slots untouched. Inherits
     /// the pool pass's scissor.
-    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>, pool: u32) {
+    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>, pool: u32, slot: usize) {
         let Some(target) = self.composite_slots.get(pool).filter(|s| s.count > 0) else {
             return;
         };
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_bind_group(0, &self.bind_group, &[globals_offset(slot)]);
         render_pass.set_vertex_buffer(0, target.instances.slice(..));
         render_pass.draw(0..6, 0..target.count);
     }
@@ -385,7 +393,13 @@ fn make_bind_group(
         entries: &[
             BindGroupEntry {
                 binding: 0,
-                resource: globals.as_entire_binding(),
+                // Bound to one slot's worth, so a dynamic offset selects a slot
+                // rather than sliding a window over the whole buffer.
+                resource: BindingResource::Buffer(BufferBinding {
+                    buffer: globals,
+                    offset: 0,
+                    size: BufferSize::new(size_of::<Globals>() as u64),
+                }),
             },
             BindGroupEntry {
                 binding: 1,

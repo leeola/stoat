@@ -10,7 +10,8 @@
 //! [`Cell`]: stoatty_term::grid::Cell
 
 use crate::render::{
-    occlusion_globals, pool_occluders, CellMetrics, CompositeSlot, CompositeSlots, Occluder,
+    globals_offset, occlusion_globals, pool_occluders, CellMetrics, CompositeSlot, CompositeSlots,
+    Occluder, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::{
@@ -19,11 +20,11 @@ use stoatty_term::{
 };
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
-    BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, Device,
-    FragmentState, PipelineLayoutDescriptor, Queue, RenderPass, RenderPipeline,
-    RenderPipelineDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages,
-    TextureFormat, VertexBufferLayout, VertexState, VertexStepMode,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
+    Buffer, BufferBinding, BufferBindingType, BufferDescriptor, BufferSize, BufferUsages,
+    ColorTargetState, ColorWrites, Device, FragmentState, PipelineLayoutDescriptor, Queue,
+    RenderPass, RenderPipeline, RenderPipelineDescriptor, ShaderModule, ShaderModuleDescriptor,
+    ShaderSource, ShaderStages, TextureFormat, VertexBufferLayout, VertexState, VertexStepMode,
 };
 
 /// Instance buffer capacity, in cells, allocated up front. Grows by doubling
@@ -141,7 +142,9 @@ impl BackgroundPass {
                     visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
+                        // One slot per composited pool plus the live grid's, so
+                        // every pool's globals coexist and a draw selects its own.
+                        has_dynamic_offset: true,
                         min_binding_size: None,
                     },
                     count: None,
@@ -199,7 +202,7 @@ impl BackgroundPass {
 
         let globals = device.create_buffer(&BufferDescriptor {
             label: Some("background globals"),
-            size: size_of::<Globals>() as u64,
+            size: GLOBALS_SLOTS as u64 * GLOBALS_SLOT_STRIDE,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -351,8 +354,10 @@ impl BackgroundPass {
     /// [`Self::draw_composite`] reads, leaving the live buffer intact for the
     /// next live frame.
     ///
-    /// `slot` identifies the pool among those composited this frame. Slots are
-    /// allocated on demand, so an unseen index costs one buffer once.
+    /// `pool` is the terminal's id for the pool, under which its instances are
+    /// kept across frames. `slot` is its position among this frame's pools, naming
+    /// the globals slot the matching [`Self::draw_composite`] binds. The two differ
+    /// because instances persist and globals do not.
     ///
     /// `grid_scroll` shifts the grid up by that many rows. The pool grid changes
     /// wholesale each frame, so every cell is rebuilt with no per-row damage
@@ -375,6 +380,7 @@ impl BackgroundPass {
         content_changed: bool,
         occludable: bool,
         pool: u32,
+        slot: usize,
     ) {
         let occluders = pool_occluders(occludable, panels);
         self.upload_occluders(device, queue, &occluders);
@@ -391,7 +397,11 @@ impl BackgroundPass {
             cols: grid.cols() as u32,
             cursor_color: [0.0; 4],
         };
-        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        queue.write_buffer(
+            &self.globals,
+            u64::from(globals_offset(slot)),
+            bytemuck::bytes_of(&globals),
+        );
 
         // Cell quads carry no atlas UVs, so a sub-cell glide over unchanged rows
         // reuses last frame's instances once the globals write above has
@@ -460,24 +470,27 @@ impl BackgroundPass {
         }
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_bind_group(0, &self.bind_group, &[0]);
         render_pass.set_vertex_buffer(0, self.instances.slice(..));
         render_pass.draw(0..6, 0..self.count);
     }
 
     /// Record a composited pool's background draw into `render_pass`.
     ///
-    /// A no-op until [`Self::prepare_composite`] has run for `slot` with a
-    /// non-empty grid. Reads that slot's buffer, so drawing a pool leaves both the
+    /// A no-op until [`Self::prepare_composite`] has run for `pool` with a
+    /// non-empty grid. Reads that pool's instances, so drawing it leaves both the
     /// live cell instances a prior [`Self::prepare`] uploaded and the other pools'
-    /// slots untouched.
-    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>, pool: u32) {
+    /// untouched.
+    ///
+    /// `slot` must be the one that prepare was given, since it selects the globals
+    /// the draw reads.
+    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>, pool: u32, slot: usize) {
         let Some(target) = self.composite_slots.get(pool).filter(|s| s.count > 0) else {
             return;
         };
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_bind_group(0, &self.bind_group, &[globals_offset(slot)]);
         render_pass.set_vertex_buffer(0, target.instances.slice(..));
         render_pass.draw(0..6, 0..target.count);
     }
@@ -492,7 +505,7 @@ impl BackgroundPass {
         }
 
         render_pass.set_pipeline(&self.cursor_pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_bind_group(0, &self.bind_group, &[0]);
         render_pass.draw(0..6, 0..1);
     }
 }
@@ -540,7 +553,13 @@ fn make_bind_group(
         entries: &[
             BindGroupEntry {
                 binding: 0,
-                resource: globals.as_entire_binding(),
+                // Bound to one slot's worth, so a dynamic offset selects a slot
+                // rather than sliding a window over the whole buffer.
+                resource: BindingResource::Buffer(BufferBinding {
+                    buffer: globals,
+                    offset: 0,
+                    size: BufferSize::new(size_of::<Globals>() as u64),
+                }),
             },
             BindGroupEntry {
                 binding: 1,

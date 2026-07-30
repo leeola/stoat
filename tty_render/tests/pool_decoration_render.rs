@@ -134,6 +134,7 @@ fn pool_decorations_composite_and_glide_with_the_shift() {
             true,
             true,
             0,
+            0,
         );
         read_back(&device, &queue, &target, width, height)
     };

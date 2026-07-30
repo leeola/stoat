@@ -563,6 +563,7 @@ impl Renderer {
         content_changed: bool,
         occludable: bool,
         pool: u32,
+        slot: usize,
     ) {
         let Some(scissor) = clamp_scissor(scissor, self.width, self.height) else {
             return;
@@ -579,6 +580,7 @@ impl Renderer {
             content_changed,
             occludable,
             pool,
+            slot,
         );
         self.text.prepare_composite(
             device,
@@ -590,6 +592,7 @@ impl Renderer {
             content_changed,
             occludable,
             pool,
+            slot,
         );
         self.bar.prepare_composite(
             device,
@@ -600,6 +603,7 @@ impl Renderer {
             shift_rows,
             occludable,
             pool,
+            slot,
         );
         self.polyline.prepare_composite(
             device,
@@ -610,6 +614,7 @@ impl Renderer {
             shift_rows,
             occludable,
             pool,
+            slot,
         );
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
@@ -633,13 +638,14 @@ impl Renderer {
             });
 
             render_pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
-            self.background.draw_composite(&mut render_pass, pool);
-            self.text.draw_composite(&mut render_pass, pool);
+            self.background.draw_composite(&mut render_pass, pool, slot);
+            self.text.draw_composite(&mut render_pass, pool, slot);
             // Off-grid gutter chrome sits above the page glyphs but below the
             // cursor. Bars fill behind the scaled run text.
-            self.bar.draw_composite(&mut render_pass, pool);
-            self.polyline.draw_composite(&mut render_pass, pool);
-            self.text.draw_composite_text_runs(&mut render_pass, pool);
+            self.bar.draw_composite(&mut render_pass, pool, slot);
+            self.polyline.draw_composite(&mut render_pass, pool, slot);
+            self.text
+                .draw_composite_text_runs(&mut render_pass, pool, slot);
         }
 
         queue.submit([encoder.finish()]);
@@ -1199,7 +1205,7 @@ impl GpuContext {
         let epoch_before = self.renderer.content_epoch();
 
         let panels = live_grid.panels();
-        for pool in pools {
+        for (slot, pool) in pools.iter().enumerate() {
             self.renderer.composite_pool(
                 &self.device,
                 &self.queue,
@@ -1211,6 +1217,7 @@ impl GpuContext {
                 pool.content_changed,
                 pool.occludable,
                 pool.id,
+                slot,
             );
         }
 

@@ -123,6 +123,7 @@ fn pool_composite_keeps_live_instances() {
         true,
         true,
         0,
+        0,
     );
     let idle = Damage::Partial(vec![false; rows]);
     renderer.render_into(&device, &queue, &view, &live, frame(&idle));
@@ -257,6 +258,7 @@ fn shift_only_composite_reuses_prior_rows() {
         true,
         true,
         0,
+        0,
     );
 
     // Reset the surface to the live grid, then composite the white pool as a
@@ -273,6 +275,7 @@ fn shift_only_composite_reuses_prior_rows() {
         0.0,
         false,
         true,
+        0,
         0,
     );
     let reused = read_back(&device, &queue, &target, width, height);
@@ -390,7 +393,9 @@ fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
         [0, band * 2, width, band],
     ];
 
-    let composite = |renderer: &mut Renderer, grid: &Grid, scissor, changed, pool| {
+    // The pool id keys the instance buffers across frames. The slot is only this
+    // frame's globals slot, so it moves when a pool leaves the frame.
+    let composite = |renderer: &mut Renderer, grid: &Grid, scissor, changed, pool, slot| {
         renderer.composite_pool(
             &device,
             &queue,
@@ -402,14 +407,15 @@ fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
             changed,
             true,
             pool,
+            slot,
         );
     };
 
     // Each pool builds its own instances.
     renderer.render_into(&device, &queue, &view, &live, frame(&Damage::Full));
-    composite(&mut renderer, &gray_pool, bands[0], true, gray_id);
-    composite(&mut renderer, &white_pool, bands[1], true, white_id);
-    composite(&mut renderer, &blue_pool, bands[2], true, blue_id);
+    composite(&mut renderer, &gray_pool, bands[0], true, gray_id, 0);
+    composite(&mut renderer, &white_pool, bands[1], true, white_id, 1);
+    composite(&mut renderer, &blue_pool, bands[2], true, blue_id, 2);
 
     let idle = Damage::Partial(vec![false; rows]);
     let pixel = |shot: &[u8], y: u32| {
@@ -423,9 +429,9 @@ fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
     // Every pool reuses, each handed a sibling's grid, so reading its own prior
     // instances is the only way to come out with its own color.
     renderer.render_into(&device, &queue, &view, &live, frame(&idle));
-    composite(&mut renderer, &white_pool, bands[0], false, gray_id);
-    composite(&mut renderer, &blue_pool, bands[1], false, white_id);
-    composite(&mut renderer, &gray_pool, bands[2], false, blue_id);
+    composite(&mut renderer, &white_pool, bands[0], false, gray_id, 0);
+    composite(&mut renderer, &blue_pool, bands[1], false, white_id, 1);
+    composite(&mut renderer, &gray_pool, bands[2], false, blue_id, 2);
     let held = read_back(&device, &queue, &target, width, height);
     let shape = (
         pixel(&held, band / 2),
@@ -440,8 +446,8 @@ fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
     // The gray pool settles and leaves the frame, so white and blue shift down a
     // position. Their buffers must follow their ids, not the positions.
     renderer.render_into(&device, &queue, &view, &live, frame(&idle));
-    composite(&mut renderer, &gray_pool, bands[1], false, white_id);
-    composite(&mut renderer, &blue_pool, bands[2], false, blue_id);
+    composite(&mut renderer, &gray_pool, bands[1], false, white_id, 0);
+    composite(&mut renderer, &blue_pool, bands[2], false, blue_id, 1);
     let shifted = read_back(&device, &queue, &target, width, height);
     let survivors = (
         pixel(&shifted, band + band / 2),
@@ -609,6 +615,7 @@ fn pool_grow_heals_live_instances() {
         true,
         true,
         0,
+        0,
     );
     let idle = Damage::Partial(vec![false; rows]);
     renderer.render_into(&device, &queue, &view, &live, frame(&idle));
@@ -704,14 +711,38 @@ fn composite_pool_bumps_content_epoch_only_on_atlas_change() {
 
     let full = [0, 0, width, height];
     let before = renderer.content_epoch();
-    renderer.composite_pool(&device, &queue, &view, &pool, &[], full, 0.0, true, true, 0);
+    renderer.composite_pool(
+        &device,
+        &queue,
+        &view,
+        &pool,
+        &[],
+        full,
+        0.0,
+        true,
+        true,
+        0,
+        0,
+    );
     let after_new = renderer.content_epoch();
     assert_ne!(
         after_new, before,
         "a burst of never-seen glyphs that overflows the atlas must bump the epoch"
     );
 
-    renderer.composite_pool(&device, &queue, &view, &pool, &[], full, 0.0, true, true, 0);
+    renderer.composite_pool(
+        &device,
+        &queue,
+        &view,
+        &pool,
+        &[],
+        full,
+        0.0,
+        true,
+        true,
+        0,
+        0,
+    );
     let after_repeat = renderer.content_epoch();
     assert_eq!(
         after_repeat, after_new,

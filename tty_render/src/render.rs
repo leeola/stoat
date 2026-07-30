@@ -153,6 +153,32 @@ pub(crate) struct CompositeSlot {
 /// rather than correctness.
 const MAX_COMPOSITE_POOLS: usize = 32;
 
+/// Byte stride between a globals buffer's slots.
+///
+/// A dynamic uniform offset has to be a multiple of the adapter's
+/// `min_uniform_buffer_offset_alignment`, and 256 is the ceiling any adapter is
+/// guaranteed to accept. Every pass's globals struct is far smaller, so one slot is
+/// one stride.
+pub(crate) const GLOBALS_SLOT_STRIDE: u64 = 256;
+
+/// Slots a pass's globals buffer holds: one per pool, plus the live grid's.
+pub(crate) const GLOBALS_SLOTS: usize = MAX_COMPOSITE_POOLS + 1;
+
+/// Byte offset of the globals a composited pool at frame slot `slot` reads.
+///
+/// Keyed by the pool's position in the frame rather than by its id, unlike the
+/// instance buffers in [`CompositeSlots`]. Globals are written and drawn within one
+/// frame, so they need no identity across frames, and a pool id is far too sparse
+/// to index a buffer by.
+///
+/// Slot 0 belongs to the live grid, so a pool's slots start above it. A slot past
+/// the cap shares the last one, which stays correct only while each pool draws
+/// before the next writes.
+pub(crate) fn globals_offset(slot: usize) -> u32 {
+    let slot = 1 + slot.min(MAX_COMPOSITE_POOLS - 1);
+    (slot as u64 * GLOBALS_SLOT_STRIDE) as u32
+}
+
 /// A pass's per-pool composite state, keyed by pool id.
 ///
 /// Keyed by id rather than by the pool's position in the frame, because pools
@@ -414,10 +440,37 @@ pub fn cell_size(font_size: u32, scale_factor: f32) -> [f32; 2] {
 #[cfg(test)]
 mod tests {
     use super::{
-        occlusion_globals, pool_occluders, rotate_row_cache, row_runs, row_uploads, CellMetrics,
-        CompositeSlots, MAX_COMPOSITE_POOLS,
+        globals_offset, occlusion_globals, pool_occluders, rotate_row_cache, row_runs, row_uploads,
+        CellMetrics, CompositeSlots, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
     };
     use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
+
+    /// Every pool reads its own aligned slot, and none reads the live grid's.
+    #[test]
+    fn each_pool_slot_lands_on_its_own_aligned_globals_offset() {
+        let offsets: Vec<u32> = (0..4).map(globals_offset).collect();
+        let stride = GLOBALS_SLOT_STRIDE as u32;
+        assert_eq!(
+            offsets,
+            [stride, stride * 2, stride * 3, stride * 4],
+            "slots step by one stride, starting above the live grid's slot zero"
+        );
+    }
+
+    /// A slot past the cap shares the last one rather than pointing off the end of
+    /// the buffer, which wgpu would reject outright.
+    #[test]
+    fn a_slot_past_the_cap_stays_inside_the_globals_buffer() {
+        let last = globals_offset(MAX_COMPOSITE_POOLS - 1);
+        let past = globals_offset(MAX_COMPOSITE_POOLS * 4);
+
+        let end = GLOBALS_SLOTS as u64 * GLOBALS_SLOT_STRIDE;
+        assert_eq!(
+            (past, u64::from(past) + GLOBALS_SLOT_STRIDE <= end),
+            (last, true),
+            "an overflowing slot clamps to the last one, which the buffer still holds"
+        );
+    }
 
     /// A pool keeps its own slot across frames whose pool set changes shape, which
     /// is what keying by id buys over keying by position in the frame.
