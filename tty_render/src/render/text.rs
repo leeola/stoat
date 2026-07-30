@@ -356,6 +356,10 @@ pub struct TextPass {
     /// a VT cell attribute, so VT damage tracks it; scroll rides the globals
     /// uniform, so this survives a scroll-only frame.
     underline_row_instances: Vec<Vec<UnderlineInstance>>,
+    /// The rows whose underlines rebuild this frame, ascending, which is both what
+    /// gets rebuilt and what gets patched into the buffer. Held across frames so a
+    /// damaged frame allocates no temporary.
+    underline_rows_to_build: Vec<usize>,
     /// The row indices rebuilt this frame, reused across frames so
     /// `rasterize_visible` allocates no per-frame temporary.
     rebuilt_scratch: Vec<usize>,
@@ -682,6 +686,7 @@ impl TextPass {
             region_row_instances: Vec::new(),
             region_split: None,
             underline_row_instances: Vec::new(),
+            underline_rows_to_build: Vec::new(),
             rebuilt_scratch: Vec::new(),
             plain_upload_scratch: Vec::new(),
             underline_upload_scratch: Vec::new(),
@@ -1533,11 +1538,14 @@ impl TextPass {
 
     /// Rebuild and re-upload only the damaged rows' underline instances.
     ///
-    /// Underline is a VT cell attribute, so `damage` tracks it: unchanged rows
-    /// reuse last frame's [`Self::underline_row_instances`], damaged rows (and
-    /// every row on `Damage::Full` or a resize) rebuild, and the upload runs from
-    /// the first changed row to the end. Scroll rides the globals uniform, so a
-    /// scroll-only frame reuses the buffer untouched.
+    /// Underline is a VT cell attribute, so `damage` tracks it. Unchanged rows reuse
+    /// last frame's [`Self::underline_row_instances`], while damaged rows, and every
+    /// row on `Damage::Full` or a resize, rebuild. Scroll rides the globals uniform,
+    /// so a scroll-only frame reuses the buffer untouched.
+    ///
+    /// The rebuilt rows are patched where they sit, adjacent ones sharing a write. A
+    /// row that came back a different length displaced the rows after it, so from
+    /// there to the end the buffer is rewritten as one span.
     fn prepare_underlines(&mut self, device: &Device, queue: &Queue, grid: &Grid, damage: &Damage) {
         let rows = grid.rows();
         let stale = self.underline_row_instances.len() != rows;
@@ -1545,67 +1553,94 @@ impl TextPass {
             self.underline_row_instances = vec![Vec::new(); rows];
         }
 
-        let build_all = matches!(damage, Damage::Full) || stale;
-        // A rotation moved every kept instance, so the buffer rewrites from the
-        // top even when no row rebuilt.
-        let mut first = self.rows_shifted.then_some(0);
-        for row in 0..rows {
-            if build_all || damage.is_dirty(row) {
-                let mut instances = mem::take(&mut self.underline_row_instances[row]);
-                instances.clear();
-                build_underline_row_into(grid, row, self.metrics, &mut instances);
-                self.underline_row_instances[row] = instances;
-                first.get_or_insert(row);
+        underline_rows_to_build(damage, rows, stale, &mut self.underline_rows_to_build);
+        if self.underline_rows_to_build.is_empty() && !self.rows_shifted {
+            return;
+        }
+
+        let metrics = self.metrics;
+        let mut resized = None;
+        {
+            let TextPass {
+                underline_rows_to_build,
+                underline_row_instances,
+                ..
+            } = self;
+            for &row in underline_rows_to_build.iter() {
+                let built = &mut underline_row_instances[row];
+                let held = built.len();
+
+                built.clear();
+                build_underline_row_into(grid, row, metrics, built);
+
+                if built.len() != held && resized.is_none() {
+                    resized = Some(row);
+                }
             }
         }
-        let Some(first) = first else {
-            return;
+
+        // A rotation moved every kept instance, so the buffer rewrites from the
+        // top even on a frame that rebuilt no row.
+        let rewrite_from = if self.rows_shifted {
+            (rows > 0).then_some(0)
+        } else {
+            resized
         };
 
-        let offset: usize = self.underline_row_instances[..first]
-            .iter()
-            .map(Vec::len)
-            .sum();
-        let tail_len: usize = self.underline_row_instances[first..]
-            .iter()
-            .map(Vec::len)
-            .sum();
-        self.underline_count = (offset + tail_len) as u32;
-        if offset + tail_len == 0 {
+        let total = row_len(&self.underline_row_instances);
+        self.underline_count = total as u32;
+        if total == 0 {
             return;
         }
 
-        if offset + tail_len > self.underline_capacity {
+        let mut scratch = mem::take(&mut self.underline_upload_scratch);
+        if total > self.underline_capacity {
             // Growing the buffer drops its contents, so re-upload every row.
-            self.underline_capacity = (offset + tail_len).next_power_of_two();
+            self.underline_capacity = total.next_power_of_two();
             self.underline_instances = alloc_instances(
                 device,
                 "underline instances",
                 instance_bytes::<UnderlineInstance>(self.underline_capacity),
             );
-            self.underline_upload_scratch.clear();
-            self.underline_upload_scratch
-                .extend(self.underline_row_instances.iter().flatten().copied());
-            queue.write_buffer(
-                &self.underline_instances,
-                0,
-                bytemuck::cast_slice(&self.underline_upload_scratch),
-            );
+            self.upload_underline_rows(queue, &mut scratch, 0, 0..rows);
         } else {
-            self.underline_upload_scratch.clear();
-            self.underline_upload_scratch.extend(
-                self.underline_row_instances[first..]
-                    .iter()
-                    .flatten()
-                    .copied(),
+            let uploads = row_uploads(
+                &self.underline_row_instances,
+                &self.underline_rows_to_build,
+                rewrite_from,
             );
-            let byte_offset = (offset * size_of::<UnderlineInstance>()) as u64;
-            queue.write_buffer(
-                &self.underline_instances,
-                byte_offset,
-                bytemuck::cast_slice(&self.underline_upload_scratch),
-            );
+            for (offset, run) in uploads {
+                self.upload_underline_rows(queue, &mut scratch, offset, run);
+            }
         }
+        self.underline_upload_scratch = scratch;
+    }
+
+    /// Write rows `range` of the per-row underline cache into the instance buffer,
+    /// at `offset` instances from its start.
+    fn upload_underline_rows(
+        &self,
+        queue: &Queue,
+        scratch: &mut Vec<UnderlineInstance>,
+        offset: usize,
+        range: Range<usize>,
+    ) {
+        scratch.clear();
+        scratch.extend(
+            self.underline_row_instances[range]
+                .iter()
+                .flatten()
+                .copied(),
+        );
+        if scratch.is_empty() {
+            return;
+        }
+
+        queue.write_buffer(
+            &self.underline_instances,
+            (offset * size_of::<UnderlineInstance>()) as u64,
+            bytemuck::cast_slice(scratch),
+        );
     }
 
     /// Record the glyph draw, then the underline draw, into `render_pass`.
@@ -3343,6 +3378,23 @@ fn overlay_content_cells(
     line_starts.push(cells.len() as u32);
 }
 
+/// Collect into `out` the rows whose underlines rebuild this frame.
+///
+/// Ascending and free of duplicates, which is what lets the caller hand the same
+/// list to [`row_uploads`] as the rows to patch.
+///
+/// `stale` says the per-row cache was just resized and holds nothing worth keeping,
+/// so every row rebuilds. Full damage needs no case of its own, since it reports
+/// every row dirty.
+fn underline_rows_to_build(damage: &Damage, rows: usize, stale: bool, out: &mut Vec<usize>) {
+    out.clear();
+    if stale {
+        out.extend(0..rows);
+    } else {
+        out.extend((0..rows).filter(|&row| damage.is_dirty(row)));
+    }
+}
+
 /// The content lines `overlay`'s box can show at `scroll`, as a range over
 /// `content`'s lines.
 fn overlay_window(overlay: &Overlay, scroll: f32, content: &OverlayContent) -> Range<usize> {
@@ -3457,14 +3509,14 @@ mod tests {
         fill_cell_box, font_covers, glyph_family, glyph_origin, grid_build, is_cell_fill,
         load_bundled_fonts, overlay_content_cells, region_split, resolve_primary_family,
         resolve_primary_font, row_len, run_text_and_columns_into, shape_char, shape_family,
-        shape_run, shape_run_cached, text_run_origin, visible_lines, GlyphSource, GridBuild,
-        OverlayContent, PendingGlyph, RectInstance, RowShaping, RunShapeCache, TextInstance,
-        TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
+        shape_run, shape_run_cached, text_run_origin, underline_rows_to_build, visible_lines,
+        GlyphSource, GridBuild, OverlayContent, PendingGlyph, RectInstance, RowShaping,
+        RunShapeCache, TextInstance, TextPass, UnderlineInstance, STYLE_DOTTED, SYMBOLS_FAMILY,
     };
     use crate::{
         atlas::{AtlasKind, GlyphInfo},
         gpu::headless_device,
-        render::{CellMetrics, Frame, Scroll},
+        render::{row_uploads, CellMetrics, Frame, Scroll},
     };
     use cosmic_text::{
         fontdb::{Database, Query, Weight},
@@ -4567,6 +4619,56 @@ mod tests {
         assert!(
             patched.1 > 0 && patched.0 > 0,
             "the region has to hold some glyphs and leave some outside: {patched:?}"
+        );
+    }
+
+    /// Two dirty underline rows with a clean row between them travel as two writes,
+    /// not one span reaching from the first of them to the end of the buffer.
+    ///
+    /// Driven through the same two calls the pass makes, since the coalescing is only
+    /// as good as the row list handed to it. A list that included clean rows, or came
+    /// out unsorted, would collapse the runs back into one.
+    #[test]
+    fn disjoint_dirty_underline_rows_upload_separately() {
+        let underline = UnderlineInstance {
+            cell_pos: [0.0, 0.0],
+            color: [0.0; 3],
+            style: STYLE_DOTTED,
+        };
+        // Rows of differing length, so a write placed by summing the rows before it
+        // lands somewhere a fixed stride would not.
+        let cache: Vec<Vec<UnderlineInstance>> = [2, 1, 3, 1, 2]
+            .iter()
+            .map(|&len| vec![underline; len])
+            .collect();
+
+        let mut rows = Vec::new();
+        let dirty = Damage::Partial(vec![false, true, false, true, false]);
+        underline_rows_to_build(&dirty, cache.len(), false, &mut rows);
+        assert_eq!(rows, [1, 3], "only the dirty rows, ascending");
+
+        assert_eq!(
+            row_uploads(&cache, &rows, None).collect::<Vec<_>>(),
+            [(2, 1..2), (6, 3..4)],
+            "one write per dirty row, each offset past the rows before it"
+        );
+
+        // The row that came back a different length displaced the rows after it, so
+        // from there the buffer has to be rewritten rather than patched.
+        assert_eq!(
+            row_uploads(&cache, &rows, Some(3)).collect::<Vec<_>>(),
+            [(2, 1..2), (6, 3..5)],
+            "the resized row's write runs to the end and absorbs the rows after it"
+        );
+
+        underline_rows_to_build(&Damage::Full, cache.len(), false, &mut rows);
+        assert_eq!(rows, [0, 1, 2, 3, 4], "full damage rebuilds every row");
+
+        underline_rows_to_build(&dirty, cache.len(), true, &mut rows);
+        assert_eq!(
+            rows,
+            [0, 1, 2, 3, 4],
+            "a resized cache rebuilds every row whatever the damage says"
         );
     }
 
