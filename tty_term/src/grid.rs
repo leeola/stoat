@@ -7,6 +7,7 @@
 
 use std::{
     collections::HashMap,
+    mem,
     ops::{BitOr, BitOrAssign},
     sync::Arc,
 };
@@ -295,10 +296,64 @@ impl Grid {
     /// gutter declares one run per visible line, so collecting into a fresh
     /// vector would allocate one per frame. `run` is called once per index in
     /// order.
-    pub fn fill_text_runs(&mut self, count: usize, mut run: impl FnMut(usize) -> TextRun) {
-        self.text_runs.clear();
-        self.text_runs.reserve(count);
-        self.text_runs.extend((0..count).map(&mut run));
+    ///
+    /// The list is held out of the grid while `run` fills it, so `run` can read the
+    /// grid it is building into. A run resolves its declared logical row through the
+    /// line layout, which lives here.
+    pub fn fill_text_runs(&mut self, count: usize, run: impl FnMut(&Grid, usize) -> TextRun) {
+        let mut text_runs = mem::take(&mut self.text_runs);
+        self.fill_list(&mut text_runs, count, run);
+        self.text_runs = text_runs;
+    }
+
+    /// Replace the bar list with `count` bars built by `bar`, reusing the vector
+    /// already there.
+    ///
+    /// Rebuilt whenever the bars or the line layout are dirty, and an editor
+    /// re-sends its layout on any wrap change, so this runs far more often than the
+    /// bars themselves change. `bar` reads the grid for the same reason
+    /// [`Self::fill_text_runs`] does.
+    pub fn fill_bars(&mut self, count: usize, bar: impl FnMut(&Grid, usize) -> Bar) {
+        let mut bars = mem::take(&mut self.bars);
+        self.fill_list(&mut bars, count, bar);
+        self.bars = bars;
+    }
+
+    /// Replace the overlay list with `count` overlays built by `overlay`, reusing
+    /// the vector already there.
+    pub fn fill_overlays(&mut self, count: usize, overlay: impl FnMut(usize) -> Overlay) {
+        fill_owned(&mut self.overlays, count, overlay);
+    }
+
+    /// Replace the panel list with `count` panels built by `panel`, reusing the
+    /// vector already there.
+    pub fn fill_panels(&mut self, count: usize, panel: impl FnMut(usize) -> Panel) {
+        fill_owned(&mut self.panels, count, panel);
+    }
+
+    /// Replace the icon list with `count` icons built by `icon`, reusing the vector
+    /// already there.
+    pub fn fill_icons(&mut self, count: usize, icon: impl FnMut(usize) -> Icon) {
+        fill_owned(&mut self.icons, count, icon);
+    }
+
+    /// Replace the minimap list with `count` strips built by `minimap`, reusing the
+    /// vector already there.
+    pub fn fill_minimaps(&mut self, count: usize, minimap: impl FnMut(usize) -> Minimap) {
+        fill_owned(&mut self.minimaps, count, minimap);
+    }
+
+    /// Fill `list` with `count` items built from this grid, for a list already taken
+    /// out of it so the closure can read it.
+    fn fill_list<T>(
+        &self,
+        list: &mut Vec<T>,
+        count: usize,
+        mut item: impl FnMut(&Grid, usize) -> T,
+    ) {
+        list.clear();
+        list.reserve(count);
+        list.extend((0..count).map(|index| item(self, index)));
     }
 
     /// The run list, for a caller rewriting it from another grid's.
@@ -1004,6 +1059,16 @@ pub struct Polyline {
     /// Monotonic declaration-order index across all non-cell components. See
     /// [`Panel::seq`].
     pub seq: u32,
+}
+
+/// Fill `list` with `count` items built by `item`, keeping the vector's allocation.
+///
+/// For a list whose builder needs nothing from the grid. The ones that do go through
+/// [`Grid::fill_list`], which hands the grid to the builder.
+fn fill_owned<T>(list: &mut Vec<T>, count: usize, mut item: impl FnMut(usize) -> T) {
+    list.clear();
+    list.reserve(count);
+    list.extend((0..count).map(&mut item));
 }
 
 /// Convert a page-local [`TextRunCommand`] to its grid [`TextRun`] at capture

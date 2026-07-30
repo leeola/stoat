@@ -2933,17 +2933,13 @@ fn apply_scales(grid: &mut Grid, commands: &[ScaleCommand], rows_dirty: &Damage)
 /// projection rather than stamped per cell. The region is clamped or clipped by
 /// the renderer, so out-of-grid anchors need no guard here.
 fn apply_popovers(grid: &mut Grid, commands: &[PopoverCommand]) {
-    let overlays = commands.iter().map(popover_overlay).collect();
-    grid.set_overlays(overlays);
+    grid.fill_overlays(commands.len(), |index| popover_overlay(&commands[index]));
 }
 
 fn apply_panels(grid: &mut Grid, commands: &[PanelCommand], seqs: &[u32]) {
-    let panels = commands
-        .iter()
-        .zip(seqs)
-        .map(|(command, &seq)| panel_grid(command, seq))
-        .collect();
-    grid.set_panels(panels);
+    grid.fill_panels(commands.len(), |index| {
+        panel_grid(&commands[index], seqs[index])
+    });
 }
 
 /// Set the grid's scrollable region from the stored command, or clear it.
@@ -2967,20 +2963,18 @@ fn apply_scroll_region(grid: &mut Grid, command: Option<ScrollRegionCommand>) {
 /// than stamped per cell. The renderer clamps an out-of-grid anchor, so wire
 /// coordinates need no guard here.
 fn apply_icons(grid: &mut Grid, commands: &[IconCommand], seqs: &[u32]) {
-    let icons = commands
-        .iter()
-        .zip(seqs)
-        .map(|(command, &seq)| Icon {
+    grid.fill_icons(commands.len(), |index| {
+        let command = &commands[index];
+        Icon {
             top: command.top,
             left: command.left,
             kind: grid_icon_kind(command.kind),
             color: Rgb::new(command.color[0], command.color[1], command.color[2]),
             size: command.size,
             offset: command.offset,
-            seq,
-        })
-        .collect();
-    grid.set_icons(icons);
+            seq: seqs[index],
+        }
+    });
 }
 
 fn grid_icon_kind(kind: command::IconKind) -> IconKind {
@@ -3118,16 +3112,11 @@ fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, page_rows: 
 /// line layout, so a run tracks expansions above it. The renderer clamps an
 /// out-of-grid anchor, so wire coordinates need no guard here.
 fn apply_text_runs(grid: &mut Grid, runs: &[StoredTextRun], seqs: &[u32]) {
-    let rows: Vec<i16> = runs
-        .iter()
-        .map(|run| resolve_logical_row(grid, run.row))
-        .collect();
-
-    grid.fill_text_runs(runs.len(), |index| {
+    grid.fill_text_runs(runs.len(), |grid, index| {
         let run = &runs[index];
         TextRun {
             col: run.col,
-            row: rows[index],
+            row: resolve_logical_row(grid, run.row),
             scale: run.scale,
             color: Rgb::new(run.color[0], run.color[1], run.color[2]),
             bg: run.bg.map(|b| Rgb::new(b[0], b[1], b[2])),
@@ -3143,19 +3132,17 @@ fn apply_text_runs(grid: &mut Grid, runs: &[StoredTextRun], seqs: &[u32]) {
 /// than stamped per cell. The declared `y` is a logical row resolved through the
 /// line layout, so a bar tracks expansions above it.
 fn apply_bars(grid: &mut Grid, commands: &[BarCommand], seqs: &[u32]) {
-    let bars = commands
-        .iter()
-        .zip(seqs)
-        .map(|(command, &seq)| Bar {
+    grid.fill_bars(commands.len(), |grid, index| {
+        let command = &commands[index];
+        Bar {
             x: command.x,
             y: resolve_logical_row(grid, command.y),
             width: command.width,
             height: command.height,
             color: Rgb::new(command.color[0], command.color[1], command.color[2]),
-            seq,
-        })
-        .collect();
-    grid.set_bars(bars);
+            seq: seqs[index],
+        }
+    });
 }
 
 /// Replace the grid's polyline list with each stored command's path.
@@ -3163,17 +3150,27 @@ fn apply_bars(grid: &mut Grid, commands: &[BarCommand], seqs: &[u32]) {
 /// Grid-level like the bars, so the full list is set each projection. Points
 /// pass through unresolved, because a path is free geometry rather than a
 /// component anchored to a logical row.
+///
+/// Each path's point list is refilled where it sits rather than cloned from the
+/// command, since this re-runs on every line-layout change and a commit graph
+/// declares a path per lane.
 fn apply_polylines(grid: &mut Grid, commands: &[PolylineCommand], seqs: &[u32]) {
-    let polylines = commands
-        .iter()
-        .zip(seqs)
-        .map(|(command, &seq)| Polyline {
-            points: command.points.clone(),
-            width: command.width,
-            color: Rgb::new(command.color[0], command.color[1], command.color[2]),
-            seq,
-        })
-        .collect();
+    let mut polylines = mem::take(grid.polylines_mut());
+
+    polylines.resize_with(commands.len(), || Polyline {
+        points: Vec::new(),
+        width: 0,
+        color: Rgb::new(0, 0, 0),
+        seq: 0,
+    });
+    for ((slot, command), &seq) in polylines.iter_mut().zip(commands).zip(seqs) {
+        slot.points.clear();
+        slot.points.extend_from_slice(&command.points);
+        slot.width = command.width;
+        slot.color = Rgb::new(command.color[0], command.color[1], command.color[2]);
+        slot.seq = seq;
+    }
+
     grid.set_polylines(polylines);
 }
 
@@ -3188,16 +3185,14 @@ fn apply_minimaps(
     seqs: &[u32],
     views: &HashMap<u32, MinimapView>,
 ) {
-    let minimaps = commands
-        .iter()
-        .zip(seqs)
-        .map(|(command, &seq)| Minimap {
+    grid.fill_minimaps(commands.len(), |index| {
+        let command = &commands[index];
+        Minimap {
             command: command.clone(),
-            seq,
+            seq: seqs[index],
             view: views.get(&command.strip_id).copied(),
-        })
-        .collect();
-    grid.set_minimaps(minimaps);
+        }
+    });
 }
 
 /// Resolve a component's declared logical row, in sixteenth-cell units, to the
@@ -5570,6 +5565,54 @@ mod tests {
                 color: Rgb::new(1, 2, 3),
                 seq: 1,
             }]
+        );
+    }
+
+    /// Reprojecting refills each path's point list where it sits, so the points must
+    /// come out as declared rather than appended to what the last projection left.
+    ///
+    /// A path list that shrinks must lose its tail too, or a cleared lane would keep
+    /// drawing.
+    #[test]
+    fn reprojected_paths_hold_only_what_is_declared() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+
+        let path = |x: i16| {
+            encode_polyline(&PolylineCommand {
+                points: vec![[x, 0], [x + 16, 16]],
+                width: 4,
+                color: [1, 2, 3],
+            })
+        };
+        terminal.advance(&path(0));
+        terminal.advance(&path(32));
+        terminal.project(&mut grid);
+
+        // A re-sent line layout re-applies the paths without redeclaring them, which
+        // is what an editor does on every wrap change.
+        terminal.advance(&encode_line_layout(&LineLayoutCommand {
+            heights: vec![1, 1],
+        }));
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.polylines()
+                .iter()
+                .map(|line| line.points.as_slice())
+                .collect::<Vec<_>>(),
+            [[[0, 0], [16, 16]], [[32, 0], [48, 16]]],
+            "a second projection refills the points rather than growing them",
+        );
+
+        // A reset clears the declared paths, so the projection has none to place.
+        terminal.advance(&encode_reset());
+        terminal.project(&mut grid);
+
+        assert!(
+            grid.polylines().is_empty(),
+            "a path no longer declared leaves no entry behind, found {}",
+            grid.polylines().len(),
         );
     }
 
