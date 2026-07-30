@@ -309,12 +309,21 @@ fn read_loop(mut reader: impl Read, mut sink: impl FnMut(PtyOutput<'_>)) {
     sink(PtyOutput::Eof);
 }
 
-/// Append `bytes` to `tail`, then drop the oldest so `tail` retains at most the
-/// newest `cap` bytes.
+/// Leave `tail` holding the newest `cap` bytes of itself followed by `bytes`.
 ///
 /// Maintains a bounded rolling window of the child's most recent output, held
 /// for the diagnostic logged when the pty closes.
 pub(crate) fn push_tail(tail: &mut Vec<u8>, bytes: &[u8], cap: usize) {
+    // A chunk at least as long as the cap supersedes the tail outright, so its own
+    // trailing bytes are the whole answer and the existing contents need no copy.
+    // Appending first would copy the chunk whole and discard nearly all of it, and a
+    // read chunk runs many times the cap.
+    if bytes.len() >= cap {
+        tail.clear();
+        tail.extend_from_slice(&bytes[bytes.len() - cap..]);
+        return;
+    }
+
     tail.extend_from_slice(bytes);
     if tail.len() > cap {
         tail.drain(..tail.len() - cap);
@@ -748,6 +757,18 @@ mod tests {
         assert_eq!(
             tail, b"defg",
             "overflow drops the oldest, keeping the newest cap"
+        );
+
+        push_tail(&mut tail, b"hijklmn", 4);
+        assert_eq!(
+            tail, b"klmn",
+            "a chunk longer than the cap supersedes the tail, keeping its own newest cap"
+        );
+
+        push_tail(&mut tail, b"opqr", 4);
+        assert_eq!(
+            tail, b"opqr",
+            "a chunk exactly at the cap replaces the tail entirely"
         );
     }
 
