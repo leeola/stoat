@@ -239,6 +239,15 @@ impl MinimapPass {
         occluders: &[Occluder],
         resolution: [f32; 2],
     ) {
+        // With no strip to draw now and none drawn last frame, nothing reads this
+        // pass's buffers, so the frame skips it without touching the GPU. The frame
+        // that empties the list still runs, which is what clears the strips and stops
+        // the draw. Leaving `last_build` unstamped is safe because a strip appearing
+        // bumps the minimap epoch, so the rebuild below cannot be skipped for it.
+        if grid.minimaps().is_empty() && self.strips.is_empty() {
+            return;
+        }
+
         self.upload_occluders(device, queue, occluders);
 
         let globals = Globals {

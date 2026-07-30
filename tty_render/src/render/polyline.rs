@@ -236,6 +236,14 @@ impl PolylinePass {
         occluders: &[Occluder],
         resolution: [f32; 2],
     ) {
+        // With no path to draw now and none drawn last frame, nothing reads this
+        // pass's buffers, so the frame skips it without touching the GPU. The frame
+        // that empties the list still runs, which is what drops the count to zero
+        // and stops the draw.
+        if polylines.is_empty() && self.count == 0 {
+            return;
+        }
+
         self.upload_occluders(device, queue, occluders);
 
         let globals = Globals {

@@ -211,6 +211,14 @@ impl PanelPass {
     /// `resolution` is the surface size in physical pixels. Reallocates the
     /// instance buffer only when the panel count outgrows the current capacity.
     pub fn prepare(&mut self, device: &Device, queue: &Queue, grid: &Grid, resolution: [f32; 2]) {
+        // With no panel to draw now and none drawn last frame, nothing reads this
+        // pass's buffers, so the frame skips it without touching the GPU. The frame
+        // that empties the list still runs, which is what drops the count to zero
+        // and stops the draw.
+        if grid.panels().is_empty() && self.count == 0 {
+            return;
+        }
+
         build_panel_instances_into(grid.panels(), &mut self.built);
         self.count = self.built.len() as u32;
 
