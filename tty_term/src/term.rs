@@ -2547,6 +2547,13 @@ impl Dimensions for GridSize {
 /// The pool clears the slot before this runs, so it copies each on-screen cell
 /// without damage tracking, resolving colors exactly as [`Terminal::project`]
 /// does for the live grid. Cells past the page's bounds are skipped.
+///
+/// The two grids are sized independently, so the copy is clamped to their overlap
+/// rather than assuming they agree, leaving any cell outside it with the pool's
+/// clear. They do agree in practice: a fill's context is built at its pool region's
+/// size, and a region re-declaration is dropped while a fill paints, so the region
+/// cannot move under an open fill. The clamp keeps that an invariant this function
+/// does not depend on.
 fn project_term_cells(
     grid: &mut Grid,
     term: &Term<ResponseSink>,
@@ -2556,18 +2563,19 @@ fn project_term_cells(
     let content = term.renderable_content();
     let offset = content.display_offset as i32;
 
-    for indexed in content.display_iter {
-        let row = indexed.point.line.0 + offset;
-        if row < 0 {
-            continue;
-        }
+    // Read per row from the term's own grid rather than filtering a cell iterator,
+    // so each row costs one bounds check instead of one per cell. `display_iter`
+    // maps grid `line + offset` to viewport `row`, so `line = row - offset` names
+    // the same cells, the inversion [`Terminal::project`] uses.
+    let term_grid = term.grid();
+    let rows = grid.rows().min(term.screen_lines());
+    let cols = grid.cols().min(term.columns());
 
-        let (row, col) = (row as usize, indexed.point.column.0);
-        if row >= grid.rows() || col >= grid.cols() {
-            continue;
+    for row in 0..rows {
+        let source = &term_grid[Line(row as i32 - offset)];
+        for (col, out) in grid.row_mut(row)[..cols].iter_mut().enumerate() {
+            *out = project_cell(&source[Column(col)], content.colors, theme, palette);
         }
-
-        *grid.get_mut(row, col) = project_cell(indexed.cell, content.colors, theme, palette);
     }
 }
 
@@ -5475,6 +5483,30 @@ mod tests {
             grid.get(0, 0).ch,
             ' ',
             "page content never reaches the live grid"
+        );
+    }
+
+    /// The commit copies the fill's screen a row at a time, mapping each page row to
+    /// the term line under it, so content on several rows has to land on the matching
+    /// rows rather than shifted or collapsed onto one.
+    #[test]
+    fn a_fill_lands_each_of_its_rows_on_the_matching_page_row() {
+        let mut terminal = Terminal::new(3, 4, Theme::default());
+
+        declare_pool(&mut terminal, 0, 3, 4);
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+        stream.extend_from_slice(b"ab\r\ncd\r\nef");
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        let page = pool_page(&terminal, 0, 0);
+        let painted: Vec<String> = (0..3)
+            .map(|row| (0..2).map(|col| page.get(row, col).ch).collect())
+            .collect();
+        assert_eq!(
+            painted,
+            ["ab", "cd", "ef"],
+            "each painted row lands on its own page row"
         );
     }
 
