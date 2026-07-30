@@ -75,6 +75,13 @@ pub struct PolylinePass {
     /// and changes on almost none of them, so building into a buffer the pass
     /// keeps spares an allocation the frame would otherwise discard.
     built: Vec<PolylineInstance>,
+    /// Where a composited pool's segments are built, separate from [`Self::built`] so
+    /// a pool draw leaves the live comparison intact.
+    ///
+    /// A pool's paths carry its eased shift in their endpoints, so they are rebuilt on
+    /// every frame the pool glides rather than only when its content changes. Holding
+    /// the buffer is what keeps that from allocating per tick.
+    composite_built: Vec<PolylineInstance>,
     count: u32,
     /// Per-pool segments of the pools composited over the live grid, one slot per
     /// pool so every pool can be prepared before any of them draws. Separate from
@@ -194,6 +201,7 @@ impl PolylinePass {
             instances,
             last_instances: Vec::new(),
             built: Vec::new(),
+            composite_built: Vec::new(),
             capacity: INITIAL_CAPACITY,
             count: 0,
             composite_slots: CompositeSlots::new(),
@@ -326,18 +334,23 @@ impl PolylinePass {
             bytemuck::bytes_of(&globals),
         );
 
-        let instances = build_polyline_instances(polylines, shift_rows);
+        build_polyline_instances_into(polylines, shift_rows, &mut self.composite_built);
+
         let target = self.composite_slots.entry(pool, || new_slot(device));
-        target.count = instances.len() as u32;
-        if instances.is_empty() {
+        target.count = self.composite_built.len() as u32;
+        if self.composite_built.is_empty() {
             return;
         }
 
-        if instances.len() > target.capacity {
-            target.capacity = instances.len().next_power_of_two();
+        if self.composite_built.len() > target.capacity {
+            target.capacity = self.composite_built.len().next_power_of_two();
             target.instances = alloc_instances(device, target.capacity);
         }
-        queue.write_buffer(&target.instances, 0, bytemuck::cast_slice(&instances));
+        queue.write_buffer(
+            &target.instances,
+            0,
+            bytemuck::cast_slice(&self.composite_built),
+        );
     }
 
     /// Record the path draw into `render_pass`.
@@ -433,9 +446,12 @@ fn make_bind_group(
     })
 }
 
-/// Flatten each path into one instance per segment, in draw order, converting
-/// the sixteenth-cell wire units to the cell-fraction units the shader scales by
-/// the cell size.
+/// Flatten each path into `out` as one instance per segment, in draw order,
+/// converting the sixteenth-cell wire units to the cell-fraction units the shader
+/// scales by the cell size.
+///
+/// `out` is cleared first, so a caller holding it across frames sees only this
+/// frame's segments.
 ///
 /// A single-point path yields one zero-length segment, which the capsule SDF
 /// draws as a dot. An empty path yields nothing.
@@ -443,15 +459,8 @@ fn make_bind_group(
 /// `shift_rows` offsets every endpoint down by that many cells, baked in here.
 /// The live path passes zero. A pool composite passes the eased sub-cell scroll
 /// so slot-bound paths glide with the page, since the shader carries no scroll
-/// uniform of its own.
-fn build_polyline_instances(polylines: &[Polyline], shift_rows: f32) -> Vec<PolylineInstance> {
-    let mut instances = Vec::new();
-    build_polyline_instances_into(polylines, shift_rows, &mut instances);
-    instances
-}
-
-/// Build the segment instances into `out`, clearing it first so a reused scratch
-/// buffer holds only this frame's segments.
+/// uniform of its own. A gliding pool therefore rebuilds every frame, since the
+/// shift lives in the instances rather than in a uniform.
 fn build_polyline_instances_into(
     polylines: &[Polyline],
     shift_rows: f32,
@@ -498,7 +507,7 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_polyline_instances, build_polyline_instances_into, PolylineInstance};
+    use super::{build_polyline_instances_into, PolylineInstance};
     use stoatty_term::grid::{Polyline, Rgb};
     use wgpu::naga::{
         front::wgsl,
@@ -512,6 +521,14 @@ mod tests {
             color: Rgb::new(220, 50, 47),
             seq: 7,
         }
+    }
+
+    /// [`build_polyline_instances_into`] into a fresh buffer, for the assertions that
+    /// only want one frame's instances and have no buffer to reuse.
+    fn build_polyline_instances(polylines: &[Polyline], shift_rows: f32) -> Vec<PolylineInstance> {
+        let mut instances = Vec::new();
+        build_polyline_instances_into(polylines, shift_rows, &mut instances);
+        instances
     }
 
     #[test]

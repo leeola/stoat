@@ -72,6 +72,13 @@ pub struct BarPass {
     /// and changes on almost none of them, so building into a buffer the pass
     /// keeps spares an allocation the frame would otherwise discard.
     built: Vec<BarInstance>,
+    /// Where a composited pool's bars are built, separate from [`Self::built`] so a
+    /// pool draw leaves the live comparison intact.
+    ///
+    /// A pool's bars carry its eased shift in their origins, so they are rebuilt on
+    /// every frame the pool glides rather than only when its content changes. Holding
+    /// the buffer is what keeps that from allocating per tick.
+    composite_built: Vec<BarInstance>,
     count: u32,
     /// Per-pool bars of the pools composited over the live grid, one slot per
     /// pool so every pool can be prepared before any of them draws. Separate from
@@ -186,6 +193,7 @@ impl BarPass {
             instances,
             last_instances: Vec::new(),
             built: Vec::new(),
+            composite_built: Vec::new(),
             capacity: INITIAL_CAPACITY,
             count: 0,
             composite_slots: CompositeSlots::new(),
@@ -319,18 +327,23 @@ impl BarPass {
             bytemuck::bytes_of(&globals),
         );
 
-        let instances = build_bar_instances(bars, shift_rows);
+        build_bar_instances_into(bars, shift_rows, &mut self.composite_built);
+
         let target = self.composite_slots.entry(pool, || new_slot(device));
-        target.count = instances.len() as u32;
-        if instances.is_empty() {
+        target.count = self.composite_built.len() as u32;
+        if self.composite_built.is_empty() {
             return;
         }
 
-        if instances.len() > target.capacity {
-            target.capacity = instances.len().next_power_of_two();
+        if self.composite_built.len() > target.capacity {
+            target.capacity = self.composite_built.len().next_power_of_two();
             target.instances = alloc_instances(device, target.capacity);
         }
-        queue.write_buffer(&target.instances, 0, bytemuck::cast_slice(&instances));
+        queue.write_buffer(
+            &target.instances,
+            0,
+            bytemuck::cast_slice(&self.composite_built),
+        );
     }
 
     /// Record the bar draw into `render_pass`.
@@ -426,21 +439,18 @@ fn make_bind_group(
     })
 }
 
-/// One instance per bar, in draw order, converting the sixteenth-cell wire units
-/// to the cell-fraction units the shader scales by the cell size.
+/// Build into `out` one instance per bar, in draw order, converting the
+/// sixteenth-cell wire units to the cell-fraction units the shader scales by the
+/// cell size.
+///
+/// `out` is cleared first, so a caller holding it across frames sees only this
+/// frame's bars.
 ///
 /// `shift_rows` offsets each bar down by that many cells, baked into the origin.
 /// The live path passes zero. A pool composite passes the eased sub-cell scroll
 /// so slot-bound bars glide with the page, since the bar shader carries no
-/// scroll uniform of its own.
-fn build_bar_instances(bars: &[Bar], shift_rows: f32) -> Vec<BarInstance> {
-    let mut instances = Vec::new();
-    build_bar_instances_into(bars, shift_rows, &mut instances);
-    instances
-}
-
-/// Build the bar instances into `out`, clearing it first so a reused scratch
-/// buffer holds only this frame's bars.
+/// scroll uniform of its own. A gliding pool therefore rebuilds every frame,
+/// since the shift lives in the instances rather than in a uniform.
 fn build_bar_instances_into(bars: &[Bar], shift_rows: f32, out: &mut Vec<BarInstance>) {
     out.clear();
     out.extend(bars.iter().map(|bar| BarInstance {
@@ -467,12 +477,20 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_bar_instances, build_bar_instances_into, BarInstance};
+    use super::{build_bar_instances_into, BarInstance};
     use stoatty_term::grid::{Bar, Rgb};
     use wgpu::naga::{
         front::wgsl,
         valid::{Capabilities, ValidationFlags, Validator},
     };
+
+    /// [`build_bar_instances_into`] into a fresh buffer, for the assertions that only
+    /// want one frame's instances and have no buffer to reuse.
+    fn build_bar_instances(bars: &[Bar], shift_rows: f32) -> Vec<BarInstance> {
+        let mut instances = Vec::new();
+        build_bar_instances_into(bars, shift_rows, &mut instances);
+        instances
+    }
 
     #[test]
     fn shader_is_valid_wgsl() {
