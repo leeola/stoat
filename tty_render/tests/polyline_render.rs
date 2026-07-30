@@ -283,6 +283,7 @@ impl Harness {
             shift,
             true,
             true,
+            0,
         );
         read_back(
             &self.device,

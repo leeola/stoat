@@ -3,6 +3,7 @@
 use bytemuck::{Pod, Zeroable};
 use std::ops::Range;
 use stoatty_term::{grid::Panel, term::Damage};
+use wgpu::Buffer;
 
 pub mod background;
 pub mod bar;
@@ -130,6 +131,21 @@ pub(crate) struct Occluder {
     size: [f32; 2],
     seq: u32,
     _pad: [u32; 3],
+}
+
+/// One pool's instances for a composite draw.
+///
+/// A frame composites several pools over the live grid, and each needs its own
+/// buffer so every pool can be prepared before any of them draws. With one buffer
+/// per pass, a pool that reuses last frame's instances reads whatever pool was
+/// prepared after it, so the draws have to be separated by a submit.
+///
+/// A pass holds these in a Vec indexed by the pool's position in the frame's
+/// slice, grown on demand, so a renderer that never composites allocates none.
+pub(crate) struct CompositeSlot {
+    pub(crate) instances: Buffer,
+    pub(crate) capacity: usize,
+    pub(crate) count: u32,
 }
 
 /// Whether `built` differs from what was last uploaded, and so has to be sent

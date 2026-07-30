@@ -122,6 +122,7 @@ fn pool_composite_keeps_live_instances() {
         0.0,
         true,
         true,
+        0,
     );
     let idle = Damage::Partial(vec![false; rows]);
     renderer.render_into(&device, &queue, &view, &live, frame(&idle));
@@ -255,6 +256,7 @@ fn shift_only_composite_reuses_prior_rows() {
         0.0,
         true,
         true,
+        0,
     );
 
     // Reset the surface to the live grid, then composite the white pool as a
@@ -271,6 +273,7 @@ fn shift_only_composite_reuses_prior_rows() {
         0.0,
         false,
         true,
+        0,
     );
     let reused = read_back(&device, &queue, &target, width, height);
 
@@ -283,6 +286,140 @@ fn shift_only_composite_reuses_prior_rows() {
     assert!(
         r > 20 || g > 20 || b > 20,
         "the reuse must redraw the pool, not leave the live grid's black: got ({r},{g},{b})"
+    );
+}
+
+/// Two pools reusing prior rows in the same frame each redraw their own, which
+/// only holds because each composites through its own slot.
+///
+/// `content_changed` is per pool, so one pool can reuse in a frame where another
+/// rebuilds. Sharing a buffer between them would hand every reusing pool whatever
+/// the last-prepared one built, painting a sibling's content inside its scissor.
+#[test]
+fn two_pools_reusing_prior_rows_keep_their_own() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("pool_keeps_live_grid: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let format = TextureFormat::Rgba8Unorm;
+    let font_size = 30;
+    let cell_h = cell_size(font_size, 1.0)[1].round() as u32;
+    let band = cell_h * 2;
+    let (width, height) = (128u32, band * 2);
+    let (black, white, gray) = (
+        Rgb::new(0, 0, 0),
+        Rgb::new(255, 255, 255),
+        Rgb::new(80, 80, 80),
+    );
+
+    let target = device.create_texture(&TextureDescriptor {
+        label: Some("two pool reuse target"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&TextureViewDescriptor::default());
+
+    let mut renderer = Renderer::new(
+        &device,
+        format,
+        [width, height],
+        build_font_system(),
+        FontConfig {
+            size: font_size,
+            scale_factor: 1.0,
+            family: &["JetBrains Mono".to_owned()],
+            ligatures: true,
+        },
+        black,
+        white,
+    );
+
+    let (rows, cols) = renderer.grid_size();
+    let live = Grid::new(rows, cols);
+
+    let filled = |color: Rgb| {
+        let mut grid = Grid::new(rows, cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                grid.get_mut(r, c).bg = color;
+            }
+        }
+        grid
+    };
+    let gray_pool = filled(gray);
+    let white_pool = filled(white);
+
+    let no_decoration = Damage::Partial(Vec::new());
+    let frame = |damage| Frame {
+        cursor: None,
+        cursor_corners: None,
+        scroll: Scroll {
+            grid: 0.0,
+            document: 0.0,
+            scrollback: 0.0,
+            region: 0.0,
+            popovers: &[],
+        },
+        damage,
+        decoration_damage: &no_decoration,
+        scrolled_rows: 0,
+    };
+
+    // Each pool owns a horizontal band, so a read-back tells them apart.
+    let top = [0, 0, width, band];
+    let bottom = [0, band, width, band];
+
+    // Gray builds slot 0's instances, white slot 1's.
+    renderer.render_into(&device, &queue, &view, &live, frame(&Damage::Full));
+    let composite = |renderer: &mut Renderer, grid: &Grid, scissor, changed, slot| {
+        renderer.composite_pool(
+            &device,
+            &queue,
+            &view,
+            grid,
+            &[],
+            scissor,
+            0.0,
+            changed,
+            true,
+            slot,
+        );
+    };
+    composite(&mut renderer, &gray_pool, top, true, 0);
+    composite(&mut renderer, &white_pool, bottom, true, 1);
+
+    // Both reuse, and each is handed the other's grid so a slot reading its own
+    // prior instances is the only way to come out with its own color.
+    let idle = Damage::Partial(vec![false; rows]);
+    renderer.render_into(&device, &queue, &view, &live, frame(&idle));
+    composite(&mut renderer, &white_pool, top, false, 0);
+    composite(&mut renderer, &gray_pool, bottom, false, 1);
+    let reused = read_back(&device, &queue, &target, width, height);
+
+    let pixel = |y: u32| {
+        let at = ((y * width + width / 2) * 4) as usize;
+        (reused[at], reused[at + 1], reused[at + 2])
+    };
+    let (tr, tg, tb) = pixel(band / 2);
+    assert!(
+        tr < 160 && tg < 160 && tb < 160 && (tr > 20 || tg > 20 || tb > 20),
+        "slot 0 must redraw its own gray, not the white its sibling built: got ({tr},{tg},{tb})"
+    );
+
+    let (br, bg, bb) = pixel(band + band / 2);
+    assert!(
+        br > 200 && bg > 200 && bb > 200,
+        "slot 1 must redraw its own white, not the gray its sibling built: got ({br},{bg},{bb})"
     );
 }
 
@@ -441,6 +578,7 @@ fn pool_grow_heals_live_instances() {
         0.0,
         true,
         true,
+        0,
     );
     let idle = Damage::Partial(vec![false; rows]);
     renderer.render_into(&device, &queue, &view, &live, frame(&idle));
@@ -536,14 +674,14 @@ fn composite_pool_bumps_content_epoch_only_on_atlas_change() {
 
     let full = [0, 0, width, height];
     let before = renderer.content_epoch();
-    renderer.composite_pool(&device, &queue, &view, &pool, &[], full, 0.0, true, true);
+    renderer.composite_pool(&device, &queue, &view, &pool, &[], full, 0.0, true, true, 0);
     let after_new = renderer.content_epoch();
     assert_ne!(
         after_new, before,
         "a burst of never-seen glyphs that overflows the atlas must bump the epoch"
     );
 
-    renderer.composite_pool(&device, &queue, &view, &pool, &[], full, 0.0, true, true);
+    renderer.composite_pool(&device, &queue, &view, &pool, &[], full, 0.0, true, true, 0);
     let after_repeat = renderer.content_epoch();
     assert_eq!(
         after_repeat, after_new,

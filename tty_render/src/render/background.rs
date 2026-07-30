@@ -9,7 +9,7 @@
 //!
 //! [`Cell`]: stoatty_term::grid::Cell
 
-use crate::render::{occlusion_globals, pool_occluders, CellMetrics, Occluder};
+use crate::render::{occlusion_globals, pool_occluders, CellMetrics, CompositeSlot, Occluder};
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::{
     grid::{Grid, Panel, Rgb},
@@ -100,9 +100,11 @@ pub struct BackgroundPass {
     instances: Buffer,
     capacity: usize,
     count: u32,
-    composite_instances: Buffer,
-    composite_capacity: usize,
-    composite_count: u32,
+    /// Per-pool cell instances of the pools composited over the live grid, one
+    /// slot per pool so a pool reusing last frame's instances cannot read a
+    /// sibling's. Separate from [`Self::instances`] so a pool draw leaves the live
+    /// grid's damage-tracked instances intact.
+    composite_slots: Vec<CompositeSlot>,
     /// One occluder per live panel at binding 1, read by the cell fragment
     /// shader on an occludable pool composite to discard a page cell a box
     /// covers. Unused by the live cell fill and the cursor, which leave the
@@ -204,7 +206,6 @@ impl BackgroundPass {
         let bind_group = make_bind_group(device, &bind_group_layout, &globals, &occluders);
 
         let instances = alloc_instances(device, INITIAL_CAPACITY);
-        let composite_instances = alloc_instances(device, INITIAL_CAPACITY);
 
         BackgroundPass {
             pipeline,
@@ -214,9 +215,7 @@ impl BackgroundPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
-            composite_instances,
-            composite_capacity: INITIAL_CAPACITY,
-            composite_count: 0,
+            composite_slots: Vec::new(),
             occluders,
             occluder_capacity: INITIAL_CAPACITY,
             cursor_pipeline,
@@ -346,9 +345,12 @@ impl BackgroundPass {
     ///
     /// A pool composite paints a pooled page over the live grid mid-glide.
     /// Building its cells into [`Self::instances`] would erase the live grid's
-    /// damage-tracked instances, so the pool builds into a dedicated buffer that
+    /// damage-tracked instances, so the pool builds into its own slot that
     /// [`Self::draw_composite`] reads, leaving the live buffer intact for the
     /// next live frame.
+    ///
+    /// `slot` identifies the pool among those composited this frame. Slots are
+    /// allocated on demand, so an unseen index costs one buffer once.
     ///
     /// `grid_scroll` shifts the grid up by that many rows. The pool grid changes
     /// wholesale each frame, so every cell is rebuilt with no per-row damage
@@ -370,6 +372,7 @@ impl BackgroundPass {
         grid_scroll: f32,
         content_changed: bool,
         occludable: bool,
+        slot: usize,
     ) {
         let occluders = pool_occluders(occludable, panels);
         self.upload_occluders(device, queue, &occluders);
@@ -397,19 +400,18 @@ impl BackgroundPass {
 
         self.scratch.clear();
         build_instances(grid, &mut self.scratch);
-        self.composite_count = self.scratch.len() as u32;
+
+        let target = composite_slot(&mut self.composite_slots, device, slot);
+        target.count = self.scratch.len() as u32;
         if self.scratch.is_empty() {
             return;
         }
-        if self.scratch.len() > self.composite_capacity {
-            self.composite_capacity = self.scratch.len().next_power_of_two();
-            self.composite_instances = alloc_instances(device, self.composite_capacity);
+
+        if self.scratch.len() > target.capacity {
+            target.capacity = self.scratch.len().next_power_of_two();
+            target.instances = alloc_instances(device, target.capacity);
         }
-        queue.write_buffer(
-            &self.composite_instances,
-            0,
-            bytemuck::cast_slice(&self.scratch),
-        );
+        queue.write_buffer(&target.instances, 0, bytemuck::cast_slice(&self.scratch));
     }
 
     /// Upload the cursor block's corners and scroll offset, leaving the cell
@@ -463,18 +465,19 @@ impl BackgroundPass {
 
     /// Record a composited pool's background draw into `render_pass`.
     ///
-    /// A no-op until [`Self::prepare_composite`] has run with a non-empty grid.
-    /// Reads the composite instance buffer, so drawing a pool leaves the live
-    /// cell instances a prior [`Self::prepare`] uploaded untouched.
-    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>) {
-        if self.composite_count == 0 {
+    /// A no-op until [`Self::prepare_composite`] has run for `slot` with a
+    /// non-empty grid. Reads that slot's buffer, so drawing a pool leaves both the
+    /// live cell instances a prior [`Self::prepare`] uploaded and the other pools'
+    /// slots untouched.
+    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>, slot: usize) {
+        let Some(target) = self.composite_slots.get(slot).filter(|s| s.count > 0) else {
             return;
-        }
+        };
 
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
-        render_pass.set_vertex_buffer(0, self.composite_instances.slice(..));
-        render_pass.draw(0..6, 0..self.composite_count);
+        render_pass.set_vertex_buffer(0, target.instances.slice(..));
+        render_pass.draw(0..6, 0..target.count);
     }
 
     /// Record the cursor-block draw into `render_pass`.
@@ -490,6 +493,25 @@ impl BackgroundPass {
         render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.draw(0..6, 0..1);
     }
+}
+
+/// Slot `slot` of `slots`, allocating every slot up to it on first use.
+///
+/// Takes the Vec rather than the whole pass so a caller can keep reading its build
+/// scratch while it writes the slot.
+fn composite_slot<'a>(
+    slots: &'a mut Vec<CompositeSlot>,
+    device: &Device,
+    slot: usize,
+) -> &'a mut CompositeSlot {
+    while slots.len() <= slot {
+        slots.push(CompositeSlot {
+            instances: alloc_instances(device, INITIAL_CAPACITY),
+            capacity: INITIAL_CAPACITY,
+            count: 0,
+        });
+    }
+    &mut slots[slot]
 }
 
 fn alloc_instances(device: &Device, capacity: usize) -> Buffer {

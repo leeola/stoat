@@ -546,6 +546,10 @@ impl Renderer {
     /// Draws only the background and text passes: no cursor, decorations,
     /// regions, overlays, icons, or bars, since the pool carries plain composed
     /// page rows.
+    ///
+    /// `slot` identifies this pool among the frame's, so each pass builds into its
+    /// own buffers. Two pools sharing a slot would have the later one's instances
+    /// drawn for both, so callers pass each pool a distinct index.
     #[allow(clippy::too_many_arguments)]
     pub fn composite_pool(
         &mut self,
@@ -558,6 +562,7 @@ impl Renderer {
         shift_rows: f32,
         content_changed: bool,
         occludable: bool,
+        slot: usize,
     ) {
         let Some(scissor) = clamp_scissor(scissor, self.width, self.height) else {
             return;
@@ -573,6 +578,7 @@ impl Renderer {
             shift_rows,
             content_changed,
             occludable,
+            slot,
         );
         self.text.prepare_composite(
             device,
@@ -583,6 +589,7 @@ impl Renderer {
             shift_rows,
             content_changed,
             occludable,
+            slot,
         );
         self.bar.prepare_composite(
             device,
@@ -592,6 +599,7 @@ impl Renderer {
             resolution,
             shift_rows,
             occludable,
+            slot,
         );
         self.polyline.prepare_composite(
             device,
@@ -601,6 +609,7 @@ impl Renderer {
             resolution,
             shift_rows,
             occludable,
+            slot,
         );
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
@@ -624,13 +633,13 @@ impl Renderer {
             });
 
             render_pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
-            self.background.draw_composite(&mut render_pass);
-            self.text.draw_composite(&mut render_pass);
+            self.background.draw_composite(&mut render_pass, slot);
+            self.text.draw_composite(&mut render_pass, slot);
             // Off-grid gutter chrome sits above the page glyphs but below the
             // cursor. Bars fill behind the scaled run text.
-            self.bar.draw_composite(&mut render_pass);
-            self.polyline.draw_composite(&mut render_pass);
-            self.text.draw_composite_text_runs(&mut render_pass);
+            self.bar.draw_composite(&mut render_pass, slot);
+            self.polyline.draw_composite(&mut render_pass, slot);
+            self.text.draw_composite_text_runs(&mut render_pass, slot);
         }
 
         queue.submit([encoder.finish()]);
@@ -1186,7 +1195,7 @@ impl GpuContext {
         let epoch_before = self.renderer.content_epoch();
 
         let panels = live_grid.panels();
-        for pool in pools {
+        for (slot, pool) in pools.iter().enumerate() {
             self.renderer.composite_pool(
                 &self.device,
                 &self.queue,
@@ -1197,6 +1206,7 @@ impl GpuContext {
                 pool.shift_rows,
                 pool.content_changed,
                 pool.occludable,
+                slot,
             );
         }
 

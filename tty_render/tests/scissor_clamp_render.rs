@@ -112,6 +112,7 @@ fn oversized_scissors_are_clamped_not_validated() {
         0.0,
         true,
         true,
+        0,
     );
     renderer.draw_cursor_over(
         &device,
