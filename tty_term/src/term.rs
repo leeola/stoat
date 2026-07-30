@@ -184,15 +184,21 @@ pub struct Terminal {
     /// so a projection re-stamps only the components that changed rather than all
     /// of them every frame.
     decorations_dirty: DecorationDirty,
-    /// The grid rows the cell-stamped decorations (borders, scales) occupied at
-    /// the previous [`Self::project`], so a moved or cleared decoration can damage
-    /// the rows it used to cover and erase its stale footprint.
+    /// The grid rows the cell-stamped decorations (borders, scales) occupied when one
+    /// of them last changed, so a moved or cleared decoration can damage the rows it
+    /// used to cover and erase its stale footprint.
+    ///
+    /// Also the current footprint on any frame between changes, since the rows a
+    /// decoration covers only move when the decoration does. That is what lets
+    /// [`Self::project`] leave this alone rather than rebuild it every frame.
     last_decoration_footprint: Vec<bool>,
-    /// Scratch reused by [`Self::project`] to build the current decoration
-    /// footprint without allocating each frame. Swapped with
-    /// [`Self::last_decoration_footprint`] after the damage comparison, so the
-    /// two buffers alternate roles and a steady-state projection allocates
-    /// neither.
+    /// Scratch [`Self::project`] builds the new decoration footprint in, so a change
+    /// compares against [`Self::last_decoration_footprint`] without allocating.
+    ///
+    /// Swapped with it once the comparison is done, so the two alternate roles and a
+    /// steady-state projection allocates neither. Holds a superseded footprint
+    /// between changes, which no reader sees because a rebuild overwrites the whole
+    /// buffer.
     footprint_scratch: Vec<bool>,
     /// One projected row, reused across the rows of a projection.
     ///
@@ -2075,18 +2081,22 @@ impl Terminal {
         if self.decoration_damage.len() != rows {
             self.decoration_damage = vec![false; rows];
         }
-        decoration_footprint(
-            &self.borders,
-            &self.panels,
-            &self.scales,
-            rows,
-            &mut self.footprint_scratch,
-        );
-        if self.decorations_dirty.borders
+        // The footprint is a pure function of the three decoration lists and the row
+        // count, and none of those can move while this is false, so the retained
+        // footprint is already what a recompute would produce. Rebuilding it costs a
+        // clear, a resize, and a fill-span per decoration, all of it unread.
+        let decorations_moved = self.decorations_dirty.borders
             || self.decorations_dirty.panels
             || self.decorations_dirty.scales
-            || resized
-        {
+            || resized;
+        if decorations_moved {
+            decoration_footprint(
+                &self.borders,
+                &self.panels,
+                &self.scales,
+                rows,
+                &mut self.footprint_scratch,
+            );
             for ((damage, &now), &before) in self
                 .decoration_damage
                 .iter_mut()
@@ -2097,11 +2107,11 @@ impl Terminal {
                     *damage = true;
                 }
             }
+            mem::swap(
+                &mut self.last_decoration_footprint,
+                &mut self.footprint_scratch,
+            );
         }
-        mem::swap(
-            &mut self.last_decoration_footprint,
-            &mut self.footprint_scratch,
-        );
 
         self.decorations_dirty = DecorationDirty::default();
 
@@ -6357,6 +6367,35 @@ mod tests {
         assert!(
             damage.is_dirty(2),
             "cleared border's prior bottom row damaged"
+        );
+    }
+
+    /// A projection that changes no decoration leaves the retained footprint in place
+    /// rather than rebuilding it, so the erase has to still work across frames that
+    /// skipped the rebuild.
+    #[test]
+    fn clearing_a_border_after_idle_frames_damages_its_prior_rows() {
+        let mut terminal = Terminal::new(4, 3, Theme::default());
+        let mut grid = Grid::new(4, 3);
+        terminal.advance(&light_border(1, 2));
+        terminal.project(&mut grid);
+        terminal.take_decoration_damage();
+
+        for _ in 0..3 {
+            terminal.project(&mut grid);
+            terminal.take_decoration_damage();
+        }
+
+        terminal.advance(&encode_reset());
+        terminal.project(&mut grid);
+        let damage = terminal.take_decoration_damage();
+        assert!(
+            damage.is_dirty(1) && damage.is_dirty(2),
+            "the border's rows are erased however many idle frames preceded the clear"
+        );
+        assert!(
+            !damage.is_dirty(0) && !damage.is_dirty(3),
+            "rows the border never covered stay clean"
         );
     }
 
