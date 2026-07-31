@@ -15,7 +15,7 @@ use std::{collections::HashMap, ops::Range};
 use stoat_language::HighlightId;
 use stoat_text::{
     patch::{Edit, Patch},
-    Point, Rope,
+    Rope,
 };
 
 /// Minimap columns a line is summarized into, matching the strip's declared
@@ -433,8 +433,10 @@ impl MinimapContent {
     ) {
         let tokens = tokens_for(range.clone());
         let mut text = String::new();
+        let mut walk = new_rope.line_walk(range.clone());
         for row in range {
-            write_line_text(new_rope, row, &mut text);
+            text.clear();
+            walk.next_into(&mut text);
             let summary = summarize_line(&text, row_tokens(&tokens, row), self.edge_at(row));
             if self.lines[row as usize] == summary {
                 continue;
@@ -490,10 +492,14 @@ impl MinimapContent {
             let rows = changed[run].iter();
             let span = rows.clone().next().expect("a run is non-empty").0
                 ..rows.clone().next_back().expect("a run is non-empty").0 + 1;
-            let tokens = tokens_for(span);
+            let tokens = tokens_for(span.clone());
 
+            // A run's rows are consecutive, so one walk over its span advances
+            // in step with them.
+            let mut walk = new_rope.line_walk(span);
             for &(row, new_edge) in rows {
-                write_line_text(new_rope, row, &mut text);
+                text.clear();
+                walk.next_into(&mut text);
                 let summary = summarize_line(&text, row_tokens(&tokens, row), new_edge);
                 self.set_edge(row, new_edge);
                 self.replace_line(row, summary);
@@ -708,8 +714,13 @@ fn summarize_rows(
     marks: &impl EdgeSource,
 ) -> Vec<Vec<Run>> {
     let mut text = String::new();
+    let mut walk = rope.line_walk(rows.clone());
     rows.map(|row| {
-        write_line_text(rope, row, &mut text);
+        // A row the walk has run out for summarizes as empty, which is what
+        // reading it a row at a time produced. Skipping it instead would shift
+        // every later summary onto the wrong row.
+        text.clear();
+        walk.next_into(&mut text);
         summarize_line(&text, row_tokens(tokens, row), marks.edge_of(row))
     })
     .collect()
@@ -718,18 +729,6 @@ fn summarize_rows(
 /// The tokens covering `row`, empty for a row the resolver reported none for.
 fn row_tokens(tokens: &HashMap<u32, Vec<LineToken>>, row: u32) -> &[LineToken] {
     tokens.get(&row).map_or(&[], Vec::as_slice)
-}
-
-/// Replace `out` with the text of `row`, without its line terminator.
-///
-/// Takes the buffer to write into because the chunk loops summarize thousands of
-/// rows per tick, and a row's text is read once and thrown away.
-fn write_line_text(rope: &Rope, row: u32, out: &mut String) {
-    let start = rope.point_to_offset(Point::new(row, 0));
-    let end = rope.point_to_offset(Point::new(row, rope.line_len(row)));
-
-    out.clear();
-    out.extend(rope.chunks_in_range(start..end));
 }
 
 /// Total line count of `rope`, counting a trailing empty line.
