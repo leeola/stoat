@@ -224,7 +224,6 @@ impl TextBuffer {
         let mut new_insertions = Vec::new();
         let old_fragments = std::mem::replace(&mut self.snapshot.fragments, SumTree::new(cx));
         let mut cursor = old_fragments.cursor::<usize>(cx);
-        let mut new_text_inserted = false;
         let mut deleted_rope = DeletedRebuild::new(range.start);
 
         // Copy all fragments before the edit start
@@ -233,25 +232,48 @@ impl TextBuffer {
         new_fragments.append(prefix, cx);
 
         let mut delete_remaining = range.end - range.start;
+        let overshoot = cursor.item().map_or(0, |_| range.start - *cursor.start());
+
+        if let Some(fragment) = cursor.item().filter(|f| overshoot > 0 && f.visible) {
+            let prefix = Fragment {
+                id: Locator::between(last_id(&new_fragments, cx), &fragment.id),
+                timestamp: fragment.timestamp,
+                insertion_offset: fragment.insertion_offset,
+                len: overshoot as u32,
+                visible: true,
+                deletions: fragment.deletions.clone(),
+                max_undos: fragment.max_undos,
+            };
+            push_insertion(&mut new_insertions, &prefix);
+            new_fragments.push(prefix, cx);
+        }
+
+        // The new text goes ahead of everything this edit deletes, so an anchor
+        // inside the replaced range resolves past the replacement rather than
+        // before it. Fragments already deleted at this position fall behind it
+        // for the same reason. They stand for text that is gone, and the new
+        // text takes its place.
+        if !text.is_empty() {
+            let next_id = cursor.item().map(|f| &f.id).unwrap_or(Locator::max_ref());
+            let new_frag_id = Locator::between(last_id(&new_fragments, cx), next_id);
+            let new_frag = Fragment {
+                id: new_frag_id.clone(),
+                timestamp,
+                insertion_offset: 0,
+                len: text.len() as u32,
+                visible: true,
+                deletions: Default::default(),
+                max_undos: 0,
+            };
+            new_insertions.push(InsertionFragment {
+                timestamp,
+                split_offset: 0,
+                fragment_id: new_frag_id,
+            });
+            new_fragments.push(new_frag, cx);
+        }
 
         if let Some(fragment) = cursor.item() {
-            let fragment_start = *cursor.start();
-            let overshoot = range.start - fragment_start;
-
-            if overshoot > 0 && fragment.visible {
-                let prefix = Fragment {
-                    id: Locator::between(last_id(&new_fragments, cx), &fragment.id),
-                    timestamp: fragment.timestamp,
-                    insertion_offset: fragment.insertion_offset,
-                    len: overshoot as u32,
-                    visible: true,
-                    deletions: fragment.deletions.clone(),
-                    max_undos: fragment.max_undos,
-                };
-                push_insertion(&mut new_insertions, &prefix);
-                new_fragments.push(prefix, cx);
-            }
-
             if fragment.visible {
                 let fragment_visible_len = fragment.len as usize;
                 let remaining_in_fragment = fragment_visible_len - overshoot;
@@ -276,33 +298,6 @@ impl TextBuffer {
 
                 let suffix_len = remaining_in_fragment.saturating_sub(to_delete_here);
                 if suffix_len > 0 && delete_remaining == 0 {
-                    let suffix_insertion_offset =
-                        fragment.insertion_offset + overshoot as u32 + to_delete_here as u32;
-
-                    if !text.is_empty() {
-                        let next_id = cursor
-                            .next_item()
-                            .map(|f| &f.id)
-                            .unwrap_or(Locator::max_ref());
-                        let new_frag_id = Locator::between(last_id(&new_fragments, cx), next_id);
-                        let new_frag = Fragment {
-                            id: new_frag_id.clone(),
-                            timestamp,
-                            insertion_offset: 0,
-                            len: text.len() as u32,
-                            visible: true,
-                            deletions: Default::default(),
-                            max_undos: 0,
-                        };
-                        new_insertions.push(InsertionFragment {
-                            timestamp,
-                            split_offset: 0,
-                            fragment_id: new_frag_id,
-                        });
-                        new_fragments.push(new_frag, cx);
-                        new_text_inserted = true;
-                    }
-
                     let next_id = cursor
                         .next_item()
                         .map(|f| &f.id)
@@ -311,7 +306,9 @@ impl TextBuffer {
                     let suffix = Fragment {
                         id: suffix_id.clone(),
                         timestamp: fragment.timestamp,
-                        insertion_offset: suffix_insertion_offset,
+                        insertion_offset: fragment.insertion_offset
+                            + overshoot as u32
+                            + to_delete_here as u32,
                         len: suffix_len as u32,
                         visible: true,
                         deletions: fragment.deletions.clone(),
@@ -323,10 +320,9 @@ impl TextBuffer {
                         fragment_id: suffix_id,
                     });
                     new_fragments.push(suffix, cx);
-                    cursor.next();
-                } else {
-                    cursor.next();
                 }
+
+                cursor.next();
             } else {
                 deleted_rope.carry(&self.snapshot.deleted_text, fragment.len as usize);
                 new_fragments.push(fragment.clone(), cx);
@@ -357,27 +353,6 @@ impl TextBuffer {
                         push_insertion(&mut new_insertions, &deleted_part);
                         new_fragments.push(deleted_part, cx);
                         deleted_rope.take(&self.snapshot.visible_text, delete_remaining);
-
-                        if !text.is_empty() {
-                            let new_frag_id =
-                                Locator::between(last_id(&new_fragments, cx), &fragment.id);
-                            let new_frag = Fragment {
-                                id: new_frag_id.clone(),
-                                timestamp,
-                                insertion_offset: 0,
-                                len: text.len() as u32,
-                                visible: true,
-                                deletions: Default::default(),
-                                max_undos: 0,
-                            };
-                            new_insertions.push(InsertionFragment {
-                                timestamp,
-                                split_offset: 0,
-                                fragment_id: new_frag_id,
-                            });
-                            new_fragments.push(new_frag, cx);
-                            new_text_inserted = true;
-                        }
 
                         let next_id = cursor
                             .next_item()
@@ -411,27 +386,6 @@ impl TextBuffer {
                 },
                 None => break,
             }
-        }
-
-        // Insert new text if not yet inserted (pure insertion case)
-        if !text.is_empty() && !new_text_inserted {
-            let next_id = cursor.item().map(|f| &f.id).unwrap_or(Locator::max_ref());
-            let new_frag_id = Locator::between(last_id(&new_fragments, cx), next_id);
-            let new_frag = Fragment {
-                id: new_frag_id.clone(),
-                timestamp,
-                insertion_offset: 0,
-                len: text.len() as u32,
-                visible: true,
-                deletions: Default::default(),
-                max_undos: 0,
-            };
-            new_insertions.push(InsertionFragment {
-                timestamp,
-                split_offset: 0,
-                fragment_id: new_frag_id,
-            });
-            new_fragments.push(new_frag, cx);
         }
 
         // Copy remaining fragments
@@ -1477,6 +1431,51 @@ mod tests {
         let a = b.anchor_at(7, Bias::Right);
         b.edit(5..11, "");
         assert_eq!(b.resolve_anchor(&a), 5);
+    }
+
+    #[test]
+    fn an_anchor_in_replaced_text_lands_after_the_replacement() {
+        for bias in [Bias::Left, Bias::Right] {
+            let mut b = buf("hello world");
+            let a = b.anchor_at(7, bias);
+
+            b.edit(5..11, "XYZ");
+            assert_eq!(b.snapshot.visible_text.to_string(), "helloXYZ");
+            assert_eq!(
+                b.resolve_anchor(&a),
+                8,
+                "{bias:?} anchor resolved before the text that replaced it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_replace_spanning_fragments_lands_anchors_after_it() {
+        let mut b = buf("abcdefghij");
+        b.edit(3..3, "XX");
+        assert_eq!(b.snapshot.visible_text.to_string(), "abcXXdefghij");
+
+        // Partway into the first fragment, across the second, partway into the
+        // third, so every branch of the walk sees the range.
+        let inside = b.anchor_at(6, Bias::Right);
+        let after = b.anchor_at(8, Bias::Right);
+
+        b.edit(2..8, "QQ");
+        assert_eq!(b.snapshot.visible_text.to_string(), "abQQghij");
+        assert_eq!(b.resolve_anchor(&inside), 4);
+        assert_eq!(b.resolve_anchor(&after), 4);
+    }
+
+    #[test]
+    fn replacing_only_part_of_a_fragment_keeps_the_rest_in_place() {
+        let mut b = buf("hello world");
+        let inside = b.anchor_at(7, Bias::Right);
+        let after = b.anchor_at(9, Bias::Right);
+
+        b.edit(5..8, "XYZ");
+        assert_eq!(b.snapshot.visible_text.to_string(), "helloXYZrld");
+        assert_eq!(b.resolve_anchor(&inside), 8);
+        assert_eq!(b.resolve_anchor(&after), 9);
     }
 
     #[test]
