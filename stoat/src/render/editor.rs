@@ -336,6 +336,17 @@ pub(crate) fn render_editor_with_overlay(
     {
         let mut x = inner.x;
         let mut y = inner.y;
+        // Cell holding the character a combining mark would attach to. It
+        // cannot be derived from `x` once that has advanced, since how far back
+        // the base sits depends on how wide it was.
+        //
+        // Cleared at a row's start, where a mark has nothing before it to join,
+        // and after a base too wide for the room left. Only a base that did not
+        // fit puts `x` past the edge, so the skip at the top of the loop
+        // swallows anything after it and that second case is unreachable, but
+        // reading a cell no character went into is not a thing to leave resting
+        // on a guard elsewhere.
+        let mut base_cell: Option<u16> = None;
         let inlay_style = fallback_style.patch(theme.get(crate::theme::scope::UI_VIRTUAL_INLAY));
         'chunks: for chunk in snapshot.highlighted_chunks_cached(
             editor.scroll_row..end_row,
@@ -368,13 +379,25 @@ pub(crate) fn render_editor_with_overlay(
                 if ch == '\n' {
                     y += 1;
                     x = inner.x;
+                    base_cell = None;
                     if y >= bottom {
                         break 'chunks;
                     }
                     continue;
                 }
                 let w = display_width(ch);
+                // A mark occupies no cell of its own, being drawn on the
+                // character before it. A cell carries a whole cluster, so it
+                // joins the one its base went into rather than being dropped,
+                // which would leave the screen saying something the buffer does
+                // not.
                 if w == 0 {
+                    if let Some(base) = base_cell {
+                        let cell = &mut buf[(base, y)];
+                        let mut symbol = String::from(cell.symbol());
+                        symbol.push(ch);
+                        cell.set_symbol(&symbol);
+                    }
                     continue;
                 }
                 if x + w as u16 <= right {
@@ -384,6 +407,9 @@ pub(crate) fn render_editor_with_overlay(
                     if w == 2 {
                         buf[(x + 1, y)].set_char(' ').set_style(style);
                     }
+                    base_cell = Some(x);
+                } else {
+                    base_cell = None;
                 }
                 x += w as u16;
             }
@@ -2716,6 +2742,80 @@ mod tests {
             snapshot.buffer_to_display(a_point).column,
             4,
             "a is painted at the display column the width model reports",
+        );
+    }
+
+    /// Render `content` as the only file and hand back the painted buffer.
+    fn painted_row(h: &mut crate::test_harness::TestHarness, root: &str, content: &str) -> Buffer {
+        let root = PathBuf::from(root);
+        let path = root.join("marks.txt");
+        h.fake_fs().insert_file(&path, content.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let theme = crate::theme::Theme::empty();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let area = Rect::new(0, 0, 20, 2);
+        let mut buf = Buffer::empty(area);
+        super::render_editor(editor, area, fallback, &theme, &mut buf, true);
+        buf
+    }
+
+    #[test]
+    fn a_combining_mark_paints_onto_the_character_it_sits_on() {
+        let mut h = Stoat::test();
+        let buf = painted_row(&mut h, "/marks-narrow", "ae\u{301}b\n");
+
+        let base = (0..20u16)
+            .find(|&x| buf[(x, 0u16)].symbol().starts_with('a'))
+            .expect("the row is painted");
+        assert_eq!(buf[(base, 0u16)].symbol(), "a");
+        assert_eq!(
+            buf[(base + 1, 0u16)].symbol(),
+            "e\u{301}",
+            "the accent rides in the cell holding its letter",
+        );
+        assert_eq!(buf[(base + 2, 0u16)].symbol(), "b");
+    }
+
+    #[test]
+    fn a_combining_mark_on_a_wide_character_paints_on_its_first_cell() {
+        // The column has already advanced two cells past a wide character, so
+        // the mark belongs two back rather than one, where the cleared second
+        // half of the glyph sits.
+        let mut h = Stoat::test();
+        let buf = painted_row(&mut h, "/marks-wide", "a\u{6c49}\u{301}b\n");
+
+        let base = (0..20u16)
+            .find(|&x| buf[(x, 0u16)].symbol().starts_with('a'))
+            .expect("the row is painted");
+        assert_eq!(buf[(base + 1, 0u16)].symbol(), "\u{6c49}\u{301}");
+        assert_eq!(
+            buf[(base + 2, 0u16)].symbol(),
+            " ",
+            "the wide glyph's second cell stays cleared",
+        );
+        assert_eq!(buf[(base + 3, 0u16)].symbol(), "b");
+    }
+
+    #[test]
+    fn a_row_opening_with_a_combining_mark_drops_it() {
+        // Nothing precedes the mark, so there is no cell for it to join. The
+        // row above is longer, so a mark landing at the column that row ended
+        // on would survive rather than being painted over by this one.
+        let mut h = Stoat::test();
+        let buf = painted_row(&mut h, "/marks-leading", "abcdef\n\u{301}x\n");
+
+        let second_row: String = (0..20u16).map(|x| buf[(x, 1u16)].symbol()).collect();
+        assert!(
+            second_row.starts_with('x'),
+            "the rest of the row still paints, got {second_row:?}",
+        );
+        assert!(
+            !second_row.contains('\u{301}'),
+            "and nothing carries over from the row above, got {second_row:?}",
         );
     }
 
