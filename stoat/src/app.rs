@@ -10430,7 +10430,7 @@ pub(crate) fn lsp_uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {
     if uri.scheme().map(|s| s.as_str()) != Some("file") {
         return None;
     }
-    Some(PathBuf::from(uri.path().as_str()))
+    Some(crate::lsp::util::percent_decode_path(uri))
 }
 
 /// Synchronous core of the parse pipeline. When `deadline` is `Some`, every

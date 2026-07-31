@@ -3983,6 +3983,7 @@ dependencies = [
  "lsp-types",
  "memchr",
  "nucleo",
+ "percent-encoding",
  "portable-pty",
  "pulldown-cmark",
  "ratatui",

@@ -194,7 +194,7 @@ fn uri_to_path(uri: &Uri) -> Result<PathBuf, WorkspaceEditError> {
         }
         .fail();
     }
-    Ok(PathBuf::from(uri.path().as_str()))
+    Ok(crate::lsp::util::percent_decode_path(uri))
 }
 
 /// Apply a set of LSP [`TextEdit`]s to the buffer for `path`, opening it

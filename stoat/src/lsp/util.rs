@@ -16,9 +16,61 @@
 //!   vscode precedent that several language servers depend on.
 
 use crate::host::OffsetEncoding;
-use lsp_types::{Position, Range};
-use std::ops::Range as ByteRange;
+use lsp_types::{Position, Range, Uri};
+use percent_encoding::{percent_decode_str, percent_encode, AsciiSet, CONTROLS};
+use std::{ops::Range as ByteRange, path::PathBuf};
 use stoat_text::{Bias, Point, PointUtf16, Rope};
+
+/// The bytes a URI path may not carry literally.
+///
+/// This is the complement of what RFC 3986 allows in a path, which is more than
+/// the unreserved characters. The sub-delims, `:` and `@` are legal there too,
+/// and `/` separates segments. Encoding only what is actually illegal leaves an
+/// ordinary path's URI byte-identical to the path, so a server matching URIs
+/// against what it sent goes on recognizing them.
+///
+/// `%` is in the set, so a literal percent in a filename survives the round trip
+/// instead of reading back as an escape.
+const URI_PATH_ILLEGAL: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'[')
+    .add(b']')
+    .add(b'\\')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
+
+/// Percent-encode `path` for the path component of a `file:` URI.
+///
+/// Without this a path holding a space or any non-ASCII character makes a
+/// string no URI parser accepts, and the file it names ends up with no language
+/// server at all.
+pub(crate) fn percent_encode_path(path: &str) -> String {
+    percent_encode(path.as_bytes(), URI_PATH_ILLEGAL).to_string()
+}
+
+/// The filesystem path `uri`'s path component names, undoing
+/// [`percent_encode_path`].
+///
+/// A percent sequence decoding to bytes that are not UTF-8 is replaced rather
+/// than rejected. Stoat has no path for those to become: building a URI needs a
+/// path that is valid UTF-8 to start with, so the replaced path matches no
+/// buffer, which is where rejecting it would have led anyway.
+pub(crate) fn percent_decode_path(uri: &Uri) -> PathBuf {
+    PathBuf::from(
+        percent_decode_str(uri.path().as_str())
+            .decode_utf8_lossy()
+            .as_ref(),
+    )
+}
 
 /// Converts an LSP [`Position`] to a byte offset in `rope` per
 /// `encoding`.
@@ -139,6 +191,44 @@ mod tests {
 
     fn pos(line: u32, character: u32) -> Position {
         Position::new(line, character)
+    }
+
+    /// The path a URI built from `path` reads back as, which is the whole round
+    /// trip a buffer's identity depends on.
+    fn round_trip(path: &str) -> PathBuf {
+        let uri = crate::action_handlers::lsp::path_to_uri(std::path::Path::new(path))
+            .expect("path makes a valid uri");
+        percent_decode_path(&uri)
+    }
+
+    #[test]
+    fn a_path_survives_the_uri_round_trip() {
+        for path in [
+            "/ws/plain.rs",
+            "/ws/my file.rs",
+            "/ws/\u{65e5}\u{672c}.rs",
+            "/ws/100% done.rs",
+            "/ws/a#b.rs",
+            "/ws/we[i]rd.rs",
+        ] {
+            assert_eq!(round_trip(path), PathBuf::from(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_legal_path_is_not_encoded_at_all() {
+        // Every one of these is a pchar, so the uri stoat sends for them is
+        // unchanged and a server matching what it sent still recognizes it.
+        let path = "/ws/a:b@c!d$e&f'g(h)i*j+k,l;m=n-o.p_q~r.rs";
+        let uri = crate::action_handlers::lsp::path_to_uri(std::path::Path::new(path))
+            .expect("path makes a valid uri");
+        assert_eq!(uri.as_str(), format!("file://{path}"));
+    }
+
+    #[test]
+    fn a_percent_escaped_uri_names_the_unescaped_path() {
+        let uri: Uri = "file:///ws/my%20file.rs".parse().expect("valid uri");
+        assert_eq!(percent_decode_path(&uri), PathBuf::from("/ws/my file.rs"));
     }
 
     const ENCODINGS: [OffsetEncoding; 3] = [

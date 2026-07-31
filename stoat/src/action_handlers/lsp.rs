@@ -4786,8 +4786,8 @@ pub(crate) fn apply_jump(stoat: &mut Stoat, path: &Path, offset: usize) {
 /// non-UTF-8 paths). Mirrors the production behaviour Helix uses
 /// internally; LSP servers expect `file:` URIs for local files.
 pub(crate) fn path_to_uri(path: &Path) -> Option<Uri> {
-    let path_str = path.to_str()?;
-    Uri::from_str(&format!("file://{path_str}")).ok()
+    let encoded = crate::lsp::util::percent_encode_path(path.to_str()?);
+    Uri::from_str(&format!("file://{encoded}")).ok()
 }
 
 #[cfg(test)]

@@ -45,6 +45,7 @@ slotmap.workspace = true
 lsp-types.workspace = true
 async-trait.workspace = true
 snafu = { workspace = true }
+percent-encoding.workspace = true
 portable-pty.workspace = true
 libc.workspace = true
 memchr.workspace = true
