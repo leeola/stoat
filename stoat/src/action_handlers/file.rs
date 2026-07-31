@@ -134,11 +134,11 @@ fn save_flow(stoat: &mut Stoat, force: bool) -> SaveFlow {
         if stoat.pending_format_on_save.is_some() {
             return SaveFlow::AlreadyPending;
         }
-        arm_format_on_save(stoat, host, buffer_id, path);
+        arm_format_on_save(stoat, host, buffer_id, path, force);
         return SaveFlow::Armed;
     }
 
-    if write_buffer_to_disk(stoat, buffer_id, &path) {
+    if write_buffer_to_disk(stoat, buffer_id, &path, force) {
         SaveFlow::Wrote
     } else {
         SaveFlow::Failed
@@ -157,6 +157,10 @@ pub(crate) struct FormatOnSaveOutcome {
     edits: Option<Vec<TextEdit>>,
     /// The units the formatting server reads positions in.
     encoding: crate::host::OffsetEncoding,
+    /// Whether the save that armed this was a forced one, which the write needs
+    /// to know because the disk-change guard runs there rather than at the
+    /// command.
+    force: bool,
 }
 
 /// Save-time budget for `format_on_save`. A formatting response slower than this
@@ -189,9 +193,10 @@ fn arm_format_on_save(
     host: Arc<dyn crate::host::LspHost>,
     buffer_id: BufferId,
     path: PathBuf,
+    force: bool,
 ) {
     let Some(uri) = super::lsp::path_to_uri(&path) else {
-        write_buffer_to_disk(stoat, buffer_id, &path);
+        write_buffer_to_disk(stoat, buffer_id, &path, force);
         return;
     };
 
@@ -216,6 +221,7 @@ fn arm_format_on_save(
             uri,
             edits,
             encoding,
+            force,
         }
     });
     stoat.pending_format_on_save = Some(task);
@@ -251,7 +257,8 @@ pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
                     );
                 }
             }
-            let wrote = write_buffer_to_disk(stoat, outcome.buffer_id, &outcome.path);
+            let wrote =
+                write_buffer_to_disk(stoat, outcome.buffer_id, &outcome.path, outcome.force);
             // A `:wq` that deferred behind this write quits once it lands, but
             // only if it succeeded, so a failed deferred write leaves the buffer
             // for the user instead of exiting over unsaved changes.
@@ -272,14 +279,24 @@ pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
 /// notification. Reads the buffer fresh so a format-on-save edit applied just
 /// before is included.
 ///
+/// Unless `force`, the write refuses a file that changed on disk since the
+/// buffer's baseline. The check belongs here rather than only at the save
+/// command, because format-on-save defers the write by up to
+/// [`FORMAT_ON_SAVE_BUDGET`] and a file can change inside that window.
+///
 /// Returns `true` when the bytes landed and the buffer was marked clean, and
-/// `false` when the write failed (with [`Stoat::pending_message`] set) or the
-/// buffer had already vanished. A skipped `did_save` notification (an
-/// unmappable path) still counts as a successful write.
-fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) -> bool {
+/// `false` when the write was refused or failed (with
+/// [`Stoat::pending_message`] set) or the buffer had already vanished. A
+/// skipped `did_save` notification (an unmappable path) still counts as a
+/// successful write.
+fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, force: bool) -> bool {
     let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) else {
         return false;
     };
+    if !force && disk_changed_since_open(stoat, buffer_id, path) {
+        stoat.set_status("file changed on disk; use :w! to overwrite");
+        return false;
+    }
     let text = {
         let guard = buffer.read().expect("buffer poisoned");
         guard.rope().to_string()
@@ -1235,8 +1252,15 @@ fn finish_open(
 
     let (buffer_id, buffer) = {
         let ws = stoat.active_workspace_mut();
+        // Opening a path already registered hands back the existing buffer and
+        // discards `content`. The mtime came with that discarded read, so
+        // adopting it would move the baseline onto a write the buffer never
+        // saw, and the change-guard would compare that write against itself.
+        let existed = ws.buffers.id_for_path(absolute).is_some();
         let (buffer_id, buffer) = ws.buffers.open(absolute, content);
-        if let Some(mtime) = disk_mtime {
+        if let Some(mtime) = disk_mtime
+            && !existed
+        {
             ws.buffers.set_disk_mtime(buffer_id, mtime);
         }
         if let Some(lang) = lang
@@ -2760,6 +2784,81 @@ mod tests {
         let mut written = Vec::new();
         h.fake_fs().read(&path, &mut written).expect("readable");
         assert_eq!(written, b"external\n", "refused save leaves disk untouched");
+    }
+
+    #[test]
+    fn reopening_a_buffer_keeps_the_baseline_it_was_opened_with() {
+        // Re-opening a path already in the registry hands back the edited
+        // buffer and drops the text just read. Taking the mtime that came with
+        // that discarded read would move the baseline onto the external write,
+        // and the guard would then be comparing it against itself.
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/reopen-guard");
+        let path = open_edited(&mut h, &root, "a.txt", b"original\n");
+        h.fake_fs().insert_file(&path, b"external\n");
+
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+
+        assert_eq!(dispatch(&mut h.stoat, &SaveBuffer), UpdateEffect::Redraw);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("file changed on disk; use :w! to overwrite"),
+        );
+        assert_eq!(
+            on_disk(&h, &path),
+            b"external\n",
+            "a save after reopening must still refuse to clobber the disk"
+        );
+    }
+
+    #[test]
+    fn a_format_on_save_write_refuses_a_change_that_landed_while_formatting() {
+        // The save-time guard runs before the format request goes out, and the
+        // write lands up to the format budget later. A file changing inside
+        // that window is invisible to a check that already happened.
+        let mut h = Stoat::test();
+        enable_format_on_save(&mut h);
+        let root = PathBuf::from("/fos-guard");
+        let path = open_rs(&mut h, &root, "a.rs", b"fn  main (){}\n");
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![whole_file_edit("fn main() {}\n")],
+        );
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.fake_fs().insert_file(&path, b"external\n");
+        h.settle();
+
+        assert_eq!(
+            on_disk(&h, &path),
+            b"external\n",
+            "the deferred write must re-check before landing"
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("file changed on disk; use :w! to overwrite"),
+        );
+    }
+
+    #[test]
+    fn a_forced_format_on_save_write_still_overwrites() {
+        // Forcing the save has to survive the trip through the format request,
+        // or :w! would start refusing whenever format-on-save is enabled.
+        let mut h = Stoat::test();
+        enable_format_on_save(&mut h);
+        let root = PathBuf::from("/fos-force");
+        let path = open_rs(&mut h, &root, "a.rs", b"fn  main (){}\n");
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![whole_file_edit("fn main() {}\n")],
+        );
+
+        dispatch(&mut h.stoat, &ForceSaveBuffer);
+        h.fake_fs().insert_file(&path, b"external\n");
+        h.settle();
+
+        assert_eq!(on_disk(&h, &path), b"fn main() {}\n");
     }
 
     #[test]
