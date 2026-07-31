@@ -4047,21 +4047,44 @@ impl Stoat {
             lsp_progress,
             diagnostics,
             lsp_message,
+            lsp_doc_versions,
+            workspaces,
+            active_workspace,
             ..
         } = self;
+        let buffers = &workspaces[*active_workspace].buffers;
         for (server, host) in lsp_registry.named_hosts_iter() {
-            drain_notifications_from(server, host, lsp_progress, diagnostics, lsp_message);
+            drain_notifications_from(
+                server,
+                host,
+                lsp_progress,
+                diagnostics,
+                lsp_message,
+                lsp_doc_versions,
+                buffers,
+            );
         }
     }
 
     #[cfg(test)]
     fn drain_notifications_from(&mut self, server: &str, host: &Arc<dyn LspHost>) {
+        let Self {
+            lsp_progress,
+            diagnostics,
+            lsp_message,
+            lsp_doc_versions,
+            workspaces,
+            active_workspace,
+            ..
+        } = self;
         drain_notifications_from(
             server,
             host,
-            &mut self.lsp_progress,
-            &mut self.diagnostics,
-            &mut self.lsp_message,
+            lsp_progress,
+            diagnostics,
+            lsp_message,
+            lsp_doc_versions,
+            &workspaces[*active_workspace].buffers,
         );
     }
 
@@ -10372,6 +10395,8 @@ fn drain_notifications_from(
     progress: &mut crate::lsp::progress::LspProgressMap,
     diagnostics: &mut crate::diagnostics::DiagnosticSet,
     message: &mut Option<(lsp_types::MessageType, String)>,
+    doc_versions: &std::collections::HashMap<BufferId, i32>,
+    buffers: &crate::buffer_registry::BufferRegistry,
 ) {
     use crate::host::LspNotification;
     use futures::FutureExt;
@@ -10393,9 +10418,20 @@ fn drain_notifications_from(
             LspNotification::Diagnostics {
                 uri,
                 diagnostics: published,
-                ..
+                version,
             } => {
                 if let Some(path) = lsp_uri_to_path(&uri) {
+                    if let Some(stale) =
+                        stale_publish_version(&path, version, doc_versions, buffers)
+                    {
+                        tracing::debug!(
+                            target: "stoat::lsp",
+                            path = %path.display(),
+                            published = stale,
+                            "diagnostics for an older document version; dropped",
+                        );
+                        continue;
+                    }
                     let count = published.len();
                     diagnostics.replace_from_server(path.clone(), server.to_string(), published);
                     tracing::info!(
@@ -10424,6 +10460,29 @@ fn drain_notifications_from(
             },
         }
     }
+}
+
+/// The version a publish names when it is behind the document stoat has since
+/// sent, or `None` when the publish should be applied.
+///
+/// A server measures its diagnostics against a document version it was given,
+/// and says which. One arriving after stoat has sent a newer document describes
+/// text that has moved, so applying it would overwrite fresher marks with ones
+/// computed for text nobody is looking at.
+///
+/// A publish with no version is applied. A server not tracking versions has
+/// nothing to be behind, and so does a buffer stoat has never announced.
+fn stale_publish_version(
+    path: &Path,
+    version: Option<i32>,
+    doc_versions: &std::collections::HashMap<BufferId, i32>,
+    buffers: &crate::buffer_registry::BufferRegistry,
+) -> Option<i32> {
+    let version = version?;
+    let current = buffers
+        .id_for_path(path)
+        .and_then(|id| doc_versions.get(&id))?;
+    (version < *current).then_some(version)
 }
 
 pub(crate) fn lsp_uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {

@@ -1642,6 +1642,60 @@ mod tests {
     }
 
     #[test]
+    fn a_publish_behind_the_document_stoat_sent_is_dropped() {
+        use crate::host::LspNotification;
+        use lsp_types::{Diagnostic, Position, Range};
+
+        let mut h = TestHarness::with_size(80, 24);
+        let ra = h.install_lsp_server("rust", "ra");
+        let path = h.write_file("a.rs", "fn a() {}\n");
+        h.open_file(&path);
+
+        let uri = ra.observed_opens()[0].text_document.uri.clone();
+        let diag = |message: &str| {
+            Diagnostic::new_simple(
+                Range::new(Position::new(0, 0), Position::new(0, 1)),
+                message.to_string(),
+            )
+        };
+
+        let buffer_id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&path)
+            .expect("buffer open");
+        h.stoat.lsp_doc_versions.insert(buffer_id, 7);
+
+        ra.push_notification(LspNotification::Diagnostics {
+            uri: uri.clone(),
+            diagnostics: vec![diag("measured against current text")],
+            version: Some(7),
+        });
+        h.drain_lsp();
+
+        ra.push_notification(LspNotification::Diagnostics {
+            uri,
+            diagnostics: vec![diag("measured against text since replaced")],
+            version: Some(3),
+        });
+        h.drain_lsp();
+
+        let messages: Vec<String> = h
+            .stoat
+            .diagnostics
+            .get(&path)
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
+        assert_eq!(
+            messages,
+            vec!["measured against current text".to_string()],
+            "a publish for an older document overwrote the fresher marks",
+        );
+    }
+
+    #[test]
     fn install_lsp_server_routes_to_named_servers_and_merges_diagnostics() {
         use crate::host::LspNotification;
         use lsp_types::{Diagnostic, Position, Range};
