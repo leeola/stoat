@@ -113,6 +113,24 @@ pub(crate) struct PickList {
     /// so clearing it is safe and setting it is not possible from outside this
     /// module.
     pub(crate) display: Option<DisplayCache>,
+    /// The query [`Self::filtered`] currently holds the matches for, when those
+    /// rows are still a usable starting point for a longer query.
+    ///
+    /// `None` wherever the rows stopped meaning anything. That is before the
+    /// first refilter, once the base moved under them, and once a caller
+    /// dropped the results outright.
+    ///
+    /// Derived state, like [`Self::display`]. [`Self::refilter`] maintains it
+    /// against the rows it produces, and [`Self::clear_results`] is how an
+    /// owner drops both together.
+    pub(crate) last_query: Option<String>,
+    /// How many candidates the last [`Self::refilter`] handed the matcher.
+    ///
+    /// A query that extends its predecessor scores only the rows that already
+    /// matched, so this falls away from the base length as a query grows. It is
+    /// the only outward sign that the narrowing happened, results being
+    /// identical either way.
+    pub(crate) scored: usize,
 }
 
 /// The display string of every base path, and the order an unfiltered list
@@ -149,6 +167,8 @@ impl Default for PickList {
             filter_generation: next_generation(),
             display_roots: None,
             display: None,
+            last_query: None,
+            scored: 0,
         }
     }
 }
@@ -188,24 +208,43 @@ impl PickList {
     /// sorted, deduplicated set of matched character offsets in that row's
     /// display string, or empty when no pattern or anchor is active.
     pub(crate) fn refilter(&mut self, query: &str, git_root: &Path) {
-        self.filtered.clear();
-        self.match_indices.clear();
-
         let (anchor, pattern) = split_root_anchor(query);
         let anchor_len = anchor.map_or(0, |a| a.chars().count()) as u32;
 
+        // Before the rows are read, since a rebuild here is what makes the
+        // previous result meaningless.
         self.ensure_display(git_root);
+
+        let narrowing = self.narrows_previous(query, anchor, pattern);
+        let previous = std::mem::take(&mut self.filtered);
+        self.match_indices.clear();
+        self.last_query = Some(query.to_string());
+
         let cache = self.display.as_ref().expect("ensure_display builds one");
         let keeps = |display: &str| anchor.is_none_or(|a| display.starts_with(a));
 
-        let items = cache
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, display)| keeps(display))
-            .map(|(idx, display)| (idx, display.as_str()));
+        let ranked = if narrowing {
+            let items = previous
+                .iter()
+                .copied()
+                .filter(|&idx| keeps(&cache.rows[idx]))
+                .map(|idx| (idx, cache.rows[idx].as_str()));
 
-        let Some(mut matches) = fuzzy::match_and_rank(pattern, items) else {
+            self.scored = previous.len();
+            fuzzy::match_and_rank(pattern, items)
+        } else {
+            let items = cache
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, display)| keeps(display))
+                .map(|(idx, display)| (idx, display.as_str()));
+
+            self.scored = cache.rows.len();
+            fuzzy::match_and_rank(pattern, items)
+        };
+
+        let Some(mut matches) = ranked else {
             // Pre-sorted at cache build, so an unfiltered list is a walk rather
             // than a sort over freshly derived strings.
             let listed: Vec<usize> = cache
@@ -231,6 +270,34 @@ impl PickList {
         self.filter_generation = next_generation();
     }
 
+    /// Whether `query` only narrows what [`Self::last_query`] already matched,
+    /// so the matcher can be handed [`Self::filtered`] instead of the whole
+    /// base.
+    ///
+    /// The rows survive three separate conditions. The query has to extend the
+    /// one behind them, since a shorter or divergent one can match rows they
+    /// dropped. The `./` anchor has to have stayed absent or grown, a longer
+    /// root prefix keeping strictly fewer rows. The pattern after the anchor
+    /// has to extend the previous pattern and to be one that narrows at all,
+    /// which [`fuzzy::extension_narrows`] decides.
+    fn narrows_previous(&self, query: &str, anchor: Option<&str>, pattern: &str) -> bool {
+        let Some(previous) = self.last_query.as_deref() else {
+            return false;
+        };
+        if !query.starts_with(previous) {
+            return false;
+        }
+
+        let (previous_anchor, previous_pattern) = split_root_anchor(previous);
+        let anchor_narrows = match (previous_anchor, anchor) {
+            (None, None) => true,
+            (Some(was), Some(now)) => now.starts_with(was),
+            _ => false,
+        };
+
+        anchor_narrows && pattern.starts_with(previous_pattern) && fuzzy::extension_narrows(pattern)
+    }
+
     /// Build the display strings for the current base, reusing them when
     /// nothing [`row_display`] reads has moved.
     fn ensure_display(&mut self, git_root: &Path) {
@@ -248,6 +315,10 @@ impl PickList {
         if reusable {
             return;
         }
+
+        // The remembered rows are indices into the base being replaced, so they
+        // name different paths on the other side of this rebuild.
+        self.last_query = None;
 
         let display_roots = self.display_roots.as_deref();
         let rows: Vec<String> = self
@@ -272,6 +343,14 @@ impl PickList {
             sorted,
             generation,
         });
+    }
+
+    /// Drop the current results, so the next [`Self::refilter`] starts from the
+    /// whole base rather than narrowing rows that no longer stand for anything.
+    pub(crate) fn clear_results(&mut self) {
+        self.filtered.clear();
+        self.match_indices.clear();
+        self.last_query = None;
     }
 
     fn clamp_selected(&mut self) {
@@ -483,8 +562,7 @@ impl PathPicker {
         self.last_filter_text.clear();
         self.filter_valid = false;
         self.built_base = None;
-        self.picklist.filtered.clear();
-        self.picklist.match_indices.clear();
+        self.picklist.clear_results();
     }
 
     /// Re-root the walk. Clears the collected paths, drops the old walk task
@@ -1182,5 +1260,159 @@ mod tests {
             row_display(&p("/elsewhere/x.rs"), &p("/ignored"), Some(&roots), None),
             "/elsewhere/x.rs"
         );
+    }
+
+    /// A candidate set with enough shared substructure that most queries keep
+    /// some rows and drop others, which is where a wrong subset shows up.
+    fn narrowing_base() -> Vec<PathBuf> {
+        let mut base: Vec<PathBuf> = Vec::new();
+        for dir in ["src", "srv", "Src", "tests", "docs/deep"] {
+            for stem in ["main", "Main", "lib", "loader", "mod", "read_me"] {
+                for ext in ["rs", "md"] {
+                    base.push(p(&format!("/repo/{dir}/{stem}.{ext}")));
+                }
+            }
+        }
+        base
+    }
+
+    fn list_over(base: &[PathBuf]) -> PickList {
+        PickList {
+            base: Arc::from(base),
+            ..PickList::default()
+        }
+    }
+
+    /// The rows and highlight offsets a query produces with no history behind
+    /// it, which is what narrowing has to reproduce exactly.
+    fn from_scratch(base: &[PathBuf], query: &str) -> (Vec<usize>, Vec<Vec<u32>>) {
+        let mut list = list_over(base);
+        list.refilter(query, &p("/repo"));
+        (list.filtered.clone(), list.match_indices.clone())
+    }
+
+    #[test]
+    fn typing_a_query_out_matches_filtering_it_from_scratch() {
+        // Covers the anchor, negation, and escape characters alongside ordinary
+        // text, so the queries that must refuse to narrow are exercised too.
+        const ALPHABET: [char; 14] = [
+            'm', 'a', 'i', 'n', 'r', 's', 'd', 'M', '.', '/', ' ', '!', '\\', '\'',
+        ];
+
+        let base = narrowing_base();
+        let mut seed = 0x243F_6A88_85A3_08D3u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as usize
+        };
+
+        for _ in 0..200 {
+            let mut list = list_over(&base);
+            let mut query = String::new();
+
+            for _ in 0..6 {
+                query.push(ALPHABET[next() % ALPHABET.len()]);
+                list.refilter(&query, &p("/repo"));
+
+                let (rows, indices) = from_scratch(&base, &query);
+                assert_eq!(list.filtered, rows, "rows differ for query {query:?}");
+                assert_eq!(
+                    list.match_indices, indices,
+                    "highlights differ for query {query:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn deleting_from_a_query_refilters_the_whole_base() {
+        let base = narrowing_base();
+        let mut list = list_over(&base);
+
+        list.refilter("mainrs", &p("/repo"));
+        list.refilter("main", &p("/repo"));
+
+        assert_eq!(
+            list.scored,
+            base.len(),
+            "a shrunk query can match rows the longer one dropped, so it rescans"
+        );
+        assert_eq!(
+            list.filtered,
+            from_scratch(&base, "main").0,
+            "and lands on the same rows as a fresh filter"
+        );
+    }
+
+    #[test]
+    fn extending_a_query_scores_only_the_rows_that_matched() {
+        let base = narrowing_base();
+        let mut list = list_over(&base);
+
+        list.refilter("m", &p("/repo"));
+        let after_first = list.filtered.len();
+        assert_eq!(list.scored, base.len(), "the first query has no history");
+
+        list.refilter("ma", &p("/repo"));
+        assert_eq!(
+            list.scored, after_first,
+            "the second scores what the first matched, not the base"
+        );
+        assert!(
+            after_first < base.len(),
+            "the fixture has to drop rows for that to mean anything"
+        );
+    }
+
+    #[test]
+    fn extending_a_negated_query_rescans_the_base() {
+        let base = narrowing_base();
+        let mut list = list_over(&base);
+
+        list.refilter("!ma", &p("/repo"));
+        list.refilter("!mai", &p("/repo"));
+
+        assert_eq!(
+            list.scored,
+            base.len(),
+            "a negation matches more rows as it grows, so its rows cannot seed it"
+        );
+        assert_eq!(
+            list.filtered,
+            from_scratch(&base, "!mai").0,
+            "and the result is the full-scan one"
+        );
+    }
+
+    #[test]
+    fn a_query_that_gains_a_root_anchor_does_not_narrow() {
+        let base = narrowing_base();
+        let mut list = list_over(&base);
+        list.refilter(".", &p("/repo"));
+
+        let (anchor, pattern) = split_root_anchor("./s .");
+        assert!(
+            !list.narrows_previous("./s .", anchor, pattern),
+            "an anchor appearing restricts rows by a rule the previous query never applied"
+        );
+    }
+
+    #[test]
+    fn a_walked_in_base_rescans_rather_than_narrowing_stale_rows() {
+        let base = narrowing_base();
+        let mut list = list_over(&base);
+        list.refilter("m", &p("/repo"));
+
+        list.base = Arc::from(&base[..base.len() / 2]);
+        list.refilter("ma", &p("/repo"));
+
+        assert_eq!(
+            list.scored,
+            base.len() / 2,
+            "the rows named different paths under the old base, so they are dropped"
+        );
+        assert_eq!(list.filtered, from_scratch(&base[..base.len() / 2], "ma").0);
     }
 }

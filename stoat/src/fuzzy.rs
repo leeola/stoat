@@ -41,6 +41,29 @@ pub fn parse_query(text: &str) -> Option<Pattern> {
     Some(pattern)
 }
 
+/// Whether appending to `query` can only shrink the set of haystacks it
+/// matches.
+///
+/// A picker that knows this holds can answer the longer query by re-scoring
+/// only the rows the shorter one matched. An ordinary atom gets harder as
+/// characters arrive, so the subset relation normally falls out for free.
+///
+/// Two constructs invert it. A negated atom rejects what it matches, so `!ab`
+/// excludes strictly more than `!abc` does and extending it widens the result.
+/// A trailing backslash escapes the space that follows it, joining two atoms
+/// into one whose needle is not an extension of either.
+///
+/// Smart case is not one of them. Appending an uppercase character flips an
+/// atom to case-sensitive, but every haystack matching it case-sensitively
+/// already matched case-insensitively.
+pub(crate) fn extension_narrows(query: &str) -> bool {
+    if query.contains('\\') {
+        return false;
+    }
+
+    parse_query(query).is_none_or(|pattern| !pattern.atoms.iter().any(|atom| atom.negative))
+}
+
 /// One scored match returned by [`match_and_rank`].
 ///
 /// `haystack` is returned alongside the original `item` so callers
