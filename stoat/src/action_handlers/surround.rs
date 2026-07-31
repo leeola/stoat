@@ -1,4 +1,5 @@
 use crate::{
+    action_handlers::movement::MAX_PAIR_SCAN,
     app::{Stoat, UpdateEffect},
     pane::View,
 };
@@ -439,17 +440,17 @@ fn walk_right_for_close(
     }
     pos += first.len_utf8();
     let mut step_over: usize = 0;
-    for c in chars {
-        let skip = in_skip_zone(tree, pos);
-        if !skip {
-            if c == open {
-                step_over += 1;
-            } else if c == close {
-                if step_over == 0 {
-                    return Some(pos);
-                }
-                step_over -= 1;
+    // The tree is asked only where the answer is used. It is a descent from the
+    // root plus an ancestor walk, and every character that is not a delimiter
+    // discarded it.
+    for c in chars.take(MAX_PAIR_SCAN) {
+        if c == open && !in_skip_zone(tree, pos) {
+            step_over += 1;
+        } else if c == close && !in_skip_zone(tree, pos) {
+            if step_over == 0 {
+                return Some(pos);
             }
+            step_over -= 1;
         }
         pos += c.len_utf8();
     }
@@ -468,18 +469,15 @@ fn walk_left_for_open(
     }
     let mut pos = cursor;
     let mut step_over: usize = 0;
-    for c in rope.reversed_chars_at(cursor) {
+    for c in rope.reversed_chars_at(cursor).take(MAX_PAIR_SCAN) {
         pos = pos.checked_sub(c.len_utf8())?;
-        let skip = in_skip_zone(tree, pos);
-        if !skip {
-            if c == close {
-                step_over += 1;
-            } else if c == open {
-                if step_over == 0 {
-                    return Some(pos);
-                }
-                step_over -= 1;
+        if c == close && !in_skip_zone(tree, pos) {
+            step_over += 1;
+        } else if c == open && !in_skip_zone(tree, pos) {
+            if step_over == 0 {
+                return Some(pos);
             }
+            step_over -= 1;
         }
     }
     None
@@ -492,7 +490,7 @@ fn walk_right_for_symmetric(
     tree: Option<&stoat_language::Tree>,
 ) -> Option<usize> {
     let mut pos = cursor;
-    for c in rope.chars_at(cursor) {
+    for c in rope.chars_at(cursor).take(MAX_PAIR_SCAN) {
         if c == ch && !in_skip_zone(tree, pos) {
             return Some(pos);
         }
@@ -508,7 +506,7 @@ fn walk_left_for_symmetric(
     tree: Option<&stoat_language::Tree>,
 ) -> Option<usize> {
     let mut pos = cursor;
-    for c in rope.reversed_chars_at(cursor) {
+    for c in rope.reversed_chars_at(cursor).take(MAX_PAIR_SCAN) {
         pos = pos.checked_sub(c.len_utf8())?;
         if c == ch && !in_skip_zone(tree, pos) {
             return Some(pos);
@@ -553,6 +551,47 @@ mod tests {
             buf_snap.resolve_anchor(&sel.tail()),
             buf_snap.resolve_anchor(&sel.head()),
         )
+    }
+
+    /// `(` then `filler` then `)`, with the cursor just inside each delimiter,
+    /// so each walk has the whole filler to cross before reaching its partner.
+    fn spaced_pair(filler: usize) -> (Rope, usize) {
+        let text = format!("({})", "x".repeat(filler));
+        let len = text.len();
+        (Rope::from(text.as_str()), len)
+    }
+
+    #[test]
+    fn a_pair_further_apart_than_the_cap_is_not_found() {
+        let (rope, len) = spaced_pair(MAX_PAIR_SCAN + 100);
+
+        assert_eq!(
+            walk_right_for_close(&rope, 1, '(', ')', None),
+            None,
+            "the close is past where the walk gives up"
+        );
+        assert_eq!(
+            walk_left_for_open(&rope, len - 1, '(', ')', None),
+            None,
+            "and so is the open, walking the other way"
+        );
+    }
+
+    #[test]
+    fn a_pair_within_the_cap_is_still_found() {
+        let filler = MAX_PAIR_SCAN - 100;
+        let (rope, len) = spaced_pair(filler);
+
+        assert_eq!(
+            walk_right_for_close(&rope, 1, '(', ')', None),
+            Some(1 + filler),
+            "a close inside the cap is where it always was"
+        );
+        assert_eq!(
+            walk_left_for_open(&rope, len - 1, '(', ')', None),
+            Some(0),
+            "and so is the open"
+        );
     }
 
     #[test]

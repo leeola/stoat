@@ -3746,6 +3746,18 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// How far a pair scan walks before giving up, in characters each way.
+///
+/// Picking the closest surrounding pair tries every pair type in both
+/// directions, so a press with nothing around it walks the document once per
+/// direction per type. Without a bound that is the whole file, fourteen times,
+/// to conclude there was nothing there.
+///
+/// A genuine pair further apart than this is no longer found, which is the
+/// price. Ten thousand characters is far past any construct a reader is asking
+/// about and far short of what makes the walk noticeable.
+pub(crate) const MAX_PAIR_SCAN: usize = 10_000;
+
 fn bracket_pair(ch: char) -> Option<(char, char, bool)> {
     match ch {
         '(' => Some(('(', ')', true)),
