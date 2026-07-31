@@ -817,6 +817,51 @@ mod tests {
     }
 
     #[test]
+    fn changed_operator_is_a_change() {
+        let lang = rust_lang();
+        let lhs = "fn a() { x + y; }";
+        let rhs = "fn a() { x - y; }";
+        let result = diff_with_language(&lang, lhs, rhs).unwrap();
+        assert!(
+            !result.fell_back_to_line_diff,
+            "structural pass must handle this"
+        );
+
+        let covered: Vec<&str> = result
+            .changes
+            .iter()
+            .map(|c| match c.side {
+                Side::Lhs => &lhs[c.byte_range.clone()],
+                Side::Rhs => &rhs[c.byte_range.clone()],
+            })
+            .collect();
+        assert_eq!(covered, ["+", "-"], "the operator is the whole change");
+    }
+
+    #[test]
+    fn changed_delimiter_is_a_change() {
+        let lang = rust_lang();
+        let lhs = "fn a() { f(x); }";
+        let rhs = "fn a() { f[x]; }";
+        let result = diff_with_language(&lang, lhs, rhs).unwrap();
+        assert!(
+            !result.fell_back_to_line_diff,
+            "structural pass must handle this"
+        );
+
+        let mut covered: Vec<&str> = result
+            .changes
+            .iter()
+            .map(|c| match c.side {
+                Side::Lhs => &lhs[c.byte_range.clone()],
+                Side::Rhs => &rhs[c.byte_range.clone()],
+            })
+            .collect();
+        covered.sort_unstable();
+        assert_eq!(covered, ["(", ")", "[", "]"], "both brackets on both sides");
+    }
+
+    #[test]
     fn appended_function_emits_only_rhs_novel() {
         let lang = rust_lang();
         let lhs = "fn main() {}";
