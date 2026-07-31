@@ -126,56 +126,95 @@ impl ContextLessSummary for TextSummary {
 #[derive(Clone, Debug)]
 struct Chunk {
     chars: Bitmap,
+    /// One set bit per UTF-16 code unit the text encodes to.
+    ///
+    /// Bit `i` is set where byte `i` starts a character, and additionally at
+    /// `i+1` where that character needs a surrogate pair. So the popcount is
+    /// the UTF-16 length, and the bits below an offset are the code units
+    /// before it, which is what every conversion into this chunk is asking
+    /// for.
+    chars_utf16: Bitmap,
     newlines: Bitmap,
-    utf16_len: usize,
     text: ArrayString<MAX_BASE>,
 }
 
 impl Chunk {
     fn new(text: &str) -> Self {
-        let mut chars: Bitmap = 0;
-        let mut newlines: Bitmap = 0;
-        let mut utf16_len = 0usize;
-
-        for (i, &byte) in text.as_bytes().iter().enumerate() {
-            let bit: Bitmap = 1 << i;
-            if byte & 0xC0 != 0x80 {
-                chars |= bit;
-            }
-            if byte == b'\n' {
-                newlines |= bit;
-            }
-        }
-        for ch in text.chars() {
-            utf16_len += ch.len_utf16();
-        }
-
+        let (chars, chars_utf16, newlines) = chunk_bitmaps(text);
         let mut arr = ArrayString::new();
         arr.push_str(text);
 
         Self {
             chars,
+            chars_utf16,
             newlines,
-            utf16_len,
             text: arr,
         }
     }
 
     fn push_str(&mut self, s: &str) {
+        if s.is_empty() {
+            return;
+        }
         let offset = self.text.len();
         self.text.push_str(s);
-        for (i, &byte) in s.as_bytes().iter().enumerate() {
-            let bit: Bitmap = 1 << (offset + i);
-            if byte & 0xC0 != 0x80 {
-                self.chars |= bit;
-            }
-            if byte == b'\n' {
-                self.newlines |= bit;
-            }
+
+        // The appended text's maps are built from bit zero and shifted into
+        // place. A surrogate pair's second bit sits at `i+1` of a four-byte
+        // sequence, so it never reaches past the text it was built from and the
+        // shift cannot push a bit out of the chunk.
+        let (chars, chars_utf16, newlines) = chunk_bitmaps(s);
+        self.chars |= chars << offset;
+        self.chars_utf16 |= chars_utf16 << offset;
+        self.newlines |= newlines << offset;
+    }
+
+    fn len_utf16(&self) -> usize {
+        self.chars_utf16.count_ones() as usize
+    }
+
+    /// Byte offset ending the line `start` falls on, exclusive of its newline.
+    fn line_end_from(&self, start: usize) -> usize {
+        let rest = bits_in(self.newlines, start..self.text.len());
+        if rest == 0 {
+            self.text.len()
+        } else {
+            start + rest.trailing_zeros() as usize
         }
-        for ch in s.chars() {
-            self.utf16_len += ch.len_utf16();
+    }
+
+    /// Byte offset reached by advancing `units` UTF-16 code units from `start`,
+    /// stopping at `limit`.
+    ///
+    /// A target falling between the two units of a surrogate pair rounds up to
+    /// the end of that character, since the answer has to be a character
+    /// boundary and the walk this replaced consumed whole characters. That is
+    /// why the round-up reads the character map rather than the code-unit one.
+    fn advance_utf16(&self, start: usize, units: usize, limit: usize) -> usize {
+        let available = bits_in(self.chars_utf16, start..limit);
+        if units == 0 || start >= limit {
+            return start;
         }
+        if units >= available.count_ones() as usize {
+            return limit;
+        }
+
+        let unit_ix = start + nth_set_bit(available, units);
+        let after = unit_ix + 1;
+        let boundary = if after >= self.text.len() {
+            self.text.len()
+        } else {
+            let run = (self.chars >> after).trailing_zeros() as usize;
+            after + run.min(self.text.len() - after)
+        };
+        boundary.min(limit)
+    }
+
+    /// Bytes from `start` to where advancing `units` UTF-16 code units lands,
+    /// stopping at the end of the line `start` falls on.
+    fn line_column_bytes(&self, start: usize, units: u32) -> u32 {
+        let line_end = self.line_end_from(start);
+        (self.advance_utf16(start, units as usize, line_end) - start.min(line_end)) as u32
     }
 
     fn summarize_from_bitmaps(&self) -> TextSummary {
@@ -217,17 +256,16 @@ impl Chunk {
             self.compute_longest_row(newline_count, first_line_chars, last_line_chars, row);
 
         let lines_utf16 = if newline_count == 0 {
-            PointUtf16::new(0, self.utf16_len as u32)
+            PointUtf16::new(0, self.len_utf16() as u32)
         } else {
             let last_nl_byte = (Bitmap::BITS - 1 - self.newlines.leading_zeros()) as usize;
-            let after_last_nl = &self.text.as_str()[last_nl_byte + 1..];
-            let utf16_col: u32 = after_last_nl.chars().map(|ch| ch.len_utf16() as u32).sum();
+            let utf16_col = bits_in(self.chars_utf16, last_nl_byte + 1..text_len).count_ones();
             PointUtf16::new(row, utf16_col)
         };
 
         TextSummary {
             len: text_len,
-            len_utf16: OffsetUtf16(self.utf16_len),
+            len_utf16: OffsetUtf16(self.len_utf16()),
             lines: Point::new(row, column),
             lines_utf16,
             chars,
@@ -921,10 +959,7 @@ impl Rope {
         };
 
         let scan_end = (line_start + col_bytes).min(text.len());
-        let utf16_col: u32 = text[line_start..scan_end]
-            .chars()
-            .map(|ch| ch.len_utf16() as u32)
-            .sum();
+        let utf16_col = bits_in(chunk.chars_utf16, line_start..scan_end).count_ones();
 
         chunk_start_utf16 + PointUtf16::new(remaining_rows, utf16_col)
     }
@@ -940,7 +975,6 @@ impl Rope {
             None => return self.chunks.summary().lines,
         };
 
-        let text = chunk.text.as_str();
         let remaining_rows = target.row - chunk_start_utf16.row;
         let line_start = if remaining_rows == 0 {
             0
@@ -954,16 +988,7 @@ impl Rope {
             target.column
         };
 
-        let line_text = &text[line_start..];
-        let mut utf16_count = 0u32;
-        let mut byte_col = 0u32;
-        for ch in line_text.chars() {
-            if ch == '\n' || utf16_count >= remaining_utf16_col {
-                break;
-            }
-            utf16_count += ch.len_utf16() as u32;
-            byte_col += ch.len_utf8() as u32;
-        }
+        let byte_col = chunk.line_column_bytes(line_start, remaining_utf16_col);
 
         chunk_start_point + Point::new(remaining_rows, byte_col)
     }
@@ -980,10 +1005,7 @@ impl Rope {
         };
 
         let remaining = offset - chunk_start_offset;
-        let utf16_delta: usize = chunk.text.as_str()[..remaining]
-            .chars()
-            .map(|ch| ch.len_utf16())
-            .sum();
+        let utf16_delta = (chunk.chars_utf16 & below(remaining)).count_ones() as usize;
 
         OffsetUtf16(chunk_start_utf16.0 + utf16_delta)
     }
@@ -1000,15 +1022,7 @@ impl Rope {
         };
 
         let remaining_utf16 = target.0 - chunk_start_utf16.0;
-        let mut utf16_count = 0usize;
-        let mut byte_offset = 0usize;
-        for ch in chunk.text.as_str().chars() {
-            if utf16_count >= remaining_utf16 {
-                break;
-            }
-            utf16_count += ch.len_utf16();
-            byte_offset += ch.len_utf8();
-        }
+        let byte_offset = chunk.advance_utf16(0, remaining_utf16, chunk.text.len());
 
         chunk_start_offset + byte_offset
     }
@@ -1036,17 +1050,15 @@ impl Rope {
         };
 
         let remaining = offset - chunk_start_offset;
-        let text = &chunk.text.as_str()[..remaining];
-        let mut row_delta = 0u32;
-        let mut utf16_col = 0u32;
-        for ch in text.chars() {
-            if ch == '\n' {
-                row_delta += 1;
-                utf16_col = 0;
-            } else {
-                utf16_col += ch.len_utf16() as u32;
-            }
-        }
+        let seen = below(remaining);
+        let row_delta = (chunk.newlines & seen).count_ones();
+        let line_start = if row_delta == 0 {
+            0
+        } else {
+            (Bitmap::BITS - (chunk.newlines & seen).leading_zeros()) as usize
+        };
+        let utf16_col = bits_in(chunk.chars_utf16, line_start..remaining).count_ones();
+
         chunk_start_utf16 + PointUtf16::new(row_delta, utf16_col)
     }
 
@@ -1061,7 +1073,6 @@ impl Rope {
             None => return self.len(),
         };
 
-        let text = chunk.text.as_str();
         let remaining_rows = target.row - chunk_start_utf16.row;
         let line_start = if remaining_rows == 0 {
             0
@@ -1075,16 +1086,7 @@ impl Rope {
             target.column
         };
 
-        let line_text = &text[line_start..];
-        let mut utf16_count = 0u32;
-        let mut byte_offset = 0usize;
-        for ch in line_text.chars() {
-            if ch == '\n' || utf16_count >= remaining_utf16_col {
-                break;
-            }
-            utf16_count += ch.len_utf16() as u32;
-            byte_offset += ch.len_utf8();
-        }
+        let byte_offset = chunk.line_column_bytes(line_start, remaining_utf16_col) as usize;
 
         chunk_start_offset + line_start + byte_offset
     }
@@ -1437,12 +1439,120 @@ impl<'a> Dimension<'a, TextSummary> for usize {
     }
 }
 
-fn nth_newline_offset_bitmap(newlines: Bitmap, n: u32) -> usize {
-    let mut remaining = newlines;
-    for _ in 0..n.saturating_sub(1) {
-        remaining &= remaining.wrapping_sub(1);
+/// Mask of every bit below `offset`, saturating at the full width.
+fn below(offset: usize) -> Bitmap {
+    if offset >= MAX_BASE {
+        !0
+    } else {
+        ((1 as Bitmap) << offset) - 1
     }
-    remaining.trailing_zeros() as usize + 1
+}
+
+/// The bits of `map` covering `range`, shifted down to bit zero.
+fn bits_in(map: Bitmap, range: Range<usize>) -> Bitmap {
+    if range.start >= MAX_BASE {
+        return 0;
+    }
+    (map & below(range.end)) >> range.start
+}
+
+/// Index of the `n`th set bit, counting from one.
+///
+/// Splitting at 64 keeps the kernel below on a word the parallel bit count is
+/// written for. [`Bitmap`] is narrowed under test so chunk boundaries stay
+/// reachable, so it is widened here rather than at each call.
+fn nth_set_bit(v: Bitmap, n: usize) -> usize {
+    #[cfg(test)]
+    let v = v as u128;
+    #[cfg(not(test))]
+    let v: u128 = v;
+
+    let low = v as u64;
+    let low_count = low.count_ones() as usize;
+    if n > low_count {
+        64 + nth_set_bit_u64((v >> 64) as u64, (n - low_count) as u64) as usize
+    } else {
+        nth_set_bit_u64(low, n as u64) as usize
+    }
+}
+
+/// Index of the `n`th set bit of `v`, counting from one.
+///
+/// A binary search over the parallel-bit-count intermediates, narrowing the
+/// answer one power of two at a time. The subtract-and-mask in each step is
+/// what keeps it branchless, and so constant-time regardless of `n`.
+fn nth_set_bit_u64(v: u64, mut n: u64) -> u64 {
+    let v = v.reverse_bits();
+    let mut s: u64 = 64;
+
+    let a = v - ((v >> 1) & (u64::MAX / 3));
+    let b = (a & (u64::MAX / 5)) + ((a >> 2) & (u64::MAX / 5));
+    let c = (b + (b >> 4)) & (u64::MAX / 0x11);
+    let d = (c + (c >> 8)) & (u64::MAX / 0x101);
+
+    let t = (d >> 32) + (d >> 48);
+    s -= (t.wrapping_sub(n) & 256) >> 3;
+    n -= t & (t.wrapping_sub(n) >> 8);
+
+    let t = (d >> (s - 16)) & 0xff;
+    s -= (t.wrapping_sub(n) & 256) >> 4;
+    n -= t & (t.wrapping_sub(n) >> 8);
+
+    let t = (c >> (s - 8)) & 0xf;
+    s -= (t.wrapping_sub(n) & 256) >> 5;
+    n -= t & (t.wrapping_sub(n) >> 8);
+
+    let t = (b >> (s - 4)) & 0x7;
+    s -= (t.wrapping_sub(n) & 256) >> 6;
+    n -= t & (t.wrapping_sub(n) >> 8);
+
+    let t = (a >> (s - 2)) & 0x3;
+    s -= (t.wrapping_sub(n) & 256) >> 7;
+    n -= t & (t.wrapping_sub(n) >> 8);
+
+    let t = (v >> (s - 1)) & 0x1;
+    s -= (t.wrapping_sub(n) & 256) >> 8;
+
+    65 - s - 1
+}
+
+/// The character, UTF-16 code unit, and newline maps for `text`, positioned
+/// from bit zero.
+///
+/// Bytes are taken a lane at a time so the per-byte work is an 8-bit shift
+/// rather than one over the full mask width, and the lanes are assembled at the
+/// end.
+fn chunk_bitmaps(text: &str) -> (Bitmap, Bitmap, Bitmap) {
+    const LANE: usize = 8;
+    let mut char_lanes = [0u8; MAX_BASE / LANE];
+    let mut wide_lanes = [0u8; MAX_BASE / LANE];
+    let mut newline_lanes = [0u8; MAX_BASE / LANE];
+
+    for (lane_ix, lane) in text.as_bytes().chunks(LANE).enumerate() {
+        let (mut chars, mut wide, mut newlines) = (0u8, 0u8, 0u8);
+        for (ix, &byte) in lane.iter().enumerate() {
+            chars |= u8::from(byte & 0xC0 != 0x80) << ix;
+            newlines |= u8::from(byte == b'\n') << ix;
+            // A byte this large opens a four-byte sequence, which is the only
+            // encoding costing two UTF-16 code units.
+            wide |= u8::from(byte >= 240) << ix;
+        }
+        char_lanes[lane_ix] = chars;
+        wide_lanes[lane_ix] = wide;
+        newline_lanes[lane_ix] = newlines;
+    }
+
+    let chars = Bitmap::from_le_bytes(char_lanes);
+    (
+        chars,
+        (Bitmap::from_le_bytes(wide_lanes) << 1) | chars,
+        Bitmap::from_le_bytes(newline_lanes),
+    )
+}
+
+/// Byte offset just past the `n`th newline, counting from one.
+fn nth_newline_offset_bitmap(newlines: Bitmap, n: u32) -> usize {
+    nth_set_bit(newlines, n as usize) + 1
 }
 
 fn offset_to_point_in_chunk(newlines: Bitmap, remaining: usize) -> (u32, u32) {
@@ -2778,6 +2888,219 @@ mod tests {
                 flag,
                 "stepping back over the flag pair takes both halves at pad {pad}",
             );
+        }
+    }
+}
+
+/// Reference conversions written as plain char walks, and a randomized check
+/// that the rope agrees with them.
+///
+/// The rope answers these from chunk bitmaps, which is fast but easy to get
+/// subtly wrong at a chunk boundary or around a character that encodes to two
+/// UTF-16 code units. These walk the text directly instead, so they are slow,
+/// obviously correct, and independent of whatever representation the chunks
+/// use.
+#[cfg(test)]
+mod utf16_reference {
+    use super::*;
+
+    /// The branchless kernel is opaque enough that a scan is worth keeping
+    /// beside it.
+    ///
+    /// It is exercised directly rather than through [`nth_set_bit`], whose
+    /// input narrows to sixteen bits under test and so would never reach the
+    /// upper half of a word.
+    #[test]
+    fn nth_set_bit_matches_a_scan() {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        for case in 0..200 {
+            // Sparse and dense words both, since the search narrows by
+            // population and a word of one set bit is a different path through
+            // it than a word of sixty.
+            let v = match case % 3 {
+                0 => next(),
+                1 => next() & next() & next(),
+                _ => next() | next() | next(),
+            };
+            let set: Vec<u64> = (0..64).filter(|ix| v >> ix & 1 == 1).collect();
+            for (rank, &ix) in set.iter().enumerate() {
+                assert_eq!(
+                    nth_set_bit_u64(v, rank as u64 + 1),
+                    ix,
+                    "bit {} of {v:#018x}",
+                    rank + 1
+                );
+            }
+        }
+    }
+
+    fn offset_to_offset_utf16(text: &str, offset: usize) -> OffsetUtf16 {
+        OffsetUtf16(text[..offset].chars().map(char::len_utf16).sum())
+    }
+
+    /// Advance `target` UTF-16 units from the start of `text`.
+    ///
+    /// Whole characters are consumed while the running count is below the
+    /// target, so a target falling between the two units of a surrogate pair
+    /// lands after the character rather than inside it.
+    fn offset_utf16_to_offset(text: &str, target: OffsetUtf16) -> usize {
+        let mut utf16 = 0usize;
+        let mut offset = 0usize;
+        for ch in text.chars() {
+            if utf16 >= target.0 {
+                break;
+            }
+            utf16 += ch.len_utf16();
+            offset += ch.len_utf8();
+        }
+        offset
+    }
+
+    fn offset_to_point_utf16(text: &str, offset: usize) -> PointUtf16 {
+        let mut row = 0u32;
+        let mut column = 0u32;
+        for ch in text[..offset].chars() {
+            if ch == '\n' {
+                row += 1;
+                column = 0;
+            } else {
+                column += ch.len_utf16() as u32;
+            }
+        }
+        PointUtf16::new(row, column)
+    }
+
+    fn point_to_point_utf16(text: &str, point: Point) -> PointUtf16 {
+        let line_start = row_start(text, point.row);
+        let scan_end = (line_start + point.column as usize).min(text.len());
+        let column = text[line_start..scan_end]
+            .chars()
+            .map(|ch| ch.len_utf16() as u32)
+            .sum();
+        PointUtf16::new(point.row, column)
+    }
+
+    fn point_utf16_to_point(text: &str, target: PointUtf16) -> Point {
+        Point::new(target.row, line_column_bytes(text, target))
+    }
+
+    fn point_utf16_to_offset(text: &str, target: PointUtf16) -> usize {
+        row_start(text, target.row) + line_column_bytes(text, target) as usize
+    }
+
+    /// Byte offset of the first character of `row`.
+    fn row_start(text: &str, row: u32) -> usize {
+        if row == 0 {
+            return 0;
+        }
+        text.match_indices('\n')
+            .nth(row as usize - 1)
+            .map(|(ix, _)| ix + 1)
+            .unwrap_or(text.len())
+    }
+
+    /// Byte column reached by advancing `target.column` UTF-16 units into
+    /// `target.row`, stopping at the end of the line.
+    fn line_column_bytes(text: &str, target: PointUtf16) -> u32 {
+        let line = &text[row_start(text, target.row)..];
+        let mut utf16 = 0u32;
+        let mut bytes = 0u32;
+        for ch in line.chars() {
+            if ch == '\n' || utf16 >= target.column {
+                break;
+            }
+            utf16 += ch.len_utf16() as u32;
+            bytes += ch.len_utf8() as u32;
+        }
+        bytes
+    }
+
+    /// Characters spanning every UTF-8 width, plus the newlines that make rows
+    /// and the chunk boundaries interesting.
+    const ALPHABET: [char; 10] = ['a', 'z', '\n', '\n', 'é', 'ß', '世', '界', '𝄞', '🎉'];
+
+    fn sample(seed: &mut u64, len: usize) -> String {
+        let mut next = || {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            *seed
+        };
+        (0..len)
+            .map(|_| ALPHABET[(next() as usize) % ALPHABET.len()])
+            .collect()
+    }
+
+    #[test]
+    fn the_rope_agrees_with_a_char_walk_over_random_text() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        for case in 0..40 {
+            let text = sample(&mut seed, 1 + case * 3);
+            let rope = Rope::from(text.as_str());
+
+            for offset in 0..=text.len() {
+                if !text.is_char_boundary(offset) {
+                    continue;
+                }
+                assert_eq!(
+                    rope.offset_to_offset_utf16(offset),
+                    offset_to_offset_utf16(&text, offset),
+                    "offset_to_offset_utf16 at {offset} of {text:?}"
+                );
+                assert_eq!(
+                    rope.offset_to_point_utf16(offset),
+                    offset_to_point_utf16(&text, offset),
+                    "offset_to_point_utf16 at {offset} of {text:?}"
+                );
+            }
+
+            let len_utf16 = offset_to_offset_utf16(&text, text.len()).0;
+            for unit in 0..=len_utf16 {
+                assert_eq!(
+                    rope.offset_utf16_to_offset(OffsetUtf16(unit)),
+                    offset_utf16_to_offset(&text, OffsetUtf16(unit)),
+                    "offset_utf16_to_offset at {unit} of {text:?}"
+                );
+            }
+
+            let rows = text.matches('\n').count() as u32;
+            for row in 0..=rows {
+                let line_bytes = text[row_start(&text, row)..]
+                    .split('\n')
+                    .next()
+                    .map(str::len)
+                    .unwrap_or(0);
+                for column in 0..=(line_bytes as u32 + 2) {
+                    let point = Point::new(row, column);
+                    if column as usize <= line_bytes
+                        && text.is_char_boundary(row_start(&text, row) + column as usize)
+                    {
+                        assert_eq!(
+                            rope.point_to_point_utf16(point),
+                            point_to_point_utf16(&text, point),
+                            "point_to_point_utf16 at {point:?} of {text:?}"
+                        );
+                    }
+                    let target = PointUtf16::new(row, column);
+                    assert_eq!(
+                        rope.point_utf16_to_point(target),
+                        point_utf16_to_point(&text, target),
+                        "point_utf16_to_point at {target:?} of {text:?}"
+                    );
+                    assert_eq!(
+                        rope.point_utf16_to_offset(target),
+                        point_utf16_to_offset(&text, target),
+                        "point_utf16_to_offset at {target:?} of {text:?}"
+                    );
+                }
+            }
         }
     }
 }
