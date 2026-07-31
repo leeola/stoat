@@ -622,21 +622,32 @@ impl Rope {
             .column
     }
 
+    /// Walk `rows` from a single cursor.
+    ///
+    /// The walk stops after the rope's last row, so it can yield fewer items
+    /// than `rows` asks for.
+    pub fn line_walk(&self, rows: Range<u32>) -> LineWalk<'_> {
+        LineWalk {
+            chunks: self.chunks.cursor::<usize>(()),
+            offset: self.point_to_offset(Point::new(rows.start, 0)),
+            row: rows.start,
+            end_row: rows.end,
+            len: self.len(),
+            started: false,
+        }
+    }
+
     pub fn line_lens_in_range(&self, rows: Range<u32>) -> Vec<u32> {
         if rows.is_empty() {
             return Vec::new();
         }
-        let max = self.max_point();
         let mut results = Vec::with_capacity(rows.len());
-        for row in rows {
-            if row > max.row {
-                results.push(0);
-            } else if row == max.row {
-                results.push(max.column);
-            } else {
-                results.push(self.line_len(row));
-            }
+        let mut walk = self.line_walk(rows.clone());
+        while let Some((_, len)) = walk.next_len() {
+            results.push(len);
         }
+        // Rows past the last one have no length of their own.
+        results.resize(rows.len(), 0);
         results
     }
 
@@ -1206,6 +1217,97 @@ impl<'a> Iterator for ChunksIter<'a> {
             self.cursor.next();
         }
         self.cursor.item().map(|chunk| chunk.text.as_str())
+    }
+}
+
+/// Walks consecutive rows from a single cursor.
+///
+/// Reading rows one at a time costs a tree descent each. This positions one
+/// cursor and carries it forward, finding each line break as a set bit in a
+/// chunk's newline map, so a screenful of rows costs one descent rather than
+/// one per row.
+///
+/// Rows come out in order and the walk ends after the rope's last row, so a
+/// caller asking for more rows than exist gets fewer items rather than empty
+/// ones.
+pub struct LineWalk<'a> {
+    chunks: sum_tree::Cursor<'a, 'a, Chunk, usize>,
+    /// Byte offset the next row starts at.
+    offset: usize,
+    /// Index of the next row.
+    row: u32,
+    /// One past the last row to report.
+    end_row: u32,
+    len: usize,
+    started: bool,
+}
+
+impl<'a> LineWalk<'a> {
+    /// Append the next row's text to `out`, returning its byte length.
+    ///
+    /// The row's newline is not appended. Appending rather than returning a
+    /// string is what lets a caller walking many rows keep one allocation.
+    pub fn next_into(&mut self, out: &mut String) -> Option<u32> {
+        self.step(Some(out))
+    }
+
+    /// The next row's index and byte length, without reading its text.
+    pub fn next_len(&mut self) -> Option<(u32, u32)> {
+        let row = self.row;
+        self.step(None).map(|len| (row, len))
+    }
+
+    /// Advance past the next row, reporting its byte length and appending its
+    /// text to `out` when one is given.
+    ///
+    /// The text is taken as the scan passes over it, so wanting a row's text
+    /// costs nothing beyond the copy itself.
+    fn step(&mut self, mut out: Option<&mut String>) -> Option<u32> {
+        if self.row >= self.end_row || self.offset > self.len {
+            return None;
+        }
+        if !self.started {
+            self.started = true;
+            self.chunks.seek(&self.offset, Bias::Right);
+        }
+
+        let start = self.offset;
+        let mut pos = start;
+        loop {
+            let Some(chunk) = self.chunks.item() else {
+                // Past the last chunk, so the row runs to the end of the rope
+                // and there is no row after it.
+                self.offset = self.len + 1;
+                self.row += 1;
+                return Some((self.len - start) as u32);
+            };
+
+            let chunk_start = *self.chunks.start();
+            let text = chunk.text.as_str();
+            let chunk_end = chunk_start + text.len();
+            if pos >= chunk_end {
+                self.chunks.next();
+                continue;
+            }
+
+            let local = pos - chunk_start;
+            let rest = chunk.newlines >> local;
+            if rest != 0 {
+                let end = local + rest.trailing_zeros() as usize;
+                if let Some(out) = out.as_mut() {
+                    out.push_str(&text[local..end]);
+                }
+                self.offset = chunk_start + end + 1;
+                self.row += 1;
+                return Some((chunk_start + end - start) as u32);
+            }
+
+            if let Some(out) = out.as_mut() {
+                out.push_str(&text[local..]);
+            }
+            pos = chunk_end;
+            self.chunks.next();
+        }
     }
 }
 
@@ -3320,5 +3422,103 @@ mod clip_reference {
                 }
             }
         }
+    }
+}
+
+/// The streaming line walk against the per-row path it replaces.
+///
+/// The walk carries one cursor across chunk boundaries, so what can go wrong
+/// is a row whose newline sits at a chunk's last byte, a row longer than a
+/// chunk, or the last row of a rope with no trailing newline.
+#[cfg(test)]
+mod line_walk_tests {
+    use super::*;
+
+    /// Every row's byte length and text, read the per-row way.
+    fn per_row(rope: &Rope) -> (Vec<u32>, Vec<String>) {
+        let rows = rope.max_point().row;
+        let lens = (0..=rows).map(|row| rope.line_len(row)).collect();
+        let texts = (0..=rows)
+            .map(|row| rope.chunks_in_line(row).collect::<String>())
+            .collect();
+        (lens, texts)
+    }
+
+    fn walked(rope: &Rope, rows: Range<u32>) -> (Vec<u32>, Vec<String>) {
+        let mut lens = Vec::new();
+        let mut walk = rope.line_walk(rows.clone());
+        while let Some((_, len)) = walk.next_len() {
+            lens.push(len);
+        }
+
+        let mut texts = Vec::new();
+        let mut walk = rope.line_walk(rows);
+        let mut scratch = String::new();
+        loop {
+            scratch.clear();
+            match walk.next_into(&mut scratch) {
+                Some(_) => texts.push(scratch.clone()),
+                None => break,
+            }
+        }
+        (lens, texts)
+    }
+
+    fn check(text: &str) {
+        let rope = Rope::from(text);
+        let rows = rope.max_point().row;
+        let (want_lens, want_texts) = per_row(&rope);
+        let (got_lens, got_texts) = walked(&rope, 0..rows + 1);
+
+        assert_eq!(got_lens, want_lens, "row lengths of {text:?}");
+        assert_eq!(got_texts, want_texts, "row texts of {text:?}");
+        assert_eq!(
+            rope.line_lens_in_range(0..rows + 3),
+            want_lens.iter().copied().chain([0, 0]).collect::<Vec<_>>(),
+            "line_lens_in_range past the end of {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_walk_matches_the_per_row_path() {
+        let long = "x".repeat(MAX_BASE * 3);
+        for text in [
+            "",
+            "\n",
+            "a",
+            "a\n",
+            "a\nb",
+            "a\nb\n",
+            "\n\n\n",
+            "a\n\nb\n\nc",
+            &long,
+            &format!("{long}\n{long}"),
+            &format!("a\n{long}\n\nb"),
+            // A newline landing exactly on a chunk boundary, which is where a
+            // walk that forgets to advance its cursor repeats a row.
+            &format!("{}\n{}", "y".repeat(MAX_BASE), "z".repeat(MAX_BASE)),
+            &format!("{}\nz", "y".repeat(MAX_BASE - 1)),
+            "héllo\nwörld\n𝄞\n🎉a",
+        ] {
+            check(text);
+        }
+    }
+
+    #[test]
+    fn a_walk_starts_at_the_row_it_is_given() {
+        let text = "zero\none\ntwo\nthree\nfour";
+        let rope = Rope::from(text);
+        let mut walk = rope.line_walk(2..4);
+
+        let mut scratch = String::new();
+        walk.next_into(&mut scratch).expect("row two");
+        assert_eq!(scratch, "two");
+
+        assert_eq!(
+            walk.next_len(),
+            Some((3, 5)),
+            "row three's index and length"
+        );
+        assert_eq!(walk.next_len(), None, "the walk stops at the end row");
     }
 }
