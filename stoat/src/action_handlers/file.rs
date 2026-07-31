@@ -410,6 +410,18 @@ pub(crate) fn font_size_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     UpdateEffect::None
 }
 
+/// How a path is named in a status message.
+///
+/// The bare file name, since the status row is one line shared with everything
+/// else and the directory is rarely what distinguishes the file the user just
+/// acted on. A path with no file name component falls back to all of it.
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// True when the file at `path` has an on-disk mtime newer than the baseline
 /// recorded for `buffer_id` at open or last save.
 ///
@@ -502,8 +514,22 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) {
         if stoat.active_workspace().buffers.disk_mtime(id) == Some(mtime) {
             continue;
         }
-        let Ok(new) = read_string_via_host(&*stoat.fs_host, &path) else {
-            continue;
+        let new = match read_string_via_host(&*stoat.fs_host, &path) {
+            Ok(new) => new,
+            Err(e) => {
+                // Recorded even though nothing was loaded, so this says the
+                // version was seen and could not be used rather than that
+                // nothing has been seen. Otherwise the poll re-reads and
+                // re-reports it twice a second until the file changes again. A
+                // later write moves the mtime and gets its own read, so a file
+                // caught mid-write still recovers.
+                stoat
+                    .active_workspace_mut()
+                    .buffers
+                    .set_disk_mtime(id, mtime);
+                stoat.set_status(format!("cannot reload {}: {e}", display_name(&path)));
+                continue;
+            },
         };
         // Before the prefix diff, which would otherwise compare the file's
         // carriage returns against a buffer that has none and call every line
@@ -639,11 +665,7 @@ pub(super) fn reload_focused(stoat: &mut Stoat, force: bool) -> UpdateEffect {
         ReloadOutcome::Missing => stoat.set_status("file no longer exists on disk"),
         ReloadOutcome::Unchanged => stoat.set_status("already up to date"),
         ReloadOutcome::Reloaded => {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.to_string_lossy().into_owned());
-            stoat.set_status(format!("reloaded {name}"));
+            stoat.set_status(format!("reloaded {}", display_name(&path)));
             super::lsp::notify_buffer_changes_pending(stoat);
         },
     }
@@ -1157,6 +1179,7 @@ pub(crate) fn open_file_in_pane(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => "\n".to_string(),
         Err(e) => {
             tracing::error!("failed to read {}: {}", absolute.display(), e);
+            stoat.set_status(format!("cannot open {}: {e}", display_name(&absolute)));
             return None;
         },
     };
@@ -1247,6 +1270,7 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
             Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => "\n".to_string(),
             Some(Err(e)) => {
                 tracing::error!("failed to read {}: {}", pending.path.display(), e);
+                stoat.set_status(format!("cannot open {}: {e}", display_name(&pending.path)));
                 continue;
             },
             None => continue,
@@ -1627,6 +1651,94 @@ mod tests {
                 .id_for_path(&path)
                 .is_some(),
             "and the second's is not dropped as a duplicate of it"
+        );
+    }
+
+    /// A lone latin-1 byte, which no UTF-8 decoder will take.
+    const NOT_UTF8: &[u8] = b"caf\xe9 au lait\n";
+
+    #[test]
+    fn opening_a_non_utf8_file_says_why() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = Path::new("/latin1");
+        let path = root.join("cafe.txt");
+        h.fake_fs().insert_file(&path, NOT_UTF8);
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+
+        assert!(
+            h.stoat
+                .active_workspace()
+                .buffers
+                .id_for_path(&path)
+                .is_none(),
+            "nothing opens"
+        );
+        let message = h.stoat.pending_message.as_deref().unwrap_or("");
+        assert!(
+            message.contains("cafe.txt") && message.contains("utf-8"),
+            "the failure must name the file and what was wrong, got {message:?}"
+        );
+    }
+
+    #[test]
+    fn a_deferred_open_of_a_non_utf8_file_says_why() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = Path::new("/latin1-big");
+        let path = root.join("cafe.txt");
+        let mut big = vec![b'x'; super::OPEN_SYNC_MAX_BYTES as usize + 16];
+        big.extend_from_slice(NOT_UTF8);
+        h.fake_fs().insert_file(&path, &big);
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        super::install_pending_opens(&mut h.stoat);
+
+        assert!(
+            h.stoat
+                .active_workspace()
+                .buffers
+                .id_for_path(&path)
+                .is_none(),
+            "nothing installs"
+        );
+        let message = h.stoat.pending_message.as_deref().unwrap_or("");
+        assert!(
+            message.contains("cafe.txt") && message.contains("utf-8"),
+            "the deferred failure must reach the user too, got {message:?}"
+        );
+    }
+
+    #[test]
+    fn auto_reload_reports_undecodable_content_once_per_change() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-latin1");
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"line1\n");
+
+        h.fake_fs().insert_file(&path, NOT_UTF8);
+        arm_and_pump(&mut h);
+
+        assert_eq!(
+            buffer_text(&h, id),
+            "line1\n",
+            "the buffer keeps what it had"
+        );
+        let message = h.stoat.pending_message.as_deref().unwrap_or("");
+        assert!(
+            message.contains("log.txt") && message.contains("utf-8"),
+            "following must say why it stopped, got {message:?}"
+        );
+
+        // Polling twice a second, a version that cannot be decoded must not be
+        // re-read and re-reported until the file changes again.
+        h.stoat.pending_message = None;
+        arm_and_pump(&mut h);
+        assert_eq!(
+            h.stoat.pending_message, None,
+            "the same undecodable version must not report again"
         );
     }
 
