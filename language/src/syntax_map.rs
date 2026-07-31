@@ -625,21 +625,40 @@ impl SyntaxMap {
                     sorted.sort_by_key(|r| r.start);
                     let merged_start = sorted.first().map(|r| r.start).unwrap_or(0);
                     let merged_end = sorted.last().map(|r| r.end).unwrap_or(0);
-                    let Some(inner_tree) =
-                        parse_rope_combined_ranges(&inner_lang, rope, &sorted, None, deadline)
-                    else {
+
+                    // A combined layer's bounds move whenever a host range is
+                    // added or dropped, so it is matched by overlap rather than
+                    // by the exact bounds a single-range layer is looked up on.
+                    // The layer's own text is what carries across, not its
+                    // extent.
+                    let prior = prior_injections.iter().find(|p| {
+                        p.depth == parent_depth + 1
+                            && p.language.name == inner_lang.name
+                            && (p.start_offset as usize) < merged_end
+                            && merged_start < p.end_offset as usize
+                    });
+                    let Some(inner_tree) = parse_rope_combined_ranges(
+                        &inner_lang,
+                        rope,
+                        &sorted,
+                        prior.map(|p| &p.tree),
+                        deadline,
+                    ) else {
                         if out_of_time() {
                             return None;
                         }
                         continue;
                     };
-                    // A combined parse is offered no prior tree, so there is
-                    // nothing to diff against and the whole merged span counts
-                    // as moved.
+                    // Diffing against a prior matched by overlap only names
+                    // where the two trees disagree, which misses text the layer
+                    // no longer covers. The carry step below reports the whole
+                    // span of any prior layer it drops, and a prior reached
+                    // here was dropped there, so that half is already accounted
+                    // for.
                     record_layer_change(
                         &mut layer_changes,
                         &(merged_start..merged_end),
-                        None,
+                        prior.map(|p| &p.tree),
                         &inner_tree,
                     );
                     new_layers.push(SyntaxLayer {
@@ -689,9 +708,12 @@ struct PriorInjection {
 /// Note where a freshly parsed injection layer could have restyled text.
 ///
 /// A layer whose prior tree was reused only differs from it where the two trees
-/// do, since the prior is looked up by exact host range and so covers the same
-/// bytes. Without one the layer is new text, or text whose bounds moved, and
-/// the whole span is suspect.
+/// do. Without one the layer is new text, or text whose bounds moved, and the
+/// whole span is suspect.
+///
+/// The tree diff says nothing about text the layer used to cover and no longer
+/// does. A caller passing a prior whose bounds may differ from `span` owes that
+/// half of the answer separately.
 fn record_layer_change(
     changes: &mut Vec<Range<usize>>,
     span: &Range<usize>,
@@ -871,6 +893,15 @@ fn parse_rope_combined_ranges(
             }
         })
         .collect();
+    // A combined tree is only reused when it was built over the very ranges
+    // being asked for again. Handing one back under a different range set
+    // yields a tree that disagrees with a from-scratch parse of the same text,
+    // since the subtrees it carries forward were positioned against the layout
+    // it had before. An edit inside an existing host range keeps the set equal,
+    // because `SyntaxMap::interpolate` shifts the prior tree's ranges exactly
+    // as the fresh query shifts the discovered ones, and that is the case worth
+    // reusing for.
+    let old_tree = old_tree.filter(|t| t.included_ranges() == ts_ranges);
     parse_rope_inner(language, rope, old_tree, Some(&ts_ranges), deadline)
 }
 
@@ -1713,6 +1744,82 @@ mod tests {
         );
 
         budgeted
+    }
+
+    #[test]
+    fn an_edit_in_one_doc_comment_reuses_the_combined_tree() {
+        use stoat_text::patch::Edit as PatchEdit;
+        let lang = rust_lang();
+        let source = "/// one **bold**\nfn a() {}\n/// two **bold**\nfn b() {}\n\
+                      /// three **bold**\nfn c() {}\n";
+        let old_rope = Rope::from(source);
+
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
+        let combined = |map: &SyntaxMap| -> Vec<tree_sitter::Range> {
+            map.snapshot()
+                .iter_layers()
+                .find(|l| l.depth == 1 && l.language.name == "markdown")
+                .expect("a depth-1 markdown layer")
+                .tree
+                .included_ranges()
+        };
+        assert!(
+            combined(&map).len() > 1,
+            "the fixture must merge several host ranges into one layer"
+        );
+
+        let at = source.find("**bold**").expect("fixture has bold") + "**".len();
+        let inserted = "very ";
+        let mut text = String::from(&source[..at]);
+        text.push_str(inserted);
+        text.push_str(&source[at..]);
+        let new_rope = Rope::from(text.as_str());
+        let edits = vec![PatchEdit {
+            old: at..at,
+            new: at..(at + inserted.len()),
+        }];
+
+        map.interpolate(&edits, &old_rope, &new_rope);
+        let carried = combined(&map);
+
+        #[allow(clippy::single_range_in_vec_init)]
+        let changed = vec![at..(at + inserted.len())];
+        map.reparse_within_changed_ranges(&new_rope, lang.clone(), 2, Some(&changed), None, None)
+            .unwrap();
+
+        // Reuse itself is invisible from here, since an incremental parse and a
+        // from-scratch one over the same text and ranges must agree. What can
+        // be pinned is the condition reuse is gated on, which is the walk
+        // rediscovering the same ranges the prior tree was built over. If that
+        // stopped holding for an ordinary edit, reuse would quietly stop with
+        // nothing else to show for it.
+        assert_eq!(
+            combined(&map),
+            carried,
+            "an edit inside one comment must leave the range set where interpolate put it"
+        );
+
+        let mut fresh = SyntaxMap::new();
+        fresh.reparse(&new_rope, lang, 2, None, None).unwrap();
+        let shapes = |map: &SyntaxMap| -> Vec<(u32, u32, u32, String)> {
+            map.snapshot()
+                .iter_layers()
+                .map(|l| {
+                    (
+                        l.depth,
+                        l.start_offset,
+                        l.end_offset,
+                        l.tree.root_node().to_sexp(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            shapes(&map),
+            shapes(&fresh),
+            "and must land on the same layers a from-scratch parse would"
+        );
     }
 
     #[test]
