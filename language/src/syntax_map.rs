@@ -38,6 +38,7 @@ use std::{
     cmp::Reverse,
     collections::{HashMap, VecDeque},
     ops::Range,
+    slice,
     sync::Arc,
     time::Instant,
 };
@@ -258,13 +259,24 @@ impl SyntaxMap {
     /// replacement's start, so it becomes empty rather than spanning
     /// unrelated text. The following reparse then drops it, since a layer
     /// inside an edit is one the injection walk must re-find to keep.
+    ///
+    /// A layer lying entirely before every edit is left as it is. Nothing about
+    /// it moves, so both halves of the work above would be writing back what is
+    /// already there. That is a narrower test than the layer not intersecting
+    /// an edit. One sitting after an edit intersects nothing and still has to be
+    /// replayed, since its tree holds absolute offsets the edit shifts.
     pub fn interpolate(&mut self, edits: &[PatchEdit<usize>], old_rope: &Rope, new_rope: &Rope) {
-        if edits.is_empty() {
+        let Some(first_edit) = edits.first().map(|edit| edit.old.start) else {
             return;
-        }
+        };
         let mut new_layers: Vec<SyntaxLayer> = Vec::with_capacity(self.snapshot.layer_count());
         for layer in self.snapshot.layers.iter() {
             let mut next = layer.clone();
+            if (layer.end_offset as usize) <= first_edit {
+                new_layers.push(next);
+                continue;
+            }
+
             edit_tree(&mut next.tree, edits, old_rope, new_rope);
 
             next.start_offset = translate_offset(edits, layer.start_offset as usize) as u32;
@@ -407,6 +419,14 @@ impl SyntaxMap {
             })
             .collect();
 
+        // The walk asks after a prior once per host range it rediscovers, so
+        // scanning the list would cost priors times discoveries. Two of the
+        // three lookups want an exact host range, which is a key.
+        let priors_by_host: HashMap<(u32, u32, &'static str), &PriorInjection> = prior_injections
+            .iter()
+            .map(|p| ((p.start_offset, p.end_offset, p.language.name), p))
+            .collect();
+
         let root_tree = match root {
             Some(tree) => tree.clone(),
             None => {
@@ -473,19 +493,23 @@ impl SyntaxMap {
                 HashMap::new();
 
             let mut cursor = QueryCursorHandle::new();
+            // Refilled per fence match rather than allocated per fence match.
+            // An info string is a handful of bytes and every fence in the
+            // buffer produces one.
+            let mut fence_token = String::new();
             // When the caller has supplied changed-range filters,
             // restrict the injection query to the union of those
             // ranges. The cursor's `set_byte_range` only accepts a
             // single range, so we walk each filter range in turn and
             // collect the matches; for the common no-filter case we
             // walk the whole tree once.
-            let filter_ranges: Vec<Range<usize>> = match injection_filter_ranges {
-                Some(ranges) if !ranges.is_empty() => ranges.to_vec(),
-                #[allow(clippy::single_range_in_vec_init)]
-                _ => vec![0..rope.len()],
+            let whole_rope = 0..rope.len();
+            let filter_ranges: &[Range<usize>] = match injection_filter_ranges {
+                Some(ranges) if !ranges.is_empty() => ranges,
+                _ => slice::from_ref(&whole_rope),
             };
             for filter in filter_ranges {
-                cursor.set_byte_range(filter);
+                cursor.set_byte_range(filter.clone());
                 let provider = RopeTextProvider { rope };
                 let mut matches =
                     cursor.matches(injection_query, parent_tree.root_node(), provider);
@@ -515,15 +539,16 @@ impl SyntaxMap {
                             // content as a standalone layer per match rather than
                             // grouping it with the combined injections above.
                             let names = injection_query.capture_names();
-                            let mut token: Option<String> = None;
+                            let mut has_token = false;
                             let mut content: Option<Range<usize>> = None;
                             for capture in m.captures {
                                 match names.get(capture.index as usize).copied() {
                                     Some("injection.language") => {
-                                        token = Some(
-                                            rope.chunks_in_range(capture.node.byte_range())
-                                                .collect(),
+                                        fence_token.clear();
+                                        fence_token.extend(
+                                            rope.chunks_in_range(capture.node.byte_range()),
                                         );
+                                        has_token = true;
                                     },
                                     Some("injection.content") => {
                                         let r = capture.node.byte_range();
@@ -534,21 +559,20 @@ impl SyntaxMap {
                                     _ => {},
                                 }
                             }
-                            let (Some(token), Some(content)) = (token, content) else {
+                            let (true, Some(content)) = (has_token, content) else {
                                 continue;
                             };
                             let Some(candidates) = parent_lang.fence_candidates.get() else {
                                 continue;
                             };
-                            let Some(inner_lang) = language_for_fence_token(&token, candidates)
+                            let Some(inner_lang) =
+                                language_for_fence_token(&fence_token, candidates)
                             else {
                                 continue;
                             };
-                            let prior = prior_injections.iter().find(|p| {
-                                p.start_offset == content.start as u32
-                                    && p.end_offset == content.end as u32
-                                    && p.language.name == inner_lang.name
-                            });
+                            let prior = priors_by_host
+                                .get(&(content.start as u32, content.end as u32, inner_lang.name))
+                                .copied();
                             let Some(inner_tree) = parse_rope_range(
                                 &inner_lang,
                                 rope,
@@ -588,11 +612,9 @@ impl SyntaxMap {
                 // common case).
                 if ranges.len() == 1 {
                     let r = ranges.into_iter().next().expect("len checked == 1");
-                    let prior = prior_injections.iter().find(|p| {
-                        p.start_offset == r.start as u32
-                            && p.end_offset == r.end as u32
-                            && p.language.name == inner_lang.name
-                    });
+                    let prior = priors_by_host
+                        .get(&(r.start as u32, r.end as u32, inner_lang.name))
+                        .copied();
                     let Some(inner_tree) = parse_rope_range(
                         &inner_lang,
                         rope,
@@ -1073,6 +1095,65 @@ mod tests {
             .to_sexp();
 
         assert_eq!(incremental, fresh_root);
+    }
+
+    #[test]
+    fn interpolate_then_reparse_matches_full_parse_over_many_fences() {
+        // The edit lands in the last fence, so every layer above it is left
+        // untouched by interpolate rather than replayed. Getting that skip
+        // wrong shows up as a layer whose tree or bounds no longer describe the
+        // text under it, which the comparison below catches.
+        use stoat_text::patch::Edit as PatchEdit;
+        let lang = markdown_lang();
+        let original: String = (0..12)
+            .map(|i| {
+                format!("## Section {i}\n\nprose {i}\n\n```rust\nfn f{i}() {{ {i} }}\n```\n\n")
+            })
+            .collect();
+        let old_rope = Rope::from(original.as_str());
+
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
+        let layers = |map: &SyntaxMap| -> Vec<(u32, u32, u32, &'static str, String)> {
+            map.snapshot()
+                .iter_layers()
+                .map(|l| {
+                    (
+                        l.depth,
+                        l.start_offset,
+                        l.end_offset,
+                        l.language.name,
+                        l.tree.root_node().to_sexp(),
+                    )
+                })
+                .collect()
+        };
+        assert!(
+            layers(&map).len() > 3,
+            "the fixture must inject many layers, got {:?}",
+            layers(&map).len()
+        );
+
+        let at = original.rfind("fn f11").expect("fixture has a last fence") + "fn f11".len();
+        let inserted = "oo";
+        let mut text = String::from(&original[..at]);
+        text.push_str(inserted);
+        text.push_str(&original[at..]);
+        let new_rope = Rope::from(text.as_str());
+        let edits = vec![PatchEdit {
+            old: at..at,
+            new: at..(at + inserted.len()),
+        }];
+
+        map.interpolate(&edits, &old_rope, &new_rope);
+        #[allow(clippy::single_range_in_vec_init)]
+        let changed = vec![at..(at + inserted.len())];
+        map.reparse_within_changed_ranges(&new_rope, lang.clone(), 2, Some(&changed), None, None)
+            .unwrap();
+
+        let mut fresh = SyntaxMap::new();
+        fresh.reparse(&new_rope, lang, 2, None, None).unwrap();
+        assert_eq!(layers(&map), layers(&fresh));
     }
 
     #[test]
