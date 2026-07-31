@@ -600,6 +600,16 @@ pub(crate) fn render_editor_with_overlay(
                     };
                     cell.set_char(char_to_paint);
                     cell.set_style(cursor_style);
+                    // A block cursor covers the character it sits on, so a wide
+                    // one takes both of its columns rather than reading as half
+                    // covered. The trailing column carries no character of its
+                    // own, so only its style changes.
+                    let width = rope.chars_at(cursor).next().map_or(1, display_width);
+                    for extra in 1..width as u16 {
+                        if x + extra < right {
+                            buf[(x + extra, y)].set_style(cursor_style);
+                        }
+                    }
                 }
             }
         }
@@ -2096,16 +2106,23 @@ fn paint_offset_range(
 
     let collect = runs.is_some();
     let mut painted: Vec<(u16, u16)> = Vec::new();
-    let mut paint = |display_row: u32, display_col: u32| {
+    // `cells` is how far the character moves the column, so a wide glyph
+    // washes both of its columns rather than leaving the right one bare, and a
+    // tab covers every column up to its stop. A combining mark moves it none
+    // and paints none, the cell it shares having been covered by the character
+    // it sits on.
+    let mut paint = |display_row: u32, display_col: u32, cells: u32| {
         if display_row < scroll_row || display_row >= end_row {
             return;
         }
         let y = inner.y + (display_row - scroll_row) as u16;
-        let x = inner.x + display_col as u16;
-        if x < right && y < bottom {
-            apply(x, y, &mut buf[(x, y)]);
-            if collect {
-                painted.push((x, y));
+        for step in 0..cells {
+            let x = inner.x + (display_col + step) as u16;
+            if x < right && y < bottom {
+                apply(x, y, &mut buf[(x, y)]);
+                if collect {
+                    painted.push((x, y));
+                }
             }
         }
     };
@@ -2136,10 +2153,11 @@ fn paint_offset_range(
                     offset += 1;
                     continue 'segments;
                 }
-                if Some(offset) != skip_offset {
-                    paint(row, col);
-                }
+                let start_col = col;
                 tab_map::advance_column_for_char(&mut col, ch, tab_size, max_expansion_column);
+                if Some(offset) != skip_offset {
+                    paint(row, start_col, col - start_col);
+                }
                 offset += ch.len_utf8();
             }
         } else {
@@ -2156,7 +2174,16 @@ fn paint_offset_range(
                 }
                 if Some(offset) != skip_offset {
                     let display = snapshot.buffer_to_display(rope.offset_to_point(offset));
-                    paint(display.row, display.column);
+                    // Advanced from the character's own column rather than from
+                    // zero, since a tab's width is the distance to its stop.
+                    let mut end_col = display.column;
+                    tab_map::advance_column_for_char(
+                        &mut end_col,
+                        ch,
+                        tab_size,
+                        max_expansion_column,
+                    );
+                    paint(display.row, display.column, end_col - display.column);
                 }
                 offset += ch.len_utf8();
             }
@@ -2171,9 +2198,12 @@ fn paint_offset_range(
 /// Coalesce painted cells, in paint order, into `(x, y, len)` runs of
 /// horizontally adjacent same-row cells, appending them to `out`.
 ///
-/// A diagnostic span paints its cells left to right within each display row, so
-/// adjacency breaks exactly at a row change or a gap (a tab or wide-char
-/// expansion the span skipped), which is where the underline should break too.
+/// A diagnostic span paints its cells left to right within each display row,
+/// and every column a character occupies, so adjacency breaks only where the
+/// span itself does. That is a row change or the character the cursor sits on,
+/// which the span steps over, and both are where the underline should break
+/// too. A wide character or a tab contributes all of its columns to one run
+/// rather than starting a new one after each.
 fn coalesce_runs(painted: &[(u16, u16)], out: &mut Vec<(u16, u16, u16)>) {
     let mut cur: Option<(u16, u16, u16)> = None;
     for &(x, y) in painted {
@@ -2816,6 +2846,185 @@ mod tests {
         assert!(
             !second_row.contains('\u{301}'),
             "and nothing carries over from the row above, got {second_row:?}",
+        );
+    }
+
+    /// Render `content` with the whole first line selected, and hand back that
+    /// row's cells.
+    fn selected_first_row(
+        h: &mut crate::test_harness::TestHarness,
+        content: &str,
+    ) -> (
+        Vec<ratatui::buffer::Cell>,
+        std::sync::Arc<crate::theme::Theme>,
+    ) {
+        open_search_buffer(h, content);
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
+
+        dispatch(&mut h.stoat, &ExtendToLineEnd);
+
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &chrome,
+            &mut buf,
+            true,
+            false,
+            LineNumbers::Off,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.0,
+            WrapMode::None,
+            80,
+        );
+        let row = (0..area.width).map(|x| buf[(x, 0)].clone()).collect();
+        (row, theme)
+    }
+
+    #[test]
+    fn a_selected_wide_glyph_is_washed_across_both_its_cells() {
+        let mut h = Stoat::test();
+        let (row, theme) = selected_first_row(&mut h, "\u{6c49}\u{5b57}\u{4e00}\nx");
+        let sel_bg = theme.get(crate::theme::scope::UI_SELECTION_EDITOR).bg;
+        assert!(sel_bg.is_some(), "the theme washes selections");
+
+        // The wash skips the character the cursor sits on, which the line-end
+        // extend leaves on the last glyph, so the first two are what it covers.
+        let washed: Vec<bool> = (0..4).map(|x| Some(row[x].bg) == sel_bg).collect();
+        assert_eq!(
+            washed,
+            vec![true; 4],
+            "both cells of both glyphs, not every other one",
+        );
+    }
+
+    #[test]
+    fn a_selected_tab_is_washed_across_the_cells_it_spans() {
+        // A tab is not two cells wide, it is however many reach the next stop,
+        // so the count comes from the column advance rather than the character.
+        let mut h = Stoat::test();
+        let (row, theme) = selected_first_row(&mut h, "\tx\ny");
+        let sel_bg = theme.get(crate::theme::scope::UI_SELECTION_EDITOR).bg;
+
+        // The x carries the cursor and so is not washed, leaving the tab's own
+        // four cells as what the selection covers.
+        let washed: Vec<bool> = (0..4).map(|x| Some(row[x].bg) == sel_bg).collect();
+        assert_eq!(washed, vec![true; 4], "every cell the tab spans");
+    }
+
+    #[test]
+    fn a_selected_wide_glyph_on_an_inlay_row_is_washed_across_both_cells() {
+        // An inlay on the row takes the paint off its fast path and onto the
+        // one that recomputes each character's column, which has to widen the
+        // wash the same way.
+        let mut h = Stoat::test();
+        open_search_buffer(&mut h, "\u{6c49}\u{5b57}x\ny");
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
+        let sel_bg = theme.get(crate::theme::scope::UI_SELECTION_EDITOR).bg;
+
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            let inserts = {
+                let snapshot = editor.display_map.snapshot();
+                let buf_snap = snapshot.buffer_snapshot();
+                vec![(
+                    buf_snap.anchor_at(6, Bias::Left),
+                    ": i32".to_string(),
+                    crate::display_map::InlayKind::Hint,
+                )]
+            };
+            editor.display_map.splice_inlays(Vec::new(), inserts);
+        }
+        dispatch(&mut h.stoat, &ExtendToLineEnd);
+
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &chrome,
+            &mut buf,
+            true,
+            false,
+            LineNumbers::Off,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.0,
+            WrapMode::None,
+            80,
+        );
+
+        let washed: Vec<bool> = (0..4).map(|x| Some(buf[(x, 0)].bg) == sel_bg).collect();
+        assert_eq!(washed, vec![true; 4], "both cells of both glyphs");
+    }
+
+    #[test]
+    fn a_cursor_on_a_wide_glyph_covers_both_its_cells() {
+        let mut h = Stoat::test();
+        open_search_buffer(&mut h, "\u{6c49}x\ny");
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
+        let cursor_modifier = theme.cursor_style().add_modifier;
+
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &chrome,
+            &mut buf,
+            true,
+            false,
+            LineNumbers::Off,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.0,
+            WrapMode::None,
+            80,
+        );
+
+        assert!(
+            !cursor_modifier.is_empty(),
+            "the cursor style is distinguishable",
+        );
+        assert_eq!(
+            (
+                buf[(0u16, 0u16)].modifier.contains(cursor_modifier),
+                buf[(1u16, 0u16)].modifier.contains(cursor_modifier),
+            ),
+            (true, true),
+            "the block cursor covers the whole glyph it sits on",
         );
     }
 
