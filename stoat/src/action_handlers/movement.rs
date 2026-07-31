@@ -2174,17 +2174,23 @@ pub(crate) fn execute_replace(stoat: &mut Stoat, ch: char) -> UpdateEffect {
             .map(|sel| {
                 let s = buffer_snapshot.resolve_anchor(&sel.start);
                 let e = buffer_snapshot.resolve_anchor(&sel.end);
-                let mut chars = 0usize;
+                // By character rather than by codepoint. A letter carrying a
+                // combining mark is two codepoints and a joined emoji is
+                // several, and each is one character to replace.
+                let mut count = 0usize;
                 let mut byte_pos = s;
-                for c in rope.chars_at(s) {
-                    if byte_pos >= e {
+                while byte_pos < e {
+                    let next = rope.next_grapheme_boundary(byte_pos);
+                    // The step stands still at the rope end, which a selection
+                    // reaching past it would otherwise spin on.
+                    if next <= byte_pos {
                         break;
                     }
-                    byte_pos += c.len_utf8();
-                    chars += 1;
+                    byte_pos = next;
+                    count += 1;
                 }
-                let mut replacement = String::with_capacity(chars * ch.len_utf8());
-                for _ in 0..chars {
+                let mut replacement = String::with_capacity(count * ch.len_utf8());
+                for _ in 0..count {
                     replacement.push(ch);
                 }
                 (sel.id, s, e, replacement)

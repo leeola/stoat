@@ -22754,6 +22754,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn replace_gives_one_character_per_character() {
+        // The count is per character, not per codepoint it is written with. A
+        // decomposed letter is two codepoints and a joined emoji is five, and
+        // each is one character on the screen and under the cursor.
+        for source in ["e\u{301}b", &format!("{FAMILY}b")] {
+            let mut h = Stoat::test();
+            let path = open_scratch_file(&mut h, source);
+            h.type_keys("r x");
+            assert_eq!(
+                buffer_text(&h, &path),
+                "xb",
+                "one x for the character replaced, from {source:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn replace_gives_one_character_for_each_one_selected() {
+        // Three accented letters written with six codepoints, so what is being
+        // asserted is the count rather than the single-character case. The
+        // line selection takes the newline too, and that is a character like
+        // any other here, so it is replaced rather than kept.
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "e\u{301}a\u{302}i\u{303}\n");
+        h.type_keys("x r z");
+        assert_eq!(buffer_text(&h, &path), "zzzz", "one z per character");
+    }
+
     /// The block cursor sits on a cluster start at every step of an `l`/`h`
     /// walk, never on a byte inside the joined sequence.
     #[test]
