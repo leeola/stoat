@@ -344,21 +344,32 @@ pub(crate) fn parse_rope_inner(
 
 /// Apply `edits` to `tree` so it can be used as `old_tree` for an incremental
 /// re-parse against `new_rope`. Edits are applied in patch order.
+///
+/// Each edit is described where the tree stands when it is applied, which is
+/// with every earlier edit landed and no later one. That is the new range's
+/// start, since edits ascend and nothing past this point has moved yet.
+///
+/// A patch states its old ranges in coordinates from before any of them ran, so
+/// describing an edit by its own old start would place it as if the tree had not
+/// been touched, and after the first edit it has. What the old range still says
+/// is how much text was replaced, which is the distance from the start to the
+/// old end rather than the old end itself.
 pub fn edit_tree(tree: &mut Tree, edits: &[PatchEdit<usize>], old_rope: &Rope, new_rope: &Rope) {
     for edit in edits {
-        let start_byte = edit.old.start;
-        let old_end_byte = edit.old.end;
-        let new_end_byte = edit.new.end;
-        let start_position = stoat_to_ts(old_rope.offset_to_point(start_byte));
-        let old_end_position = stoat_to_ts(old_rope.offset_to_point(old_end_byte));
-        let new_end_position = stoat_to_ts(new_rope.offset_to_point(new_end_byte));
+        let start_byte = edit.new.start;
+        let start_position = new_rope.offset_to_point(start_byte);
+        // Point's own subtraction carries rows and columns the way a span
+        // between two positions does, so this is the operators rather than
+        // arithmetic on the fields.
+        let replaced =
+            old_rope.offset_to_point(edit.old.end) - old_rope.offset_to_point(edit.old.start);
         tree.edit(&InputEdit {
             start_byte,
-            old_end_byte,
-            new_end_byte,
-            start_position,
-            old_end_position,
-            new_end_position,
+            old_end_byte: start_byte + edit.old.len(),
+            new_end_byte: edit.new.end,
+            start_position: stoat_to_ts(start_position),
+            old_end_position: stoat_to_ts(start_position + replaced),
+            new_end_position: stoat_to_ts(new_rope.offset_to_point(edit.new.end)),
         });
     }
 }
@@ -919,6 +930,51 @@ mod tests {
             new_tree.root_node().to_sexp(),
             fresh.root_node().to_sexp(),
             "incremental and full parse must agree on tree shape",
+        );
+    }
+
+    #[test]
+    fn a_two_edit_patch_leaves_the_tree_a_fresh_parse_would_build() {
+        use stoat_text::{patch::Edit as PatchEdit, Rope};
+        let lang = rust();
+        let original = "fn main() {\n    let aaa = 1;\n    let b = 2;\n}\n";
+        let old_rope = Rope::from(original);
+        let mut tree = super::parse_rope(&lang, &old_rope, None).unwrap();
+
+        // The first edit shortens the text, so anything described afterwards in
+        // old coordinates lands past where it belongs.
+        let first = original.find("aaa").expect("identifier");
+        let second = original.find("let b").expect("second binding");
+        let new_text = format!(
+            "{}{}{}{}{}",
+            &original[..first],
+            "a",
+            &original[first + 3..second],
+            "let bbbb",
+            &original[second + 5..],
+        );
+        let new_rope = Rope::from(new_text.as_str());
+
+        let shift = 1isize - 3;
+        let edits = vec![
+            PatchEdit {
+                old: first..first + 3,
+                new: first..first + 1,
+            },
+            PatchEdit {
+                old: second..second + 5,
+                new: (second as isize + shift) as usize
+                    ..(second as isize + shift) as usize + "let bbbb".len(),
+            },
+        ];
+
+        super::edit_tree(&mut tree, &edits, &old_rope, &new_rope);
+        let incremental = super::parse_rope(&lang, &new_rope, Some(&tree)).unwrap();
+        let fresh = super::parse_rope(&lang, &new_rope, None).unwrap();
+        assert_eq!(
+            incremental.root_node().to_sexp(),
+            fresh.root_node().to_sexp(),
+            "the second edit was applied to a tree the first had already moved",
         );
     }
 }
