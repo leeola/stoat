@@ -83,6 +83,9 @@ pub enum WorkspaceEditError {
 #[derive(Debug, Default, Clone)]
 pub struct WorkspaceEditOutcome {
     pub buffers_edited: Vec<BufferId>,
+    /// Documents whose edits named a version the buffer has since moved past,
+    /// left untouched. Empty unless the server sent versions at all.
+    pub buffers_stale: Vec<BufferId>,
     pub files_created: Vec<PathBuf>,
     pub files_renamed: Vec<(PathBuf, PathBuf)>,
     pub files_deleted: Vec<PathBuf>,
@@ -106,6 +109,7 @@ pub fn apply_workspace_edit(
                 validate_uris(text_doc_edits.iter().map(|e| &e.text_document.uri))?;
                 for tde in text_doc_edits {
                     let path = uri_to_path(&tde.text_document.uri)?;
+                    let version = tde.text_document.version;
                     let edits: Vec<TextEdit> = tde
                         .edits
                         .into_iter()
@@ -114,6 +118,11 @@ pub fn apply_workspace_edit(
                             lsp_types::OneOf::Right(annotated) => annotated.text_edit,
                         })
                         .collect();
+                    let id = ensure_open(stoat, &path)?;
+                    if !document_version_current(stoat, id, version) {
+                        outcome.buffers_stale.push(id);
+                        continue;
+                    }
                     let id = apply_text_edits_to_buffer(stoat, &path, edits)?;
                     outcome.buffers_edited.push(id);
                 }
@@ -128,6 +137,7 @@ pub fn apply_workspace_edit(
                     match op {
                         DocumentChangeOperation::Edit(tde) => {
                             let path = uri_to_path(&tde.text_document.uri)?;
+                            let version = tde.text_document.version;
                             let edits: Vec<TextEdit> = tde
                                 .edits
                                 .into_iter()
@@ -136,6 +146,11 @@ pub fn apply_workspace_edit(
                                     lsp_types::OneOf::Right(annotated) => annotated.text_edit,
                                 })
                                 .collect();
+                            let id = ensure_open(stoat, &path)?;
+                            if !document_version_current(stoat, id, version) {
+                                outcome.buffers_stale.push(id);
+                                continue;
+                            }
                             let id = apply_text_edits_to_buffer(stoat, &path, edits)?;
                             outcome.buffers_edited.push(id);
                         },
@@ -212,6 +227,23 @@ pub(crate) fn apply_text_edits_to_buffer(
         guard.edit(byte_range, &edit.new_text);
     }
     Ok(buffer_id)
+}
+
+/// Whether `version` still names the document the buffer holds.
+///
+/// A `TextDocumentEdit` may state the document version its edits were computed
+/// against. That is the version stoat last sent the server in a change
+/// notification, not the buffer's own, and it stands still while the buffer is
+/// edited between one notification and the next.
+///
+/// A version of `None` says the server is not tracking versions, and there is
+/// nothing to compare against. So does a buffer stoat has never announced,
+/// which cannot be behind a version it never sent.
+fn document_version_current(stoat: &Stoat, id: BufferId, version: Option<i32>) -> bool {
+    let (Some(version), Some(&current)) = (version, stoat.lsp_doc_versions.get(&id)) else {
+        return true;
+    };
+    version == current
 }
 
 fn ensure_open(stoat: &mut Stoat, path: &Path) -> Result<BufferId, WorkspaceEditError> {
@@ -383,6 +415,61 @@ mod tests {
         };
         apply_workspace_edit(&mut h.stoat, edit).expect("apply");
         assert_eq!(buffer_text(&h, &path), "Xabc\n");
+    }
+
+    /// `edit` as a single versioned document change over `path`.
+    fn versioned_edit(path: &Path, version: Option<i32>) -> WorkspaceEdit {
+        WorkspaceEdit {
+            changes: None,
+            document_changes: Some(DocumentChanges::Edits(vec![TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier {
+                    uri: file_uri(path),
+                    version,
+                },
+                edits: vec![OneOf::Left(text_edit(0, 0, 0, "X"))],
+            }])),
+            change_annotations: None,
+        }
+    }
+
+    #[test]
+    fn a_document_edit_naming_a_passed_version_is_skipped() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = PathBuf::from("/ws/a.rs");
+        open_buffer_with_text(&mut h, &path, "abc\n");
+        let id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&path)
+            .unwrap();
+        h.stoat.lsp_doc_versions.insert(id, 7);
+
+        let outcome =
+            apply_workspace_edit(&mut h.stoat, versioned_edit(&path, Some(3))).expect("apply");
+        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(outcome.buffers_stale, vec![id]);
+        assert!(outcome.buffers_edited.is_empty());
+    }
+
+    #[test]
+    fn a_document_edit_naming_the_current_version_applies() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = PathBuf::from("/ws/a.rs");
+        open_buffer_with_text(&mut h, &path, "abc\n");
+        let id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&path)
+            .unwrap();
+        h.stoat.lsp_doc_versions.insert(id, 7);
+
+        let outcome =
+            apply_workspace_edit(&mut h.stoat, versioned_edit(&path, Some(7))).expect("apply");
+        assert_eq!(buffer_text(&h, &path), "Xabc\n");
+        assert_eq!(outcome.buffers_edited, vec![id]);
+        assert!(outcome.buffers_stale.is_empty());
     }
 
     #[test]
