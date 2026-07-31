@@ -752,6 +752,7 @@ fn compute_wrap_columns(
     let mut breaks = vec![0u32];
     let mut expanded_col = 0u32;
     let mut last_break_candidate: Option<u32> = None;
+    let mut wide_escape: Option<u32> = None;
     let mut leading_ws = 0u32;
     let mut in_leading = true;
 
@@ -777,8 +778,12 @@ fn compute_wrap_columns(
         if ch == ' ' || ch == '\t' || ch == '-' {
             last_break_candidate = Some(expanded_col + char_width);
         } else if char_width >= 2 {
-            // CJK and other wide characters can break at any boundary.
-            last_break_candidate = Some(expanded_col);
+            // CJK and other wide characters can break at any boundary, so one
+            // that would overrun the row can start the next instead of being
+            // split down the middle. Recorded before the character rather than
+            // after it, which is what makes it an escape from an overrun and
+            // not a place a reader would choose to break.
+            wide_escape = Some(expanded_col);
         }
 
         expanded_col += char_width;
@@ -793,12 +798,22 @@ fn compute_wrap_columns(
         };
         let segment_start = *breaks.last().expect("breaks starts with [0]");
         if expanded_col - segment_start >= budget {
+            // A word boundary is where a reader would break, so it wins
+            // whenever there is one. Failing that, a character ending exactly
+            // on the budget fills the row rather than overrunning it and keeps
+            // its place, and only one that would overrun falls back to starting
+            // the next row.
             let break_at = match last_break_candidate {
                 Some(b) if b > segment_start => b,
-                _ => expanded_col,
+                _ if expanded_col - segment_start == budget => expanded_col,
+                _ => match wide_escape {
+                    Some(b) if b > segment_start => b,
+                    _ => expanded_col,
+                },
             };
             breaks.push(break_at);
             last_break_candidate = None;
+            wide_escape = None;
         }
     }
 
@@ -1632,6 +1647,44 @@ mod tests {
         let snap = make_snapshot("abcdefgh", Some(5));
         assert_eq!(snap.line_len(0), 5);
         assert_eq!(snap.line_len(1), 3);
+    }
+
+    #[test]
+    fn wide_characters_filling_the_width_exactly_stay_on_the_row() {
+        // Two ideographs are four columns and the width is four, so they fit
+        // and the third character is what moves down.
+        let snap = make_snapshot("\u{6c49}\u{6c49}x", Some(4));
+        assert_eq!(snap.line_count(), 2);
+        assert_eq!(snap.line_len(0), 4);
+        assert_eq!(snap.line_len(1), 1);
+    }
+
+    #[test]
+    fn wide_characters_pack_two_to_a_row() {
+        let snap = make_snapshot("\u{6c49}\u{6c49}\u{6c49}", Some(4));
+        assert_eq!(snap.line_count(), 2, "two then one, not one each");
+        assert_eq!(snap.line_len(0), 4);
+        assert_eq!(snap.line_len(1), 2);
+    }
+
+    #[test]
+    fn a_wide_character_that_would_overrun_starts_the_next_row() {
+        // The escape the exact-fit case must not disturb. One column is left
+        // and the ideograph needs two, so it moves rather than being split.
+        let snap = make_snapshot("x\u{6c49}", Some(2));
+        assert_eq!(snap.line_count(), 2);
+        assert_eq!(snap.line_len(0), 1);
+        assert_eq!(snap.line_len(1), 2);
+    }
+
+    #[test]
+    fn a_word_boundary_still_wins_over_an_exact_fit() {
+        // The second o lands exactly on the width, but a reader breaks at the
+        // space before it rather than mid-word.
+        let snap = make_snapshot("hello world", Some(8));
+        assert_eq!(snap.line_count(), 2);
+        assert_eq!(snap.line_len(0), 6, "hello and its space");
+        assert_eq!(snap.line_len(1), 5);
     }
 
     #[test]
