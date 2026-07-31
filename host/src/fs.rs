@@ -324,12 +324,20 @@ impl FsHost for LocalFs {
     }
 
     fn write_atomic(&self, path: &Path, data: &[u8]) -> io::Result<()> {
-        let dest = match std::fs::symlink_metadata(path) {
-            Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path)?,
-            _ => path.to_path_buf(),
-        };
-        let dir = dest.parent().unwrap_or_else(|| Path::new("."));
+        let dest = resolve_write_target(path);
 
+        // Replacing the inode would leave every other name for this file
+        // pointing at the old content, with nothing to show that it happened.
+        // Keeping the inode costs the atomic replace for this one file, which
+        // is the lesser harm.
+        if has_siblings(&dest) {
+            let mut file = std::fs::File::create(&dest)?;
+            file.write_all(data)?;
+            file.sync_all()?;
+            return Ok(());
+        }
+
+        let dir = dest.parent().unwrap_or_else(|| Path::new("."));
         let mut tmp = NamedTempFile::new_in(dir)?;
         tmp.write_all(data)?;
         tmp.as_file().sync_all()?;
@@ -440,5 +448,181 @@ impl FsHost for LocalFs {
         if !buffer.is_empty() {
             let _ = on_batch(buffer);
         }
+    }
+}
+
+/// Symlink hops [`resolve_write_target`] follows before giving up.
+///
+/// A cycle of links would otherwise never resolve. The bound only has to exceed
+/// what a real path uses, which is one or two hops.
+const MAX_SYMLINK_HOPS: usize = 16;
+
+/// The file a write aimed at `path` should actually land on.
+///
+/// Follows symlinks to the end of the chain. The last hop is returned even when
+/// nothing is there, because a link pointing at a file that does not exist yet
+/// still names where that file belongs. Resolving the same thing by
+/// canonicalizing would refuse, having nothing to canonicalize against.
+///
+/// A relative target is read against the directory holding the link that names
+/// it, not the process's working directory.
+fn resolve_write_target(path: &Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        let Ok(target) = std::fs::read_link(&current) else {
+            return current;
+        };
+        current = match target.is_relative() {
+            true => current.parent().unwrap_or(Path::new(".")).join(target),
+            false => target,
+        };
+    }
+    current
+}
+
+/// Whether `dest` is reachable under more than one name.
+///
+/// Metadata that cannot be read counts as more than one, since detaching links
+/// that turn out to exist is worse than losing atomicity on a file that has
+/// none. A destination that does not exist is not that case: there is no inode
+/// yet, so nothing can be pointing at it.
+#[cfg(unix)]
+fn has_siblings(dest: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    match std::fs::metadata(dest) {
+        Ok(meta) => meta.nlink() > 1,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
+}
+
+#[cfg(not(unix))]
+fn has_siblings(_dest: &Path) -> bool {
+    false
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{FsHost, LocalFs};
+    use std::{fs, os::unix::fs::MetadataExt, path::Path};
+    use tempfile::TempDir;
+
+    fn read(path: &Path) -> Vec<u8> {
+        fs::read(path).expect("readable")
+    }
+
+    #[test]
+    fn a_plain_file_is_replaced() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("a.txt");
+        fs::write(&path, b"old").expect("seed");
+
+        LocalFs.write_atomic(&path, b"new").expect("write");
+
+        assert_eq!(read(&path), b"new");
+    }
+
+    #[test]
+    fn a_new_file_is_created() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("fresh.txt");
+
+        LocalFs.write_atomic(&path, b"new").expect("write");
+
+        assert_eq!(read(&path), b"new");
+    }
+
+    #[test]
+    fn a_hardlinked_file_keeps_its_siblings_in_step() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("a.txt");
+        let sibling = dir.path().join("b.txt");
+        fs::write(&path, b"old").expect("seed");
+        fs::hard_link(&path, &sibling).expect("link");
+
+        LocalFs.write_atomic(&path, b"new").expect("write");
+
+        assert_eq!(read(&path), b"new");
+        assert_eq!(read(&sibling), b"new", "the sibling link must follow");
+        assert_eq!(
+            fs::metadata(&path).expect("meta").ino(),
+            fs::metadata(&sibling).expect("meta").ino(),
+            "both names must still be the same file"
+        );
+    }
+
+    #[test]
+    fn a_dangling_symlink_gets_its_target_created() {
+        let dir = TempDir::new().expect("tempdir");
+        let target = dir.path().join("target.txt");
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        LocalFs.write_atomic(&link, b"new").expect("write");
+
+        assert_eq!(read(&target), b"new");
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("meta")
+                .file_type()
+                .is_symlink(),
+            "the link itself must survive"
+        );
+    }
+
+    #[test]
+    fn a_relative_dangling_symlink_resolves_against_its_own_parent() {
+        let dir = TempDir::new().expect("tempdir");
+        let nested = dir.path().join("nested");
+        fs::create_dir(&nested).expect("mkdir");
+        let link = nested.join("link.txt");
+        std::os::unix::fs::symlink(Path::new("target.txt"), &link).expect("symlink");
+
+        LocalFs.write_atomic(&link, b"new").expect("write");
+
+        assert_eq!(read(&nested.join("target.txt")), b"new");
+    }
+
+    #[test]
+    fn a_live_symlink_writes_through_to_its_target() {
+        let dir = TempDir::new().expect("tempdir");
+        let target = dir.path().join("target.txt");
+        let link = dir.path().join("link.txt");
+        fs::write(&target, b"old").expect("seed");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        LocalFs.write_atomic(&link, b"new").expect("write");
+
+        assert_eq!(read(&target), b"new");
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("meta")
+                .file_type()
+                .is_symlink(),
+            "the link must not be replaced by a regular file"
+        );
+    }
+
+    #[test]
+    fn a_chain_of_symlinks_reaches_the_file_at_its_end() {
+        let dir = TempDir::new().expect("tempdir");
+        let target = dir.path().join("target.txt");
+        let middle = dir.path().join("middle.txt");
+        let outer = dir.path().join("outer.txt");
+        fs::write(&target, b"old").expect("seed");
+        std::os::unix::fs::symlink(&target, &middle).expect("symlink");
+        std::os::unix::fs::symlink(&middle, &outer).expect("symlink");
+
+        LocalFs.write_atomic(&outer, b"new").expect("write");
+
+        assert_eq!(read(&target), b"new");
+        assert!(
+            fs::symlink_metadata(&middle)
+                .expect("meta")
+                .file_type()
+                .is_symlink(),
+            "the intermediate link must not be clobbered"
+        );
     }
 }
