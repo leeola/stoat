@@ -1047,20 +1047,56 @@ impl Rope {
     /// Offsets it reports are rope offsets. Most callers want
     /// [`Self::regex_input`], which wraps this and carries the search range.
     pub fn regex_cursor(&self) -> RegexChunks<'_> {
-        let mut chunks = self.chunks.cursor::<usize>(());
-        chunks.next();
-        RegexChunks {
-            chunks,
-            len: self.len(),
-        }
+        self.regex_cursor_over(0..self.len())
     }
 
-    /// An [`Input`] over this rope, searching only `range`.
+    /// `span` of this rope's chunks as a haystack, presented as though nothing
+    /// surrounded it.
     ///
-    /// The range rides on the input rather than on the haystack, so a match
-    /// comes back in rope offsets rather than offsets into a slice.
+    /// Offsets it reports are relative to `span`, and its first and last chunks
+    /// are clipped to it, so the automata see the span's edges as the edges of
+    /// the text. Most callers want [`Self::regex_slice_input`].
+    pub fn regex_cursor_over(&self, span: Range<usize>) -> RegexChunks<'_> {
+        let mut chunks = self.chunks.cursor::<usize>(());
+        chunks.seek(&span.start, Bias::Right);
+        if chunks.item().is_none() {
+            chunks.prev();
+        }
+        RegexChunks { chunks, span }
+    }
+
+    /// An [`Input`] searching `range` of this rope, with the rest of the rope
+    /// still around it.
+    ///
+    /// The range says where matches may be found, not what the text is. A `^`
+    /// at its start still asks whether a newline precedes it, and a word
+    /// boundary still sees the character before, both of which a search
+    /// resuming mid-buffer wants.
+    ///
+    /// Offsets come back as rope offsets either way.
+    ///
+    /// See also:
+    /// - [`Self::regex_slice_input`] for when the range is the whole text.
     pub fn regex_input(&self, range: Range<usize>) -> Input<RegexChunks<'_>> {
         Input::new(self.regex_cursor()).range(range)
+    }
+
+    /// An [`Input`] over `range` of this rope as though nothing surrounded it.
+    ///
+    /// For matching against a piece of text that happens to live in a buffer, a
+    /// selection being the case in point. A `^` matches at the range's start
+    /// unconditionally and a word boundary sees nothing before it, which is
+    /// what the same text copied into a string would have given.
+    ///
+    /// **Offsets come back relative to `range`**, not to the rope, since to the
+    /// automata the range is the whole text. Add `range.start` to place a match
+    /// back in the buffer.
+    ///
+    /// See also:
+    /// - [`Self::regex_input`] for searching part of a buffer, which reports rope offsets and lets
+    ///   the surrounding text inform the assertions.
+    pub fn regex_slice_input(&self, range: Range<usize>) -> Input<RegexChunks<'_>> {
+        Input::new(self.regex_cursor_over(range))
     }
 
     pub fn reversed_chunks_in_range(&self, range: Range<usize>) -> ReversedChunksInRange<'_> {
@@ -1422,15 +1458,31 @@ impl<'a> Iterator for ChunksInRange<'a> {
 /// - [`Rope::regex_cursor`] to build one.
 pub struct RegexChunks<'a> {
     chunks: sum_tree::Cursor<'a, 'a, Chunk, usize>,
-    len: usize,
+    /// The rope span this cursor presents, which every chunk is clipped to and
+    /// every offset is measured from.
+    span: Range<usize>,
+}
+
+impl RegexChunks<'_> {
+    /// Where the current chunk sits in the rope, clipped to the span.
+    fn clipped(&self) -> Range<usize> {
+        let Some(chunk) = self.chunks.item() else {
+            return self.span.start..self.span.start;
+        };
+        let start = *self.chunks.start();
+        let end = start + chunk.text.len();
+        start.max(self.span.start)..end.min(self.span.end)
+    }
 }
 
 impl RegexCursor for RegexChunks<'_> {
     fn chunk(&self) -> &[u8] {
-        self.chunks
-            .item()
-            .map(|chunk| chunk.text.as_bytes())
-            .unwrap_or_default()
+        let Some(chunk) = self.chunks.item() else {
+            return &[];
+        };
+        let start = *self.chunks.start();
+        let clipped = self.clipped();
+        &chunk.text.as_bytes()[clipped.start - start..clipped.end - start]
     }
 
     /// Chunks never split a codepoint, so every regex feature is available.
@@ -1441,7 +1493,12 @@ impl RegexCursor for RegexChunks<'_> {
     fn advance(&mut self) -> bool {
         // Peeked rather than stepped and undone, the trait requiring a failed
         // step to leave the chunk exactly where it was.
-        if self.chunks.next_item().is_none() {
+        let Some(next) = self.chunks.next_item() else {
+            return false;
+        };
+        if self.clipped().end + next.text.len() <= self.span.start
+            || self.clipped().end >= self.span.end
+        {
             return false;
         }
         self.chunks.next();
@@ -1449,7 +1506,11 @@ impl RegexCursor for RegexChunks<'_> {
     }
 
     fn backtrack(&mut self) -> bool {
-        if self.chunks.prev_item().is_none() {
+        // Stopping at the span keeps the contract rather than the answer. A
+        // chunk before it clips to nothing, so stepping onto one would report a
+        // move that left an empty chunk behind, which callers are entitled to
+        // read as the collection being empty.
+        if self.chunks.prev_item().is_none() || self.clipped().start <= self.span.start {
             return false;
         }
         self.chunks.prev();
@@ -1457,11 +1518,11 @@ impl RegexCursor for RegexChunks<'_> {
     }
 
     fn total_bytes(&self) -> Option<usize> {
-        Some(self.len)
+        Some(self.span.len())
     }
 
     fn offset(&self) -> usize {
-        *self.chunks.start()
+        self.clipped().start - self.span.start
     }
 }
 
@@ -3808,6 +3869,7 @@ mod summary_identity_tests {
 mod regex_cursor_tests {
     use super::Rope;
     use regex_cursor::{engines::meta::Regex, Input};
+    use std::ops::Range;
 
     /// Long enough that its matches land either side of a chunk boundary, and
     /// varied enough that they do not all sit at the same place within one.
@@ -3883,12 +3945,125 @@ mod regex_cursor_tests {
         );
     }
 
+    /// A range starting inside a word, inside a line, and inside a chunk, which
+    /// is where a slice and a span disagree and where the clipping has to be
+    /// right.
+    fn mid_word_range(text: &str) -> Range<usize> {
+        let from = text.find("needle").expect("the fixture has one") + 3;
+        let to = text.rfind("gamma").expect("the fixture has one") + 3;
+        from..to
+    }
+
+    #[test]
+    fn a_slice_matches_as_though_it_were_the_whole_text() {
+        let text = straddling();
+        let rope = Rope::from(text.as_str());
+        let range = mid_word_range(&text);
+        let piece = &text[range.clone()];
+
+        for pattern in [
+            "needle",
+            "^caf",
+            "^ +needle",
+            r"\bneedle\b",
+            r"\Adle",
+            "tail$",
+            "row [0-9]+",
+        ] {
+            let regex = Regex::new(pattern).expect("the pattern compiles");
+            assert_eq!(
+                spans(&regex, rope.regex_slice_input(range.clone())),
+                spans(&regex, Input::new(piece)),
+                "slice and standalone differ for {pattern:?}"
+            );
+        }
+    }
+
+    /// A slice beginning exactly on a chunk boundary is the case that makes the
+    /// engine step back a chunk to look behind, rather than reading the byte
+    /// before it within the chunk it is already on. Stepping back has to stop at
+    /// the slice, not walk into the text in front of it.
+    #[test]
+    fn a_slice_starting_on_a_chunk_boundary_does_not_look_behind_it() {
+        let text = straddling();
+        let rope = Rope::from(text.as_str());
+
+        let boundary = rope.chunks().next().expect("a first chunk").len();
+        assert!(
+            text.as_bytes()[boundary - 1].is_ascii_alphanumeric()
+                && text.as_bytes()[boundary].is_ascii_alphanumeric(),
+            "the boundary has to fall mid-word for a word boundary to be in question"
+        );
+
+        let range = boundary..text.len();
+        let piece = &text[range.clone()];
+
+        for pattern in [r"\A\w", r"\b\w", "^."] {
+            let regex = Regex::new(pattern).expect("the pattern compiles");
+            assert_eq!(
+                spans(&regex, rope.regex_slice_input(range.clone())),
+                spans(&regex, Input::new(piece)),
+                "slice and standalone differ for {pattern:?} at a chunk boundary"
+            );
+        }
+    }
+
+    /// The two inputs exist because they answer differently, so pin that they
+    /// do. A slice starts where it was cut. A span is a position in text that
+    /// carries on either side of it.
+    #[test]
+    fn a_slice_and_a_span_disagree_about_where_the_text_begins() {
+        let text = straddling();
+        let rope = Rope::from(text.as_str());
+        let range = mid_word_range(&text);
+        let regex = Regex::new(r"\Adle").expect("the pattern compiles");
+
+        assert_eq!(
+            spans(&regex, rope.regex_slice_input(range.clone())),
+            vec![(0, 3)],
+            "the slice starts where it was cut"
+        );
+        assert_eq!(
+            spans(&regex, rope.regex_input(range)),
+            Vec::new(),
+            "the span is part-way through a text that started elsewhere"
+        );
+    }
+
     #[test]
     fn an_empty_rope_has_one_empty_chunk_and_no_matches() {
         let rope = Rope::new();
         let regex = Regex::new("needle").expect("the pattern compiles");
 
         assert_eq!(spans(&regex, rope.regex_input(0..0)), Vec::new());
+    }
+
+    #[test]
+    fn a_slice_cursor_stops_at_the_slice_rather_than_the_rope() {
+        use regex_cursor::Cursor;
+
+        let text = straddling();
+        let rope = Rope::from(text.as_str());
+        let boundary = rope.chunks().next().expect("a first chunk").len();
+
+        let mut cursor = rope.regex_cursor_over(boundary..text.len());
+        assert_eq!(cursor.offset(), 0, "the slice starts where it was cut");
+        assert!(
+            !cursor.backtrack(),
+            "nothing precedes a slice, so a step back reports none rather than \
+             leaving an empty chunk behind"
+        );
+        assert!(
+            !cursor.chunk().is_empty(),
+            "and the chunk it is on still holds text"
+        );
+
+        while cursor.advance() {}
+        assert_eq!(
+            cursor.offset() + cursor.chunk().len(),
+            text.len() - boundary,
+            "the last chunk ends where the slice does"
+        );
     }
 
     #[test]

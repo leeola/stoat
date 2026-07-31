@@ -6,7 +6,7 @@ use regex_cursor::{engines::meta, regex_automata::util::syntax};
 use stoat_text::Rope;
 
 /// The search pattern compiled for the engine that matches over a rope.
-type CursorRegex = meta::Regex;
+pub(crate) type CursorRegex = meta::Regex;
 
 /// Direction the search was opened in. Forward (`/`) finds matches at
 /// or after the cursor; Reverse (`?`) finds matches before the cursor.
@@ -259,7 +259,7 @@ pub(crate) fn compile_search_regex(pattern: &str) -> Result<regex::Regex, regex:
 /// The two exist side by side because they suit different haystacks. This one
 /// searches the buffer without flattening it. The plain one is what the
 /// highlight pass runs over the window it has already built as a string.
-fn compile_cursor_regex(pattern: &str) -> Option<CursorRegex> {
+pub(crate) fn compile_cursor_regex(pattern: &str) -> Option<CursorRegex> {
     CursorRegex::builder()
         .syntax(syntax::Config::new().multi_line(true))
         .build(pattern)

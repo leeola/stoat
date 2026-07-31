@@ -53,9 +53,8 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
     if query.is_empty() {
         return true;
     }
-    let regex = match super::search::compile_search_regex(&query) {
-        Ok(r) => r,
-        Err(_) => return true,
+    let Some(regex) = super::search::compile_cursor_regex(&query) else {
+        return true;
     };
     let Some(editor) = super::focused_editor_mut(stoat) else {
         return true;
@@ -70,8 +69,7 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
         .filter(|sel| {
             let start = buffer_snapshot.resolve_anchor(&sel.start);
             let end = buffer_snapshot.resolve_anchor(&sel.end);
-            let text: String = rope.chunks_in_range(start..end).collect();
-            regex.is_match(&text) ^ remove
+            regex.is_match(rope.regex_slice_input(start..end)) ^ remove
         })
         .cloned()
         .collect();

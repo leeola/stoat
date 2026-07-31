@@ -1,4 +1,5 @@
 use crate::{
+    action_handlers::search::CursorRegex,
     app::{Stoat, UpdateEffect},
     input_view::{InputView, SubmitTarget},
 };
@@ -47,9 +48,8 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
     if query.is_empty() {
         return true;
     }
-    let regex = match super::search::compile_search_regex(&query) {
-        Ok(r) => r,
-        Err(_) => return true,
+    let Some(regex) = super::search::compile_cursor_regex(&query) else {
+        return true;
     };
     match state.kind {
         RegexSelectKind::Split => split_on_matches(stoat, &regex),
@@ -59,7 +59,7 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
 }
 
 /// Split every selection at each match, keeping the gaps between matches.
-fn split_on_matches(stoat: &mut Stoat, regex: &regex::Regex) {
+fn split_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
     let Some(editor) = focused_editor_mut(stoat) else {
         return;
     };
@@ -72,10 +72,9 @@ fn split_on_matches(stoat: &mut Stoat, regex: &regex::Regex) {
         if start == end {
             return Vec::new();
         }
-        let text: String = rope.chunks_in_range(start..end).collect();
         let mut pieces: Vec<Selection<Anchor>> = Vec::new();
         let mut piece_start = start;
-        for m in regex.find_iter(&text) {
+        for m in regex.find_iter(rope.regex_slice_input(start..end)) {
             pieces.push(make_anchor_selection(
                 buffer_snapshot,
                 piece_start,
@@ -92,56 +91,55 @@ fn split_on_matches(stoat: &mut Stoat, regex: &regex::Regex) {
 
 /// Replace the selections with every match found inside them. When nothing
 /// matches anywhere, the selections are kept and a message is shown.
-fn select_on_matches(stoat: &mut Stoat, regex: &regex::Regex) {
-    let matched = {
+fn select_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
+    // Collected in one pass rather than asked twice. Whether anything matched
+    // is a property of what was collected, so a scan of its own to answer that
+    // would be the same work over the same ranges.
+    let found: Vec<Vec<Selection<Anchor>>> = {
         let Some(editor) = focused_editor_mut(stoat) else {
             return;
         };
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
         let rope = buffer_snapshot.rope();
-        editor.selections.all_anchors().iter().any(|sel| {
-            let start = buffer_snapshot.resolve_anchor(&sel.start);
-            let end = buffer_snapshot.resolve_anchor(&sel.end);
-            if start >= end {
-                return false;
-            }
-            let text: String = rope.chunks_in_range(start..end).collect();
-            regex.find_iter(&text).any(|m| start + m.start() != end)
-        })
+
+        editor
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                let start = buffer_snapshot.resolve_anchor(&sel.start);
+                let end = buffer_snapshot.resolve_anchor(&sel.end);
+                if start >= end {
+                    return Vec::new();
+                }
+
+                regex
+                    .find_iter(rope.regex_slice_input(start..end))
+                    // An empty match sitting at the selection end, which a
+                    // `$`-style anchor produces, is not a selection.
+                    .filter(|m| start + m.start() != end)
+                    .map(|m| {
+                        make_anchor_selection(buffer_snapshot, start + m.start(), start + m.end())
+                    })
+                    .collect()
+            })
+            .collect()
     };
-    if !matched {
+
+    if found.iter().all(Vec::is_empty) {
         stoat.set_status("nothing selected");
         return;
     }
+
     let Some(editor) = focused_editor_mut(stoat) else {
         return;
     };
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope();
-    editor.selections.split_each(buffer_snapshot, |sel| {
-        let start = buffer_snapshot.resolve_anchor(&sel.start);
-        let end = buffer_snapshot.resolve_anchor(&sel.end);
-        if start >= end {
-            return Vec::new();
-        }
-        let text: String = rope.chunks_in_range(start..end).collect();
-        let mut matches: Vec<Selection<Anchor>> = Vec::new();
-        for m in regex.find_iter(&text) {
-            let match_start = start + m.start();
-            // Skip an empty match sitting at the selection end (from `$`-style
-            // anchors), matching Helix.
-            if match_start == end {
-                continue;
-            }
-            matches.push(make_anchor_selection(
-                buffer_snapshot,
-                match_start,
-                start + m.end(),
-            ));
-        }
-        matches
+    let mut per_selection = found.into_iter();
+    editor.selections.split_each(buffer_snapshot, |_| {
+        per_selection.next().unwrap_or_default()
     });
 }
 
@@ -309,6 +307,27 @@ mod tests {
         let spans = editor::selection_spans(&mut h.stoat);
         assert_eq!(spans, vec![(0, 7, false)]);
         assert_eq!(h.stoat.pending_message.as_deref(), Some("nothing selected"));
+    }
+
+    /// A selection is matched as though it were the whole text, which is what
+    /// copying it into a string used to give. Searching it as a range of the
+    /// buffer instead would let `^` see the line it was cut from, and it would
+    /// not match part-way along one.
+    #[test]
+    fn an_anchor_matches_at_a_selection_starting_mid_line() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("abcdef\n");
+        select_range(&mut h, 3, 6);
+
+        dispatch(&mut h.stoat, &action::SelectRegex);
+        h.type_text("^d");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(3, 4, false)],
+            "the selection's own start counts as the start of the text"
+        );
     }
 
     #[test]
