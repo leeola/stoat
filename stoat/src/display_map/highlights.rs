@@ -429,13 +429,24 @@ impl CachedHighlightEndpoints {
     }
 }
 
+/// How a caller turns anchors into byte offsets.
+///
+/// Two forms because the bounds searches probe one anchor at a time by nature,
+/// while everything between the bounds is known before any of it is needed. A
+/// batch walks the anchor trees once instead of descending per anchor, so the
+/// split is what lets each half be answered the cheaper way.
+pub struct AnchorResolver<'a> {
+    pub one: &'a dyn Fn(&Anchor) -> usize,
+    pub many: &'a dyn Fn(&[Anchor]) -> Vec<usize>,
+}
+
 pub fn create_highlight_endpoints_cached(
     version: u64,
     range: &Range<usize>,
     highlights: &TextHighlights,
     semantic_highlights: Option<&SemanticTokensHighlights>,
     lsp_highlights: Option<&SemanticTokensHighlights>,
-    resolve: &impl Fn(&Anchor) -> usize,
+    resolver: &AnchorResolver<'_>,
     cache: &mut Option<CachedHighlightEndpoints>,
 ) -> Arc<[HighlightEndpoint]> {
     if let &mut Some(ref cached) = cache
@@ -454,7 +465,7 @@ pub fn create_highlight_endpoints_cached(
         highlights,
         semantic_highlights,
         lsp_highlights,
-        resolve,
+        resolver,
     );
     let arc: Arc<[HighlightEndpoint]> = Arc::from(endpoints);
     *cache = Some(CachedHighlightEndpoints {
@@ -468,12 +479,18 @@ pub fn create_highlight_endpoints_cached(
     arc
 }
 
+/// Build the endpoint list for `range`.
+///
+/// `resolve` answers the bounds searches, which probe one anchor at a time by
+/// nature. `resolve_batch` answers everything between those bounds, where the
+/// whole set is known before any of it is needed and one walk of the anchor
+/// trees beats a descent per anchor.
 pub fn create_highlight_endpoints(
     range: &Range<usize>,
     highlights: &TextHighlights,
     semantic_highlights: Option<&SemanticTokensHighlights>,
     lsp_highlights: Option<&SemanticTokensHighlights>,
-    resolve: &impl Fn(&Anchor) -> usize,
+    resolver: &AnchorResolver<'_>,
 ) -> Vec<HighlightEndpoint> {
     let mut endpoints = Vec::new();
 
@@ -483,18 +500,20 @@ pub fn create_highlight_endpoints(
 
         let start_ix = ranges
             .binary_search_by(|probe| {
-                resolve(&probe.end)
+                (resolver.one)(&probe.end)
                     .cmp(&range.start)
                     .then(std::cmp::Ordering::Less)
             })
             .unwrap_or_else(|i| i);
+        // The walk used to stop at the first range starting past the viewport,
+        // which meant resolving to learn where to stop. Finding that bound up
+        // front is the same sortedness the stop assumed, and it is what lets
+        // the anchors between the bounds go out together.
+        let end_ix = start_ix
+            + ranges[start_ix..].partition_point(|probe| (resolver.one)(&probe.start) < range.end);
 
-        for anchor_range in &ranges[start_ix..] {
-            let s = resolve(&anchor_range.start);
-            let e = resolve(&anchor_range.end);
-            if s >= range.end {
-                break;
-            }
+        let bounded = &ranges[start_ix..end_ix];
+        for (s, e) in resolve_pairs(bounded.iter().map(|r| (&r.start, &r.end)), resolver) {
             if s == e {
                 continue;
             }
@@ -519,7 +538,7 @@ pub fn create_highlight_endpoints(
             semantic,
             HighlightLayer::SemanticToken,
             range,
-            resolve,
+            resolver,
         );
     }
 
@@ -531,12 +550,29 @@ pub fn create_highlight_endpoints(
             lsp,
             HighlightLayer::LspSemanticToken,
             range,
-            resolve,
+            resolver,
         );
     }
 
     endpoints.sort();
     endpoints
+}
+
+/// Resolve both ends of each range, in order.
+///
+/// One call rather than two because the resolver's cost is walking its cursors,
+/// and a single walk over twice the anchors beats two walks over half each.
+fn resolve_pairs<'a>(
+    ranges: impl Iterator<Item = (&'a Anchor, &'a Anchor)>,
+    resolver: &AnchorResolver<'_>,
+) -> Vec<(usize, usize)> {
+    let (mut anchors, mut ends): (Vec<Anchor>, Vec<Anchor>) = ranges.map(|(s, e)| (*s, *e)).unzip();
+    let count = anchors.len();
+    anchors.append(&mut ends);
+
+    let offsets = (resolver.many)(&anchors);
+    let (starts, ends) = offsets.split_at(count);
+    starts.iter().copied().zip(ends.iter().copied()).collect()
 }
 
 /// Emit start/end endpoints for one semantic-token channel at `layer`, bounding
@@ -554,15 +590,19 @@ fn push_semantic_endpoints(
     semantic: &SemanticTokensHighlights,
     layer: HighlightLayer,
     range: &Range<usize>,
-    resolve: &impl Fn(&Anchor) -> usize,
+    resolver: &AnchorResolver<'_>,
 ) {
     for (_buffer_id, channel) in semantic.iter() {
-        let bounds = channel.overlap_bounds(range, resolve);
+        let bounds = channel.overlap_bounds(range, resolver.one);
         let lo = bounds.start;
 
-        for (offset, token) in channel.tokens[bounds].iter().enumerate() {
-            let s = resolve(&token.range.start);
-            let e = resolve(&token.range.end);
+        let tokens = &channel.tokens[bounds];
+        let resolved = resolve_pairs(
+            tokens.iter().map(|t| (&t.range.start, &t.range.end)),
+            resolver,
+        );
+
+        for (offset, (token, (s, e))) in tokens.iter().zip(resolved).enumerate() {
             if s == e {
                 continue;
             }
@@ -756,8 +796,8 @@ impl<'a> Iterator for BufferChunks<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_highlight_endpoints, highlighted_chunks, Chunk, HighlightKey, HighlightLayer,
-        HighlightStyle, TextHighlights,
+        create_highlight_endpoints, highlighted_chunks, AnchorResolver, Chunk, HighlightKey,
+        HighlightLayer, HighlightStyle, TextHighlights,
     };
     use ratatui::style::Color;
     use std::{collections::HashMap, ops::Range, sync::Arc};
@@ -786,12 +826,48 @@ mod tests {
         Arc::new(map)
     }
 
+    /// The viewport's end is exclusive, so a highlight starting exactly on it
+    /// belongs to the next viewport. That boundary used to be a break reading a
+    /// resolved start and is now the bound the batch is collected between, which
+    /// is why it is worth pinning rather than left to the ranges that clearly
+    /// straddle it.
+    #[test]
+    fn a_highlight_starting_at_the_range_end_is_left_out() {
+        let style = HighlightStyle {
+            foreground: Some(Color::Red),
+            ..Default::default()
+        };
+        let highlights = make_highlights(vec![(
+            HighlightKey::layer(HighlightLayer::SearchHighlight),
+            style,
+            vec![2..4, 10..12, 14..16],
+        )]);
+        let resolve = |a: &Anchor| a.offset as usize;
+        let resolve_batch = |a: &[Anchor]| a.iter().map(&resolve).collect::<Vec<usize>>();
+        let resolver = AnchorResolver {
+            one: &resolve,
+            many: &resolve_batch,
+        };
+
+        let eps = create_highlight_endpoints(&(0..10), &highlights, None, None, &resolver);
+        assert_eq!(
+            eps.iter().map(|e| e.offset).collect::<Vec<_>>(),
+            vec![2, 4],
+            "only the range inside the viewport, not the one opening at its end"
+        );
+    }
+
     #[test]
     fn no_highlights() {
         let text = "hello world";
         let highlights = Arc::new(HashMap::new());
         let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
+        let resolve_batch = |a: &[Anchor]| a.iter().map(&resolve).collect::<Vec<usize>>();
+        let resolver = AnchorResolver {
+            one: &resolve,
+            many: &resolve_batch,
+        };
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolver);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "hello world");
@@ -812,7 +888,12 @@ mod tests {
             vec![6..11],
         )]);
         let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
+        let resolve_batch = |a: &[Anchor]| a.iter().map(&resolve).collect::<Vec<usize>>();
+        let resolver = AnchorResolver {
+            one: &resolve,
+            many: &resolve_batch,
+        };
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolver);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].text, "hello ");
@@ -850,7 +931,12 @@ mod tests {
             ),
         ]);
         let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
+        let resolve_batch = |a: &[Anchor]| a.iter().map(&resolve).collect::<Vec<usize>>();
+        let resolver = AnchorResolver {
+            one: &resolve,
+            many: &resolve_batch,
+        };
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolver);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
 
         // "ab" (no style), "cd" (blue+bold), "ef" (red+bold, red overrides blue fg),
@@ -890,7 +976,12 @@ mod tests {
             vec![2..2],
         )]);
         let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
+        let resolve_batch = |a: &[Anchor]| a.iter().map(&resolve).collect::<Vec<usize>>();
+        let resolver = AnchorResolver {
+            one: &resolve,
+            many: &resolve_batch,
+        };
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolver);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "hello");
@@ -955,9 +1046,19 @@ mod tests {
         let semantic: SemanticTokensHighlights = Arc::new(semantic_map);
         let text_hl: TextHighlights = Arc::new(HashMap::new());
         let resolve = |a: &Anchor| a.offset as usize;
+        let resolve_batch = |a: &[Anchor]| a.iter().map(&resolve).collect::<Vec<usize>>();
+        let resolver = AnchorResolver {
+            one: &resolve,
+            many: &resolve_batch,
+        };
 
-        let eps =
-            create_highlight_endpoints(&(0..text.len()), &text_hl, Some(&semantic), None, &resolve);
+        let eps = create_highlight_endpoints(
+            &(0..text.len()),
+            &text_hl,
+            Some(&semantic),
+            None,
+            &resolver,
+        );
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
 
         // "ab" unstyled; "cd" outer only (blue+bold); "ef" outer+inner (inner slot
@@ -1039,8 +1140,13 @@ mod tests {
         let semantic: SemanticTokensHighlights = Arc::new(semantic_map);
         let text_hl: TextHighlights = Arc::new(HashMap::new());
         let resolve = |a: &Anchor| a.offset as usize;
+        let resolve_batch = |a: &[Anchor]| a.iter().map(&resolve).collect::<Vec<usize>>();
+        let resolver = AnchorResolver {
+            one: &resolve,
+            many: &resolve_batch,
+        };
 
-        let eps = create_highlight_endpoints(&(20..40), &text_hl, Some(&semantic), None, &resolve);
+        let eps = create_highlight_endpoints(&(20..40), &text_hl, Some(&semantic), None, &resolver);
         let endpoints: Arc<[HighlightEndpoint]> = Arc::from(eps);
         let chunks: Vec<Chunk<'_>> = BufferChunks::new(&rope, 20..40, endpoints).collect();
 
@@ -1181,10 +1287,16 @@ mod tests {
         let semantic: SemanticTokensHighlights = Arc::new(semantic_map);
         let text_hl: TextHighlights = Arc::new(HashMap::new());
         let resolve = |a: &Anchor| a.offset as usize;
+        let resolve_batch = |a: &[Anchor]| a.iter().map(&resolve).collect::<Vec<usize>>();
+        let resolver = AnchorResolver {
+            one: &resolve,
+            many: &resolve_batch,
+        };
 
         // A viewport over the last token only. Every earlier token ends at or
         // before byte 84, so none may contribute an endpoint.
-        let eps = create_highlight_endpoints(&(92..100), &text_hl, Some(&semantic), None, &resolve);
+        let eps =
+            create_highlight_endpoints(&(92..100), &text_hl, Some(&semantic), None, &resolver);
 
         let offsets: Vec<usize> = eps.iter().map(|e| e.offset).collect();
         assert_eq!(

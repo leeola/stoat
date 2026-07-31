@@ -2092,7 +2092,8 @@ mod tests {
     #[test]
     fn wrapped_chunks_preserve_highlights() {
         use crate::display_map::highlights::{
-            create_highlight_endpoints, HighlightKey, HighlightLayer, HighlightStyle,
+            create_highlight_endpoints, AnchorResolver, HighlightKey, HighlightLayer,
+            HighlightStyle,
         };
         use ratatui::style::Color;
         use std::collections::HashMap;
@@ -2124,12 +2125,17 @@ mod tests {
         );
         let highlights = Arc::new(highlights_map);
         let resolve = |a: &Anchor| a.offset as usize;
+        let resolve_batch = |a: &[Anchor]| a.iter().map(&resolve).collect::<Vec<usize>>();
+        let resolver = AnchorResolver {
+            one: &resolve,
+            many: &resolve_batch,
+        };
         let endpoints: Arc<[_]> = Arc::from(create_highlight_endpoints(
             &(0..10),
             &highlights,
             None,
             None,
-            &resolve,
+            &resolver,
         ));
 
         let chunks: Vec<_> = snap.chunks(0..2, endpoints).collect();

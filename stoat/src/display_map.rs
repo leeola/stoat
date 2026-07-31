@@ -23,7 +23,7 @@ pub use crease_map::{
     Crease, CreaseId, CreaseMap, CreaseMetadata, CreaseSnapshot, RenderToggleFn, RenderTrailerFn,
 };
 pub use fold_map::{FoldMap, FoldMetadata, FoldOffset, FoldPlaceholder, FoldPoint, FoldSnapshot};
-use highlights::prefix_max_end_indices;
+use highlights::{prefix_max_end_indices, AnchorResolver};
 pub use highlights::{
     BufferSemanticTokens, CachedHighlightEndpoints, Chunk, ChunkRenderer, ChunkRendererId,
     ChunkReplacement, HighlightKey, HighlightLayer, HighlightStyle, HighlightStyleId,
@@ -1097,12 +1097,17 @@ impl DisplaySnapshot {
         let semantic_ref = highlights.semantic_token_highlights;
         let lsp_ref = highlights.lsp_token_highlights;
         let resolve = |a: &Anchor| buffer.resolve_anchor(a);
+        let resolve_batch = |a: &[Anchor]| buffer.resolve_anchors_batch(a);
+        let resolver = AnchorResolver {
+            one: &resolve,
+            many: &resolve_batch,
+        };
         let eps = highlights::create_highlight_endpoints(
             &range,
             text_highlights_ref,
             semantic_ref,
             lsp_ref,
-            &resolve,
+            &resolver,
         );
         Arc::from(eps)
     }
@@ -1120,13 +1125,18 @@ impl DisplaySnapshot {
         let semantic_ref = highlights.semantic_token_highlights;
         let lsp_ref = highlights.lsp_token_highlights;
         let resolve = |a: &Anchor| buffer.resolve_anchor(a);
+        let resolve_batch = |a: &[Anchor]| buffer.resolve_anchors_batch(a);
+        let resolver = AnchorResolver {
+            one: &resolve,
+            many: &resolve_batch,
+        };
         highlights::create_highlight_endpoints_cached(
             buffer.version(),
             &range,
             text_highlights_ref,
             semantic_ref,
             lsp_ref,
-            &resolve,
+            &resolver,
             cache,
         )
     }
