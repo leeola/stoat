@@ -1132,6 +1132,60 @@ mod tests {
     }
 
     #[test]
+    fn insert_register_gives_each_cursor_its_own_fragment() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "xy\nzw\n");
+        h.stoat.registers.write(
+            crate::register::Register::Unnamed,
+            vec!["A".to_string(), "B".to_string()],
+        );
+        h.type_keys("C");
+        h.type_keys("i");
+        h.type_keys("Ctrl-r");
+        h.type_keys("\"");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "Axy\nBzw\n",
+            "every cursor received the whole register joined together"
+        );
+    }
+
+    #[test]
+    fn insert_register_repeats_the_last_fragment() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "xy\nzw\nuv\n");
+        h.stoat.registers.write(
+            crate::register::Register::Unnamed,
+            vec!["A".to_string(), "B".to_string()],
+        );
+        h.type_keys("2 C");
+        h.type_keys("i");
+        h.type_keys("Ctrl-r");
+        h.type_keys("\"");
+        assert_eq!(buffer_text(&h, &path), "Axy\nBzw\nBuv\n");
+    }
+
+    #[test]
+    fn insert_register_records_the_newest_cursor_for_repeat() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "xy\nzw\n");
+        h.stoat.registers.write(
+            crate::register::Register::Unnamed,
+            vec!["A".to_string(), "B".to_string()],
+        );
+        h.type_keys("C");
+        h.type_keys("i");
+        h.type_keys("Ctrl-r");
+        h.type_keys("\"");
+        h.type_keys("escape");
+        assert_eq!(
+            h.stoat.last_insert_text.as_deref(),
+            Some("B"),
+            "repeat replays one string, so it is one a cursor actually received"
+        );
+    }
+
+    #[test]
     fn insert_register_with_empty_register_is_noop() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");

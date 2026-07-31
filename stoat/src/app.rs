@@ -6477,7 +6477,7 @@ impl Stoat {
                 && let Some(fragments) =
                     action_handlers::yank::read_register_fragments(self, register)
             {
-                self.editor_insert(editor_id, buffer_id, &fragments.join("\n"));
+                self.editor_insert_register(editor_id, buffer_id, &fragments);
             }
             return Some(UpdateEffect::Redraw);
         }
@@ -7350,6 +7350,50 @@ impl Stoat {
             }
             (cursor, rope.next_grapheme_boundary(cursor))
         });
+    }
+
+    /// Insert a register's fragments at the cursors, one fragment per cursor in
+    /// offset order.
+    ///
+    /// A register holds one fragment per selection because that is how a
+    /// multi-cursor yank recorded what each cursor took, so each fragment goes
+    /// back to the cursor in its position. Cursors past the fragment count
+    /// repeat the last, which is what pasting the same register does.
+    fn editor_insert_register(
+        &mut self,
+        editor_id: EditorId,
+        buffer_id: BufferId,
+        fragments: &[String],
+    ) {
+        let Some(last) = fragments.last() else {
+            return;
+        };
+
+        let cursors = self.editor_cursor_offsets(editor_id);
+        let insertions: Vec<(usize, usize, String)> = cursors
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (id, offset))| (id, offset, fragments.get(idx).unwrap_or(last).clone()))
+            .collect();
+
+        // Repeat replays one string, and the newest cursor's fragment is one
+        // that was actually inserted, where the blob the fragments used to be
+        // joined into is now inserted nowhere.
+        let newest = self
+            .active_workspace()
+            .editors
+            .get(editor_id)
+            .map(|editor| editor.selections.newest_anchor().id);
+        if let Some(newest) = newest
+            && let Some((_, _, text)) = insertions.iter().find(|(id, _, _)| *id == newest)
+        {
+            let text = text.clone();
+            if let Some(run) = self.current_insert_run.as_mut() {
+                run.push_str(&text);
+            }
+        }
+
+        self.editor_insert_each(editor_id, buffer_id, insertions);
     }
 
     fn editor_insert_newline(&mut self, editor_id: EditorId, buffer_id: BufferId) {
