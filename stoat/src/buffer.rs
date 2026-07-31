@@ -647,6 +647,17 @@ impl TextBuffer {
     /// typing run is one pass over the buffer rather than one per typed
     /// character.
     ///
+    /// That pass then only visits what the batch can reach. A fragment's
+    /// visibility turns on whether its own insertion or one of its deletions was
+    /// toggled, and a subtree's `max_version` is the newest of exactly those
+    /// timestamps, so a subtree older than everything the batch touched holds
+    /// nothing that can change and is copied through whole. The runs between
+    /// what does change keep their `visible` flags, so their bytes stay in the
+    /// rope already holding them and move across as one slice per side rather
+    /// than a fragment at a time. Undoing recent edits therefore costs the spans
+    /// they cover. Undoing the oldest edit in the buffer still costs the whole
+    /// buffer, which is the honest bound on the pruning.
+    ///
     /// A fragment the batch toggled is stamped with the batch's last undo
     /// timestamp rather than the one that flipped it. The stamp only has to
     /// exceed any `since_version` a caller can hold, and no snapshot is taken
@@ -656,11 +667,13 @@ impl TextBuffer {
     /// unstamped because its net visibility never changed.
     fn apply_undo_toggles(&mut self, timestamps: impl Iterator<Item = u64>, op: BufferOp) {
         let mut last_undo_timestamp = None;
+        let mut oldest_toggled = u64::MAX;
         for edit_timestamp in timestamps {
             self.ops.push(op.clone());
             let undo_timestamp = self.next_timestamp;
             self.next_timestamp += 1;
             last_undo_timestamp = Some(undo_timestamp);
+            oldest_toggled = oldest_toggled.min(edit_timestamp);
 
             let new_count = self.snapshot.undo_map.undo_count(edit_timestamp) + 1;
             self.snapshot.undo_map.insert(&UndoOperation {
@@ -681,47 +694,81 @@ impl TextBuffer {
         let mut new_visible = Rope::new();
         let mut new_deleted = Rope::new();
 
-        let mut visible_cursor_offset = 0usize;
-        let mut deleted_cursor_offset = 0usize;
+        let mut copied_visible = 0usize;
+        let mut copied_deleted = 0usize;
 
-        let frag_cursor = old_fragments.cursor::<()>(cx);
-        for fragment in frag_cursor {
+        let mut untouched = old_fragments.cursor::<Option<Locator>>(cx);
+        let mut reachable =
+            old_fragments.filter::<_, ()>(cx, |summary| summary.max_version >= oldest_toggled);
+        reachable.next();
+
+        while let Some(fragment) = reachable.item() {
+            let run = untouched.slice(&Some(&fragment.id), Bias::Left);
+            let run_visible = run.summary().text.visible;
+            let run_deleted = run.summary().text.deleted;
+
+            new_visible.append(
+                self.snapshot
+                    .visible_text
+                    .slice(copied_visible..copied_visible + run_visible),
+            );
+            new_deleted.append(
+                self.snapshot
+                    .deleted_text
+                    .slice(copied_deleted..copied_deleted + run_deleted),
+            );
+            copied_visible += run_visible;
+            copied_deleted += run_deleted;
+            new_fragments.append(run, cx);
+
             let len = fragment.len as usize;
             let was_visible = fragment.visible;
             let is_visible = fragment.is_visible_with_undos(&self.snapshot.undo_map);
+
+            let text = if was_visible {
+                let slice = self
+                    .snapshot
+                    .visible_text
+                    .slice(copied_visible..copied_visible + len);
+                copied_visible += len;
+                slice
+            } else {
+                let slice = self
+                    .snapshot
+                    .deleted_text
+                    .slice(copied_deleted..copied_deleted + len);
+                copied_deleted += len;
+                slice
+            };
+
+            if is_visible {
+                new_visible.append(text);
+            } else {
+                new_deleted.append(text);
+            }
 
             let mut new_frag = fragment.clone();
             new_frag.visible = is_visible;
             if was_visible != is_visible {
                 new_frag.max_undos = undo_timestamp;
             }
-
-            if was_visible {
-                let text_slice = self
-                    .snapshot
-                    .visible_text
-                    .slice(visible_cursor_offset..(visible_cursor_offset + len));
-                if is_visible {
-                    new_visible.append(text_slice);
-                } else {
-                    new_deleted.append(text_slice);
-                }
-                visible_cursor_offset += len;
-            } else {
-                let text_slice = self
-                    .snapshot
-                    .deleted_text
-                    .slice(deleted_cursor_offset..(deleted_cursor_offset + len));
-                if is_visible {
-                    new_visible.append(text_slice);
-                } else {
-                    new_deleted.append(text_slice);
-                }
-                deleted_cursor_offset += len;
-            }
-
             new_fragments.push(new_frag, cx);
+
+            untouched.next();
+            reachable.next();
         }
+
+        new_visible.append(
+            self.snapshot
+                .visible_text
+                .slice(copied_visible..self.snapshot.visible_text.len()),
+        );
+        new_deleted.append(
+            self.snapshot
+                .deleted_text
+                .slice(copied_deleted..self.snapshot.deleted_text.len()),
+        );
+        new_fragments.append(untouched.suffix(), cx);
 
         self.snapshot.fragments = new_fragments;
         self.snapshot.visible_text = new_visible;
