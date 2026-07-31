@@ -6,6 +6,7 @@ use crate::{
     editor_state::{EditorState, ScrollGlide},
     multi_buffer::MultiBufferSnapshot,
     pane::View,
+    selection::merge_overlapping_spans,
 };
 use std::{
     ops::Range,
@@ -1869,9 +1870,16 @@ fn delete_selection_impl(stoat: &mut Stoat, yank: bool) -> UpdateEffect {
     deletions.sort_by_key(|(_, s, _)| *s);
 
     {
+        // Selections are merged where they overlap, but these are offsets the
+        // anchors resolve to now, and text deleted between two selections
+        // collapses them onto each other without any selection change to
+        // notice it. Editing an overlap twice takes as much text again beyond
+        // it, so the spans are unioned before anything is removed.
+        let spans = merge_overlapping_spans(deletions.iter().map(|&(_, s, e)| (s, e)).collect());
+
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for (_, s, e) in deletions.iter().rev() {
+        for (s, e) in spans.iter().rev() {
             guard.edit(*s..*e, "");
         }
     }

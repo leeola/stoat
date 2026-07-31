@@ -37,6 +37,7 @@ use crate::{
     },
     review_session::ReviewSource,
     run::{CommandMark, GridSelection, PtyNotification, RunId},
+    selection::merge_overlapping_spans,
     symbol_finder::SymbolFinder,
     term_session::{TermId, TermReturnFocus, TermSelection},
     ui::RenderFrame,
@@ -7328,7 +7329,7 @@ impl Stoat {
             })
             .collect();
 
-        let mut ranges: Vec<(usize, usize)> = per_sel
+        let ranges: Vec<(usize, usize)> = per_sel
             .iter()
             .filter(|(_, start, end)| start < end)
             .map(|&(_, start, end)| (start, end))
@@ -7336,15 +7337,8 @@ impl Stoat {
         if ranges.is_empty() {
             return;
         }
-        ranges.sort_unstable();
 
-        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
-        for (start, end) in ranges {
-            match merged.last_mut() {
-                Some(last) if start < last.1 => last.1 = last.1.max(end),
-                _ => merged.push((start, end)),
-            }
-        }
+        let merged = merge_overlapping_spans(ranges);
 
         {
             let mut guard = buffer.write().expect("poisoned");

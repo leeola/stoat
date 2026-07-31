@@ -302,27 +302,63 @@ impl SelectionsCollection {
             .collect();
         indexed.sort_by_key(|r| (r.start, r.selection.id));
 
-        // Merge selections that resolve to the same span, keeping the
-        // highest-id survivor. Under the min-width-1 model duplicate cursors
-        // are identical 1-wide ranges rather than empty points (e.g. a
-        // multi-cursor page motion landing every cursor on one row), so the
-        // dedupe keys on the whole span, not just an empty offset. Sorted by
-        // start offset, any duplicate is adjacent to its twin.
+        // Merge selections that overlap into the span their union covers,
+        // keeping the highest-id survivor. Two selections over the same text
+        // are one place the buffer is being edited, and letting both through
+        // means editing the shared part twice, which consumes as much text
+        // again beyond it. Sorted by start offset, anything overlapping is
+        // adjacent to what it overlaps.
+        //
+        // Equal starts merge whatever the ends do, which is what collapses
+        // duplicate cursors. Under the min-width-1 model those are identical
+        // 1-wide ranges rather than empty points, as a multi-cursor page motion
+        // landing every cursor on one row produces. Spans that merely touch
+        // stay apart, covering disjoint text.
         let mut deduped: Vec<Resolved> = Vec::with_capacity(indexed.len());
         for entry in indexed {
             if let Some(prev) = deduped.last_mut()
-                && prev.start == entry.start
-                && prev.end == entry.end
+                && (entry.start == prev.start || entry.start < prev.end)
             {
+                let start_anchor = prev.selection.start;
+                let (end, end_anchor) = if entry.end > prev.end {
+                    (entry.end, entry.selection.end)
+                } else {
+                    (prev.end, prev.selection.end)
+                };
+
                 if entry.selection.id > prev.selection.id {
                     prev.selection = entry.selection;
                 }
+
+                prev.end = end;
+                prev.selection.start = start_anchor;
+                prev.selection.end = end_anchor;
                 continue;
             }
             deduped.push(entry);
         }
         self.disjoint = deduped.into_iter().map(|r| r.selection).collect();
     }
+}
+
+/// Collapse overlapping spans into the ranges their union covers, sorted by
+/// start.
+///
+/// Editing selection by selection needs spans that do not overlap, or the
+/// shared part is edited twice and the text after it is consumed a second
+/// time. Spans that merely touch stay separate, `(0, 3)` and `(3, 6)` covering
+/// disjoint text.
+pub(crate) fn merge_overlapping_spans(mut spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    spans.sort_unstable();
+
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+    for (start, end) in spans {
+        match merged.last_mut() {
+            Some(last) if start < last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
 }
 
 /// Build a forward 1-wide block cursor covering the character at `offset`,
@@ -696,9 +732,12 @@ mod tests {
         assert_eq!(offsets, vec![5]);
     }
 
-    /// The collection is ordered by where each selection starts. A selection
-    /// enclosing another starts first but ends last, so the two endpoints
-    /// disagree about the order and only the start gives the documented one.
+    /// The collection is ordered by where each selection starts, and the merge
+    /// depends on it, comparing each entry only against the one behind it.
+    ///
+    /// A selection enclosing another starts first but ends last, so the two
+    /// endpoints disagree about the order. Ordered by end, the enclosing
+    /// selection arrives second and the union is taken from the wrong start.
     #[test]
     fn replace_with_orders_by_start_not_end() {
         let multi = singleton("abcdefghij");
@@ -727,9 +766,66 @@ mod tests {
             .collect();
         assert_eq!(
             spans,
-            vec![(0, 8), (2, 4)],
-            "the enclosing selection sorts first because it starts first",
+            vec![(0, 8)],
+            "the union runs from the enclosing selection's start",
         );
+    }
+
+    #[test]
+    fn touching_selections_stay_apart() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+
+        let span = |id: usize, start: usize, end: usize| Selection {
+            id,
+            start: snapshot.anchor_at(start, Bias::Right),
+            end: snapshot.anchor_at(end, Bias::Left),
+            reversed: false,
+            goal: SelectionGoal::None,
+        };
+        collection.replace_with(vec![span(1, 0, 3), span(2, 3, 6)], &snapshot);
+
+        let spans: Vec<(usize, usize)> = collection
+            .all_anchors()
+            .iter()
+            .map(|s| {
+                (
+                    snapshot.resolve_anchor(&s.start),
+                    snapshot.resolve_anchor(&s.end),
+                )
+            })
+            .collect();
+        assert_eq!(
+            spans,
+            vec![(0, 3), (3, 6)],
+            "abutting selections cover disjoint text and are not one selection",
+        );
+    }
+
+    #[test]
+    fn merge_overlapping_spans_takes_the_union() {
+        assert_eq!(
+            merge_overlapping_spans(vec![(3, 7), (0, 4)]),
+            vec![(0, 7)],
+            "overlapping"
+        );
+        assert_eq!(
+            merge_overlapping_spans(vec![(0, 3), (3, 6)]),
+            vec![(0, 3), (3, 6)],
+            "touching"
+        );
+        assert_eq!(
+            merge_overlapping_spans(vec![(0, 9), (2, 4)]),
+            vec![(0, 9)],
+            "enclosed, so the union keeps the wider end"
+        );
+        assert_eq!(
+            merge_overlapping_spans(vec![(0, 3), (1, 4), (2, 9)]),
+            vec![(0, 9)],
+            "a chain merges through"
+        );
+        assert_eq!(merge_overlapping_spans(vec![]), vec![], "empty");
     }
 
     #[test]
@@ -2910,6 +3006,33 @@ mod tests {
         let before = focused_buffer_text(&mut h);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AlignSelections);
         assert_eq!(focused_buffer_text(&mut h), before);
+    }
+
+    #[test]
+    fn extending_two_cursors_into_each_other_leaves_one_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = h.write_file("s.txt", "aa\nbb\ncc\n");
+        h.open_file(&path);
+
+        // Cursors on the first two rows, each extended a row down, so the
+        // second row belongs to both.
+        h.type_keys("shift-C v j");
+        assert_eq!(h.selection_spans(), vec![(0, 7, false)]);
+    }
+
+    #[test]
+    fn deleting_overlapping_selections_spares_the_text_outside_them() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = h.write_file("s.txt", "aa\nbb\ncc\n");
+        h.open_file(&path);
+        h.type_keys("shift-C v j");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
+        assert_eq!(
+            focused_buffer_text(&mut h),
+            "c\n",
+            "deleting the overlap twice consumed a character no selection covered"
+        );
     }
 
     #[test]
