@@ -22734,6 +22734,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn goto_line_end_lands_on_a_whole_final_character() {
+        // The step back off the line end has to be by character, and the
+        // selection it lands has to cover a whole one. Both mechanisms are
+        // needed for this gesture, and it fails if either regresses.
+        for (source, remaining) in [
+            ("ab cafe\u{301}", "ab caf"),
+            (&format!("ab x{FAMILY}"), "ab x"),
+        ] {
+            let mut h = Stoat::test();
+            let path = open_scratch_file(&mut h, source);
+            h.type_keys("g l d");
+            assert_eq!(
+                buffer_text(&h, &path),
+                remaining,
+                "the whole last character goes, from {source:?}",
+            );
+        }
+    }
+
     /// The block cursor sits on a cluster start at every step of an `l`/`h`
     /// walk, never on a byte inside the joined sequence.
     #[test]

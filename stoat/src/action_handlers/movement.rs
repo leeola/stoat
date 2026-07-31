@@ -500,16 +500,14 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
                 return sel.clone();
             }
 
-            let shift_to_prev_char = || {
-                rope.reversed_chars_at(head)
-                    .next()
-                    .map(|ch| head - ch.len_utf8())
-                    .unwrap_or(head)
-            };
+            // A word end is the last character of the word, so the head steps
+            // back off the boundary it stopped on. By whole characters, since a
+            // codepoint step lands inside one made of several.
+            let shift_to_prev_grapheme = || rope.prev_grapheme_boundary(head);
 
             if extend {
                 let new_head_offset = if matches!(target, WordTarget::PrevEnd) {
-                    shift_to_prev_char()
+                    shift_to_prev_grapheme()
                 } else {
                     head
                 };
@@ -535,7 +533,7 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
                 }
             } else {
                 let resolved_head_offset = if matches!(target, WordTarget::PrevEnd) {
-                    shift_to_prev_char()
+                    shift_to_prev_grapheme()
                 } else {
                     head
                 };
@@ -971,14 +969,14 @@ fn goto_line_boundary(stoat: &mut Stoat, boundary: LineBoundary, extend: bool) -
                     buffer_snapshot,
                 )
             } else {
-                // The block cursor rests on the last visible char, one grapheme
-                // before a non-empty line's end, rather than on the newline. An
-                // empty line has no char, so it stays at the line start.
+                // The block cursor rests on the last visible character, one
+                // grapheme before a non-empty line's end, rather than on the
+                // newline. An empty line has no character, so it stays at the
+                // line start.
                 let land_offset = match boundary {
-                    LineBoundary::End if boundary_offset > line_start => rope
-                        .reversed_chars_at(boundary_offset)
-                        .next()
-                        .map_or(boundary_offset, |c| boundary_offset - c.len_utf8()),
+                    LineBoundary::End if boundary_offset > line_start => {
+                        rope.prev_grapheme_boundary(boundary_offset)
+                    },
                     _ => boundary_offset,
                 };
                 land_block_cursor(
