@@ -421,6 +421,16 @@ impl SyntaxMap {
         // so the clock decides which of the two happened.
         let out_of_time = || deadline.is_some_and(|(dl, executor)| executor.now() >= dl);
 
+        // A combined injection is one layer over several host ranges, so a walk
+        // that re-found only the ranges inside the filter would install a layer
+        // covering less text than it should, and the carry below would decline
+        // to restore the fuller one it replaced. Absorbing every prior layer the
+        // filter touches makes the walk re-find each of them whole.
+        let expanded_filter = injection_filter_ranges
+            .filter(|ranges| !ranges.is_empty())
+            .map(|ranges| absorb_prior_layers(ranges, &prior_injections));
+        let injection_filter_ranges = expanded_filter.as_deref();
+
         // Queue of (depth, language, tree, parent host range) for the
         // BFS-like injection walk. Start with the root layer.
         let mut new_layers = vec![SyntaxLayer {
@@ -635,6 +645,57 @@ struct PriorInjection {
     end_offset: u32,
     language: Arc<Language>,
     tree: Tree,
+}
+
+/// Grow `filter` to swallow every prior layer it touches, whole.
+///
+/// A layer is the unit a walk can re-find, not a set of bytes. A combined
+/// injection merges several host ranges into one tree, and re-finding a subset
+/// of them yields a layer that is wrong rather than one that is smaller. A
+/// filter reaching any part of such a layer therefore has to reach all of it.
+///
+/// Swallowing one layer can put the filter in contact with another, so this
+/// settles rather than passing once. Each layer is swallowed at most once,
+/// which is what bounds it.
+fn absorb_prior_layers(filter: &[Range<usize>], prior: &[PriorInjection]) -> Vec<Range<usize>> {
+    let overlaps = |a: &Range<usize>, b: &Range<usize>| a.start < b.end && b.start < a.end;
+    let mut ranges: Vec<Range<usize>> = filter.to_vec();
+    let mut absorbed = vec![false; prior.len()];
+
+    loop {
+        let mut grew = false;
+        for (ix, layer) in prior.iter().enumerate() {
+            let span = layer.start_offset as usize..layer.end_offset as usize;
+            if absorbed[ix] || span.is_empty() {
+                continue;
+            }
+            if ranges.iter().any(|r| overlaps(&span, r)) {
+                ranges.push(span);
+                absorbed[ix] = true;
+                grew = true;
+            }
+        }
+        if !grew {
+            return ranges;
+        }
+        ranges.sort_unstable_by_key(|r| r.start);
+        merge_ranges(&mut ranges);
+    }
+}
+
+/// Collapse a start-sorted range list in place so no two entries overlap or
+/// touch.
+fn merge_ranges(ranges: &mut Vec<Range<usize>>) {
+    let mut write = 0;
+    for read in 0..ranges.len() {
+        if write > 0 && ranges[read].start <= ranges[write - 1].end {
+            ranges[write - 1].end = ranges[write - 1].end.max(ranges[read].end);
+            continue;
+        }
+        ranges[write] = ranges[read].clone();
+        write += 1;
+    }
+    ranges.truncate(write);
 }
 
 /// Re-add the prior injection layers a filtered walk could not have found.

@@ -14397,19 +14397,60 @@ mod tests {
     /// accident.
     #[test]
     fn a_carried_parse_tracks_a_fresh_parse_through_random_edits() {
-        let (styles, lang) = carried_parse_fixture("a.rs");
-        let buffer_id = BufferId::new(1);
-        let mut buf = TextBuffer::with_text(
-            buffer_id,
-            "fn main() {\n    let name = \"hello\";\n    let n = 1 + 2;\n\
-             \n    println!(\"{name} {n}\");\n}\n\nfn other(x: u32) -> u32 {\n    x * 2\n}\n",
-        );
-
         // Snippets chosen to move token boundaries rather than plain text:
         // quotes and comment markers restyle text far from where they land.
-        let snippets = [
-            "\"", "//", "let ", "fn ", "*/", "/*", "x", " ", "\n", "'", "}", "{",
-        ];
+        let layers = random_edits_tracking_a_fresh_parse(
+            "a.rs",
+            "fn main() {\n    let name = \"hello\";\n    let n = 1 + 2;\n\
+             \n    println!(\"{name} {n}\");\n}\n\nfn other(x: u32) -> u32 {\n    x * 2\n}\n",
+            &[
+                "\"", "//", "let ", "fn ", "*/", "/*", "x", " ", "\n", "'", "}", "{",
+            ],
+        );
+        assert!(
+            layers.iter().all(|&l| l == 1),
+            "a rust buffer with no doc comment stays single-layer, got {layers:?}",
+        );
+    }
+
+    /// The same randomized check over a buffer whose tokens come from several
+    /// layers at once.
+    ///
+    /// A combined injection is one layer over several host ranges, so an edit
+    /// that reaches it has to leave the layer covering every one of them. Edits
+    /// that open, rename, and delete fences all move which ranges those are.
+    #[test]
+    fn a_carried_parse_tracks_a_fresh_parse_across_injection_layers() {
+        // Fence markers and info strings are in the snippet set because an
+        // edit that opens or renames a fence is what moves the layer set.
+        let layers = random_edits_tracking_a_fresh_parse(
+            "a.md",
+            "# Title\n\nSome **bold** prose.\n\n```rust\nfn a() -> u32 { 1 }\n\
+             let s = \"text\";\n```\n\nmore *prose* here\n\n```\nplain\n```\n",
+            &[
+                "```", "```rust", "\"", "*", "`", "#", "fn ", "x", " ", "\n", "-", "]",
+            ],
+        );
+        assert!(
+            layers.iter().any(|&l| l > 1),
+            "the fixture must actually inject layers, got {layers:?}",
+        );
+    }
+
+    /// Drive randomized edits over `source`, asserting after each one that the
+    /// carried parse still equals a from-scratch parse of the same snapshot.
+    ///
+    /// Returns the layer count each step's parse produced, so a caller can pin
+    /// that the fixture exercised the shape it was chosen for.
+    fn random_edits_tracking_a_fresh_parse(
+        path: &str,
+        source: &str,
+        snippets: &[&str],
+    ) -> Vec<usize> {
+        let (styles, lang) = carried_parse_fixture(path);
+        let buffer_id = BufferId::new(1);
+        let mut buf = TextBuffer::with_text(buffer_id, source);
+
         let mut state = CarriedParse::new(buffer_id);
         let mut seed = 0x2545_f491_4f6c_dd1d_u64;
         let mut next = || {
@@ -14419,29 +14460,30 @@ mod tests {
             seed
         };
 
-        for step in 0..80 {
-            let len = buf.snapshot.visible_text.len();
-            let at = (next() as usize) % (len + 1);
-            let at = buf.snapshot.visible_text.clip_offset(at, Bias::Left);
-            if next() % 3 == 0 {
-                let end = buf
-                    .snapshot
-                    .visible_text
-                    .clip_offset((at + 1 + (next() as usize) % 4).min(len), Bias::Right);
-                buf.edit(at..end, "");
-            } else {
-                buf.edit(at..at, snippets[(next() as usize) % snippets.len()]);
-            }
+        (0..80)
+            .map(|step| {
+                let len = buf.snapshot.visible_text.len();
+                let at = (next() as usize) % (len + 1);
+                let at = buf.snapshot.visible_text.clip_offset(at, Bias::Left);
+                if next() % 3 == 0 {
+                    let end = buf
+                        .snapshot
+                        .visible_text
+                        .clip_offset((at + 1 + (next() as usize) % 4).min(len), Bias::Right);
+                    buf.edit(at..end, "");
+                } else {
+                    buf.edit(at..at, snippets[(next() as usize) % snippets.len()]);
+                }
 
-            let layers = assert_carried_parse_matches_fresh(
-                &mut state,
-                &buf.snapshot.clone(),
-                &lang,
-                &styles,
-                &format!("step {step}"),
-            );
-            assert_eq!(layers, 1, "step {step}: a rust buffer stays single-layer");
-        }
+                assert_carried_parse_matches_fresh(
+                    &mut state,
+                    &buf.snapshot.clone(),
+                    &lang,
+                    &styles,
+                    &format!("step {step}"),
+                )
+            })
+            .collect()
     }
 
     /// An opened quote restyles every line after it until it closes, which no
