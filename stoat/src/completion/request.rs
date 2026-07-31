@@ -31,6 +31,7 @@ use crate::{
     completion::{
         applicable_sources, CompletionContext, CompletionItem, CompletionPopup, CompletionSource,
     },
+    fuzzy,
     host::{FsHost, LanguageServerFeature, LspHost, OffsetEncoding},
     keymap_state,
     lsp::util,
@@ -517,12 +518,113 @@ async fn run_request(
         }
     }
 
+    rank_by_prefix(&mut items, &owned.prefix);
+
     CompletionPopup {
         items,
         selected_idx: 0,
         anchor_offset: owned.prefix_range.start,
         prefix_range: owned.prefix_range,
     }
+}
+
+/// Order `items` by how well each answers `prefix`.
+///
+/// Sources are fetched one after another and concatenated, so left alone the
+/// popup leads with whichever source happened to run first rather than with
+/// whatever best matches what the reader typed.
+///
+/// Items are scored on their `filterText` where a server gave one and their
+/// label otherwise, that field existing precisely for servers that want
+/// matching done against something other than what they display.
+///
+/// Nothing is dropped. A server filters for itself and can offer an item whose
+/// label the prefix does not match, so the ones that do not score keep their
+/// order behind the ones that do rather than disappearing.
+///
+/// An empty prefix leaves the order alone, having nothing to rank by.
+fn rank_by_prefix(items: &mut Vec<CompletionItem>, prefix: &str) {
+    if prefix.is_empty() {
+        return;
+    }
+
+    order_by_sort_text(items);
+
+    let mut scores = vec![0u32; items.len()];
+    {
+        let haystacks: Vec<&str> = items.iter().map(match_against).collect();
+        let ranked = fuzzy::match_and_rank(
+            prefix,
+            haystacks.iter().enumerate().map(|(idx, hay)| (idx, *hay)),
+        );
+        for m in ranked.into_iter().flatten() {
+            scores[m.item] = m.score;
+        }
+    }
+
+    // Stable, so items the score cannot separate keep what the sort-text pass
+    // left them in, and everything else keeps the order its source produced.
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by(|&a, &b| scores[b].cmp(&scores[a]));
+
+    apply_order(items, order);
+}
+
+/// The text an item is matched against, which is its `filterText` when the
+/// server set one and its label otherwise.
+fn match_against(item: &CompletionItem) -> &str {
+    item.lsp_item
+        .as_ref()
+        .and_then(|lsp| lsp.filter_text.as_deref())
+        .unwrap_or(&item.label)
+}
+
+/// Reorder the items carrying a `sortText` among themselves, leaving every
+/// other item where it is.
+///
+/// Only LSP items have one, so ordering the whole list by it would have to
+/// decide how an item with a sort text ranks against an item without, and any
+/// answer to that shuffles items across sources for no reason. Confining the
+/// reorder to the items that have one asks no such question.
+fn order_by_sort_text(items: &mut Vec<CompletionItem>) {
+    let slots: Vec<usize> = (0..items.len())
+        .filter(|&idx| sort_text(&items[idx]).is_some())
+        .collect();
+    if slots.len() < 2 {
+        return;
+    }
+
+    let mut sorted = slots.clone();
+    sorted.sort_by(|&a, &b| {
+        sort_text(&items[a])
+            .cmp(&sort_text(&items[b]))
+            .then(a.cmp(&b))
+    });
+
+    // Every position keeps what it holds except the slots, which take the
+    // sorted sequence between them.
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    for (slot, from) in slots.into_iter().zip(sorted) {
+        order[slot] = from;
+    }
+
+    apply_order(items, order);
+}
+
+fn sort_text(item: &CompletionItem) -> Option<&str> {
+    item.lsp_item
+        .as_ref()
+        .and_then(|lsp| lsp.sort_text.as_deref())
+}
+
+/// Permute `items` so that position `n` holds what `order`'s `n`th index names.
+fn apply_order(items: &mut Vec<CompletionItem>, order: Vec<usize>) {
+    let mut taken: Vec<Option<CompletionItem>> = items.drain(..).map(Some).collect();
+    items.extend(
+        order
+            .into_iter()
+            .map(|from| taken[from].take().expect("each index is named once")),
+    );
 }
 
 #[cfg(test)]
@@ -1022,6 +1124,159 @@ mod harness_tests {
         assert!(
             h.stoat.pending_completion_request.is_some(),
             "typing after re-entering insert arms a fresh request",
+        );
+    }
+
+    /// A buffer-word item, which carries no server fields.
+    fn word(label: &str) -> CompletionItem {
+        CompletionItem {
+            label: label.to_string(),
+            source: CompletionSource::Word,
+            kind: None,
+            detail: None,
+            documentation: None,
+            replace_range: 0..0,
+            insert_text: label.to_string(),
+            is_snippet: false,
+            lsp_item: None,
+            server: None,
+        }
+    }
+
+    /// A server item, optionally carrying the two fields a server uses to steer
+    /// matching and ordering.
+    fn served(label: &str, filter_text: Option<&str>, sort_text: Option<&str>) -> CompletionItem {
+        CompletionItem {
+            source: CompletionSource::Lsp,
+            lsp_item: Some(Box::new(lsp_types::CompletionItem {
+                label: label.to_string(),
+                filter_text: filter_text.map(str::to_string),
+                sort_text: sort_text.map(str::to_string),
+                ..Default::default()
+            })),
+            server: Some("test".to_string()),
+            ..word(label)
+        }
+    }
+
+    #[test]
+    fn ranking_leads_with_what_answers_the_prefix_not_its_source() {
+        // Interleaved as the sources produce them, with the run of characters
+        // the reader typed scattered through the first and contiguous in the
+        // second. The scorer separates those. It does not separate a match from
+        // a longer haystack around the same match.
+        let mut items = vec![
+            word("a_pretty_pear"),
+            served("apply_theme", None, None),
+            word("zebra_handler"),
+        ];
+
+        rank_by_prefix(&mut items, "app");
+
+        assert_eq!(
+            labels(&items),
+            ["apply_theme", "a_pretty_pear", "zebra_handler"],
+            "the popup leads with the best answer whichever source produced it"
+        );
+    }
+
+    #[test]
+    fn an_item_the_prefix_cannot_match_stays_in_the_list() {
+        let mut items = vec![served("unrelated", None, None), word("apply")];
+
+        rank_by_prefix(&mut items, "app");
+
+        assert_eq!(
+            labels(&items),
+            ["apply", "unrelated"],
+            "a server filters for itself, so what it offered is kept rather than dropped"
+        );
+    }
+
+    #[test]
+    fn an_empty_prefix_leaves_the_sources_order_alone() {
+        let mut items = vec![
+            word("zebra"),
+            served("beta", None, Some("0001")),
+            served("alpha", None, Some("0000")),
+        ];
+
+        rank_by_prefix(&mut items, "");
+
+        assert_eq!(
+            labels(&items),
+            ["zebra", "beta", "alpha"],
+            "nothing to rank by, so the order the sources gave stands"
+        );
+    }
+
+    #[test]
+    fn equal_scores_fall_back_to_the_servers_sort_text() {
+        // Identical labels score identically, so only the sort text separates
+        // them, and the word item has none to be judged by.
+        let mut items = vec![
+            served("item", Some("app"), Some("0002")),
+            word("app"),
+            served("item", Some("app"), Some("0001")),
+        ];
+
+        rank_by_prefix(&mut items, "app");
+
+        let ordering: Vec<Option<&str>> = items.iter().map(sort_text).collect();
+        assert_eq!(
+            ordering,
+            [Some("0001"), None, Some("0002")],
+            "the two server items take the server's order between them, and the \
+             word item they straddle keeps the position its source gave it"
+        );
+    }
+
+    #[test]
+    fn matching_uses_the_filter_text_a_server_supplies() {
+        // The label alone would put the word item first, its characters being
+        // findable in order where the server's label's are not.
+        let mut items = vec![
+            word("a_p_p_lication"),
+            served("unhelpful label", Some("app"), None),
+        ];
+
+        rank_by_prefix(&mut items, "app");
+
+        assert_eq!(
+            labels(&items),
+            ["unhelpful label", "a_p_p_lication"],
+            "a server asking to be matched on something else is matched on it"
+        );
+    }
+
+    #[test]
+    fn the_installed_popup_is_already_ranked() {
+        let mut h = TestHarness::default();
+        enable_completion(&h);
+        open_scratch(&mut h, "");
+
+        // Offered worst-first, so arrival order and ranked order disagree.
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 0, 3, &["f_o_o_bar", "foobar"]);
+
+        h.type_keys("i");
+        h.type_text("foo");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+
+        let popup = h.stoat.pending_completion.clone().expect("popup armed");
+        let got = labels(&popup.items);
+        let contiguous = got
+            .iter()
+            .position(|l| l == "foobar")
+            .expect("the contiguous match is offered");
+        let scattered = got
+            .iter()
+            .position(|l| l == "f_o_o_bar")
+            .expect("the scattered match is offered");
+
+        assert!(
+            contiguous < scattered,
+            "the popup is ranked where it is installed rather than left in arrival order: {got:?}"
         );
     }
 }
