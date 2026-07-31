@@ -3987,6 +3987,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "regex",
+ "regex-cursor",
  "ron",
  "serde",
  "serde_json",

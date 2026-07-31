@@ -2,6 +2,11 @@ use crate::{
     app::{Stoat, UpdateEffect},
     input_view::{InputView, SubmitTarget},
 };
+use regex_cursor::{engines::meta, regex_automata::util::syntax};
+use stoat_text::Rope;
+
+/// The search pattern compiled for the engine that matches over a rope.
+type CursorRegex = meta::Regex;
 
 /// Direction the search was opened in. Forward (`/`) finds matches at
 /// or after the cursor; Reverse (`?`) finds matches before the cursor.
@@ -43,13 +48,17 @@ pub(crate) struct LastSearch {
     /// `None` for a pattern that does not compile. The query is kept either
     /// way, because it is also what the search register pastes and what the
     /// highlight pass reads, neither of which needs it to be searchable.
-    regex: Option<regex::Regex>,
+    ///
+    /// Compiled for the cursor engine rather than the plain one, so a repeat
+    /// runs over the buffer's chunks instead of a flattened copy of it. The
+    /// highlight pass compiles its own, over the window it paints.
+    regex: Option<CursorRegex>,
 }
 
 impl LastSearch {
     pub(crate) fn new(query: String, direction: SearchDirection) -> Self {
         Self {
-            regex: compile_search_regex(&query).ok(),
+            regex: compile_cursor_regex(&query),
             query,
             direction,
         }
@@ -142,7 +151,7 @@ pub(super) fn search_prev(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// Clones the regex, which is a refcount bump, rather than the whole
 /// [`LastSearch`], which would copy the query text on every press.
-fn repeat_target(stoat: &Stoat) -> Option<(regex::Regex, SearchDirection)> {
+fn repeat_target(stoat: &Stoat) -> Option<(CursorRegex, SearchDirection)> {
     let last = stoat.last_search.as_ref()?;
     Some((last.regex.clone()?, last.direction))
 }
@@ -154,7 +163,7 @@ fn repeat_target(stoat: &Stoat) -> Option<(regex::Regex, SearchDirection)> {
 ///
 /// Takes the pattern already compiled, since `n` and `N` repeat one that
 /// [`LastSearch`] built when it was submitted.
-fn jump_to_match(stoat: &mut Stoat, regex: &regex::Regex, direction: SearchDirection) -> bool {
+fn jump_to_match(stoat: &mut Stoat, regex: &CursorRegex, direction: SearchDirection) -> bool {
     use crate::pane::View;
     use stoat_text::SelectionGoal;
 
@@ -168,28 +177,16 @@ fn jump_to_match(stoat: &mut Stoat, regex: &regex::Regex, direction: SearchDirec
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
-    // The regex needs one flat &str, so reuse the last one taken at this
-    // version rather than re-flattening the whole file on every n/N.
-    let version = buffer_snapshot.version();
-    let text = match &editor.search_text_cache {
-        Some((cached, text)) if *cached == version => text.clone(),
-        _ => {
-            let text = std::sync::Arc::new(rope.to_string());
-            editor.search_text_cache = Some((version, text.clone()));
-            text
-        },
-    };
     let sel = editor.selections.newest_anchor();
     let cursor = stoat_text::cursor_offset(
         rope,
         buffer_snapshot.resolve_anchor(&sel.tail()),
         buffer_snapshot.resolve_anchor(&sel.head()),
     );
-    let len = text.len();
 
     let target = match direction {
-        SearchDirection::Forward => find_forward(regex, &text, cursor, len),
-        SearchDirection::Reverse => find_reverse(regex, &text, cursor),
+        SearchDirection::Forward => find_forward(regex, rope, cursor),
+        SearchDirection::Reverse => find_reverse(regex, rope, cursor),
     };
     let Some(target) = target else { return false };
 
@@ -200,12 +197,12 @@ fn jump_to_match(stoat: &mut Stoat, regex: &regex::Regex, direction: SearchDirec
     true
 }
 
-fn find_forward(regex: &regex::Regex, text: &str, head: usize, len: usize) -> Option<usize> {
-    let start = head.saturating_add(1).min(len);
-    if let Some(m) = next_match_at_or_after(regex, text, start) {
+fn find_forward(regex: &CursorRegex, rope: &Rope, head: usize) -> Option<usize> {
+    let start = head.saturating_add(1).min(rope.len());
+    if let Some(m) = next_match_at_or_after(regex, rope, start) {
         return Some(m);
     }
-    next_match_at_or_after(regex, text, 0)
+    next_match_at_or_after(regex, rope, 0)
 }
 
 /// The last match starting before `head`, or the last in the file when there is
@@ -215,8 +212,8 @@ fn find_forward(regex: &regex::Regex, text: &str, head: usize, len: usize) -> Op
 /// `find_iter` is lazy, so an ordinary reverse search reads `head` bytes rather
 /// than the file. Only a search with nothing behind the cursor, which is the
 /// one that has to wrap, reads to the end.
-fn find_reverse(regex: &regex::Regex, text: &str, head: usize) -> Option<usize> {
-    let mut matches = regex.find_iter(text);
+fn find_reverse(regex: &CursorRegex, rope: &Rope, head: usize) -> Option<usize> {
+    let mut matches = regex.find_iter(rope.regex_input(0..rope.len()));
     let mut before = None;
 
     let at_or_after = loop {
@@ -234,13 +231,15 @@ fn find_reverse(regex: &regex::Regex, text: &str, head: usize) -> Option<usize> 
 }
 
 /// Finds the first regex match whose start is at or after `at`.
-/// Walks forward via `find_at` and skips matches that pre-date `at`
-/// (which can happen for zero-width patterns).
-fn next_match_at_or_after(regex: &regex::Regex, text: &str, at: usize) -> Option<usize> {
-    if at > text.len() {
+///
+/// The scan is bounded to `at..` on the input rather than by slicing, so the
+/// offset it reports is a buffer offset. A zero-width pattern can still report
+/// a match before the bound, which is why the start is checked.
+fn next_match_at_or_after(regex: &CursorRegex, rope: &Rope, at: usize) -> Option<usize> {
+    if at > rope.len() {
         return None;
     }
-    let m = regex.find_at(text, at)?;
+    let m = regex.find(rope.regex_input(at..rope.len()))?;
     if m.start() >= at {
         Some(m.start())
     } else {
@@ -252,6 +251,19 @@ fn next_match_at_or_after(regex: &regex::Regex, text: &str, at: usize) -> Option
 /// so `^` and `$` match line boundaries inside the buffer text.
 pub(crate) fn compile_search_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
     regex::RegexBuilder::new(pattern).multi_line(true).build()
+}
+
+/// Compile `pattern` for the engine that matches over a rope's chunks, with the
+/// same multiline mode [`compile_search_regex`] uses.
+///
+/// The two exist side by side because they suit different haystacks. This one
+/// searches the buffer without flattening it. The plain one is what the
+/// highlight pass runs over the window it has already built as a string.
+fn compile_cursor_regex(pattern: &str) -> Option<CursorRegex> {
+    CursorRegex::builder()
+        .syntax(syntax::Config::new().multi_line(true))
+        .build(pattern)
+        .ok()
 }
 
 #[cfg(test)]
@@ -349,57 +361,34 @@ mod tests {
         assert_eq!(cursor_offset(&mut h), 0);
     }
 
-    /// The buffer version the search text was flattened at, or `None` when
-    /// nothing is cached.
-    fn cached_text_version(h: &mut TestHarness) -> Option<u64> {
-        crate::action_handlers::focused_editor_mut(&mut h.stoat)
-            .expect("focused editor")
-            .search_text_cache
-            .as_ref()
-            .map(|(version, _)| *version)
+    /// The buffer text from the cursor onward, which says whether a jump landed
+    /// on a match rather than at an offset the match used to be at.
+    fn text_at_cursor(h: &mut TestHarness) -> String {
+        let at = cursor_offset(h);
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let rope = snapshot.buffer_snapshot().rope();
+        rope.slice(at..rope.len()).to_string()
     }
 
     #[test]
-    fn repeat_jumps_reuse_the_flattened_buffer() {
-        let mut h = TestHarness::with_size(40, 10);
-        seed(&mut h, "abc def abc xyz\n");
-        assert_eq!(
-            cached_text_version(&mut h),
-            None,
-            "nothing is flattened before a search runs"
-        );
-
-        h.type_keys("/");
-        h.type_text("abc");
-        h.type_keys("enter");
-        let first = cached_text_version(&mut h).expect("the jump flattened the buffer");
-
-        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
-        assert_eq!(
-            cached_text_version(&mut h),
-            Some(first),
-            "a repeat on an unchanged buffer reuses the same flattening",
-        );
-    }
-
-    #[test]
-    fn an_edit_invalidates_the_flattened_buffer() {
+    fn a_repeat_after_an_edit_searches_the_edited_buffer() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc def abc xyz\n");
         h.type_keys("/");
         h.type_text("abc");
         h.type_keys("enter");
-        let before = cached_text_version(&mut h).expect("the jump flattened the buffer");
 
+        // Shifts every following match along, so a repeat reading anything but
+        // the buffer as it stands now lands short of one.
         h.type_keys("i");
         h.type_text("zz");
         h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
 
-        let after = cached_text_version(&mut h).expect("the repeat re-flattened");
-        assert_ne!(
-            after, before,
-            "an edit moves the version, so the stale text is not reused",
+        assert!(
+            text_at_cursor(&mut h).starts_with("abc"),
+            "the repeat landed on a match in the edited buffer, not where one used to be"
         );
     }
 
@@ -408,22 +397,65 @@ mod tests {
     /// the cursor.
     #[test]
     fn find_reverse_picks_the_last_match_before_the_cursor() {
-        let regex = super::compile_search_regex("ab").expect("valid regex");
-        let text = "ab..ab..ab";
+        let regex = super::compile_cursor_regex("ab").expect("valid regex");
+        let text = stoat_text::Rope::from("ab..ab..ab");
 
         assert_eq!(
-            super::find_reverse(&regex, text, 8),
+            super::find_reverse(&regex, &text, 8),
             Some(4),
             "the nearest match before the cursor wins, not the first or last",
         );
-        assert_eq!(super::find_reverse(&regex, text, 9), Some(8));
-        assert_eq!(super::find_reverse(&regex, text, 5), Some(4));
+        assert_eq!(super::find_reverse(&regex, &text, 9), Some(8));
+        assert_eq!(super::find_reverse(&regex, &text, 5), Some(4));
         assert_eq!(
-            super::find_reverse(&regex, text, 0),
+            super::find_reverse(&regex, &text, 0),
             Some(8),
             "with nothing before the cursor it wraps to the last match",
         );
-        assert_eq!(super::find_reverse(&regex, "nope", 2), None);
+        assert_eq!(
+            super::find_reverse(&regex, &stoat_text::Rope::from("nope"), 2),
+            None
+        );
+    }
+
+    /// Chunks are far smaller than the file, so a match near the end of one
+    /// spans the boundary into the next. Nothing else here reaches past a
+    /// single chunk, so without this the chunk walking is untested.
+    #[test]
+    fn a_match_straddling_a_chunk_boundary_is_found_either_way() {
+        let mut text = String::new();
+        for row in 0..80 {
+            text.push_str(&format!("filler line {row} with some words on it\n"));
+        }
+        let at = text.len();
+        text.push_str("the needle_in_a_haystack sits here\n");
+        for row in 0..80 {
+            text.push_str(&format!("trailing line {row}\n"));
+        }
+
+        let rope = stoat_text::Rope::from(text.as_str());
+        let regex = super::compile_cursor_regex("needle_in_a_haystack").expect("valid regex");
+        let target = at + "the ".len();
+
+        assert!(
+            rope.chunks().count() > 1,
+            "the fixture has to span chunks for this to test anything"
+        );
+        assert_eq!(
+            super::find_forward(&regex, &rope, 0),
+            Some(target),
+            "found walking forward from the start"
+        );
+        assert_eq!(
+            super::find_reverse(&regex, &rope, rope.len()),
+            Some(target),
+            "and walking back from the end"
+        );
+        assert_eq!(
+            super::find_forward(&regex, &rope, target),
+            Some(target),
+            "and wrapping round when the cursor sits on it"
+        );
     }
 
     #[test]

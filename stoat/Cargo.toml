@@ -24,6 +24,7 @@ stoat_language = { path = "../language" }
 stoat_log = { path = "../log" }
 stoat_scheduler = { path = "../scheduler" }
 stoat_text = { path = "../text" }
+regex-cursor.workspace = true
 stoatty_protocol = { path = "../tty_protocol" }
 vscode_theme = { path = "../vscode_theme" }
 stoatty_widgets = { path = "../tty_widgets" }
