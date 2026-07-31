@@ -16,6 +16,16 @@ use lsp_types::{
 };
 use stoat_text::Rope;
 
+/// What one server offered, and whether that is all of it.
+#[derive(Default)]
+pub struct Answer {
+    pub items: Vec<CompletionItem>,
+    /// `false` where the server marked its list incomplete, meaning it stopped
+    /// early and wants asking again as the prefix grows rather than having the
+    /// client narrow what it gave.
+    pub complete: bool,
+}
+
 /// Fetch LSP completions for the cursor described by `params`.
 ///
 /// `rope` and `encoding` are needed to convert any `text_edit`
@@ -23,8 +33,8 @@ use stoat_text::Rope;
 /// item's `replace_range`. Items without a `text_edit` fall back
 /// to `ctx.prefix_range` so acceptance rewrites the current prefix.
 ///
-/// Returns an empty `Vec` when the server returns `Err` or
-/// `Ok(None)`.
+/// A server that errors or answers `None` yields no items, and is reported
+/// incomplete so nothing is narrowed from an answer that never came.
 pub async fn fetch(
     ctx: &CompletionContext<'_>,
     server: &str,
@@ -32,21 +42,29 @@ pub async fn fetch(
     params: CompletionParams,
     rope: &Rope,
     encoding: OffsetEncoding,
-) -> Vec<CompletionItem> {
-    let items = match lsp.completion(params).await {
+) -> Answer {
+    let (items, complete) = match lsp.completion(params).await {
         Ok(Some(response)) => extract_items(response),
-        _ => return Vec::new(),
+        _ => return Answer::default(),
     };
-    items
-        .into_iter()
-        .map(|item| translate(item, server, ctx, rope, encoding))
-        .collect()
+
+    Answer {
+        items: items
+            .into_iter()
+            .map(|item| translate(item, server, ctx, rope, encoding))
+            .collect(),
+        complete,
+    }
 }
 
-fn extract_items(response: CompletionResponse) -> Vec<LspCompletionItem> {
+/// Split a response into its items and whether the server called the list
+/// complete.
+///
+/// A bare array carries no such flag, and the protocol reads that as complete.
+fn extract_items(response: CompletionResponse) -> (Vec<LspCompletionItem>, bool) {
     match response {
-        CompletionResponse::Array(items) => items,
-        CompletionResponse::List(list) => list.items,
+        CompletionResponse::Array(items) => (items, true),
+        CompletionResponse::List(list) => (list.items, !list.is_incomplete),
     }
 }
 
@@ -162,7 +180,8 @@ mod tests {
             params,
             &rope,
             OffsetEncoding::Utf16,
-        ));
+        ))
+        .items;
         assert_eq!(items, Vec::new());
     }
 
@@ -180,7 +199,8 @@ mod tests {
             params,
             &rope,
             OffsetEncoding::Utf16,
-        ));
+        ))
+        .items;
         assert_eq!(items.len(), 3);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(labels, ["foo", "bar", "baz"]);
@@ -219,7 +239,8 @@ mod tests {
             params,
             &rope,
             OffsetEncoding::Utf16,
-        ));
+        ))
+        .items;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].replace_range, 0..5);
         assert_eq!(items[0].insert_text, "println!(\"\")");
@@ -248,7 +269,8 @@ mod tests {
             params,
             &rope,
             OffsetEncoding::Utf16,
-        ));
+        ))
+        .items;
         assert_eq!(
             items[0].detail.as_deref(),
             Some("fn open(path: &Path) -> io::Result<File>"),
@@ -278,7 +300,8 @@ mod tests {
             params,
             &rope,
             OffsetEncoding::Utf16,
-        ));
+        ))
+        .items;
         assert_eq!(items[0].kind, Some(CompletionItemKind::Method));
     }
 
@@ -305,7 +328,8 @@ mod tests {
             params,
             &rope,
             OffsetEncoding::Utf16,
-        ));
+        ))
+        .items;
         assert_eq!(items[0].kind, Some(CompletionItemKind::Other));
     }
 
@@ -323,7 +347,8 @@ mod tests {
             params,
             &rope,
             OffsetEncoding::Utf16,
-        ));
+        ))
+        .items;
         assert_eq!(items[0].insert_text, "bare_label");
     }
 
@@ -350,7 +375,8 @@ mod tests {
             params,
             &rope,
             OffsetEncoding::Utf16,
-        ));
+        ))
+        .items;
         assert_eq!(items[0].insert_text, "method");
         assert_eq!(items[0].label, "method (display)");
     }

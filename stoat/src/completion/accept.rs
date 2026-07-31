@@ -277,6 +277,8 @@ mod tests {
             selected_idx: 0,
             anchor_offset: prefix_range.start,
             prefix_range,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         });
     }
 
@@ -376,6 +378,8 @@ mod tests {
             selected_idx: 1,
             anchor_offset: 0,
             prefix_range: 0..2,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         });
 
         dispatch(&mut h.stoat, &AcceptCompletion);

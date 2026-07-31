@@ -589,6 +589,8 @@ struct FakeLspState {
     observed_opens: Vec<DidOpenTextDocumentParams>,
     observed_changes: Vec<DidChangeTextDocumentParams>,
     observed_completions: Vec<CompletionParams>,
+    /// Keys whose programmed list the server reports as incomplete.
+    incomplete_completions: std::collections::BTreeSet<LspKey>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     renames: BTreeMap<LspKey, WorkspaceEdit>,
     open_documents: BTreeMap<Uri, String>,
@@ -668,6 +670,7 @@ impl FakeLsp {
                 observed_opens: Vec::new(),
                 observed_changes: Vec::new(),
                 observed_completions: Vec::new(),
+                incomplete_completions: std::collections::BTreeSet::new(),
                 prepare_renames: BTreeMap::new(),
                 renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
@@ -1454,6 +1457,17 @@ impl FakeLsp {
 
     // --- Completions ---
 
+    /// Mark the list programmed for `path` at `line`/`col` incomplete, so the
+    /// server is saying it stopped early and wants asking again as the prefix
+    /// grows rather than having the client narrow what it gave.
+    pub fn set_completions_incomplete(&self, path: &str, line: u32, col: u32) {
+        self.state
+            .lock()
+            .unwrap()
+            .incomplete_completions
+            .insert(LspKey::new(path, line, col));
+    }
+
     pub fn set_completions(&self, path: &str, line: u32, col: u32, labels: &[&str]) {
         let items = labels
             .iter()
@@ -2049,9 +2063,10 @@ impl LspHost for FakeLsp {
         );
         let mut state = self.state.lock().unwrap();
         state.observed_completions.push(params);
+        let is_incomplete = state.incomplete_completions.contains(&key);
         Ok(state.completions.get(&key).map(|items| {
             CompletionResponse::List(CompletionList {
-                is_incomplete: false,
+                is_incomplete,
                 items: items.clone(),
             })
         }))

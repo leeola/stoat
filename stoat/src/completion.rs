@@ -127,6 +127,22 @@ pub struct CompletionPopup {
     /// at trigger time covers; LSP items may widen via their own
     /// `text_edit.range`.
     pub prefix_range: Range<usize>,
+    /// The text these items were fetched for.
+    ///
+    /// Kept alongside the range because the range moves with the buffer as the
+    /// reader types on, so it cannot say what the items already answer. Typing
+    /// a longer prefix that starts with this one asks a narrower question than
+    /// the items were fetched for, which they can answer without asking again.
+    pub prefix: String,
+    /// Servers that marked their list incomplete, meaning they stopped early
+    /// and want asking again rather than having the client narrow what they
+    /// gave.
+    ///
+    /// Empty is the ordinary case and the one that lets a further keystroke be
+    /// answered from these items alone. A name here means that server has more
+    /// to say about a longer prefix, so it is asked again while the rest are
+    /// carried across.
+    pub incomplete: Vec<String>,
 }
 
 /// State the dispatch entry hands to each source so it can decide
@@ -380,6 +396,8 @@ mod tests {
             selected_idx: 0,
             anchor_offset: 4,
             prefix_range: 4..7,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         };
         assert_eq!(popup.clone(), popup);
         assert_eq!(popup.items, [item]);

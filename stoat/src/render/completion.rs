@@ -354,6 +354,8 @@ mod tests {
             selected_idx: 0,
             anchor_offset,
             prefix_range: anchor_offset..anchor_offset,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         });
 
         let (_, cursor) =
@@ -379,6 +381,8 @@ mod tests {
             selected_idx: 1,
             anchor_offset: 0,
             prefix_range: 0..0,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         });
         h.assert_snapshot("snapshot_completion_popup_basic");
     }
@@ -396,6 +400,8 @@ mod tests {
             selected_idx: 0,
             anchor_offset: 0,
             prefix_range: 0..0,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         });
         h.assert_snapshot("snapshot_completion_popup_detail_footer");
     }
@@ -413,6 +419,8 @@ mod tests {
             selected_idx: 12,
             anchor_offset: 0,
             prefix_range: 0..0,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         });
         h.assert_snapshot("snapshot_completion_popup_scrolling");
     }
@@ -427,6 +435,8 @@ mod tests {
             selected_idx: 0,
             anchor_offset: 3,
             prefix_range: 0..3,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         });
         h.assert_snapshot("snapshot_completion_popup_with_match");
     }

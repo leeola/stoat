@@ -17852,6 +17852,8 @@ mod tests {
             selected_idx: 0,
             anchor_offset: 0,
             prefix_range: 0..0,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         });
 
         let mut buf = Buffer::empty(h.stoat.size());
@@ -18575,6 +18577,8 @@ mod tests {
             selected_idx: 0,
             anchor_offset: 0,
             prefix_range: 0..0,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         });
 
         h.stoat.emit_smooth_scroll();
@@ -23134,6 +23138,8 @@ mod tests {
             selected_idx: 0,
             anchor_offset: 0,
             prefix_range: 0..0,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         });
         h.type_keys("escape");
         assert_eq!(h.stoat.pending_completion, None);
@@ -23189,6 +23195,8 @@ mod tests {
             selected_idx: 0,
             anchor_offset: 0,
             prefix_range: 0..3,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         });
 
         h.type_keys("tab");
@@ -23249,6 +23257,8 @@ mod tests {
             selected_idx: 0,
             anchor_offset: 0,
             prefix_range: 0..1,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         };
         h.stoat.pending_completion = Some(popup());
 
@@ -23307,6 +23317,8 @@ mod tests {
             selected_idx: 0,
             anchor_offset: 0,
             prefix_range: 0..3,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         });
         h.type_keys("tab");
         assert_eq!(buffer_text(&h, &path), "name(arg)");
@@ -23351,6 +23363,8 @@ mod tests {
             selected_idx: 0,
             anchor_offset: 0,
             prefix_range: 0..1,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         });
         h.type_keys("tab");
         assert!(h.stoat.active_snippet.is_some());

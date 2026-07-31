@@ -169,14 +169,20 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         return;
     };
 
-    if let Some(popup) = &stoat.pending_completion
-        && (cursor_offset < popup.prefix_range.start || cursor_offset > popup.prefix_range.end)
-    {
-        stoat.pending_completion = None;
-    }
-
     let signature = (buffer_id, buffer_version);
-    if stoat.last_completion_signature == Some(signature) {
+    let edited = stoat.last_completion_signature != Some(signature);
+
+    // A motion moves the cursor without touching the version, so the popup has
+    // to notice the cursor leaving the range it was filtered for. An edit is
+    // not that case. It moves the cursor by construction, and typing on is the
+    // very thing the refine below answers, so the check waits until that has
+    // declined.
+    if !edited {
+        if let Some(popup) = &stoat.pending_completion
+            && cursor_left_popup(popup, cursor_offset)
+        {
+            stoat.pending_completion = None;
+        }
         return;
     }
     stoat.last_completion_signature = Some(signature);
@@ -208,6 +214,32 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         (Some(ch), Some(triggers)) => triggers.contains(&ch.to_string()),
         _ => false,
     };
+
+    // A server asked to answer a trigger character wants to answer it, so the
+    // cached list is not consulted even where the prefix only grew.
+    if !is_trigger_char {
+        match refine_open_popup(stoat, &owned) {
+            Refine::Fresh => {
+                // The edit moved the cursor somewhere the open popup was never
+                // filtered for, so it goes now rather than lingering until the
+                // request it triggers lands.
+                if let Some(popup) = &stoat.pending_completion
+                    && cursor_left_popup(popup, owned.cursor_offset)
+                {
+                    stoat.pending_completion = None;
+                }
+            },
+            Refine::Done(popup) => {
+                stoat.pending_completion_request = None;
+                install_popup(stoat, popup);
+                return;
+            },
+            Refine::Ask { servers, carried } => {
+                ask_again(stoat, &snapshot, owned, servers, carried);
+                return;
+            },
+        }
+    }
 
     let mut sources = applicable_sources(&owned.as_borrowed());
     if is_trigger_char && !sources.contains(&CompletionSource::Lsp) {
@@ -275,6 +307,210 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
     stoat.pending_completion_request = Some(task);
 }
 
+/// Whether the cursor has left the span `popup` was filtered for.
+fn cursor_left_popup(popup: &CompletionPopup, cursor_offset: usize) -> bool {
+    cursor_offset < popup.prefix_range.start || cursor_offset > popup.prefix_range.end
+}
+
+/// What an open popup can do for a prefix that has grown since it was filled.
+enum Refine {
+    /// Nothing cached applies, so ask every source afresh.
+    Fresh,
+    /// The cached items answer this prefix outright.
+    Done(CompletionPopup),
+    /// These servers stopped early last time and are asked again. Everything
+    /// else carries across rather than being fetched twice.
+    Ask {
+        servers: Vec<String>,
+        carried: Vec<CompletionItem>,
+    },
+}
+
+/// Decide what the open popup can do for `owned`'s prefix.
+///
+/// The cached items only answer a question narrower than the one they were
+/// fetched for, so the prefix has to have grown at the same anchor and to still
+/// start with what it grew from. A prefix that shrank, moved, or diverged can
+/// match items that were never fetched.
+///
+/// The items are filtered as well as re-ranked, which the install path
+/// deliberately does not do. A server filters for itself and its list is
+/// authoritative at the moment it answered, but between answers the client is
+/// what narrows, so a cached item the prefix no longer matches goes rather than
+/// sinking down the list.
+fn refine_open_popup(stoat: &Stoat, owned: &ContextOwned) -> Refine {
+    let Some(popup) = &stoat.pending_completion else {
+        return Refine::Fresh;
+    };
+
+    let grew = owned.prefix_range.start == popup.prefix_range.start
+        && owned.prefix.len() > popup.prefix.len()
+        && owned.prefix.starts_with(&popup.prefix);
+    if !grew {
+        return Refine::Fresh;
+    }
+
+    let kept: Vec<CompletionItem> = {
+        let stale: &[String] = &popup.incomplete;
+        let survives = |item: &CompletionItem| {
+            item.server
+                .as_deref()
+                .is_none_or(|name| !stale.iter().any(|s| s == name))
+        };
+        matching(
+            popup.items.iter().filter(|item| survives(item)),
+            &owned.prefix,
+        )
+    };
+
+    if !popup.incomplete.is_empty() {
+        return Refine::Ask {
+            servers: popup.incomplete.clone(),
+            carried: kept,
+        };
+    }
+
+    let mut items = kept;
+    rank_by_prefix(&mut items, &owned.prefix);
+
+    Refine::Done(CompletionPopup {
+        items,
+        selected_idx: 0,
+        anchor_offset: owned.prefix_range.start,
+        prefix_range: owned.prefix_range.clone(),
+        prefix: owned.prefix.clone(),
+        incomplete: Vec::new(),
+    })
+}
+
+/// The items `prefix` still matches, in the order they were given.
+fn matching<'a>(
+    items: impl Iterator<Item = &'a CompletionItem>,
+    prefix: &str,
+) -> Vec<CompletionItem> {
+    let items: Vec<&CompletionItem> = items.collect();
+    let haystacks: Vec<&str> = items.iter().map(|item| match_against(item)).collect();
+
+    let Some(ranked) = fuzzy::match_and_rank(
+        prefix,
+        haystacks.iter().enumerate().map(|(idx, hay)| (idx, *hay)),
+    ) else {
+        return items.into_iter().cloned().collect();
+    };
+
+    let mut keep: Vec<usize> = ranked.into_iter().map(|m| m.item).collect();
+    keep.sort_unstable();
+    keep.into_iter().map(|idx| items[idx].clone()).collect()
+}
+
+/// Ask `servers` again for a prefix they answered incompletely, carrying the
+/// items held from everywhere else into the result.
+///
+/// Re-requesting everything would throw away answers that are still good, and
+/// leaving the server out would leave the popup permanently short of what it
+/// has to offer. The debounce stays, so typing through several characters asks
+/// once rather than once a keystroke.
+fn ask_again(
+    stoat: &mut Stoat,
+    snapshot: &EditorSnapshot,
+    owned: ContextOwned,
+    servers: Vec<String>,
+    carried: Vec<CompletionItem>,
+) {
+    let hosts: Vec<(String, Arc<dyn LspHost>)> = stoat
+        .feature_hosts(snapshot.buffer_id, LanguageServerFeature::Completion)
+        .into_iter()
+        .filter(|(name, _)| servers.iter().any(|wanted| wanted == name))
+        .collect();
+
+    let encoding = hosts
+        .first()
+        .map(|(_, host)| host.offset_encoding())
+        .unwrap_or(OffsetEncoding::Utf16);
+
+    let params = build_lsp_params(
+        snapshot.source_path.as_deref(),
+        &snapshot.rope,
+        snapshot.cursor_offset,
+        encoding,
+        Some(LspCompletionContext {
+            trigger_kind: CompletionTriggerKind::TRIGGER_FOR_INCOMPLETE_COMPLETIONS,
+            trigger_character: None,
+        }),
+    );
+
+    let Some(params) = params.filter(|_| !hosts.is_empty()) else {
+        // The server is no longer there to ask, so what is held is all of it.
+        let mut items = carried;
+        rank_by_prefix(&mut items, &owned.prefix);
+        stoat.pending_completion_request = None;
+        install_popup(
+            stoat,
+            CompletionPopup {
+                items,
+                selected_idx: 0,
+                anchor_offset: owned.prefix_range.start,
+                prefix_range: owned.prefix_range,
+                prefix: owned.prefix,
+                incomplete: Vec::new(),
+            },
+        );
+        return;
+    };
+
+    let executor = stoat.executor.clone();
+    let rope = snapshot.rope.clone();
+    let task = stoat.spawn_woken(async move {
+        executor.timer(COMPLETION_DEBOUNCE).await;
+
+        let mut items = carried;
+        let mut incomplete = Vec::new();
+        {
+            let ctx = owned.as_borrowed();
+            for (name, host) in &hosts {
+                let answer = crate::completion::lsp::fetch(
+                    &ctx,
+                    name,
+                    host.as_ref(),
+                    params.clone(),
+                    &rope,
+                    encoding,
+                )
+                .await;
+
+                if !answer.complete {
+                    incomplete.push(name.clone());
+                }
+                items.extend(answer.items);
+            }
+        }
+
+        rank_by_prefix(&mut items, &owned.prefix);
+
+        CompletionPopup {
+            items,
+            selected_idx: 0,
+            anchor_offset: owned.prefix_range.start,
+            prefix_range: owned.prefix_range,
+            prefix: owned.prefix,
+            incomplete,
+        }
+    });
+    stoat.pending_completion_request = Some(task);
+}
+
+/// Install `popup` as the current one, or clear the popup when it came out
+/// empty, the way a landed request does.
+fn install_popup(stoat: &mut Stoat, popup: CompletionPopup) {
+    if popup.items.is_empty() {
+        stoat.pending_completion = None;
+    } else {
+        stoat.completion_generation = stoat.completion_generation.wrapping_add(1);
+        stoat.pending_completion = Some(popup);
+    }
+    crate::action_handlers::completion::arm_completion_resolve(stoat);
+}
+
 /// Poll the in-flight completion task. On `Ready` writes the
 /// returned [`CompletionPopup`] onto [`Stoat::pending_completion`]
 /// (or clears it when the result has no items). Returns `true` when
@@ -288,15 +524,7 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(popup) => {
-            if popup.items.is_empty() {
-                stoat.pending_completion = None;
-            } else {
-                // Bumped on each install so the pooled list region detects a
-                // re-query by comparing this counter instead of hashing labels.
-                stoat.completion_generation = stoat.completion_generation.wrapping_add(1);
-                stoat.pending_completion = Some(popup);
-            }
-            crate::action_handlers::completion::arm_completion_resolve(stoat);
+            install_popup(stoat, popup);
             true
         },
         Poll::Pending => {
@@ -475,6 +703,7 @@ async fn run_request(
 
     let ctx = owned.as_borrowed();
     let mut items: Vec<CompletionItem> = Vec::new();
+    let mut incomplete: Vec<String> = Vec::new();
     for source in &sources {
         match source {
             CompletionSource::Path => {
@@ -488,17 +717,20 @@ async fn run_request(
             CompletionSource::Lsp => {
                 if let Some(params) = &lsp_params {
                     for (name, host) in &completion_hosts {
-                        items.extend(
-                            crate::completion::lsp::fetch(
-                                &ctx,
-                                name,
-                                host.as_ref(),
-                                params.clone(),
-                                &rope,
-                                encoding,
-                            )
-                            .await,
-                        );
+                        let answer = crate::completion::lsp::fetch(
+                            &ctx,
+                            name,
+                            host.as_ref(),
+                            params.clone(),
+                            &rope,
+                            encoding,
+                        )
+                        .await;
+
+                        if !answer.complete {
+                            incomplete.push(name.clone());
+                        }
+                        items.extend(answer.items);
                     }
                 }
             },
@@ -525,6 +757,8 @@ async fn run_request(
         selected_idx: 0,
         anchor_offset: owned.prefix_range.start,
         prefix_range: owned.prefix_range,
+        prefix: owned.prefix,
+        incomplete,
     }
 }
 
@@ -1246,6 +1480,135 @@ mod harness_tests {
             labels(&items),
             ["unhelpful label", "a_p_p_lication"],
             "a server asking to be matched on something else is matched on it"
+        );
+    }
+
+    /// A popup open over `foo`, from a server that answered completely.
+    fn popup_over_foo(h: &mut TestHarness) -> usize {
+        enable_completion(h);
+        open_scratch(h, "");
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 0, 3, &["foobar", "foobaz", "fooqux"]);
+
+        h.type_keys("i");
+        h.type_text("foo");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+        assert!(
+            h.stoat.pending_completion.is_some(),
+            "the session has to be open for typing on to refine anything"
+        );
+
+        h.fake_lsp().observed_completions().len()
+    }
+
+    #[test]
+    fn typing_on_narrows_the_popup_without_asking_again() {
+        let mut h = TestHarness::default();
+        let asked = popup_over_foo(&mut h);
+
+        h.type_text("b");
+
+        let popup = h
+            .stoat
+            .pending_completion
+            .clone()
+            .expect("the popup survives the keystroke");
+        assert_eq!(
+            labels(&popup.items),
+            ["foobar", "foobaz"],
+            "the rows the longer prefix cannot match are gone"
+        );
+        assert_eq!(
+            h.fake_lsp().observed_completions().len(),
+            asked,
+            "and the server was not asked again"
+        );
+    }
+
+    #[test]
+    fn typing_on_narrows_within_the_keystroke() {
+        let mut h = TestHarness::default();
+        popup_over_foo(&mut h);
+
+        h.type_text("bar");
+        let popup = h.stoat.pending_completion.clone().expect("popup");
+
+        assert_eq!(
+            labels(&popup.items),
+            ["foobar"],
+            "narrowed before any debounce could have elapsed"
+        );
+    }
+
+    #[test]
+    fn deleting_back_asks_again() {
+        let mut h = TestHarness::default();
+        let asked = popup_over_foo(&mut h);
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 0, 2, &["fizz", "foobar"]);
+
+        h.type_keys("backspace");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+
+        assert!(
+            h.fake_lsp().observed_completions().len() > asked,
+            "a shorter prefix can match items the longer one never fetched"
+        );
+    }
+
+    #[test]
+    fn a_trigger_character_asks_again_even_though_the_prefix_grew() {
+        // A dot is both a trigger character and a prefix character, so typing
+        // one extends the prefix and would otherwise be narrowed from what is
+        // held, leaving the server that asked to answer it unasked.
+        let mut h = TestHarness::default();
+        enable_completion_with_triggers(&h, &["."]);
+        open_scratch(&mut h, "");
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 0, 3, &["foobar", "foobaz"]);
+
+        h.type_keys("i");
+        h.type_text("foo");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+        let asked = h.fake_lsp().observed_completions().len();
+
+        h.type_text(".");
+        h.settle();
+
+        assert!(
+            h.fake_lsp().observed_completions().len() > asked,
+            "the server declared the character its own, so it answers it"
+        );
+    }
+
+    #[test]
+    fn a_server_that_stopped_early_is_asked_again() {
+        let mut h = TestHarness::default();
+        enable_completion(&h);
+        open_scratch(&mut h, "");
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 0, 3, &["foobar"]);
+        h.fake_lsp().set_completions_incomplete("/ws/buf.rs", 0, 3);
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 0, 4, &["foobarred"]);
+
+        h.type_keys("i");
+        h.type_text("foo");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+        let asked = h.fake_lsp().observed_completions().len();
+
+        h.type_text("b");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+
+        assert!(
+            h.fake_lsp().observed_completions().len() > asked,
+            "the server said it had more to say, so it is asked rather than narrowed"
+        );
+        let popup = h.stoat.pending_completion.clone().expect("popup");
+        assert!(
+            labels(&popup.items).contains(&"foobarred".to_string()),
+            "and what it then offered is shown: {:?}",
+            labels(&popup.items)
         );
     }
 

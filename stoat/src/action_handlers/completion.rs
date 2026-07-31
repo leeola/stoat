@@ -236,6 +236,8 @@ mod tests {
             selected_idx: 0,
             anchor_offset: 0,
             prefix_range: 0..2,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         });
         dispatch(&mut h.stoat, &SmartTab);
         assert!(h.stoat.pending_completion.is_none());
@@ -302,6 +304,8 @@ mod tests {
             selected_idx: 0,
             anchor_offset: 0,
             prefix_range: 0..0,
+            prefix: String::new(),
+            incomplete: Vec::new(),
         }
     }
 
