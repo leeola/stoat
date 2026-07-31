@@ -9,15 +9,45 @@
 use lsp_types::{Diagnostic, DiagnosticSeverity};
 use std::{
     collections::{BTreeMap, HashMap},
+    ops::Range,
     path::{Path, PathBuf},
 };
+
+/// Where a diagnostic sat in the buffer when its publish landed.
+///
+/// A server measures a diagnostic against a document version and names it by
+/// line and column. Converting that against the current text puts the mark
+/// wherever those coordinates now point, which after an edit above it is the
+/// wrong place. Resolving once, when the publish arrives and the coordinates
+/// still mean what the server meant, gives a span that later edits can be
+/// carried through instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedSpan {
+    pub range: Range<usize>,
+    /// The buffer version [`Self::range`] is in the coordinates of.
+    ///
+    /// [`u64::MAX`] means the span was never resolved against a buffer, so
+    /// there is no history to carry it through and a reader leaves it alone.
+    pub base_version: u64,
+}
+
+/// One server's published diagnostics for a path, with each one's span.
+#[derive(Debug, Default, Clone)]
+struct ServerPublish {
+    diagnostics: Vec<Diagnostic>,
+    /// One per entry of [`Self::diagnostics`], in the same order.
+    spans: Vec<PublishedSpan>,
+}
 
 /// A path's diagnostics grouped by the server that published them, plus their
 /// merged list cached so reads hand out a borrow without re-merging.
 #[derive(Debug, Default, Clone)]
 struct PathDiagnostics {
-    by_server: BTreeMap<String, Vec<Diagnostic>>,
+    by_server: BTreeMap<String, ServerPublish>,
     merged: Vec<Diagnostic>,
+    /// Spans for [`Self::merged`], in the same order, kept beside it so the two
+    /// are built by one traversal and cannot fall out of step.
+    merged_spans: Vec<PublishedSpan>,
     /// Severity counts over [`Self::merged`], refreshed whenever a server
     /// republishes for this path.
     ///
@@ -35,9 +65,23 @@ impl PathDiagnostics {
     /// contributes, sparing a full clone on the common single-server publish.
     fn merged(&self) -> &[Diagnostic] {
         if self.by_server.len() == 1 {
-            self.by_server.values().next().expect("one server")
+            &self
+                .by_server
+                .values()
+                .next()
+                .expect("one server")
+                .diagnostics
         } else {
             &self.merged
+        }
+    }
+
+    /// Spans for [`Self::merged`], in the same order, read the same way.
+    fn merged_spans(&self) -> &[PublishedSpan] {
+        if self.by_server.len() == 1 {
+            &self.by_server.values().next().expect("one server").spans
+        } else {
+            &self.merged_spans
         }
     }
 }
@@ -73,6 +117,17 @@ impl DiagnosticSummary {
     }
 }
 
+impl PublishedSpan {
+    /// A span for a diagnostic nothing could resolve, because the path has no
+    /// open buffer to measure against. Carried through no edits.
+    pub fn unresolved() -> Self {
+        Self {
+            range: 0..0,
+            base_version: u64::MAX,
+        }
+    }
+}
+
 impl DiagnosticSet {
     pub fn new() -> Self {
         Self::default()
@@ -85,18 +140,27 @@ impl DiagnosticSet {
     /// so its prior slice for the path is dropped. An empty slice clears its
     /// contribution. When the last server clears its slice, the path is
     /// dropped.
+    ///
+    /// `spans` is one entry per diagnostic, resolved by the caller against the
+    /// text the publish was measured for. The caller has the rope and the
+    /// server's offset encoding. The store has neither, and by the time anything
+    /// reads these the text has usually moved on.
     pub fn replace_from_server(
         &mut self,
         path: PathBuf,
         server: String,
         diagnostics: Vec<Diagnostic>,
+        spans: Vec<PublishedSpan>,
     ) {
+        debug_assert_eq!(diagnostics.len(), spans.len(), "one span per diagnostic");
         self.version += 1;
         let entry = self.by_path.entry(path.clone()).or_default();
         if diagnostics.is_empty() {
             entry.by_server.remove(&server);
         } else {
-            entry.by_server.insert(server, diagnostics);
+            entry
+                .by_server
+                .insert(server, ServerPublish { diagnostics, spans });
         }
         if entry.by_server.is_empty() {
             self.by_path.remove(&path);
@@ -104,20 +168,69 @@ impl DiagnosticSet {
         }
 
         if entry.by_server.len() > 1 {
-            entry.merged = entry.by_server.values().flatten().cloned().collect();
+            entry.merged = entry
+                .by_server
+                .values()
+                .flat_map(|publish| publish.diagnostics.iter().cloned())
+                .collect();
+            entry.merged_spans = entry
+                .by_server
+                .values()
+                .flat_map(|publish| publish.spans.iter().cloned())
+                .collect();
         } else {
             // A single server's slice is read directly by `merged()`, so skip
             // the clone. Drop any stale multi-server copy so it never lingers.
             entry.merged = Vec::new();
+            entry.merged_spans = Vec::new();
         }
         entry.summary = summarize_diagnostics(entry.merged());
     }
 
     /// Replaces the whole diagnostic list for `path` from a single unnamed
-    /// server, for tests that do not exercise multi-server merging.
+    /// server, for tests whose subject is the store rather than where anything
+    /// sits. Every span is unresolved, so nothing carries them anywhere.
     #[cfg(test)]
     pub fn replace_for_path(&mut self, path: PathBuf, diagnostics: Vec<Diagnostic>) {
-        self.replace_from_server(path, "lsp".to_string(), diagnostics);
+        let spans = vec![PublishedSpan::unresolved(); diagnostics.len()];
+        self.replace_from_server(path, "lsp".to_string(), diagnostics, spans);
+    }
+
+    /// [`Self::replace_for_path`] with each span resolved against `rope` in
+    /// UTF-16, for tests that assert where a diagnostic lands rather than what
+    /// the store holds.
+    #[cfg(test)]
+    pub fn replace_for_path_in(
+        &mut self,
+        path: PathBuf,
+        diagnostics: Vec<Diagnostic>,
+        rope: &stoat_text::Rope,
+    ) {
+        let spans = diagnostics
+            .iter()
+            .map(|diag| PublishedSpan {
+                range: crate::lsp::util::lsp_range_to_byte_range(
+                    rope,
+                    diag.range,
+                    crate::host::OffsetEncoding::Utf16,
+                ),
+                base_version: u64::MAX,
+            })
+            .collect();
+        self.replace_from_server(path, "lsp".to_string(), diagnostics, spans);
+    }
+
+    /// Each diagnostic for `path` with the span it was published at, in the same
+    /// order [`Self::get`] yields. Empty when the path is unknown.
+    ///
+    /// The span is where the diagnostic sat when its publish landed. A caller
+    /// painting it against text that has moved since carries it through the
+    /// edits, which is what [`PublishedSpan::base_version`] names the start of.
+    pub fn spans(&self, path: &Path) -> &[PublishedSpan] {
+        self.by_path
+            .get(path)
+            .map(PathDiagnostics::merged_spans)
+            .unwrap_or(&[])
     }
 
     /// Returns the merged diagnostic list currently stored for `path` across
@@ -137,10 +250,12 @@ impl DiagnosticSet {
     /// path is unknown.
     pub fn attributed(&self, path: &Path) -> impl Iterator<Item = (&str, &Diagnostic)> {
         self.by_path.get(path).into_iter().flat_map(|entry| {
-            entry
-                .by_server
-                .iter()
-                .flat_map(|(server, diags)| diags.iter().map(move |diag| (server.as_str(), diag)))
+            entry.by_server.iter().flat_map(|(server, publish)| {
+                publish
+                    .diagnostics
+                    .iter()
+                    .map(move |diag| (server.as_str(), diag))
+            })
         })
     }
 
@@ -149,8 +264,9 @@ impl DiagnosticSet {
     /// picker uses this to convert each position with the right encoding.
     pub fn iter_attributed(&self) -> impl Iterator<Item = (&Path, &str, &Diagnostic)> {
         self.by_path.iter().flat_map(|(path, entry)| {
-            entry.by_server.iter().flat_map(move |(server, diags)| {
-                diags
+            entry.by_server.iter().flat_map(move |(server, publish)| {
+                publish
+                    .diagnostics
                     .iter()
                     .map(move |diag| (path.as_path(), server.as_str(), diag))
             })
@@ -182,6 +298,27 @@ impl DiagnosticSet {
             .map(|entry| entry.summary)
             .unwrap_or_default()
     }
+}
+
+/// Move `offset` from the coordinates `patch` starts in into the ones it ends
+/// in.
+///
+/// An offset inside a range an edit replaced has no position of its own in the
+/// new text, so it lands at the start of what replaced it. Edits are disjoint
+/// and ascending, so one pass accumulating the length each one added or removed
+/// answers the rest.
+pub fn shift_offset(offset: usize, patch: &stoat_text::patch::Patch<usize>) -> usize {
+    let mut shifted = offset as i64;
+    for edit in patch.edits() {
+        if edit.old.start >= offset {
+            break;
+        }
+        if edit.old.end > offset {
+            return edit.new.start;
+        }
+        shifted += edit.new.len() as i64 - edit.old.len() as i64;
+    }
+    shifted.max(0) as usize
 }
 
 /// Bucket `diagnostics` by severity and name the worst one present.
@@ -216,6 +353,18 @@ fn summarize_diagnostics(diagnostics: &[Diagnostic]) -> DiagnosticSummary {
 
 #[cfg(test)]
 mod tests {
+    /// One empty span per diagnostic, for tests whose subject is the store
+    /// rather than where anything sits.
+    fn no_spans(count: usize) -> Vec<PublishedSpan> {
+        vec![
+            PublishedSpan {
+                range: 0..0,
+                base_version: 0,
+            };
+            count
+        ]
+    }
+
     use super::*;
     use lsp_types::{Position, Range};
 
@@ -363,11 +512,13 @@ mod tests {
             path.clone(),
             "ra".into(),
             vec![diag(DiagnosticSeverity::ERROR, "ra")],
+            no_spans(1),
         );
         set.replace_from_server(
             path.clone(),
             "clippy".into(),
             vec![diag(DiagnosticSeverity::WARNING, "clippy")],
+            no_spans(1),
         );
 
         // Merged in server-name order (a BTreeMap keys the contributions).
@@ -375,12 +526,12 @@ mod tests {
         assert_eq!(messages, ["clippy", "ra"], "both servers contribute");
 
         // Clearing one server leaves the other's diagnostics.
-        set.replace_from_server(path.clone(), "ra".into(), vec![]);
+        set.replace_from_server(path.clone(), "ra".into(), vec![], no_spans(0));
         let after: Vec<&str> = set.get(&path).iter().map(|d| d.message.as_str()).collect();
         assert_eq!(after, ["clippy"]);
 
         // Clearing the last server drops the path entirely.
-        set.replace_from_server(path.clone(), "clippy".into(), vec![]);
+        set.replace_from_server(path.clone(), "clippy".into(), vec![], no_spans(0));
         assert!(set.get(&path).is_empty());
     }
 }

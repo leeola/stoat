@@ -89,7 +89,7 @@ pub(crate) fn render_pane(
                 };
                 let diagnostic_info = buffers
                     .path_for(editor.buffer_id)
-                    .map(|path| (path, frame.diagnostics, frame.lsp_registry));
+                    .map(|path| (path, frame.diagnostics));
                 render_editor_with_overlay(
                     editor,
                     content_area,
@@ -1478,9 +1478,7 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root;
         dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
-        h.stoat
-            .diagnostics
-            .replace_for_path(path, vec![diag(DiagnosticSeverity::WARNING)]);
+        h.seed_diagnostics(path, vec![diag(DiagnosticSeverity::WARNING)]);
         h.assert_snapshot("status_bar_diagnostic_badge_warning_color");
     }
 

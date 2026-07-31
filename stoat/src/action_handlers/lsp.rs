@@ -84,7 +84,7 @@ pub(crate) enum DiagnosticDirection {
 /// not an editor, the buffer has no path, or no diagnostic lies in
 /// the requested direction.
 pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection) -> UpdateEffect {
-    let (cursor_offset, buffer_id, rope) = {
+    let (cursor_offset, buffer_id, _rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
         };
@@ -102,16 +102,20 @@ pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection)
         None => return UpdateEffect::None,
     };
 
-    let encodings = stoat.lsp_registry.offset_encodings();
+    // Where each diagnostic was published, carried through the edits since. The
+    // position the server named is in the coordinates of text that has moved.
+    let snapshot = {
+        let editor = crate::action_handlers::focused_editor_mut(stoat).expect("editor");
+        editor.display_map.snapshot()
+    };
+    let buffer_snapshot = snapshot.buffer_snapshot();
     let mut offsets: Vec<usize> = stoat
         .diagnostics
-        .attributed(&path)
-        .map(|(server, d)| {
-            let encoding = encodings
-                .get(server)
-                .copied()
-                .unwrap_or(OffsetEncoding::Utf16);
-            crate::lsp::util::lsp_pos_to_byte_offset(&rope, d.range.start, encoding)
+        .spans(&path)
+        .iter()
+        .map(|span| {
+            let patch = buffer_snapshot.edits_since(span.base_version);
+            crate::diagnostics::shift_offset(span.range.start, &patch)
         })
         .collect();
     offsets.sort_unstable();
@@ -2602,9 +2606,16 @@ fn apply_pull_diagnostics(
                 .next()
                 .map(|(name, _)| name)
                 .unwrap_or_else(|| String::from("lsp"));
+            let encoding = stoat.lsp_for(id).offset_encoding();
+            let spans = crate::app::publish_spans(
+                &path,
+                &diagnostics,
+                encoding,
+                &stoat.active_workspace().buffers,
+            );
             stoat
                 .diagnostics
-                .replace_from_server(path, server, diagnostics);
+                .replace_from_server(path, server, diagnostics, spans);
             match result_id {
                 Some(rid) => {
                     stoat.pull_diagnostic_result_ids.insert(id, rid);
@@ -6071,9 +6082,7 @@ mod tests {
         let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
         let path = root.join("a.rs");
         open_buffer(&mut h, path.clone());
-        h.stoat
-            .diagnostics
-            .replace_for_path(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
+        h.seed_diagnostics(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
         assert_eq!(cursor_offset(&mut h), 4);
     }
@@ -6084,9 +6093,7 @@ mod tests {
         let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
         let path = root.join("a.rs");
         open_buffer(&mut h, path.clone());
-        h.stoat
-            .diagnostics
-            .replace_for_path(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
+        h.seed_diagnostics(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
         assert_eq!(cursor_offset(&mut h), 4);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
@@ -6111,12 +6118,29 @@ mod tests {
         open_buffer(&mut h, path.clone());
 
         // ra (utf-8) names x at char 2; clippy (utf-16) names y at char 1.
-        h.stoat
-            .diagnostics
-            .replace_from_server(path.clone(), "ra".into(), vec![diag(0, 2, "ra")]);
-        h.stoat
-            .diagnostics
-            .replace_from_server(path, "clippy".into(), vec![diag(1, 1, "clippy")]);
+        h.stoat.diagnostics.replace_from_server(
+            path.clone(),
+            "ra".into(),
+            vec![diag(0, 2, "ra")],
+            crate::app::publish_spans(
+                &path,
+                &[diag(0, 2, "ra")],
+                OffsetEncoding::Utf8,
+                &h.stoat.active_workspace().buffers,
+            ),
+        );
+        let path2 = path.clone();
+        h.stoat.diagnostics.replace_from_server(
+            path,
+            "clippy".into(),
+            vec![diag(1, 1, "clippy")],
+            crate::app::publish_spans(
+                &path2,
+                &[diag(1, 1, "clippy")],
+                OffsetEncoding::Utf16,
+                &h.stoat.active_workspace().buffers,
+            ),
+        );
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
         assert_eq!(cursor_offset(&mut h), 2, "ra's utf-8 column lands on x");
@@ -6134,9 +6158,7 @@ mod tests {
         let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
         let path = root.join("a.rs");
         open_buffer(&mut h, path.clone());
-        h.stoat
-            .diagnostics
-            .replace_for_path(path, vec![diag(0, 0, "only")]);
+        h.seed_diagnostics(path, vec![diag(0, 0, "only")]);
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 11);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
         assert_eq!(cursor_offset(&mut h), 11);
@@ -6148,9 +6170,7 @@ mod tests {
         let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
         let path = root.join("a.rs");
         open_buffer(&mut h, path.clone());
-        h.stoat
-            .diagnostics
-            .replace_for_path(path, vec![diag(0, 0, "first"), diag(2, 0, "third")]);
+        h.seed_diagnostics(path, vec![diag(0, 0, "first"), diag(2, 0, "third")]);
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 11);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevDiagnostic);
         assert_eq!(cursor_offset(&mut h), 8);
@@ -6164,9 +6184,7 @@ mod tests {
         let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
         let path = root.join("a.rs");
         open_buffer(&mut h, path.clone());
-        h.stoat
-            .diagnostics
-            .replace_for_path(path, vec![diag(2, 0, "only")]);
+        h.seed_diagnostics(path, vec![diag(2, 0, "only")]);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevDiagnostic);
         assert_eq!(cursor_offset(&mut h), 0);
     }
@@ -6179,9 +6197,7 @@ mod tests {
         let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
         let path = root.join("a.rs");
         open_buffer(&mut h, path.clone());
-        h.stoat
-            .diagnostics
-            .replace_for_path(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
+        h.seed_diagnostics(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenDiagnosticsPicker);
         assert!(h.stoat.diagnostics_picker.is_some());
 
@@ -6199,9 +6215,7 @@ mod tests {
         let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
         let path = root.join("a.rs");
         open_buffer(&mut h, path.clone());
-        h.stoat
-            .diagnostics
-            .replace_for_path(path, vec![diag(1, 0, "first")]);
+        h.seed_diagnostics(path, vec![diag(1, 0, "first")]);
         let before = cursor_offset(&mut h);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenDiagnosticsPicker);
         h.stoat.update(Event::Key(keys::key(KeyCode::Esc)));
@@ -6226,9 +6240,7 @@ mod tests {
         let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
         let path = root.join("a.rs");
         open_buffer(&mut h, path.clone());
-        h.stoat
-            .diagnostics
-            .replace_for_path(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
+        h.seed_diagnostics(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
         h.type_keys("space l w");
         assert_eq!(cursor_offset(&mut h), 4);
         assert_eq!(h.stoat.focused_mode(), "normal");
@@ -6240,9 +6252,7 @@ mod tests {
         let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
         let path = root.join("a.rs");
         open_buffer(&mut h, path.clone());
-        h.stoat
-            .diagnostics
-            .replace_for_path(path, vec![diag(0, 0, "first"), diag(2, 0, "third")]);
+        h.seed_diagnostics(path, vec![diag(0, 0, "first"), diag(2, 0, "third")]);
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 11);
         h.type_keys("space l shift-w");
         assert_eq!(cursor_offset(&mut h), 8);
@@ -7302,9 +7312,7 @@ mod tests {
             message: "boom".into(),
             ..Default::default()
         };
-        h.stoat
-            .diagnostics
-            .replace_for_path(path.clone(), vec![diagnostic.clone()]);
+        h.seed_diagnostics(path.clone(), vec![diagnostic.clone()]);
 
         let uid = h.stoat.active_workspace().uid();
         let (reply_tx, mut reply_rx) = oneshot::channel();

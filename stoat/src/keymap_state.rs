@@ -825,7 +825,7 @@ mod tests {
         use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
         let mut h = Stoat::test();
         open_foo_bar(&mut h);
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             std::path::PathBuf::from("/lsp/a.rs"),
             vec![Diagnostic {
                 range: Range::new(Position::new(0, 0), Position::new(0, 1)),

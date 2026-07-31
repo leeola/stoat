@@ -5272,20 +5272,12 @@ impl Stoat {
             workspaces,
             active_workspace,
             diagnostics,
-            lsp_registry,
             ..
         } = self;
         let editor = workspaces[*active_workspace].editors.get_mut(editor_id)?;
         let snapshot = editor.display_map.snapshot();
         let buffer = snapshot.buffer_snapshot();
-        crate::render::editor::build_diagnostic_span_cache(
-            editor,
-            diagnostics,
-            &path,
-            buffer.rope(),
-            lsp_registry,
-            buffer.version(),
-        );
+        crate::render::editor::build_diagnostic_span_cache(editor, diagnostics, &path, buffer);
         let spans = editor
             .diagnostic_span_cache
             .as_ref()
@@ -8192,7 +8184,6 @@ impl Stoat {
             goto_word_labels: None,
             mode_badges: &self.settings.mode_badges,
             diagnostics: &self.diagnostics,
-            lsp_registry: &self.lsp_registry,
             search_query: None,
             line_numbers: LineNumbers::Relative,
             wrap_mode: WrapMode::EditorWidth,
@@ -10433,7 +10424,13 @@ fn drain_notifications_from(
                         continue;
                     }
                     let count = published.len();
-                    diagnostics.replace_from_server(path.clone(), server.to_string(), published);
+                    let spans = publish_spans(&path, &published, host.offset_encoding(), buffers);
+                    diagnostics.replace_from_server(
+                        path.clone(),
+                        server.to_string(),
+                        published,
+                        spans,
+                    );
                     tracing::info!(
                         target: "stoat::lsp",
                         path = %path.display(),
@@ -10460,6 +10457,35 @@ fn drain_notifications_from(
             },
         }
     }
+}
+
+/// Resolve each of `published`'s ranges to a byte span in the buffer for `path`,
+/// in `encoding`, tagged with the buffer version they are measured in.
+///
+/// Resolved here, where the publish has just landed and the ranges still name
+/// the text the server measured, rather than every frame against text that has
+/// moved since. A path with no open buffer resolves to empty spans at version
+/// zero, which no reader can shift but none has a buffer to shift against
+/// either.
+pub(crate) fn publish_spans(
+    path: &Path,
+    published: &[lsp_types::Diagnostic],
+    encoding: crate::host::OffsetEncoding,
+    buffers: &crate::buffer_registry::BufferRegistry,
+) -> Vec<crate::diagnostics::PublishedSpan> {
+    let Some(buffer) = buffers.id_for_path(path).and_then(|id| buffers.get(id)) else {
+        return vec![crate::diagnostics::PublishedSpan::unresolved(); published.len()];
+    };
+    let guard = buffer.read().expect("buffer lock");
+    let rope = guard.rope();
+    let base_version = guard.version();
+    published
+        .iter()
+        .map(|diag| crate::diagnostics::PublishedSpan {
+            range: crate::lsp::util::lsp_range_to_byte_range(rope, diag.range, encoding),
+            base_version,
+        })
+        .collect()
 }
 
 /// The version a publish names when it is behind the document stoat has since
@@ -16153,9 +16179,7 @@ mod tests {
             "the modified line leads with the modified edge class, got {first:?}"
         );
 
-        h.stoat
-            .diagnostics
-            .replace_for_path(path.clone(), vec![diag(1, DiagnosticSeverity::ERROR)]);
+        h.seed_diagnostics(path.clone(), vec![diag(1, DiagnosticSeverity::ERROR)]);
         let _ = h.stoat.render();
         h.stoat.emit_minimap();
         let errored = drain_apc(&mut rx);
@@ -16165,7 +16189,7 @@ mod tests {
             "an error overrides the diff mark, got {errored:?}"
         );
 
-        h.stoat.diagnostics.replace_for_path(path.clone(), vec![]);
+        h.seed_diagnostics(path.clone(), vec![]);
         let _ = h.stoat.render();
         h.stoat.emit_minimap();
         let cleared = drain_apc(&mut rx);
@@ -16216,9 +16240,7 @@ mod tests {
             "line 1 matches the base again, so its lane is empty, got {moved:?}"
         );
 
-        h.stoat
-            .diagnostics
-            .replace_for_path(path, vec![diag(0, DiagnosticSeverity::ERROR)]);
+        h.seed_diagnostics(path, vec![diag(0, DiagnosticSeverity::ERROR)]);
         let _ = h.stoat.render();
         h.stoat.emit_minimap();
         let on_clean = drain_apc(&mut rx);
@@ -16619,6 +16641,34 @@ mod tests {
         h.type_keys("enter");
         h.settle();
         assert_eq!(focused_buffer_string(&h), "\thello\n\t\n");
+    }
+
+    #[test]
+    fn publish_spans_resolve_in_the_publishing_servers_encoding() {
+        use crate::host::OffsetEncoding;
+        use lsp_types::{Diagnostic, Position, Range as LspRange};
+
+        let mut h = Stoat::test();
+        // é is two UTF-8 bytes but one UTF-16 unit, so character 2 is byte 2
+        // under UTF-8 and byte 3 under UTF-16.
+        open_indent_buffer(&mut h, "a.txt", "\u{e9}xy\n".as_bytes());
+        let path = std::path::PathBuf::from("/indent/a.txt");
+
+        let diag = Diagnostic::new_simple(
+            LspRange::new(Position::new(0, 2), Position::new(0, 3)),
+            "boom".to_string(),
+        );
+        let buffers = &h.stoat.active_workspace().buffers;
+        let utf8 = publish_spans(
+            &path,
+            std::slice::from_ref(&diag),
+            OffsetEncoding::Utf8,
+            buffers,
+        );
+        let utf16 = publish_spans(&path, &[diag], OffsetEncoding::Utf16, buffers);
+
+        assert_eq!(utf8[0].range, 2..3, "utf-8 character 2 is the x");
+        assert_eq!(utf16[0].range, 3..4, "utf-16 character 2 is the y");
     }
 
     #[test]
@@ -17491,7 +17541,7 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root;
         action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path,
             vec![lsp_types::Diagnostic {
                 range: lsp_types::Range {
@@ -17536,7 +17586,7 @@ mod tests {
         action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
         // A span covering the start, so the cursor at offset zero sits inside it.
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path,
             vec![lsp_types::Diagnostic {
                 range: lsp_types::Range {
@@ -17709,7 +17759,7 @@ mod tests {
         // A multi-line span keeps the cursor inside the diagnostic after it moves
         // down, and a multi-line message makes the below-anchor popover tall
         // enough to sit over the row beneath the diagnostic's start.
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path,
             vec![lsp_types::Diagnostic {
                 range: lsp_types::Range {
@@ -19567,9 +19617,7 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        h.stoat
-            .diagnostics
-            .replace_for_path(path.to_owned(), diagnostics);
+        h.seed_diagnostics(path, diagnostics);
     }
 
     fn cached_span_count(h: &crate::test_harness::TestHarness, editor_id: EditorId) -> usize {
@@ -24087,7 +24135,7 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root;
         action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path,
             vec![lsp_types::Diagnostic {
                 range: lsp_types::Range {

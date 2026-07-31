@@ -259,7 +259,6 @@ pub(crate) struct FrameCtx<'a> {
     /// column of a multibyte line. Held as the registry rather than a prebuilt
     /// map so the encodings are resolved only when the diagnostic span cache
     /// rebuilds, not on every frame.
-    pub(crate) lsp_registry: &'a LspRegistry,
     /// Most-recently submitted in-buffer search query. When `Some`,
     /// every editor pane paints visible matches with the
     /// `ui.search.match` style so users see all hits at once.
@@ -605,7 +604,6 @@ pub(crate) fn frame(
         goto_word_labels: stoat.pending_goto_word.as_ref(),
         mode_badges: &stoat.settings.mode_badges,
         diagnostics: &stoat.diagnostics,
-        lsp_registry: &stoat.lsp_registry,
         search_query: stoat.last_search.as_ref().map(|s| s.query.as_str()),
         line_numbers: stoat
             .settings
@@ -1624,7 +1622,7 @@ mod lsp_filter_tests {
         );
 
         h.type_keys("escape");
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             std::path::PathBuf::from("/lsp/a.rs"),
             vec![Diagnostic {
                 range: Range::new(Position::new(0, 0), Position::new(0, 1)),

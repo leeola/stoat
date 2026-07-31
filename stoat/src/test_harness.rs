@@ -1032,6 +1032,32 @@ impl TestHarness {
         editor::seed_focused_buffer(&mut self.stoat, text);
     }
 
+    /// Publish `diagnostics` for `path` as one unnamed server would, resolving
+    /// each span against the buffer open there.
+    ///
+    /// Spans are resolved when a publish lands, so a test seeding the store
+    /// directly has to do the same or its diagnostics carry no position at all.
+    /// Routing through the production resolution keeps the two in step.
+    pub(crate) fn seed_diagnostics(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+        diagnostics: Vec<lsp_types::Diagnostic>,
+    ) {
+        let path = path.as_ref();
+        let spans = crate::app::publish_spans(
+            path,
+            &diagnostics,
+            crate::host::OffsetEncoding::Utf16,
+            &self.stoat.active_workspace().buffers,
+        );
+        self.stoat.diagnostics.replace_from_server(
+            path.to_path_buf(),
+            "lsp".to_string(),
+            diagnostics,
+            spans,
+        );
+    }
+
     /// Resolved byte offsets for each selection's head in the focused
     /// editor.
     pub(crate) fn head_offsets(&mut self) -> Vec<usize> {

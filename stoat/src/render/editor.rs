@@ -3,8 +3,6 @@ use crate::{
     diff_map::DiffHunkStatus,
     display_map::{display_width, tab_map, BlockRowKind, DisplayPoint, DisplaySnapshot},
     editor_state::{EditorState, SearchMatchCache},
-    host::OffsetEncoding,
-    lsp::registry::LspRegistry,
     minimap::color_to_rgb,
     render::{
         conflict_view::render_conflict_view,
@@ -21,7 +19,7 @@ use ratatui::{
 };
 use std::{
     cmp::Reverse,
-    collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet},
+    collections::{hash_map::DefaultHasher, BTreeMap, HashSet},
     fmt::Write,
     hash::{Hash, Hasher},
     ops::Range,
@@ -57,8 +55,6 @@ pub(super) const MINIMAP_MIN_PANE_COLS: u16 = 108;
 
 /// Each server name mapped to its negotiated offset encoding, so a diagnostic's
 /// LSP position converts to a byte column through the server that published it.
-pub(crate) type DiagnosticEncodings = HashMap<String, OffsetEncoding>;
-
 pub(crate) fn render_editor(
     editor: &mut EditorState,
     inner: Rect,
@@ -109,7 +105,7 @@ pub(crate) fn render_editor_with_overlay(
     hover_cell: Option<(u16, u16)>,
     goto_word_labels: Option<&BTreeMap<String, usize>>,
     search_query: Option<&str>,
-    diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet, &LspRegistry)>,
+    diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet)>,
     mut scene: Option<&mut ApcScene>,
     undercurls: Option<&mut UndercurlBatch>,
     dim: f32,
@@ -154,7 +150,7 @@ pub(crate) fn render_editor_with_overlay(
         )
     } else {
         match diagnostic_info {
-            Some((path, set, _)) if !set.get(path).is_empty() => 1,
+            Some((path, set)) if !set.get(path).is_empty() => 1,
             _ => 0,
         }
     };
@@ -184,7 +180,7 @@ pub(crate) fn render_editor_with_overlay(
 
     let empty_severity = BTreeMap::new();
     let row_severity: &BTreeMap<u32, DiagnosticSeverity> = match diagnostic_info {
-        Some((path, set, _)) => {
+        Some((path, set)) => {
             let version = set.version();
             let stale = match &editor.gutter_severity_cache {
                 Some(cache) => cache.version != version,
@@ -225,7 +221,7 @@ pub(crate) fn render_editor_with_overlay(
             rope.offset_to_point(cursor).row + 1
         });
 
-    let severity_version = diagnostic_info.map_or(0, |(_, set, _)| set.version());
+    let severity_version = diagnostic_info.map_or(0, |(_, set)| set.version());
 
     let gutter_w = if line_numbers != LineNumbers::Off {
         draw_line_number_gutter(
@@ -402,9 +398,9 @@ pub(crate) fn render_editor_with_overlay(
         end_row,
     );
 
-    if let Some((path, set, registry)) = diagnostic_info {
+    if let Some((path, set)) = diagnostic_info {
         let rope = buffer_snapshot.rope();
-        build_diagnostic_span_cache(editor, set, path, rope, registry, buffer_snapshot.version());
+        build_diagnostic_span_cache(editor, set, path, buffer_snapshot);
         // The cache and the scratch are disjoint fields, so the paint borrows one
         // of each rather than the editor twice.
         let EditorState {
@@ -585,8 +581,8 @@ pub(crate) fn render_editor_with_overlay(
 
     editor.cursor_screen_cell = primary_cell;
 
-    if let Some((path, set, registry)) = diagnostic_info {
-        build_diagnostic_span_cache(editor, set, path, rope, registry, buffer_snapshot.version());
+    if let Some((path, set)) = diagnostic_info {
+        build_diagnostic_span_cache(editor, set, path, buffer_snapshot);
         let spans: &[ResolvedDiag] = editor
             .diagnostic_span_cache
             .as_ref()
@@ -801,26 +797,34 @@ impl DiagnosticSpanCache {
 pub(crate) fn resolve_diagnostic_spans(
     set: &crate::diagnostics::DiagnosticSet,
     path: &Path,
-    rope: &Rope,
-    encodings: &DiagnosticEncodings,
+    snapshot: &crate::multi_buffer::MultiBufferSnapshot,
 ) -> Vec<ResolvedDiag> {
+    let rope = snapshot.rope();
+    let published = set.spans(path);
     let mut spans: Vec<ResolvedDiag> = set
-        .attributed(path)
+        .get(path)
+        .iter()
         .enumerate()
-        .map(|(index, (server, diag))| {
-            let encoding = encodings
-                .get(server)
-                .copied()
-                .unwrap_or(OffsetEncoding::Utf16);
-            let start = crate::lsp::util::lsp_pos_to_byte_offset(rope, diag.range.start, encoding);
-            let end = crate::lsp::util::lsp_pos_to_byte_offset(rope, diag.range.end, encoding);
+        .map(|(index, diag)| {
+            let (start, end) = match published.get(index) {
+                Some(span) => {
+                    let patch = snapshot.edits_since(span.base_version);
+                    (
+                        crate::diagnostics::shift_offset(span.range.start, &patch),
+                        crate::diagnostics::shift_offset(span.range.end, &patch),
+                    )
+                },
+                None => (0, 0),
+            };
+            let start_line = rope.offset_to_point(start.min(rope.len())).row;
+            let end_line = rope.offset_to_point(end.min(rope.len())).row;
             ResolvedDiag {
                 start,
                 end,
                 severity: diag.severity.unwrap_or(DiagnosticSeverity::ERROR),
                 unnecessary: is_unnecessary(diag),
-                start_line: diag.range.start.line,
-                end_line: diag.range.end.line,
+                start_line,
+                end_line,
                 index,
             }
         })
@@ -839,20 +843,16 @@ pub(crate) fn build_diagnostic_span_cache(
     editor: &mut EditorState,
     set: &crate::diagnostics::DiagnosticSet,
     path: &Path,
-    rope: &Rope,
-    registry: &LspRegistry,
-    buffer_version: u64,
+    snapshot: &crate::multi_buffer::MultiBufferSnapshot,
 ) {
+    let buffer_version = snapshot.version();
     let set_version = set.version();
     let stale = match &editor.diagnostic_span_cache {
         Some(cache) => cache.set_version != set_version || cache.buffer_version != buffer_version,
         None => true,
     };
     if stale {
-        // Resolve the per-server encodings only on rebuild, not every frame. The
-        // cache goes stale only when the diagnostic set or buffer version moves.
-        let encodings = registry.offset_encodings();
-        let spans = resolve_diagnostic_spans(set, path, rope, &encodings);
+        let spans = resolve_diagnostic_spans(set, path, snapshot);
         editor.diagnostic_span_cache = Some(DiagnosticSpanCache {
             set_version,
             buffer_version,
@@ -3488,23 +3488,42 @@ mod tests {
         }
     }
 
+    /// A singleton multi-buffer over `content`, for tests that need a snapshot
+    /// to resolve diagnostics against.
+    fn snapshot_over(content: &str) -> crate::multi_buffer::MultiBufferSnapshot {
+        use crate::{buffer::TextBuffer, multi_buffer::MultiBuffer};
+        use std::sync::{Arc, RwLock};
+        let id = stoat_text::BufferId::new(0);
+        let buffer = TextBuffer::with_text(id, content);
+        MultiBuffer::singleton(id, Arc::new(RwLock::new(buffer))).snapshot()
+    }
+
+    /// A span at `range` that no edit history moves, for tests stating where a
+    /// diagnostic sits rather than how it got there.
+    fn fixed_span(range: std::ops::Range<usize>) -> crate::diagnostics::PublishedSpan {
+        crate::diagnostics::PublishedSpan {
+            range,
+            base_version: u64::MAX,
+        }
+    }
+
     #[test]
     fn diagnostic_at_offset_finds_worst_containing_span() {
-        use stoat_text::Rope;
-        let rope = Rope::from("let x = 1;\n");
         let path = PathBuf::from("/a");
+        let snapshot = snapshot_over("let x = 1;\n");
         let mut set = crate::diagnostics::DiagnosticSet::new();
         // A warning over just `x` [4,5) and an error over `x = 1` [4,9).
-        set.replace_for_path(
+        set.replace_from_server(
             path.clone(),
+            "lsp".into(),
             vec![
                 span_diag(4, 5, DiagnosticSeverity::WARNING),
                 span_diag(4, 9, DiagnosticSeverity::ERROR),
             ],
+            vec![fixed_span(4..5), fixed_span(4..9)],
         );
 
-        let spans =
-            super::resolve_diagnostic_spans(&set, &path, &rope, &super::DiagnosticEncodings::new());
+        let spans = super::resolve_diagnostic_spans(&set, &path, &snapshot);
         // Offset 4 is in both, so the worse severity (the error) wins.
         assert_eq!(super::diagnostic_at_offset(&spans, 4), Some(1));
         // Offset 7 is inside only the error span.
@@ -3576,35 +3595,36 @@ mod tests {
     }
 
     #[test]
-    fn resolve_diagnostic_spans_uses_each_servers_encoding() {
-        use crate::host::OffsetEncoding;
-        use stoat_text::Rope;
-
-        // "éxy": é is two UTF-8 bytes but one UTF-16 unit, so char 2 is byte 2
-        // (x) under UTF-8 and byte 3 (y) under UTF-16.
-        let rope = Rope::from("\u{e9}xy\n");
+    fn an_edit_above_a_diagnostic_carries_it_down() {
         let path = PathBuf::from("/a");
+        let snapshot = snapshot_over("let x = 1;\n");
+        let base_version = snapshot.version();
         let mut set = crate::diagnostics::DiagnosticSet::new();
         set.replace_from_server(
             path.clone(),
-            "utf8".into(),
-            vec![span_diag(2, 3, DiagnosticSeverity::ERROR)],
+            "lsp".into(),
+            vec![span_diag(4, 5, DiagnosticSeverity::ERROR)],
+            vec![crate::diagnostics::PublishedSpan {
+                range: 4..5,
+                base_version,
+            }],
         );
-        set.replace_from_server(
-            path.clone(),
-            "utf16".into(),
-            vec![span_diag(2, 3, DiagnosticSeverity::ERROR)],
-        );
-        let mut encodings = super::DiagnosticEncodings::new();
-        encodings.insert("utf8".into(), OffsetEncoding::Utf8);
-        encodings.insert("utf16".into(), OffsetEncoding::Utf16);
 
-        let spans = super::resolve_diagnostic_spans(&set, &path, &rope, &encodings);
-        let starts: Vec<usize> = spans.iter().map(|s| s.start).collect();
+        // Two characters inserted ahead of it, with no republish behind them.
+        let edited = {
+            use crate::{buffer::TextBuffer, multi_buffer::MultiBuffer};
+            use std::sync::{Arc, RwLock};
+            let id = stoat_text::BufferId::new(0);
+            let mut buffer = TextBuffer::with_text(id, "let x = 1;\n");
+            buffer.edit(0..0, "xy");
+            MultiBuffer::singleton(id, Arc::new(RwLock::new(buffer))).snapshot()
+        };
+
+        let spans = super::resolve_diagnostic_spans(&set, &path, &edited);
         assert_eq!(
-            starts,
-            vec![2, 3],
-            "utf-8 char 2 lands on x (byte 2), utf-16 char 2 on y (byte 3)"
+            (spans[0].start, spans[0].end),
+            (6, 7),
+            "the mark stayed where the old coordinates pointed",
         );
     }
 
@@ -3753,9 +3773,7 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root;
         dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
-        h.stoat
-            .diagnostics
-            .replace_for_path(path, vec![diag(0, DiagnosticSeverity::WARNING)]);
+        h.seed_diagnostics(path, vec![diag(0, DiagnosticSeverity::WARNING)]);
 
         let _ = h.stoat.render();
 
@@ -3808,7 +3826,7 @@ mod tests {
             message: String::new(),
             ..Default::default()
         });
-        h.stoat.diagnostics.replace_for_path(path, diags);
+        h.seed_diagnostics(path, diags);
 
         action_handlers::focused_editor_mut(&mut h.stoat)
             .unwrap()
@@ -3844,7 +3862,7 @@ mod tests {
         dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
 
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path.clone(),
             vec![
                 overlap_diag(0, 0, 5, DiagnosticSeverity::WARNING),
@@ -3858,7 +3876,7 @@ mod tests {
             "both spans paint"
         );
 
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path,
             vec![overlap_diag(2, 0, 5, DiagnosticSeverity::WARNING)],
         );
@@ -3882,7 +3900,7 @@ mod tests {
         dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
 
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path,
             vec![tagged_overlap_diag(1, 0, 10, DiagnosticSeverity::HINT)],
         );
@@ -3902,7 +3920,7 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root;
         dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path,
             vec![
                 diag(0, DiagnosticSeverity::ERROR),
@@ -3923,7 +3941,7 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root;
         dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path,
             vec![
                 diag(0, DiagnosticSeverity::WARNING),
@@ -3945,7 +3963,7 @@ mod tests {
         h.settle();
         // The diagnostic sits on line 1 while the cursor stays on line 0, so
         // only the span is underlined and no end-of-line message appears.
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path,
             vec![Diagnostic {
                 range: Range {
@@ -4004,7 +4022,7 @@ mod tests {
         // Same span, warning then hint in rust-analyzer's publish order. The
         // worse severity must win the span color over the later-published hint,
         // so the underline stays warning yellow rather than turning hint grey.
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path,
             vec![
                 overlap_diag(1, 4, 5, DiagnosticSeverity::WARNING),
@@ -4025,7 +4043,7 @@ mod tests {
         dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
         // Hint then error in publish order. Error must win the span color.
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path,
             vec![
                 overlap_diag(1, 4, 5, DiagnosticSeverity::HINT),
@@ -4048,7 +4066,7 @@ mod tests {
         // An Unnecessary-tagged hint marks inactive code. Its span blends each
         // token's syntax fg toward the background, keeping the per-token hues
         // rather than flattening the line to one hint color or underlining it.
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path,
             vec![tagged_overlap_diag(1, 0, 10, DiagnosticSeverity::HINT)],
         );
@@ -4068,7 +4086,7 @@ mod tests {
         // A warning overlapping an inactive-code region sorts last and paints on
         // top, so its underline lands over the muted span rather than being
         // erased by the mute.
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path,
             vec![
                 tagged_overlap_diag(1, 0, 10, DiagnosticSeverity::HINT),
@@ -4096,13 +4114,13 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path.clone(),
             vec![tagged_overlap_diag(1, 0, 10, DiagnosticSeverity::HINT)],
         );
         let once = row_fg(&mut h.stoat);
 
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path,
             vec![
                 tagged_overlap_diag(1, 0, 10, DiagnosticSeverity::HINT),
@@ -4128,7 +4146,7 @@ mod tests {
         h.settle();
         // The cursor opens on line 0. The diagnostic underlines its span, and
         // its message trails the line content, dimmed in the severity color.
-        h.stoat.diagnostics.replace_for_path(
+        h.seed_diagnostics(
             path,
             vec![Diagnostic {
                 range: Range {
