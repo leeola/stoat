@@ -859,12 +859,19 @@ pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
 
     let fs = stoat.fs_host.clone();
     let LspRequestSite {
+        buffer_id,
         path: source_path,
         rope: source_rope,
         offset,
-        ..
     } = site;
+    // The position was measured after edits whose change may still be sitting in
+    // its debounce, and a server cannot place a position in text it has not been
+    // sent.
+    let pending_change = flush_pending_did_change(stoat, buffer_id);
     let task = stoat.spawn_woken(async move {
+        if let Some(pending_change) = pending_change {
+            pending_change.await;
+        }
         let requests = hosts.iter().map(|(_, host)| {
             let encoding = host.offset_encoding();
             let position = crate::lsp::util::byte_offset_to_lsp_pos(&source_rope, offset, encoding);
@@ -1027,12 +1034,19 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
 
     let fs = stoat.fs_host.clone();
     let LspRequestSite {
+        buffer_id,
         path: source_path,
         rope: source_rope,
         offset,
-        ..
     } = site;
+    // The position was measured after edits whose change may still be sitting in
+    // its debounce, and a server cannot place a position in text it has not been
+    // sent.
+    let pending_change = flush_pending_did_change(stoat, buffer_id);
     let task = stoat.spawn_woken(async move {
+        if let Some(pending_change) = pending_change {
+            pending_change.await;
+        }
         let requests = hosts.iter().map(|(_, host)| {
             let encoding = host.offset_encoding();
             let position = crate::lsp::util::byte_offset_to_lsp_pos(&source_rope, offset, encoding);
@@ -1331,7 +1345,14 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     };
 
+    // The position was measured after edits whose change may still be sitting in
+    // its debounce, and a server cannot place a position in text it has not been
+    // sent.
+    let pending_change = flush_pending_did_change(stoat, buffer_id);
     let task = stoat.spawn_woken(async move {
+        if let Some(pending_change) = pending_change {
+            pending_change.await;
+        }
         let requests = hosts.iter().map(|(name, host)| {
             let name = name.clone();
             let encoding = host.offset_encoding();
@@ -1766,7 +1787,14 @@ pub(crate) fn request_signature_help(stoat: &mut Stoat) {
         work_done_progress_params: Default::default(),
     };
 
+    // The position was measured after edits whose change may still be sitting in
+    // its debounce, and a server cannot place a position in text it has not been
+    // sent.
+    let pending_change = flush_pending_did_change(stoat, buffer_id);
     let task = stoat.spawn_woken(async move {
+        if let Some(pending_change) = pending_change {
+            pending_change.await;
+        }
         match host.signature_help(params).await {
             Ok(Some(help)) => signature_help_to_popup(help, anchor_offset),
             Ok(None) => None,
@@ -6874,6 +6902,43 @@ mod tests {
             vec![vec![("fn foo() -> u32".to_string(), Style::default())]]
         );
         assert_eq!(popup.anchor_offset, 0);
+    }
+
+    #[test]
+    fn a_hover_flushes_the_edit_its_position_was_measured_after() {
+        use lsp_types::{
+            HoverProviderCapability, ServerCapabilities, TextDocumentSyncCapability,
+            TextDocumentSyncKind,
+        };
+        let mut h = TestHarness::with_size(80, 24);
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
+            text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                TextDocumentSyncKind::INCREMENTAL,
+            )),
+            ..Default::default()
+        });
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+
+        h.type_keys("i");
+        h.type_text("x");
+        // No clock advance, so the change debounce has not run out on its own.
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+
+        let sent: Vec<String> = h
+            .fake_lsp()
+            .observed_changes()
+            .iter()
+            .flat_map(|c| c.content_changes.iter().map(|e| e.text.clone()))
+            .collect();
+        assert_eq!(
+            sent,
+            vec!["x".to_string()],
+            "hover named a position in text the server was never sent",
+        );
     }
 
     #[test]
