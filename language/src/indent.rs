@@ -27,16 +27,20 @@ struct IndentRange {
 /// Leading whitespace for a new empty line inserted at `cursor_offset`.
 ///
 /// The new line copies the cursor row's leading whitespace, plus one tab when
-/// the cursor's row opens an `@indent` region whose end lies past the cursor (so
-/// the new line falls inside a freshly opened block). A query yielding no region
-/// leaves it at a plain copy. This is Zed's indent-from-previous-row branch
-/// specialized to an empty new line, so it needs no post-edit reparse.
+/// the cursor's row opens an `@indent` region the cursor sits inside (so the new
+/// line falls inside a freshly opened block). A query yielding no region leaves
+/// it at a plain copy. This is Zed's indent-from-previous-row branch specialized
+/// to an empty new line, so it needs no post-edit reparse.
+///
+/// A region opening later on the row does not count. Its delimiter goes down
+/// with the new line rather than staying above it, so the line it lands on is
+/// still outside the region and belongs at the enclosing level.
 pub fn newline_indent(query: &Query, root: Node<'_>, rope: &Rope, cursor_offset: usize) -> String {
     let row = rope.offset_to_point(cursor_offset).row;
     let base = line_leading_whitespace(rope, row);
     let opens = collect_indent_ranges(query, root, rope)
         .iter()
-        .any(|r| r.start_row == row && r.end_byte > cursor_offset);
+        .any(|r| r.start_row == row && r.start_byte < cursor_offset && r.end_byte > cursor_offset);
     if opens {
         format!("{base}\t")
     } else {
@@ -243,6 +247,17 @@ mod tests {
         assert_eq!(suggested("rust", src, 2).as_deref(), Some("\t\t"));
         assert_eq!(suggested("rust", src, 3).as_deref(), Some("\t"));
         assert_eq!(suggested("rust", src, 4).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn rust_newline_before_the_open_brace_does_not_indent() {
+        // The new line carries `fn a() {` down, and that opener has not opened
+        // anything above the line it lands on.
+        assert_eq!(newline_at("rust", "fn a() {\n}\n", 0), "");
+        // Between the parens, still ahead of the brace.
+        assert_eq!(newline_at("rust", "fn a() {\n}\n", 5), "");
+        // Directly before it, where the brace goes down with the new line.
+        assert_eq!(newline_at("rust", "fn a() {\n}\n", 7), "");
     }
 
     #[test]
