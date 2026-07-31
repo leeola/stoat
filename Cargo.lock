@@ -3446,6 +3446,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex-cursor"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0497c781d2f982ae8284d2932aee6a877e58a4541daa5e8fadc18cc75c23a61d"
+dependencies = [
+ "log",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-lite"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4102,6 +4114,7 @@ name = "stoat_text"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
+ "regex-cursor",
  "serde",
  "smallvec",
  "unicode-segmentation",

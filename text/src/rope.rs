@@ -3,6 +3,7 @@ use crate::{
     Bias, Dimensions, Item, OffsetUtf16, Point, PointUtf16, SumTree,
 };
 use arrayvec::ArrayString;
+use regex_cursor::{Cursor as RegexCursor, Input};
 use std::{cmp, ops::Range};
 use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
 
@@ -1041,6 +1042,27 @@ impl Rope {
         }
     }
 
+    /// This rope's chunks as a haystack the regex automata can walk in place.
+    ///
+    /// Offsets it reports are rope offsets. Most callers want
+    /// [`Self::regex_input`], which wraps this and carries the search range.
+    pub fn regex_cursor(&self) -> RegexChunks<'_> {
+        let mut chunks = self.chunks.cursor::<usize>(());
+        chunks.next();
+        RegexChunks {
+            chunks,
+            len: self.len(),
+        }
+    }
+
+    /// An [`Input`] over this rope, searching only `range`.
+    ///
+    /// The range rides on the input rather than on the haystack, so a match
+    /// comes back in rope offsets rather than offsets into a slice.
+    pub fn regex_input(&self, range: Range<usize>) -> Input<RegexChunks<'_>> {
+        Input::new(self.regex_cursor()).range(range)
+    }
+
     pub fn reversed_chunks_in_range(&self, range: Range<usize>) -> ReversedChunksInRange<'_> {
         let mut chunks = self.chunks.cursor::<usize>(());
         chunks.seek(&range.end, Bias::Right);
@@ -1385,6 +1407,61 @@ impl<'a> Iterator for ChunksInRange<'a> {
         let local_end = self.range.end.min(chunk_end) - chunk_start;
 
         Some(&chunk.text.as_str()[local_start..local_end])
+    }
+}
+
+/// A [`Rope`]'s chunks as a haystack the regex automata can walk without the
+/// rope being flattened first.
+///
+/// Spans the whole rope rather than a slice of it, so an offset it reports is a
+/// rope offset and a match needs no translating back. Restrict a search with
+/// the range on the [`Input`] instead, which is what [`Rope::regex_input`]
+/// does.
+///
+/// See also:
+/// - [`Rope::regex_cursor`] to build one.
+pub struct RegexChunks<'a> {
+    chunks: sum_tree::Cursor<'a, 'a, Chunk, usize>,
+    len: usize,
+}
+
+impl RegexCursor for RegexChunks<'_> {
+    fn chunk(&self) -> &[u8] {
+        self.chunks
+            .item()
+            .map(|chunk| chunk.text.as_bytes())
+            .unwrap_or_default()
+    }
+
+    /// Chunks never split a codepoint, so every regex feature is available.
+    fn utf8_aware(&self) -> bool {
+        true
+    }
+
+    fn advance(&mut self) -> bool {
+        // Peeked rather than stepped and undone, the trait requiring a failed
+        // step to leave the chunk exactly where it was.
+        if self.chunks.next_item().is_none() {
+            return false;
+        }
+        self.chunks.next();
+        true
+    }
+
+    fn backtrack(&mut self) -> bool {
+        if self.chunks.prev_item().is_none() {
+            return false;
+        }
+        self.chunks.prev();
+        true
+    }
+
+    fn total_bytes(&self) -> Option<usize> {
+        Some(self.len)
+    }
+
+    fn offset(&self) -> usize {
+        *self.chunks.start()
     }
 }
 
@@ -3717,6 +3794,123 @@ mod summary_identity_tests {
         assert!(
             laid_out_differently,
             "no fixture reached two different chunk layouts, so nothing here tested chunking"
+        );
+    }
+}
+
+/// Matching over the rope's chunks has to agree with matching over the same
+/// text in one piece.
+///
+/// The oracle is the very same engine given the text as a single chunk, which
+/// `regex_cursor` supports for `&str`, so the only thing differing between the
+/// two runs is the chunking.
+#[cfg(test)]
+mod regex_cursor_tests {
+    use super::Rope;
+    use regex_cursor::{engines::meta::Regex, Input};
+
+    /// Long enough that its matches land either side of a chunk boundary, and
+    /// varied enough that they do not all sit at the same place within one.
+    fn straddling() -> String {
+        let mut text = String::new();
+        for row in 0..40 {
+            text.push_str(&format!("row {row}: alpha beta gamma\n"));
+            text.push_str("    needle in the haystack\n");
+            text.push_str("caf\u{e9} \u{4e2d}\u{6587} tail\n");
+        }
+        text
+    }
+
+    fn spans(regex: &Regex, input: Input<impl regex_cursor::Cursor>) -> Vec<(usize, usize)> {
+        regex
+            .find_iter(input)
+            .map(|m| (m.start(), m.end()))
+            .collect()
+    }
+
+    fn assert_agrees(pattern: &str, text: &str) {
+        let regex = Regex::new(pattern).expect("the pattern compiles");
+        let rope = Rope::from(text);
+
+        assert_eq!(
+            spans(&regex, rope.regex_input(0..rope.len())),
+            spans(&regex, Input::new(text)),
+            "chunked and whole-text matches differ for {pattern:?}"
+        );
+    }
+
+    #[test]
+    fn matching_over_chunks_agrees_with_matching_the_whole_text() {
+        let text = straddling();
+        assert!(
+            Rope::from(text.as_str()).chunks().count() > 1,
+            "the fixture has to span chunks for any of this to mean anything"
+        );
+
+        for pattern in [
+            "needle",
+            "haystack",
+            "alpha beta gamma",
+            "row [0-9]+",
+            "caf.",
+            "\u{4e2d}\u{6587}",
+            "^caf\u{e9}",
+            "tail$",
+            "(?s)needle.{0,40}caf",
+            r"\bbeta\b",
+            "z+",
+        ] {
+            assert_agrees(pattern, &text);
+        }
+    }
+
+    #[test]
+    fn a_search_restricted_to_a_range_reports_rope_offsets() {
+        let text = straddling();
+        let rope = Rope::from(text.as_str());
+        let regex = Regex::new("needle").expect("the pattern compiles");
+
+        let whole = spans(&regex, rope.regex_input(0..rope.len()));
+        assert!(whole.len() > 4, "the fixture has to have several matches");
+
+        let from = whole[2].0;
+        let found = spans(&regex, rope.regex_input(from..rope.len()));
+
+        assert_eq!(
+            found,
+            whole[2..],
+            "a range restricts which matches are found without moving them"
+        );
+    }
+
+    #[test]
+    fn an_empty_rope_has_one_empty_chunk_and_no_matches() {
+        let rope = Rope::new();
+        let regex = Regex::new("needle").expect("the pattern compiles");
+
+        assert_eq!(spans(&regex, rope.regex_input(0..0)), Vec::new());
+    }
+
+    #[test]
+    fn stepping_off_either_end_leaves_the_chunk_alone() {
+        use regex_cursor::Cursor;
+
+        let rope = Rope::from(straddling().as_str());
+        let mut cursor = rope.regex_cursor();
+
+        let first = cursor.chunk().to_vec();
+        assert!(!cursor.backtrack(), "nothing precedes the first chunk");
+        assert_eq!(cursor.chunk(), first, "and the failed step moved nothing");
+
+        while cursor.advance() {}
+        let last = cursor.chunk().to_vec();
+        assert!(!cursor.advance(), "nothing follows the last chunk");
+        assert_eq!(cursor.chunk(), last, "and the failed step moved nothing");
+
+        assert_eq!(
+            cursor.offset() + last.len(),
+            rope.len(),
+            "the last chunk ends where the rope does"
         );
     }
 }

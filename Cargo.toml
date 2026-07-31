@@ -90,6 +90,7 @@ postcard = { version = "1", features = ["alloc"] }
 arboard = "3"
 base64 = "0.22"
 regex = "1"
+regex-cursor = { version = "0.1", default-features = false, features = ["perf-inline"] }
 brush-parser = "0.4"
 wgpu = "29"
 bytemuck = { version = "1.25", features = ["derive"] }
