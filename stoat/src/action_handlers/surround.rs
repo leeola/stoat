@@ -1,6 +1,7 @@
 use crate::{
     action_handlers::movement::MAX_PAIR_SCAN,
     app::{Stoat, UpdateEffect},
+    buffer::TextBuffer,
     pane::View,
 };
 use stoat_text::{Bias, Rope, SelectionGoal};
@@ -143,10 +144,18 @@ pub(crate) fn execute_surround_delete(stoat: &mut Stoat, ch: char) -> UpdateEffe
     let ws = stoat.active_workspace_mut();
     let buffer = ws.buffers.get(buffer_id).expect("buffer");
     let mut guard = buffer.write().expect("poisoned");
-    for (open_off, close_off, open, close) in pairs.iter().rev() {
-        guard.edit(*close_off..*close_off + close.len_utf8(), "");
-        guard.edit(*open_off..*open_off + open.len_utf8(), "");
-    }
+
+    let edits = pairs
+        .iter()
+        .flat_map(|(open_off, close_off, open, close)| {
+            [
+                (*open_off, open.len_utf8(), ""),
+                (*close_off, close.len_utf8(), ""),
+            ]
+        })
+        .collect();
+    edit_delimiters(&mut guard, edits);
+
     UpdateEffect::Redraw
 }
 
@@ -171,14 +180,40 @@ pub(crate) fn execute_surround_replace(stoat: &mut Stoat, from: char, to: char) 
     let mut guard = buffer.write().expect("poisoned");
     let new_open_str = new_open.to_string();
     let new_close_str = new_close.to_string();
-    for (open_off, close_off, old_open, old_close) in pairs.iter().rev() {
-        guard.edit(
-            *close_off..*close_off + old_close.len_utf8(),
-            &new_close_str,
-        );
-        guard.edit(*open_off..*open_off + old_open.len_utf8(), &new_open_str);
-    }
+
+    let edits = pairs
+        .iter()
+        .flat_map(|(open_off, close_off, old_open, old_close)| {
+            [
+                (*open_off, old_open.len_utf8(), new_open_str.as_str()),
+                (*close_off, old_close.len_utf8(), new_close_str.as_str()),
+            ]
+        })
+        .collect();
+    edit_delimiters(&mut guard, edits);
+
     UpdateEffect::Redraw
+}
+
+/// Apply delimiter edits given as `(offset, len, replacement)`, from the end of
+/// the buffer backwards.
+///
+/// The offsets were read off the text as it stood before any of them ran, and
+/// nested pairs interleave their four delimiters, so the outer close sits past
+/// the inner pair and moves when the inner pair is edited. Taking the whole set
+/// from the end means every edit only ever disturbs text already dealt with.
+///
+/// Delimiters at one offset collapse to a single edit. A quote can close one
+/// pair and open the next, as the middle quote of `"a"b"` does for cursors on
+/// either side of it, and editing that offset twice would consume the character
+/// after it.
+fn edit_delimiters(buffer: &mut TextBuffer, mut edits: Vec<(usize, usize, &str)>) {
+    edits.sort_unstable_by_key(|&(offset, _, _)| offset);
+    edits.dedup_by_key(|&mut (offset, _, _)| offset);
+
+    for (offset, len, replacement) in edits.iter().rev() {
+        buffer.edit(*offset..*offset + *len, replacement);
+    }
 }
 
 /// Walk every selection's primary cursor in the focused editor and
@@ -1011,6 +1046,66 @@ mod tests {
         h.type_keys("m d (");
         assert_eq!(buffer_text(&h, &path), "abc\n");
         assert!(!h.stoat.pending_surround_delete);
+    }
+
+    /// Cursors on the `a` and the `b`, so the two enclosing pairs nest.
+    fn nested_pairs_with_a_cursor_in_each(h: &mut TestHarness) {
+        h.type_keys("%");
+        h.type_keys("s");
+        h.type_text("[ab]");
+        h.type_keys("Enter");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(1, 2, false), (3, 4, false)],
+            "fixture needs one cursor inside each pair"
+        );
+    }
+
+    #[test]
+    fn surround_delete_nested_pairs_removes_both() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "(a(b)c)\n");
+        nested_pairs_with_a_cursor_in_each(&mut h);
+
+        h.type_keys("m d (");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "abc\n",
+            "the outer close was edited at an offset the inner delete had moved"
+        );
+    }
+
+    #[test]
+    fn surround_replace_nested_pairs_replaces_both() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "(a(b)c)\n");
+        nested_pairs_with_a_cursor_in_each(&mut h);
+
+        h.type_keys("m r ( [");
+        assert_eq!(buffer_text(&h, &path), "[a[b]c]\n");
+    }
+
+    #[test]
+    fn surround_replace_nested_pairs_with_a_wider_delimiter() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "(a(b)c)\n");
+        nested_pairs_with_a_cursor_in_each(&mut h);
+
+        // Two bytes replacing one, so every offset after the first edit moves.
+        h.type_keys("m r ( \u{ab}");
+        assert_eq!(buffer_text(&h, &path), "\u{ab}a\u{ab}b\u{ab}c\u{ab}\n");
+    }
+
+    #[test]
+    fn surround_delete_pairs_sharing_a_quote_removes_it_once() {
+        let mut h = TestHarness::with_size(40, 10);
+        // The middle quote closes the first pair and opens the second, so it
+        // reaches the edits twice.
+        let path = seed(&mut h, "\"a\"b\"\n");
+        nested_pairs_with_a_cursor_in_each(&mut h);
+
+        h.type_keys("m d \"");
+        assert_eq!(buffer_text(&h, &path), "ab\n");
     }
 
     #[test]
