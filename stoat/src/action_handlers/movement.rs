@@ -3800,9 +3800,12 @@ fn scan_bracket_match(
         Some(t) => is_in_string_or_comment(t, offset),
         None => false,
     };
+    // Bounded like the surround walks. A language with no bracket query leaves
+    // the tree absent, so an unmatched bracket would otherwise read to the end
+    // of the file to report that there is no match, once per press.
     if forward {
         let mut cur = start + start_ch.len_utf8();
-        for c in rope.chars_at(cur) {
+        for c in rope.chars_at(cur).take(MAX_PAIR_SCAN) {
             if (c == open || c == close) && !in_skip_zone(cur) {
                 if c == open {
                     depth += 1;
@@ -3818,7 +3821,7 @@ fn scan_bracket_match(
         None
     } else {
         let mut cur = start;
-        for c in rope.reversed_chars_at(start) {
+        for c in rope.reversed_chars_at(start).take(MAX_PAIR_SCAN) {
             cur -= c.len_utf8();
             if (c == open || c == close) && !in_skip_zone(cur) {
                 if c == close {
@@ -5901,5 +5904,46 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelections);
         assert_eq!(buffer_string(&mut h), "ab cd\n");
         assert_ne!(h.selection_spans(), vec![(2, 3, false)]);
+    }
+
+    /// `(` then `filler` then `)`, so a scan from either bracket has the whole
+    /// filler to cross before reaching its partner.
+    fn spaced_brackets(filler: usize) -> (Rope, usize) {
+        let text = format!("({})", "x".repeat(filler));
+        let len = text.len();
+        (Rope::from(text.as_str()), len)
+    }
+
+    #[test]
+    fn a_bracket_partner_beyond_the_cap_is_not_matched() {
+        let (rope, len) = spaced_brackets(MAX_PAIR_SCAN + 100);
+
+        assert_eq!(
+            scan_bracket_match(&rope, 0, '(', '(', ')', true, None),
+            None,
+            "scanning forward, the close is past where the scan gives up"
+        );
+        assert_eq!(
+            scan_bracket_match(&rope, len - 1, ')', '(', ')', false, None),
+            None,
+            "and scanning back, so is the open"
+        );
+    }
+
+    #[test]
+    fn a_bracket_partner_within_the_cap_is_still_matched() {
+        let filler = MAX_PAIR_SCAN - 100;
+        let (rope, len) = spaced_brackets(filler);
+
+        assert_eq!(
+            scan_bracket_match(&rope, 0, '(', '(', ')', true, None),
+            Some(1 + filler),
+            "a close inside the cap is where it always was"
+        );
+        assert_eq!(
+            scan_bracket_match(&rope, len - 1, ')', '(', ')', false, None),
+            Some(0),
+            "and so is the open"
+        );
     }
 }
