@@ -554,7 +554,7 @@ pub(super) fn expand_column(
     expanded
 }
 
-fn collapse_column(
+pub(super) fn collapse_column(
     chars: impl Iterator<Item = char>,
     tab_column: u32,
     tab_size: u32,

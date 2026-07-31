@@ -404,9 +404,12 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
         .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
             let cursor = cursor_offset(rope, tail_offset, head_offset);
             let cursor_pt = rope.offset_to_point(cursor);
+            // Cells from the line start, not bytes. The two agree only while
+            // every character is one byte and one cell, so carrying bytes
+            // between lines drifts across wide glyphs and tabs.
             let goal_col = match sel.goal {
                 SelectionGoal::Column(c) => c,
-                SelectionGoal::None => cursor_pt.column,
+                SelectionGoal::None => display_snapshot.visual_column(cursor_pt),
             };
             let new_row = (cursor_pt.row as i64)
                 .saturating_add(delta)
@@ -416,7 +419,11 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
             if new_row == cursor_pt.row {
                 return sel.clone();
             }
-            let col = goal_col.min(rope.line_len(new_row));
+            // Back to a byte column on the landing line, which leaves the
+            // display round-trip below to place it across wraps and folds. A
+            // display point built from the goal directly would clip against one
+            // wrapped segment's width rather than the whole line's.
+            let col = display_snapshot.buffer_column_at_visual(new_row, goal_col, Bias::Left);
             // The target is the same column of the target buffer line. Snap it
             // through display space so a row hidden in a fold or beside a diff block
             // row lands on the next visible buffer row in the travel direction
@@ -5288,6 +5295,114 @@ mod tests {
         h.stoat.pending_count = Some(50);
         h.type_keys("j");
         h.assert_snapshot("count_jump_keeps_cursor_visible");
+    }
+
+    #[test]
+    fn vertical_motion_keeps_a_visual_column_across_wide_characters() {
+        // Each ideograph is three bytes and two cells wide, so the third one
+        // starts at byte 6 and at visual column 4. The ASCII line below has its
+        // visual column 4 at byte 4.
+        let mut h = TestHarness::with_size(40, 12);
+        let path = h.write_file("cjk.rs", "\u{4e00}\u{4e01}\u{4e02}\u{4e03}\nabcdefgh\n");
+        h.open_file(&path);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            place_cursor(editor, 0, 6);
+        }
+
+        move_vertical(&mut h.stoat, 1, false);
+
+        assert_eq!(
+            focused_cursor_point(&mut h),
+            Point::new(1, 4),
+            "j holds the visual column, which is a different byte column",
+        );
+    }
+
+    #[test]
+    fn vertical_motion_keeps_a_visual_column_across_a_tab() {
+        // The tab occupies cells 0 through 3, so the `a` after it is byte 1 and
+        // visual column 4.
+        let mut h = TestHarness::with_size(40, 12);
+        let path = h.write_file("tabbed.rs", "\tabc\nxyzwuvst\n");
+        h.open_file(&path);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            place_cursor(editor, 0, 1);
+        }
+
+        move_vertical(&mut h.stoat, 1, false);
+
+        assert_eq!(
+            focused_cursor_point(&mut h),
+            Point::new(1, 4),
+            "the cells the tab occupies count toward the column",
+        );
+    }
+
+    #[test]
+    fn vertical_motion_lands_on_the_visual_column_of_a_wide_line() {
+        // The other direction. Leaving an ASCII line at visual column 4 has to
+        // land on the ideograph that occupies cells 4 and 5, which starts at
+        // byte 6, not on byte 4 inside the one before it.
+        let mut h = TestHarness::with_size(40, 12);
+        let path = h.write_file("cjk.rs", "abcdefgh\n\u{4e00}\u{4e01}\u{4e02}\u{4e03}\n");
+        h.open_file(&path);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            place_cursor(editor, 0, 4);
+        }
+
+        move_vertical(&mut h.stoat, 1, false);
+
+        assert_eq!(focused_cursor_point(&mut h), Point::new(1, 6));
+    }
+
+    #[test]
+    fn vertical_motion_lands_past_a_tab_on_the_target_line() {
+        // Visual column 4 on the line below is the character after the tab, at
+        // byte 1, since the tab occupies the four cells before it.
+        let mut h = TestHarness::with_size(40, 12);
+        let path = h.write_file("tabbed.rs", "xyzwuvst\n\tabc\n");
+        h.open_file(&path);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            place_cursor(editor, 0, 4);
+        }
+
+        move_vertical(&mut h.stoat, 1, false);
+
+        assert_eq!(focused_cursor_point(&mut h), Point::new(1, 1));
+    }
+
+    #[test]
+    fn vertical_motion_returns_to_the_visual_column_it_left() {
+        // Down onto a line that cannot reach the column, then back up. The goal
+        // is what survives the short line, not where the cursor sat on it.
+        let mut h = TestHarness::with_size(40, 12);
+        let path = h.write_file(
+            "mixed.rs",
+            "\u{4e00}\u{4e01}\u{4e02}\u{4e03}\nab\nabcdefgh\n",
+        );
+        h.open_file(&path);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            place_cursor(editor, 0, 6);
+        }
+
+        move_vertical(&mut h.stoat, 1, false);
+        assert_eq!(
+            focused_cursor_point(&mut h),
+            Point::new(1, 2),
+            "the short line clamps to its end",
+        );
+
+        move_vertical(&mut h.stoat, 1, false);
+        assert_eq!(
+            focused_cursor_point(&mut h),
+            Point::new(2, 4),
+            "and the column comes back on the line that can hold it",
+        );
     }
 
     #[test]

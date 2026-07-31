@@ -1159,6 +1159,54 @@ impl DisplaySnapshot {
             .block_to_buffer(BlockPoint::new(point.row, point.column))
     }
 
+    /// Cells `point` sits at, counted from the start of its buffer line.
+    ///
+    /// A character occupies as many cells as it is drawn in, one for most, two
+    /// for a wide glyph, and as many as the next tab stop for a tab. That count
+    /// is what a reader means by a column, where a byte offset is only the same
+    /// number while every character is one byte and one cell.
+    ///
+    /// Counted along the buffer line rather than along a display row, so a
+    /// soft-wrapped line answers one column for its whole length instead of
+    /// restarting at each wrap.
+    ///
+    /// See also:
+    /// - [`Self::buffer_column_at_visual`] for the way back.
+    pub fn visual_column(&self, point: Point) -> u32 {
+        let tabs = self.tab_snapshot();
+        tab_map::expand_column(
+            self.line_chars(point.row),
+            point.column,
+            tabs.tab_size(),
+            tabs.max_expansion_column(),
+        )
+    }
+
+    /// Byte column on `row` that sits at `visual` cells from its start.
+    ///
+    /// A column landing inside a character resolves by `bias`, and one past the
+    /// line's end gives the line's length, so a short line answers its own end
+    /// rather than refusing.
+    pub fn buffer_column_at_visual(&self, row: u32, visual: u32, bias: Bias) -> u32 {
+        let tabs = self.tab_snapshot();
+        tab_map::collapse_column(
+            self.line_chars(row),
+            visual,
+            tabs.tab_size(),
+            bias,
+            tabs.max_expansion_column(),
+        )
+    }
+
+    /// Characters of buffer `row`, stopping at its line break.
+    fn line_chars(&self, row: u32) -> impl Iterator<Item = char> {
+        let buffer = self.buffer_snapshot();
+        let rope = buffer.rope();
+        let start = rope.point_to_offset(Point::new(row, 0));
+        let len = rope.line_len(row) as usize;
+        rope.chars_at(start).take(len)
+    }
+
     pub fn classify_row(&self, display_row: u32) -> BlockRowKind<'_> {
         self.block_snapshot.classify_row(display_row)
     }
