@@ -297,6 +297,20 @@ pub(crate) fn deepest_tree_at(
         .map(|layer| &layer.tree)
 }
 
+/// Every pair type the closest-pair textobject considers.
+///
+/// Their delimiter characters are disjoint, so a character is a delimiter for
+/// at most one entry here. That is what lets one walk serve all of them.
+const SURROUND_PAIRS: [(char, char); 7] = [
+    ('(', ')'),
+    ('[', ']'),
+    ('{', '}'),
+    ('<', '>'),
+    ('"', '"'),
+    ('\'', '\''),
+    ('`', '`'),
+];
+
 /// The innermost enclosing pair of any surround type around `cursor`,
 /// as `(open, close, open_off, close_off)`. Runs [`find_surround_pair`]
 /// for each bracket and quote pair and keeps the one with the greatest
@@ -307,22 +321,140 @@ pub(crate) fn closest_surround_pair(
     cursor: usize,
     tree: Option<&stoat_language::Tree>,
 ) -> Option<(char, char, usize, usize)> {
-    const PAIRS: [(char, char); 7] = [
-        ('(', ')'),
-        ('[', ']'),
-        ('{', '}'),
-        ('<', '>'),
-        ('"', '"'),
-        ('\'', '\''),
-        ('`', '`'),
-    ];
-    PAIRS
+    let at_cursor = rope.chars_at(cursor).next();
+
+    // A quote under the cursor cannot say which of its sides opens, so its type
+    // is answered by the syntax tree rather than by walking. Deciding that here
+    // keeps those types out of both walks entirely.
+    let mut resolved: [Option<(usize, usize)>; SURROUND_PAIRS.len()] = Default::default();
+    let mut settled = [false; SURROUND_PAIRS.len()];
+    for (i, (open, close)) in SURROUND_PAIRS.into_iter().enumerate() {
+        if open == close && at_cursor == Some(open) {
+            settled[i] = true;
+            resolved[i] = enclosing_string_pair(rope, tree, cursor, open);
+        }
+    }
+
+    let opens = scan_left_for_opens(rope, cursor, at_cursor, &settled, tree);
+    let closes = scan_right_for_closes(rope, cursor, at_cursor, &settled, tree);
+    for i in 0..SURROUND_PAIRS.len() {
+        if !settled[i] {
+            resolved[i] = opens[i].zip(closes[i]);
+        }
+    }
+
+    SURROUND_PAIRS
         .into_iter()
-        .filter_map(|(open, close)| {
-            find_surround_pair(rope, cursor, open, close, tree)
-                .map(|(open_off, close_off)| (open, close, open_off, close_off))
+        .enumerate()
+        .filter_map(|(i, (open, close))| {
+            resolved[i].map(|(open_off, close_off)| (open, close, open_off, close_off))
         })
         .max_by_key(|&(_, _, open_off, _)| open_off)
+}
+
+/// Which pair type `c` is a delimiter of, if any.
+fn pair_index(c: char) -> Option<usize> {
+    SURROUND_PAIRS
+        .iter()
+        .position(|&(open, close)| c == open || c == close)
+}
+
+/// The nearest enclosing open left of `cursor`, per pair type, in one walk.
+///
+/// Each asymmetric type carries the depth counter its own walk carried, and
+/// each symmetric type takes the first occurrence it meets. A type that has its
+/// answer drops out, so the walk only continues for those still looking.
+fn scan_left_for_opens(
+    rope: &Rope,
+    cursor: usize,
+    at_cursor: Option<char>,
+    settled: &[bool; SURROUND_PAIRS.len()],
+    tree: Option<&stoat_language::Tree>,
+) -> [Option<usize>; SURROUND_PAIRS.len()] {
+    let mut found: [Option<usize>; SURROUND_PAIRS.len()] = Default::default();
+    let mut step_over = [0usize; SURROUND_PAIRS.len()];
+    let mut done = *settled;
+
+    // An open under the cursor is that type's open, without walking anywhere.
+    for (i, (open, close)) in SURROUND_PAIRS.into_iter().enumerate() {
+        if !done[i] && open != close && at_cursor == Some(open) && !in_skip_zone(tree, cursor) {
+            found[i] = Some(cursor);
+            done[i] = true;
+        }
+    }
+
+    let mut pos = cursor;
+    for c in rope.reversed_chars_at(cursor).take(MAX_PAIR_SCAN) {
+        let Some(next) = pos.checked_sub(c.len_utf8()) else {
+            break;
+        };
+        pos = next;
+
+        let Some(i) = pair_index(c) else { continue };
+        if done[i] || in_skip_zone(tree, pos) {
+            continue;
+        }
+
+        let (open, close) = SURROUND_PAIRS[i];
+        if open == close || c == open && step_over[i] == 0 {
+            found[i] = Some(pos);
+            done[i] = true;
+        } else if c == close {
+            step_over[i] += 1;
+        } else {
+            step_over[i] -= 1;
+        }
+    }
+    found
+}
+
+/// The matching close right of `cursor`, per pair type, in one walk.
+///
+/// The mirror of [`scan_left_for_opens`], with one inherited quirk. The
+/// character under the cursor counts as a close but not as an open, which is
+/// what the per-type walk did by testing it before its loop began.
+///
+/// The cap is one budget shared by every type, where each type used to have its
+/// own of the same size. Those budgets began a character apart for the two
+/// families, so a symmetric type now reaches one character further than it did,
+/// ten thousand characters out.
+fn scan_right_for_closes(
+    rope: &Rope,
+    cursor: usize,
+    at_cursor: Option<char>,
+    settled: &[bool; SURROUND_PAIRS.len()],
+    tree: Option<&stoat_language::Tree>,
+) -> [Option<usize>; SURROUND_PAIRS.len()] {
+    let mut found: [Option<usize>; SURROUND_PAIRS.len()] = Default::default();
+    let mut step_over = [0usize; SURROUND_PAIRS.len()];
+    let mut done = *settled;
+
+    for (i, (open, close)) in SURROUND_PAIRS.into_iter().enumerate() {
+        if !done[i] && open != close && at_cursor == Some(close) && !in_skip_zone(tree, cursor) {
+            found[i] = Some(cursor);
+            done[i] = true;
+        }
+    }
+
+    let mut pos = cursor + at_cursor.map_or(0, char::len_utf8);
+    for c in rope.chars_at(pos).take(MAX_PAIR_SCAN) {
+        if let Some(i) = pair_index(c)
+            && !done[i]
+            && !in_skip_zone(tree, pos)
+        {
+            let (open, close) = SURROUND_PAIRS[i];
+            if open == close || c == close && step_over[i] == 0 {
+                found[i] = Some(pos);
+                done[i] = true;
+            } else if c == open {
+                step_over[i] += 1;
+            } else {
+                step_over[i] -= 1;
+            }
+        }
+        pos += c.len_utf8();
+    }
+    found
 }
 
 fn focused_buffer_id(stoat: &Stoat) -> Option<crate::buffer::BufferId> {
@@ -592,6 +724,93 @@ mod tests {
             Some(0),
             "and so is the open"
         );
+    }
+
+    /// The deepest of the per-type answers, which is what the closest pair used
+    /// to be found by. Kept as the oracle for the merged walk.
+    fn closest_by_type(
+        rope: &Rope,
+        cursor: usize,
+        tree: Option<&stoat_language::Tree>,
+    ) -> Option<(char, char, usize, usize)> {
+        SURROUND_PAIRS
+            .into_iter()
+            .filter_map(|(open, close)| {
+                find_surround_pair(rope, cursor, open, close, tree)
+                    .map(|(open_off, close_off)| (open, close, open_off, close_off))
+            })
+            .max_by_key(|&(_, _, open_off, _)| open_off)
+    }
+
+    /// Text built from every delimiter set, nested and interleaved, so the
+    /// per-type states have to be kept apart rather than sharing a counter.
+    fn nested_fixture(seed: u64) -> String {
+        const PIECES: [&str; 14] = [
+            "(", ")", "[", "]", "{", "}", "<", ">", "\"", "'", "`", "ab ", "\n", "; ",
+        ];
+        let mut rng = seed;
+        let mut text = String::new();
+        for _ in 0..120 {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            text.push_str(PIECES[((rng >> 33) % PIECES.len() as u64) as usize]);
+        }
+        text
+    }
+
+    #[test]
+    fn one_walk_finds_what_asking_every_type_found() {
+        for seed in 0..40u64 {
+            let text = nested_fixture(seed);
+            let rope = Rope::from(text.as_str());
+
+            for cursor in 0..=rope.len() {
+                if !text.is_char_boundary(cursor) {
+                    continue;
+                }
+                assert_eq!(
+                    closest_surround_pair(&rope, cursor, None),
+                    closest_by_type(&rope, cursor, None),
+                    "seed {seed}, cursor {cursor}, in {text:?}"
+                );
+            }
+        }
+    }
+
+    /// The same comparison over a buffer with a real syntax tree, so the skip
+    /// zones are live. Both walks consult them, and the property test above
+    /// passes no tree, which would leave that half unchecked.
+    #[test]
+    fn one_walk_agrees_where_skip_zones_are_live() {
+        let mut h = TestHarness::with_size(60, 10);
+        let src = "let a = (\"str (with) [brackets]\"); // {comment} 'x'\n\
+                   let b = [c(d), e{f}, \"g'h\"];\n\
+                   let c = `raw (x)` + 'y';\n";
+        let path = seed_rs(&mut h, src);
+
+        let ws = h.stoat.active_workspace();
+        let buffer_id = ws.buffers.id_for_path(&path).expect("buffer is open");
+        let rope = ws
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .rope()
+            .clone();
+        let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
+        assert!(snapshot.is_some(), "the fixture has to have parsed");
+
+        for cursor in 0..=rope.len() {
+            let tree = deepest_tree_at(snapshot, cursor);
+            assert!(tree.is_some(), "a covering layer at {cursor}");
+            assert_eq!(
+                closest_surround_pair(&rope, cursor, tree),
+                closest_by_type(&rope, cursor, tree),
+                "cursor {cursor}"
+            );
+        }
     }
 
     #[test]
