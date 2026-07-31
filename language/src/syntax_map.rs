@@ -288,7 +288,7 @@ impl SyntaxMap {
         version: u64,
         root: Option<&Tree>,
         deadline: Option<(Instant, &Executor)>,
-    ) -> Option<()> {
+    ) -> Option<Vec<Range<usize>>> {
         self.reparse_within_changed_ranges(rope, language, version, None, root, deadline)
     }
 
@@ -334,6 +334,12 @@ impl SyntaxMap {
     /// layer would be indistinguishable from one whose injection genuinely
     /// went away. A `None` return means the deadline passed or the root parse
     /// failed, and leaves the map as the caller handed it over.
+    ///
+    /// Returns the byte ranges where the layer set moved, merged and in
+    /// document order. An injection can restyle its whole span with the host
+    /// tree identical throughout, so a caller narrowing its own work to the
+    /// host tree's changed ranges would miss it. Adding these is what makes
+    /// such a narrowing sound over an injected buffer.
     pub fn reparse_within_changed_ranges(
         &mut self,
         rope: &Rope,
@@ -342,7 +348,7 @@ impl SyntaxMap {
         changed_ranges: Option<&[Range<usize>]>,
         root: Option<&Tree>,
         deadline: Option<(Instant, &Executor)>,
-    ) -> Option<()> {
+    ) -> Option<Vec<Range<usize>>> {
         // Expand changed ranges by +/- 1 row when filtering injection
         // queries. The expansion catches injection boundary flips
         // (e.g. uncommenting a line whose adjacent line was the start
@@ -384,7 +390,7 @@ impl SyntaxMap {
         injection_filter_ranges: Option<&[Range<usize>]>,
         root: Option<&Tree>,
         deadline: Option<(Instant, &Executor)>,
-    ) -> Option<()> {
+    ) -> Option<Vec<Range<usize>>> {
         // Snapshot prior injection layers keyed by (host_range, language name)
         // so we can reuse them when the same host node still exists.
         let prior_injections: Vec<PriorInjection> = self
@@ -430,6 +436,10 @@ impl SyntaxMap {
             .filter(|ranges| !ranges.is_empty())
             .map(|ranges| absorb_prior_layers(ranges, &prior_injections));
         let injection_filter_ranges = expanded_filter.as_deref();
+
+        // Where this walk moved the layer set, for a caller narrowing its own
+        // work to the ranges a restyle could have reached.
+        let mut layer_changes: Vec<Range<usize>> = Vec::new();
 
         // Queue of (depth, language, tree, parent host range) for the
         // BFS-like injection walk. Start with the root layer.
@@ -551,6 +561,12 @@ impl SyntaxMap {
                                 }
                                 continue;
                             };
+                            record_layer_change(
+                                &mut layer_changes,
+                                &content,
+                                prior.map(|p| &p.tree),
+                                &inner_tree,
+                            );
                             new_layers.push(SyntaxLayer {
                                 depth: parent_depth + 1,
                                 start_offset: content.start as u32,
@@ -589,6 +605,12 @@ impl SyntaxMap {
                         }
                         continue;
                     };
+                    record_layer_change(
+                        &mut layer_changes,
+                        &r,
+                        prior.map(|p| &p.tree),
+                        &inner_tree,
+                    );
                     new_layers.push(SyntaxLayer {
                         depth: parent_depth + 1,
                         start_offset: r.start as u32,
@@ -611,6 +633,15 @@ impl SyntaxMap {
                         }
                         continue;
                     };
+                    // A combined parse is offered no prior tree, so there is
+                    // nothing to diff against and the whole merged span counts
+                    // as moved.
+                    record_layer_change(
+                        &mut layer_changes,
+                        &(merged_start..merged_end),
+                        None,
+                        &inner_tree,
+                    );
                     new_layers.push(SyntaxLayer {
                         depth: parent_depth + 1,
                         start_offset: merged_start as u32,
@@ -624,11 +655,19 @@ impl SyntaxMap {
         }
 
         if let Some(filter) = injection_filter_ranges.filter(|ranges| !ranges.is_empty()) {
-            carry_unvisited_injections(&mut new_layers, &prior_injections, filter);
+            carry_unvisited_injections(
+                &mut new_layers,
+                &prior_injections,
+                filter,
+                &mut layer_changes,
+            );
         }
 
+        layer_changes.sort_unstable_by_key(|r| r.start);
+        merge_ranges(&mut layer_changes);
+
         self.install_layers(new_layers, version);
-        Some(())
+        Some(layer_changes)
     }
 }
 
@@ -645,6 +684,28 @@ struct PriorInjection {
     end_offset: u32,
     language: Arc<Language>,
     tree: Tree,
+}
+
+/// Note where a freshly parsed injection layer could have restyled text.
+///
+/// A layer whose prior tree was reused only differs from it where the two trees
+/// do, since the prior is looked up by exact host range and so covers the same
+/// bytes. Without one the layer is new text, or text whose bounds moved, and
+/// the whole span is suspect.
+fn record_layer_change(
+    changes: &mut Vec<Range<usize>>,
+    span: &Range<usize>,
+    prior: Option<&Tree>,
+    parsed: &Tree,
+) {
+    match prior {
+        Some(prior) => changes.extend(
+            prior
+                .changed_ranges(parsed)
+                .map(|r| r.start_byte..r.end_byte),
+        ),
+        None => changes.push(span.clone()),
+    }
 }
 
 /// Grow `filter` to swallow every prior layer it touches, whole.
@@ -718,6 +779,7 @@ fn carry_unvisited_injections(
     layers: &mut Vec<SyntaxLayer>,
     prior: &[PriorInjection],
     filter: &[Range<usize>],
+    layer_changes: &mut Vec<Range<usize>>,
 ) {
     let overlaps = |a: Range<usize>, b: &Range<usize>| a.start < b.end && b.start < a.end;
 
@@ -733,6 +795,7 @@ fn carry_unvisited_injections(
         }
 
         if filter.iter().any(|r| overlaps(span.clone(), r)) {
+            layer_changes.push(span);
             continue;
         }
 
@@ -746,6 +809,7 @@ fn carry_unvisited_injections(
                 && overlaps(l.start_offset as usize..l.end_offset as usize, &span)
         });
         if superseded {
+            layer_changes.push(span);
             continue;
         }
 
@@ -1649,6 +1713,83 @@ mod tests {
         );
 
         budgeted
+    }
+
+    #[test]
+    fn an_edit_in_code_leaves_a_doc_comment_layer_alone() {
+        // Reporting layer changes only pays off if the common edit reports
+        // nothing. A rust file with one doc comment is the case that matters,
+        // since otherwise every keystroke anywhere in it would drag the
+        // comment's markdown layer back through the caller's re-query.
+        use stoat_text::patch::Edit as PatchEdit;
+        let lang = rust_lang();
+        let source = "/// A **doc** comment\nfn a() {}\n\nfn b() {}\n\nfn c() {}\n";
+        let rope = Rope::from(source);
+
+        let mut map = SyntaxMap::new();
+        map.reparse(&rope, lang.clone(), 1, None, None).unwrap();
+        let markdown_layers = |map: &SyntaxMap| -> Vec<(u32, u32)> {
+            map.snapshot()
+                .iter_layers()
+                .filter(|l| l.language.name == "markdown")
+                .map(|l| (l.start_offset, l.end_offset))
+                .collect()
+        };
+        let before = markdown_layers(&map);
+        assert_eq!(
+            before.len(),
+            1,
+            "the fixture must inject one markdown layer"
+        );
+
+        let edit_at = source.rfind("fn c() {").expect("fixture has a third fn") + "fn c() {".len();
+        let reparse = |map: &mut SyntaxMap, at: usize| -> Vec<Range<usize>> {
+            let inserted = " let x = 1; ";
+            let mut text = String::from(&source[..at]);
+            text.push_str(inserted);
+            text.push_str(&source[at..]);
+            let new_rope = Rope::from(text.as_str());
+            let edits = vec![PatchEdit {
+                old: at..at,
+                new: at..(at + inserted.len()),
+            }];
+            map.interpolate(&edits, &rope, &new_rope);
+            #[allow(clippy::single_range_in_vec_init)]
+            let changed = vec![at..(at + inserted.len())];
+            map.reparse_within_changed_ranges(
+                &new_rope,
+                lang.clone(),
+                2,
+                Some(&changed),
+                None,
+                None,
+            )
+            .expect("reparse must succeed")
+        };
+
+        let mut untouched = map.clone();
+        assert_eq!(
+            reparse(&mut untouched, edit_at),
+            Vec::<Range<usize>>::new(),
+            "an edit in code rows away from the comment moves no layer"
+        );
+        assert_eq!(
+            markdown_layers(&untouched),
+            before,
+            "and leaves the comment's layer exactly where it was"
+        );
+
+        // The contrast is what shows the empty report above is a real answer
+        // rather than the reporting never firing.
+        let mut touched = map;
+        assert!(
+            !reparse(
+                &mut touched,
+                source.find("**doc**").expect("fixture has bold")
+            )
+            .is_empty(),
+            "an edit inside the comment does move the layer set"
+        );
     }
 
     #[test]

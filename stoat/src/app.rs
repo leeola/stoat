@@ -10317,13 +10317,6 @@ pub(crate) fn parse_buffer_step(
     let cur_version = snapshot.version;
     let new_rope = snapshot.visible_text.clone();
 
-    // An injection layer can restyle without any change to the host tree, so
-    // the changed-range narrowing below only holds for a file that had, and
-    // still has, nothing but its root grammar.
-    let prior_single_layer = prior_syntax_map
-        .as_ref()
-        .is_some_and(|map| map.snapshot().layer_count() == 1);
-
     // Edit a clone of the prior tree rather than mutating it in place. If
     // the parse aborts (deadline exceeded, etc.) the caller's prior must
     // remain valid for the next attempt; an in-place edit would leave the
@@ -10381,7 +10374,7 @@ pub(crate) fn parse_buffer_step(
             let mut map = prior_map.clone();
             map.interpolate(edits.edits(), &prev.rope_snapshot, &new_rope);
 
-            map.reparse_within_changed_ranges(
+            let layer_changes = map.reparse_within_changed_ranges(
                 &new_rope,
                 lang.clone(),
                 cur_version,
@@ -10389,18 +10382,18 @@ pub(crate) fn parse_buffer_step(
                 Some(&tree),
                 deadline,
             )?;
-            Some(map)
+            Some((map, layer_changes))
         },
         _ => None,
     };
 
     let incremental_reparse = incremental.is_some();
-    let syntax_map = match incremental {
-        Some(map) => map,
+    let (syntax_map, layer_changes) = match incremental {
+        Some((map, layer_changes)) => (map, layer_changes),
         None => {
             let mut map = stoat_language::SyntaxMap::default();
             map.reparse(&new_rope, lang.clone(), cur_version, Some(&tree), deadline)?;
-            map
+            (map, Vec::new())
         },
     };
 
@@ -10409,33 +10402,42 @@ pub(crate) fn parse_buffer_step(
     prior.take();
     prior_syntax_map.take();
 
+    // What the re-query has to cover. The root tree names where the host
+    // grammar restyled, and the reparse names where the layer set moved. An
+    // injected buffer needs that second half, since a layer can restyle its
+    // whole span with the host tree identical throughout.
+    let recapture_ranges = invalidated.map(|mut ranges| {
+        ranges.extend(layer_changes);
+        ranges.sort_unstable_by_key(|r| r.start);
+        merge_ranges(&mut ranges);
+        ranges
+    });
+
     // Re-query only what the edit could have restyled. The prior tokens carry
     // across the edit and keep their anchors, so a keystroke costs a query over
-    // the edited region rather than one over the file. A map that had to be
-    // rebuilt from nothing leaves no prior tree to compare against, and either
-    // side of the edit having an injection layer puts restyles outside the
-    // changed ranges, so both drop back to the full walk below.
-    let recaptured =
-        if incremental_reparse && prior_single_layer && syntax_map.snapshot().layer_count() == 1 {
-            // A carried span takes its anchor by index, so both halves of the prior
-            // parse's tokens have to be present and line up one for one.
-            prior_token_spans
-                .zip(prior_token_anchors)
-                .filter(|(spans, anchors)| spans.len() == anchors.len())
-                .zip(edits.zip(invalidated))
-                .and_then(|((spans, _), (edits, invalidated))| {
-                    recapture_edited_ranges(
-                        syntax_map.snapshot(),
-                        &new_rope,
-                        spans,
-                        edits,
-                        invalidated,
-                        styles,
-                    )
-                })
-        } else {
-            None
-        };
+    // the edited region rather than one over the file. A map rebuilt from
+    // nothing leaves no prior tree to compare against, so that case alone drops
+    // back to the full walk below.
+    let recaptured = if incremental_reparse {
+        // A carried span takes its anchor by index, so both halves of the prior
+        // parse's tokens have to be present and line up one for one.
+        prior_token_spans
+            .zip(prior_token_anchors)
+            .filter(|(spans, anchors)| spans.len() == anchors.len())
+            .zip(edits.zip(recapture_ranges))
+            .and_then(|((spans, _), (edits, invalidated))| {
+                recapture_edited_ranges(
+                    syntax_map.snapshot(),
+                    &new_rope,
+                    spans,
+                    edits,
+                    invalidated,
+                    styles,
+                )
+            })
+    } else {
+        None
+    };
 
     // Borrowed rather than moved out, since the recapture still owns the two
     // short lists the changed-row report reads below.
