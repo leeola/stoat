@@ -7026,40 +7026,15 @@ impl Stoat {
         {
             run.push_str(text);
         }
+        let mut inserts = self.editor_cursor_offsets(editor_id);
+        if inserts.is_empty() {
+            return;
+        }
+
         let ws = self.active_workspace_mut();
-        let editor = match ws.editors.get_mut(editor_id) {
-            Some(e) => e,
-            None => return,
+        let Some(buffer) = ws.buffers.get(buffer_id) else {
+            return;
         };
-        let buffer = match ws.buffers.get(buffer_id) {
-            Some(b) => b,
-            None => return,
-        };
-        let display_snapshot = editor.display_map.snapshot();
-        let buf_snapshot = display_snapshot.buffer_snapshot();
-        let rope = buf_snapshot.rope();
-
-        // One walk for every cursor's endpoints rather than a root descent per
-        // anchor, which a multi-cursor session pays on every typed character.
-        let ends = {
-            let anchors: Vec<Anchor> = editor
-                .selections
-                .all_anchors()
-                .iter()
-                .flat_map(|sel| [sel.tail(), sel.head()])
-                .collect();
-            buf_snapshot.resolve_anchors_batch(&anchors)
-        };
-
-        let mut inserts: Vec<(usize, usize)> = editor
-            .selections
-            .all_anchors()
-            .iter()
-            .zip(ends.chunks_exact(2))
-            .map(|(sel, ends)| (sel.id, stoat_text::cursor_offset(rope, ends[0], ends[1])))
-            .collect();
-        inserts.sort_by_key(|(id, offset)| (*offset, *id));
-
         {
             let mut guard = buffer.write().expect("poisoned");
             for (_, offset) in inserts.iter().rev() {
@@ -7075,18 +7050,70 @@ impl Stoat {
         for (k, (_, offset)) in inserts.iter_mut().enumerate() {
             *offset += (k + 1) * text_len;
         }
-        // Re-keyed by id, which is what the closure below looks up. A binary
-        // search over a list already in hand beats hashing a fresh map into
-        // existence for every typed character.
-        inserts.sort_unstable_by_key(|(id, _)| *id);
 
+        self.land_cursors_after_insert(editor_id, inserts);
+    }
+
+    /// Every cursor in `editor_id` as `(selection id, byte offset)`, sorted by
+    /// offset then id. Empty when the editor is gone.
+    ///
+    /// One walk for every cursor's endpoints rather than a root descent per
+    /// anchor, which a multi-cursor session pays on every typed character.
+    fn editor_cursor_offsets(&mut self, editor_id: EditorId) -> Vec<(usize, usize)> {
+        let ws = self.active_workspace_mut();
+        let Some(editor) = ws.editors.get_mut(editor_id) else {
+            return Vec::new();
+        };
+        let display_snapshot = editor.display_map.snapshot();
+        let buf_snapshot = display_snapshot.buffer_snapshot();
+        let rope = buf_snapshot.rope();
+
+        let ends = {
+            let anchors: Vec<Anchor> = editor
+                .selections
+                .all_anchors()
+                .iter()
+                .flat_map(|sel| [sel.tail(), sel.head()])
+                .collect();
+            buf_snapshot.resolve_anchors_batch(&anchors)
+        };
+
+        let mut cursors: Vec<(usize, usize)> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .zip(ends.chunks_exact(2))
+            .map(|(sel, ends)| (sel.id, stoat_text::cursor_offset(rope, ends[0], ends[1])))
+            .collect();
+        cursors.sort_by_key(|(id, offset)| (*offset, *id));
+        cursors
+    }
+
+    /// Put each selection back as a block cursor at the offset `landings` gives
+    /// for its id, leaving any selection the list does not name alone.
+    ///
+    /// `landings` is re-keyed by id here rather than by the caller, which holds
+    /// it in offset order to compute the shifts. A binary search over a list
+    /// already in hand beats hashing a fresh map into existence for every typed
+    /// character.
+    fn land_cursors_after_insert(
+        &mut self,
+        editor_id: EditorId,
+        mut landings: Vec<(usize, usize)>,
+    ) {
+        landings.sort_unstable_by_key(|(id, _)| *id);
+
+        let ws = self.active_workspace_mut();
+        let Some(editor) = ws.editors.get_mut(editor_id) else {
+            return;
+        };
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
         editor.selections.transform(new_buf, |s| {
-            match inserts.binary_search_by_key(&s.id, |(id, _)| *id) {
+            match landings.binary_search_by_key(&s.id, |(id, _)| *id) {
                 Ok(found) => action_handlers::movement::forward_block_cursor(
                     s.id,
-                    inserts[found].1,
+                    landings[found].1,
                     stoat_text::SelectionGoal::None,
                     new_buf.rope(),
                     new_buf,
@@ -7094,6 +7121,50 @@ impl Stoat {
                 Err(_) => s.clone(),
             }
         });
+    }
+
+    /// Insert a string per cursor in one multi-edit, mirroring
+    /// [`Self::editor_insert`]. `insertions` pairs each selection id with its
+    /// cursor offset and the text that cursor inserts, in offset order.
+    ///
+    /// The uniform [`Self::editor_insert`] stays separate rather than
+    /// delegating here. It runs on every typed character, where a string per
+    /// cursor would be an allocation per cursor per keystroke that a uniform
+    /// insertion has no use for.
+    fn editor_insert_each(
+        &mut self,
+        editor_id: EditorId,
+        buffer_id: BufferId,
+        insertions: Vec<(usize, usize, String)>,
+    ) {
+        if insertions.is_empty() {
+            return;
+        }
+
+        let ws = self.active_workspace_mut();
+        let Some(buffer) = ws.buffers.get(buffer_id) else {
+            return;
+        };
+        {
+            let mut guard = buffer.write().expect("poisoned");
+            for (_, offset, text) in insertions.iter().rev() {
+                guard.edit(*offset..*offset, text);
+            }
+        }
+
+        // Each cursor lands after its own text, shifted by everything inserted
+        // at or before it. Lengths differ per cursor, so this is a running total
+        // where the uniform path multiplies one length by the insertion's index.
+        let mut inserted = 0usize;
+        let landings: Vec<(usize, usize)> = insertions
+            .iter()
+            .map(|(id, offset, text)| {
+                inserted += text.len();
+                (*id, *offset + inserted)
+            })
+            .collect();
+
+        self.land_cursors_after_insert(editor_id, landings);
     }
 
     /// Byte offset of the focused editor's newest cursor.
@@ -7282,11 +7353,27 @@ impl Stoat {
     }
 
     fn editor_insert_newline(&mut self, editor_id: EditorId, buffer_id: BufferId) {
-        let insertion = match self.newest_cursor_offset(editor_id) {
+        // Repeat replays one string, and there is no one string when every
+        // cursor continues its own line. The newest cursor's is what the
+        // uniform insertion recorded before the others had their own.
+        let newest = match self.newest_cursor_offset(editor_id) {
             Some(offset) => self.newline_continuation(buffer_id, offset),
             None => "\n".to_string(),
         };
-        self.editor_insert(editor_id, buffer_id, &insertion);
+        if let Some(run) = self.current_insert_run.as_mut() {
+            run.push_str(&newest);
+        }
+
+        let cursors = self.editor_cursor_offsets(editor_id);
+        let insertions: Vec<(usize, usize, String)> = cursors
+            .into_iter()
+            .map(|(id, offset)| {
+                let text = self.newline_continuation(buffer_id, offset);
+                (id, offset, text)
+            })
+            .collect();
+
+        self.editor_insert_each(editor_id, buffer_id, insertions);
     }
 
     /// Delete a per-selection range at every cursor in one multi-edit, mirroring
@@ -16409,6 +16496,42 @@ mod tests {
         h.type_keys("enter");
         h.settle();
         assert_eq!(focused_buffer_string(&h), "\thello\n\t\n");
+    }
+
+    #[test]
+    fn enter_indents_each_cursor_by_its_own_line() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "note.txt", b"\tfoo\nbar\n");
+        h.type_keys("C");
+        h.type_keys("A");
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(focused_buffer_string(&h), "\tfoo\n\t\nbar\n\n");
+    }
+
+    #[test]
+    fn each_cursor_lands_after_its_own_continuation() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "note.txt", b"\tfoo\nbar\n");
+        h.type_keys("C");
+        h.type_keys("A");
+        h.type_keys("enter");
+        // Typing next is what reveals where each cursor actually landed, the
+        // continuations differing in length so a uniform shift misplaces one.
+        h.type_keys("x");
+        h.settle();
+        assert_eq!(focused_buffer_string(&h), "\tfoo\n\tx\nbar\nx\n");
+    }
+
+    #[test]
+    fn enter_continues_a_comment_only_on_the_comment_line() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"let a = 1;\n// note\n");
+        h.type_keys("C");
+        h.type_keys("A");
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(focused_buffer_string(&h), "let a = 1;\n\n// note\n// \n");
     }
 
     #[test]
