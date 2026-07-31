@@ -161,7 +161,8 @@ fn apply_or_resolve_additional_edits(
         let edits = resolved.additional_text_edits?;
         (!edits.is_empty()).then_some(AcceptedImports { buffer_id, edits })
     });
-    stoat.pending_completion_accept = Some(task);
+    stoat.pending_completion_accept =
+        crate::action_handlers::lsp::DocumentStamp::take(stoat, buffer_id).map(|at| (at, task));
 }
 
 /// The server to route `item`'s `completionItem/resolve` back to: the server
@@ -204,19 +205,22 @@ fn apply_additional_edits(stoat: &mut Stoat, buffer_id: BufferId, edits: Vec<lsp
 /// cursor rides edit-tracking anchors, so imports inserted above it keep
 /// it correct. Returns `true` when the buffer changed.
 pub(crate) fn pump_completion_accept(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_completion_accept.take() else {
+    let Some((requested_at, mut task)) = stoat.pending_completion_accept.take() else {
         return false;
     };
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
+        // Imports name lines in the text the accept left behind. Typing since
+        // then moves them, and an import landing mid-line is worse than none.
+        Poll::Ready(Some(_)) if !requested_at.is_current(stoat) => false,
         Poll::Ready(Some(imports)) => {
             apply_additional_edits(stoat, imports.buffer_id, imports.edits);
             true
         },
         Poll::Ready(None) => false,
         Poll::Pending => {
-            stoat.pending_completion_accept = Some(task);
+            stoat.pending_completion_accept = Some((requested_at, task));
             false
         },
     }
@@ -613,6 +617,40 @@ mod tests {
             buffer_text(&h, &path),
             "use foo;\nbarbaz",
             "the resolved import is applied above the completion",
+        );
+    }
+
+    #[test]
+    fn a_resolved_import_is_dropped_when_the_buffer_moved_under_it() {
+        let mut h = TestHarness::default();
+        let path = open_scratch(&mut h, "");
+        enable_resolve(&h);
+        h.fake_lsp()
+            .set_completion_resolve("barbaz", resolved_with_import("barbaz", "use foo;\n"));
+        h.type_keys("i");
+        h.type_text("bar");
+        install_popup(&mut h, vec![lsp_row("barbaz", 0..3)], 0..3);
+
+        dispatch(&mut h.stoat, &AcceptCompletion);
+
+        // The import names a line in the text the accept left behind. Edited
+        // directly because a keypress would also pump the reply, closing the
+        // window before the edit lands.
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .edit(0..0, "x");
+        h.settle();
+
+        assert_eq!(
+            buffer_text(&h, &path),
+            "xbarbaz",
+            "an import landed against text it was not resolved for"
         );
     }
 

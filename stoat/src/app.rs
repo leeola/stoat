@@ -1304,8 +1304,10 @@ pub struct Stoat {
     /// [`action_handlers::lsp::pump_lsp_code_action_resolve`]; on
     /// `Ready(Some(edit))` the edit is applied via
     /// [`crate::lsp::edit_apply::apply_workspace_edit`].
-    pub(crate) pending_code_action_resolve:
-        Option<stoat_scheduler::Task<Option<lsp_types::WorkspaceEdit>>>,
+    pub(crate) pending_code_action_resolve: Option<(
+        action_handlers::lsp::DocumentStamp,
+        stoat_scheduler::Task<Option<lsp_types::WorkspaceEdit>>,
+    )>,
 
     /// In-flight `textDocument/prepareRename` request. On response,
     /// [`action_handlers::lsp::pump_lsp_prepare_rename`] opens
@@ -1324,7 +1326,10 @@ pub struct Stoat {
     /// [`action_handlers::lsp::pump_lsp_rename`]; on `Ready(Some(edit))`
     /// the edit is applied via
     /// [`crate::lsp::edit_apply::apply_workspace_edit`].
-    pub(crate) pending_rename: Option<stoat_scheduler::Task<Option<lsp_types::WorkspaceEdit>>>,
+    pub(crate) pending_rename: Option<(
+        action_handlers::lsp::DocumentStamp,
+        stoat_scheduler::Task<Option<lsp_types::WorkspaceEdit>>,
+    )>,
 
     /// In-flight `textDocument/documentSymbol` request. Polled by
     /// [`action_handlers::lsp::pump_lsp_symbol_picker`], which installs the
@@ -1406,8 +1411,10 @@ pub struct Stoat {
     /// 300ms timeout. Polled by
     /// [`crate::completion::accept::pump_completion_accept`], which
     /// applies the resolved edits to the captured buffer.
-    pub(crate) pending_completion_accept:
-        Option<stoat_scheduler::Task<Option<crate::completion::accept::AcceptedImports>>>,
+    pub(crate) pending_completion_accept: Option<(
+        action_handlers::lsp::DocumentStamp,
+        stoat_scheduler::Task<Option<crate::completion::accept::AcceptedImports>>,
+    )>,
 
     /// Buffer signature `(BufferId, version)` recorded at the most
     /// recent completion-trigger call. The trigger pipeline returns

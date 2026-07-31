@@ -3304,19 +3304,26 @@ pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
 /// the app. On `Ready(None)` the resolve produced no edit, which is a
 /// silent no-op.
 pub(crate) fn pump_lsp_code_action_resolve(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_code_action_resolve.take() else {
+    let Some((requested_at, mut task)) = stoat.pending_code_action_resolve.take() else {
         return false;
     };
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some(_)) if !requested_at.is_current(stoat) => {
+            set_lsp_status(
+                stoat,
+                "lsp: code action skipped, buffer changed".to_string(),
+            );
+            true
+        },
         Poll::Ready(Some(edit)) => {
             apply_code_action_edit(stoat, edit);
             true
         },
         Poll::Ready(None) => true,
         Poll::Pending => {
-            stoat.pending_code_action_resolve = Some(task);
+            stoat.pending_code_action_resolve = Some((requested_at, task));
             false
         },
     }
@@ -3376,7 +3383,9 @@ pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
                     },
                 }
             });
-            stoat.pending_code_action_resolve = Some(task);
+            stoat.pending_code_action_resolve = buffer_id
+                .and_then(|id| DocumentStamp::take(stoat, id))
+                .map(|at| (at, task));
         },
         CodeActionEntry::Command {
             command, server, ..
@@ -3649,7 +3658,7 @@ pub(crate) fn rename_input_submit(stoat: &mut Stoat) -> bool {
             },
         }
     });
-    stoat.pending_rename = Some(task);
+    stoat.pending_rename = DocumentStamp::take(stoat, rename_state.buffer_id).map(|at| (at, task));
     true
 }
 
@@ -3666,12 +3675,16 @@ pub(crate) fn rename_input_cancel(stoat: &mut Stoat) -> bool {
 
 /// Poll any in-flight rename task and apply its [`WorkspaceEdit`].
 pub(crate) fn pump_lsp_rename(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_rename.take() else {
+    let Some((requested_at, mut task)) = stoat.pending_rename.take() else {
         return false;
     };
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some(_)) if !requested_at.is_current(stoat) => {
+            set_lsp_status(stoat, "lsp: rename skipped, buffer changed".to_string());
+            true
+        },
         Poll::Ready(Some(edit)) => {
             if let Err(err) = crate::lsp::edit_apply::apply_workspace_edit(stoat, edit) {
                 tracing::warn!(
@@ -3684,7 +3697,7 @@ pub(crate) fn pump_lsp_rename(stoat: &mut Stoat) -> bool {
         },
         Poll::Ready(None) => true,
         Poll::Pending => {
-            stoat.pending_rename = Some(task);
+            stoat.pending_rename = Some((requested_at, task));
             false
         },
     }
@@ -7997,6 +8010,57 @@ mod tests {
         h.settle();
         assert!(h.stoat.rename_input.is_none());
         assert_eq!(buffer_text(&h, &path), "fn bar() {}\n");
+    }
+
+    /// Move the focused buffer on without going through a keypress, which would
+    /// also pump the reply and close the window the guard exists for.
+    fn edit_focused_buffer_directly(h: &mut TestHarness, text: &str) {
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .edit(0..0, text);
+    }
+
+    #[test]
+    fn a_rename_reply_is_dropped_when_the_buffer_moved_under_it() {
+        use lsp_types::{Position as LspPosition, PrepareRenameResponse, Range as LspRange};
+        let mut h = TestHarness::with_size(80, 24);
+        enable_rename(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_prepare_rename(
+            path.to_str().unwrap(),
+            0,
+            0,
+            PrepareRenameResponse::Range(LspRange::new(
+                LspPosition::new(0, 3),
+                LspPosition::new(0, 6),
+            )),
+        );
+        h.fake_lsp().set_rename(
+            path.to_str().unwrap(),
+            0,
+            0,
+            rename_workspace_edit(path.to_str().unwrap(), 0, 3, 3, "bar"),
+        );
+        h.type_keys("space l r");
+        h.settle();
+
+        crate::action_handlers::lsp::rename_input_submit(&mut h.stoat);
+        edit_focused_buffer_directly(&mut h, "x");
+        h.settle();
+
+        assert_eq!(buffer_text(&h, &path), "xfn foo() {}\n");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("lsp: rename skipped, buffer changed"),
+        );
     }
 
     #[test]
