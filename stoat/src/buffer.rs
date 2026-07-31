@@ -555,16 +555,24 @@ impl TextBuffer {
     }
 
     /// Whether the visible text is byte-identical to the content captured at the
-    /// last [`Self::mark_clean`]. Compares lengths first -- O(1), and always
-    /// different for an insert or delete -- then streams bytes across chunk
-    /// boundaries, so the O(n) walk runs only for a length-preserving edit.
-    /// Always false before the first clean point, when no saved text exists.
+    /// last [`Self::mark_clean`]. Always false before the first clean point,
+    /// when no saved text exists.
+    ///
+    /// Compares each rope's summary first, which is O(1) and carries the line
+    /// and character counts, the UTF-16 length, and the longest row alongside
+    /// the byte length. Two texts that differ almost always differ in one of
+    /// those, and that is enough to answer, which matters because this runs
+    /// after every edit and the walk below is O(file).
+    ///
+    /// Equal summaries do not mean equal text, so the byte walk still decides
+    /// those. It is what a length-preserving edit costs, a case toggle or a
+    /// replacement of like for like.
     fn matches_saved_text(&self) -> bool {
         let Some(saved) = &self.saved_text else {
             return false;
         };
         let current = &self.snapshot.visible_text;
-        saved.len() == current.len()
+        saved.summary() == current.summary()
             && saved
                 .chunks()
                 .flat_map(str::bytes)

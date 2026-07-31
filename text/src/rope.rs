@@ -19,7 +19,13 @@ const MAX_BASE: usize = Bitmap::BITS as usize;
 /// below it fit in one, so the merge never has to split again.
 const MIN_BASE: usize = MAX_BASE / 2;
 
-#[derive(Clone, Default, Debug)]
+/// A rope's shape, summed from its chunks.
+///
+/// Equality is over the whole shape, which is a property of the text rather
+/// than of how it happens to be chunked. Two ropes holding the same bytes
+/// compare equal however they were built, which is what lets a caller use
+/// inequality as proof that two ropes differ without reading either.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct TextSummary {
     pub len: usize,
     pub len_utf16: OffsetUtf16,
@@ -3617,6 +3623,100 @@ mod chunk_density_tests {
             "after 300 edits over {} bytes the rope holds {} chunks, against {floor} for the text",
             rope.len(),
             chunk_count(&rope),
+        );
+    }
+}
+
+/// Whether a rope's summary depends on how its text got chunked.
+///
+/// A caller that treats unequal summaries as proof of unequal text is only
+/// right if identical text always summarises identically. The combine has a
+/// tie-break on the longest row and branches on whether a side spans rows, and
+/// chunk boundaries differ widely between a rope built in one push, one built
+/// in pieces, and one arrived at through edits.
+#[cfg(test)]
+mod summary_identity_tests {
+    use super::*;
+
+    /// The same text, reached four ways that chunk it differently.
+    fn built_every_way(text: &str) -> Vec<(&'static str, Rope)> {
+        let one_push = Rope::from(text);
+
+        let mut in_pieces = Rope::new();
+        for piece in text.as_bytes().chunks(3) {
+            in_pieces.push(std::str::from_utf8(piece).expect("ascii fixture"));
+        }
+
+        let mut appended = Rope::new();
+        for piece in text.as_bytes().chunks(MAX_BASE + 1) {
+            appended.append(Rope::from(
+                std::str::from_utf8(piece).expect("ascii fixture"),
+            ));
+        }
+
+        // Reached by editing. Each marker goes in and straight back out, so the
+        // text is what it started as while the chunking has been churned.
+        let mut edited = Rope::from(text);
+        for at in (0..=text.len()).step_by(5) {
+            edited.replace(at..at, "@@@");
+            edited.replace(at..at + 3, "");
+        }
+
+        vec![
+            ("one push", one_push),
+            ("in pieces", in_pieces),
+            ("appended", appended),
+            ("edited", edited),
+        ]
+    }
+
+    #[test]
+    fn the_same_text_summarises_the_same_however_it_was_built() {
+        // Some fixtures land on the same layout whichever way they are built,
+        // since appending merges seams. At least one has to actually differ, or
+        // this compares summaries of identically chunked ropes and proves
+        // nothing about chunking.
+        let mut laid_out_differently = false;
+
+        for text in [
+            "",
+            "a",
+            "no newlines at all, just one long row of text here",
+            "short\nrows\nof\nvarying\nlength\nhere\n",
+            // Two rows of equal length, which is what the longest-row tie-break
+            // decides between.
+            "equalrow\nequalrow\nshort\n",
+            "trailing newline\n",
+            "\n\n\nleading blanks\n",
+            &"filler line that runs past a chunk\n".repeat(9),
+        ] {
+            let built = built_every_way(text);
+            for (label, rope) in &built {
+                assert_eq!(
+                    rope.to_string(),
+                    text,
+                    "{label} must hold the fixture's text"
+                );
+            }
+            let layouts: Vec<Vec<usize>> = built
+                .iter()
+                .map(|(_, rope)| rope.chunks.iter().map(|c| c.text.len()).collect())
+                .collect();
+            laid_out_differently |= layouts.iter().any(|l| *l != layouts[0]);
+
+            let (_, first) = &built[0];
+            for (label, rope) in &built[1..] {
+                assert_eq!(
+                    rope.summary(),
+                    first.summary(),
+                    "{label} summarises {text:?} differently from one push"
+                );
+            }
+        }
+
+        assert!(
+            laid_out_differently,
+            "no fixture reached two different chunk layouts, so nothing here tested chunking"
         );
     }
 }
