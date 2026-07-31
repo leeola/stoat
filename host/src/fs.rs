@@ -342,8 +342,18 @@ impl FsHost for LocalFs {
         tmp.write_all(data)?;
         tmp.as_file().sync_all()?;
 
-        if let Ok(meta) = std::fs::metadata(&dest) {
-            std::fs::set_permissions(tmp.path(), meta.permissions())?;
+        match std::fs::metadata(&dest) {
+            // Ownership first. An unprivileged chown clears the setuid and
+            // setgid bits, so copying the mode afterwards is what puts them
+            // back on a file that carried them.
+            Ok(meta) => {
+                copy_ownership(&meta, tmp.path());
+                std::fs::set_permissions(tmp.path(), meta.permissions())?;
+            },
+            // A temp file is created private so its half-written contents are
+            // not readable, which is not the mode a file the user just created
+            // should keep.
+            Err(_) => set_created_permissions(tmp.path())?,
         }
         tmp.persist(&dest).map_err(|e| e.error)?;
         Ok(())
@@ -502,10 +512,73 @@ fn has_siblings(_dest: &Path) -> bool {
     false
 }
 
+/// Give `tmp` the permissions a file the user has just created should carry.
+///
+/// A newly created regular file is granted read and write to everyone, minus
+/// whatever the umask withholds. That is what the kernel would have done had
+/// the file been opened directly rather than assembled under a temporary name.
+#[cfg(unix)]
+fn set_created_permissions(tmp: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = 0o666 & !process_umask();
+    std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_created_permissions(_tmp: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// The permission bits this process withholds from files it creates.
+///
+/// There is no call that reads a umask, only one that replaces it and hands
+/// back what was there, so the value is recovered by setting it and putting it
+/// straight back. That leaves a window where the process umask is the probe
+/// value. It is read once and nothing else here sets a umask, so the window is
+/// accepted rather than worked around.
+#[cfg(unix)]
+fn process_umask() -> u32 {
+    static UMASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+    *UMASK.get_or_init(|| unsafe {
+        // SAFETY: umask takes and returns a mode by value and touches no
+        // memory. It cannot fail.
+        let previous = libc::umask(0o022);
+        libc::umask(previous);
+        previous as u32
+    })
+}
+
+/// Give `tmp` the owner and group recorded in `meta`.
+///
+/// Failure is ignored, leaving the file owned by whoever is running the editor.
+/// Handing a file to another user takes a privilege the editor usually lacks,
+/// and refusing the save over it would be worse than saving it under the wrong
+/// name.
+///
+/// The owner and group go separately because one chown carrying both is
+/// all-or-nothing. Bundled, an unprivileged process that cannot set the owner
+/// would lose the group with it, which is the part it could have kept.
+#[cfg(unix)]
+fn copy_ownership(meta: &std::fs::Metadata, tmp: &Path) {
+    use std::os::unix::fs::MetadataExt;
+
+    let _ = std::os::unix::fs::chown(tmp, None, Some(meta.gid()));
+    let _ = std::os::unix::fs::chown(tmp, Some(meta.uid()), None);
+}
+
+#[cfg(not(unix))]
+fn copy_ownership(_meta: &std::fs::Metadata, _tmp: &Path) {}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::{FsHost, LocalFs};
-    use std::{fs, os::unix::fs::MetadataExt, path::Path};
+    use std::{
+        fs,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        path::Path,
+    };
     use tempfile::TempDir;
 
     fn read(path: &Path) -> Vec<u8> {
@@ -531,6 +604,93 @@ mod tests {
         LocalFs.write_atomic(&path, b"new").expect("write");
 
         assert_eq!(read(&path), b"new");
+    }
+
+    /// A group the running user belongs to that is not `current`, or `None`
+    /// when they belong to no other. Moving a file to such a group is what
+    /// puts something behind the claim that its group survived a save.
+    fn other_group(current: u32) -> Option<u32> {
+        let mut buf = [0u32; 64];
+        // SAFETY: getgroups writes at most the count it is given, which is the
+        // buffer's own length, and reports how many it wrote.
+        let found = unsafe { libc::getgroups(buf.len() as i32, buf.as_mut_ptr()) };
+        buf.iter()
+            .take(found.max(0) as usize)
+            .copied()
+            .find(|gid| *gid != current)
+    }
+
+    #[test]
+    fn a_new_file_lands_with_umask_permissions() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("fresh.txt");
+
+        LocalFs.write_atomic(&path, b"new").expect("write");
+
+        let umask = unsafe {
+            let previous = libc::umask(0o022);
+            libc::umask(previous);
+            previous
+        };
+        assert_eq!(
+            fs::metadata(&path).expect("meta").mode() & 0o777,
+            0o666 & !(umask as u32),
+            "a created file gets what the umask allows, not the temp file's mode"
+        );
+    }
+
+    #[test]
+    fn a_replaced_file_keeps_its_mode() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("a.txt");
+        fs::write(&path, b"old").expect("seed");
+        fs::set_permissions(&path, PermissionsExt::from_mode(0o640)).expect("chmod");
+
+        LocalFs.write_atomic(&path, b"new").expect("write");
+
+        assert_eq!(fs::metadata(&path).expect("meta").mode() & 0o777, 0o640);
+    }
+
+    #[test]
+    fn a_replaced_file_keeps_its_setgid_bit() {
+        // An unprivileged chown that moves a group-executable file to another
+        // group clears setgid, so this only holds while the ownership is copied
+        // before the mode rather than after. Both halves of that are needed:
+        // the group has to actually change, and the file has to be executable
+        // by it, or the kernel leaves the bit alone regardless of order.
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("a.sh");
+        fs::write(&path, b"old").expect("seed");
+
+        let seeded = fs::metadata(&path).expect("meta").gid();
+        if let Some(gid) = other_group(seeded) {
+            std::os::unix::fs::chown(&path, None, Some(gid)).expect("chgrp");
+        }
+        fs::set_permissions(&path, PermissionsExt::from_mode(0o2750)).expect("chmod");
+
+        LocalFs.write_atomic(&path, b"new").expect("write");
+
+        assert_eq!(fs::metadata(&path).expect("meta").mode() & 0o7777, 0o2750);
+    }
+
+    #[test]
+    fn a_replaced_file_keeps_its_group() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("a.txt");
+        fs::write(&path, b"old").expect("seed");
+
+        let seeded = fs::metadata(&path).expect("meta").gid();
+        let expected = match other_group(seeded) {
+            Some(gid) => {
+                std::os::unix::fs::chown(&path, None, Some(gid)).expect("chgrp");
+                gid
+            },
+            None => seeded,
+        };
+
+        LocalFs.write_atomic(&path, b"new").expect("write");
+
+        assert_eq!(fs::metadata(&path).expect("meta").gid(), expected);
     }
 
     #[test]

@@ -10,5 +10,6 @@ workspace = true
 [dependencies]
 compact_str.workspace = true
 ignore.workspace = true
+libc.workspace = true
 notify.workspace = true
 tempfile.workspace = true
