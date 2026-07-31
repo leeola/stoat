@@ -13,6 +13,12 @@ type Bitmap = u16;
 
 const MAX_BASE: usize = Bitmap::BITS as usize;
 
+/// Smallest chunk [`Rope::append`] leaves at a seam it controls.
+///
+/// Half a chunk is where merging starts paying and stays safe. Two chunks each
+/// below it fit in one, so the merge never has to split again.
+const MIN_BASE: usize = MAX_BASE / 2;
+
 #[derive(Clone, Default, Debug)]
 pub struct TextSummary {
     pub len: usize,
@@ -445,8 +451,42 @@ impl Rope {
         }
     }
 
+    /// Concatenate `other` onto this rope, merging the seam when it would leave
+    /// two partial chunks against each other.
+    ///
+    /// Every edit rebuilds a rope by appending a prefix, the new text, and a
+    /// suffix, and the suffix starts wherever the cursor stopped, so it is
+    /// partial by construction. Left alone those chunks never merge again, and
+    /// the count drifts with the number of edits rather than the size of the
+    /// text, deepening the tree for every later descent.
     pub fn append(&mut self, other: Rope) {
-        self.chunks.append(other.chunks, ());
+        let Some(incoming) = other.chunks.first().map(|chunk| chunk.text.len()) else {
+            return;
+        };
+        // Under half a chunk on either side is the point past which merging is
+        // worth it and cannot overflow, since two such chunks fit in one.
+        let merge = incoming < MIN_BASE
+            || self
+                .chunks
+                .last()
+                .is_some_and(|last| last.text.len() < MIN_BASE);
+        if !merge {
+            self.chunks.append(other.chunks, ());
+            return;
+        }
+
+        // Everything past the boundary chunk, which appends untouched.
+        let rest = {
+            let mut chunks = other.chunks.cursor::<()>(());
+            chunks.next();
+            chunks.next();
+            chunks.suffix()
+        };
+        // The boundary chunk goes back through `push`, which is the one path
+        // that fills this rope's tail before opening a new chunk.
+        let first = other.chunks.first().expect("a first chunk was just read");
+        self.push(first.text.as_str());
+        self.chunks.append(rest, ());
     }
 
     pub fn cursor(&self, offset: usize) -> Cursor<'_> {
@@ -3520,5 +3560,63 @@ mod line_walk_tests {
             "row three's index and length"
         );
         assert_eq!(walk.next_len(), None, "the walk stops at the end row");
+    }
+}
+
+/// Chunk-count drift under repeated edits.
+///
+/// Every edit rebuilds the rope from a prefix, the new text, and a suffix, and
+/// the suffix begins wherever the cursor stopped. Without merging at that seam
+/// the count climbs with the number of edits rather than with the size of the
+/// text, and it never recovers.
+#[cfg(test)]
+mod chunk_density_tests {
+    use super::*;
+
+    fn chunk_count(rope: &Rope) -> usize {
+        rope.chunks.iter().count()
+    }
+
+    /// The seam is worth merging when either side is short, and an edit only
+    /// exercises one of those. Here the incoming chunk is not short, so the
+    /// tail's own shortfall is the only thing that can trigger the merge.
+    #[test]
+    fn a_short_tail_absorbs_an_incoming_chunk_that_fits() {
+        let mut rope = Rope::from("a".repeat(MAX_BASE + 1).as_str());
+        assert_eq!(chunk_count(&rope), 2, "a full chunk and a one-byte tail");
+
+        rope.append(Rope::from("b".repeat(MIN_BASE).as_str()));
+        assert_eq!(
+            chunk_count(&rope),
+            2,
+            "the incoming chunk fits in the tail, so it joins it rather than following it"
+        );
+    }
+
+    #[test]
+    fn scattered_replaces_leave_the_chunk_count_near_the_text() {
+        let mut seed = 0x5deece66d_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        let mut rope = Rope::from("abcdefghij".repeat(200).as_str());
+        for _ in 0..300 {
+            let len = rope.len();
+            let at = rope.clip_offset((next() as usize) % (len + 1), Bias::Left);
+            let end = rope.clip_offset((at + (next() as usize) % 6).min(len), Bias::Right);
+            rope.replace(at..end, "xy");
+        }
+
+        let floor = rope.len().div_ceil(MAX_BASE);
+        assert!(
+            chunk_count(&rope) <= floor * 3 / 2,
+            "after 300 edits over {} bytes the rope holds {} chunks, against {floor} for the text",
+            rope.len(),
+            chunk_count(&rope),
+        );
     }
 }
