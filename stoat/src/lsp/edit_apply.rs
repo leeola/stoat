@@ -34,7 +34,10 @@ use lsp_types::{
     DocumentChangeOperation, DocumentChanges, ResourceOp, TextEdit, Uri, WorkspaceEdit,
 };
 use snafu::{ResultExt, Snafu};
-use std::path::{Path, PathBuf};
+use std::{
+    cmp::Reverse,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -195,9 +198,23 @@ fn uri_to_path(uri: &Uri) -> Result<PathBuf, WorkspaceEditError> {
 }
 
 /// Apply a set of LSP [`TextEdit`]s to the buffer for `path`, opening it
-/// if needed. Edits are sorted descending and applied right-to-left so
-/// earlier ranges keep their offsets, converting each range against the
-/// live rope. The spec guarantees the edits do not overlap.
+/// if needed.
+///
+/// Every range converts to bytes against the text as it stands before any of
+/// them run, and they apply from the end of the buffer backwards, so nothing is
+/// ever measured against text an earlier edit has already moved. The spec
+/// guarantees the edits do not overlap, which is what makes converting them all
+/// up front well defined.
+///
+/// Edits sharing a position apply later-in-the-array first, which leaves the
+/// earlier one ahead of it in the text. That is what the spec's array order for
+/// same-position inserts amounts to once the edits run backwards.
+///
+/// The order is taken from each range's end rather than its start. For
+/// non-overlapping edits the two agree, and where an insert shares a start with
+/// a replace, ending order applies the replace first and leaves the insertion
+/// standing. Ordering by start there would apply the insert into the span the
+/// replace is about to consume, swallowing it.
 pub(crate) fn apply_text_edits_to_buffer(
     stoat: &mut Stoat,
     path: &Path,
@@ -213,18 +230,20 @@ pub(crate) fn apply_text_edits_to_buffer(
         .buffers
         .get(buffer_id)
         .expect("buffer was just opened");
-    let mut sorted = edits;
-    sorted.sort_by(|a, b| {
-        b.range
-            .start
-            .line
-            .cmp(&a.range.start.line)
-            .then_with(|| b.range.start.character.cmp(&a.range.start.character))
-    });
     let mut guard = buffer.write().expect("buffer poisoned");
-    for edit in sorted {
-        let byte_range = lsp_range_to_byte_range(guard.rope(), edit.range, encoding);
-        guard.edit(byte_range, &edit.new_text);
+
+    let mut converted: Vec<(usize, std::ops::Range<usize>, String)> = edits
+        .into_iter()
+        .enumerate()
+        .map(|(index, edit)| {
+            let byte_range = lsp_range_to_byte_range(guard.rope(), edit.range, encoding);
+            (index, byte_range, edit.new_text)
+        })
+        .collect();
+    converted.sort_by_key(|(index, range, _)| Reverse((range.end, *index)));
+
+    for (_, range, new_text) in converted {
+        guard.edit(range, &new_text);
     }
     Ok(buffer_id)
 }
@@ -394,6 +413,83 @@ mod tests {
         };
         apply_workspace_edit(&mut h.stoat, edit).expect("apply");
         assert_eq!(buffer_text(&h, &path), "aBcdEf\n");
+    }
+
+    /// Apply `edits` to `path` through the changes map, which is the carrier
+    /// with no versioning to get in the way of what is under test.
+    fn apply_edits(h: &mut TestHarness, path: &Path, edits: Vec<TextEdit>) {
+        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+        changes.insert(file_uri(path), edits);
+        let edit = WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        };
+        apply_workspace_edit(&mut h.stoat, edit).expect("apply");
+    }
+
+    #[test]
+    fn inserts_at_one_position_keep_the_order_the_server_sent() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = PathBuf::from("/ws/a.rs");
+        open_buffer_with_text(&mut h, &path, "fn main() {}\n");
+
+        // The shape a code action adding two imports takes.
+        apply_edits(
+            &mut h,
+            &path,
+            vec![
+                text_edit(0, 0, 0, "use a;\n"),
+                text_edit(0, 0, 0, "use b;\n"),
+            ],
+        );
+
+        assert_eq!(
+            buffer_text(&h, &path),
+            "use a;\nuse b;\nfn main() {}\n",
+            "the second insert landed ahead of the first"
+        );
+    }
+
+    #[test]
+    fn an_insert_sharing_a_start_with_a_replace_measures_the_original() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = PathBuf::from("/ws/a.rs");
+        open_buffer_with_text(&mut h, &path, "abcdef\n");
+
+        apply_edits(
+            &mut h,
+            &path,
+            vec![text_edit(0, 0, 0, "X"), text_edit(0, 0, 3, "Y")],
+        );
+
+        assert_eq!(
+            buffer_text(&h, &path),
+            "XYdef\n",
+            "the replace was measured against text the insert had already moved"
+        );
+    }
+
+    #[test]
+    fn a_replace_listed_before_the_insert_sharing_its_start_keeps_both() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = PathBuf::from("/ws/a.rs");
+        open_buffer_with_text(&mut h, &path, "abcdef\n");
+
+        // The two overlap at the start, which the spec forbids, so no array
+        // order settles which comes first. What can be promised either way is
+        // that neither edit is consumed by the other.
+        apply_edits(
+            &mut h,
+            &path,
+            vec![text_edit(0, 0, 3, "Y"), text_edit(0, 0, 0, "X")],
+        );
+
+        assert_eq!(
+            buffer_text(&h, &path),
+            "XYdef\n",
+            "the insert landed inside the span the replace then consumed"
+        );
     }
 
     #[test]
