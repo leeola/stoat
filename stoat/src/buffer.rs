@@ -225,9 +225,12 @@ impl TextBuffer {
         let old_fragments = std::mem::replace(&mut self.snapshot.fragments, SumTree::new(cx));
         let mut cursor = old_fragments.cursor::<usize>(cx);
         let mut new_text_inserted = false;
+        let mut deleted_rope = DeletedRebuild::new(range.start);
 
         // Copy all fragments before the edit start
-        new_fragments.append(cursor.slice(&range.start, Bias::Right), cx);
+        let prefix = cursor.slice(&range.start, Bias::Right);
+        deleted_rope.carry(&self.snapshot.deleted_text, prefix.summary().text.deleted);
+        new_fragments.append(prefix, cx);
 
         let mut delete_remaining = range.end - range.start;
 
@@ -267,6 +270,7 @@ impl TextBuffer {
                     deleted.deletions.push(timestamp);
                     push_insertion(&mut new_insertions, &deleted);
                     new_fragments.push(deleted, cx);
+                    deleted_rope.take(&self.snapshot.visible_text, to_delete_here);
                     delete_remaining -= to_delete_here;
                 }
 
@@ -324,6 +328,7 @@ impl TextBuffer {
                     cursor.next();
                 }
             } else {
+                deleted_rope.carry(&self.snapshot.deleted_text, fragment.len as usize);
                 new_fragments.push(fragment.clone(), cx);
                 cursor.next();
             }
@@ -339,6 +344,7 @@ impl TextBuffer {
                         deleted.visible = false;
                         deleted.deletions.push(timestamp);
                         new_fragments.push(deleted, cx);
+                        deleted_rope.take(&self.snapshot.visible_text, frag_len);
                         delete_remaining -= frag_len;
                         cursor.next();
                     } else {
@@ -350,6 +356,7 @@ impl TextBuffer {
                         deleted_part.deletions.push(timestamp);
                         push_insertion(&mut new_insertions, &deleted_part);
                         new_fragments.push(deleted_part, cx);
+                        deleted_rope.take(&self.snapshot.visible_text, delete_remaining);
 
                         if !text.is_empty() {
                             let new_frag_id =
@@ -398,6 +405,7 @@ impl TextBuffer {
                     }
                 },
                 Some(fragment) => {
+                    deleted_rope.carry(&self.snapshot.deleted_text, fragment.len as usize);
                     new_fragments.push(fragment.clone(), cx);
                     cursor.next();
                 },
@@ -427,7 +435,9 @@ impl TextBuffer {
         }
 
         // Copy remaining fragments
-        new_fragments.append(cursor.suffix(), cx);
+        let suffix = cursor.suffix();
+        deleted_rope.carry(&self.snapshot.deleted_text, suffix.summary().text.deleted);
+        new_fragments.append(suffix, cx);
 
         // Update insertions tree
         let mut all_insertions = self.snapshot.insertions.clone();
@@ -435,16 +445,11 @@ impl TextBuffer {
             all_insertions.insert_or_replace(ins, ());
         }
 
-        // Capture deleted text before mutating the visible rope
-        if range.start < range.end {
-            let deleted_bytes = self.snapshot.visible_text.slice(range.clone());
-            self.snapshot.deleted_text.append(deleted_bytes);
-        }
-
         // Update the rope
         self.snapshot.visible_text.replace(range, text);
 
         // Store new state
+        self.snapshot.deleted_text = deleted_rope.text;
         self.snapshot.fragments = new_fragments;
         self.snapshot.insertions = all_insertions;
         self.snapshot.version = timestamp;
@@ -795,6 +800,50 @@ impl Default for TextBuffer {
 
 fn last_id<'a>(tree: &'a SumTree<Fragment>, _cx: &Option<u64>) -> &'a Locator {
     tree.last().map(|f| &f.id).unwrap_or(Locator::min_ref())
+}
+
+/// Builds the deleted rope for one edit, in document order.
+///
+/// The deleted rope holds the bytes of every non-visible fragment concatenated
+/// in the order those fragments appear in the tree, which is what lets undo
+/// find a fragment's bytes by counting the deleted lengths ahead of it. So an
+/// edit cannot simply append what it deletes. Bytes deleted later can belong
+/// earlier in the document than bytes deleted before them, so appending would
+/// hand undo some other deletion's bytes.
+///
+/// Bytes reach the new rope from two places, each read in ascending order, so
+/// each side needs only a running offset. Text already deleted comes from the
+/// old deleted rope, and text this edit deletes is still in the visible one.
+struct DeletedRebuild {
+    text: Rope,
+    already_deleted: usize,
+    being_deleted: usize,
+}
+
+impl DeletedRebuild {
+    /// `range_start` is where in the visible rope this edit starts deleting.
+    fn new(range_start: usize) -> Self {
+        Self {
+            text: Rope::new(),
+            already_deleted: 0,
+            being_deleted: range_start,
+        }
+    }
+
+    /// Carry over `len` bytes of text that was already deleted and stays so.
+    fn carry(&mut self, old_deleted: &Rope, len: usize) {
+        let end = self.already_deleted + len;
+        self.text
+            .append(old_deleted.slice(self.already_deleted..end));
+        self.already_deleted = end;
+    }
+
+    /// Take `len` bytes that this edit is deleting out of the visible rope.
+    fn take(&mut self, old_visible: &Rope, len: usize) {
+        let end = self.being_deleted + len;
+        self.text.append(old_visible.slice(self.being_deleted..end));
+        self.being_deleted = end;
+    }
 }
 
 fn push_insertion(insertions: &mut Vec<InsertionFragment>, fragment: &Fragment) {
@@ -2014,5 +2063,170 @@ mod tests {
         let cps = b.checkpoints();
         assert_eq!(cps[0].label.as_deref(), Some("before refactor"));
         assert_eq!(cps[1].label, None);
+    }
+
+    #[test]
+    fn undoing_a_delete_restores_that_deletes_own_bytes() {
+        let mut b = buf("abcdef");
+
+        b.edit(4..5, "");
+        b.edit(1..2, "");
+        assert_eq!(b.snapshot.visible_text.to_string(), "acdf");
+
+        b.undo();
+        assert_eq!(
+            b.snapshot.visible_text.to_string(),
+            "abcdf",
+            "undo restored another deletion's bytes"
+        );
+    }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) % n as u64) as usize
+        }
+    }
+
+    /// Each fragment in tree order as its insertion timestamp, its offset into
+    /// that insertion, whether it is visible, and its bytes read from whichever
+    /// rope the flag claims holds them.
+    ///
+    /// Asserts on the way that neither rope carries bytes past the fragments
+    /// claiming them, which is what a mis-copied span leaves behind.
+    fn fragment_spans(b: &TextBuffer) -> Vec<(u64, u32, bool, String)> {
+        let cx = &None;
+        let mut visible_offset = 0usize;
+        let mut deleted_offset = 0usize;
+        let mut spans = Vec::new();
+
+        for fragment in b.snapshot.fragments.cursor::<()>(cx) {
+            let len = fragment.len as usize;
+            let text = if fragment.visible {
+                let slice = b
+                    .snapshot
+                    .visible_text
+                    .slice(visible_offset..visible_offset + len);
+                visible_offset += len;
+                slice.to_string()
+            } else {
+                let slice = b
+                    .snapshot
+                    .deleted_text
+                    .slice(deleted_offset..deleted_offset + len);
+                deleted_offset += len;
+                slice.to_string()
+            };
+
+            spans.push((
+                fragment.timestamp,
+                fragment.insertion_offset,
+                fragment.visible,
+                text,
+            ));
+        }
+
+        assert_eq!(
+            visible_offset,
+            b.snapshot.visible_text.len(),
+            "visible rope holds bytes no fragment claims"
+        );
+        assert_eq!(
+            deleted_offset,
+            b.snapshot.deleted_text.len(),
+            "deleted rope holds bytes no fragment claims"
+        );
+
+        spans
+    }
+
+    /// Assert the full contract of an undo or redo rebuild.
+    ///
+    /// Every fragment survives in order carrying the same bytes, each one's
+    /// visibility agrees with the undo map, and the ones that flipped are
+    /// stamped with the resulting version.
+    fn assert_toggle_preserved(before: &[(u64, u32, bool, String)], b: &TextBuffer) {
+        let after = fragment_spans(b);
+        assert_eq!(before.len(), after.len(), "fragment count changed");
+
+        for (i, (was, now)) in before.iter().zip(&after).enumerate() {
+            assert_eq!(
+                (was.0, was.1, &was.3),
+                (now.0, now.1, &now.3),
+                "fragment {i} lost its identity or its bytes"
+            );
+        }
+
+        // The head sentinel carries no bytes, so which rope it claims is not
+        // observable and no rebuild has to agree with the undo map about it.
+        let cx = &None;
+        for (i, fragment) in b
+            .snapshot
+            .fragments
+            .cursor::<()>(cx)
+            .enumerate()
+            .filter(|(_, fragment)| fragment.len > 0)
+        {
+            assert_eq!(
+                fragment.visible,
+                fragment.is_visible_with_undos(&b.snapshot.undo_map),
+                "fragment {i} visibility disagrees with the undo map"
+            );
+
+            if before[i].2 != fragment.visible {
+                assert_eq!(
+                    fragment.max_undos,
+                    b.version(),
+                    "fragment {i} flipped without being stamped"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn undo_and_redo_preserve_every_fragment_and_its_bytes() {
+        const INSERTS: [&str; 6] = ["", "x", "hello ", "\n", "\u{65e5}\u{672c}", "  \n  "];
+
+        let mut rng = Lcg(0x9E37_79B9_7F4A_7C15);
+
+        for _ in 0..64 {
+            let mut b = buf("the quick brown fox\njumps over the lazy dog\nsphinx of quartz\n");
+
+            for _ in 0..30 {
+                match rng.below(10) {
+                    0..=5 => {
+                        b.begin_group(Vec::new());
+
+                        for _ in 0..1 + rng.below(3) {
+                            let text = b.snapshot.visible_text.to_string();
+                            let mut bounds: Vec<usize> =
+                                text.char_indices().map(|(i, _)| i).collect();
+                            bounds.push(text.len());
+
+                            let a = bounds[rng.below(bounds.len())];
+                            let z = bounds[rng.below(bounds.len())];
+                            b.edit(a.min(z)..a.max(z), INSERTS[rng.below(INSERTS.len())]);
+                        }
+
+                        b.seal_group(Vec::new());
+                    },
+                    6..=8 => {
+                        let before = fragment_spans(&b);
+                        b.undo();
+                        assert_toggle_preserved(&before, &b);
+                    },
+                    _ => {
+                        let before = fragment_spans(&b);
+                        b.redo();
+                        assert_toggle_preserved(&before, &b);
+                    },
+                }
+            }
+        }
     }
 }
