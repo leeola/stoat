@@ -1348,8 +1348,10 @@ pub struct Stoat {
     /// [`action_handlers::lsp::pump_lsp_format`]; on `Ready(Some)`
     /// the returned text edits are applied via
     /// [`crate::lsp::edit_apply::apply_workspace_edit`].
-    pub(crate) pending_format_request:
-        Option<stoat_scheduler::Task<Option<action_handlers::lsp::FormatResponse>>>,
+    pub(crate) pending_format_request: Option<(
+        action_handlers::lsp::DocumentStamp,
+        stoat_scheduler::Task<Option<action_handlers::lsp::FormatResponse>>,
+    )>,
     /// In-flight format-on-save task. Set when a save with `format_on_save`
     /// enabled arms a formatting request bounded by a save-time budget;
     /// [`action_handlers::file::pump_format_on_save`] applies any edits and

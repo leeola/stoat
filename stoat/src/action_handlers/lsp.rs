@@ -402,6 +402,43 @@ fn set_lsp_status(stoat: &mut Stoat, msg: String) {
     stoat.set_status(msg);
 }
 
+/// The buffer a server request was made about, and its version at that moment.
+///
+/// A reply names positions in the text the server was told about, so if the
+/// buffer has moved since, those positions name different text and applying the
+/// reply shifts every edit by whatever was typed. The stamp is what lets the
+/// reply be recognized as stale and dropped instead.
+///
+/// The version compared is the buffer's own, not the version last synced to the
+/// server. The synced one only advances when the sync pump runs, so a reply
+/// landing between an edit and the next sync would compare equal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DocumentStamp {
+    buffer_id: BufferId,
+    version: u64,
+}
+
+impl DocumentStamp {
+    /// Stamp `buffer_id` at the version it holds now. `None` when there is no
+    /// such buffer, in which case there is nothing to make a request about.
+    pub(crate) fn take(stoat: &Stoat, buffer_id: BufferId) -> Option<Self> {
+        let version = stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)?
+            .read()
+            .expect("buffer lock")
+            .version();
+        Some(Self { buffer_id, version })
+    }
+
+    /// Whether the buffer still holds the version this was taken at. A buffer
+    /// that has since closed counts as changed, there being nothing to apply to.
+    pub(crate) fn is_current(&self, stoat: &Stoat) -> bool {
+        Self::take(stoat, self.buffer_id) == Some(*self)
+    }
+}
+
 /// Report why a user-launched LSP action for `what` cannot be served, then
 /// return [`UpdateEffect::Redraw`] so the frame repaints with the message.
 ///
@@ -4549,7 +4586,7 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
             },
         }
     });
-    stoat.pending_format_request = Some(task);
+    stoat.pending_format_request = DocumentStamp::take(stoat, buffer_id).map(|at| (at, task));
     UpdateEffect::None
 }
 
@@ -4613,7 +4650,7 @@ pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
             },
         }
     });
-    stoat.pending_format_request = Some(task);
+    stoat.pending_format_request = DocumentStamp::take(stoat, buffer_id).map(|at| (at, task));
     UpdateEffect::None
 }
 
@@ -4622,12 +4659,16 @@ pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
 /// [`crate::lsp::edit_apply::apply_workspace_edit`] are logged and
 /// swallowed so a malformed edit does not crash the app.
 pub(crate) fn pump_lsp_format(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_format_request.take() else {
+    let Some((requested_at, mut task)) = stoat.pending_format_request.take() else {
         return false;
     };
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some(_)) if !requested_at.is_current(stoat) => {
+            set_lsp_status(stoat, "lsp: format skipped, buffer changed".to_string());
+            true
+        },
         Poll::Ready(Some(FormatResponse { uri, edits })) => {
             #[allow(clippy::mutable_key_type)]
             let mut changes: std::collections::HashMap<Uri, Vec<TextEdit>> =
@@ -4649,7 +4690,7 @@ pub(crate) fn pump_lsp_format(stoat: &mut Stoat) -> bool {
         },
         Poll::Ready(None) => true,
         Poll::Pending => {
-            stoat.pending_format_request = Some(task);
+            stoat.pending_format_request = Some((requested_at, task));
             false
         },
     }
@@ -9172,6 +9213,46 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Format);
         h.settle();
         assert_eq!(buffer_text(&h, &path), "fn foo() {}\n");
+    }
+
+    #[test]
+    fn a_format_reply_is_dropped_when_the_buffer_moved_under_it() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_format(&h);
+        let root = seed(&mut h, &[("main.rs", "fn  foo (){}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![format_text_edit(0, 0, 1, 0, "fn foo() {}\n")],
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Format);
+
+        // The buffer moves while the request is in flight, so every position
+        // the server sent back names text one character along from what it
+        // measured. Edited directly because a keypress would also pump the
+        // reply, closing the window before the edit lands.
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .edit(0..0, "x");
+        h.settle();
+
+        assert_eq!(
+            buffer_text(&h, &path),
+            "xfn  foo (){}\n",
+            "the reply was applied to text the server never saw"
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("lsp: format skipped, buffer changed"),
+        );
     }
 
     #[test]
