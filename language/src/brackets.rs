@@ -29,11 +29,29 @@ pub fn matching_bracket(
     rope: &Rope,
     offset: usize,
 ) -> Option<usize> {
+    matching_bracket_scanning(query, root, rope, offset, true)
+}
+
+/// [`matching_bracket`], with the query restriction made optional so a test can
+/// compare the restricted answer against the whole-file one.
+fn matching_bracket_scanning(
+    query: &Query,
+    root: Node<'_>,
+    rope: &Rope,
+    offset: usize,
+    restrict: bool,
+) -> Option<usize> {
     let open_ix = query.capture_index_for_name("open")?;
     let close_ix = query.capture_index_for_name("close")?;
 
     let provider = RopeTextProvider { rope };
     let mut cursor = QueryCursorHandle::new();
+    if restrict {
+        // Every match that can answer contains the cursor. A direct hit has it
+        // inside a delimiter and the enclosing case has it between them, so
+        // matches elsewhere in the file cannot win and need not be visited.
+        cursor.set_byte_range(offset..offset + 1);
+    }
     let mut matches = cursor.matches(query, root, provider);
 
     // Innermost pair whose delimiters enclose `offset`, as (open.start,
@@ -105,6 +123,62 @@ mod tests {
             &rope,
             offset,
         )
+    }
+
+    /// Nested and sibling pairs of several kinds, deep enough that a cursor in
+    /// the middle has many pairs enclosing it and many more nowhere near it.
+    fn nested_source() -> String {
+        let mut src = String::from("fn main() {\n");
+        for depth in 0..12 {
+            let pad = "    ".repeat(depth + 1);
+            src.push_str(&format!("{pad}if a[{depth}] == (b + {depth}) {{\n"));
+        }
+        src.push_str(&"    ".repeat(13));
+        src.push_str("let s = \"text (paren) here\";\n");
+        for depth in (0..12).rev() {
+            src.push_str(&"    ".repeat(depth + 1));
+            src.push_str("}\n");
+        }
+        src.push_str("}\n");
+        src
+    }
+
+    #[test]
+    fn restricting_the_query_finds_what_scanning_the_file_found() {
+        let lang = lang("rust");
+        let src = nested_source();
+        let tree = parse(&lang, &src);
+        let rope = Rope::from(src.as_str());
+        let query = lang.bracket_query.as_ref().expect("bracket query");
+
+        let mut answered = 0;
+        for offset in 0..src.len() {
+            if !src.is_char_boundary(offset) {
+                continue;
+            }
+            let restricted =
+                super::matching_bracket_scanning(query, tree.root_node(), &rope, offset, true);
+            let whole_file =
+                super::matching_bracket_scanning(query, tree.root_node(), &rope, offset, false);
+
+            assert_eq!(
+                restricted,
+                whole_file,
+                "offset {offset} in {:?}",
+                &src[offset.saturating_sub(20)..(offset + 20).min(src.len())]
+            );
+            // The restriction could plausibly break where the cursor sits
+            // between a pair's delimiters, touching neither, so that only the
+            // pattern as a whole covers it. Counted so this cannot go vacuous.
+            let on_delimiter = src[offset..].starts_with(['(', ')', '[', ']', '{', '}', '"']);
+            answered += usize::from(whole_file.is_some() && !on_delimiter);
+        }
+
+        assert!(
+            answered > 100,
+            "the fixture has to put the cursor inside plenty of pairs rather than on them, \
+             or nothing here tested the case that could break: {answered}"
+        );
     }
 
     #[test]
