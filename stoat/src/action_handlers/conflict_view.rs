@@ -4,7 +4,7 @@ use crate::{
     conflict_session::{ConflictSession, ConflictViewState, FileResolveState},
     display_map::{BlockPlacement, BlockProperties, BlockStyle},
     editor_state::{EditorId, EditorState},
-    host::git::GitRepo,
+    host::{git::GitRepo, ConflictedFile},
     jumplist::JumpEntry,
     merge_view::{ChunkState, ConflictChunk, MergeDoc, MergeRow, RowPick, Side},
     pane::View,
@@ -17,7 +17,7 @@ use std::{
     sync::Arc,
 };
 use stoat_action::ActionKind;
-use stoat_text::{Anchor, Bias, SelectionGoal};
+use stoat_text::{Anchor, Bias, LineEnding, SelectionGoal};
 
 /// Open the three-way conflict resolve view on the repository's conflicted
 /// files, swapping a scratch merged-result editor into the focused pane.
@@ -116,12 +116,15 @@ fn prepare_file(
 ) -> Option<(FileResolveState, Option<usize>)> {
     let stages = repo.conflict_stages(path)?;
     let language = stoat.language_registry.for_path(path);
-    let doc = MergeDoc::build(
-        stages.ancestor.as_deref().unwrap_or(""),
-        stages.ours.as_deref().unwrap_or(""),
-        stages.theirs.as_deref().unwrap_or(""),
-        language.as_ref(),
-    );
+    // The stages carry the conflicted file's own line endings, and the center
+    // buffer is built out of them. Without normalizing here the carriage
+    // returns become marker-block content, and resolving the file writes them
+    // back doubled or mixed depending on which rows the user touched.
+    let ending = stage_line_ending(&stages);
+    let ancestor = LineEnding::normalize(stages.ancestor.as_deref().unwrap_or(""));
+    let ours = LineEnding::normalize(stages.ours.as_deref().unwrap_or(""));
+    let theirs = LineEnding::normalize(stages.theirs.as_deref().unwrap_or(""));
+    let doc = MergeDoc::build(&ancestor, &ours, &theirs, language.as_ref());
     let (center_text, chunk_ranges) = doc.initial_center_text();
     let first_chunk_offset = chunk_ranges.first().map(|r| r.start);
     let executor = stoat.executor.clone();
@@ -137,6 +140,7 @@ fn prepare_file(
     if let Some(lang) = language {
         ws.buffers.set_language(buffer_id, lang);
     }
+    ws.buffers.set_line_ending(buffer_id, ending);
 
     let chunk_anchors: Vec<(Anchor, Anchor)> = {
         let guard = buffer.read().expect("buffer poisoned");
@@ -187,6 +191,19 @@ fn prepare_file(
         },
         first_chunk_offset,
     ))
+}
+
+/// The line terminator the conflicted file uses, read from its index stages.
+///
+/// Ours is the working-tree side and answers first. A file added on only one
+/// side has no ours stage, so the others stand in rather than defaulting the
+/// answer away.
+fn stage_line_ending(stages: &ConflictedFile) -> LineEnding {
+    [&stages.ours, &stages.theirs, &stages.ancestor]
+        .into_iter()
+        .flatten()
+        .find(|text| text.contains('\n'))
+        .map_or(LineEnding::default(), |text| LineEnding::detect(text))
 }
 
 /// Close the conflict view, restoring the original editor into the focused pane
@@ -440,7 +457,11 @@ pub(super) fn conflict_apply(stoat: &mut Stoat) {
         guard.rope().to_string()
     };
 
-    if let Err(err) = stoat.fs_host.write_atomic(&path, text.as_bytes()) {
+    let ending = stoat.active_workspace().buffers.line_ending(buffer_id);
+    if let Err(err) = stoat
+        .fs_host
+        .write_atomic(&path, ending.restore(&text).as_bytes())
+    {
         stoat.set_status(format!("write failed: {err}"));
         return;
     }

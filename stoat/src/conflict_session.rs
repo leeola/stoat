@@ -694,6 +694,39 @@ mod tests {
     }
 
     #[test]
+    fn apply_writes_a_crlf_conflict_back_as_crlf() {
+        // The center buffer is built out of the index stages rather than read
+        // from disk, so it needs the same normalization an opened file gets.
+        // Left alone the carriage returns become marker-block content, and the
+        // resolved file comes back with them doubled.
+        let mut h = Stoat::test();
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git().add_repo(git_root.clone()).conflicted_file(
+            "f.txt",
+            Some("base\r\n"),
+            Some("ours\r\n"),
+            Some("theirs\r\n"),
+        );
+        dispatch_conflict(&mut h);
+        let path = git_root.join("f.txt");
+
+        assert!(
+            !center_text(&h).contains('\r'),
+            "the center buffer must hold no carriage returns"
+        );
+
+        pick(&mut h, &ConflictPickOurs);
+        pick(&mut h, &ConflictApply);
+
+        let mut written = Vec::new();
+        h.stoat
+            .fs_host
+            .read(&path, &mut written)
+            .expect("resolved file written");
+        assert_eq!(String::from_utf8(written).unwrap(), "ours\r\n");
+    }
+
+    #[test]
     fn apply_writes_honest_markers_when_a_chunk_is_unresolved() {
         let mut h = Stoat::test();
         let git_root = h.stoat.active_workspace().git_root.clone();

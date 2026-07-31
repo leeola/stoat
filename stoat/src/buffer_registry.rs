@@ -14,7 +14,7 @@ use std::{
 use stoat_language::{
     drop_syntax_in_background, structural_diff::DiffResult, Language, SyntaxMap, SyntaxState,
 };
-use stoat_text::Anchor;
+use stoat_text::{Anchor, LineEnding};
 
 /// Anchored, start-sorted LSP symbol kinds for one buffer, keyed by span. Built
 /// from a semantic-tokens response and queried by offset via
@@ -117,6 +117,10 @@ struct BufferEntry {
     /// [`BufferRegistry::mark_shown`]. It orders eviction of hidden buffers'
     /// highlight state, dropping the lowest values first.
     last_shown: u64,
+    /// The line terminator the file on disk was found to use. The buffer itself
+    /// always holds LF, so this is remembered only to write the file back in the
+    /// form it arrived in. Scratch buffers keep the LF default.
+    line_ending: LineEnding,
 }
 
 pub(crate) struct BufferRegistry {
@@ -231,6 +235,7 @@ impl BufferRegistry {
                 disk_mtime: None,
                 auto_reload: AutoReloadMode::Off,
                 last_shown: 0,
+                line_ending: LineEnding::default(),
             },
         );
         (id, buffer)
@@ -265,6 +270,7 @@ impl BufferRegistry {
                 disk_mtime: None,
                 auto_reload: AutoReloadMode::Off,
                 last_shown: 0,
+                line_ending: LineEnding::default(),
             },
         );
         (id, buffer)
@@ -320,6 +326,23 @@ impl BufferRegistry {
     /// scratch buffer, an unknown id, or a file whose metadata never read.
     pub(crate) fn disk_mtime(&self, id: BufferId) -> Option<SystemTime> {
         self.buffers.get(&id).and_then(|e| e.disk_mtime)
+    }
+
+    /// Record the line terminator `id`'s file was read with, so a save can write
+    /// it back in the same form. No-op for an unknown id.
+    pub(crate) fn set_line_ending(&mut self, id: BufferId, ending: LineEnding) {
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.line_ending = ending;
+        }
+    }
+
+    /// The line terminator `id`'s file uses. A scratch buffer or unknown id
+    /// answers [`LineEnding::Lf`], which is what an unread file writes as.
+    pub(crate) fn line_ending(&self, id: BufferId) -> LineEnding {
+        self.buffers
+            .get(&id)
+            .map(|e| e.line_ending)
+            .unwrap_or_default()
     }
 
     /// Flag `id` to be re-read from disk as its file grows, or clear the flag.
@@ -805,6 +828,7 @@ impl BufferRegistry {
                     disk_mtime: None,
                     auto_reload: AutoReloadMode::Off,
                     last_shown: 0,
+                    line_ending: LineEnding::default(),
                 },
             );
         }

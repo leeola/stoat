@@ -2,6 +2,7 @@ mod anchor;
 mod buffer_id;
 mod fragment;
 mod indent;
+mod line_ending;
 mod locator;
 mod movement;
 mod offset_utf16;
@@ -19,6 +20,7 @@ pub use fragment::{
     Fragment, FragmentSummary, FragmentTextSummary, InsertionFragment, InsertionFragmentKey,
 };
 pub use indent::{detect_indent_style, IndentStyle};
+pub use line_ending::LineEnding;
 pub use locator::Locator;
 pub use movement::{
     categorize_char, find_decimal_number_at, find_decimal_number_seeking, find_number_at,

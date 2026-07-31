@@ -23,7 +23,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use stoat_scheduler::{Executor, Task};
-use stoat_text::{Bias, SelectionGoal};
+use stoat_text::{Bias, LineEnding, SelectionGoal};
 
 /// Write the focused buffer to its backing file via
 /// [`crate::host::FsHost::write_atomic`], clear the dirty flag, and notify the
@@ -302,7 +302,11 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, for
         guard.rope().to_string()
     };
 
-    if let Err(err) = stoat.fs_host.write_atomic(path, text.as_bytes()) {
+    let ending = stoat.active_workspace().buffers.line_ending(buffer_id);
+    if let Err(err) = stoat
+        .fs_host
+        .write_atomic(path, ending.restore(&text).as_bytes())
+    {
         tracing::warn!(target: "stoat::file", ?err, ?path, "buffer save failed");
         stoat.set_status(format!("save failed: {err}"));
         return false;
@@ -500,6 +504,15 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) {
         let Ok(new) = read_string_via_host(&*stoat.fs_host, &path) else {
             continue;
         };
+        // Before the prefix diff, which would otherwise compare the file's
+        // carriage returns against a buffer that has none and call every line
+        // changed. The file may also have changed style since it was opened, so
+        // its current one is the honest answer.
+        stoat
+            .active_workspace_mut()
+            .buffers
+            .set_line_ending(id, LineEnding::detect(&new));
+        let new = LineEnding::normalize(&new).into_owned();
 
         let (old_len, old_last_row, common) = {
             let guard = buffer.read().expect("buffer poisoned");
@@ -732,6 +745,11 @@ fn reload_from_disk(stoat: &mut Stoat, id: BufferId, path: &Path) -> ReloadOutco
     let Ok(new) = read_string_via_host(&*stoat.fs_host, path) else {
         return ReloadOutcome::Missing;
     };
+    stoat
+        .active_workspace_mut()
+        .buffers
+        .set_line_ending(id, LineEnding::detect(&new));
+    let new = LineEnding::normalize(&new).into_owned();
     let Some(buffer) = stoat.active_workspace().buffers.get(id) else {
         return ReloadOutcome::Missing;
     };
@@ -1250,18 +1268,24 @@ fn finish_open(
     let lang = stoat.language_registry.for_path(absolute);
     let executor = stoat.executor.clone();
 
+    let ending = LineEnding::detect(content);
+    let content = LineEnding::normalize(content);
+
     let (buffer_id, buffer) = {
         let ws = stoat.active_workspace_mut();
         // Opening a path already registered hands back the existing buffer and
-        // discards `content`. The mtime came with that discarded read, so
-        // adopting it would move the baseline onto a write the buffer never
-        // saw, and the change-guard would compare that write against itself.
+        // discards `content`. Everything read alongside it describes a file the
+        // buffer never took, so none of it may replace what is already recorded.
+        // The mtime matters most. Adopting it would move the change-guard's
+        // baseline onto a write the buffer never saw, leaving the guard
+        // comparing that write against itself.
         let existed = ws.buffers.id_for_path(absolute).is_some();
-        let (buffer_id, buffer) = ws.buffers.open(absolute, content);
-        if let Some(mtime) = disk_mtime
-            && !existed
-        {
-            ws.buffers.set_disk_mtime(buffer_id, mtime);
+        let (buffer_id, buffer) = ws.buffers.open(absolute, &content);
+        if !existed {
+            ws.buffers.set_line_ending(buffer_id, ending);
+            if let Some(mtime) = disk_mtime {
+                ws.buffers.set_disk_mtime(buffer_id, mtime);
+            }
         }
         if let Some(lang) = lang
             && ws.buffers.language_for(buffer_id).is_none()
@@ -1271,7 +1295,7 @@ fn finish_open(
         (buffer_id, buffer)
     };
 
-    super::lsp::notify_buffer_opened(stoat, buffer_id, absolute, content);
+    super::lsp::notify_buffer_opened(stoat, buffer_id, absolute, &content);
 
     super::jump::record_pane_switch(stoat, target, buffer_id);
     show_buffer_in_pane(stoat, target, buffer_id, buffer, executor)
@@ -1642,6 +1666,22 @@ mod tests {
 
         assert_eq!(buffer_text(&h, id), "line1\nline2\n");
         assert!(!focused_dirty(&h.stoat), "a reloaded buffer stays clean");
+    }
+
+    #[test]
+    fn pump_auto_reload_normalizes_before_the_prefix_diff() {
+        // The re-read is compared against the buffer to find the common prefix.
+        // Carriage returns still in the disk text diverge on the first line, so
+        // an ordinary append would be read as a whole-file rewrite, and the
+        // buffer would take the carriage returns as content.
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-crlf");
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"line1\r\n");
+
+        h.fake_fs().insert_file(&path, b"line1\r\nline2\r\n");
+        arm_and_pump(&mut h);
+
+        assert_eq!(buffer_text(&h, id), "line1\nline2\n");
     }
 
     #[test]
@@ -2784,6 +2824,108 @@ mod tests {
         let mut written = Vec::new();
         h.fake_fs().read(&path, &mut written).expect("readable");
         assert_eq!(written, b"external\n", "refused save leaves disk untouched");
+    }
+
+    #[test]
+    fn a_crlf_file_saves_back_as_crlf_unchanged() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/crlf-roundtrip");
+        let path = open_rs(&mut h, &root, "a.rs", b"one\r\ntwo\r\n");
+
+        dispatch(&mut h.stoat, &ForceSaveBuffer);
+        h.settle();
+
+        assert_eq!(on_disk(&h, &path), b"one\r\ntwo\r\n");
+    }
+
+    #[test]
+    fn a_crlf_buffer_holds_no_carriage_returns() {
+        // The whole point of normalizing on load is that nothing downstream has
+        // to know about them. A carriage return left in the buffer is
+        // addressable content. The cursor stops on it, and appending at a line
+        // end lands between it and the newline.
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/crlf-buffer");
+        open_rs(&mut h, &root, "a.rs", b"one\r\ntwo\r\n");
+
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        let text = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .rope()
+            .to_string();
+        assert_eq!(text, "one\ntwo\n");
+    }
+
+    #[test]
+    fn an_edited_crlf_file_saves_uniformly_crlf() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/crlf-edit");
+        let path = open_rs(&mut h, &root, "a.rs", b"one\r\ntwo\r\n");
+
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .edit(0..0, "zero\n");
+
+        dispatch(&mut h.stoat, &ForceSaveBuffer);
+        h.settle();
+
+        assert_eq!(on_disk(&h, &path), b"zero\r\none\r\ntwo\r\n");
+    }
+
+    #[test]
+    fn an_lf_file_is_left_alone() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/lf-untouched");
+        let path = open_rs(&mut h, &root, "a.rs", b"one\ntwo\n");
+
+        dispatch(&mut h.stoat, &ForceSaveBuffer);
+        h.settle();
+
+        assert_eq!(on_disk(&h, &path), b"one\ntwo\n");
+    }
+
+    #[test]
+    fn reloading_a_crlf_file_keeps_the_buffer_in_lf() {
+        // `:e` re-reads from disk straight into the buffer, so it needs the
+        // same normalization the open path does.
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/crlf-reload");
+        let path = open_rs(&mut h, &root, "a.rs", b"one\r\ntwo\r\n");
+        h.fake_fs().insert_file(&path, b"one\r\ntwo\r\nthree\r\n");
+
+        super::reload_focused(&mut h.stoat, true);
+        h.settle();
+
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        let text = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .rope()
+            .to_string();
+        assert_eq!(text, "one\ntwo\nthree\n");
     }
 
     #[test]
