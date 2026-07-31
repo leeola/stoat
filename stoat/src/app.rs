@@ -974,6 +974,12 @@ pub struct Stoat {
     /// that register's content is inserted at the cursor and the
     /// flag clears. Non-char keypresses also clear the flag.
     pub(crate) pending_insert_register: bool,
+    /// Registers whose macros are being replayed right now, innermost last.
+    ///
+    /// A replay re-feeds its keys through the same path a real keypress takes,
+    /// which without this would record the expansion into whatever macro is
+    /// recording, and would let a macro naming itself run forever.
+    pub(crate) replaying_registers: Vec<register::Register>,
     /// Set on `MouseEventKind::Down(Left)` over a focused editor pane, as
     /// `(editor, buffer, moved)`. While `Some`, `Drag(Left)` events extend the
     /// matching editor's primary selection head and set `moved`. `Up(Left)`
@@ -1823,6 +1829,7 @@ impl Stoat {
             pending_register_select: false,
             selected_register: None,
             pending_insert_register: false,
+            replaying_registers: Vec::new(),
             editor_drag: None,
             terminal_drag: None,
             hover_cell: None,
@@ -5765,6 +5772,10 @@ impl Stoat {
         if self.pending_macro_replay {
             self.pending_macro_replay = false;
             if let KeyCode::Char(ch) = key.code {
+                // The register name is half of what a recording needs to replay
+                // this later, and returning here is what would skip the capture
+                // every other key goes through below.
+                action_handlers::macro_recording::capture(self, &key);
                 return action_handlers::macro_recording::execute_replay(self, ch);
             }
             return UpdateEffect::Redraw;
