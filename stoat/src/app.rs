@@ -10359,8 +10359,12 @@ pub(crate) fn parse_buffer_step(
     // positioned as tree-sitter's `old_tree` and each layer's bounds on the
     // text it still covers. The reparse then re-walks only the edited rows
     // for injection changes, keeping the layers elsewhere. Working on a clone
-    // means a reparse that fails leaves the caller's prior map intact for the
-    // fallback below rather than half-interpolated.
+    // leaves the caller's map borrowed rather than taken, for a handful of
+    // refcount bumps.
+    //
+    // The root parsed above is handed in rather than parsed a second time.
+    // That also removes the reparse's only failure mode, so the fallback below
+    // now runs only when there was no prior map to advance.
     let incremental = match (prior_syntax_map.as_ref(), prior.as_ref(), edited.as_ref()) {
         (Some(prior_map), Some(prev), Some((_, edits))) => {
             let mut map = prior_map.clone();
@@ -10368,8 +10372,14 @@ pub(crate) fn parse_buffer_step(
 
             let changed: Vec<Range<usize>> =
                 edits.edits().iter().map(|edit| edit.new.clone()).collect();
-            map.reparse_within_changed_ranges(&new_rope, lang.clone(), cur_version, Some(&changed))
-                .map(|()| map)
+            map.reparse_within_changed_ranges(
+                &new_rope,
+                lang.clone(),
+                cur_version,
+                Some(&changed),
+                Some(&tree),
+            )
+            .map(|()| map)
         },
         _ => None,
     };
@@ -10380,7 +10390,7 @@ pub(crate) fn parse_buffer_step(
     let incremental_reparse = incremental.is_some();
     let syntax_map = incremental.unwrap_or_else(|| {
         let mut map = stoat_language::SyntaxMap::default();
-        let _ = map.reparse(&new_rope, lang.clone(), cur_version);
+        let _ = map.reparse(&new_rope, lang.clone(), cur_version, Some(&tree));
         map
     });
 
@@ -14567,7 +14577,7 @@ mod tests {
         );
         let mut map = first.syntax_map.clone();
         map.interpolate(edits.edits(), &first.syntax.rope_snapshot, &rope);
-        map.reparse(&rope, lang.clone(), snapshot.version)
+        map.reparse(&rope, lang.clone(), snapshot.version, None)
             .expect("reparse should succeed");
         let tree = map
             .snapshot()
