@@ -261,11 +261,6 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
     let fs_host = stoat.fs_host.clone();
     let executor = stoat.executor.clone();
     let home_dir = stoat.env_host.var("HOME").map(PathBuf::from);
-    let encoding = completion_hosts
-        .first()
-        .map(|(_, host)| host.offset_encoding())
-        .unwrap_or(OffsetEncoding::Utf16);
-
     let base_dir = base_dir_for(snapshot.source_path.as_deref(), &snapshot.git_root);
 
     let completion_context = if is_trigger_char {
@@ -280,17 +275,14 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         }
     };
 
-    let lsp_params = if sources.contains(&CompletionSource::Lsp) && !completion_hosts.is_empty() {
-        build_lsp_params(
-            snapshot.source_path.as_deref(),
-            &snapshot.rope,
-            snapshot.cursor_offset,
-            encoding,
-            Some(completion_context),
-        )
-    } else {
-        None
-    };
+    // The pieces a position is built from rather than a built one, since each
+    // host needs the position in the encoding it negotiated.
+    let lsp_request = (sources.contains(&CompletionSource::Lsp) && !completion_hosts.is_empty())
+        .then(|| LspRequest {
+            source_path: snapshot.source_path.clone(),
+            cursor_offset: snapshot.cursor_offset,
+            context: completion_context,
+        });
 
     // A trigger character skips the completion debounce, so without this the
     // position it carries would reach a server whose document is still waiting
@@ -308,10 +300,9 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         completion_hosts,
         fs_host,
         snapshot.rope,
-        encoding,
         base_dir,
         home_dir,
-        lsp_params,
+        lsp_request,
         is_trigger_char,
         pending_change,
     ));
@@ -434,23 +425,20 @@ fn ask_again(
         .filter(|(name, _)| servers.iter().any(|wanted| wanted == name))
         .collect();
 
-    let encoding = hosts
-        .first()
-        .map(|(_, host)| host.offset_encoding())
-        .unwrap_or(OffsetEncoding::Utf16);
-
-    let params = build_lsp_params(
-        snapshot.source_path.as_deref(),
-        &snapshot.rope,
-        snapshot.cursor_offset,
-        encoding,
-        Some(LspCompletionContext {
+    // Unbuilt, so each host is asked in the encoding it negotiated rather than
+    // in whatever the first of them uses.
+    let request = LspRequest {
+        source_path: snapshot.source_path.clone(),
+        cursor_offset: snapshot.cursor_offset,
+        context: LspCompletionContext {
             trigger_kind: CompletionTriggerKind::TRIGGER_FOR_INCOMPLETE_COMPLETIONS,
             trigger_character: None,
-        }),
-    );
+        },
+    };
 
-    let Some(params) = params.filter(|_| !hosts.is_empty()) else {
+    let Some(request) =
+        Some(request).filter(|_| !hosts.is_empty() && snapshot.source_path.is_some())
+    else {
         // The server is no longer there to ask, so what is held is all of it.
         let mut items = carried;
         rank_by_prefix(&mut items, &owned.prefix);
@@ -479,11 +467,21 @@ fn ask_again(
         {
             let ctx = owned.as_borrowed();
             for (name, host) in &hosts {
+                let encoding = host.offset_encoding();
+                let Some(params) = build_lsp_params(
+                    request.source_path.as_deref(),
+                    &rope,
+                    request.cursor_offset,
+                    encoding,
+                    Some(request.context.clone()),
+                ) else {
+                    continue;
+                };
                 let answer = crate::completion::lsp::fetch(
                     &ctx,
                     name,
                     host.as_ref(),
-                    params.clone(),
+                    params,
                     &rope,
                     encoding,
                 )
@@ -673,6 +671,14 @@ fn server_trigger_characters(lsp_host: &Arc<dyn LspHost>) -> Option<Vec<String>>
         .clone()
 }
 
+/// What a completion request needs to build its position, held unbuilt so each
+/// host can have it in the encoding that host negotiated.
+struct LspRequest {
+    source_path: Option<PathBuf>,
+    cursor_offset: usize,
+    context: LspCompletionContext,
+}
+
 fn build_lsp_params(
     source_path: Option<&Path>,
     rope: &Rope,
@@ -702,10 +708,9 @@ async fn run_request(
     completion_hosts: Vec<(String, Arc<dyn LspHost>)>,
     fs_host: Arc<dyn FsHost>,
     rope: Rope,
-    encoding: OffsetEncoding,
     base_dir: PathBuf,
     home_dir: Option<PathBuf>,
-    lsp_params: Option<CompletionParams>,
+    lsp_request: Option<LspRequest>,
     immediate: bool,
     pending_change: Option<Task<()>>,
 ) -> CompletionPopup {
@@ -732,13 +737,25 @@ async fn run_request(
                 ));
             },
             CompletionSource::Lsp => {
-                if let Some(params) = &lsp_params {
+                if let Some(request) = &lsp_request {
                     for (name, host) in &completion_hosts {
+                        // Built per host: the position and the edits that come
+                        // back are both in the encoding this host negotiated.
+                        let encoding = host.offset_encoding();
+                        let Some(params) = build_lsp_params(
+                            request.source_path.as_deref(),
+                            &rope,
+                            request.cursor_offset,
+                            encoding,
+                            Some(request.context.clone()),
+                        ) else {
+                            continue;
+                        };
                         let answer = crate::completion::lsp::fetch(
                             &ctx,
                             name,
                             host.as_ref(),
-                            params.clone(),
+                            params,
                             &rope,
                             encoding,
                         )
@@ -1118,6 +1135,49 @@ mod harness_tests {
             vec![".".to_string()],
             "the request named a position past a character the server was never sent",
         );
+    }
+
+    #[test]
+    fn each_host_is_asked_in_the_encoding_it_negotiated() {
+        use crate::host::OffsetEncoding;
+
+        let mut h = TestHarness::default();
+        let utf8 = h.install_lsp_server("rust", "utf8");
+        let utf16 = h.install_lsp_server("rust", "utf16");
+        for (host, encoding) in [
+            (&utf8, OffsetEncoding::Utf8),
+            (&utf16, OffsetEncoding::Utf16),
+        ] {
+            // Capabilities first: setting them replaces the struct the encoding
+            // is stored in.
+            host.set_capabilities(ServerCapabilities {
+                completion_provider: Some(CompletionOptions::default()),
+                ..ServerCapabilities::default()
+            });
+            host.set_offset_encoding(encoding);
+        }
+
+        // é is two UTF-8 bytes but one UTF-16 unit, so a cursor after "éab"
+        // sits at character 4 for the first server and 3 for the second.
+        let path = PathBuf::from("/ws/buf.rs");
+        h.fake_fs()
+            .insert_files(std::iter::once((path.clone(), "".as_bytes())));
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/ws");
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        h.type_keys("i");
+        h.type_text("\u{e9}ab");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+
+        let character = |host: &Arc<crate::host::FakeLsp>| {
+            host.observed_completions()[0]
+                .text_document_position
+                .position
+                .character
+        };
+        assert_eq!(character(&utf8), 4, "utf-8 counts e-acute as two");
+        assert_eq!(character(&utf16), 3, "utf-16 counts it as one");
     }
 
     #[test]
