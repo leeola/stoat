@@ -1,4 +1,4 @@
-use super::{line_snippet, offset_to_line_column, SearchMatch};
+use super::{line_snippet, line_start_at, offset_to_line_column, SearchMatch};
 use ast_grep_core::{
     matcher::{PatternBuilder, PatternError},
     tree_sitter::{LanguageExt, StrDoc, TSLanguage},
@@ -58,7 +58,7 @@ pub(crate) fn ast_scan_file(
     for m in root.root().find_all(pattern) {
         let start = m.range().start;
         let (line, column) = offset_to_line_column(text, start);
-        let snippet = line_snippet(text, start);
+        let snippet = line_snippet(text, line_start_at(text, start), start);
         out.push(SearchMatch {
             path: path.to_path_buf(),
             offset: start,

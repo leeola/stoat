@@ -164,16 +164,29 @@ pub(crate) fn scan_file(
     let Ok(text) = std::str::from_utf8(&buf) else {
         return;
     };
-    for m in regex.find_iter(text) {
+    // Matches arrive in ascending order, so each one's position is the last
+    // one's plus what lies between them. Recomputing from the start of the file
+    // each time would walk the file once per match.
+    let mut counted_to = 0usize;
+    let mut line = 1u32;
+    let mut line_start = 0usize;
+
+    for m in regex.find_iter(text).take(MATCH_CAP) {
         let start = m.start();
-        let (line, column) = offset_to_line_column(text, start);
-        let snippet = line_snippet(text, start);
+
+        let since = &text[counted_to..start];
+        line += since.bytes().filter(|&b| b == b'\n').count() as u32;
+        if let Some(last) = since.rfind('\n') {
+            line_start = counted_to + last + 1;
+        }
+        counted_to = start;
+
         out.push(SearchMatch {
             path: path.to_path_buf(),
             offset: start,
             line,
-            column,
-            snippet,
+            column: text[line_start..start].chars().count() as u32 + 1,
+            snippet: line_snippet(text, line_start, start),
         });
     }
 }
@@ -181,20 +194,34 @@ pub(crate) fn scan_file(
 /// Convert a byte offset into a `(line, column)` pair, both 1-based, counting
 /// characters (not bytes) for the column. Out-of-range `offset` clamps to the
 /// text length.
-fn offset_to_line_column(text: &str, offset: usize) -> (u32, u32) {
+///
+/// Walks from the start of `text`, so a caller with several ascending offsets
+/// carries its own state instead, as [`scan_file`] does.
+pub(crate) fn offset_to_line_column(text: &str, offset: usize) -> (u32, u32) {
     let clipped = offset.min(text.len());
     let preceding = &text[..clipped];
     let line = preceding.bytes().filter(|&b| b == b'\n').count() as u32 + 1;
-    let line_start = preceding.rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let column = text[line_start..clipped].chars().count() as u32 + 1;
+    let column = text[line_start_at(text, clipped)..clipped].chars().count() as u32 + 1;
     (line, column)
 }
 
-/// Extract the line containing `offset`, trim leading whitespace, and cap at
-/// [`SNIPPET_MAX_CHARS`] for compact display.
-fn line_snippet(text: &str, offset: usize) -> String {
+/// Where the line containing `offset` begins, by searching back for the
+/// newline before it.
+///
+/// For a caller holding one offset. One walking ascending offsets carries the
+/// line start forward instead, as [`scan_file`] does.
+pub(crate) fn line_start_at(text: &str, offset: usize) -> usize {
     let clipped = offset.min(text.len());
-    let line_start = text[..clipped].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    text[..clipped].rfind('\n').map(|i| i + 1).unwrap_or(0)
+}
+
+/// Extract the line starting at `line_start` and containing `offset`, trim
+/// leading whitespace, and cap at [`SNIPPET_MAX_CHARS`] for compact display.
+///
+/// The line start is passed rather than searched for, the caller already
+/// knowing it from the position it computed.
+fn line_snippet(text: &str, line_start: usize, offset: usize) -> String {
+    let clipped = offset.min(text.len());
     let line_end = text[clipped..]
         .find('\n')
         .map(|i| clipped + i)
@@ -205,7 +232,10 @@ fn line_snippet(text: &str, offset: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{line_snippet, offset_to_line_column, scan_file, SearchMatch, SearchMode};
+    use super::{
+        line_snippet, line_start_at, offset_to_line_column, scan_file, SearchMatch, SearchMode,
+        MATCH_CAP,
+    };
     use crate::{
         app::{CODE_SEARCH_AST_DEBOUNCE, CODE_SEARCH_DEBOUNCE},
         host::{FakeFs, FsHost},
@@ -522,10 +552,75 @@ mod tests {
         assert_eq!(offset_to_line_column("café\n", 5), (1, 5));
     }
 
+    /// A file with matches spread across many lines, at varying distances and
+    /// with multi-byte characters between them, which is the shape a carried
+    /// position drifts on.
+    fn dense_matches() -> String {
+        let mut text = String::new();
+        for row in 0..200 {
+            match row % 4 {
+                0 => text.push_str("needle at the start\n"),
+                1 => text.push_str("    caf\u{e9} indented needle here\n"),
+                2 => text.push_str("no match on this line at all\n"),
+                _ => text.push_str("needle needle twice\n"),
+            }
+        }
+        text
+    }
+
+    #[test]
+    fn carrying_the_position_lands_where_recomputing_would() {
+        let text = dense_matches();
+        let (fs, root) = fake_with(&[("dense.rs", text.as_str())]);
+
+        let regex = Regex::new("needle").expect("the pattern compiles");
+        let mut found = Vec::new();
+        scan_file(&fs, &regex, &root.join("dense.rs"), &mut found);
+
+        assert!(
+            found.len() > 100,
+            "the fixture has to carry far enough to drift: {}",
+            found.len()
+        );
+
+        for m in &found {
+            let (line, column) = offset_to_line_column(&text, m.offset);
+            assert_eq!(
+                (m.line, m.column),
+                (line, column),
+                "carried position differs at offset {}",
+                m.offset
+            );
+            assert_eq!(
+                m.snippet,
+                line_snippet(&text, line_start_at(&text, m.offset), m.offset),
+                "carried snippet differs at offset {}",
+                m.offset
+            );
+        }
+    }
+
+    #[test]
+    fn one_file_yields_no_more_than_the_cap() {
+        let text = "needle\n".repeat(MATCH_CAP + 50);
+        let (fs, root) = fake_with(&[("many.rs", text.as_str())]);
+
+        let regex = Regex::new("needle").expect("the pattern compiles");
+        let mut found = Vec::new();
+        scan_file(&fs, &regex, &root.join("many.rs"), &mut found);
+
+        assert_eq!(
+            found.len(),
+            MATCH_CAP,
+            "nothing downstream can show more, so the file stops there"
+        );
+        assert_eq!(found[0].line, 1, "and it stops at the end, not the start");
+    }
+
     #[test]
     fn line_snippet_returns_full_line_trimmed() {
-        assert_eq!(line_snippet("    hello\nbeta\n", 4), "hello");
-        assert_eq!(line_snippet("alpha\n  beta\n", 8), "beta");
+        assert_eq!(line_snippet("    hello\nbeta\n", 0, 4), "hello");
+        assert_eq!(line_snippet("alpha\n  beta\n", 6, 8), "beta");
     }
 
     #[test]
