@@ -50,69 +50,22 @@ pub fn lsp_pos_to_byte_offset(rope: &Rope, pos: Position, encoding: OffsetEncodi
     }
 }
 
-/// Convert LSP [`Position`]s to byte offsets in `rope` in one forward pass.
+/// Convert LSP [`Position`]s to byte offsets in `rope`, in the input order.
 ///
-/// Equivalent to [`lsp_pos_to_byte_offset`] on each position, but walks a single
-/// [`Rope::chars_at`] cursor forward over the positions sorted by
-/// `(line, character)` rather than seeking from the root per position, so a whole
-/// token stream costs O(file) instead of O(tokens * log n). Results are returned
-/// in the input order.
-///
-/// Clips a character past the line end to the line end and a line past EOF to
-/// EOF, matching [`lsp_pos_to_byte_offset`].
+/// Each position is converted through [`lsp_pos_to_byte_offset`], so the cost
+/// is proportional to how many positions arrived rather than to the size of the
+/// buffer. This walked one character cursor from the start of the rope instead,
+/// which beat seeking back when a seek cost more than it does now, but meant a
+/// handful of hints near the end of a large buffer decoded all of it to arrive.
 pub fn lsp_positions_to_byte_offsets_batch(
     rope: &Rope,
     positions: &[Position],
     encoding: OffsetEncoding,
 ) -> Vec<usize> {
-    let mut indexed: Vec<(usize, Position)> = positions.iter().copied().enumerate().collect();
-    indexed.sort_unstable_by_key(|(_, p)| (p.line, p.character));
-
-    let mut results = vec![0usize; positions.len()];
-    let mut chars = rope.chars_at(0).peekable();
-    let mut line = 0u32;
-    let mut col = 0u32;
-    let mut offset = 0usize;
-
-    for (original_idx, pos) in indexed {
-        while line < pos.line {
-            match chars.next() {
-                Some(ch) => {
-                    offset += ch.len_utf8();
-                    if ch == '\n' {
-                        line += 1;
-                        col = 0;
-                    }
-                },
-                None => break,
-            }
-        }
-        while col < pos.character {
-            match chars.peek() {
-                Some(&ch) if ch != '\n' => {
-                    let width = encoding_width(ch, encoding);
-                    if col + width > pos.character {
-                        break;
-                    }
-                    col += width;
-                    offset += ch.len_utf8();
-                    chars.next();
-                },
-                _ => break,
-            }
-        }
-        results[original_idx] = offset;
-    }
-    results
-}
-
-/// The `character` units one `ch` spans in `encoding`.
-fn encoding_width(ch: char, encoding: OffsetEncoding) -> u32 {
-    match encoding {
-        OffsetEncoding::Utf8 => ch.len_utf8() as u32,
-        OffsetEncoding::Utf16 => ch.len_utf16() as u32,
-        OffsetEncoding::Utf32 => 1,
-    }
+    positions
+        .iter()
+        .map(|&pos| lsp_pos_to_byte_offset(rope, pos, encoding))
+        .collect()
 }
 
 /// Converts a byte offset in `rope` to an LSP [`Position`] per
@@ -343,6 +296,32 @@ mod tests {
         }
     }
 
+    /// Literal offsets rather than agreement with the single-position path, so
+    /// the batch's own contract does not rest on the two being the same code.
+    #[test]
+    fn positions_batch_answers_in_input_order() {
+        // "he" then a two-byte e-acute, a newline, then a four-byte emoji and
+        // "ok". Byte offsets: h=0 e=1 é=2..4 \n=4 emoji=5..9 o=9 k=10.
+        let r = rope("he\u{00e9}\n\u{1F600}ok");
+
+        // Row 1 column 2 is past the emoji under UTF-16, which spends two of
+        // its units, and past its first byte under UTF-8.
+        let positions = [pos(1, 2), pos(0, 0), pos(0, 3), pos(1, 0)];
+        assert_eq!(
+            lsp_positions_to_byte_offsets_batch(&r, &positions, OffsetEncoding::Utf16),
+            vec![9, 0, 4, 5],
+            "utf16 offsets, in the order asked for"
+        );
+        assert_eq!(
+            lsp_positions_to_byte_offsets_batch(&r, &positions, OffsetEncoding::Utf32),
+            vec![10, 0, 4, 5],
+            "utf32 counts the emoji as one, so column two clears it and the o"
+        );
+    }
+
+    /// The batch is the per-position conversion applied to each position, so
+    /// this cannot fail as written. It is kept against the batch ever being
+    /// specialized again, which is what it caught back when it was.
     #[test]
     fn positions_batch_matches_per_token() {
         let text = "h\u{00e9}llo\nw\u{00f6}rld\n\u{1F600} tail\nlast line";
@@ -350,8 +329,7 @@ mod tests {
         for enc in ENCODINGS {
             // Positions a server emits sit on character boundaries, so derive
             // them from each char-boundary offset. Add out-of-range and
-            // past-EOF positions (which clip identically both ways) and reverse
-            // the order to exercise the internal sort and scatter.
+            // past-EOF positions, which clip identically both ways.
             let mut positions: Vec<Position> = std::iter::once(0)
                 .chain(text.char_indices().map(|(i, ch)| i + ch.len_utf8()))
                 .map(|off| byte_offset_to_lsp_pos(&r, off, enc))
