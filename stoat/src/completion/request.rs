@@ -51,6 +51,7 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
+use stoat_scheduler::Task;
 use stoat_text::{Point, Rope};
 
 /// Quiet window from the most recent keystroke before a completion
@@ -291,6 +292,15 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         None
     };
 
+    // A trigger character skips the completion debounce, so without this the
+    // position it carries would reach a server whose document is still waiting
+    // on the change debounce and does not have that character yet. A debounced
+    // request waits long enough that the change has already gone out, and
+    // forcing it there would only defeat the quiet window.
+    let pending_change = is_trigger_char
+        .then(|| crate::action_handlers::lsp::flush_pending_did_change(stoat, snapshot.buffer_id))
+        .flatten();
+
     let task = stoat.spawn_woken(run_request(
         executor,
         owned,
@@ -303,6 +313,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         home_dir,
         lsp_params,
         is_trigger_char,
+        pending_change,
     ));
     stoat.pending_completion_request = Some(task);
 }
@@ -696,7 +707,13 @@ async fn run_request(
     home_dir: Option<PathBuf>,
     lsp_params: Option<CompletionParams>,
     immediate: bool,
+    pending_change: Option<Task<()>>,
 ) -> CompletionPopup {
+    // The server has to have the edit this position was measured after before
+    // the request naming that position goes out.
+    if let Some(pending_change) = pending_change {
+        pending_change.await;
+    }
     if !immediate {
         executor.timer(COMPLETION_DEBOUNCE).await;
     }
@@ -1061,6 +1078,45 @@ mod harness_tests {
                 trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
                 trigger_character: Some(".".to_string()),
             }),
+        );
+    }
+
+    #[test]
+    fn a_trigger_character_reaches_the_server_before_the_request_naming_it() {
+        use lsp_types::{TextDocumentSyncCapability, TextDocumentSyncKind};
+        let mut h = TestHarness::default();
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            completion_provider: Some(CompletionOptions {
+                trigger_characters: Some(vec![".".to_string()]),
+                ..CompletionOptions::default()
+            }),
+            text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                TextDocumentSyncKind::INCREMENTAL,
+            )),
+            ..ServerCapabilities::default()
+        });
+        open_scratch(&mut h, "");
+
+        h.type_keys("i");
+        h.type_text(".");
+        // No clock advance, so the change debounce has not run out on its own.
+        h.settle();
+
+        assert_eq!(
+            h.fake_lsp().observed_completions().len(),
+            1,
+            "the trigger character issues its request at once",
+        );
+
+        let changes = h.fake_lsp().observed_changes();
+        let sent: Vec<String> = changes
+            .iter()
+            .flat_map(|c| c.content_changes.iter().map(|e| e.text.clone()))
+            .collect();
+        assert_eq!(
+            sent,
+            vec![".".to_string()],
+            "the request named a position past a character the server was never sent",
         );
     }
 

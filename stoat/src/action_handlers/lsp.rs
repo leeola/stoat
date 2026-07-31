@@ -58,12 +58,16 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
+use stoat_scheduler::Task;
 use stoat_text::{patch::Patch, Anchor, Bias, Point, Rope};
 use tokio::sync::oneshot;
 
-/// Quiet window after the last edit before a buffer's `did_change`
-/// fires. Matches Helix's default and prevents per-keystroke storms
-/// of LSP traffic.
+/// Quiet window after the last edit before a buffer's `did_change` fires,
+/// keeping a typing run from becoming a storm of LSP traffic.
+///
+/// Nothing else waits on this. A request carrying a position has to know the
+/// server holds the text that position was measured against, and so flushes the
+/// window through [`flush_pending_did_change`] rather than racing it.
 pub(crate) const LSP_DID_CHANGE_DEBOUNCE: Duration = Duration::from_millis(50);
 
 /// Direction for [`goto_diagnostic`]. `Next` searches forward from
@@ -493,109 +497,145 @@ pub(crate) fn notify_buffer_changes_pending(stoat: &mut Stoat) {
             }
         }
 
-        // Group the buffer's hosts by the sync kind and encoding each
-        // negotiated, so a FULL host and an INCREMENTAL one -- or two hosts on
-        // different encodings -- each get content changes shaped their own way.
-        // A host on sync NONE takes no change.
-        let mut groups: HostSyncGroups = Vec::new();
-        for host in stoat.hosts_for_buffer(id) {
-            let sync_kind = resolve_sync_kind(&host.capabilities().text_document_sync);
-            if !matches!(
-                sync_kind,
-                TextDocumentSyncKind::FULL | TextDocumentSyncKind::INCREMENTAL
-            ) {
-                continue;
-            }
-            let key = (sync_kind, host.offset_encoding());
-            match groups.iter_mut().find(|(existing, _)| *existing == key) {
-                Some((_, group)) => group.push(host),
-                None => groups.push((key, vec![host])),
-            }
+        if let Some(task) = dispatch_did_change(stoat, id, Some(LSP_DID_CHANGE_DEBOUNCE)) {
+            stoat.lsp_pending_changes.insert(id, task);
         }
-
-        // Each group reads the same last-seen and last-delivered baseline, which
-        // advance only after the plans are built.
-        let plans: Vec<(DispatchPlan, Vec<Arc<dyn LspHost>>)> = groups
-            .into_iter()
-            .filter_map(|((sync_kind, encoding), hosts)| {
-                build_dispatch_plan(stoat, id, sync_kind, encoding).map(|plan| (plan, hosts))
-            })
-            .collect();
-
-        // The change is consumed for this buffer once seen, whether or not any
-        // group took it, mirroring the sync-NONE path.
-        if let Some(buffer) = stoat.active_workspace().buffers.get(id) {
-            let v = buffer.read().expect("buffer lock").version();
-            stoat.lsp_buffer_versions.insert(id, v);
-        }
-
-        if plans.is_empty() {
-            continue;
-        }
-
-        // One monotonic LSP document version per buffer, shared across groups --
-        // a per-server counter buys nothing since each server still sees it rise.
-        let lsp_version = {
-            let version = stoat.lsp_doc_versions.entry(id).or_insert(0);
-            *version += 1;
-            *version
-        };
-
-        // The delivered baseline is per-buffer, so every group targets the same
-        // text and version.
-        let target_text = plans[0].0.target_text.clone();
-        let target_version = plans[0].0.target_buffer_version;
-
-        let dispatches: Vec<(DidChangeTextDocumentParams, Vec<Arc<dyn LspHost>>)> = plans
-            .into_iter()
-            .map(|(plan, hosts)| {
-                (
-                    DidChangeTextDocumentParams {
-                        text_document: VersionedTextDocumentIdentifier {
-                            uri: plan.uri,
-                            version: lsp_version,
-                        },
-                        content_changes: plan.content_changes,
-                    },
-                    hosts,
-                )
-            })
-            .collect();
-
-        let executor = stoat.executor.clone();
-        let last_text = stoat.lsp_last_delivered_text.clone();
-        let last_version = stoat.lsp_last_delivered_buffer_version.clone();
-
-        let task = stoat.executor.spawn(async move {
-            executor.timer(LSP_DID_CHANGE_DEBOUNCE).await;
-            let mut delivered = true;
-            for (params, hosts) in dispatches {
-                for lsp in hosts {
-                    if let Err(err) = lsp.did_change(params.clone()).await {
-                        tracing::warn!(target: "stoat::lsp", ?err, "did_change notification failed");
-                        delivered = false;
-                    }
-                }
-            }
-            // Only advance the delivered baseline when every server in every
-            // group received the change, so a failed server's next delta still
-            // replays it.
-            if delivered {
-                last_text
-                    .lock()
-                    .expect("lsp text mutex")
-                    .insert(id, target_text);
-                last_version
-                    .lock()
-                    .expect("lsp version mutex")
-                    .insert(id, target_version);
-            }
-        });
-        stoat.lsp_pending_changes.insert(id, task);
     }
 
     opened.clear();
     stoat.lsp_drain_buffers = opened;
+}
+
+/// Send `buffer_id`'s pending `did_change` now and hand back the delivery, or
+/// `None` when the servers already have everything in the buffer.
+///
+/// A request that skips its own debounce carries a position measured after an
+/// edit whose change is still sitting in the 50ms timer, so the server resolves
+/// it against text without that edit in it. Typing a trigger character is the
+/// case that shows: the position lands past a character the server cannot see,
+/// and the answer comes back scoped to the wrong thing.
+///
+/// The caller has to await what this returns. Dispatching earlier is not
+/// ordering, and two spawned tasks race.
+///
+/// Dropping the debounce handle cancels its timer before it fires, and a
+/// cancelled delivery never advanced the delivered baseline, so the change
+/// rebuilt here is the one it was holding.
+pub(crate) fn flush_pending_did_change(stoat: &mut Stoat, buffer_id: BufferId) -> Option<Task<()>> {
+    stoat.lsp_pending_changes.remove(&buffer_id);
+    dispatch_did_change(stoat, buffer_id, None)
+}
+
+/// Build `id`'s change for every host that wants one and spawn the delivery,
+/// waiting `debounce` first when given.
+///
+/// `None` when no host takes changes or the delta against what was last
+/// delivered is empty.
+fn dispatch_did_change(
+    stoat: &mut Stoat,
+    id: BufferId,
+    debounce: Option<Duration>,
+) -> Option<Task<()>> {
+    // Group the buffer's hosts by the sync kind and encoding each
+    // negotiated, so a FULL host and an INCREMENTAL one -- or two hosts on
+    // different encodings -- each get content changes shaped their own way.
+    // A host on sync NONE takes no change.
+    let mut groups: HostSyncGroups = Vec::new();
+    for host in stoat.hosts_for_buffer(id) {
+        let sync_kind = resolve_sync_kind(&host.capabilities().text_document_sync);
+        if !matches!(
+            sync_kind,
+            TextDocumentSyncKind::FULL | TextDocumentSyncKind::INCREMENTAL
+        ) {
+            continue;
+        }
+        let key = (sync_kind, host.offset_encoding());
+        match groups.iter_mut().find(|(existing, _)| *existing == key) {
+            Some((_, group)) => group.push(host),
+            None => groups.push((key, vec![host])),
+        }
+    }
+
+    // Each group reads the same last-seen and last-delivered baseline, which
+    // advance only after the plans are built.
+    let plans: Vec<(DispatchPlan, Vec<Arc<dyn LspHost>>)> = groups
+        .into_iter()
+        .filter_map(|((sync_kind, encoding), hosts)| {
+            build_dispatch_plan(stoat, id, sync_kind, encoding).map(|plan| (plan, hosts))
+        })
+        .collect();
+
+    // The change is consumed for this buffer once seen, whether or not any
+    // group took it, mirroring the sync-NONE path.
+    if let Some(buffer) = stoat.active_workspace().buffers.get(id) {
+        let v = buffer.read().expect("buffer lock").version();
+        stoat.lsp_buffer_versions.insert(id, v);
+    }
+
+    if plans.is_empty() {
+        return None;
+    }
+
+    // One monotonic LSP document version per buffer, shared across groups --
+    // a per-server counter buys nothing since each server still sees it rise.
+    let lsp_version = {
+        let version = stoat.lsp_doc_versions.entry(id).or_insert(0);
+        *version += 1;
+        *version
+    };
+
+    // The delivered baseline is per-buffer, so every group targets the same
+    // text and version.
+    let target_text = plans[0].0.target_text.clone();
+    let target_version = plans[0].0.target_buffer_version;
+
+    let dispatches: Vec<(DidChangeTextDocumentParams, Vec<Arc<dyn LspHost>>)> = plans
+        .into_iter()
+        .map(|(plan, hosts)| {
+            (
+                DidChangeTextDocumentParams {
+                    text_document: VersionedTextDocumentIdentifier {
+                        uri: plan.uri,
+                        version: lsp_version,
+                    },
+                    content_changes: plan.content_changes,
+                },
+                hosts,
+            )
+        })
+        .collect();
+
+    let executor = stoat.executor.clone();
+    let last_text = stoat.lsp_last_delivered_text.clone();
+    let last_version = stoat.lsp_last_delivered_buffer_version.clone();
+
+    Some(stoat.executor.spawn(async move {
+        if let Some(debounce) = debounce {
+            executor.timer(debounce).await;
+        }
+        let mut delivered = true;
+        for (params, hosts) in dispatches {
+            for lsp in hosts {
+                if let Err(err) = lsp.did_change(params.clone()).await {
+                    tracing::warn!(target: "stoat::lsp", ?err, "did_change notification failed");
+                    delivered = false;
+                }
+            }
+        }
+        // Only advance the delivered baseline when every server in every
+        // group received the change, so a failed server's next delta still
+        // replays it.
+        if delivered {
+            last_text
+                .lock()
+                .expect("lsp text mutex")
+                .insert(id, target_text);
+            last_version
+                .lock()
+                .expect("lsp version mutex")
+                .insert(id, target_version);
+        }
+    }))
 }
 
 /// A buffer's fanned-out hosts grouped by the sync kind and encoding each
@@ -622,10 +662,22 @@ fn build_dispatch_plan(
     let buffer = workspace.buffers.get(id)?;
     let buffer_b = buffer.read().expect("buffer lock");
     let current_version = buffer_b.version();
-    let last_seen = stoat.lsp_buffer_versions.get(&id).copied().unwrap_or(0);
-    if current_version == last_seen {
+
+    // Against what the servers were last *given*, not what the sync pump has
+    // last looked at. The pump marks a buffer seen before it spawns the
+    // delivery, so a flush arriving between the two would find the seen mark
+    // already current and build nothing, which is the case a flush exists for.
+    let last_delivered_version = stoat
+        .lsp_last_delivered_buffer_version
+        .lock()
+        .expect("lsp version mutex")
+        .get(&id)
+        .copied()
+        .unwrap_or(0);
+    if current_version == last_delivered_version {
         return None;
     }
+
     let path = workspace.buffers.path_for(id)?.to_path_buf();
     let uri = path_to_uri(&path)?;
     let new_rope = buffer_b.rope();
@@ -639,13 +691,6 @@ fn build_dispatch_plan(
             }]
         },
         TextDocumentSyncKind::INCREMENTAL => {
-            let last_delivered_version = stoat
-                .lsp_last_delivered_buffer_version
-                .lock()
-                .expect("lsp version mutex")
-                .get(&id)
-                .copied()
-                .unwrap_or(0);
             let last_delivered_text = stoat
                 .lsp_last_delivered_text
                 .lock()
@@ -3939,7 +3984,7 @@ fn spawn_symbol_doc_request(
     stoat: &mut Stoat,
     buffer_id: BufferId,
     target: &SymbolTarget,
-) -> Option<stoat_scheduler::Task<Option<String>>> {
+) -> Option<Task<Option<String>>> {
     let (_, host) = stoat
         .feature_hosts(buffer_id, LanguageServerFeature::Hover)
         .into_iter()
@@ -4352,7 +4397,7 @@ fn spawn_workspace_symbol_request(
     servers: &[String],
     buffer_id: BufferId,
     query: String,
-) -> stoat_scheduler::Task<Vec<WorkspaceSymbolEntry>> {
+) -> Task<Vec<WorkspaceSymbolEntry>> {
     let params = WorkspaceSymbolParams {
         query,
         work_done_progress_params: WorkDoneProgressParams::default(),
