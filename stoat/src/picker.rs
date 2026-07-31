@@ -20,6 +20,13 @@ use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 /// file never stalls the render thread.
 pub(crate) const PREVIEW_BYTE_LIMIT: usize = 128 * 1024;
 
+/// How far down a filtered list matched indices are derived eagerly.
+///
+/// Deriving them is the expensive half of matching, and a list this deep is
+/// already far past what a viewport shows or a reader pages through. Rows below
+/// it derive theirs when something actually paints them.
+const INDEXED_ROWS: usize = 512;
+
 /// Source of process-unique content-version stamps, shared by every pool that
 /// versions its content by a monotonic generation instead of a content hash.
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -95,11 +102,21 @@ pub(crate) struct PickList {
     pub(crate) base_generation: u64,
     /// Indices into `base`, after filtering, in display order.
     pub(crate) filtered: Vec<usize>,
-    /// Per-row matched character offsets into the row's display string,
-    /// parallel to `filtered`. A row is empty when no pattern is active. The
-    /// offsets are sorted and deduplicated so the renderer can `contains`-test
-    /// without further work.
+    /// Per-row matched character offsets into the row's display string, for the
+    /// leading [`Self::indexed`] rows of `filtered`. A row is empty when no
+    /// pattern is active. The offsets are sorted and deduplicated so the
+    /// renderer can `contains`-test without further work.
+    ///
+    /// Read it through [`Self::row_indices`], which covers the rows past the
+    /// end of this.
     pub(crate) match_indices: Vec<Vec<u32>>,
+    /// How many leading rows of `filtered` have their offsets in
+    /// [`Self::match_indices`].
+    ///
+    /// Deriving offsets costs more than deciding what matched, so a list far
+    /// longer than any viewport derives them only as deep as something can
+    /// plausibly paint. Rows below derive theirs on demand.
+    pub(crate) indexed: usize,
     pub(crate) selected: usize,
     /// Rendered list height in rows, refreshed each frame by the owner's render
     /// so [`PickList::page`] can size its half-page step. `None` before the
@@ -178,6 +195,7 @@ impl Default for PickList {
             base_generation: next_generation(),
             filtered: Vec::new(),
             match_indices: Vec::new(),
+            indexed: 0,
             selected: 0,
             viewport_rows: None,
             filter_generation: next_generation(),
@@ -253,7 +271,7 @@ impl PickList {
                 .map(|idx| (idx, cache.rows[idx].as_str()));
 
             self.scored = previous.len() + (cache.rows.len() - covered);
-            fuzzy::match_and_rank(pattern, items)
+            fuzzy::rank_indexing_best(pattern, items, INDEXED_ROWS)
         } else {
             let items = cache
                 .rows
@@ -263,10 +281,10 @@ impl PickList {
                 .map(|(idx, display)| (idx, display.as_str()));
 
             self.scored = cache.rows.len();
-            fuzzy::match_and_rank(pattern, items)
+            fuzzy::rank_indexing_best(pattern, items, INDEXED_ROWS)
         };
 
-        let Some(mut matches) = ranked else {
+        let Some(ranked) = ranked else {
             // Pre-sorted at cache build, so an unfiltered list is a walk rather
             // than a sort over freshly derived strings.
             let listed: Vec<usize> = cache
@@ -277,19 +295,48 @@ impl PickList {
                 .collect();
 
             self.match_indices = vec![(0..anchor_len).collect(); listed.len()];
+            self.indexed = listed.len();
             self.filtered = listed;
             self.clamp_selected();
             return;
         };
 
-        fuzzy::sort_ranked(&mut matches);
-        for m in matches {
+        self.indexed = ranked.indexed;
+        for (row, m) in ranked.matches.into_iter().enumerate() {
             self.filtered.push(m.item);
-            self.match_indices
-                .push(prepend_anchor(anchor_len, m.matched_indices));
+            if row < self.indexed {
+                self.match_indices
+                    .push(prepend_anchor(anchor_len, m.matched_indices));
+            }
         }
         self.clamp_selected();
         self.filter_generation = next_generation();
+    }
+
+    /// Highlight offsets for filtered row `row`.
+    ///
+    /// A row the refilter indexed returns its stored offsets. A row past that
+    /// block was never indexed, so it is derived now into `scratch`, which a
+    /// caller painting a window reuses across its rows.
+    pub(crate) fn row_indices<'a>(&'a self, row: usize, scratch: &'a mut Vec<u32>) -> &'a [u32] {
+        if let Some(indices) = self.match_indices.get(row) {
+            return indices;
+        }
+
+        scratch.clear();
+        let Some((query, _)) = self.last_filter.as_ref() else {
+            return scratch;
+        };
+        let (Some(cache), Some(&idx)) = (self.display.as_ref(), self.filtered.get(row)) else {
+            return scratch;
+        };
+
+        let (anchor, pattern) = split_root_anchor(query);
+        let anchor_len = anchor.map_or(0, |a| a.chars().count()) as u32;
+        fuzzy::indices_of(pattern, &cache.rows[idx], scratch);
+
+        *scratch = prepend_anchor(anchor_len, std::mem::take(scratch));
+        scratch
     }
 
     /// Whether `query` only narrows what [`Self::last_filter`] already matched,
@@ -1630,6 +1677,77 @@ mod tests {
             "the batch extended the rows rather than rebuilding them"
         );
         assert_eq!(cache.rows.len(), 3, "and the arriving path has a row");
+    }
+
+    /// A candidate set deeper than the eagerly indexed block, every row of which
+    /// matches, so rows genuinely fall past it.
+    fn deeper_than_the_block() -> Vec<PathBuf> {
+        (0..INDEXED_ROWS + 64)
+            .map(|i| p(&format!("/repo/src/module_{i:04}_main.rs")))
+            .collect()
+    }
+
+    #[test]
+    fn rows_past_the_indexed_block_derive_their_offsets_on_demand() {
+        let base = deeper_than_the_block();
+        let mut list = list_over(&base);
+        list.refilter("main", &p("/repo"));
+
+        assert_eq!(
+            list.filtered.len(),
+            base.len(),
+            "every row of the fixture matches"
+        );
+        assert_eq!(
+            list.indexed, INDEXED_ROWS,
+            "only the block is indexed up front"
+        );
+        assert_eq!(
+            list.match_indices.len(),
+            INDEXED_ROWS,
+            "and only the block stores offsets"
+        );
+
+        let deep = INDEXED_ROWS + 10;
+        let row = {
+            let cache = list.display.as_ref().expect("a cache");
+            cache.rows[list.filtered[deep]].clone()
+        };
+
+        let stored = {
+            let mut unbounded =
+                fuzzy::match_and_rank("main", std::iter::once((0usize, row.as_str())))
+                    .expect("the query has atoms");
+            unbounded.pop().expect("the row matches").matched_indices
+        };
+
+        let mut derived = Vec::new();
+        assert_eq!(
+            list.row_indices(deep, &mut derived),
+            stored.as_slice(),
+            "deriving late gives what indexing early would have stored"
+        );
+    }
+
+    #[test]
+    fn a_recomputed_row_keeps_its_anchor_highlight() {
+        let base = deeper_than_the_block();
+        let mut list = list_over(&base);
+        list.refilter("./src main", &p("/repo"));
+
+        let deep = INDEXED_ROWS + 10;
+        let mut derived = Vec::new();
+        let indices = list.row_indices(deep, &mut derived).to_vec();
+
+        assert_eq!(
+            &indices[..3],
+            &[0, 1, 2],
+            "the anchor's own characters stay highlighted on a recomputed row"
+        );
+        assert!(
+            indices.len() > 3,
+            "and the pattern's own matches follow them"
+        );
     }
 
     #[test]

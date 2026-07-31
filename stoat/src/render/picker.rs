@@ -141,14 +141,18 @@ pub(crate) fn paint_path_rows(
     let prefix_len = prefix.chars().count() as u32;
     let mut label = String::new();
 
-    for (row_idx, (&idx, indices)) in picklist
+    // Rows past the eagerly indexed block derive their offsets here, one row at
+    // a time into a buffer the whole window shares.
+    let mut derived = Vec::new();
+
+    for (row_idx, &idx) in picklist
         .filtered
         .iter()
-        .zip(picklist.match_indices.iter())
         .skip(start_row)
         .take(rows)
         .enumerate()
     {
+        let indices = picklist.row_indices(start_row + row_idx, &mut derived);
         let row = area.y + row_idx as u16;
         let is_selected = start_row + row_idx == picklist.selected;
         let style = if is_selected {
@@ -452,6 +456,48 @@ mod tests {
             highlighted,
             vec![8],
             "only the tail match highlights at its shifted column; the dropped-head match paints nothing"
+        );
+    }
+
+    #[test]
+    fn a_row_past_the_indexed_block_still_highlights() {
+        let git_root = Path::new("/r");
+        let base: Vec<PathBuf> = (0..600)
+            .map(|i| PathBuf::from(format!("/r/mod_{i:04}_alpha.rs")))
+            .collect();
+
+        let mut list = PickList {
+            base,
+            ..PickList::default()
+        };
+        list.refilter("alpha", git_root);
+
+        let deep = 550;
+        assert!(
+            deep >= list.indexed && deep < list.filtered.len(),
+            "the painted row has to fall past the eagerly indexed block"
+        );
+
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        paint_path_rows(
+            &list,
+            git_root,
+            None,
+            "",
+            area,
+            deep,
+            &match_theme(),
+            &mut buf,
+        );
+
+        let match_fg = Color::Rgb(255, 0, 0);
+        let highlighted = (area.x..area.x + area.width)
+            .filter(|&c| buf[(c, 0)].fg == match_fg)
+            .count();
+        assert_eq!(
+            highlighted, 5,
+            "the query's five characters highlight on a row whose offsets were derived at paint"
         );
     }
 }

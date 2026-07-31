@@ -111,6 +111,110 @@ pub fn match_and_rank<'a, T>(
     Some(out)
 }
 
+/// Matches ordered best-first, indexed only as deep as `indexed`.
+///
+/// See [`rank_indexing_best`], which produces this.
+pub(crate) struct Ranked<'a, T> {
+    pub(crate) matches: Vec<RankedMatch<'a, T>>,
+    /// How many leading matches carry `matched_indices`. Past this the field is
+    /// empty because it was never computed, which a caller deep enough to paint
+    /// those rows answers with [`indices_of`].
+    pub(crate) indexed: usize,
+}
+
+/// Scores every candidate but only indexes the `indexed` best, returning them
+/// already ordered best-first.
+///
+/// Deriving matched indices is the score-matrix traceback plus a vector per
+/// atom, and a list far longer than its viewport spends nearly all of that on
+/// rows nobody sees. Scoring alone decides what matches, so the traceback is
+/// held back for the rows that can lead the list.
+///
+/// The ordering is exact down to `indexed` and approximate below it. Two of the
+/// bonuses need the indices, so rows past the block are ranked on their raw
+/// score, and one whose bonuses would have lifted it just inside the block
+/// stays just outside. The bonuses are bounded, so this only ever reshuffles
+/// rows across that boundary.
+///
+/// Ordering is otherwise [`sort_ranked`]'s. This sorts rather than leaving that
+/// to the caller because `indexed` counts positions, and a caller's own
+/// tie-break could move an unindexed row above it.
+///
+/// See also:
+/// - [`match_and_rank`] for the unbounded form, which indexes every match.
+/// - [`indices_of`] to derive one row's indices after the fact.
+pub(crate) fn rank_indexing_best<'a, T>(
+    query: &str,
+    items: impl IntoIterator<Item = (T, &'a str)>,
+    indexed: usize,
+) -> Option<Ranked<'a, T>> {
+    let pattern = parse_query(query)?;
+    let mut guard = matcher().lock().expect("fuzzy matcher poisoned");
+    let mut hay_buf: Vec<char> = Vec::new();
+
+    let mut scored: Vec<RankedMatch<'a, T>> = Vec::new();
+    for (item, haystack) in items {
+        let hay = Utf32Str::new(haystack, &mut hay_buf);
+        if let Some(score) = pattern.score(hay, &mut guard) {
+            scored.push(RankedMatch {
+                item,
+                haystack,
+                score,
+                matched_indices: Vec::new(),
+            });
+        }
+    }
+
+    // Ordering the whole set by raw score first is what makes the block a
+    // deterministic set of rows rather than whichever equal-scoring ones a
+    // partition happened to leave in front.
+    sort_ranked(&mut scored);
+
+    let indexed = indexed.min(scored.len());
+    let mut buffers = Scratch::default();
+    for ranked in &mut scored[..indexed] {
+        let hay = Utf32Str::new(ranked.haystack, &mut hay_buf);
+        let Some(with_bonuses) =
+            score_with_bonuses(&pattern, ranked.haystack, hay, &mut guard, &mut buffers)
+        else {
+            continue;
+        };
+        ranked.score = with_bonuses.score;
+        ranked.matched_indices = with_bonuses.indices;
+    }
+    sort_ranked(&mut scored[..indexed]);
+
+    Some(Ranked {
+        matches: scored,
+        indexed,
+    })
+}
+
+/// Matched offsets for one haystack, into `out`.
+///
+/// Answers for a single row what [`rank_indexing_best`] holds back below its
+/// block. `out` is cleared first and is meant to be one buffer reused across a
+/// painted window. Returns whether `haystack` matched at all.
+pub(crate) fn indices_of(query: &str, haystack: &str, out: &mut Vec<u32>) -> bool {
+    out.clear();
+    let Some(pattern) = parse_query(query) else {
+        return false;
+    };
+
+    let mut guard = matcher().lock().expect("fuzzy matcher poisoned");
+    let mut hay_buf: Vec<char> = Vec::new();
+    let hay = Utf32Str::new(haystack, &mut hay_buf);
+    let mut scratch = Scratch::default();
+
+    match score_with_bonuses(&pattern, haystack, hay, &mut guard, &mut scratch) {
+        Some(scored) => {
+            *out = scored.indices;
+            true
+        },
+        None => false,
+    }
+}
+
 /// Order matches best-first, breaking ties alphabetically by haystack.
 ///
 /// This is the ordering a fuzzy result list wants when it has nothing to say
@@ -402,5 +506,137 @@ mod tests {
         let results = match_and_rank("quit", items).expect("query has atoms");
         assert_eq!(results.len(), 1);
         assert!(results[0].score > 0);
+    }
+
+    fn haystacks() -> Vec<String> {
+        let mut out = Vec::new();
+        for dir in ["src", "srv", "tests/deep"] {
+            for stem in ["main", "lib", "loader", "read_me"] {
+                for ext in ["rs", "md"] {
+                    out.push(format!("{dir}/{stem}.{ext}"));
+                }
+            }
+        }
+        out
+    }
+
+    fn as_rows(haystacks: &[String]) -> Vec<(usize, &str)> {
+        haystacks
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (i, h.as_str()))
+            .collect()
+    }
+
+    fn shape(matches: &[RankedMatch<'_, usize>]) -> Vec<(usize, u32, Vec<u32>)> {
+        matches
+            .iter()
+            .map(|m| (m.item, m.score, m.matched_indices.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn indexing_every_row_ranks_as_the_unbounded_path_does() {
+        let haystacks = haystacks();
+
+        for query in ["ma", "main rs", "^src", "'lib", "read me"] {
+            let mut unbounded =
+                match_and_rank(query, as_rows(&haystacks)).expect("the query has atoms");
+            sort_ranked(&mut unbounded);
+
+            let capped = rank_indexing_best(query, as_rows(&haystacks), usize::MAX)
+                .expect("the query has atoms");
+
+            assert_eq!(
+                capped.indexed,
+                unbounded.len(),
+                "every match is indexed for {query:?}"
+            );
+            assert_eq!(
+                shape(&capped.matches),
+                shape(&unbounded),
+                "ranking or highlights differ for {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_block_leads_the_list_and_carries_the_bonuses() {
+        // One row whose basename is the query outright, buried among many that
+        // match it only as scattered characters across a directory prefix.
+        let mut haystacks: Vec<String> = (0..600).map(|i| format!("m{i:04}/a-i-n/x.rs")).collect();
+        haystacks.push("other/main.rs".to_string());
+
+        let ranked =
+            rank_indexing_best("main", as_rows(&haystacks), 512).expect("the query has atoms");
+
+        assert_eq!(ranked.indexed, 512, "the block caps at what was asked for");
+        assert_eq!(
+            ranked.matches[0].item,
+            haystacks.len() - 1,
+            "the basename match leads, so the bonuses reached it"
+        );
+        assert!(
+            !ranked.matches[0].matched_indices.is_empty(),
+            "and it carries its offsets"
+        );
+        assert!(
+            ranked.matches[512..]
+                .iter()
+                .all(|m| m.matched_indices.is_empty()),
+            "rows past the block carry none"
+        );
+    }
+
+    #[test]
+    fn the_block_is_reordered_once_its_bonuses_are_known() {
+        // The directory match scores better on the raw pass, matching at the
+        // very start, but only the basename match earns the basename bonus, so
+        // knowing the indices reverses them.
+        let haystacks = ["abc/z.rs".to_string(), "z/qabc.rs".to_string()];
+
+        let bonused: Vec<u32> = as_rows(&haystacks)
+            .into_iter()
+            .map(|(_, h)| {
+                let mut one = match_and_rank("abc", std::iter::once((0usize, h)))
+                    .expect("the query has atoms");
+                one.pop().expect("both match").score
+            })
+            .collect();
+        assert!(
+            bonused[1] > bonused[0],
+            "the basename match wins on bonused score, which is the order to reach"
+        );
+
+        let ranked =
+            rank_indexing_best("abc", as_rows(&haystacks), 512).expect("the query has atoms");
+        assert_eq!(
+            ranked.matches[0].item, 1,
+            "the block is ranked on its bonused scores, not the raw ones it was chosen by"
+        );
+    }
+
+    #[test]
+    fn a_row_past_the_block_derives_the_offsets_it_would_have_stored() {
+        let haystacks = haystacks();
+        let ranked = rank_indexing_best("ma", as_rows(&haystacks), 1).expect("the query has atoms");
+
+        let past = &ranked.matches[1];
+        assert!(
+            past.matched_indices.is_empty(),
+            "the fixture has to reach past the block"
+        );
+
+        let mut derived = Vec::new();
+        assert!(indices_of("ma", past.haystack, &mut derived));
+
+        let mut unbounded = match_and_rank("ma", std::iter::once((0usize, past.haystack)))
+            .expect("the query has atoms");
+        let stored = unbounded.pop().expect("the row matches").matched_indices;
+
+        assert_eq!(
+            derived, stored,
+            "deriving late gives what indexing early would"
+        );
     }
 }
