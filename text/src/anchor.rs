@@ -61,19 +61,13 @@ impl Anchor {
     pub fn is_max(&self) -> bool {
         self.timestamp == u64::MAX && self.offset == u32::MAX && self.bias == Bias::Right
     }
-
-    pub fn cmp<R: Fn(&Anchor) -> usize>(&self, other: &Anchor, resolve: &R) -> Ordering {
-        let self_off = resolve(self);
-        let other_off = resolve(other);
-        self_off.cmp(&other_off).then(self.bias.cmp(&other.bias))
-    }
 }
 
 pub trait AnchorRangeExt {
     fn to_offset_range<R: Fn(&Anchor) -> usize>(&self, resolve: &R) -> Range<usize>;
     fn contains_offset<R: Fn(&Anchor) -> usize>(&self, offset: usize, resolve: &R) -> bool;
     fn overlaps_range(&self, range: &Range<usize>, resolve: &impl Fn(&Anchor) -> usize) -> bool;
-    fn cmp<R: Fn(&Anchor) -> usize>(&self, other: &Self, resolve: &R) -> Ordering;
+    fn cmp<C: Fn(&Anchor, &Anchor) -> Ordering>(&self, other: &Self, compare: &C) -> Ordering;
     fn is_empty<R: Fn(&Anchor) -> usize>(&self, resolve: &R) -> bool;
     fn len<R: Fn(&Anchor) -> usize>(&self, resolve: &R) -> usize;
     fn intersect<R: Fn(&Anchor) -> usize>(&self, other: &Self, resolve: &R)
@@ -98,10 +92,8 @@ impl AnchorRangeExt for Range<Anchor> {
         s < range.end && range.start < e
     }
 
-    fn cmp<R: Fn(&Anchor) -> usize>(&self, other: &Self, resolve: &R) -> Ordering {
-        self.start
-            .cmp(&other.start, resolve)
-            .then_with(|| self.end.cmp(&other.end, resolve))
+    fn cmp<C: Fn(&Anchor, &Anchor) -> Ordering>(&self, other: &Self, compare: &C) -> Ordering {
+        compare(&self.start, &other.start).then_with(|| compare(&self.end, &other.end))
     }
 
     fn is_empty<R: Fn(&Anchor) -> usize>(&self, resolve: &R) -> bool {
@@ -154,6 +146,12 @@ mod tests {
         a.offset as usize
     }
 
+    /// A stand-in for the buffer's ordering, which the text crate cannot reach.
+    /// These fixtures share one timestamp, so offset alone places them.
+    fn compare(a: &Anchor, b: &Anchor) -> Ordering {
+        a.offset.cmp(&b.offset).then(a.bias.cmp(&b.bias))
+    }
+
     #[test]
     fn anchor_hashable() {
         let mut set = HashSet::new();
@@ -167,32 +165,6 @@ mod tests {
         let a = Anchor::min();
         let b = a;
         assert_eq!(a, b);
-    }
-
-    #[test]
-    fn anchor_cmp_by_offset() {
-        let a = anchor(5);
-        let b = anchor(10);
-        assert_eq!(a.cmp(&b, &resolve), Ordering::Less);
-        assert_eq!(b.cmp(&a, &resolve), Ordering::Greater);
-        assert_eq!(a.cmp(&a, &resolve), Ordering::Equal);
-    }
-
-    #[test]
-    fn anchor_cmp_tiebreak_by_bias() {
-        let a = Anchor {
-            timestamp: 1,
-            offset: 5,
-            bias: Bias::Left,
-            buffer_id: None,
-        };
-        let b = Anchor {
-            timestamp: 1,
-            offset: 5,
-            bias: Bias::Right,
-            buffer_id: None,
-        };
-        assert_eq!(a.cmp(&b, &resolve), Ordering::Less);
     }
 
     #[test]
@@ -214,21 +186,21 @@ mod tests {
     fn range_cmp_by_start() {
         let r1 = anchor(3)..anchor(8);
         let r2 = anchor(5)..anchor(10);
-        assert_eq!(r1.cmp(&r2, &resolve), Ordering::Less);
+        assert_eq!(r1.cmp(&r2, &compare), Ordering::Less);
     }
 
     #[test]
     fn range_cmp_same_start_different_end() {
         let r1 = anchor(3)..anchor(8);
         let r2 = anchor(3)..anchor(10);
-        assert_eq!(r1.cmp(&r2, &resolve), Ordering::Less);
+        assert_eq!(r1.cmp(&r2, &compare), Ordering::Less);
     }
 
     #[test]
     fn range_cmp_equal() {
         let r1 = anchor(3)..anchor(8);
         let r2 = anchor(3)..anchor(8);
-        assert_eq!(r1.cmp(&r2, &resolve), Ordering::Equal);
+        assert_eq!(r1.cmp(&r2, &compare), Ordering::Equal);
     }
 
     #[test]

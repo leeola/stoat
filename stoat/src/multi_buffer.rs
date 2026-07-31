@@ -629,7 +629,7 @@ impl MultiBufferSnapshot {
     }
 
     pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> std::cmp::Ordering {
-        a.cmp(b, &|anchor| self.resolve_anchor(anchor))
+        self.buffer_snapshot.cmp_anchors(a, b)
     }
 
     pub fn edits_since(&self, since_version: u64) -> Patch<usize> {
@@ -658,9 +658,9 @@ impl MultiBufferSnapshot {
         a: &MultiBufferAnchor,
         b: &MultiBufferAnchor,
     ) -> std::cmp::Ordering {
-        let text_cmp = a.text_anchor.cmp(&b.text_anchor, &|anchor| {
-            self.buffer_snapshot.resolve_anchor(anchor)
-        });
+        let text_cmp = self
+            .buffer_snapshot
+            .cmp_anchors(&a.text_anchor, &b.text_anchor);
         if text_cmp.is_ne() {
             return text_cmp;
         }
@@ -668,9 +668,7 @@ impl MultiBufferSnapshot {
             (Some(_), None) => std::cmp::Ordering::Greater,
             (None, Some(_)) => std::cmp::Ordering::Less,
             (None, None) => std::cmp::Ordering::Equal,
-            (Some(a_base), Some(b_base)) => a_base.cmp(b_base, &|anchor| {
-                self.buffer_snapshot.resolve_anchor(anchor)
-            }),
+            (Some(a_base), Some(b_base)) => self.buffer_snapshot.cmp_anchors(a_base, b_base),
         }
     }
 
@@ -944,6 +942,34 @@ mod tests {
         assert_eq!(snapshot.cmp_anchors(&a, &b), std::cmp::Ordering::Less);
         assert_eq!(snapshot.cmp_anchors(&b, &a), std::cmp::Ordering::Greater);
         assert_eq!(snapshot.cmp_anchors(&a, &a), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn cmp_anchors_survives_deleting_the_text_between_them() {
+        let (id, buffer) = create_test_buffer("hello world");
+        let multi = MultiBuffer::singleton(id, buffer);
+
+        let (a, b) = {
+            let snapshot = multi.snapshot();
+            (
+                snapshot.anchor_at(6, stoat_text::Bias::Right),
+                snapshot.anchor_at(9, stoat_text::Bias::Left),
+            )
+        };
+
+        multi
+            .as_singleton()
+            .unwrap()
+            .write()
+            .unwrap()
+            .edit(5..11, "");
+
+        let snapshot = multi.snapshot();
+        assert_eq!(
+            snapshot.cmp_anchors(&a, &b),
+            std::cmp::Ordering::Less,
+            "both anchors resolve to the deletion's start, which must not reorder them"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::diff_map::DiffMap;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{cmp::Ordering, collections::HashMap, ops::Range, sync::Arc};
 pub use stoat_text::BufferId;
 use stoat_text::{
     patch::{Edit, Patch},
@@ -997,7 +997,51 @@ impl TextBufferSnapshot {
         }
     }
 
-    fn find_fragment_for_anchor(&self, anchor: &Anchor) -> (Option<&Fragment>, usize) {
+    /// Order two anchors by position, permanently.
+    ///
+    /// Anchors compare by the identity of the fragment holding them rather than
+    /// by the offset they currently resolve to. A deletion collapses every
+    /// anchor in the deleted span onto one offset, so an offset comparison
+    /// reports them equal and lets the bias tiebreak invert a range that was
+    /// well formed. Fragment locators order by document position and are never
+    /// renumbered, so the order they give outlives the text going invisible.
+    ///
+    /// Anchors sharing an insertion skip the locator entirely. An insertion's
+    /// bytes keep their relative order however the fragment tree later splits
+    /// them, so the offset within it already decides.
+    pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Ordering {
+        let fragments = if a.timestamp == b.timestamp {
+            Ordering::Equal
+        } else {
+            self.fragment_id_for_anchor(a)
+                .cmp(self.fragment_id_for_anchor(b))
+        };
+
+        fragments
+            .then_with(|| a.offset.cmp(&b.offset))
+            .then_with(|| a.bias.cmp(&b.bias))
+    }
+
+    /// The locator of the fragment an anchor sits in, which is its position in
+    /// the document expressed so that edits elsewhere cannot renumber it.
+    ///
+    /// Only the max sentinel needs answering here. Its key runs off the end of
+    /// the insertion tree, where the fallback is the newest insertion, and the
+    /// newest insertion is not the last fragment in the document. The min
+    /// sentinel needs no branch of its own. Its key sorts below every insertion,
+    /// so the lookup finds no predecessor and already answers
+    /// [`Locator::min_ref`].
+    fn fragment_id_for_anchor(&self, anchor: &Anchor) -> &Locator {
+        if anchor.is_max() {
+            return Locator::max_ref();
+        }
+        self.insertion_fragment_id(anchor)
+    }
+
+    /// The fragment an anchor's insertion offset falls in, looked up through the
+    /// insertion tree. Sentinel anchors have no insertion, so callers reaching
+    /// this directly answer for them first.
+    fn insertion_fragment_id(&self, anchor: &Anchor) -> &Locator {
         let key = InsertionFragmentKey {
             timestamp: anchor.timestamp,
             split_offset: anchor.offset,
@@ -1007,7 +1051,7 @@ impl TextBufferSnapshot {
             self.insertions
                 .find_with_prev::<InsertionFragmentKey, _>((), &key, anchor.bias);
 
-        let fragment_id = match result {
+        match result {
             Some((prev, insertion)) => {
                 let ins_key = InsertionFragmentKey {
                     timestamp: insertion.timestamp,
@@ -1028,7 +1072,11 @@ impl TextBufferSnapshot {
                 Some(ins) => &ins.fragment_id,
                 None => Locator::min_ref(),
             },
-        };
+        }
+    }
+
+    fn find_fragment_for_anchor(&self, anchor: &Anchor) -> (Option<&Fragment>, usize) {
+        let fragment_id = self.insertion_fragment_id(anchor);
 
         let cx = &None;
         let target = Some(fragment_id.clone());
@@ -1241,8 +1289,8 @@ pub type SharedBuffer = Arc<std::sync::RwLock<TextBuffer>>;
 #[cfg(test)]
 mod tests {
     use super::TextBuffer;
-    use std::{mem, ops::Range};
-    use stoat_text::{Bias, BufferId, IndentStyle, Point, Selection, SelectionGoal};
+    use std::{cmp::Ordering, mem, ops::Range};
+    use stoat_text::{Anchor, Bias, BufferId, IndentStyle, Point, Selection, SelectionGoal};
 
     fn buf(content: &str) -> TextBuffer {
         TextBuffer::with_text(BufferId::new(0), content)
@@ -1311,8 +1359,8 @@ mod tests {
         let mid = b.snapshot.clone();
         let len = mid.visible_text.len();
         let mut anchors = vec![
-            stoat_text::Anchor::min_for_buffer(BufferId::new(0)),
-            stoat_text::Anchor::max_for_buffer(BufferId::new(0)),
+            Anchor::min_for_buffer(BufferId::new(0)),
+            Anchor::max_for_buffer(BufferId::new(0)),
         ];
         for _ in 0..50 {
             let off = (lcg(&mut seed) as usize) % (len + 1);
@@ -1432,6 +1480,67 @@ mod tests {
     }
 
     #[test]
+    fn a_range_spanning_deleted_text_stays_well_formed() {
+        let mut b = buf("hello world");
+
+        // Start biased right and end biased left, the convention a token range
+        // is built with so typing at either edge falls outside it.
+        let start = b.anchor_at(6, Bias::Right);
+        let end = b.anchor_at(9, Bias::Left);
+        assert_eq!(b.snapshot.cmp_anchors(&start, &end), Ordering::Less);
+
+        b.edit(5..11, "");
+        assert_eq!(
+            b.snapshot.cmp_anchors(&start, &end),
+            Ordering::Less,
+            "the deletion inverted a range that was well formed before it"
+        );
+    }
+
+    #[test]
+    fn deleted_anchors_keep_their_order_and_stay_distinct() {
+        let mut b = buf("hello world");
+
+        let inside: Vec<Anchor> = (6..10).map(|o| b.anchor_at(o, Bias::Right)).collect();
+        b.edit(5..11, "");
+
+        for pair in inside.windows(2) {
+            assert_eq!(
+                b.snapshot.cmp_anchors(&pair[0], &pair[1]),
+                Ordering::Less,
+                "distinct anchors in one deleted region tied or swapped"
+            );
+        }
+
+        for (i, a) in inside.iter().enumerate() {
+            assert_eq!(b.snapshot.cmp_anchors(a, a), Ordering::Equal, "anchor {i}");
+        }
+    }
+
+    #[test]
+    fn the_document_sentinels_bound_every_anchor() {
+        let mut b = buf("hello world");
+        let min = Anchor::min_for_buffer(b.snapshot.buffer_id);
+        let max = Anchor::max_for_buffer(b.snapshot.buffer_id);
+
+        // A second insertion, so the newest fragment by timestamp is not the
+        // last one in the document and max cannot rely on being either.
+        b.edit(0..0, "first ");
+
+        for offset in [1, 6, 11, 16] {
+            let a = b.anchor_at(offset, Bias::Right);
+            assert_eq!(b.snapshot.cmp_anchors(&min, &a), Ordering::Less, "{offset}");
+            assert_eq!(
+                b.snapshot.cmp_anchors(&max, &a),
+                Ordering::Greater,
+                "{offset}"
+            );
+        }
+
+        assert_eq!(b.snapshot.cmp_anchors(&min, &max), Ordering::Less);
+    }
+
+    #[test]
     fn anchor_multiple_edits() {
         let mut b = buf("abcdef");
         let a = b.anchor_at(4, Bias::Right);
@@ -1443,8 +1552,8 @@ mod tests {
     #[test]
     fn anchor_min_max() {
         let mut b = buf("hello");
-        let min = stoat_text::Anchor::min();
-        let max = stoat_text::Anchor::max();
+        let min = Anchor::min();
+        let max = Anchor::max();
         assert_eq!(b.resolve_anchor(&min), 0);
         assert_eq!(b.resolve_anchor(&max), 5);
         b.edit(5..5, " world");
