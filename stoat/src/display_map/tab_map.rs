@@ -561,10 +561,11 @@ fn collapse_column(
     bias: Bias,
     max_expansion_column: u32,
 ) -> u32 {
+    let mut chars = chars.peekable();
     let mut expanded = 0u32;
     let mut fold_col = 0u32;
     let mut last_char_byte_len = 0u32;
-    for ch in chars {
+    while let Some(&ch) = chars.peek() {
         if expanded >= tab_column {
             break;
         }
@@ -580,11 +581,43 @@ fn collapse_column(
         expanded += char_width;
         last_char_byte_len = ch.len_utf8() as u32;
         fold_col += last_char_byte_len;
+        chars.next();
     }
     if bias == Bias::Left && expanded > tab_column {
         fold_col = fold_col.saturating_sub(last_char_byte_len);
+    } else {
+        fold_col += trailing_zero_width_bytes(&mut chars, fold_col);
     }
     fold_col
+}
+
+/// Bytes of the zero-width characters `chars` is sitting in front of, which
+/// belong to the character the walk just consumed rather than to the position
+/// after it.
+///
+/// A mark occupying no cells is reached only after the walk has already covered
+/// the column it was asked for, so it is left in front of unless it is taken
+/// here, and the column returned would name a byte inside a character.
+///
+/// `consumed` is how many bytes the walk took. Nothing means the position is at
+/// the line start, where a mark has no character before it to continue and
+/// stands as one itself, so it is left alone.
+fn trailing_zero_width_bytes(
+    chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
+    consumed: u32,
+) -> u32 {
+    if consumed == 0 {
+        return 0;
+    }
+    let mut bytes = 0u32;
+    while let Some(&ch) = chars.peek() {
+        if ch == '\t' || super::display_width(ch) != 0 {
+            break;
+        }
+        bytes += ch.len_utf8() as u32;
+        chars.next();
+    }
+    bytes
 }
 
 fn collapse_column_detailed(
@@ -594,11 +627,12 @@ fn collapse_column_detailed(
     bias: Bias,
     max_expansion_column: u32,
 ) -> (u32, u32, u32) {
+    let mut chars = chars.peekable();
     let mut expanded = 0u32;
     let mut fold_col = 0u32;
     let mut last_char_byte_len = 0u32;
     let mut last_char_width = 0u32;
-    for ch in chars {
+    while let Some(&ch) = chars.peek() {
         if expanded >= tab_column {
             break;
         }
@@ -615,10 +649,16 @@ fn collapse_column_detailed(
         last_char_byte_len = ch.len_utf8() as u32;
         last_char_width = char_width;
         fold_col += last_char_byte_len;
+        chars.next();
     }
     if bias == Bias::Left && expanded > tab_column {
         fold_col = fold_col.saturating_sub(last_char_byte_len);
         expanded -= last_char_width;
+    } else {
+        // Only the byte column moves. The characters taken occupy no cells, so
+        // the expanded column and the distance to the next tab stop that
+        // follows from it are the same as before.
+        fold_col += trailing_zero_width_bytes(&mut chars, fold_col);
     }
     let to_next_stop = if expanded >= max_expansion_column {
         1
@@ -644,6 +684,66 @@ mod tests {
         sync::{Arc, RwLock},
     };
     use stoat_text::{patch::Patch, Bias, Point};
+
+    /// Byte column a display column converts to, both ways round, since a
+    /// position on a character boundary must not depend on the bias.
+    fn byte_column(line: &str, display_column: u32) -> u32 {
+        let left = super::collapse_column(line.chars(), display_column, 4, Bias::Left, u32::MAX);
+        let right = super::collapse_column(line.chars(), display_column, 4, Bias::Right, u32::MAX);
+        assert_eq!(left, right, "bias must not matter on a boundary");
+        left
+    }
+
+    #[test]
+    fn a_display_column_converts_past_a_combining_mark() {
+        // Characters begin at bytes 0, 3 and 4. Column 1 is after the accented
+        // one, so it converts to 3 rather than to the 1 that sits between the
+        // letter and its accent.
+        assert_eq!(byte_column("e\u{301}x", 0), 0);
+        assert_eq!(byte_column("e\u{301}x", 1), 3);
+        assert_eq!(byte_column("e\u{301}x", 2), 4);
+    }
+
+    #[test]
+    fn a_mark_later_in_the_line_converts_the_same_way() {
+        // Characters at 0, 1, 4 and 5.
+        assert_eq!(byte_column("ab\u{301}c", 1), 1);
+        assert_eq!(byte_column("ab\u{301}c", 2), 4);
+        assert_eq!(byte_column("ab\u{301}c", 3), 5);
+    }
+
+    #[test]
+    fn a_leading_mark_keeps_the_line_start() {
+        // With nothing before it the mark is a character in its own right, so
+        // column 0 is byte 0 rather than past it.
+        assert_eq!(byte_column("\u{301}x", 0), 0);
+        assert_eq!(byte_column("\u{301}x", 1), 3);
+    }
+
+    #[test]
+    fn a_left_bias_stepping_back_off_a_wide_character_stays_put() {
+        // The wide character spans bytes 1..4 and occupies columns 1 and 2,
+        // with the mark continuing it. A left bias landing in its middle steps
+        // back before it, to byte 1. The mark belongs to the character stepped
+        // over rather than to the position, so taking it would land byte 3,
+        // which is inside the wide character itself.
+        let line = "a\u{4e00}\u{301}x";
+        assert_eq!(
+            super::collapse_column(line.chars(), 2, 4, Bias::Left, u32::MAX),
+            1,
+        );
+    }
+
+    #[test]
+    fn the_detailed_conversion_moves_only_its_byte_column() {
+        // Same answer as the plain one, and the cell bookkeeping beside it is
+        // untouched, the characters taken occupying no cells. One column in,
+        // three cells short of the next four-wide tab stop.
+        assert_eq!(
+            super::collapse_column_detailed("e\u{301}x".chars(), 1, 4, Bias::Left, u32::MAX),
+            (3, 1, 3),
+        );
+    }
 
     fn make_snapshot(content: &str) -> super::TabSnapshot {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
