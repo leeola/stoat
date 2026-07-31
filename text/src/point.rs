@@ -104,6 +104,19 @@ impl AddAssign for PointUtf16 {
     }
 }
 
+impl Sub for PointUtf16 {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        debug_assert!(other <= self);
+        if self.row == other.row {
+            PointUtf16::new(0, self.column - other.column)
+        } else {
+            PointUtf16::new(self.row - other.row, self.column)
+        }
+    }
+}
+
 impl<'a> Dimension<'a, TextSummary> for PointUtf16 {
     fn zero(_cx: ()) -> Self {
         Self::default()

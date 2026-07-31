@@ -183,6 +183,68 @@ impl Chunk {
         }
     }
 
+    /// Byte range of `row` within this chunk, exclusive of its newline.
+    ///
+    /// A row past the last one this chunk holds collapses onto the end, which
+    /// is what lets a caller ask for a row whose text continues in the next
+    /// chunk and get an empty range rather than a wrong one.
+    fn offset_range_for_row(&self, row: u32) -> Range<usize> {
+        let start = if row == 0 {
+            0
+        } else {
+            nth_newline_offset_bitmap(self.newlines, row)
+        };
+        if start >= self.text.len() {
+            return self.text.len()..self.text.len();
+        }
+        start..self.line_end_from(start)
+    }
+
+    /// Clamp `point` to this chunk's row, then to a character boundary.
+    ///
+    /// The boundary is a character one, not a grapheme cluster. That is the
+    /// contract [`Rope::clip_offset`] has always had, and callers wanting
+    /// clusters go through [`Rope::next_grapheme_boundary`] instead.
+    fn clip_point(&self, point: Point, bias: Bias) -> Point {
+        let row = self.offset_range_for_row(point.row);
+        let len = (row.end - row.start) as u32;
+        if point.column >= len {
+            return Point::new(point.row, len);
+        }
+
+        let text = self.text.as_str();
+        let mut column = point.column as usize;
+        match bias {
+            Bias::Left => {
+                while column > 0 && !text.is_char_boundary(row.start + column) {
+                    column -= 1;
+                }
+            },
+            Bias::Right => {
+                while column < len as usize && !text.is_char_boundary(row.start + column) {
+                    column += 1;
+                }
+            },
+        }
+        Point::new(point.row, column as u32)
+    }
+
+    /// Clamp a UTF-16 column to this chunk's row, then to a character boundary.
+    ///
+    /// The column is converted into bytes, clipped there, and converted back,
+    /// which is what makes the answer a column the rope can actually address.
+    fn clip_point_utf16(&self, point: PointUtf16, bias: Bias) -> PointUtf16 {
+        let row = self.offset_range_for_row(point.row);
+        let bytes = self.advance_utf16(row.start, point.column as usize, row.end);
+        let clipped = self.clip_point(Point::new(point.row, (bytes - row.start) as u32), bias);
+
+        let end = row.start + clipped.column as usize;
+        PointUtf16::new(
+            point.row,
+            bits_in(self.chars_utf16, row.start..end).count_ones(),
+        )
+    }
+
     /// Byte offset reached by advancing `units` UTF-16 code units from `start`,
     /// stopping at `limit`.
     ///
@@ -516,43 +578,48 @@ impl Rope {
         results
     }
 
+    /// Byte range of `row`, exclusive of its newline.
+    ///
+    /// Seeking the row's end rather than its start is what keeps this to one
+    /// descent. The chunk it lands on either starts on this row, meaning the
+    /// row began earlier and its start is that chunk's offset less the columns
+    /// already counted, or starts on an earlier row, meaning the row begins
+    /// inside it.
     fn row_byte_range(&self, row: u32) -> Range<usize> {
         let max = self.max_point();
         if row > max.row {
             let len = self.len();
             return len..len;
         }
-        let start = self.point_to_offset(Point::new(row, 0));
-        if row >= max.row {
-            return start..self.len();
-        }
-        let mut cursor = self.chunks.cursor::<usize>(());
-        cursor.seek(&start, Bias::Right);
-        let mut pos = start;
-        while let Some(chunk) = cursor.item() {
-            let chunk_start = *cursor.start();
-            let local = pos - chunk_start;
-            let nl_mask = chunk.newlines >> local;
-            if nl_mask != 0 {
-                let nl_offset = nl_mask.trailing_zeros() as usize;
-                return start..(pos + nl_offset);
-            }
-            pos = chunk_start + chunk.text.len();
-            cursor.next();
-        }
-        start..self.len()
+
+        let (start, _end, chunk_opt) = self.chunks.find::<Dimensions<Point, usize>, _>(
+            (),
+            &Point::new(row, u32::MAX),
+            Bias::Right,
+        );
+        let Dimensions(chunk_start_point, chunk_start_offset, ()) = start;
+        let Some(chunk) = chunk_opt else {
+            let len = self.len();
+            return (len - max.column as usize)..len;
+        };
+
+        let local = chunk.offset_range_for_row(row - chunk_start_point.row);
+        let row_start = if chunk_start_point.row == row {
+            chunk_start_offset - chunk_start_point.column as usize
+        } else {
+            chunk_start_offset + local.start
+        };
+        row_start..(chunk_start_offset + local.end)
     }
 
     pub fn line_len(&self, row: u32) -> u32 {
-        let max = self.max_point();
-        if row > max.row {
+        // A row past the end has no length of its own, where clipping would
+        // answer with the last row's.
+        if row > self.max_point().row {
             return 0;
         }
-        if row == max.row {
-            return max.column;
-        }
-        let range = self.row_byte_range(row);
-        (range.end - range.start) as u32
+        self.clip_point(Point::new(row, u32::MAX), Bias::Left)
+            .column
     }
 
     pub fn line_lens_in_range(&self, rows: Range<u32>) -> Vec<u32> {
@@ -578,16 +645,20 @@ impl Rope {
         self.chunks_in_range(range)
     }
 
+    /// Clamp `point` to a position the rope actually holds.
+    ///
+    /// A column past the end of its row lands on the row's end, and one inside
+    /// a multi-byte character moves to a character boundary in the direction of
+    /// `bias`. A row past the last one collapses onto the rope's end.
+    ///
+    /// Seeking by [`Point`] carries the row's columns across chunk boundaries,
+    /// so a row spanning chunks still resolves in the one descent this takes.
     pub fn clip_point(&self, point: Point, bias: Bias) -> Point {
-        let max = self.max_point();
-        if point.row > max.row {
-            return max;
+        let (start, _end, chunk_opt) = self.chunks.find::<Point, _>((), &point, Bias::Right);
+        match chunk_opt {
+            Some(chunk) => start + chunk.clip_point(point - start, bias),
+            None => self.chunks.summary().lines,
         }
-        let len = self.line_len(point.row);
-        let col = point.column.min(len);
-        let offset = self.point_to_offset(Point::new(point.row, col));
-        let clipped = self.clip_offset(offset, bias);
-        self.offset_to_point(clipped)
     }
 
     pub fn lines(&self) -> Lines<'_> {
@@ -1027,10 +1098,16 @@ impl Rope {
         chunk_start_offset + byte_offset
     }
 
+    /// Clamp `point` to a UTF-16 position the rope actually holds.
+    ///
+    /// The byte-space counterpart of [`Self::clip_point`], and the same single
+    /// descent, where composing the two conversions around it cost three.
     pub fn clip_point_utf16(&self, point: PointUtf16, bias: Bias) -> PointUtf16 {
-        let p = self.point_utf16_to_point(point);
-        let clipped = self.clip_point(p, bias);
-        self.point_to_point_utf16(clipped)
+        let (start, _end, chunk_opt) = self.chunks.find::<PointUtf16, _>((), &point, Bias::Right);
+        match chunk_opt {
+            Some(chunk) => start + chunk.clip_point_utf16(point - start, bias),
+            None => self.chunks.summary().lines_utf16,
+        }
     }
 
     pub fn slice(&self, range: Range<usize>) -> Rope {
@@ -3099,6 +3176,147 @@ mod utf16_reference {
                         point_utf16_to_offset(&text, target),
                         "point_utf16_to_offset at {target:?} of {text:?}"
                     );
+                }
+            }
+        }
+    }
+}
+
+/// Reference implementations of the row and clipping primitives, and a
+/// randomized check that the rope agrees with them.
+///
+/// The rope answers these from chunk bitmaps in a single tree descent, which
+/// has to stay correct for a row spanning several chunks and for a column that
+/// is not a character boundary. These walk the text directly instead.
+#[cfg(test)]
+mod clip_reference {
+    use super::*;
+
+    fn row_byte_range(text: &str, row: u32) -> Range<usize> {
+        let mut start = 0usize;
+        for _ in 0..row {
+            match text[start..].find('\n') {
+                Some(ix) => start += ix + 1,
+                None => return text.len()..text.len(),
+            }
+        }
+        let end = text[start..]
+            .find('\n')
+            .map(|ix| start + ix)
+            .unwrap_or(text.len());
+        start..end
+    }
+
+    fn line_len(text: &str, row: u32) -> u32 {
+        let rows = text.matches('\n').count() as u32;
+        if row > rows {
+            return 0;
+        }
+        let range = row_byte_range(text, row);
+        (range.end - range.start) as u32
+    }
+
+    fn clip_point(text: &str, point: Point, bias: Bias) -> Point {
+        let rows = text.matches('\n').count() as u32;
+        if point.row > rows {
+            return Point::new(rows, line_len(text, rows));
+        }
+        let range = row_byte_range(text, point.row);
+        let len = (range.end - range.start) as u32;
+        let mut column = point.column.min(len) as usize;
+        match bias {
+            Bias::Left => {
+                while column > 0 && !text.is_char_boundary(range.start + column) {
+                    column -= 1;
+                }
+            },
+            Bias::Right => {
+                while column < len as usize && !text.is_char_boundary(range.start + column) {
+                    column += 1;
+                }
+            },
+        }
+        Point::new(point.row, column as u32)
+    }
+
+    /// Columns are counted in UTF-16 code units, so the clip converts into
+    /// bytes, clips there, and converts back the way the rope's composition of
+    /// the three conversions does.
+    fn clip_point_utf16(text: &str, point: PointUtf16, bias: Bias) -> PointUtf16 {
+        let rows = text.matches('\n').count() as u32;
+        let row = point.row.min(rows);
+        let range = row_byte_range(text, row);
+        let line = &text[range.clone()];
+
+        let mut utf16 = 0u32;
+        let mut bytes = 0usize;
+        for ch in line.chars() {
+            if utf16 >= point.column {
+                break;
+            }
+            utf16 += ch.len_utf16() as u32;
+            bytes += ch.len_utf8();
+        }
+        let byte_column = if point.row > rows { line.len() } else { bytes };
+
+        let clipped = clip_point(text, Point::new(row, byte_column as u32), bias);
+        let column = line[..clipped.column as usize]
+            .chars()
+            .map(|ch| ch.len_utf16() as u32)
+            .sum();
+        PointUtf16::new(row, column)
+    }
+
+    const ALPHABET: [char; 8] = ['a', 'b', '\n', '\n', 'é', '世', '𝄞', '🎉'];
+
+    fn sample(seed: &mut u64, len: usize) -> String {
+        let mut next = || {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            *seed
+        };
+        (0..len)
+            .map(|_| ALPHABET[(next() as usize) % ALPHABET.len()])
+            .collect()
+    }
+
+    #[test]
+    fn the_rope_agrees_with_a_text_walk_over_random_ropes() {
+        let mut seed = 0x1234_5678_9abc_def0_u64;
+        for case in 0..30 {
+            let text = sample(&mut seed, 1 + case * 4);
+            let rope = Rope::from(text.as_str());
+            let rows = text.matches('\n').count() as u32;
+
+            for row in 0..=rows + 1 {
+                assert_eq!(
+                    rope.line_len(row),
+                    line_len(&text, row),
+                    "line_len at row {row} of {text:?}"
+                );
+                assert_eq!(
+                    rope.row_byte_range(row),
+                    row_byte_range(&text, row),
+                    "row_byte_range at row {row} of {text:?}"
+                );
+
+                let len = line_len(&text, row);
+                for column in 0..=len + 3 {
+                    for bias in [Bias::Left, Bias::Right] {
+                        let point = Point::new(row, column);
+                        assert_eq!(
+                            rope.clip_point(point, bias),
+                            clip_point(&text, point, bias),
+                            "clip_point at {point:?} {bias:?} of {text:?}"
+                        );
+                        let utf16 = PointUtf16::new(row, column);
+                        assert_eq!(
+                            rope.clip_point_utf16(utf16, bias),
+                            clip_point_utf16(&text, utf16, bias),
+                            "clip_point_utf16 at {utf16:?} {bias:?} of {text:?}"
+                        );
+                    }
                 }
             }
         }
