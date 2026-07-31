@@ -828,6 +828,64 @@ impl Rope {
         chunk_start_offset + clipped_local
     }
 
+    /// Move `offset` to a grapheme-cluster boundary, or leave it where it is if
+    /// it is already on one.
+    ///
+    /// `bias` picks the direction to escape a offset that has landed inside a
+    /// cluster, `Left` to the boundary before it and `Right` to the one after.
+    ///
+    /// This is a clamp, not a step. The stepping pair moves off a boundary
+    /// rather than staying on it, which is what a cursor motion wants and what
+    /// snapping a range must not do. Applying a step to an already-aligned
+    /// range would grow it by a cluster at each end.
+    ///
+    /// See also:
+    /// - [`Self::next_grapheme_boundary`] and [`Self::prev_grapheme_boundary`] for the stepping
+    ///   pair.
+    pub fn clip_to_grapheme_boundary(&self, offset: usize, bias: Bias) -> usize {
+        let offset = self.clip_offset(offset, Bias::Left);
+        if offset == 0 || offset >= self.len() {
+            return offset;
+        }
+
+        // The cursor needs the text before `offset` to answer, since whether a
+        // boundary exists here depends on what it would be splitting.
+        let mut cursor = GraphemeCursor::new(offset, self.len(), true);
+        let mut pos = offset;
+        let on_boundary = loop {
+            let Some((chunk, chunk_start)) = self.chunk_at(pos) else {
+                return offset;
+            };
+            match cursor.is_boundary(chunk, chunk_start) {
+                Ok(answer) => break answer,
+                Err(GraphemeIncomplete::PreContext(end)) => {
+                    let Some((ctx, ctx_start)) = self.chunk_ending_at(end) else {
+                        return offset;
+                    };
+                    cursor.provide_context(ctx, ctx_start);
+                },
+                Err(GraphemeIncomplete::PrevChunk) => {
+                    let Some((_, chunk_start)) = self.chunk_at(pos) else {
+                        return offset;
+                    };
+                    if chunk_start == 0 {
+                        return offset;
+                    }
+                    pos = chunk_start - 1;
+                },
+                Err(_) => return offset,
+            }
+        };
+
+        if on_boundary {
+            return offset;
+        }
+        match bias {
+            Bias::Left => self.prev_grapheme_boundary(offset),
+            Bias::Right => self.next_grapheme_boundary(offset),
+        }
+    }
+
     /// Offset of the first grapheme-cluster boundary after `offset`, or
     /// `offset` itself at the rope end.
     ///
@@ -839,6 +897,7 @@ impl Rope {
     ///
     /// See also:
     /// - [`Self::prev_grapheme_boundary`] for the backward step.
+    /// - [`Self::clip_to_grapheme_boundary`] to snap onto one instead of past it.
     pub fn next_grapheme_boundary(&self, offset: usize) -> usize {
         let offset = self.clip_offset(offset, Bias::Left);
         if offset >= self.len() {
@@ -3250,6 +3309,72 @@ mod tests {
                 rope.prev_grapheme_boundary(decomposed),
                 flag,
                 "stepping back over the flag pair takes both halves at pad {pad}",
+            );
+        }
+    }
+
+    #[test]
+    fn clipping_to_a_boundary_leaves_one_alone() {
+        // The distinction from the stepping pair. Every one of these offsets is
+        // already a boundary, so a clamp must not move any of them, where a
+        // step would move all of them.
+        let rope = Rope::from("ae\u{301}b");
+        for offset in [0, 1, 4, 5] {
+            for bias in [Bias::Left, Bias::Right] {
+                assert_eq!(
+                    rope.clip_to_grapheme_boundary(offset, bias),
+                    offset,
+                    "offset {offset} is a boundary already, under {bias:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clipping_escapes_a_cluster_in_the_asked_direction() {
+        // Byte 2 sits between the e and its combining acute.
+        let rope = Rope::from("ae\u{301}b");
+        assert_eq!(rope.clip_to_grapheme_boundary(2, Bias::Left), 1);
+        assert_eq!(rope.clip_to_grapheme_boundary(2, Bias::Right), 4);
+    }
+
+    #[test]
+    fn clipping_holds_at_the_rope_ends() {
+        let rope = Rope::from("e\u{301}");
+        for bias in [Bias::Left, Bias::Right] {
+            assert_eq!(rope.clip_to_grapheme_boundary(0, bias), 0);
+            assert_eq!(rope.clip_to_grapheme_boundary(rope.len(), bias), rope.len());
+            assert_eq!(Rope::new().clip_to_grapheme_boundary(0, bias), 0);
+        }
+    }
+
+    #[test]
+    fn clipping_reaches_across_a_chunk_boundary() {
+        // The cursor has to be handed the text before the offset to answer, and
+        // that text can live in an earlier chunk. Chunks cap at 16 bytes under
+        // cfg(test), so the padding only has to clear that.
+        for pad in 16..24usize {
+            let mut rope = Rope::new();
+            for ch in format!("{}e\u{301}{}", "a".repeat(pad), "b".repeat(24)).chars() {
+                rope.push(&ch.to_string());
+            }
+            assert!(rope.chunks().count() > 1, "pad {pad} must span chunks");
+
+            let inside = pad + 1;
+            assert_eq!(
+                rope.clip_to_grapheme_boundary(inside, Bias::Left),
+                pad,
+                "clamping back off the acute at pad {pad}",
+            );
+            assert_eq!(
+                rope.clip_to_grapheme_boundary(inside, Bias::Right),
+                pad + 3,
+                "clamping forward off the acute at pad {pad}",
+            );
+            assert_eq!(
+                rope.clip_to_grapheme_boundary(pad, Bias::Right),
+                pad,
+                "the cluster start is a boundary at pad {pad}",
             );
         }
     }

@@ -291,13 +291,33 @@ impl SelectionsCollection {
             snapshot.resolve_anchors_batch(&anchors)
         };
 
+        // A motion walks codepoints, and a combining mark is a codepoint that
+        // categorizes apart from the letter it sits on, so a word motion stops
+        // between the two. Every producer of selections could be taught the
+        // rule separately, or it can hold here, where all of them arrive.
+        //
+        // Starts clamp down and ends clamp up, so a selection only ever grows
+        // out to the character it was cutting, and start stays at or below end
+        // without asking. An endpoint already on a boundary keeps the anchor it
+        // came with rather than being rebuilt into an equivalent one.
+        let rope = snapshot.rope();
         let mut indexed: Vec<Resolved> = new_disjoint
             .into_iter()
             .zip(offsets.chunks_exact(2))
-            .map(|(selection, span)| Resolved {
-                start: span[0],
-                end: span[1],
-                selection,
+            .map(|(mut selection, span)| {
+                let start = rope.clip_to_grapheme_boundary(span[0], Bias::Left);
+                let end = rope.clip_to_grapheme_boundary(span[1], Bias::Right);
+                if start != span[0] {
+                    selection.start = snapshot.anchor_at(start, Bias::Left);
+                }
+                if end != span[1] {
+                    selection.end = snapshot.anchor_at(end, Bias::Right);
+                }
+                Resolved {
+                    start,
+                    end,
+                    selection,
+                }
             })
             .collect();
         indexed.sort_by_key(|r| (r.start, r.selection.id));

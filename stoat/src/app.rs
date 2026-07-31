@@ -22717,6 +22717,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_word_motion_selects_whole_clusters() {
+        // A combining mark is its own codepoint and categorizes apart from the
+        // letter it sits on, so the motion stops between them. What the
+        // selection covers has to be whole characters even when the motion that
+        // proposed it did not think so, or deleting the word leaves the mark
+        // behind on whatever follows it.
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "cafe\u{301} bar");
+        h.type_keys("w d");
+        assert_eq!(
+            buffer_text(&h, &path),
+            " bar",
+            "the accent leaves with the e it sits on",
+        );
+    }
+
     /// The block cursor sits on a cluster start at every step of an `l`/`h`
     /// walk, never on a byte inside the joined sequence.
     #[test]

@@ -595,6 +595,42 @@ mod tests {
         assert_eq!(categorize_char(','), CharCategory::Punctuation);
     }
 
+    /// A combining mark categorizes apart from the letter it sits on, so a
+    /// motion counting codepoints stops between the two.
+    ///
+    /// These pin what the motion returns, which is an offset inside a
+    /// character. That is deliberate. The invariant that a selection covers
+    /// whole characters is applied where selections are written, so every
+    /// producer is covered at once rather than each learning the rule. See
+    /// `SelectionsCollection::replace_with`.
+    #[test]
+    fn a_combining_mark_is_its_own_category() {
+        assert_eq!(categorize_char('e'), CharCategory::Word);
+        assert_eq!(categorize_char('\u{301}'), CharCategory::Unknown);
+    }
+
+    #[test]
+    fn next_word_end_stops_inside_a_decomposed_cluster() {
+        // "cafe" + combining acute at 4..6, so the cluster runs 3..6.
+        let r = rope("cafe\u{301} bar");
+        assert_eq!(fwd_head(&r, 0, next_word_end_range), 4);
+    }
+
+    #[test]
+    fn next_word_start_stops_inside_a_decomposed_cluster() {
+        let r = rope("cafe\u{301} bar");
+        assert_eq!(fwd_head(&r, 0, next_word_start_range), 4);
+    }
+
+    #[test]
+    fn a_precomposed_accent_is_one_word_character() {
+        // The same word spelled with U+00E9 has no separate mark, so the motion
+        // runs to the space. This is what makes the decomposed cases above a
+        // property of the spelling rather than of the letter.
+        let r = rope("caf\u{e9} bar");
+        assert_eq!(fwd_head(&r, 0, next_word_end_range), 5);
+    }
+
     #[test]
     fn next_word_start_basic() {
         let r = rope("hello world");
