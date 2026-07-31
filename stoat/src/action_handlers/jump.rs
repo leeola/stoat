@@ -13,6 +13,7 @@ use crate::{
     buffer::BufferId,
     jumplist::JumpEntry,
     pane::{FocusTarget, PaneId, View},
+    workspace::WorkspaceId,
 };
 
 /// The focused editor's current position as a [`JumpEntry`], or `None` when no
@@ -57,8 +58,13 @@ pub(crate) fn push_entry(stoat: &mut Stoat, entry: JumpEntry) {
 /// A no-op when the pane already shows `incoming` (a same-buffer reopen) or
 /// shows no editor. Kept out of [`show_buffer_in_pane`](super::file::show_buffer_in_pane)
 /// so a jumplist walk re-showing a buffer records nothing.
-pub(crate) fn record_pane_switch(stoat: &mut Stoat, target: PaneId, incoming: BufferId) {
-    let ws = stoat.active_workspace_mut();
+pub(crate) fn record_pane_switch(
+    stoat: &mut Stoat,
+    workspace: WorkspaceId,
+    target: PaneId,
+    incoming: BufferId,
+) {
+    let ws = &mut stoat.workspaces[workspace];
     let entry = {
         let eid = match ws.panes.pane(target).view {
             View::Editor(eid) => eid,
@@ -109,7 +115,15 @@ pub(crate) fn apply_jump_entry(stoat: &mut Stoat, entry: JumpEntry) {
     let swapped_buffer = resolved.is_some();
     if let Some((pane_id, buffer)) = resolved {
         let executor = stoat.executor.clone();
-        super::file::show_buffer_in_pane(stoat, pane_id, entry.buffer_id, buffer, executor);
+        let workspace = stoat.active_workspace;
+        super::file::show_buffer_in_pane(
+            stoat,
+            workspace,
+            pane_id,
+            entry.buffer_id,
+            buffer,
+            executor,
+        );
     }
 
     let scrolloff = stoat.settings.scrolloff.unwrap_or(3);

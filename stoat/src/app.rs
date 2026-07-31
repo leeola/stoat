@@ -4269,7 +4269,8 @@ impl Stoat {
             self.lsp_opened.remove(&id);
             self.lsp_doc_versions.remove(&id);
             self.lsp_buffer_versions.remove(&id);
-            action_handlers::lsp::notify_buffer_opened(self, id, &path, &text);
+            let workspace = self.active_workspace;
+            action_handlers::lsp::notify_buffer_opened(self, workspace, id, &path, &text);
         }
     }
 

@@ -25,7 +25,7 @@ use crate::{
     picker::PreviewSource,
     symbol_finder::{SymbolFinder, SymbolFinderEntry, SymbolFinderScope, SymbolTarget},
     theme::scope,
-    workspace::WorkspaceUid,
+    workspace::{WorkspaceId, WorkspaceUid},
 };
 use codegraph::SymbolKey;
 pub(crate) use lsp_types::Uri;
@@ -161,21 +161,21 @@ pub(crate) fn lsp_language_name(buffers: &BufferRegistry, buffer_id: BufferId) -
 /// fatal to the open.
 pub(crate) fn notify_buffer_opened(
     stoat: &mut Stoat,
+    workspace: WorkspaceId,
     buffer_id: BufferId,
     path: &Path,
     text: &str,
 ) {
-    maybe_spawn_language_server(stoat, buffer_id);
+    maybe_spawn_language_server(stoat, workspace, buffer_id);
     if !stoat.lsp_opened.insert(buffer_id) {
         return;
     }
     let Some(uri) = path_to_uri(path) else {
         return;
     };
-    let language_id = lsp_language_name(&stoat.active_workspace().buffers, buffer_id)
+    let language_id = lsp_language_name(&stoat.workspaces[workspace].buffers, buffer_id)
         .unwrap_or_else(|| "plaintext".to_string());
-    let buffer_version = stoat
-        .active_workspace()
+    let buffer_version = stoat.workspaces[workspace]
         .buffers
         .get(buffer_id)
         .map(|b| b.read().expect("buffer lock").version())
@@ -226,7 +226,11 @@ pub(crate) fn notify_buffer_opened(
 /// Each spawn plus `initialize` handshake runs detached on the workspace
 /// [`Stoat::executor`] via [`spawn_server`]. The ready host, or the failure, is
 /// parked in [`Stoat::pending_lsp_host`] for [`Stoat::update`] to install.
-pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId) {
+pub(crate) fn maybe_spawn_language_server(
+    stoat: &mut Stoat,
+    workspace: WorkspaceId,
+    buffer_id: BufferId,
+) {
     if !stoat.lsp_auto_spawn {
         return;
     }
@@ -234,7 +238,7 @@ pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId
     if stoat.lsp_registry.has_real_sole_client() {
         return;
     }
-    let Some(language_name) = lsp_language_name(&stoat.active_workspace().buffers, buffer_id)
+    let Some(language_name) = lsp_language_name(&stoat.workspaces[workspace].buffers, buffer_id)
     else {
         return;
     };
@@ -964,7 +968,8 @@ fn review_lsp_source(stoat: &mut Stoat) -> Option<(PathBuf, Rope, usize)> {
         }
         (buffer_id, buffer)
     };
-    notify_buffer_opened(stoat, buffer_id, &path, &content);
+    let workspace = stoat.active_workspace;
+    notify_buffer_opened(stoat, workspace, buffer_id, &path, &content);
 
     let rope = buffer.read().expect("buffer lock").rope().clone();
     let offset = rope.point_to_offset(Point::new(line, col));

@@ -215,7 +215,8 @@ pub(crate) fn install_pending(stoat: &mut Stoat) {
                 .collect()
         };
         for id in ids {
-            crate::action_handlers::lsp::maybe_spawn_language_server(stoat, id);
+            let workspace = stoat.active_workspace;
+            crate::action_handlers::lsp::maybe_spawn_language_server(stoat, workspace, id);
         }
     }
 }

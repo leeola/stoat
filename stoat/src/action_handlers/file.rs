@@ -7,6 +7,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::LanguageServerFeature,
     pane::{PaneId, View},
+    workspace::WorkspaceId,
 };
 use lsp_types::{
     DidCloseTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams,
@@ -1122,6 +1123,11 @@ const OPEN_SYNC_MAX_BYTES: u64 = 1 << 20;
 /// the read, before it lands.
 pub(crate) struct PendingFileOpen {
     path: PathBuf,
+    /// The workspace that asked for this file, which is where it installs.
+    ///
+    /// [`PaneId`] is a per-workspace key, so `target` names a different pane in
+    /// every workspace and says nothing on its own about which one meant it.
+    workspace: WorkspaceId,
     target: PaneId,
     disk_mtime: Option<SystemTime>,
     _task: Task<()>,
@@ -1154,20 +1160,29 @@ pub(crate) fn open_file_in_pane(
             return None;
         },
     };
-    finish_open(stoat, target, &absolute, &content, disk_mtime)
+    let workspace = stoat.active_workspace;
+    finish_open(stoat, workspace, target, &absolute, &content, disk_mtime)
 }
 
-/// Read `absolute` on the blocking pool and queue it for install.
+/// Read `absolute` on the blocking pool and queue it for install into the
+/// active workspace.
 ///
-/// A no-op if an open for the same path is already pending, so repeated opens of
-/// one large file spawn a single read.
+/// A no-op if the same workspace already has an open pending for the path, so
+/// repeated opens of one large file spawn a single read. Another workspace
+/// asking for the same file is a separate request, since the read installs
+/// somewhere else.
 fn spawn_pending_open(
     stoat: &mut Stoat,
     target: PaneId,
     absolute: PathBuf,
     disk_mtime: Option<SystemTime>,
 ) {
-    if stoat.pending_file_opens.iter().any(|p| p.path == absolute) {
+    let workspace = stoat.active_workspace;
+    if stoat
+        .pending_file_opens
+        .iter()
+        .any(|p| p.path == absolute && p.workspace == workspace)
+    {
         return;
     }
 
@@ -1185,6 +1200,7 @@ fn spawn_pending_open(
     };
     stoat.pending_file_opens.push(PendingFileOpen {
         path: absolute,
+        workspace,
         target,
         disk_mtime,
         _task: task,
@@ -1223,6 +1239,8 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
         }
     }
 
+    let cleared: Vec<WorkspaceId> = ready.iter().map(|p| p.workspace).collect();
+
     for pending in ready {
         let content = match pending.result.lock().expect("pending open mutex").take() {
             Some(Ok(c)) => c,
@@ -1233,11 +1251,17 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
             },
             None => continue,
         };
-        if !stoat.active_workspace().panes.contains(pending.target) {
+        // A workspace closed mid-read takes its panes with it, so there is
+        // nothing left to install into and nowhere to redirect to.
+        let Some(ws) = stoat.workspaces.get(pending.workspace) else {
+            continue;
+        };
+        if !ws.panes.contains(pending.target) {
             continue;
         }
         finish_open(
             stoat,
+            pending.workspace,
             pending.target,
             &pending.path,
             &content,
@@ -1245,21 +1269,30 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
         );
     }
 
-    if stoat.pending_file_opens.is_empty() {
-        stoat
-            .active_workspace_mut()
-            .badges
-            .remove_by_source(BadgeSource::FileOpen);
+    // The badge belongs to whichever workspace raised it, which is not
+    // necessarily the one in front of the user when the queue drains.
+    for id in cleared {
+        if !stoat.pending_file_opens.iter().any(|p| p.workspace == id)
+            && let Some(ws) = stoat.workspaces.get_mut(id)
+        {
+            ws.badges.remove_by_source(BadgeSource::FileOpen);
+        }
     }
 }
 
-/// Open `content` as the buffer for `absolute` and show it in `target`.
+/// Open `content` as the buffer for `absolute` in `workspace` and show it in
+/// `target`.
 ///
 /// The shared tail of the sync and background open paths. It registers the
 /// buffer (deduping on path), applies mtime and language, notifies LSP, records
 /// the pane switch, and installs the editor.
+///
+/// `workspace` is named rather than taken as the active one because the
+/// background path installs a read that may have finished after the user
+/// switched away, and `target` is a key only that workspace can resolve.
 fn finish_open(
     stoat: &mut Stoat,
+    workspace: WorkspaceId,
     target: PaneId,
     absolute: &Path,
     content: &str,
@@ -1272,7 +1305,7 @@ fn finish_open(
     let content = LineEnding::normalize(content);
 
     let (buffer_id, buffer) = {
-        let ws = stoat.active_workspace_mut();
+        let ws = &mut stoat.workspaces[workspace];
         // Opening a path already registered hands back the existing buffer and
         // discards `content`. Everything read alongside it describes a file the
         // buffer never took, so none of it may replace what is already recorded.
@@ -1295,10 +1328,10 @@ fn finish_open(
         (buffer_id, buffer)
     };
 
-    super::lsp::notify_buffer_opened(stoat, buffer_id, absolute, &content);
+    super::lsp::notify_buffer_opened(stoat, workspace, buffer_id, absolute, &content);
 
-    super::jump::record_pane_switch(stoat, target, buffer_id);
-    show_buffer_in_pane(stoat, target, buffer_id, buffer, executor)
+    super::jump::record_pane_switch(stoat, workspace, target, buffer_id);
+    show_buffer_in_pane(stoat, workspace, target, buffer_id, buffer, executor)
 }
 
 /// Show `buffer_id` in `target` by swapping the pane's editor to a fresh
@@ -1310,12 +1343,13 @@ fn finish_open(
 /// through [`open_file_in_pane`].
 pub(crate) fn show_buffer_in_pane(
     stoat: &mut Stoat,
+    workspace: WorkspaceId,
     target: PaneId,
     buffer_id: BufferId,
     buffer: SharedBuffer,
     executor: Executor,
 ) -> Option<BufferId> {
-    let ws = stoat.active_workspace_mut();
+    let ws = &mut stoat.workspaces[workspace];
     ws.buffers.mark_shown(buffer_id);
     if let View::Editor(eid) = ws.panes.pane(target).view
         && ws
@@ -1462,6 +1496,137 @@ mod tests {
                 .find_by_source(BadgeSource::FileOpen)
                 .is_none(),
             "the badge clears once no open is pending"
+        );
+    }
+
+    #[test]
+    fn a_deferred_open_installs_into_the_workspace_that_asked() {
+        let mut h = TestHarness::with_size(80, 24);
+        let origin = h.stoat.active_workspace;
+        let root = Path::new("/big-switch");
+        let path = root.join("huge.txt");
+        let big = vec![b'x'; super::OPEN_SYNC_MAX_BYTES as usize + 16];
+        h.fake_fs().insert_file(&path, &big);
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+
+        // The read is still in flight when the user moves on.
+        let elsewhere = h.create_workspace();
+        h.set_active_workspace(elsewhere);
+
+        h.settle();
+        super::install_pending_opens(&mut h.stoat);
+
+        assert!(
+            h.stoat.workspaces[origin]
+                .buffers
+                .id_for_path(&path)
+                .is_some(),
+            "the buffer belongs to the workspace that asked for it"
+        );
+        assert!(
+            h.stoat.workspaces[elsewhere]
+                .buffers
+                .id_for_path(&path)
+                .is_none(),
+            "and not to whichever one happened to be active"
+        );
+    }
+
+    #[test]
+    fn a_deferred_open_clears_the_badge_it_raised() {
+        use crate::badge::BadgeSource;
+
+        let mut h = TestHarness::with_size(80, 24);
+        let origin = h.stoat.active_workspace;
+        let root = Path::new("/big-badge");
+        let path = root.join("huge.txt");
+        let big = vec![b'x'; super::OPEN_SYNC_MAX_BYTES as usize + 16];
+        h.fake_fs().insert_file(&path, &big);
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        let elsewhere = h.create_workspace();
+        h.set_active_workspace(elsewhere);
+
+        h.settle();
+        super::install_pending_opens(&mut h.stoat);
+
+        assert!(
+            h.stoat.workspaces[origin]
+                .badges
+                .find_by_source(BadgeSource::FileOpen)
+                .is_none(),
+            "the badge clears where it was raised, not where the user ended up"
+        );
+    }
+
+    #[test]
+    fn a_deferred_open_whose_workspace_closed_is_dropped() {
+        // The pane it was told to fill went with the workspace, and no other
+        // workspace's pane of that key has anything to do with this file.
+        let mut h = TestHarness::with_size(80, 24);
+        let doomed = h.create_workspace();
+        h.set_active_workspace(doomed);
+        let root = Path::new("/big-closed");
+        let path = root.join("huge.txt");
+        let big = vec![b'x'; super::OPEN_SYNC_MAX_BYTES as usize + 16];
+        h.fake_fs().insert_file(&path, &big);
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+
+        let survivor = h.create_workspace();
+        h.set_active_workspace(survivor);
+        h.stoat.workspaces.remove(doomed);
+
+        h.settle();
+        super::install_pending_opens(&mut h.stoat);
+
+        assert!(
+            h.stoat.workspaces[survivor]
+                .buffers
+                .id_for_path(&path)
+                .is_none(),
+            "the read does not fall through to whoever is left"
+        );
+        assert!(h.stoat.pending_file_opens.is_empty(), "and is not requeued");
+    }
+
+    #[test]
+    fn two_workspaces_opening_one_large_file_both_get_it() {
+        let mut h = TestHarness::with_size(80, 24);
+        let first = h.stoat.active_workspace;
+        let root = Path::new("/big-shared");
+        let path = root.join("huge.txt");
+        let big = vec![b'x'; super::OPEN_SYNC_MAX_BYTES as usize + 16];
+        h.fake_fs().insert_file(&path, &big);
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+
+        let second = h.create_workspace();
+        h.set_active_workspace(second);
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+
+        h.settle();
+        super::install_pending_opens(&mut h.stoat);
+
+        assert!(
+            h.stoat.workspaces[first]
+                .buffers
+                .id_for_path(&path)
+                .is_some(),
+            "the first workspace's request lands"
+        );
+        assert!(
+            h.stoat.workspaces[second]
+                .buffers
+                .id_for_path(&path)
+                .is_some(),
+            "and the second's is not dropped as a duplicate of it"
         );
     }
 
