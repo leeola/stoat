@@ -30,16 +30,18 @@
 
 use crate::{
     edit_tree,
-    highlight::{QueryCursorHandle, RopeTextProvider},
+    highlight::{parse_rope_inner, QueryCursorHandle, RopeTextProvider},
     language::InjectionInner,
-    language_for_fence_token, parse_rope, parse_rope_range, Language,
+    language_for_fence_token, parse_rope_range, Language,
 };
 use std::{
     cmp::Reverse,
     collections::{HashMap, VecDeque},
     ops::Range,
     sync::Arc,
+    time::Instant,
 };
+use stoat_scheduler::Executor;
 use stoat_text::{patch::Edit as PatchEdit, ContextLessSummary, Item, Rope, SumTree};
 use tree_sitter::{Node, Query, StreamingIterator, Tree};
 
@@ -285,8 +287,9 @@ impl SyntaxMap {
         language: Arc<Language>,
         version: u64,
         root: Option<&Tree>,
+        deadline: Option<(Instant, &Executor)>,
     ) -> Option<()> {
-        self.reparse_within_changed_ranges(rope, language, version, None, root)
+        self.reparse_within_changed_ranges(rope, language, version, None, root, deadline)
     }
 
     /// Reparse `rope` against `language`, optionally filtering the
@@ -324,6 +327,13 @@ impl SyntaxMap {
     /// be a parse of `rope` under `language`. It is installed as the depth-0
     /// layer verbatim, so one taken from other text or another grammar would
     /// publish layer offsets that do not describe the buffer.
+    ///
+    /// Every parse below this call honors `deadline`, so a caller on a latency
+    /// budget cannot be stalled by a pathological injection layer. Passing it
+    /// costs the whole reparse rather than one layer, since a map missing a
+    /// layer would be indistinguishable from one whose injection genuinely
+    /// went away. A `None` return means the deadline passed or the root parse
+    /// failed, and leaves the map as the caller handed it over.
     pub fn reparse_within_changed_ranges(
         &mut self,
         rope: &Rope,
@@ -331,6 +341,7 @@ impl SyntaxMap {
         version: u64,
         changed_ranges: Option<&[Range<usize>]>,
         root: Option<&Tree>,
+        deadline: Option<(Instant, &Executor)>,
     ) -> Option<()> {
         // Expand changed ranges by +/- 1 row when filtering injection
         // queries. The expansion catches injection boundary flips
@@ -355,7 +366,14 @@ impl SyntaxMap {
                 .collect()
         });
         // Continue with the body of the original `reparse`.
-        self.reparse_inner(rope, language, version, expanded_ranges.as_deref(), root)
+        self.reparse_inner(
+            rope,
+            language,
+            version,
+            expanded_ranges.as_deref(),
+            root,
+            deadline,
+        )
     }
 
     fn reparse_inner(
@@ -365,6 +383,7 @@ impl SyntaxMap {
         version: u64,
         injection_filter_ranges: Option<&[Range<usize>]>,
         root: Option<&Tree>,
+        deadline: Option<(Instant, &Executor)>,
     ) -> Option<()> {
         // Snapshot prior injection layers keyed by (host_range, language name)
         // so we can reuse them when the same host node still exists.
@@ -391,9 +410,16 @@ impl SyntaxMap {
                     .iter()
                     .find(|l| l.depth == 0)
                     .map(|l| l.tree.clone());
-                parse_rope(&language, rope, prior_root_tree.as_ref())?
+                parse_rope_inner(&language, rope, prior_root_tree.as_ref(), None, deadline)?
             },
         };
+
+        // An injection parse reports both "no tree here" and "out of time" as
+        // `None`, and the walk's ordinary answer to the first is to move on
+        // without a layer. Doing that after the budget ran out would install a
+        // map that looks complete while missing the layers the abort cut off,
+        // so the clock decides which of the two happened.
+        let out_of_time = || deadline.is_some_and(|(dl, executor)| executor.now() >= dl);
 
         // Queue of (depth, language, tree, parent host range) for the
         // BFS-like injection walk. Start with the root layer.
@@ -508,7 +534,11 @@ impl SyntaxMap {
                                 rope,
                                 content.clone(),
                                 prior.map(|p| &p.tree),
+                                deadline,
                             ) else {
+                                if out_of_time() {
+                                    return None;
+                                }
                                 continue;
                             };
                             new_layers.push(SyntaxLayer {
@@ -537,9 +567,16 @@ impl SyntaxMap {
                             && p.end_offset == r.end as u32
                             && p.language.name == inner_lang.name
                     });
-                    let Some(inner_tree) =
-                        parse_rope_range(&inner_lang, rope, r.clone(), prior.map(|p| &p.tree))
-                    else {
+                    let Some(inner_tree) = parse_rope_range(
+                        &inner_lang,
+                        rope,
+                        r.clone(),
+                        prior.map(|p| &p.tree),
+                        deadline,
+                    ) else {
+                        if out_of_time() {
+                            return None;
+                        }
                         continue;
                     };
                     new_layers.push(SyntaxLayer {
@@ -557,8 +594,11 @@ impl SyntaxMap {
                     let merged_start = sorted.first().map(|r| r.start).unwrap_or(0);
                     let merged_end = sorted.last().map(|r| r.end).unwrap_or(0);
                     let Some(inner_tree) =
-                        parse_rope_combined_ranges(&inner_lang, rope, &sorted, None)
+                        parse_rope_combined_ranges(&inner_lang, rope, &sorted, None, deadline)
                     else {
+                        if out_of_time() {
+                            return None;
+                        }
                         continue;
                     };
                     new_layers.push(SyntaxLayer {
@@ -688,8 +728,8 @@ fn parse_rope_combined_ranges(
     rope: &Rope,
     ranges: &[Range<usize>],
     old_tree: Option<&Tree>,
+    deadline: Option<(Instant, &Executor)>,
 ) -> Option<Tree> {
-    use crate::highlight::with_parser;
     if ranges.is_empty() {
         return None;
     }
@@ -706,54 +746,7 @@ fn parse_rope_combined_ranges(
             }
         })
         .collect();
-    with_parser(|parser| {
-        parser.set_language(&language.grammar).ok()?;
-        parser.set_included_ranges(&ts_ranges).ok()?;
-        // Stream rope chunks via the same callback shape as parse_rope.
-        struct CursorState<'a> {
-            rope: &'a Rope,
-            chunks: Option<stoat_text::ChunksInRange<'a>>,
-            pending: &'a str,
-            pending_start: usize,
-        }
-        let mut state = CursorState {
-            rope,
-            chunks: None,
-            pending: "",
-            pending_start: 0,
-        };
-        let total_len = rope.len();
-        let mut callback = |byte_offset: usize, _pos: tree_sitter::Point| -> &[u8] {
-            if byte_offset >= total_len {
-                return &[];
-            }
-            let pending_end = state.pending_start + state.pending.len();
-            if byte_offset >= state.pending_start && byte_offset < pending_end {
-                let local = byte_offset - state.pending_start;
-                return state.pending.as_bytes().get(local..).unwrap_or(&[]);
-            }
-            if byte_offset < state.pending_start || state.chunks.is_none() {
-                state.chunks = Some(state.rope.chunks_in_range(byte_offset..total_len));
-                state.pending = "";
-                state.pending_start = byte_offset;
-            }
-            loop {
-                let chunk_end = state.pending_start + state.pending.len();
-                state.pending_start = chunk_end;
-                state.pending = "";
-                let Some(chunk) = state.chunks.as_mut().and_then(|it| it.next()) else {
-                    return &[];
-                };
-                state.pending = chunk;
-                let new_chunk_end = state.pending_start + chunk.len();
-                if byte_offset < new_chunk_end {
-                    let local = byte_offset - state.pending_start;
-                    return chunk.as_bytes().get(local..).unwrap_or(&[]);
-                }
-            }
-        };
-        parser.parse_with_options(&mut callback, old_tree, None)
-    })
+    parse_rope_inner(language, rope, old_tree, Some(&ts_ranges), deadline)
 }
 
 fn stoat_to_ts(p: stoat_text::Point) -> tree_sitter::Point {
@@ -766,7 +759,9 @@ fn stoat_to_ts(p: stoat_text::Point) -> tree_sitter::Point {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::LanguageRegistry;
+    use crate::{parse_rope, LanguageRegistry};
+    use std::time::Duration;
+    use stoat_scheduler::TestScheduler;
 
     fn rust_lang() -> Arc<Language> {
         LanguageRegistry::standard()
@@ -817,7 +812,7 @@ mod tests {
         let lang = rust_lang();
         let rope = Rope::from("fn main() {}");
         let mut map = SyntaxMap::new();
-        assert!(map.reparse(&rope, lang.clone(), 1, None).is_some());
+        assert!(map.reparse(&rope, lang.clone(), 1, None, None).is_some());
 
         assert_eq!(map.snapshot().layer_count(), 1);
         let root = map.snapshot().iter_layers().next().unwrap();
@@ -839,7 +834,7 @@ mod tests {
         let lang = rust_lang();
         let rope1 = Rope::from("fn main() {}");
         let mut map = SyntaxMap::new();
-        map.reparse(&rope1, lang.clone(), 1, None).unwrap();
+        map.reparse(&rope1, lang.clone(), 1, None, None).unwrap();
         assert_eq!(
             map.snapshot()
                 .iter_layers()
@@ -866,7 +861,7 @@ mod tests {
         }];
 
         map.interpolate(&edits, &rope1, &rope2);
-        map.reparse(&rope2, lang.clone(), 2, None).unwrap();
+        map.reparse(&rope2, lang.clone(), 2, None, None).unwrap();
 
         let layer = map.snapshot().iter_layers().next().unwrap();
         assert_eq!(layer.tree.root_node().byte_range(), 0..rope2.len());
@@ -882,7 +877,7 @@ mod tests {
         let original = "fn main() { let x = 1; }";
         let old_rope = Rope::from(original);
         let mut map = SyntaxMap::new();
-        map.reparse(&old_rope, lang.clone(), 1, None).unwrap();
+        map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
 
         let insert_pos = 23;
         let inserted = "let y = 2; ";
@@ -897,7 +892,7 @@ mod tests {
             new: insert_pos..(insert_pos + inserted.len()),
         }];
         map.interpolate(&edits, &old_rope, &new_rope);
-        map.reparse(&new_rope, lang.clone(), 2, None).unwrap();
+        map.reparse(&new_rope, lang.clone(), 2, None, None).unwrap();
 
         let incremental = map
             .snapshot()
@@ -911,7 +906,7 @@ mod tests {
         // Equivalence check: a fresh map parsing the new rope from
         // scratch must produce the same tree.
         let mut fresh = SyntaxMap::new();
-        fresh.reparse(&new_rope, lang, 2, None).unwrap();
+        fresh.reparse(&new_rope, lang, 2, None, None).unwrap();
         let fresh_root = fresh
             .snapshot()
             .iter_layers()
@@ -962,7 +957,7 @@ mod tests {
         let source = "# Title\n\nSome **bold** prose with `code`.\n";
         let rope = Rope::from(source);
         let mut map = SyntaxMap::new();
-        map.reparse(&rope, lang, 1, None).unwrap();
+        map.reparse(&rope, lang, 1, None, None).unwrap();
 
         let layers: Vec<(u32, u32, &str)> = map
             .snapshot()
@@ -988,7 +983,7 @@ mod tests {
         let lang = rust_lang();
         let rope = Rope::from("fn main() { let x = 1; }");
         let mut map = SyntaxMap::new();
-        map.reparse(&rope, lang, 1, None).unwrap();
+        map.reparse(&rope, lang, 1, None, None).unwrap();
         assert_eq!(map.snapshot().layer_count(), 1);
         assert_eq!(map.snapshot().iter_layers().next().unwrap().depth, 0);
     }
@@ -1002,7 +997,7 @@ mod tests {
         let source = "/// **bold** [text](url)\nfn a() {}\n";
         let rope = Rope::from(source);
         let mut map = SyntaxMap::new();
-        map.reparse(&rope, lang, 1, None).unwrap();
+        map.reparse(&rope, lang, 1, None, None).unwrap();
 
         let layers: Vec<(u32, &str)> = map
             .snapshot()
@@ -1053,7 +1048,7 @@ mod tests {
         let source = "```rust\nfn a() {}\n```\n";
         let rope = Rope::from(source);
         let mut map = SyntaxMap::new();
-        map.reparse(&rope, lang, 1, None).unwrap();
+        map.reparse(&rope, lang, 1, None, None).unwrap();
 
         let layers: Vec<(u32, &str)> = map
             .snapshot()
@@ -1089,7 +1084,7 @@ mod tests {
         let lang = markdown_lang();
         let rope = Rope::from("```cobol\nMOVE X TO Y\n```\n");
         let mut map = SyntaxMap::new();
-        map.reparse(&rope, lang, 1, None).unwrap();
+        map.reparse(&rope, lang, 1, None, None).unwrap();
 
         assert!(
             map.snapshot()
@@ -1111,7 +1106,7 @@ mod tests {
         let source = "/// ```rust\n/// fn b() {}\n/// ```\nfn a() {}\n";
         let rope = Rope::from(source);
         let mut map = SyntaxMap::new();
-        map.reparse(&rope, lang, 1, None).unwrap();
+        map.reparse(&rope, lang, 1, None, None).unwrap();
 
         let layers: Vec<(u32, &str)> = map
             .snapshot()
@@ -1142,7 +1137,7 @@ mod tests {
         let source = "# Title\n\nSome **bold** text\n";
         let rope = Rope::from(source);
         let mut map = SyntaxMap::new();
-        map.reparse(&rope, lang, 1, None).unwrap();
+        map.reparse(&rope, lang, 1, None, None).unwrap();
 
         let captures = map
             .snapshot()
@@ -1190,7 +1185,7 @@ mod tests {
         let source = "# Title\n\nSome **bold** text\n";
         let rope = Rope::from(source);
         let mut map = SyntaxMap::new();
-        map.reparse(&rope, lang, 1, None).unwrap();
+        map.reparse(&rope, lang, 1, None, None).unwrap();
 
         let half = source.len() / 2;
         let captures = map
@@ -1220,7 +1215,7 @@ mod tests {
         let source = "Some **bold** text\n";
         let rope = Rope::from(source);
         let mut map = SyntaxMap::new();
-        map.reparse(&rope, lang.clone(), 1, None).unwrap();
+        map.reparse(&rope, lang.clone(), 1, None, None).unwrap();
         let first_inline_range = map
             .snapshot()
             .iter_layers()
@@ -1231,7 +1226,7 @@ mod tests {
             "first reparse should produce an inline layer"
         );
 
-        map.reparse(&rope, lang, 2, None).unwrap();
+        map.reparse(&rope, lang, 2, None, None).unwrap();
         let second_inline_range = map
             .snapshot()
             .iter_layers()
@@ -1255,7 +1250,7 @@ mod tests {
         let first_newline = source.find('\n').unwrap();
         #[allow(clippy::single_range_in_vec_init)]
         let changed = vec![0..first_newline];
-        map.reparse_within_changed_ranges(&rope, lang.clone(), 1, Some(&changed), None)
+        map.reparse_within_changed_ranges(&rope, lang.clone(), 1, Some(&changed), None, None)
             .unwrap();
 
         // Should still produce at least one depth-1 inline layer (the
@@ -1285,7 +1280,7 @@ mod tests {
         let source = "```rust\nfn a() {}\n```\n\ntail text\n";
         let rope = Rope::from(source);
         let mut map = SyntaxMap::new();
-        map.reparse(&rope, lang.clone(), 1, None).unwrap();
+        map.reparse(&rope, lang.clone(), 1, None, None).unwrap();
         assert!(
             map.snapshot()
                 .iter_layers()
@@ -1296,7 +1291,7 @@ mod tests {
         let tail = source.find("tail").unwrap();
         #[allow(clippy::single_range_in_vec_init)]
         let changed = vec![tail..source.len()];
-        map.reparse_within_changed_ranges(&rope, lang.clone(), 2, Some(&changed), None)
+        map.reparse_within_changed_ranges(&rope, lang.clone(), 2, Some(&changed), None, None)
             .unwrap();
 
         let fence_layers: Vec<(u32, u32)> = map
@@ -1323,7 +1318,7 @@ mod tests {
         let old_source = "```rust\nfn a() {}\n```\n";
         let old_rope = Rope::from(old_source);
         let mut map = SyntaxMap::new();
-        map.reparse(&old_rope, lang.clone(), 1, None).unwrap();
+        map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
         assert!(
             map.snapshot()
                 .iter_layers()
@@ -1340,7 +1335,7 @@ mod tests {
         map.interpolate(&edits, &old_rope, &new_rope);
         #[allow(clippy::single_range_in_vec_init)]
         let changed = vec![0..new_source.len()];
-        map.reparse_within_changed_ranges(&new_rope, lang.clone(), 2, Some(&changed), None)
+        map.reparse_within_changed_ranges(&new_rope, lang.clone(), 2, Some(&changed), None, None)
             .unwrap();
 
         assert!(
@@ -1366,7 +1361,7 @@ mod tests {
         let old_source = "```rust\nfn a() {}\n```\n";
         let old_rope = Rope::from(old_source);
         let mut map = SyntaxMap::new();
-        map.reparse(&old_rope, lang.clone(), 1, None).unwrap();
+        map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
         let before: Vec<(u32, u32)> = map
             .snapshot()
             .iter_layers()
@@ -1410,10 +1405,10 @@ mod tests {
         let rope = Rope::from(source);
 
         let mut a = SyntaxMap::new();
-        a.reparse(&rope, lang.clone(), 1, None).unwrap();
+        a.reparse(&rope, lang.clone(), 1, None, None).unwrap();
 
         let mut b = SyntaxMap::new();
-        b.reparse_within_changed_ranges(&rope, lang.clone(), 1, None, None)
+        b.reparse_within_changed_ranges(&rope, lang.clone(), 1, None, None, None)
             .unwrap();
 
         let a_layers: Vec<(u32, u32, u32, &str)> = a
@@ -1465,12 +1460,14 @@ mod tests {
         let rope = Rope::from(source);
 
         let mut self_parsed = SyntaxMap::new();
-        self_parsed.reparse(&rope, lang.clone(), 1, None).unwrap();
+        self_parsed
+            .reparse(&rope, lang.clone(), 1, None, None)
+            .unwrap();
 
         let root = parse_rope(&lang, &rope, None).expect("markdown parse must succeed");
         let mut supplied = SyntaxMap::new();
         supplied
-            .reparse(&rope, lang.clone(), 1, Some(&root))
+            .reparse(&rope, lang.clone(), 1, Some(&root), None)
             .unwrap();
 
         assert_eq!(layer_shapes(&self_parsed), layer_shapes(&supplied));
@@ -1504,12 +1501,13 @@ mod tests {
         let changed = vec![insert_pos..(insert_pos + inserted.len())];
 
         let mut base = SyntaxMap::new();
-        base.reparse(&old_rope, lang.clone(), 1, None).unwrap();
+        base.reparse(&old_rope, lang.clone(), 1, None, None)
+            .unwrap();
 
         let mut self_parsed = base.clone();
         self_parsed.interpolate(&edits, &old_rope, &new_rope);
         self_parsed
-            .reparse_within_changed_ranges(&new_rope, lang.clone(), 2, Some(&changed), None)
+            .reparse_within_changed_ranges(&new_rope, lang.clone(), 2, Some(&changed), None, None)
             .unwrap();
 
         // The root a caller already holds is the prior root advanced across
@@ -1527,9 +1525,108 @@ mod tests {
         let mut supplied = base;
         supplied.interpolate(&edits, &old_rope, &new_rope);
         supplied
-            .reparse_within_changed_ranges(&new_rope, lang.clone(), 2, Some(&changed), Some(&root))
+            .reparse_within_changed_ranges(
+                &new_rope,
+                lang.clone(),
+                2,
+                Some(&changed),
+                Some(&root),
+                None,
+            )
             .unwrap();
 
         assert_eq!(layer_shapes(&self_parsed), layer_shapes(&supplied));
+    }
+
+    /// Reparse `source` with the root handed in, once on a budget that cannot
+    /// expire and once on one already spent.
+    ///
+    /// Asserts the spent budget aborts, and returns the budgeted map so the
+    /// caller can pin which injection layers the abort cut off. Supplying the
+    /// root is what makes the assertion mean something. It leaves the
+    /// injection parses as the only parses, so nothing else could have
+    /// aborted.
+    ///
+    /// Callers must give the injection they are testing a body big enough to
+    /// matter. Tree-sitter consults the progress callback on its own schedule,
+    /// so a parse of a few dozen bytes finishes without ever checking the
+    /// clock, and a fixture built from those would abort nowhere and prove
+    /// nothing.
+    fn reparse_on_a_live_and_a_spent_budget(lang: &Arc<Language>, source: &str) -> SyntaxMap {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = scheduler.executor();
+        let rope = Rope::from(source);
+        let root = parse_rope(lang, &rope, None).expect("the root parse must succeed");
+
+        let mut budgeted = SyntaxMap::new();
+        let unreachable_deadline = executor.now() + Duration::from_secs(60);
+        budgeted
+            .reparse(
+                &rope,
+                lang.clone(),
+                1,
+                Some(&root),
+                Some((unreachable_deadline, &executor)),
+            )
+            .expect("a budget that cannot expire must not abort");
+
+        let mut expired = SyntaxMap::new();
+        assert_eq!(
+            expired.reparse(
+                &rope,
+                lang.clone(),
+                1,
+                Some(&root),
+                Some((executor.now(), &executor)),
+            ),
+            None,
+            "an injection parse past the deadline must abort the whole reparse"
+        );
+        assert!(
+            expired.snapshot().is_empty(),
+            "and must install nothing, since a layer set missing its aborted layers reads as complete"
+        );
+
+        budgeted
+    }
+
+    #[test]
+    fn an_expired_deadline_aborts_a_ranged_injection_parse() {
+        // A fence and no prose, so the fence body is the only injection parse
+        // the walk runs and the abort can have come from nowhere else.
+        let source = format!("```rust\n{}```\n", "fn main() { let x = 1; }\n".repeat(400));
+        let budgeted = reparse_on_a_live_and_a_spent_budget(&markdown_lang(), &source);
+
+        assert!(
+            budgeted
+                .snapshot()
+                .iter_layers()
+                .any(|l| l.language.name == "rust"),
+            "the fixture must inject a fence layer for the deadline to have cut one off"
+        );
+    }
+
+    #[test]
+    fn an_expired_deadline_aborts_a_combined_injection_parse() {
+        // Two doc-comment blocks put two markdown host ranges at the same
+        // depth, which the walk merges into one combined-range parse rather
+        // than a layer each, so this fixture routes through a different parse
+        // helper than the ranged test above. The layer assertion below is what
+        // pins that the merge happened rather than a layer per block.
+        let block = "/// some **bold** text and `code` and [a link](url)\n".repeat(200);
+        let source = format!("{block}fn a() {{}}\n{block}fn b() {{}}\n");
+        let budgeted = reparse_on_a_live_and_a_spent_budget(&rust_lang(), &source);
+
+        let second_block = source.rfind("///").expect("the fixture has two blocks");
+        let host = budgeted
+            .snapshot()
+            .iter_layers()
+            .find(|l| l.depth == 1)
+            .expect("a depth-1 markdown layer");
+        assert!(
+            (host.start_offset as usize) < second_block
+                && (host.end_offset as usize) > second_block,
+            "one layer must span both blocks, which is what makes it combined, got {host:?}"
+        );
     }
 }

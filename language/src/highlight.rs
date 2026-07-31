@@ -219,6 +219,7 @@ pub fn parse_rope_range(
     rope: &Rope,
     range: Range<usize>,
     old_tree: Option<&Tree>,
+    deadline: Option<(Instant, &Executor)>,
 ) -> Option<Tree> {
     if range.start >= range.end || range.end > rope.len() {
         return None;
@@ -231,10 +232,16 @@ pub fn parse_rope_range(
         start_point,
         end_point,
     }];
-    parse_rope_inner(language, rope, old_tree, Some(&included), None)
+    parse_rope_inner(language, rope, old_tree, Some(&included), deadline)
 }
 
-fn parse_rope_inner(
+/// Parse `rope` under every option the wrappers above expose.
+///
+/// `included_ranges` restricts the parse to a set of byte ranges, and a
+/// `deadline` aborts it once passed. Both an abort and an ordinary parse
+/// failure come back as `None`. A caller that must tell them apart checks the
+/// clock itself.
+pub(crate) fn parse_rope_inner(
     language: &Language,
     rope: &Rope,
     old_tree: Option<&Tree>,
@@ -428,7 +435,7 @@ pub fn extract_highlights_rope_with_cache(
                 // inner tree's nodes already carry rope-absolute byte
                 // offsets. No flat-string allocation, no offset translation.
                 let Some(inner_tree) =
-                    parse_rope_range(inner, rope, host_range.clone(), prev_tree.as_ref())
+                    parse_rope_range(inner, rope, host_range.clone(), prev_tree.as_ref(), None)
                 else {
                     continue;
                 };

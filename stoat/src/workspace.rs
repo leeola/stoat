@@ -62,9 +62,9 @@ new_key_type! {
 /// Largest buffer, in bytes, that [`Workspace::drive_parse_jobs`] parses
 /// synchronously on the event-loop thread.
 ///
-/// Only the tree-sitter step honors the 1ms deadline. The full reparse and
-/// captures walk that follow it are unbounded O(file), so past this cap a
-/// buffer is parsed on the background pool instead of blocking a keystroke.
+/// Every tree-sitter parse honors the 1ms deadline, but the captures walk that
+/// follows them does not and is unbounded O(file), so past this cap a buffer
+/// is parsed on the background pool instead of blocking a keystroke.
 const SYNC_PARSE_MAX_BYTES: usize = 256 * 1024;
 
 /// Stable-across-restart workspace identifier. [`WorkspaceId`] is a SlotMap
@@ -817,9 +817,9 @@ impl Workspace {
             // so the incremental path can hand a carried token back its anchor.
             let prior_anchors = self.buffers.tokens_for(buffer_id).map(|(tokens, _)| tokens);
 
-            // Only the tree-sitter step honors the deadline. The full reparse
-            // and captures walk that follow it are unbounded O(file), so a
-            // large buffer skips this synchronous fast path and parses on the
+            // Every tree-sitter parse honors the deadline, but the captures
+            // walk after them does not and is unbounded O(file), so a large
+            // buffer skips this synchronous fast path and parses on the
             // blocking pool below, landing through the job poll instead of
             // holding the run loop for the whole file.
             let sync_out = (snapshot.len() <= SYNC_PARSE_MAX_BYTES)

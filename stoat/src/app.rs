@@ -10288,11 +10288,13 @@ pub(crate) fn lsp_uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {
     Some(PathBuf::from(uri.path().as_str()))
 }
 
-/// Synchronous core of the parse pipeline. When `deadline` is `Some`, the
-/// host parse aborts if it would exceed it and the function returns `None`,
-/// signalling that the caller should fall back to the background path.
-/// `None` is also returned for ordinary parse failures (unsupported
-/// language, etc.); the difference does not matter for the call sites.
+/// Synchronous core of the parse pipeline. When `deadline` is `Some`, every
+/// parse it runs aborts if it would exceed it and the function returns `None`,
+/// signalling that the caller should fall back to the background path. An
+/// abort leaves `prior` and `prior_syntax_map` untouched so that background
+/// attempt still has the previous parse to work from. `None` is also returned
+/// for ordinary parse failures (unsupported language, etc.); the difference
+/// does not matter for the call sites.
 ///
 /// `prior_token_spans` and `prior_token_anchors` are the previous parse's
 /// tokens in its own byte coordinates and as anchors in the buffer. They must
@@ -10362,9 +10364,11 @@ pub(crate) fn parse_buffer_step(
     // leaves the caller's map borrowed rather than taken, for a handful of
     // refcount bumps.
     //
-    // The root parsed above is handed in rather than parsed a second time.
-    // That also removes the reparse's only failure mode, so the fallback below
-    // now runs only when there was no prior map to advance.
+    // The root parsed above is handed in rather than parsed a second time, so
+    // what remains under the reparse is the injection layers, running on the
+    // same budget. A spent budget takes the `?` here rather than the rebuild
+    // below, since rebuilding from nothing would parse every one of those
+    // layers again only to abort again.
     let incremental = match (prior_syntax_map.as_ref(), prior.as_ref(), edited.as_ref()) {
         (Some(prior_map), Some(prev), Some((_, edits))) => {
             let mut map = prior_map.clone();
@@ -10378,21 +10382,27 @@ pub(crate) fn parse_buffer_step(
                 cur_version,
                 Some(&changed),
                 Some(&tree),
-            )
-            .map(|()| map)
+                deadline,
+            )?;
+            Some(map)
         },
         _ => None,
     };
 
+    let incremental_reparse = incremental.is_some();
+    let syntax_map = match incremental {
+        Some(map) => map,
+        None => {
+            let mut map = stoat_language::SyntaxMap::default();
+            map.reparse(&new_rope, lang.clone(), cur_version, Some(&tree), deadline)?;
+            map
+        },
+    };
+
+    // Past here the parse can no longer abort, so the caller's prior has done
+    // its job and every abort above has left it whole for the retry.
     prior.take();
     prior_syntax_map.take();
-
-    let incremental_reparse = incremental.is_some();
-    let syntax_map = incremental.unwrap_or_else(|| {
-        let mut map = stoat_language::SyntaxMap::default();
-        let _ = map.reparse(&new_rope, lang.clone(), cur_version, Some(&tree));
-        map
-    });
 
     // Re-query only what the edit could have restyled. The prior tokens carry
     // across the edit and keep their anchors, so a keystroke costs a query over
@@ -14577,7 +14587,7 @@ mod tests {
         );
         let mut map = first.syntax_map.clone();
         map.interpolate(edits.edits(), &first.syntax.rope_snapshot, &rope);
-        map.reparse(&rope, lang.clone(), snapshot.version, None)
+        map.reparse(&rope, lang.clone(), snapshot.version, None, None)
             .expect("reparse should succeed");
         let tree = map
             .snapshot()
