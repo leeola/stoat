@@ -1904,6 +1904,147 @@ mod tests {
     }
 
     #[test]
+    fn absorbing_one_layer_can_reach_a_layer_the_filter_did_not() {
+        // Swallowing a layer widens the filter, and the wider filter can land on
+        // a layer the original missed. That second layer has to come in whole
+        // too, so the absorption settles rather than passing once.
+        //
+        // The chain only needs the extra round when it runs backwards through
+        // the prior list, since a single pass grows its range list as it goes
+        // and would pick up anything still ahead of it. The far layer is first
+        // here for that reason.
+        let lang = rust_lang();
+        let tree = crate::parse(&lang, "fn a() {}", None).expect("parse");
+        let prior = |start: u32, end: u32| PriorInjection {
+            depth: 1,
+            start_offset: start,
+            end_offset: end,
+            language: lang.clone(),
+            tree: tree.clone(),
+        };
+
+        #[allow(clippy::single_range_in_vec_init)]
+        let filter = vec![0..1];
+        let absorbed = absorb_prior_layers(&filter, &[prior(10, 30), prior(0, 15)]);
+        assert_eq!(
+            absorbed,
+            vec![0..30],
+            "the layer reached only after the first was swallowed must come in too"
+        );
+    }
+
+    #[test]
+    fn a_filtered_reparse_keeps_the_paragraphs_the_filter_never_reached() {
+        // Markdown puts every paragraph's inline content in one combined layer.
+        // A filter covering the last paragraph reaches that layer, so the walk
+        // owns it and the carry pass will not restore it. Re-finding only the
+        // filtered paragraph would leave the layer covering that alone, and the
+        // rest of the document loses its inline highlighting.
+        use stoat_text::patch::Edit as PatchEdit;
+        let lang = markdown_lang();
+        let source = "para one *em*\n\npara two *em*\n";
+        let old_rope = Rope::from(source);
+
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
+        let inline = |map: &SyntaxMap| -> Vec<Range<usize>> {
+            map.snapshot()
+                .iter_layers()
+                .find(|l| l.language.name == "markdown-inline")
+                .expect("an inline layer")
+                .tree
+                .included_ranges()
+                .iter()
+                .map(|r| r.start_byte..r.end_byte)
+                .collect()
+        };
+        let first = source.find("para one").expect("fixture");
+        assert_eq!(
+            inline(&map),
+            vec![first..first + "para one *em*".len(), 15..28],
+            "the fixture must merge both paragraphs into one layer"
+        );
+
+        let at = source.find("para two").expect("fixture") + "para ".len();
+        let inserted = "the ";
+        let text = format!("{}{inserted}{}", &source[..at], &source[at..]);
+        let new_rope = Rope::from(text.as_str());
+        let edits = vec![PatchEdit {
+            old: at..at,
+            new: at..(at + inserted.len()),
+        }];
+        map.interpolate(&edits, &old_rope, &new_rope);
+
+        #[allow(clippy::single_range_in_vec_init)]
+        let changed = vec![at..(at + inserted.len())];
+        map.reparse_within_changed_ranges(&new_rope, lang.clone(), 2, Some(&changed), None, None)
+            .unwrap();
+
+        let mut fresh = SyntaxMap::new();
+        fresh.reparse(&new_rope, lang, 2, None, None).unwrap();
+        assert_eq!(
+            inline(&map),
+            inline(&fresh),
+            "the untouched first paragraph must stay in the inline layer"
+        );
+    }
+
+    #[test]
+    fn a_filtered_reparse_keeps_doc_comments_the_edit_sat_between() {
+        // A combined layer spans its first host range through its last, so code
+        // written between two doc comments falls inside the markdown layer while
+        // belonging to none of its ranges. The filter reaches the layer, which
+        // makes it the walk's to re-find, and the walk querying only the edited
+        // body finds no markdown there at all. The layer does not shrink, it
+        // goes away, and both comments stop being highlighted.
+        use stoat_text::patch::Edit as PatchEdit;
+        let lang = rust_lang();
+        let source = "/// one **b**\nfn a() {\n    let x = 1;\n}\n/// two **b**\nfn b() {}\n";
+        let old_rope = Rope::from(source);
+
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
+        let comments = |map: &SyntaxMap| -> Vec<Range<usize>> {
+            map.snapshot()
+                .iter_layers()
+                .find(|l| l.depth == 1 && l.language.name == "markdown")
+                .expect("a doc-comment layer")
+                .tree
+                .included_ranges()
+                .iter()
+                .map(|r| r.start_byte..r.end_byte)
+                .collect()
+        };
+        assert_eq!(
+            comments(&map).len(),
+            2,
+            "the fixture must merge both doc comments into one layer"
+        );
+
+        let at = source.find("let x = 1").expect("fixture") + "let x = ".len();
+        let text = format!("{}42{}", &source[..at], &source[at + 1..]);
+        let new_rope = Rope::from(text.as_str());
+        let edits = vec![PatchEdit {
+            old: at..at + 1,
+            new: at..at + 2,
+        }];
+        map.interpolate(&edits, &old_rope, &new_rope);
+
+        #[allow(clippy::single_range_in_vec_init)]
+        let changed = vec![at..at + 2];
+        map.reparse_within_changed_ranges(&new_rope, lang.clone(), 2, Some(&changed), None, None)
+            .unwrap();
+
+        let mut fresh = SyntaxMap::new();
+        fresh.reparse(&new_rope, lang, 2, None, None).unwrap();
+        assert_eq!(
+            comments(&map),
+            comments(&fresh),
+            "an edit between the comments must leave both of them injected"
+        );
+    }
+
+    #[test]
     fn an_edit_in_code_leaves_a_doc_comment_layer_alone() {
         // Reporting layer changes only pays off if the common edit reports
         // nothing. A rust file with one doc comment is the case that matters,
