@@ -10355,12 +10355,19 @@ pub(crate) fn parse_buffer_step(
         },
     };
 
+    // Everything this edit could have restyled, which the injection re-walk
+    // and the token recapture are both narrowed to. One union serves both
+    // because they are asking the same question of the same pair of trees.
+    let invalidated = edited
+        .as_ref()
+        .map(|(old_tree, edits)| invalidated_ranges(old_tree, &tree, edits, new_rope.len()));
+
     // Advance the multi-layer SyntaxMap the highlights are read from. With a
     // prior map this rides the interpolate-then-reparse contract. Interpolate
     // replays this version's edits onto every layer, leaving each tree
     // positioned as tree-sitter's `old_tree` and each layer's bounds on the
-    // text it still covers. The reparse then re-walks only the edited rows
-    // for injection changes, keeping the layers elsewhere. Working on a clone
+    // text it still covers. The reparse then re-walks the invalidated rows for
+    // injection changes, keeping the layers elsewhere. Working on a clone
     // leaves the caller's map borrowed rather than taken, for a handful of
     // refcount bumps.
     //
@@ -10374,13 +10381,11 @@ pub(crate) fn parse_buffer_step(
             let mut map = prior_map.clone();
             map.interpolate(edits.edits(), &prev.rope_snapshot, &new_rope);
 
-            let changed: Vec<Range<usize>> =
-                edits.edits().iter().map(|edit| edit.new.clone()).collect();
             map.reparse_within_changed_ranges(
                 &new_rope,
                 lang.clone(),
                 cur_version,
-                Some(&changed),
+                invalidated.as_deref(),
                 Some(&tree),
                 deadline,
             )?;
@@ -10417,14 +10422,14 @@ pub(crate) fn parse_buffer_step(
             prior_token_spans
                 .zip(prior_token_anchors)
                 .filter(|(spans, anchors)| spans.len() == anchors.len())
-                .zip(edited.as_ref())
-                .and_then(|((spans, _), (old_tree, edits))| {
+                .zip(edits.zip(invalidated))
+                .and_then(|((spans, _), (edits, invalidated))| {
                     recapture_edited_ranges(
                         syntax_map.snapshot(),
                         &new_rope,
                         spans,
                         edits,
-                        invalidated_ranges(old_tree, &tree, edits, new_rope.len()),
+                        invalidated,
                         styles,
                     )
                 })
@@ -10623,6 +10628,12 @@ fn anchor_spans(
 /// actually changed, and `old_tree.changed_ranges(new_tree)` names the regions
 /// whose syntax differs, which is what catches a restyle far from the caret
 /// such as an unclosed quote swallowing the rest of a file.
+///
+/// Two consumers narrow themselves to this. The token recapture re-queries it
+/// and carries the prior tokens everywhere else, and the injection re-walk
+/// treats it as the region it is responsible for re-finding layers in, keeping
+/// the layers outside it. Both are only sound if a restyle cannot land outside
+/// the union, which is why the second source is not optional.
 ///
 /// Every range is widened by a byte on each side, which is load-bearing rather
 /// than slack. A `Bias::Left` end anchor at an insertion point resolves to the
@@ -14541,6 +14552,44 @@ mod tests {
             &lang,
             &styles,
             "edit outside the fence",
+        );
+    }
+
+    /// An edit restyles text nowhere near itself when it opens a construct that
+    /// runs to end of file. The injection walk only re-queries where it is told
+    /// to look, and keeps every layer it could not have re-found, so a filter
+    /// built from the edit span alone carries the invalidated layer forward
+    /// stale.
+    #[test]
+    fn an_edit_that_swallows_a_distant_fence_drops_its_layer() {
+        let (styles, lang) = carried_parse_fixture("a.md");
+        let buffer_id = BufferId::new(1);
+        let source = "# Title\n\nprose\n\n```rust\nfn a() -> u32 { 1 }\n```\n\ntail text\n";
+        let mut buf = TextBuffer::with_text(buffer_id, source);
+
+        let mut state = CarriedParse::new(buffer_id);
+        let layers = assert_carried_parse_matches_fresh(
+            &mut state,
+            &buf.snapshot.clone(),
+            &lang,
+            &styles,
+            "first parse",
+        );
+        assert!(
+            layers > 1,
+            "fixture must start with the rust fence injected, got {layers} layers",
+        );
+
+        // A bare fence above the rust one, rows away from it. Everything below
+        // becomes one unnamed fenced block, so the rust layer has to go.
+        let prose = source.find("prose").expect("fixture has prose");
+        buf.edit(prose..prose, "```\n");
+        assert_carried_parse_matches_fresh(
+            &mut state,
+            &buf.snapshot.clone(),
+            &lang,
+            &styles,
+            "an opening fence above swallows the rust fence",
         );
     }
 
