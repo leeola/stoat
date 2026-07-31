@@ -202,6 +202,38 @@ impl SelectionsCollection {
         self.replace_with(transformed, snapshot);
     }
 
+    /// [`Self::transform`] with each selection's endpoints already resolved.
+    ///
+    /// The closure receives its selection alongside the head and tail offsets,
+    /// in that order. Resolving an anchor descends the fragment tree from the
+    /// root, so a closure resolving its own turns a few hundred cursors into a
+    /// few hundred pairs of descents per keystroke. Here every endpoint is
+    /// resolved in one batch, which is two sorted walks for the whole set.
+    ///
+    /// Head and tail rather than start and end, that being what a motion asks
+    /// for, and the two differing by whether the selection is reversed.
+    pub(crate) fn transform_resolved<F>(&mut self, snapshot: &MultiBufferSnapshot, mut f: F)
+    where
+        F: FnMut(&Selection<Anchor>, usize, usize) -> Selection<Anchor>,
+    {
+        let offsets = {
+            let anchors: Vec<Anchor> = self
+                .disjoint
+                .iter()
+                .flat_map(|sel| [sel.head(), sel.tail()])
+                .collect();
+            snapshot.resolve_anchors_batch(&anchors)
+        };
+
+        let transformed: Vec<Selection<Anchor>> = self
+            .disjoint
+            .iter()
+            .zip(offsets.chunks_exact(2))
+            .map(|(sel, ends)| f(sel, ends[0], ends[1]))
+            .collect();
+        self.replace_with(transformed, snapshot);
+    }
+
     /// Flat-map each selection into zero or more replacement pieces. Returning
     /// an empty vec keeps the original selection unchanged; returning a
     /// non-empty vec replaces it with the pieces, each receiving a fresh id
@@ -343,6 +375,57 @@ mod tests {
         assert!(sel.is_empty());
         assert_eq!(sel.goal, SelectionGoal::None);
         assert!(sel.start.is_min());
+    }
+
+    #[test]
+    fn transform_resolved_hands_over_what_each_selection_would_resolve() {
+        let text: String = (0..200).map(|i| format!("line {i} of text\n")).collect();
+        let multi = singleton(&text);
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+
+        // Many cursors, some reversed, so head and tail are not interchangeable
+        // and the batch has to keep them the right way round.
+        for row in 0..200 {
+            let at = text
+                .match_indices('\n')
+                .nth(row)
+                .map(|(i, _)| i)
+                .expect("the fixture has the rows");
+            collection.insert_cursor(
+                snapshot.anchor_at(at.saturating_sub(row % 5), Bias::Right),
+                SelectionGoal::None,
+                &snapshot,
+            );
+        }
+        collection.transform(&snapshot, |sel| {
+            let mut flipped = sel.clone();
+            flipped.reversed = sel.id % 2 == 0;
+            flipped
+        });
+
+        let expected: Vec<(usize, usize)> = collection
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                (
+                    snapshot.resolve_anchor(&sel.head()),
+                    snapshot.resolve_anchor(&sel.tail()),
+                )
+            })
+            .collect();
+        assert!(expected.len() > 100, "the fixture has to have many cursors");
+
+        let mut handed = Vec::new();
+        collection.transform_resolved(&snapshot, |sel, head, tail| {
+            handed.push((head, tail));
+            sel.clone()
+        });
+
+        assert_eq!(
+            handed, expected,
+            "the batch gives each closure the offsets it would have resolved itself"
+        );
     }
 
     #[test]
