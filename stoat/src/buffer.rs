@@ -1241,7 +1241,7 @@ pub type SharedBuffer = Arc<std::sync::RwLock<TextBuffer>>;
 #[cfg(test)]
 mod tests {
     use super::TextBuffer;
-    use std::ops::Range;
+    use std::{mem, ops::Range};
     use stoat_text::{Bias, BufferId, IndentStyle, Point, Selection, SelectionGoal};
 
     fn buf(content: &str) -> TextBuffer {
@@ -2274,6 +2274,195 @@ mod tests {
                     },
                 }
             }
+        }
+    }
+
+    /// The text a buffer should be showing, modeled as a string and two stacks
+    /// of strings that know nothing of fragments, ropes, or timestamps.
+    ///
+    /// The fragment fuzz above checks the ropes against the fragments, so it
+    /// still holds for a buffer that is wrong about its text in a way its own
+    /// bookkeeping agrees with. Agreeing with this model is a claim about the
+    /// text itself, which is what the deleted rope's order decides.
+    struct TextStack {
+        current: String,
+        undone: Vec<String>,
+        redone: Vec<String>,
+    }
+
+    impl TextStack {
+        /// Seed text is not an undo target, matching `with_text` flooring its
+        /// history above the edit that seeded it.
+        fn new(text: &str) -> Self {
+            Self {
+                current: text.to_owned(),
+                undone: Vec::new(),
+                redone: Vec::new(),
+            }
+        }
+
+        /// Open an undo step over the edits that follow, whose bytes the buffer
+        /// restores in one batch.
+        fn begin_group(&mut self) {
+            self.redone.clear();
+            self.undone.push(self.current.clone());
+        }
+
+        fn edit(&mut self, range: Range<usize>, text: &str) {
+            self.current.replace_range(range, text);
+        }
+
+        fn undo(&mut self) {
+            if let Some(previous) = self.undone.pop() {
+                self.redone.push(mem::replace(&mut self.current, previous));
+            }
+        }
+
+        fn redo(&mut self) {
+            if let Some(next) = self.redone.pop() {
+                self.undone.push(mem::replace(&mut self.current, next));
+            }
+        }
+    }
+
+    /// A char boundary of `text` chosen by `rng`, its end included, so a random
+    /// range never splits a character.
+    fn random_boundary(rng: &mut Lcg, text: &str) -> usize {
+        let mut bounds: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+        bounds.push(text.len());
+        bounds[rng.below(bounds.len())]
+    }
+
+    #[test]
+    fn edits_undos_and_redos_show_the_text_they_should() {
+        const INSERTS: [&str; 6] = ["", "z", "hello ", "\n", "\u{65e5}\u{672c}", "  \n  "];
+        const SEED: &str = "the quick brown fox\njumps over the lazy dog\nsphinx of quartz\n";
+
+        let mut rng = Lcg(0x243F_6A88_85A3_08D3);
+
+        for _ in 0..64 {
+            let mut b = buf(SEED);
+            let mut model = TextStack::new(SEED);
+
+            for step in 0..30 {
+                match rng.below(10) {
+                    0..=5 => {
+                        b.begin_group(Vec::new());
+                        model.begin_group();
+
+                        for _ in 0..1 + rng.below(3) {
+                            let text = b.snapshot.visible_text.to_string();
+                            let a = random_boundary(&mut rng, &text);
+                            let z = random_boundary(&mut rng, &text);
+                            let insert = INSERTS[rng.below(INSERTS.len())];
+
+                            b.edit(a.min(z)..a.max(z), insert);
+                            model.edit(a.min(z)..a.max(z), insert);
+                        }
+
+                        b.seal_group(Vec::new());
+                    },
+                    6..=8 => {
+                        b.undo();
+                        model.undo();
+                    },
+                    _ => {
+                        b.redo();
+                        model.redo();
+                    },
+                }
+
+                assert_eq!(
+                    b.snapshot.visible_text.to_string(),
+                    model.current,
+                    "step {step} left the buffer showing text no edit history explains"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn undoing_a_delete_that_spans_multibyte_text_restores_it() {
+        // Deleting the shorter run first, later in the document, then the
+        // longer multibyte run before it. Read back in the order the deletions
+        // happened rather than the document's, the first fragment's span ends
+        // inside a character.
+        let mut b = buf("ab\u{65e5}\u{672c}cd");
+
+        b.edit(8..9, "");
+        b.edit(2..8, "");
+        assert_eq!(b.snapshot.visible_text.to_string(), "abd");
+
+        b.undo();
+        assert_eq!(
+            b.snapshot.visible_text.to_string(),
+            "ab\u{65e5}\u{672c}d",
+            "undo read the deleted rope at a mid-character offset"
+        );
+
+        b.undo();
+        assert_eq!(b.snapshot.visible_text.to_string(), "ab\u{65e5}\u{672c}cd");
+    }
+
+    /// One random edit, undo, or redo, weighted so a buffer accumulates
+    /// history faster than it unwinds it.
+    fn random_step(rng: &mut Lcg, b: &mut TextBuffer) {
+        const INSERTS: [&str; 5] = ["", "z", "hello ", "\u{65e5}\u{672c}", "\n  "];
+
+        match rng.below(10) {
+            0..=5 => {
+                let text = b.snapshot.visible_text.to_string();
+                let a = random_boundary(rng, &text);
+                let z = random_boundary(rng, &text);
+                b.edit(a.min(z)..a.max(z), INSERTS[rng.below(INSERTS.len())]);
+            },
+            6..=8 => {
+                b.undo();
+            },
+            _ => {
+                b.redo();
+            },
+        }
+    }
+
+    #[test]
+    fn edits_since_reconstructs_across_undo_and_redo() {
+        const SEED: &str = "aaaa bbbb cccc\ndddd eeee ffff\ngggg hhhh iiii\n";
+
+        let mut rng = Lcg(0xB7E1_5162_8AED_2A6B);
+
+        for round in 0..64 {
+            let mut b = buf(SEED);
+
+            // The version a caller holds is taken mid-history, not at a
+            // pristine buffer. Only then can the span it asks about contain an
+            // undo of its own, which is what makes a fragment's visibility at
+            // that version a question the undo map has to answer.
+            for _ in 0..8 {
+                random_step(&mut rng, &mut b);
+            }
+
+            let old_text = b.snapshot.visible_text.to_string();
+            let v0 = b.version();
+
+            for _ in 0..12 {
+                random_step(&mut rng, &mut b);
+            }
+
+            let new_text = b.snapshot.visible_text.to_string();
+            let patch = b.snapshot.edits_since(v0);
+
+            let mut reconstructed = old_text.clone();
+            for edit in patch.edits().iter().rev() {
+                reconstructed.replace_range(edit.old.clone(), &new_text[edit.new.clone()]);
+            }
+
+            assert_eq!(
+                reconstructed,
+                new_text,
+                "round {round}: the patch does not carry the old text to the new one, patch={:?}",
+                patch.edits()
+            );
         }
     }
 }
