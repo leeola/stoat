@@ -9,10 +9,7 @@ use crate::{
 };
 use std::{
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::{Executor, Task};
@@ -82,9 +79,20 @@ pub(crate) fn nav_clamp(len: usize, selected: &mut usize) {
 /// query string. The owner sets `base`, calls [`PickList::refilter`] with the
 /// query, and reads `filtered`/`match_indices`/`selected` to render.
 pub(crate) struct PickList {
-    /// Candidate paths the query filters over. Shared as an [`Arc`] so the owner
-    /// can hand it a snapshot of its walked paths without a second copy.
-    pub(crate) base: Arc<[PathBuf]>,
+    /// Candidate paths the query filters over.
+    ///
+    /// Owned rather than shared so a streaming walk can append to it, which is
+    /// what lets the display strings and the current match survive a batch.
+    /// Move it through [`Self::set_base`] or [`Self::extend_base`]. Replacing it
+    /// by hand leaves [`Self::base_generation`] behind, and the display cache
+    /// would then read stale rows as a prefix of the new set.
+    pub(crate) base: Vec<PathBuf>,
+    /// Bumped whenever [`Self::base`] is replaced, and deliberately not when it
+    /// is extended.
+    ///
+    /// This is what makes a shorter display cache safe to treat as a prefix of
+    /// a longer base rather than as something built from other paths entirely.
+    pub(crate) base_generation: u64,
     /// Indices into `base`, after filtering, in display order.
     pub(crate) filtered: Vec<usize>,
     /// Per-row matched character offsets into the row's display string,
@@ -113,17 +121,21 @@ pub(crate) struct PickList {
     /// so clearing it is safe and setting it is not possible from outside this
     /// module.
     pub(crate) display: Option<DisplayCache>,
-    /// The query [`Self::filtered`] currently holds the matches for, when those
-    /// rows are still a usable starting point for a longer query.
+    /// The query [`Self::filtered`] holds the matches for, and how much of the
+    /// base it had seen at the time.
+    ///
+    /// A longer query starts from those rows rather than the whole base, and a
+    /// base that has since grown contributes only its tail, so the two compose
+    /// into one candidate set.
     ///
     /// `None` wherever the rows stopped meaning anything. That is before the
-    /// first refilter, once the base moved under them, and once a caller
+    /// first refilter, once the base was replaced under them, and once a caller
     /// dropped the results outright.
     ///
     /// Derived state, like [`Self::display`]. [`Self::refilter`] maintains it
     /// against the rows it produces, and [`Self::clear_results`] is how an
     /// owner drops both together.
-    pub(crate) last_query: Option<String>,
+    pub(crate) last_filter: Option<(String, usize)>,
     /// How many candidates the last [`Self::refilter`] handed the matcher.
     ///
     /// A query that extends its predecessor scores only the rows that already
@@ -141,13 +153,16 @@ pub(crate) struct PickList {
 /// renderer formats only the rows on screen, so a large repo would spend most
 /// of a keystroke rebuilding strings that did not change.
 pub(crate) struct DisplayCache {
-    /// Everything [`row_display`] reads, so a cache hit is equivalent to
-    /// deriving the strings again.
-    base: Arc<[PathBuf]>,
+    /// Which candidate set these rows describe. Everything else here is what
+    /// [`row_display`] reads, so a cache hit is equivalent to deriving the
+    /// strings again.
+    base_generation: u64,
     git_root: PathBuf,
     display_roots: Option<Vec<PathBuf>>,
     home: Option<PathBuf>,
-    /// One string per [`Self::base`] entry, in the same order.
+    /// One string per base entry, in the same order, covering a prefix of the
+    /// base. A walk that appended since this was built leaves the tail
+    /// uncovered, and its length is what says where that tail starts.
     rows: Vec<String>,
     /// Indices into [`Self::rows`], ordered by the string each names, which is
     /// the order an empty query lists them in.
@@ -159,7 +174,8 @@ pub(crate) struct DisplayCache {
 impl Default for PickList {
     fn default() -> Self {
         Self {
-            base: Vec::new().into(),
+            base: Vec::new(),
+            base_generation: next_generation(),
             filtered: Vec::new(),
             match_indices: Vec::new(),
             selected: 0,
@@ -167,7 +183,7 @@ impl Default for PickList {
             filter_generation: next_generation(),
             display_roots: None,
             display: None,
-            last_query: None,
+            last_filter: None,
             scored: 0,
         }
     }
@@ -215,22 +231,28 @@ impl PickList {
         // previous result meaningless.
         self.ensure_display(git_root);
 
-        let narrowing = self.narrows_previous(query, anchor, pattern);
+        // A grown base contributes only what arrived after the previous result,
+        // every row before that having already been offered to the same query.
+        let arrived = match self.narrows_previous(query, anchor, pattern) {
+            true => self.last_filter.as_ref().map(|&(_, covered)| covered),
+            false => None,
+        };
         let previous = std::mem::take(&mut self.filtered);
         self.match_indices.clear();
-        self.last_query = Some(query.to_string());
+        self.last_filter = Some((query.to_string(), self.base.len()));
 
         let cache = self.display.as_ref().expect("ensure_display builds one");
         let keeps = |display: &str| anchor.is_none_or(|a| display.starts_with(a));
 
-        let ranked = if narrowing {
+        let ranked = if let Some(covered) = arrived {
             let items = previous
                 .iter()
                 .copied()
+                .chain(covered..cache.rows.len())
                 .filter(|&idx| keeps(&cache.rows[idx]))
                 .map(|idx| (idx, cache.rows[idx].as_str()));
 
-            self.scored = previous.len();
+            self.scored = previous.len() + (cache.rows.len() - covered);
             fuzzy::match_and_rank(pattern, items)
         } else {
             let items = cache
@@ -270,7 +292,7 @@ impl PickList {
         self.filter_generation = next_generation();
     }
 
-    /// Whether `query` only narrows what [`Self::last_query`] already matched,
+    /// Whether `query` only narrows what [`Self::last_filter`] already matched,
     /// so the matcher can be handed [`Self::filtered`] instead of the whole
     /// base.
     ///
@@ -281,7 +303,7 @@ impl PickList {
     /// has to extend the previous pattern and to be one that narrows at all,
     /// which [`fuzzy::extension_narrows`] decides.
     fn narrows_previous(&self, query: &str, anchor: Option<&str>, pattern: &str) -> bool {
-        let Some(previous) = self.last_query.as_deref() else {
+        let Some((previous, _)) = self.last_filter.as_ref() else {
             return false;
         };
         if !query.starts_with(previous) {
@@ -298,27 +320,59 @@ impl PickList {
         anchor_narrows && pattern.starts_with(previous_pattern) && fuzzy::extension_narrows(pattern)
     }
 
-    /// Build the display strings for the current base, reusing them when
-    /// nothing [`row_display`] reads has moved.
+    /// Point the list at a different candidate set, so the next
+    /// [`Self::refilter`] derives its display strings afresh.
+    pub(crate) fn set_base(&mut self, base: Vec<PathBuf>) {
+        self.base = base;
+        self.base_generation = next_generation();
+    }
+
+    /// Append candidates, leaving the ones already there in place.
+    ///
+    /// The display strings already built stay valid, and so does the current
+    /// match, so a streaming walk costs a batch rather than the whole set it
+    /// has collected so far.
+    pub(crate) fn extend_base(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        self.base.extend(paths);
+    }
+
+    /// Build the display strings for the current base, reusing what still
+    /// describes it.
+    ///
+    /// A walk that only appended leaves every row it already built valid, so
+    /// the tail is derived and merged into the order rather than the whole set
+    /// being rebuilt. Anything [`row_display`] reads moving, or the base being
+    /// replaced outright, still rebuilds.
     fn ensure_display(&mut self, git_root: &Path) {
         // Resolved once for the whole list rather than per path, since
         // `row_display`'s git-root-relative branch would otherwise hit the env
         // for every candidate.
         let home = paths::home_dir();
 
-        let reusable = self.display.as_ref().is_some_and(|cache| {
-            Arc::ptr_eq(&cache.base, &self.base)
+        let describes_base = self.display.as_ref().is_some_and(|cache| {
+            cache.base_generation == self.base_generation
                 && cache.git_root == git_root
                 && cache.display_roots == self.display_roots
                 && cache.home == home
+                && cache.rows.len() <= self.base.len()
         });
-        if reusable {
+
+        if describes_base {
+            let covered = self
+                .display
+                .as_ref()
+                .expect("describes_base implies a cache")
+                .rows
+                .len();
+            if covered < self.base.len() {
+                self.extend_display(covered, git_root, home.as_deref());
+            }
             return;
         }
 
         // The remembered rows are indices into the base being replaced, so they
         // name different paths on the other side of this rebuild.
-        self.last_query = None;
+        self.last_filter = None;
 
         let display_roots = self.display_roots.as_deref();
         let rows: Vec<String> = self
@@ -335,7 +389,7 @@ impl PickList {
             .as_ref()
             .map_or(0, |cache| cache.generation + 1);
         self.display = Some(DisplayCache {
-            base: Arc::clone(&self.base),
+            base_generation: self.base_generation,
             git_root: git_root.to_path_buf(),
             display_roots: self.display_roots.clone(),
             home,
@@ -345,12 +399,52 @@ impl PickList {
         });
     }
 
+    /// Derive display strings for `base[from..]` and fold them into the order.
+    ///
+    /// The tail is sorted on its own and merged against the rows already there.
+    /// Ties take from the existing side, and every tail index is the larger, so
+    /// the result is the order a full stable sort would have produced.
+    fn extend_display(&mut self, from: usize, git_root: &Path, home: Option<&Path>) {
+        let display_roots = self.display_roots.as_deref();
+        let tail: Vec<String> = self.base[from..]
+            .iter()
+            .map(|path| row_display(path, git_root, display_roots, home))
+            .collect();
+
+        let mut tail_order: Vec<usize> = (from..from + tail.len()).collect();
+        tail_order.sort_by(|&a, &b| tail[a - from].cmp(&tail[b - from]));
+
+        let cache = self.display.as_mut().expect("the caller found a cache");
+        cache.rows.extend(tail);
+
+        let mut merged = Vec::with_capacity(cache.sorted.len() + tail_order.len());
+        let mut order = cache.sorted.iter().copied().peekable();
+        let mut arriving = tail_order.into_iter().peekable();
+        loop {
+            match (order.peek(), arriving.peek()) {
+                (Some(&held), Some(&new)) => {
+                    if cache.rows[held] <= cache.rows[new] {
+                        merged.push(held);
+                        order.next();
+                    } else {
+                        merged.push(new);
+                        arriving.next();
+                    }
+                },
+                (Some(_), None) => merged.extend(order.by_ref()),
+                (None, Some(_)) => merged.extend(arriving.by_ref()),
+                (None, None) => break,
+            }
+        }
+        cache.sorted = merged;
+    }
+
     /// Drop the current results, so the next [`Self::refilter`] starts from the
     /// whole base rather than narrowing rows that no longer stand for anything.
     pub(crate) fn clear_results(&mut self) {
         self.filtered.clear();
         self.match_indices.clear();
-        self.last_query = None;
+        self.last_filter = None;
     }
 
     fn clamp_selected(&mut self) {
@@ -482,10 +576,13 @@ pub(crate) struct PathPicker {
     /// than a non-empty result keeps a zero-match query cached instead of
     /// refiltering the whole list every render tick.
     filter_valid: bool,
-    /// The base handed to [`Self::picklist`], kept so an unchanged walk reuses
-    /// it. Dropped by [`PathPicker::invalidate`], which every caller that moves
-    /// [`Self::all_paths`] already goes through.
-    built_base: Option<Arc<[PathBuf]>>,
+    /// How much of [`Self::all_paths`] the pick list's base already holds, so a
+    /// refilter hands it only what arrived since.
+    ///
+    /// Dropped by [`PathPicker::invalidate`], which every caller that replaces
+    /// [`Self::all_paths`] already goes through. The callers that only truncate
+    /// it are covered without that, the length no longer agreeing.
+    synced_paths: Option<usize>,
     pub(crate) preview: Preview,
 }
 
@@ -511,7 +608,7 @@ impl PathPicker {
             picklist: PickList::default(),
             last_filter_text: String::new(),
             filter_valid: false,
-            built_base: None,
+            synced_paths: None,
             preview,
         }
     }
@@ -550,7 +647,10 @@ impl PathPicker {
             }
         }
         if received_any {
-            self.invalidate();
+            // A batch only appends, so the pick list keeps its base, display
+            // strings, and current match, and folds the new paths in on the
+            // next refilter. Only the results are stale.
+            self.filter_valid = false;
         }
         received_any
     }
@@ -561,7 +661,7 @@ impl PathPicker {
     pub(crate) fn invalidate(&mut self) {
         self.last_filter_text.clear();
         self.filter_valid = false;
-        self.built_base = None;
+        self.synced_paths = None;
         self.picklist.clear_results();
     }
 
@@ -592,19 +692,21 @@ impl PathPicker {
             return;
         }
 
-        // Rebuilt only when the walk moved the paths under it. Copying every
-        // path per keystroke would also hand the pick list a base it cannot
-        // recognise, discarding its display strings along with it.
-        let base = match &self.built_base {
-            Some(base) => Arc::clone(base),
-            None => {
-                let base: Arc<[PathBuf]> = Arc::from(self.all_paths.as_slice());
-                self.built_base = Some(Arc::clone(&base));
-                base
+        // A walk only ever appends, so the pick list is handed the paths that
+        // arrived since it last looked rather than a fresh copy of all of them.
+        // Copying every path per keystroke would also discard its display
+        // strings, which is the expensive half.
+        match self.synced_paths {
+            Some(synced) if synced == self.all_paths.len() => {},
+            Some(synced) if synced < self.all_paths.len() => {
+                self.picklist
+                    .extend_base(self.all_paths[synced..].iter().cloned());
             },
-        };
+            _ => self.picklist.set_base(self.all_paths.clone()),
+        }
+        self.synced_paths = Some(self.all_paths.len());
 
-        self.set_base_and_refilter(query, base);
+        self.run_refilter(query);
     }
 
     /// Refilter over a caller-owned `base` set. The query cache still applies,
@@ -614,14 +716,19 @@ impl PathPicker {
         if query == self.last_filter_text && self.filter_valid {
             return;
         }
-        self.set_base_and_refilter(query, Arc::from(base));
+
+        // The pick list now holds a caller's set rather than a prefix of the
+        // walk, so the next walk-fed refilter starts over.
+        self.picklist.set_base(base.to_vec());
+        self.synced_paths = None;
+
+        self.run_refilter(query);
     }
 
-    /// Point the pick list at `base`, run the matcher, and mark the filter valid
-    /// so an unchanged-query re-render short-circuits until the next
-    /// [`Self::invalidate`].
-    fn set_base_and_refilter(&mut self, query: &str, base: Arc<[PathBuf]>) {
-        self.picklist.base = base;
+    /// Run the matcher over whatever base the pick list now holds, and mark the
+    /// filter valid so an unchanged-query re-render short-circuits until the
+    /// next [`Self::invalidate`].
+    fn run_refilter(&mut self, query: &str) {
         self.picklist.refilter(query, &self.git_root);
         self.last_filter_text = query.to_string();
         self.filter_valid = true;
@@ -969,7 +1076,7 @@ mod tests {
     /// Display strings of the filtered rows after running `query` over `base`.
     fn names(query: &str, base: Vec<PathBuf>, git_root: &Path) -> Vec<String> {
         let mut list = PickList {
-            base: base.into(),
+            base,
             ..PickList::default()
         };
         list.refilter(query, git_root);
@@ -991,7 +1098,7 @@ mod tests {
     fn refiltering_an_unchanged_base_reuses_the_display_strings() {
         let git_root = p("/r");
         let mut list = PickList {
-            base: vec![p("/r/b.rs"), p("/r/a.rs"), p("/r/sub/c.rs")].into(),
+            base: vec![p("/r/b.rs"), p("/r/a.rs"), p("/r/sub/c.rs")],
             ..PickList::default()
         };
 
@@ -1014,7 +1121,7 @@ mod tests {
     fn flipping_display_roots_rebuilds_the_display_strings() {
         let git_root = p("/r");
         let mut list = PickList {
-            base: vec![p("/r/a.rs")].into(),
+            base: vec![p("/r/a.rs")],
             ..PickList::default()
         };
 
@@ -1061,7 +1168,7 @@ mod tests {
     fn refilter_and_construction_bump_the_filter_generation() {
         let git_root = p("/r");
         let mut list = PickList {
-            base: vec![p("/r/a.rs"), p("/r/b.rs")].into(),
+            base: vec![p("/r/a.rs"), p("/r/b.rs")],
             ..PickList::default()
         };
         let before = list.filter_generation;
@@ -1138,7 +1245,7 @@ mod tests {
     fn root_anchor_highlights_the_prefix() {
         let git_root = p("/r");
         let mut list = PickList {
-            base: vec![p("/r/docs/readme.md")].into(),
+            base: vec![p("/r/docs/readme.md")],
             ..PickList::default()
         };
         list.refilter("./docs", &git_root);
@@ -1212,7 +1319,7 @@ mod tests {
     fn refilter_clamps_selected_when_results_shrink() {
         let git_root = p("/r");
         let mut list = PickList {
-            base: vec![p("/r/a.rs"), p("/r/b.rs"), p("/r/c.rs")].into(),
+            base: vec![p("/r/a.rs"), p("/r/b.rs"), p("/r/c.rs")],
             selected: 2,
             ..PickList::default()
         };
@@ -1278,7 +1385,7 @@ mod tests {
 
     fn list_over(base: &[PathBuf]) -> PickList {
         PickList {
-            base: Arc::from(base),
+            base: base.to_vec(),
             ..PickList::default()
         }
     }
@@ -1386,6 +1493,145 @@ mod tests {
         );
     }
 
+    /// The same paths handed over at once, and streamed in `chunks` batches
+    /// with a refilter after each, which is what a walk does.
+    fn one_shot_and_streamed(base: &[PathBuf], chunks: usize, query: &str) -> (PickList, PickList) {
+        let root = p("/repo");
+
+        let mut one_shot = PickList::default();
+        one_shot.set_base(base.to_vec());
+        one_shot.refilter(query, &root);
+
+        let mut streamed = PickList::default();
+        for batch in base.chunks(base.len().div_ceil(chunks)) {
+            streamed.extend_base(batch.iter().cloned());
+            streamed.refilter(query, &root);
+        }
+
+        (one_shot, streamed)
+    }
+
+    fn assert_indistinguishable(one_shot: &PickList, streamed: &PickList, what: &str) {
+        let whole = one_shot.display.as_ref().expect("a cache");
+        let grown = streamed.display.as_ref().expect("a cache");
+
+        assert_eq!(grown.rows, whole.rows, "rows differ {what}");
+        assert_eq!(
+            grown.sorted, whole.sorted,
+            "unfiltered order differs {what}"
+        );
+        assert_eq!(
+            streamed.filtered, one_shot.filtered,
+            "matches differ {what}"
+        );
+        assert_eq!(
+            streamed.match_indices, one_shot.match_indices,
+            "highlights differ {what}"
+        );
+    }
+
+    #[test]
+    fn a_streamed_walk_lands_where_the_whole_set_would_have() {
+        let base = narrowing_base();
+
+        for query in ["", "main", "ma rs", "./src", "./src ma", "!main"] {
+            for chunks in [2, 3, 7] {
+                let (one_shot, streamed) = one_shot_and_streamed(&base, chunks, query);
+                assert_indistinguishable(
+                    &one_shot,
+                    &streamed,
+                    &format!("for {query:?} across {chunks} batches"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_merged_order_breaks_ties_where_a_full_sort_would() {
+        // Duplicated paths give every display string a twin, so the merge has to
+        // choose a side on every comparison rather than never meeting a tie.
+        let mut base = narrowing_base();
+        base.extend(base.clone());
+
+        let (one_shot, streamed) = one_shot_and_streamed(&base, 4, "");
+        assert_indistinguishable(&one_shot, &streamed, "across rows that tie");
+    }
+
+    #[test]
+    fn a_display_roots_flip_rebuilds_every_row() {
+        let mut list = PickList::default();
+        list.set_base(vec![p("/a/x/one.rs"), p("/b/y/two.rs")]);
+        list.refilter("", &p("/a"));
+
+        let (built, rows) = {
+            let cache = list.display.as_ref().expect("a cache");
+            (cache.generation, cache.rows.clone())
+        };
+
+        list.display_roots = Some(vec![p("/a/x"), p("/b/y")]);
+        list.refilter("", &p("/a"));
+
+        let cache = list.display.as_ref().expect("a cache");
+        assert_ne!(
+            cache.generation, built,
+            "the flip rewrites every row, so extending would keep stale ones"
+        );
+        assert_ne!(cache.rows, rows, "and the rows do change");
+    }
+
+    #[test]
+    fn a_walk_batch_scores_only_the_paths_it_brought() {
+        let base = narrowing_base();
+        let walked = base.len() / 2;
+
+        let mut list = PickList::default();
+        list.set_base(base[..walked].to_vec());
+        list.refilter("ma", &p("/repo"));
+        let matched = list.filtered.len();
+
+        list.extend_base(base[walked..].iter().cloned());
+        list.refilter("ma", &p("/repo"));
+
+        assert_eq!(
+            list.scored,
+            matched + (base.len() - walked),
+            "the arriving batch plus what already matched, not the whole base"
+        );
+        assert!(
+            matched < walked,
+            "the fixture has to drop rows for that to mean anything"
+        );
+    }
+
+    #[test]
+    fn a_grown_path_set_keeps_the_display_cache() {
+        let mut h = crate::Stoat::test();
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        let mut picker = PathPicker::new(ws, executor, p("/repo"), None);
+
+        picker.all_paths = vec![p("/repo/one.rs"), p("/repo/two.rs")];
+        picker.refilter("r");
+        let built = picker
+            .picklist
+            .display
+            .as_ref()
+            .expect("a cache")
+            .generation;
+
+        picker.all_paths.push(p("/repo/three.rs"));
+        // A walk batch leaves the results stale and everything else intact.
+        picker.filter_valid = false;
+        picker.refilter("r");
+
+        let cache = picker.picklist.display.as_ref().expect("a cache");
+        assert_eq!(
+            cache.generation, built,
+            "the batch extended the rows rather than rebuilding them"
+        );
+        assert_eq!(cache.rows.len(), 3, "and the arriving path has a row");
+    }
+
     #[test]
     fn a_query_that_gains_a_root_anchor_does_not_narrow() {
         let base = narrowing_base();
@@ -1405,7 +1651,7 @@ mod tests {
         let mut list = list_over(&base);
         list.refilter("m", &p("/repo"));
 
-        list.base = Arc::from(&base[..base.len() / 2]);
+        list.set_base(base[..base.len() / 2].to_vec());
         list.refilter("ma", &p("/repo"));
 
         assert_eq!(

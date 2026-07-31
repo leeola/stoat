@@ -325,7 +325,7 @@ mod tests {
     fn list_of(base: Vec<PathBuf>, match_indices: Vec<Vec<u32>>) -> PickList {
         PickList {
             filtered: (0..base.len()).collect(),
-            base: base.into(),
+            base,
             match_indices,
             selected: usize::MAX,
             ..PickList::default()
