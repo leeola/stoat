@@ -19,6 +19,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     pane::View,
 };
+use std::collections::HashMap;
 use stoat_text::{Bias, CharCategory, Point, Rope, SelectionGoal};
 
 /// Around / inside selection mode for the active textobject chord.
@@ -47,9 +48,15 @@ pub(super) fn select_textobject_inner(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Resolve the type-char + mode chord into a target byte range and
-/// install it as the focused editor's primary selection. Unknown
-/// type chars and ranges that cannot be resolved are no-ops.
+/// Select the textobject the type-char + mode chord names around every cursor.
+///
+/// Each selection resolves its own object from its own cursor, so cursors in
+/// different words or pairs each take theirs. A selection whose object does not
+/// resolve keeps the range it had. The chord is a no-op when the type char names
+/// no textobject, or when no cursor is inside one.
+///
+/// Cursors resolving to the same object end as one selection, the collection
+/// merging selections that overlap.
 pub(crate) fn execute_select_textobject(
     stoat: &mut Stoat,
     mode: TextobjectMode,
@@ -62,19 +69,67 @@ pub(crate) fn execute_select_textobject(
         _ => return UpdateEffect::None,
     };
 
-    let (buffer_id, cursor) = {
+    let (buffer_id, cursors) = {
         let editor = ws.editors.get_mut(editor_id).expect("editor");
         let buffer_id = editor.buffer_id;
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor();
-        let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
-        let head_off = buffer_snapshot.resolve_anchor(&sel.head());
-        let cursor = stoat_text::cursor_offset(buffer_snapshot.rope(), tail_off, head_off);
-        (buffer_id, cursor)
+        let cursors: Vec<(usize, usize)> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
+                let head_off = buffer_snapshot.resolve_anchor(&sel.head());
+                let cursor = stoat_text::cursor_offset(buffer_snapshot.rope(), tail_off, head_off);
+                (sel.id, cursor)
+            })
+            .collect();
+        (buffer_id, cursors)
     };
 
-    let target = match ch {
+    let targets: HashMap<usize, std::ops::Range<usize>> = cursors
+        .into_iter()
+        .filter_map(|(id, cursor)| {
+            find_textobject(ws, buffer_id, cursor, mode, ch).map(|range| (id, range))
+        })
+        .collect();
+
+    if targets.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    let new_display = editor.display_map.snapshot();
+    let new_buf = new_display.buffer_snapshot();
+    editor.selections.transform(new_buf, |sel| {
+        let Some(range) = targets.get(&sel.id) else {
+            return sel.clone();
+        };
+        let mut new = sel.clone();
+        new.start = new_buf.anchor_at(range.start, Bias::Right);
+        new.end = new_buf.anchor_at(range.end, Bias::Left);
+        new.reversed = false;
+        new.goal = SelectionGoal::None;
+        new
+    });
+    UpdateEffect::Redraw
+}
+
+/// The byte range of the textobject `ch` names around one cursor, or `None`
+/// when the chord names no type or nothing of that type encloses the cursor.
+///
+/// Taking a single cursor is what lets every selection resolve its own object.
+/// The tree-sitter types therefore run their query once per cursor, which is
+/// the cost of the objects being per cursor at all.
+fn find_textobject(
+    ws: &crate::workspace::Workspace,
+    buffer_id: crate::buffer::BufferId,
+    cursor: usize,
+    mode: TextobjectMode,
+    ch: char,
+) -> Option<std::ops::Range<usize>> {
+    match ch {
         'p' => {
             let buffer = ws.buffers.get(buffer_id).expect("buffer");
             let guard = buffer.read().expect("poisoned");
@@ -116,26 +171,7 @@ pub(crate) fn execute_select_textobject(
                 .map(|(open_off, close_off)| pair_to_range(open, close, open_off, close_off, mode))
         },
         _ => None,
-    };
-
-    let Some(range) = target else {
-        return UpdateEffect::None;
-    };
-
-    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
-    let new_display = editor.display_map.snapshot();
-    let new_buf = new_display.buffer_snapshot();
-    let new_start = new_buf.anchor_at(range.start, Bias::Right);
-    let new_end = new_buf.anchor_at(range.end, Bias::Left);
-    editor.selections.transform(new_buf, |sel| {
-        let mut new = sel.clone();
-        new.start = new_start;
-        new.end = new_end;
-        new.reversed = false;
-        new.goal = SelectionGoal::None;
-        new
-    });
-    UpdateEffect::Redraw
+    }
 }
 
 /// Byte range for a resolved surround pair, given the delimiter chars
@@ -713,6 +749,72 @@ mod tests {
         assert_eq!(
             find_textobject_word(&r, 3, TextobjectMode::Around, false),
             Some(1..4)
+        );
+    }
+
+    #[test]
+    fn each_cursor_selects_its_own_word() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "foo baz\nbar quux\n");
+        h.type_keys("shift-C");
+        assert_eq!(h.selection_spans(), vec![(0, 1, false), (8, 9, false)]);
+
+        h.type_keys("m i w");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 3, false), (8, 11, false)],
+            "one cursor's word was imposed on the other"
+        );
+    }
+
+    #[test]
+    fn each_cursor_selects_its_own_pair() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "(ab) (cd)\n");
+        h.type_keys("%");
+        h.type_keys("s");
+        h.type_text("[ac]");
+        h.type_keys("Enter");
+        assert_eq!(h.selection_spans(), vec![(1, 2, false), (6, 7, false)]);
+
+        h.type_keys("m i (");
+        assert_eq!(h.selection_spans(), vec![(1, 3, false), (6, 8, false)]);
+    }
+
+    #[test]
+    fn a_cursor_with_no_object_stays_where_it_is() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "(ab) cd\n");
+        h.type_keys("%");
+        h.type_keys("s");
+        h.type_text("[ad]");
+        h.type_keys("Enter");
+        assert_eq!(h.selection_spans(), vec![(1, 2, false), (6, 7, false)]);
+
+        // The second cursor is in no pair at all, so it has nothing to select.
+        h.type_keys("m i (");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(1, 3, false), (6, 7, false)],
+            "a cursor with no object was moved onto another cursor's"
+        );
+    }
+
+    #[test]
+    fn cursors_in_one_word_become_one_selection() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "hello world\n");
+        h.type_keys("%");
+        h.type_keys("s");
+        h.type_text("[he]");
+        h.type_keys("Enter");
+        assert_eq!(h.selection_spans(), vec![(0, 1, false), (1, 2, false)]);
+
+        h.type_keys("m i w");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 5, false)],
+            "both resolve to the same word, so the collection merges them"
         );
     }
 
