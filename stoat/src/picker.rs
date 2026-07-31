@@ -8,6 +8,7 @@ use crate::{
     workspace::Workspace,
 };
 use std::{
+    ops::Range,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -165,6 +166,112 @@ pub(crate) struct PickList {
     pub(crate) scored: usize,
 }
 
+/// One query's scan over a pick list's display rows, carrying everything it
+/// needs so it can run away from the list it came from.
+///
+/// [`PickList::begin_refilter`] produces one, [`Self::run`] does the matching,
+/// and [`PickList::apply_scan`] takes the result. A caller wanting the scan off
+/// its own thread puts `run` on a worker. One that does not simply calls it.
+pub(crate) struct Scan {
+    /// The whole query, kept so the result can say what it answers.
+    query: String,
+    /// The query with its `./` anchor removed, which is what actually matches.
+    pattern: String,
+    anchor: Option<String>,
+    anchor_len: u32,
+    rows: Arc<Vec<Arc<str>>>,
+    candidates: Candidates,
+    /// How much of the base the rows covered when this was prepared.
+    covered: usize,
+}
+
+/// Which rows a [`Scan`] offers to the matcher.
+enum Candidates {
+    /// Every row, for a query that cannot narrow a previous result.
+    Every,
+    /// The rows a shorter query already matched, plus whatever a walk appended
+    /// since it ran. Everything else was offered to that shorter query and
+    /// rejected, and a longer one cannot revive it.
+    Narrowed {
+        previous: Vec<usize>,
+        arrived: Range<usize>,
+    },
+}
+
+/// What a [`Scan`] produced, in the shape [`PickList`] keeps it.
+pub(crate) struct ScanOutcome {
+    query: String,
+    covered: usize,
+    filtered: Vec<usize>,
+    match_indices: Vec<Vec<u32>>,
+    indexed: usize,
+    scored: usize,
+}
+
+impl Scan {
+    /// Match and rank, which is the expensive half and touches nothing but this.
+    pub(crate) fn run(self) -> ScanOutcome {
+        let anchor = self.anchor.as_deref();
+        let keeps = |display: &str| anchor.is_none_or(|a| display.starts_with(a));
+
+        let (ranked, scored) = match &self.candidates {
+            Candidates::Every => {
+                let items = self
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, display)| keeps(display))
+                    .map(|(idx, display)| (idx, &**display));
+
+                (
+                    fuzzy::rank_indexing_best(&self.pattern, items, INDEXED_ROWS),
+                    self.rows.len(),
+                )
+            },
+            Candidates::Narrowed { previous, arrived } => {
+                let items = previous
+                    .iter()
+                    .copied()
+                    .chain(arrived.clone())
+                    .filter(|&idx| keeps(&self.rows[idx]))
+                    .map(|idx| (idx, &*self.rows[idx]));
+
+                (
+                    fuzzy::rank_indexing_best(&self.pattern, items, INDEXED_ROWS),
+                    previous.len() + arrived.len(),
+                )
+            },
+        };
+
+        let mut outcome = ScanOutcome {
+            query: self.query,
+            covered: self.covered,
+            filtered: Vec::new(),
+            match_indices: Vec::new(),
+            indexed: 0,
+            scored,
+        };
+
+        // `begin_refilter` only builds a scan for a query with atoms, so the
+        // matcher always has something to rank.
+        let Some(ranked) = ranked else {
+            return outcome;
+        };
+
+        outcome.indexed = ranked.indexed;
+        for (row, m) in ranked.matches.into_iter().enumerate() {
+            outcome.filtered.push(m.item);
+            if row < ranked.indexed {
+                outcome
+                    .match_indices
+                    .push(prepend_anchor(self.anchor_len, m.matched_indices));
+            }
+        }
+
+        outcome
+    }
+}
+
 /// The display string of every base path, and the order an unfiltered list
 /// shows them in.
 ///
@@ -251,6 +358,26 @@ impl PickList {
     /// sorted, deduplicated set of matched character offsets in that row's
     /// display string, or empty when no pattern or anchor is active.
     pub(crate) fn refilter(&mut self, query: &str, git_root: &Path) {
+        if let Some(scan) = self.begin_refilter(query, git_root) {
+            let outcome = scan.run();
+            self.apply_scan(outcome);
+        }
+    }
+
+    /// Refilter as far as this thread has to, handing back the scan when one is
+    /// left to run.
+    ///
+    /// Everything needing the pick list itself happens here. The display strings
+    /// are brought up to date against the base, and a query with no pattern is
+    /// listed outright, that being a walk of an order already built rather than
+    /// a scan. A query with a pattern yields a [`Scan`], which carries what it
+    /// needs and so can run anywhere, and whose result goes to
+    /// [`Self::apply_scan`].
+    ///
+    /// The results on display are left alone until then, so a caller running the
+    /// scan elsewhere keeps painting the previous query's rows rather than
+    /// blanking the list while it waits.
+    pub(crate) fn begin_refilter(&mut self, query: &str, git_root: &Path) -> Option<Scan> {
         let (anchor, pattern) = split_root_anchor(query);
         let anchor_len = anchor.map_or(0, |a| a.chars().count()) as u32;
 
@@ -264,36 +391,11 @@ impl PickList {
             true => self.last_filter.as_ref().map(|&(_, covered)| covered),
             false => None,
         };
-        let previous = std::mem::take(&mut self.filtered);
-        self.match_indices.clear();
-        self.last_filter = Some((query.to_string(), self.base.len()));
 
         let cache = self.display.as_ref().expect("ensure_display builds one");
         let keeps = |display: &str| anchor.is_none_or(|a| display.starts_with(a));
 
-        let ranked = if let Some(covered) = arrived {
-            let items = previous
-                .iter()
-                .copied()
-                .chain(covered..cache.rows.len())
-                .filter(|&idx| keeps(&cache.rows[idx]))
-                .map(|idx| (idx, &*cache.rows[idx]));
-
-            self.scored = previous.len() + (cache.rows.len() - covered);
-            fuzzy::rank_indexing_best(pattern, items, INDEXED_ROWS)
-        } else {
-            let items = cache
-                .rows
-                .iter()
-                .enumerate()
-                .filter(|(_, display)| keeps(display))
-                .map(|(idx, display)| (idx, &**display));
-
-            self.scored = cache.rows.len();
-            fuzzy::rank_indexing_best(pattern, items, INDEXED_ROWS)
-        };
-
-        let Some(ranked) = ranked else {
+        if fuzzy::parse_query(pattern).is_none() {
             // Pre-sorted at cache build, so an unfiltered list is a walk rather
             // than a sort over freshly derived strings.
             let listed: Vec<usize> = cache
@@ -305,19 +407,39 @@ impl PickList {
 
             self.match_indices = vec![(0..anchor_len).collect(); listed.len()];
             self.indexed = listed.len();
+            self.scored = 0;
             self.filtered = listed;
+            self.last_filter = Some((query.to_string(), self.base.len()));
             self.clamp_selected();
-            return;
+            return None;
+        }
+
+        let candidates = match arrived {
+            Some(covered) => Candidates::Narrowed {
+                previous: self.filtered.clone(),
+                arrived: covered..cache.rows.len(),
+            },
+            None => Candidates::Every,
         };
 
-        self.indexed = ranked.indexed;
-        for (row, m) in ranked.matches.into_iter().enumerate() {
-            self.filtered.push(m.item);
-            if row < self.indexed {
-                self.match_indices
-                    .push(prepend_anchor(anchor_len, m.matched_indices));
-            }
-        }
+        Some(Scan {
+            query: query.to_string(),
+            pattern: pattern.to_string(),
+            anchor: anchor.map(str::to_string),
+            anchor_len,
+            rows: Arc::clone(&cache.rows),
+            candidates,
+            covered: self.base.len(),
+        })
+    }
+
+    /// Take the rows a [`Scan`] produced as the current result.
+    pub(crate) fn apply_scan(&mut self, outcome: ScanOutcome) {
+        self.filtered = outcome.filtered;
+        self.match_indices = outcome.match_indices;
+        self.indexed = outcome.indexed;
+        self.scored = outcome.scored;
+        self.last_filter = Some((outcome.query, outcome.covered));
         self.clamp_selected();
         self.filter_generation = next_generation();
     }
