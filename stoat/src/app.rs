@@ -7313,6 +7313,25 @@ impl Stoat {
             .unwrap_or_default()
     }
 
+    /// What a formatting request should tell a server about `buffer_id`'s
+    /// indentation.
+    ///
+    /// A server is entitled to take these literally, and the spec's own default
+    /// is a tab size of zero with spaces off, which describes no indentation at
+    /// all. Answering from the style the buffer was detected to use is also what
+    /// keeps a tab-indented file from coming back in spaces.
+    pub(crate) fn buffer_formatting_options(
+        &self,
+        buffer_id: BufferId,
+    ) -> lsp_types::FormattingOptions {
+        let style = self.buffer_indent_style(buffer_id);
+        lsp_types::FormattingOptions {
+            tab_size: style.indent_width(TAB_WIDTH) as u32,
+            insert_spaces: matches!(style, IndentStyle::Spaces(_)),
+            ..lsp_types::FormattingOptions::default()
+        }
+    }
+
     /// The leading whitespace `row` in `buffer_id` should carry given its
     /// enclosing syntax, for re-indenting a blank line to its block depth.
     ///

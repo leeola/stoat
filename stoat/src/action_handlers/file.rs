@@ -10,8 +10,7 @@ use crate::{
 };
 use lsp_types::{
     DidCloseTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams,
-    FormattingOptions, TextDocumentIdentifier, TextEdit, Uri, WorkDoneProgressParams,
-    WorkspaceEdit,
+    TextDocumentIdentifier, TextEdit, Uri, WorkDoneProgressParams, WorkspaceEdit,
 };
 use std::{
     collections::HashMap,
@@ -198,11 +197,7 @@ fn arm_format_on_save(
 
     let params = DocumentFormattingParams {
         text_document: TextDocumentIdentifier { uri: uri.clone() },
-        options: FormattingOptions {
-            tab_size: 4,
-            insert_spaces: true,
-            ..FormattingOptions::default()
-        },
+        options: stoat.buffer_formatting_options(buffer_id),
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
 

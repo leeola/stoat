@@ -35,12 +35,12 @@ use lsp_types::{
     DocumentDiagnosticReport, DocumentDiagnosticReportResult, DocumentFormattingParams,
     DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
     DocumentRangeFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-    Documentation, FoldingRange, FoldingRangeParams, FormattingOptions, GotoDefinitionParams,
-    GotoDefinitionResponse, HoverContents, HoverParams, InlayHint, InlayHintLabel, InlayHintParams,
-    MarkedString, MarkupKind, OneOf, ParameterLabel, Position, PrepareRenameResponse, Range,
-    ReferenceContext, ReferenceParams, RenameParams, SemanticToken, SemanticTokenType,
-    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities, ServerInfo,
-    SignatureHelp, SignatureHelpParams, SignatureInformation, SymbolInformation, SymbolKind,
+    Documentation, FoldingRange, FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse,
+    HoverContents, HoverParams, InlayHint, InlayHintLabel, InlayHintParams, MarkedString,
+    MarkupKind, OneOf, ParameterLabel, Position, PrepareRenameResponse, Range, ReferenceContext,
+    ReferenceParams, RenameParams, SemanticToken, SemanticTokenType, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerInfo, SignatureHelp,
+    SignatureHelpParams, SignatureInformation, SymbolInformation, SymbolKind,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
     VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol,
@@ -4691,7 +4691,7 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
             uri: source_uri.clone(),
         },
         range: lsp_range,
-        options: FormattingOptions::default(),
+        options: stoat.buffer_formatting_options(buffer_id),
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
 
@@ -4753,11 +4753,7 @@ pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
         text_document: TextDocumentIdentifier {
             uri: source_uri.clone(),
         },
-        options: FormattingOptions {
-            tab_size: 4,
-            insert_spaces: true,
-            ..FormattingOptions::default()
-        },
+        options: stoat.buffer_formatting_options(buffer_id),
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
 
@@ -9465,6 +9461,55 @@ mod tests {
             h.stoat.pending_message.as_deref(),
             Some("lsp: format skipped, buffer changed"),
         );
+    }
+
+    #[test]
+    fn formatting_asks_for_the_indentation_the_buffer_uses() {
+        // Two leading levels each, so the style detector has something to vote
+        // on. One file indents with tabs and the other with two spaces.
+        for (name, text, tab_size, insert_spaces) in [
+            ("tabs.rs", "fn a() {\n\tlet b = 1;\n\t\tc();\n}\n", 4, false),
+            (
+                "spaces.rs",
+                "fn a() {\n  let b = 1;\n    c();\n}\n",
+                2,
+                true,
+            ),
+        ] {
+            let mut h = TestHarness::with_size(80, 24);
+            enable_format(&h);
+            let root = seed(&mut h, &[(name, text)]);
+            let path = root.join(name);
+            open_buffer(&mut h, path.clone());
+
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Format);
+            h.settle();
+
+            let observed = h.fake_lsp().observed_formatting();
+            assert_eq!(observed.len(), 1, "{name}");
+            assert_eq!(observed[0].options.tab_size, tab_size, "{name} tab size");
+            assert_eq!(
+                observed[0].options.insert_spaces, insert_spaces,
+                "{name} insert spaces",
+            );
+        }
+    }
+
+    #[test]
+    fn range_formatting_asks_for_the_indentation_too() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_format(&h);
+        let root = seed(&mut h, &[("a.rs", "fn a() {\n  let b = 1;\n    c();\n}\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FormatSelections);
+        h.settle();
+
+        let observed = h.fake_lsp().observed_range_formatting();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].options.tab_size, 2);
+        assert!(observed[0].options.insert_spaces);
     }
 
     #[test]

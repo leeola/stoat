@@ -589,6 +589,8 @@ struct FakeLspState {
     observed_opens: Vec<DidOpenTextDocumentParams>,
     observed_changes: Vec<DidChangeTextDocumentParams>,
     observed_completions: Vec<CompletionParams>,
+    observed_formatting: Vec<DocumentFormattingParams>,
+    observed_range_formatting: Vec<DocumentRangeFormattingParams>,
     /// Keys whose programmed list the server reports as incomplete.
     incomplete_completions: std::collections::BTreeSet<LspKey>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
@@ -670,6 +672,8 @@ impl FakeLsp {
                 observed_opens: Vec::new(),
                 observed_changes: Vec::new(),
                 observed_completions: Vec::new(),
+                observed_formatting: Vec::new(),
+                observed_range_formatting: Vec::new(),
                 incomplete_completions: std::collections::BTreeSet::new(),
                 prepare_renames: BTreeMap::new(),
                 renames: BTreeMap::new(),
@@ -1044,6 +1048,19 @@ impl FakeLsp {
     /// context and that a request fired at the expected time.
     pub fn observed_completions(&self) -> Vec<CompletionParams> {
         self.state.lock().unwrap().observed_completions.clone()
+    }
+
+    /// Snapshot of every [`DocumentFormattingParams`] received via
+    /// [`LspHost::formatting`] in call order. Tests assert the options the
+    /// editor said it wanted, which a server is entitled to take literally.
+    pub fn observed_formatting(&self) -> Vec<DocumentFormattingParams> {
+        self.state.lock().unwrap().observed_formatting.clone()
+    }
+
+    /// Snapshot of every [`DocumentRangeFormattingParams`] received via
+    /// [`LspHost::range_formatting`] in call order.
+    pub fn observed_range_formatting(&self) -> Vec<DocumentRangeFormattingParams> {
+        self.state.lock().unwrap().observed_range_formatting.clone()
     }
 
     /// Snapshot of every [`DidChangeWatchedFilesParams`] received
@@ -2464,7 +2481,8 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::Formatting, params);
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.observed_formatting.push(params.clone());
         Ok(state.formatting.get(&params.text_document.uri).cloned())
     }
 
@@ -2477,7 +2495,8 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::RangeFormatting, params);
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.observed_range_formatting.push(params.clone());
         Ok(state
             .range_formatting
             .get(&params.text_document.uri)
