@@ -219,45 +219,46 @@ pub(crate) fn paint_completion_rows(
     let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
 
     let pattern = fuzzy::parse_query(prefix);
-    let mut matcher_guard = pattern
-        .as_ref()
-        .map(|_| fuzzy::matcher().lock().expect("fuzzy matcher poisoned"));
     let mut hay_buf: Vec<char> = Vec::new();
     let mut indices_buf: Vec<u32> = Vec::new();
 
-    let width = area.width as usize;
-    for row_idx in 0..area.height {
-        let item_idx = start_row + row_idx as usize;
-        let Some(item) = items.get(item_idx) else {
-            break;
-        };
-        let row = area.y + row_idx;
-        let label = truncate_to_width(&item.label, width);
-        let row_style = if item_idx == selected_idx {
-            selected_style
-        } else {
-            modal_style
-        };
-
-        indices_buf.clear();
-        if let (Some(p), Some(matcher)) = (&pattern, matcher_guard.as_deref_mut()) {
-            let hay = Utf32Str::new(&label, &mut hay_buf);
-            p.indices(hay, matcher, &mut indices_buf);
-        }
-
-        for (col_idx, ch) in label.chars().enumerate() {
-            let col = area.x + col_idx as u16;
-            if col >= area.x + area.width {
+    // Taken once for the whole window rather than per row, the matcher's
+    // scratch buffers being what makes reuse worth anything.
+    fuzzy::with_matcher(|matcher| {
+        let width = area.width as usize;
+        for row_idx in 0..area.height {
+            let item_idx = start_row + row_idx as usize;
+            let Some(item) = items.get(item_idx) else {
                 break;
-            }
-            let style = if indices_buf.contains(&(col_idx as u32)) {
-                match_style
-            } else {
-                row_style
             };
-            buf[(col, row)].set_char(ch).set_style(style);
+            let row = area.y + row_idx;
+            let label = truncate_to_width(&item.label, width);
+            let row_style = if item_idx == selected_idx {
+                selected_style
+            } else {
+                modal_style
+            };
+
+            indices_buf.clear();
+            if let Some(p) = &pattern {
+                let hay = Utf32Str::new(&label, &mut hay_buf);
+                p.indices(hay, matcher, &mut indices_buf);
+            }
+
+            for (col_idx, ch) in label.chars().enumerate() {
+                let col = area.x + col_idx as u16;
+                if col >= area.x + area.width {
+                    break;
+                }
+                let style = if indices_buf.contains(&(col_idx as u32)) {
+                    match_style
+                } else {
+                    row_style
+                };
+                buf[(col, row)].set_char(ch).set_style(style);
+            }
         }
-    }
+    });
 }
 
 fn extract_prefix(stoat: &Stoat, prefix_range: Range<usize>) -> String {

@@ -1,6 +1,6 @@
 //! Shared fuzzy-matching helpers used by every picker.
 //!
-//! Centralises the [`nucleo`] matcher mutex, the
+//! Centralises the [`nucleo`] matcher, the
 //! [`Pattern::parse`] empty-atoms guard, and the
 //! score-plus-indices loop so the file finder, command palette,
 //! and completion popup all see the same ranking and
@@ -11,14 +11,27 @@ use nucleo::{
     pattern::{CaseMatching, Normalization, Pattern},
     Matcher, Utf32Str,
 };
-use std::sync::{Mutex, OnceLock};
+use std::cell::RefCell;
 
-/// Returns the singleton `nucleo` matcher used by every picker.
-/// Held behind a [`Mutex`] because [`Matcher`] carries scratch
-/// state that is not [`Sync`].
-pub fn matcher() -> &'static Mutex<Matcher> {
-    static MATCHER: OnceLock<Mutex<Matcher>> = OnceLock::new();
-    MATCHER.get_or_init(|| Mutex::new(Matcher::default()))
+thread_local! {
+    static MATCHER: RefCell<Matcher> = RefCell::new(Matcher::default());
+}
+
+/// Run `f` against this thread's `nucleo` matcher.
+///
+/// [`Matcher`] carries scratch state and is not [`Sync`], so it cannot simply be
+/// shared. One per thread rather than one behind a lock is what lets a
+/// background scan and the UI thread match at the same time instead of
+/// serialising on each other.
+///
+/// It is reused rather than constructed per call because constructing one
+/// eagerly allocates a matrix slab of some 135KB, which a caller matching a few
+/// hundred rows per keystroke would otherwise pay for every time.
+///
+/// Do not call this from inside `f`. The matcher is behind a [`RefCell`], so a
+/// nested call panics rather than handing out a second mutable borrow.
+pub(crate) fn with_matcher<R>(f: impl FnOnce(&mut Matcher) -> R) -> R {
+    MATCHER.with(|matcher| f(&mut matcher.borrow_mut()))
 }
 
 /// Parses `text` into a [`Pattern`]. Returns `None` when there are
@@ -92,22 +105,27 @@ pub fn match_and_rank<'a, T>(
     items: impl IntoIterator<Item = (T, &'a str)>,
 ) -> Option<Vec<RankedMatch<'a, T>>> {
     let pattern = parse_query(query)?;
-    let mut guard = matcher().lock().expect("fuzzy matcher poisoned");
-    let mut hay_buf: Vec<char> = Vec::new();
-    let mut scratch = Scratch::default();
-    let mut out: Vec<RankedMatch<'a, T>> = Vec::new();
-    for (item, haystack) in items {
-        let hay = Utf32Str::new(haystack, &mut hay_buf);
-        if let Some(scored) = score_with_bonuses(&pattern, haystack, hay, &mut guard, &mut scratch)
-        {
-            out.push(RankedMatch {
-                item,
-                haystack,
-                score: scored.score,
-                matched_indices: scored.indices,
-            });
+    let out = with_matcher(|matcher| {
+        let mut hay_buf: Vec<char> = Vec::new();
+        let mut scratch = Scratch::default();
+        let mut out: Vec<RankedMatch<'a, T>> = Vec::new();
+
+        for (item, haystack) in items {
+            let hay = Utf32Str::new(haystack, &mut hay_buf);
+            if let Some(scored) = score_with_bonuses(&pattern, haystack, hay, matcher, &mut scratch)
+            {
+                out.push(RankedMatch {
+                    item,
+                    haystack,
+                    score: scored.score,
+                    matched_indices: scored.indices,
+                });
+            }
         }
-    }
+
+        out
+    });
+
     Some(out)
 }
 
@@ -149,40 +167,43 @@ pub(crate) fn rank_indexing_best<'a, T>(
     indexed: usize,
 ) -> Option<Ranked<'a, T>> {
     let pattern = parse_query(query)?;
-    let mut guard = matcher().lock().expect("fuzzy matcher poisoned");
-    let mut hay_buf: Vec<char> = Vec::new();
+    let (scored, indexed) = with_matcher(|matcher| {
+        let mut hay_buf: Vec<char> = Vec::new();
 
-    let mut scored: Vec<RankedMatch<'a, T>> = Vec::new();
-    for (item, haystack) in items {
-        let hay = Utf32Str::new(haystack, &mut hay_buf);
-        if let Some(score) = pattern.score(hay, &mut guard) {
-            scored.push(RankedMatch {
-                item,
-                haystack,
-                score,
-                matched_indices: Vec::new(),
-            });
+        let mut scored: Vec<RankedMatch<'a, T>> = Vec::new();
+        for (item, haystack) in items {
+            let hay = Utf32Str::new(haystack, &mut hay_buf);
+            if let Some(score) = pattern.score(hay, matcher) {
+                scored.push(RankedMatch {
+                    item,
+                    haystack,
+                    score,
+                    matched_indices: Vec::new(),
+                });
+            }
         }
-    }
 
-    // Ordering the whole set by raw score first is what makes the block a
-    // deterministic set of rows rather than whichever equal-scoring ones a
-    // partition happened to leave in front.
-    sort_ranked(&mut scored);
+        // Ordering the whole set by raw score first is what makes the block a
+        // deterministic set of rows rather than whichever equal-scoring ones a
+        // partition happened to leave in front.
+        sort_ranked(&mut scored);
 
-    let indexed = indexed.min(scored.len());
-    let mut buffers = Scratch::default();
-    for ranked in &mut scored[..indexed] {
-        let hay = Utf32Str::new(ranked.haystack, &mut hay_buf);
-        let Some(with_bonuses) =
-            score_with_bonuses(&pattern, ranked.haystack, hay, &mut guard, &mut buffers)
-        else {
-            continue;
-        };
-        ranked.score = with_bonuses.score;
-        ranked.matched_indices = with_bonuses.indices;
-    }
-    sort_ranked(&mut scored[..indexed]);
+        let indexed = indexed.min(scored.len());
+        let mut buffers = Scratch::default();
+        for ranked in &mut scored[..indexed] {
+            let hay = Utf32Str::new(ranked.haystack, &mut hay_buf);
+            let Some(with_bonuses) =
+                score_with_bonuses(&pattern, ranked.haystack, hay, matcher, &mut buffers)
+            else {
+                continue;
+            };
+            ranked.score = with_bonuses.score;
+            ranked.matched_indices = with_bonuses.indices;
+        }
+        sort_ranked(&mut scored[..indexed]);
+
+        (scored, indexed)
+    });
 
     Some(Ranked {
         matches: scored,
@@ -201,18 +222,19 @@ pub(crate) fn indices_of(query: &str, haystack: &str, out: &mut Vec<u32>) -> boo
         return false;
     };
 
-    let mut guard = matcher().lock().expect("fuzzy matcher poisoned");
-    let mut hay_buf: Vec<char> = Vec::new();
-    let hay = Utf32Str::new(haystack, &mut hay_buf);
-    let mut scratch = Scratch::default();
+    with_matcher(|matcher| {
+        let mut hay_buf: Vec<char> = Vec::new();
+        let hay = Utf32Str::new(haystack, &mut hay_buf);
+        let mut scratch = Scratch::default();
 
-    match score_with_bonuses(&pattern, haystack, hay, &mut guard, &mut scratch) {
-        Some(scored) => {
-            *out = scored.indices;
-            true
-        },
-        None => false,
-    }
+        match score_with_bonuses(&pattern, haystack, hay, matcher, &mut scratch) {
+            Some(scored) => {
+                *out = scored.indices;
+                true
+            },
+            None => false,
+        }
+    })
 }
 
 /// Order matches best-first, breaking ties alphabetically by haystack.
