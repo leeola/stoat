@@ -1667,7 +1667,10 @@ fn carry_rows(rows: &mut [u32], edits: &Patch<u32>) {
             rows[i] = edit.new.start;
             i += 1;
         }
-        delta += edit.new.end as i64 - edit.old.end as i64;
+        // Assigned, not accumulated. A patch states new ranges in
+        // post-all-edits coordinates, so this difference is the running total
+        // already and adding them counts every earlier edit again.
+        delta = edit.new.end as i64 - edit.old.end as i64;
     }
 
     for row in &mut rows[i..] {
@@ -2121,6 +2124,43 @@ fn push_isomorphic(
 #[cfg(test)]
 mod tests {
     use super::{BlockMap, BlockPlacement, BlockPoint, BlockProperties, BlockRowKind, BlockStyle};
+
+    #[test]
+    fn carrying_rows_across_a_multi_edit_patch() {
+        // Two edits each adding a row. The second's new range is stated with
+        // the first's row already added, so its own ends give +2 as the running
+        // total and not as a further step, and a row below both lands at +2
+        // rather than at +3.
+        let edits = Patch::new(vec![
+            stoat_text::patch::Edit {
+                old: 2..2,
+                new: 2..3,
+            },
+            stoat_text::patch::Edit {
+                old: 10..10,
+                new: 11..12,
+            },
+        ]);
+        let mut rows = [0, 1, 5, 20];
+        super::carry_rows(&mut rows, &edits);
+
+        assert_eq!(rows, [0, 1, 6, 22]);
+    }
+
+    #[test]
+    fn carrying_rows_through_a_replaced_range() {
+        // A row the edit covers has nowhere of its own to go, so it collapses
+        // onto where the replacement starts.
+        let edits = Patch::new(vec![stoat_text::patch::Edit {
+            old: 3..6,
+            new: 3..4,
+        }]);
+        let mut rows = [1, 4, 5, 9];
+        super::carry_rows(&mut rows, &edits);
+
+        assert_eq!(rows, [1, 3, 3, 7]);
+    }
+
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::{fold_map::FoldMap, inlay_map::InlayMap, tab_map::TabMap, wrap_map::WrapMap},

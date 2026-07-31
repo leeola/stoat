@@ -519,7 +519,10 @@ fn shift_offsets(offsets: &mut [usize], needs_resolve: &mut [bool], edits: &Patc
             needs_resolve[i] = true;
             i += 1;
         }
-        delta += (edit.new.end as isize) - (edit.old.end as isize);
+        // Assigned, not accumulated. A patch states new ranges in
+        // post-all-edits coordinates, so this difference is the running total
+        // already and adding them counts every earlier edit again.
+        delta = (edit.new.end as isize) - (edit.old.end as isize);
     }
     for offset in &mut offsets[i..] {
         *offset = ((*offset as isize) + delta).max(0) as usize;
@@ -1647,23 +1650,29 @@ mod tests {
         stoat_text::patch::Edit { old, new }
     }
 
-    /// The reverse per-edit shift the forward walk replaced, kept here as the
-    /// oracle its results are compared against.
+    /// One offset at a time, straight from the coordinate contract, as the
+    /// oracle the forward walk's results are compared against.
+    ///
+    /// An edit's new range is stated in post-all-edits coordinates, so the
+    /// difference between its ends is where everything after it has landed by
+    /// then. An offset therefore takes that difference from the last edit it
+    /// sits past, and nothing from the ones before, which is what makes this an
+    /// answer rather than a second copy of the walk.
     fn shift_offsets_per_edit(
         offsets: &mut [usize],
         needs_resolve: &mut [bool],
         edits: &Patch<usize>,
     ) {
-        for edit in edits.clone().into_iter().rev() {
-            let delta = (edit.new.end as isize) - (edit.old.end as isize);
-            let start_idx = offsets.partition_point(|&o| o < edit.old.start);
-            let end_idx = offsets.partition_point(|&o| o < edit.old.end);
-            for flag in &mut needs_resolve[start_idx..end_idx] {
-                *flag = true;
+        for (i, offset) in offsets.iter_mut().enumerate() {
+            let mut delta = 0isize;
+            for edit in edits {
+                if *offset >= edit.old.end {
+                    delta = (edit.new.end as isize) - (edit.old.end as isize);
+                } else if *offset >= edit.old.start {
+                    needs_resolve[i] = true;
+                }
             }
-            for offset in &mut offsets[end_idx..] {
-                *offset = ((*offset as isize) + delta).max(0) as usize;
-            }
+            *offset = ((*offset as isize) + delta).max(0) as usize;
         }
     }
 
@@ -1681,15 +1690,17 @@ mod tests {
 
     #[test]
     fn shifting_offsets_lands_hand_computed_values() {
-        // 5..8 shrinks to 2 bytes for -1, then 20..20 inserts 5 for +5.
+        // 5..8 shrinks to 2 bytes, so everything past it stands at -1. The
+        // insert's new range, 19..24, is already stated with that -1 applied,
+        // so its own ends give +4 as the total and not as a further step.
         let edits = Patch::new(vec![edit(5..8, 5..7), edit(20..20, 19..24)]);
         let offsets = [0, 4, 5, 7, 8, 12, 20, 30];
         let (mine, _) = both_shifts(&offsets, &edits);
 
         assert_eq!(
             mine.0,
-            vec![0, 4, 5, 7, 7, 11, 23, 33],
-            "before the first edit unshifted, after it -1, and past the insert a further +4",
+            vec![0, 4, 5, 7, 7, 11, 24, 34],
+            "before the first edit unshifted, after it -1, and past the insert +4",
         );
         assert_eq!(
             mine.1,

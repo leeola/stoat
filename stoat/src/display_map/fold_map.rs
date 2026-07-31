@@ -814,7 +814,10 @@ fn carry_offsets(offsets: &mut [usize], needs_resolve: &mut [bool], edits: &Patc
             needs_resolve[i] = true;
             i += 1;
         }
-        delta += (edit.new.end as isize) - (edit.old.end as isize);
+        // Assigned, not accumulated. A patch states new ranges in
+        // post-all-edits coordinates, so this difference is the running total
+        // already and adding them counts every earlier edit again.
+        delta = (edit.new.end as isize) - (edit.old.end as isize);
     }
     for offset in &mut offsets[i..] {
         *offset = ((*offset as isize) + delta).max(0) as usize;
@@ -2210,6 +2213,38 @@ mod tests {
     /// shortcut past the anchor trees, so a discrepancy would misplace folds
     /// with nothing else to catch it.
     #[test]
+    fn carrying_offsets_across_a_multi_edit_patch() {
+        // 5..8 shrinks by one, so everything past it stands at -1. The insert's
+        // new range, 19..24, is stated with that -1 already applied, so its own
+        // ends give +4 as the running total rather than as a further step.
+        let edits = Patch::new(vec![
+            stoat_text::patch::Edit {
+                old: 5..8,
+                new: 5..7,
+            },
+            stoat_text::patch::Edit {
+                old: 20..20,
+                new: 19..24,
+            },
+        ]);
+        let mut offsets = [0, 4, 5, 12, 20, 30];
+        let mut needs_resolve = [false; 6];
+        super::carry_offsets(&mut offsets, &mut needs_resolve, &edits);
+
+        assert_eq!(
+            offsets,
+            [0, 4, 5, 11, 19, 34],
+            "the last one takes +4, which summing the two would make +3",
+        );
+        assert_eq!(
+            needs_resolve,
+            [false, false, true, false, true, false],
+            "an offset an edit reaches, or an insertion lands exactly on, is \
+             sent back to its anchor rather than trusted to the carry",
+        );
+    }
+
+    #[test]
     fn carried_fold_offsets_match_a_full_resolve() {
         for seed in 0..40u64 {
             let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
@@ -2242,7 +2277,12 @@ mod tests {
             fold_map.sync(inlay_snapshot, &Patch::empty());
 
             // Several edits, some landing inside a fold and some between them,
-            // each driven through the carrying sync.
+            // each driven through the carrying sync. One edit per sync, so
+            // every patch holds one. Several per sync is what
+            // `carrying_offsets_across_a_multi_edit_patch` covers instead. This
+            // cannot reach that case, because the incremental transform rebuild
+            // mistiles a multi-edit patch and trips its own consistency
+            // assertion before the offsets are ever compared.
             for _ in 0..4 {
                 let before = multi_buffer.snapshot();
                 let len = before.rope().len();
