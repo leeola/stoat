@@ -9,7 +9,10 @@ use crate::{
 };
 use std::{
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::{Executor, Task};
@@ -180,7 +183,13 @@ pub(crate) struct DisplayCache {
     /// One string per base entry, in the same order, covering a prefix of the
     /// base. A walk that appended since this was built leaves the tail
     /// uncovered, and its length is what says where that tail starts.
-    rows: Vec<String>,
+    ///
+    /// Shared rather than owned so a background scan can read the haystacks
+    /// without a copy of them. Each row is itself shared, so the copy
+    /// [`Arc::make_mut`] makes when a scan is in flight moves pointers rather
+    /// than the strings, and appending a walk batch stays proportional to the
+    /// batch.
+    rows: Arc<Vec<Arc<str>>>,
     /// Indices into [`Self::rows`], ordered by the string each names, which is
     /// the order an empty query lists them in.
     sorted: Vec<usize>,
@@ -268,7 +277,7 @@ impl PickList {
                 .copied()
                 .chain(covered..cache.rows.len())
                 .filter(|&idx| keeps(&cache.rows[idx]))
-                .map(|idx| (idx, cache.rows[idx].as_str()));
+                .map(|idx| (idx, &*cache.rows[idx]));
 
             self.scored = previous.len() + (cache.rows.len() - covered);
             fuzzy::rank_indexing_best(pattern, items, INDEXED_ROWS)
@@ -278,7 +287,7 @@ impl PickList {
                 .iter()
                 .enumerate()
                 .filter(|(_, display)| keeps(display))
-                .map(|(idx, display)| (idx, display.as_str()));
+                .map(|(idx, display)| (idx, &**display));
 
             self.scored = cache.rows.len();
             fuzzy::rank_indexing_best(pattern, items, INDEXED_ROWS)
@@ -422,10 +431,10 @@ impl PickList {
         self.last_filter = None;
 
         let display_roots = self.display_roots.as_deref();
-        let rows: Vec<String> = self
+        let rows: Vec<Arc<str>> = self
             .base
             .iter()
-            .map(|path| row_display(path, git_root, display_roots, home.as_deref()))
+            .map(|path| Arc::from(row_display(path, git_root, display_roots, home.as_deref())))
             .collect();
 
         let mut sorted: Vec<usize> = (0..rows.len()).collect();
@@ -440,7 +449,7 @@ impl PickList {
             git_root: git_root.to_path_buf(),
             display_roots: self.display_roots.clone(),
             home,
-            rows,
+            rows: Arc::new(rows),
             sorted,
             generation,
         });
@@ -453,16 +462,16 @@ impl PickList {
     /// the result is the order a full stable sort would have produced.
     fn extend_display(&mut self, from: usize, git_root: &Path, home: Option<&Path>) {
         let display_roots = self.display_roots.as_deref();
-        let tail: Vec<String> = self.base[from..]
+        let tail: Vec<Arc<str>> = self.base[from..]
             .iter()
-            .map(|path| row_display(path, git_root, display_roots, home))
+            .map(|path| Arc::from(row_display(path, git_root, display_roots, home)))
             .collect();
 
         let mut tail_order: Vec<usize> = (from..from + tail.len()).collect();
         tail_order.sort_by(|&a, &b| tail[a - from].cmp(&tail[b - from]));
 
         let cache = self.display.as_mut().expect("the caller found a cache");
-        cache.rows.extend(tail);
+        Arc::make_mut(&mut cache.rows).extend(tail);
 
         let mut merged = Vec::with_capacity(cache.sorted.len() + tail_order.len());
         let mut order = cache.sorted.iter().copied().peekable();
@@ -1200,7 +1209,7 @@ mod tests {
         let cache = list.display.as_ref().expect("a cache is built");
         list.filtered
             .iter()
-            .map(|&idx| cache.rows[idx].clone())
+            .map(|&idx| cache.rows[idx].to_string())
             .collect()
     }
 
@@ -1605,6 +1614,36 @@ mod tests {
     }
 
     #[test]
+    fn appending_while_the_rows_are_shared_copies_no_strings() {
+        let base = narrowing_base();
+        let head = base.len() / 2;
+
+        let mut list = list_over(&base[..head]);
+        list.refilter("ma", &p("/repo"));
+
+        // What a background scan holds for the length of its run.
+        let held = list.display.as_ref().expect("a cache").rows.clone();
+
+        list.extend_base(base[head..].iter().cloned());
+        list.refilter("ma", &p("/repo"));
+
+        assert_eq!(
+            held.len(),
+            head,
+            "the scan's view keeps the rows it started with"
+        );
+
+        let grown = list.display.as_ref().expect("a cache");
+        assert_eq!(grown.rows.len(), base.len(), "and the list gains the rest");
+        assert!(
+            held.iter()
+                .zip(grown.rows.iter())
+                .all(|(before, after)| Arc::ptr_eq(before, after)),
+            "the shared prefix is the same strings rather than copies of them"
+        );
+    }
+
+    #[test]
     fn a_display_roots_flip_rebuilds_every_row() {
         let mut list = PickList::default();
         list.set_base(vec![p("/a/x/one.rs"), p("/b/y/two.rs")]);
@@ -1715,9 +1754,8 @@ mod tests {
         };
 
         let stored = {
-            let mut unbounded =
-                fuzzy::match_and_rank("main", std::iter::once((0usize, row.as_str())))
-                    .expect("the query has atoms");
+            let mut unbounded = fuzzy::match_and_rank("main", std::iter::once((0usize, &*row)))
+                .expect("the query has atoms");
             unbounded.pop().expect("the row matches").matched_indices
         };
 
