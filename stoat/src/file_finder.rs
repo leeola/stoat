@@ -2,7 +2,7 @@ use crate::{
     host::{FsHost, GitHost},
     input_view::{InputView, SubmitTarget},
     paths,
-    picker::{PathPicker, PreviewPolicy},
+    picker::{PathPicker, PreviewPolicy, Scan},
     workspace::Workspace,
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -293,7 +293,7 @@ impl FileFinder {
     /// filter. Called from the renderer so typing picks up without a dedicated
     /// sync hook. Drains any pending walk result first so freshly arrived
     /// paths participate in the same render tick.
-    pub(crate) fn refilter_from_input(&mut self, ws: &Workspace) {
+    pub(crate) fn refilter_from_input(&mut self, ws: &Workspace) -> Option<(u64, Scan)> {
         if let Some(browse) = &mut self.browse {
             browse.picker.pump_walk();
             if browse.picker.all_paths.len() >= BROWSE_PATH_CAP {
@@ -302,12 +302,19 @@ impl FileFinder {
             }
             browse.picker.refilter(&browse.partial);
             self.remeasure_content();
-            return;
+            return None;
         }
         self.core.pump_walk();
+        self.core.pump_scan();
         let text = self.input.text(ws);
         match self.scope.clone() {
-            FinderScope::All | FinderScope::AllWorkspaces => self.core.refilter(&text),
+            // The uncapped scopes are the whole repo walk, so their scan goes to
+            // a worker and the caller spawns what this hands back.
+            FinderScope::All | FinderScope::AllWorkspaces => {
+                let pending = self.core.begin_scan(&text);
+                self.remeasure_content();
+                return pending;
+            },
             FinderScope::Modified => self.core.refilter_with_base(&text, &self.modified_paths),
             FinderScope::Buffers => self.core.refilter_with_base(&text, &self.buffer_paths),
             FinderScope::Named(name) => {
@@ -320,6 +327,20 @@ impl FileFinder {
             },
         }
         self.remeasure_content();
+        None
+    }
+
+    /// Bring the rows up to date with `query` on this thread.
+    ///
+    /// Only the uncapped scopes scan elsewhere, so only they can be behind. The
+    /// rest filter within their refilter call and are current already.
+    pub(crate) fn settle_scan(&mut self, query: &str) {
+        if self.browse.is_some() {
+            return;
+        }
+        if matches!(self.scope, FinderScope::All | FinderScope::AllWorkspaces) {
+            self.core.settle_scan(query);
+        }
     }
 
     /// Re-derive [`Self::content_size`] from the active picker's candidate base.

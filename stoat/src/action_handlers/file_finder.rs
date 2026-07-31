@@ -1,7 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     file_finder::{Browse, FileFinder, FinderScope, OpenIntent},
-    picker::PathPicker,
+    picker::{PathPicker, Scan},
 };
 use std::{collections::HashSet, ops::ControlFlow, path::PathBuf};
 use stoat_action::{OpenFile, SplitNewDown, SplitNewRight};
@@ -25,8 +25,55 @@ pub(crate) fn sync_file_finder_preview(stoat: &mut Stoat) {
     let fs_host = &*stoat.fs_host;
     let language_registry = &stoat.language_registry;
     let finder = stoat.file_finder.as_mut().expect("file_finder present");
-    finder.refilter_from_input(ws);
+    let pending = finder.refilter_from_input(ws);
     finder.sync_preview(ws, fs_host, language_registry);
+
+    if let Some((generation, scan)) = pending {
+        spawn_finder_scan(stoat, generation, scan);
+    }
+}
+
+/// Run `scan` on a worker and report it back to the finder that asked for it.
+///
+/// The uncapped scopes scan the whole repo walk, which is too much to do inside
+/// the update path without input and paint waiting on it. The picker keeps
+/// painting the previous query's rows until the result lands, and the redraw
+/// wakes the loop so it lands without needing another keystroke.
+fn spawn_finder_scan(stoat: &mut Stoat, generation: u64, scan: Scan) {
+    let finder = stoat.file_finder.as_mut().expect("file_finder present");
+    let sink = finder.core.scan_sink();
+    let redraw = stoat.redraw_notify.clone();
+
+    let task = stoat.executor.spawn_blocking(move || {
+        let outcome = scan.run();
+        if sink.send((generation, outcome)).is_ok() {
+            redraw.notify_one();
+        }
+    });
+
+    let finder = stoat.file_finder.as_mut().expect("file_finder present");
+    finder.core.hold_scan(task);
+}
+
+/// Bring the finder's rows up to date with what is typed, before an action
+/// reads the selection rather than paints it.
+///
+/// A scan running elsewhere answers the query that started it. Completing or
+/// submitting between keystrokes would otherwise act on the row the previous
+/// query had selected, which is the wrong file.
+fn settle_finder_scan(stoat: &mut Stoat) {
+    if stoat.file_finder.is_none() {
+        return;
+    }
+
+    let query = {
+        let ws = stoat.active_workspace();
+        let finder = stoat.file_finder.as_ref().expect("file_finder present");
+        finder.input.text(ws)
+    };
+
+    let finder = stoat.file_finder.as_mut().expect("file_finder present");
+    finder.settle_scan(&query);
 }
 
 /// Enter, re-root, or leave the finder's directory-browse mode for the current
@@ -314,6 +361,7 @@ pub(super) fn spawn_workspace_dir_walk(
 /// when the finder consumed the submission, `None` if no finder is open so
 /// the caller can fall through to other prompt consumers.
 pub(super) fn file_finder_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
+    settle_finder_scan(stoat);
     let (path, intent) = {
         let finder = stoat.file_finder.as_ref()?;
         (finder.selected_path()?.to_path_buf(), finder.open_intent)
@@ -351,6 +399,7 @@ pub(super) fn file_finder_cancel(stoat: &mut Stoat) -> Option<UpdateEffect> {
 /// to the top row, so an Enter arriving before the next render opens the
 /// completed row rather than whatever the stale selection pointed at.
 pub(super) fn file_finder_complete(stoat: &mut Stoat) -> UpdateEffect {
+    settle_finder_scan(stoat);
     let active_idx = stoat.active_workspace;
 
     let completed = {

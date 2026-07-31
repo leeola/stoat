@@ -18,7 +18,7 @@ use std::{
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::{Executor, Task};
 use stoat_text::{Bias, SelectionGoal};
-use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
+use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver, UnboundedSender};
 
 /// Preview content cap. Keeps preview reads bounded so a stray large or binary
 /// file never stalls the render thread.
@@ -754,6 +754,20 @@ pub(crate) struct PathPicker {
     /// than a non-empty result keeps a zero-match query cached instead of
     /// refiltering the whole list every render tick.
     filter_valid: bool,
+    /// Results from scans running elsewhere, each tagged with the generation it
+    /// was started at.
+    scan_rx: UnboundedReceiver<(u64, ScanOutcome)>,
+    scan_tx: UnboundedSender<(u64, ScanOutcome)>,
+    /// The generation of the most recently started scan.
+    ///
+    /// A result arriving under any other generation answers a query the user
+    /// has since typed past, so it is dropped rather than painted. That is what
+    /// keeps a burst of keystrokes from showing its own history in order.
+    scan_generation: u64,
+    /// Whether a scan is out and has not reported back yet.
+    scan_pending: bool,
+    /// Held so dropping the picker cancels a scan still running for it.
+    _scan_task: Option<Task<()>>,
     /// How much of [`Self::all_paths`] the pick list's base already holds, so a
     /// refilter hands it only what arrived since.
     ///
@@ -777,6 +791,7 @@ impl PathPicker {
             Some((rx, task)) => (Some(rx), Some(task)),
             None => (None, None),
         };
+        let (scan_tx, scan_rx) = tokio::sync::mpsc::unbounded_channel();
         let preview = Preview::new(ws, executor);
         Self {
             git_root,
@@ -786,6 +801,11 @@ impl PathPicker {
             picklist: PickList::default(),
             last_filter_text: String::new(),
             filter_valid: false,
+            scan_rx,
+            scan_tx,
+            scan_generation: 0,
+            scan_pending: false,
+            _scan_task: None,
             synced_paths: None,
             preview,
         }
@@ -870,10 +890,17 @@ impl PathPicker {
             return;
         }
 
-        // A walk only ever appends, so the pick list is handed the paths that
-        // arrived since it last looked rather than a fresh copy of all of them.
-        // Copying every path per keystroke would also discard its display
-        // strings, which is the expensive half.
+        self.sync_base();
+        self.run_refilter(query);
+    }
+
+    /// Bring the pick list's base up to date with the walk.
+    ///
+    /// A walk only ever appends, so the pick list is handed the paths that
+    /// arrived since it last looked rather than a fresh copy of all of them.
+    /// Copying every path per keystroke would also discard its display strings,
+    /// which is the expensive half.
+    fn sync_base(&mut self) {
         match self.synced_paths {
             Some(synced) if synced == self.all_paths.len() => {},
             Some(synced) if synced < self.all_paths.len() => {
@@ -883,8 +910,96 @@ impl PathPicker {
             _ => self.picklist.set_base(self.all_paths.clone()),
         }
         self.synced_paths = Some(self.all_paths.len());
+    }
 
-        self.run_refilter(query);
+    /// Prepare the scan for `query`, for a caller that will run it elsewhere.
+    ///
+    /// Does everything a refilter does except the matching, and stamps what is
+    /// left with a fresh generation. Hand the [`Scan`] and that generation to
+    /// [`Self::scan_sink`]'s sender, and [`Self::pump_scan`] takes it from
+    /// there. `None` means the query needed no scan and the list is already
+    /// current, which an empty query is.
+    ///
+    /// The rows on display are untouched until a result lands, so a picker with
+    /// a scan in flight keeps painting the query before it.
+    pub(crate) fn begin_scan(&mut self, query: &str) -> Option<(u64, Scan)> {
+        if query == self.last_filter_text && self.filter_valid {
+            return None;
+        }
+        self.sync_base();
+
+        // Marked valid on the way out rather than on arrival. It says a scan for
+        // this query is accounted for, not that its answer is in hand.
+        self.last_filter_text = query.to_string();
+        self.filter_valid = true;
+
+        let scan = self.picklist.begin_refilter(query, &self.git_root)?;
+        self.scan_generation = next_generation();
+        self.scan_pending = true;
+        Some((self.scan_generation, scan))
+    }
+
+    /// The sender a scan's runner reports back through, and the task slot that
+    /// keeps it alive.
+    pub(crate) fn scan_sink(&mut self) -> UnboundedSender<(u64, ScanOutcome)> {
+        self.scan_tx.clone()
+    }
+
+    /// Bring the rows up to date with `query` here and now.
+    ///
+    /// For a caller about to act on the selection rather than paint it. A scan
+    /// running elsewhere answers the query that started it, and an action taken
+    /// between keystrokes can already have moved past that, so acting on what is
+    /// displayed would act on the wrong row.
+    ///
+    /// Costs one scan at the moment the user commits rather than one per
+    /// keystroke, which is the whole point of the split. A result still in
+    /// flight is orphaned rather than waited for.
+    pub(crate) fn settle_scan(&mut self, query: &str) {
+        self.pump_scan();
+        if !self.scan_pending && query == self.last_filter_text && self.filter_valid {
+            return;
+        }
+
+        self.sync_base();
+        self.picklist.refilter(query, &self.git_root);
+        self.last_filter_text = query.to_string();
+        self.filter_valid = true;
+        self.scan_pending = false;
+        self.scan_generation = next_generation();
+    }
+
+    /// Hold the task running a scan, so dropping the picker cancels it.
+    pub(crate) fn hold_scan(&mut self, task: Task<()>) {
+        self._scan_task = Some(task);
+    }
+
+    /// Take the newest arrived scan result, if it still answers the current
+    /// query, and report whether the displayed rows moved.
+    ///
+    /// Results for superseded generations are drained and dropped. A burst of
+    /// keystrokes therefore paints once, for the last of them, rather than
+    /// flickering through the ones it outran.
+    pub(crate) fn pump_scan(&mut self) -> bool {
+        let mut current = None;
+        loop {
+            match self.scan_rx.try_recv() {
+                Ok((generation, outcome)) if generation == self.scan_generation => {
+                    current = Some(outcome);
+                },
+                Ok(_) => {},
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+
+        match current {
+            Some(outcome) => {
+                self.picklist.apply_scan(outcome);
+                self.scan_pending = false;
+                true
+            },
+            None => false,
+        }
     }
 
     /// Refilter over a caller-owned `base` set. The query cache still applies,
@@ -1907,6 +2022,92 @@ mod tests {
         assert!(
             indices.len() > 3,
             "and the pattern's own matches follow them"
+        );
+    }
+
+    fn walked_picker(h: &mut crate::test_harness::TestHarness) -> PathPicker {
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        let mut picker = PathPicker::new(ws, executor, p("/repo"), None);
+        picker.all_paths = narrowing_base();
+        picker
+    }
+
+    fn answered_query(picker: &PathPicker) -> Option<&str> {
+        picker
+            .picklist
+            .last_filter
+            .as_ref()
+            .map(|(query, _)| query.as_str())
+    }
+
+    #[test]
+    fn a_burst_of_queries_lands_only_the_last() {
+        let mut h = crate::Stoat::test();
+        let mut picker = walked_picker(&mut h);
+
+        let scans: Vec<_> = ["m", "ma", "mai"]
+            .into_iter()
+            .map(|query| picker.begin_scan(query).expect("each query needs a scan"))
+            .collect();
+
+        let sink = picker.scan_sink();
+        for (generation, scan) in scans {
+            sink.send((generation, scan.run()))
+                .expect("the picker is listening");
+        }
+
+        assert!(picker.pump_scan(), "a result landed");
+        assert_eq!(
+            answered_query(&picker),
+            Some("mai"),
+            "the rows answer the last query typed, not one it outran"
+        );
+    }
+
+    #[test]
+    fn a_scan_finishing_after_its_query_moved_on_is_dropped() {
+        let mut h = crate::Stoat::test();
+        let mut picker = walked_picker(&mut h);
+
+        let (slow, first) = picker.begin_scan("m").expect("a scan");
+        let (quick, second) = picker.begin_scan("ma").expect("a scan");
+
+        let sink = picker.scan_sink();
+        sink.send((quick, second.run())).expect("listening");
+        assert!(picker.pump_scan());
+        assert_eq!(answered_query(&picker), Some("ma"));
+
+        // The earlier scan reports back late, having taken longer over a query
+        // the user has since typed past.
+        sink.send((slow, first.run())).expect("listening");
+        assert!(
+            !picker.pump_scan(),
+            "the late result changes nothing rather than reverting the list"
+        );
+        assert_eq!(answered_query(&picker), Some("ma"));
+    }
+
+    #[test]
+    fn settling_takes_the_rows_the_typed_query_wants() {
+        let mut h = crate::Stoat::test();
+        let mut picker = walked_picker(&mut h);
+
+        // A scan is out for a query the user has already typed past.
+        let (orphaned, scan) = picker.begin_scan("m").expect("a scan");
+
+        picker.settle_scan("mai");
+        assert_eq!(
+            answered_query(&picker),
+            Some("mai"),
+            "settling answers what is typed rather than waiting on what is out"
+        );
+
+        let sink = picker.scan_sink();
+        sink.send((orphaned, scan.run())).expect("listening");
+        assert!(
+            !picker.pump_scan(),
+            "and the scan it overtook can no longer land"
         );
     }
 
