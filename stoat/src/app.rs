@@ -4149,9 +4149,11 @@ impl Stoat {
                 },
                 IncomingRequest::ShowMessageRequest { .. } => Ok(Value::Null),
                 IncomingRequest::WorkspaceApplyEdit { params, .. } => {
+                    // The server that asked is the one whose units the edit is in.
                     let response = match crate::lsp::edit_apply::apply_workspace_edit(
                         self,
                         params.edit,
+                        host.offset_encoding(),
                     ) {
                         Ok(_) => ApplyWorkspaceEditResponse {
                             applied: true,

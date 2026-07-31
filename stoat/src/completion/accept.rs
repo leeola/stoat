@@ -141,10 +141,16 @@ fn apply_or_resolve_additional_edits(
     if let Some(edits) = lsp_item.additional_text_edits.clone()
         && !edits.is_empty()
     {
-        apply_additional_edits(stoat, buffer_id, edits);
+        apply_additional_edits(
+            stoat,
+            buffer_id,
+            edits,
+            resolve_host(stoat, item, buffer_id).offset_encoding(),
+        );
         return;
     }
     let lsp = resolve_host(stoat, item, buffer_id);
+    let lsp_encoding = lsp.offset_encoding();
     if !resolve_advertised(&lsp) {
         return;
     }
@@ -162,7 +168,8 @@ fn apply_or_resolve_additional_edits(
         (!edits.is_empty()).then_some(AcceptedImports { buffer_id, edits })
     });
     stoat.pending_completion_accept =
-        crate::action_handlers::lsp::DocumentStamp::take(stoat, buffer_id).map(|at| (at, task));
+        crate::action_handlers::lsp::DocumentStamp::take(stoat, buffer_id, lsp_encoding)
+            .map(|at| (at, task));
 }
 
 /// The server to route `item`'s `completionItem/resolve` back to: the server
@@ -186,7 +193,12 @@ fn resolve_advertised(host: &std::sync::Arc<dyn crate::host::LspHost>) -> bool {
         .unwrap_or(false)
 }
 
-fn apply_additional_edits(stoat: &mut Stoat, buffer_id: BufferId, edits: Vec<lsp_types::TextEdit>) {
+fn apply_additional_edits(
+    stoat: &mut Stoat,
+    buffer_id: BufferId,
+    edits: Vec<lsp_types::TextEdit>,
+    encoding: crate::host::OffsetEncoding,
+) {
     let Some(path) = stoat
         .active_workspace()
         .buffers
@@ -195,7 +207,9 @@ fn apply_additional_edits(stoat: &mut Stoat, buffer_id: BufferId, edits: Vec<lsp
     else {
         return;
     };
-    if let Err(err) = crate::lsp::edit_apply::apply_text_edits_to_buffer(stoat, &path, edits) {
+    if let Err(err) =
+        crate::lsp::edit_apply::apply_text_edits_to_buffer(stoat, &path, edits, encoding)
+    {
         tracing::warn!(target: "stoat::lsp", ?err, "additionalTextEdits apply failed");
     }
 }
@@ -215,7 +229,12 @@ pub(crate) fn pump_completion_accept(stoat: &mut Stoat) -> bool {
         // then moves them, and an import landing mid-line is worse than none.
         Poll::Ready(Some(_)) if !requested_at.is_current(stoat) => false,
         Poll::Ready(Some(imports)) => {
-            apply_additional_edits(stoat, imports.buffer_id, imports.edits);
+            apply_additional_edits(
+                stoat,
+                imports.buffer_id,
+                imports.edits,
+                requested_at.encoding(),
+            );
             true
         },
         Poll::Ready(None) => false,

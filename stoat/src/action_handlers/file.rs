@@ -156,6 +156,8 @@ pub(crate) struct FormatOnSaveOutcome {
     path: PathBuf,
     uri: Uri,
     edits: Option<Vec<TextEdit>>,
+    /// The units the formatting server reads positions in.
+    encoding: crate::host::OffsetEncoding,
 }
 
 /// Save-time budget for `format_on_save`. A formatting response slower than this
@@ -205,6 +207,7 @@ fn arm_format_on_save(
     };
 
     let executor = stoat.executor.clone();
+    let encoding = host.offset_encoding();
     let task = stoat.executor.spawn(async move {
         let format = std::pin::pin!(host.formatting(params));
         let timer = std::pin::pin!(executor.timer(FORMAT_ON_SAVE_BUDGET));
@@ -217,6 +220,7 @@ fn arm_format_on_save(
             path,
             uri,
             edits,
+            encoding,
         }
     });
     stoat.pending_format_on_save = Some(task);
@@ -242,7 +246,9 @@ pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
                     document_changes: None,
                     change_annotations: None,
                 };
-                if let Err(err) = crate::lsp::edit_apply::apply_workspace_edit(stoat, edit) {
+                if let Err(err) =
+                    crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, outcome.encoding)
+                {
                     tracing::warn!(
                         target: "stoat::lsp",
                         ?err,

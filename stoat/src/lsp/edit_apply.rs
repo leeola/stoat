@@ -101,9 +101,13 @@ pub struct WorkspaceEditOutcome {
 /// `changes` map carries no version information and no resource ops,
 /// matching `Some(DocumentChanges::Edits(...))`'s behaviour without the
 /// version.
+/// `encoding` is what the server that produced `edit` reads positions in. Two
+/// servers on one buffer can differ, and a rename or code action routed back to
+/// the one that produced it has to be converted in that one's units.
 pub fn apply_workspace_edit(
     stoat: &mut Stoat,
     edit: WorkspaceEdit,
+    encoding: crate::host::OffsetEncoding,
 ) -> Result<WorkspaceEditOutcome, WorkspaceEditError> {
     let mut outcome = WorkspaceEditOutcome::default();
     if let Some(changes) = edit.document_changes {
@@ -126,7 +130,7 @@ pub fn apply_workspace_edit(
                         outcome.buffers_stale.push(id);
                         continue;
                     }
-                    let id = apply_text_edits_to_buffer(stoat, &path, edits)?;
+                    let id = apply_text_edits_to_buffer(stoat, &path, edits, encoding)?;
                     outcome.buffers_edited.push(id);
                 }
             },
@@ -154,7 +158,7 @@ pub fn apply_workspace_edit(
                                 outcome.buffers_stale.push(id);
                                 continue;
                             }
-                            let id = apply_text_edits_to_buffer(stoat, &path, edits)?;
+                            let id = apply_text_edits_to_buffer(stoat, &path, edits, encoding)?;
                             outcome.buffers_edited.push(id);
                         },
                         DocumentChangeOperation::Op(resource_op) => {
@@ -170,7 +174,7 @@ pub fn apply_workspace_edit(
         entries.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         for (uri, edits) in entries {
             let path = uri_to_path(&uri)?;
-            let id = apply_text_edits_to_buffer(stoat, &path, edits)?;
+            let id = apply_text_edits_to_buffer(stoat, &path, edits, encoding)?;
             outcome.buffers_edited.push(id);
         }
     }
@@ -219,12 +223,12 @@ pub(crate) fn apply_text_edits_to_buffer(
     stoat: &mut Stoat,
     path: &Path,
     edits: Vec<TextEdit>,
+    encoding: crate::host::OffsetEncoding,
 ) -> Result<BufferId, WorkspaceEditError> {
     let buffer_id = ensure_open(stoat, path)?;
     if edits.is_empty() {
         return Ok(buffer_id);
     }
-    let encoding = stoat.lsp_for(buffer_id).offset_encoding();
     let buffer = stoat
         .active_workspace()
         .buffers
@@ -341,7 +345,10 @@ fn apply_resource_op(
 #[allow(clippy::mutable_key_type)]
 mod tests {
     use super::*;
-    use crate::{host::FsHost, test_harness::TestHarness};
+    use crate::{
+        host::{FsHost, OffsetEncoding},
+        test_harness::TestHarness,
+    };
     use lsp_types::{
         CreateFile, DeleteFile, OneOf, OptionalVersionedTextDocumentIdentifier, Position, Range,
         RenameFile, TextDocumentEdit,
@@ -393,7 +400,8 @@ mod tests {
             document_changes: None,
             change_annotations: None,
         };
-        let outcome = apply_workspace_edit(&mut h.stoat, edit).expect("apply");
+        let outcome =
+            apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
         assert_eq!(outcome.buffers_edited.len(), 1);
         assert_eq!(buffer_text(&h, &path), "aXe\n");
     }
@@ -411,7 +419,7 @@ mod tests {
             document_changes: None,
             change_annotations: None,
         };
-        apply_workspace_edit(&mut h.stoat, edit).expect("apply");
+        apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
         assert_eq!(buffer_text(&h, &path), "aBcdEf\n");
     }
 
@@ -425,7 +433,7 @@ mod tests {
             document_changes: None,
             change_annotations: None,
         };
-        apply_workspace_edit(&mut h.stoat, edit).expect("apply");
+        apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
     }
 
     #[test]
@@ -509,7 +517,7 @@ mod tests {
             document_changes: Some(DocumentChanges::Edits(vec![tde])),
             change_annotations: None,
         };
-        apply_workspace_edit(&mut h.stoat, edit).expect("apply");
+        apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
         assert_eq!(buffer_text(&h, &path), "Xabc\n");
     }
 
@@ -529,6 +537,43 @@ mod tests {
     }
 
     #[test]
+    fn an_edit_converts_in_the_encoding_it_was_applied_with() {
+        let path = PathBuf::from("/ws/a.rs");
+        // é is two UTF-8 bytes and one UTF-16 unit. Character 1 counted in bytes
+        // lands inside it and clips back to the start; counted in UTF-16 units it
+        // lands just past it, at byte 2.
+        let edit_at_char_one = |path: &Path| {
+            let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+            changes.insert(file_uri(path), vec![text_edit(0, 1, 1, "X")]);
+            WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            }
+        };
+
+        let mut h = TestHarness::with_size(80, 24);
+        open_buffer_with_text(&mut h, &path, "\u{e9}ab\n");
+        apply_workspace_edit(&mut h.stoat, edit_at_char_one(&path), OffsetEncoding::Utf8)
+            .expect("apply");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "X\u{e9}ab\n",
+            "utf-8 char 1 falls inside the character and clips back to its start"
+        );
+
+        let mut h = TestHarness::with_size(80, 24);
+        open_buffer_with_text(&mut h, &path, "\u{e9}ab\n");
+        apply_workspace_edit(&mut h.stoat, edit_at_char_one(&path), OffsetEncoding::Utf16)
+            .expect("apply");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "\u{e9}Xab\n",
+            "utf-16 char 1 is past the whole character, at byte 2"
+        );
+    }
+
+    #[test]
     fn a_document_edit_naming_a_passed_version_is_skipped() {
         let mut h = TestHarness::with_size(80, 24);
         let path = PathBuf::from("/ws/a.rs");
@@ -541,8 +586,12 @@ mod tests {
             .unwrap();
         h.stoat.lsp_doc_versions.insert(id, 7);
 
-        let outcome =
-            apply_workspace_edit(&mut h.stoat, versioned_edit(&path, Some(3))).expect("apply");
+        let outcome = apply_workspace_edit(
+            &mut h.stoat,
+            versioned_edit(&path, Some(3)),
+            OffsetEncoding::Utf16,
+        )
+        .expect("apply");
         assert_eq!(buffer_text(&h, &path), "abc\n");
         assert_eq!(outcome.buffers_stale, vec![id]);
         assert!(outcome.buffers_edited.is_empty());
@@ -561,8 +610,12 @@ mod tests {
             .unwrap();
         h.stoat.lsp_doc_versions.insert(id, 7);
 
-        let outcome =
-            apply_workspace_edit(&mut h.stoat, versioned_edit(&path, Some(7))).expect("apply");
+        let outcome = apply_workspace_edit(
+            &mut h.stoat,
+            versioned_edit(&path, Some(7)),
+            OffsetEncoding::Utf16,
+        )
+        .expect("apply");
         assert_eq!(buffer_text(&h, &path), "Xabc\n");
         assert_eq!(outcome.buffers_edited, vec![id]);
         assert!(outcome.buffers_stale.is_empty());
@@ -586,7 +639,7 @@ mod tests {
             document_changes: None,
             change_annotations: None,
         };
-        apply_workspace_edit(&mut h.stoat, edit).expect("apply");
+        apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
         assert!(h
             .stoat
             .active_workspace()
@@ -610,7 +663,8 @@ mod tests {
             document_changes: Some(DocumentChanges::Operations(vec![op])),
             change_annotations: None,
         };
-        let outcome = apply_workspace_edit(&mut h.stoat, edit).expect("apply");
+        let outcome =
+            apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
         assert_eq!(outcome.files_created, vec![path.clone()]);
         assert!(h.fake_fs().exists(&path));
     }
@@ -632,7 +686,8 @@ mod tests {
             document_changes: Some(DocumentChanges::Operations(vec![op])),
             change_annotations: None,
         };
-        let outcome = apply_workspace_edit(&mut h.stoat, edit).expect("apply");
+        let outcome =
+            apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
         assert_eq!(outcome.files_renamed, vec![(from.clone(), to.clone())]);
         assert!(!h.fake_fs().exists(&from));
         assert!(h.fake_fs().exists(&to));
@@ -664,7 +719,8 @@ mod tests {
             document_changes: Some(DocumentChanges::Operations(vec![op])),
             change_annotations: None,
         };
-        let outcome = apply_workspace_edit(&mut h.stoat, edit).expect("apply");
+        let outcome =
+            apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
         assert_eq!(outcome.files_deleted, vec![path.clone()]);
         assert!(!h.fake_fs().exists(&path));
     }
@@ -682,7 +738,8 @@ mod tests {
             document_changes: None,
             change_annotations: None,
         };
-        let err = apply_workspace_edit(&mut h.stoat, edit).expect_err("expected error");
+        let err = apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16)
+            .expect_err("expected error");
         assert!(matches!(err, WorkspaceEditError::UriNotFile { .. }));
     }
 }

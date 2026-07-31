@@ -410,7 +410,11 @@ fn set_lsp_status(stoat: &mut Stoat, msg: String) {
     stoat.set_status(msg);
 }
 
-/// The buffer a server request was made about, and its version at that moment.
+/// What a reply needs to be applied to the document its request was about.
+///
+/// The buffer, the version it held when the request went out, and the offset
+/// encoding the server it went to negotiated. A reply is applied against all
+/// three or against nothing.
 ///
 /// A reply names positions in the text the server was told about, so if the
 /// buffer has moved since, those positions name different text and applying the
@@ -420,16 +424,23 @@ fn set_lsp_status(stoat: &mut Stoat, msg: String) {
 /// The version compared is the buffer's own, not the version last synced to the
 /// server. The synced one only advances when the sync pump runs, so a reply
 /// landing between an edit and the next sync would compare equal.
+/// Two servers on one buffer can negotiate different encodings, and an edit
+/// routed back to the one that produced it has to be read in that one's units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DocumentStamp {
     buffer_id: BufferId,
     version: u64,
+    encoding: OffsetEncoding,
 }
 
 impl DocumentStamp {
     /// Stamp `buffer_id` at the version it holds now. `None` when there is no
     /// such buffer, in which case there is nothing to make a request about.
-    pub(crate) fn take(stoat: &Stoat, buffer_id: BufferId) -> Option<Self> {
+    pub(crate) fn take(
+        stoat: &Stoat,
+        buffer_id: BufferId,
+        encoding: OffsetEncoding,
+    ) -> Option<Self> {
         let version = stoat
             .active_workspace()
             .buffers
@@ -437,13 +448,22 @@ impl DocumentStamp {
             .read()
             .expect("buffer lock")
             .version();
-        Some(Self { buffer_id, version })
+        Some(Self {
+            buffer_id,
+            version,
+            encoding,
+        })
     }
 
     /// Whether the buffer still holds the version this was taken at. A buffer
     /// that has since closed counts as changed, there being nothing to apply to.
     pub(crate) fn is_current(&self, stoat: &Stoat) -> bool {
-        Self::take(stoat, self.buffer_id) == Some(*self)
+        Self::take(stoat, self.buffer_id, self.encoding) == Some(*self)
+    }
+
+    /// The encoding the server this request went to reads positions in.
+    pub(crate) fn encoding(&self) -> OffsetEncoding {
+        self.encoding
     }
 }
 
@@ -3402,7 +3422,7 @@ pub(crate) fn pump_lsp_code_action_resolve(stoat: &mut Stoat) -> bool {
             true
         },
         Poll::Ready(Some(edit)) => {
-            apply_code_action_edit(stoat, edit);
+            apply_code_action_edit(stoat, edit, requested_at.encoding());
             true
         },
         Poll::Ready(None) => true,
@@ -3417,8 +3437,8 @@ pub(crate) fn pump_lsp_code_action_resolve(stoat: &mut Stoat) -> bool {
 /// Code actions arrive from the server and may fail to apply for
 /// reasons orthogonal to user action (URI scheme, missing buffer);
 /// crashing the app on a server-driven failure is the wrong shape.
-fn apply_code_action_edit(stoat: &mut Stoat, edit: WorkspaceEdit) {
-    if let Err(err) = crate::lsp::edit_apply::apply_workspace_edit(stoat, edit) {
+fn apply_code_action_edit(stoat: &mut Stoat, edit: WorkspaceEdit, encoding: OffsetEncoding) {
+    if let Err(err) = crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, encoding) {
         tracing::warn!(
             target: "stoat::lsp",
             ?err,
@@ -3447,13 +3467,15 @@ pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
             server,
             ..
         } => {
-            apply_code_action_edit(stoat, *edit);
+            let encoding = resolve_code_action_host(stoat, &server, buffer_id).offset_encoding();
+            apply_code_action_edit(stoat, *edit, encoding);
             if let Some(command) = command {
                 dispatch_execute_command(stoat, &server, buffer_id, command);
             }
         },
         CodeActionEntry::NeedsResolve { action, server, .. } => {
             let lsp = resolve_code_action_host(stoat, &server, buffer_id);
+            let encoding = lsp.offset_encoding();
             let task = stoat.spawn_woken(async move {
                 match lsp.code_action_resolve(*action).await {
                     Ok(resolved) => resolved.edit,
@@ -3468,7 +3490,7 @@ pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
                 }
             });
             stoat.pending_code_action_resolve = buffer_id
-                .and_then(|id| DocumentStamp::take(stoat, id))
+                .and_then(|id| DocumentStamp::take(stoat, id, encoding))
                 .map(|at| (at, task));
         },
         CodeActionEntry::Command {
@@ -3733,6 +3755,7 @@ pub(crate) fn rename_input_submit(stoat: &mut Stoat) -> bool {
         .unwrap_or_else(|| {
             stoat.lsp_for_feature(rename_state.buffer_id, LanguageServerFeature::RenameSymbol)
         });
+    let encoding = lsp.offset_encoding();
     let task = stoat.spawn_woken(async move {
         match lsp.rename(params).await {
             Ok(edit) => edit,
@@ -3742,7 +3765,8 @@ pub(crate) fn rename_input_submit(stoat: &mut Stoat) -> bool {
             },
         }
     });
-    stoat.pending_rename = DocumentStamp::take(stoat, rename_state.buffer_id).map(|at| (at, task));
+    stoat.pending_rename =
+        DocumentStamp::take(stoat, rename_state.buffer_id, encoding).map(|at| (at, task));
     true
 }
 
@@ -3770,7 +3794,8 @@ pub(crate) fn pump_lsp_rename(stoat: &mut Stoat) -> bool {
             true
         },
         Poll::Ready(Some(edit)) => {
-            if let Err(err) = crate::lsp::edit_apply::apply_workspace_edit(stoat, edit) {
+            let encoding = requested_at.encoding();
+            if let Err(err) = crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, encoding) {
                 tracing::warn!(
                     target: "stoat::lsp",
                     ?err,
@@ -4683,7 +4708,8 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
             },
         }
     });
-    stoat.pending_format_request = DocumentStamp::take(stoat, buffer_id).map(|at| (at, task));
+    stoat.pending_format_request =
+        DocumentStamp::take(stoat, buffer_id, encoding).map(|at| (at, task));
     UpdateEffect::None
 }
 
@@ -4709,6 +4735,7 @@ pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
     else {
         return report_lsp_unavailable(stoat, "format");
     };
+    let encoding = host.offset_encoding();
 
     let Some(source_path) = stoat
         .active_workspace()
@@ -4747,7 +4774,8 @@ pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
             },
         }
     });
-    stoat.pending_format_request = DocumentStamp::take(stoat, buffer_id).map(|at| (at, task));
+    stoat.pending_format_request =
+        DocumentStamp::take(stoat, buffer_id, encoding).map(|at| (at, task));
     UpdateEffect::None
 }
 
@@ -4776,7 +4804,9 @@ pub(crate) fn pump_lsp_format(stoat: &mut Stoat) -> bool {
                 document_changes: None,
                 change_annotations: None,
             };
-            if let Err(err) = crate::lsp::edit_apply::apply_workspace_edit(stoat, edit) {
+            if let Err(err) =
+                crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, requested_at.encoding())
+            {
                 tracing::warn!(
                     target: "stoat::lsp",
                     ?err,
