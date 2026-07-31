@@ -7,7 +7,10 @@ use crate::{
     multi_buffer::MultiBufferSnapshot,
     pane::View,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+};
 use stoat_language::structural_diff::BufferRef;
 use stoat_text::{
     cursor_offset, find_number_seeking, next_char_boundary, next_long_word_end_range,
@@ -2893,7 +2896,7 @@ pub(super) fn shrink_selection(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let editor = ws.editors.get_mut(editor_id).expect("editor");
-    let mut target: Option<std::ops::Range<usize>> = None;
+    let mut target: Option<Range<usize>> = None;
     for _ in 0..count {
         match editor.expansion_history.pop() {
             Some(t) => target = Some(t),
@@ -3303,7 +3306,7 @@ pub(crate) fn execute_find(
     UpdateEffect::Redraw
 }
 
-fn apply_primary_range(editor: &mut EditorState, target: std::ops::Range<usize>) {
+fn apply_primary_range(editor: &mut EditorState, target: Range<usize>) {
     let new_display = editor.display_map.snapshot();
     let new_buf = new_display.buffer_snapshot();
     let widened = Selection {
@@ -3523,6 +3526,57 @@ pub(super) enum ParaDir {
     Prev,
 }
 
+/// Rows read per refill of [`BlankRows`].
+///
+/// A scan that stops after a row or two still fills a whole window, which is
+/// the price of the scans this is for, where the same walk crosses hundreds of
+/// rows without finding a blank.
+const BLANK_ROW_WINDOW: u32 = 128;
+
+/// Blank-row lookups over a rope, reading rows in windows rather than seeking
+/// the tree for each one.
+///
+/// Paragraph scans step outward from the cursor a row at a time, and a file
+/// with no blank lines makes them cross all of it, so a descent per probe is
+/// what this exists to avoid.
+///
+/// A probe outside the window refills it on the side the probe left from,
+/// which is what lets a scan running backward be served as well as one running
+/// forward.
+pub(super) struct BlankRows<'a> {
+    rope: &'a Rope,
+    /// Byte length of each row in [`Self::window`].
+    lens: Vec<u32>,
+    window: Range<u32>,
+}
+
+impl<'a> BlankRows<'a> {
+    pub(super) fn new(rope: &'a Rope) -> Self {
+        Self {
+            rope,
+            lens: Vec::new(),
+            window: 0..0,
+        }
+    }
+
+    /// Whether `row` holds no text.
+    ///
+    /// A row past the end of the rope reads as blank, matching the length the
+    /// rope reports for one, so a caller's bounds check stays its own business.
+    pub(super) fn is_blank(&mut self, row: u32) -> bool {
+        if !self.window.contains(&row) {
+            let start = if row < self.window.start {
+                row.saturating_sub(BLANK_ROW_WINDOW - 1)
+            } else {
+                row
+            };
+            self.window = start..start + BLANK_ROW_WINDOW;
+            self.lens = self.rope.line_lens_in_range(self.window.clone());
+        }
+        self.lens[(row - self.window.start) as usize] == 0
+    }
+}
+
 pub(super) fn goto_paragraph(stoat: &mut Stoat, dir: ParaDir) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
     let Some(editor) = focused_editor_mut(stoat) else {
@@ -3537,26 +3591,26 @@ pub(super) fn goto_paragraph(stoat: &mut Stoat, dir: ParaDir) -> UpdateEffect {
     let head_off = buffer_snapshot.resolve_anchor(&sel.head());
     let cursor = cursor_offset(rope, tail_off, head_off);
     let cursor_row = rope.offset_to_point(cursor).row;
+    let mut blanks = BlankRows::new(rope);
     let mut last_content_row = rope.max_point().row;
-    if last_content_row > 0 && rope.line_len(last_content_row) == 0 {
+    if last_content_row > 0 && blanks.is_blank(last_content_row) {
         last_content_row -= 1;
     }
-    let is_empty = |r: u32| rope.line_len(r) == 0;
 
-    let step = |current: u32| -> Option<u32> {
+    let step = |blanks: &mut BlankRows<'_>, current: u32| -> Option<u32> {
         match dir {
             ParaDir::Next => {
                 if current >= last_content_row {
                     return None;
                 }
                 let mut row = current;
-                while row <= last_content_row && !is_empty(row) {
+                while row <= last_content_row && !blanks.is_blank(row) {
                     row += 1;
                 }
                 if row > last_content_row {
                     return None;
                 }
-                while row <= last_content_row && is_empty(row) {
+                while row <= last_content_row && blanks.is_blank(row) {
                     row += 1;
                 }
                 if row > last_content_row {
@@ -3569,13 +3623,13 @@ pub(super) fn goto_paragraph(stoat: &mut Stoat, dir: ParaDir) -> UpdateEffect {
                     return None;
                 }
                 let mut row = current - 1;
-                while row > 0 && is_empty(row) {
+                while row > 0 && blanks.is_blank(row) {
                     row -= 1;
                 }
-                while row > 0 && !is_empty(row) {
+                while row > 0 && !blanks.is_blank(row) {
                     row -= 1;
                 }
-                if is_empty(row) && row < last_content_row {
+                if blanks.is_blank(row) && row < last_content_row {
                     row += 1;
                 }
                 if row == current {
@@ -3588,7 +3642,7 @@ pub(super) fn goto_paragraph(stoat: &mut Stoat, dir: ParaDir) -> UpdateEffect {
 
     let mut target_row = cursor_row;
     for _ in 0..count {
-        match step(target_row) {
+        match step(&mut blanks, target_row) {
             Some(next) => target_row = next,
             None => break,
         }
@@ -4512,7 +4566,7 @@ mod tests {
     /// `buffer_spans_present` selects the moved-to (RHS) side vs. the moved-away
     /// (LHS) base side, and an empty `line_range` makes it a seam.
     fn moved_hunk(
-        line_range: std::ops::Range<u32>,
+        line_range: Range<u32>,
         buffer_spans_present: bool,
         source: MoveSource,
     ) -> DiffHunk {

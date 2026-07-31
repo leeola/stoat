@@ -15,6 +15,7 @@
 //! and does not require tree-sitter.
 
 use crate::{
+    action_handlers::movement::BlankRows,
     app::{Stoat, UpdateEffect},
     pane::View,
 };
@@ -216,12 +217,16 @@ fn find_textobject_paragraph(
         return None;
     }
 
-    if rope.line_len(cursor_row) == 0 {
+    // One lookup across every scan below, so the windows it reads carry from
+    // the outward search to the paragraph's ends.
+    let mut blanks = BlankRows::new(rope);
+
+    if blanks.is_blank(cursor_row) {
         let mut probe = cursor_row;
         let mut found = None;
         while probe > 0 {
             probe -= 1;
-            if rope.line_len(probe) > 0 {
+            if !blanks.is_blank(probe) {
                 found = Some(probe);
                 break;
             }
@@ -230,42 +235,17 @@ fn find_textobject_paragraph(
             let mut probe = cursor_row;
             while probe < max_row {
                 probe += 1;
-                if rope.line_len(probe) > 0 {
+                if !blanks.is_blank(probe) {
                     found = Some(probe);
                     break;
                 }
             }
         }
         let anchor_row = found?;
-        return paragraph_range_starting_from(rope, anchor_row, mode, max_row);
+        return paragraph_range_starting_from(rope, anchor_row, mode, max_row, &mut blanks);
     }
 
-    let mut start_row = cursor_row;
-    while start_row > 0 && rope.line_len(start_row - 1) > 0 {
-        start_row -= 1;
-    }
-    let mut end_row = cursor_row;
-    while end_row < max_row && rope.line_len(end_row + 1) > 0 {
-        end_row += 1;
-    }
-
-    let start = rope.point_to_offset(Point::new(start_row, 0));
-    let inner_end = end_of_line_offset(rope, end_row);
-    match mode {
-        TextobjectMode::Inner => Some(start..inner_end),
-        TextobjectMode::Around => {
-            let mut tail_row = end_row;
-            while tail_row < max_row && rope.line_len(tail_row + 1) == 0 {
-                tail_row += 1;
-            }
-            let around_end = if tail_row == end_row {
-                inner_end
-            } else {
-                end_of_line_offset(rope, tail_row)
-            };
-            Some(start..around_end)
-        },
-    }
+    paragraph_range_starting_from(rope, cursor_row, mode, max_row, &mut blanks)
 }
 
 fn paragraph_range_starting_from(
@@ -273,13 +253,14 @@ fn paragraph_range_starting_from(
     anchor_row: u32,
     mode: TextobjectMode,
     max_row: u32,
+    blanks: &mut BlankRows<'_>,
 ) -> Option<std::ops::Range<usize>> {
     let mut start_row = anchor_row;
-    while start_row > 0 && rope.line_len(start_row - 1) > 0 {
+    while start_row > 0 && !blanks.is_blank(start_row - 1) {
         start_row -= 1;
     }
     let mut end_row = anchor_row;
-    while end_row < max_row && rope.line_len(end_row + 1) > 0 {
+    while end_row < max_row && !blanks.is_blank(end_row + 1) {
         end_row += 1;
     }
     let start = rope.point_to_offset(Point::new(start_row, 0));
@@ -288,7 +269,7 @@ fn paragraph_range_starting_from(
         TextobjectMode::Inner => Some(start..inner_end),
         TextobjectMode::Around => {
             let mut tail_row = end_row;
-            while tail_row < max_row && rope.line_len(tail_row + 1) == 0 {
+            while tail_row < max_row && blanks.is_blank(tail_row + 1) {
                 tail_row += 1;
             }
             let around_end = if tail_row == end_row {
