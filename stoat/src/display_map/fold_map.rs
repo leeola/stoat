@@ -1021,26 +1021,42 @@ fn sync_fold_incremental(
     let mut cursor = old_snapshot.transforms.cursor::<InputOffset>(());
     let mut row_edits = Patch::empty();
 
-    // Rows already rebuilt, so a widened edit cannot reach back over one its
-    // predecessor covered and emit that text a second time.
-    let mut covered_old_row = 0;
-    let mut covered_new_row = 0;
-
-    let mut edits_iter = inlay_edits.into_iter().peekable();
-    while let Some(edit) = edits_iter.next() {
-        let new_rows = rows_covering_folds(resolved_folds, edit.new.clone());
-        let old_rows = {
+    // Every edit widened to whole folds, with any that meet merged into one
+    // region, before a single row of it is rebuilt.
+    //
+    // The walk holds two positions, one in the old tree and one in what it has
+    // built, and relies on them naming the same place: the old text from the
+    // cursor to a region's old start is exactly the new text from what is built
+    // to that region's new start. Widening breaks that on its own, since an
+    // edit can reach back over rows its predecessor already rebuilt.
+    //
+    // Merging is what restores it. Pulling each range forward to the last row
+    // covered instead cannot, because two widened edits can meet in one
+    // coordinate space and not the other, and no single amount to move by
+    // satisfies both.
+    let regions = {
+        let mut regions: Vec<(Range<u32>, Range<u32>)> = Vec::new();
+        for edit in inlay_edits {
+            let new_rows = rows_covering_folds(resolved_folds, edit.new.clone());
             let grew_start = edit.new.start - new_rows.start;
             let grew_end = new_rows.end - edit.new.end;
-            edit.old.start.saturating_sub(grew_start)..edit.old.end + grew_end
-        };
-        let new_rows = new_rows.start.max(covered_new_row)..new_rows.end;
-        let old_rows = old_rows.start.max(covered_old_row)..old_rows.end;
-        if new_rows.start >= new_rows.end {
-            continue;
+            let old_rows = edit.old.start.saturating_sub(grew_start)..edit.old.end + grew_end;
+            match regions.last_mut() {
+                Some((prev_old, prev_new))
+                    if old_rows.start <= prev_old.end || new_rows.start <= prev_new.end =>
+                {
+                    prev_old.end = prev_old.end.max(old_rows.end);
+                    prev_new.end = prev_new.end.max(new_rows.end);
+                },
+                _ => regions.push((old_rows, new_rows)),
+            }
         }
-        covered_old_row = old_rows.end;
-        covered_new_row = new_rows.end;
+        regions
+    };
+
+    for (index, (old_rows, new_rows)) in regions.iter().enumerate() {
+        let (old_rows, new_rows) = (old_rows.clone(), new_rows.clone());
+        let next_region_old_start = regions.get(index + 1).map(|(old, _)| old.start);
 
         let old_start_offset = old_row_to_offset(old_rows.start);
         let old_end_offset = old_row_to_offset(old_rows.end).min(old_text_len);
@@ -1191,10 +1207,7 @@ fn sync_fold_incremental(
         // Handle tail of current transform
         if let Some(item) = cursor.item() {
             let cursor_end = cursor.start().0 + item.summary.input.len;
-            if edits_iter
-                .peek()
-                .is_none_or(|next| old_row_to_offset(next.old.start) >= cursor_end)
-            {
+            if next_region_old_start.is_none_or(|start| old_row_to_offset(start) >= cursor_end) {
                 let tail = cursor_end - old_end_offset;
                 let tail_end_new = new_end_offset + tail;
                 let current_pos = new_transforms.summary().input.len;
@@ -2277,20 +2290,20 @@ mod tests {
             fold_map.sync(inlay_snapshot, &Patch::empty());
 
             // Several edits, some landing inside a fold and some between them,
-            // each driven through the carrying sync. One edit per sync, so
-            // every patch holds one. Several per sync is what
-            // `carrying_offsets_across_a_multi_edit_patch` covers instead. This
-            // cannot reach that case, because the incremental transform rebuild
-            // mistiles a multi-edit patch and trips its own consistency
-            // assertion before the offsets are ever compared.
+            // each driven through the carrying sync. One to three per sync, so
+            // some patches hold several and the carrying is exercised against
+            // the post-all-edits coordinates a multi-edit patch states its new
+            // ranges in.
             for _ in 0..4 {
                 let before = multi_buffer.snapshot();
-                let len = before.rope().len();
-                let at = (lcg(&mut state) as usize) % (len + 1);
-                if lcg(&mut state).is_multiple_of(3) && at + 4 <= len {
-                    shared.write().expect("poisoned").edit(at..at + 4, "");
-                } else {
-                    shared.write().expect("poisoned").edit(at..at, "zz\n");
+                for _ in 0..1 + lcg(&mut state) % 3 {
+                    let len = multi_buffer.snapshot().rope().len();
+                    let at = (lcg(&mut state) as usize) % (len + 1);
+                    if lcg(&mut state).is_multiple_of(3) && at + 4 <= len {
+                        shared.write().expect("poisoned").edit(at..at + 4, "");
+                    } else {
+                        shared.write().expect("poisoned").edit(at..at, "zz\n");
+                    }
                 }
 
                 let after = multi_buffer.snapshot();
