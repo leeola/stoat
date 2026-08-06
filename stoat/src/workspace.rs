@@ -1423,21 +1423,39 @@ fn compute_base_highlights(
     let name = language.name.to_string();
     let bucket_key = (content, name.clone(), syntax_styles.generation);
 
-    let spans = {
-        let mut guard = cache.lock().expect("base highlight cache poisoned");
+    let parse_key = (content, name);
+    let hit = {
+        let guard = cache.lock().expect("base highlight cache poisoned");
         if let Some(bucketed) = guard.buckets.get(&bucket_key) {
             return bucketed.clone();
         }
-        guard
-            .parses
-            .entry((content, name))
-            .or_insert_with(|| {
-                let spans = parse(language, base_text, None)
+        guard.parses.get(&parse_key).cloned()
+    };
+
+    // Parsed outside the lock, which a miss holds only long enough to look up.
+    // A changeset warms one diff job per changed file on the blocking pool, and
+    // parsing under the lock queues every one of them behind whichever job got
+    // there first.
+    //
+    // Two jobs missing at once both parse, which is the price. Same content and
+    // same language means the same spans, so whichever lands first is kept and
+    // the other is dropped.
+    let spans = match hit {
+        Some(spans) => spans,
+        None => {
+            let parsed = Arc::new(
+                parse(language, base_text, None)
                     .map(|tree| extract_highlights(language, &tree, base_text))
-                    .unwrap_or_default();
-                Arc::new(spans)
-            })
-            .clone()
+                    .unwrap_or_default(),
+            );
+            cache
+                .lock()
+                .expect("base highlight cache poisoned")
+                .parses
+                .entry(parse_key)
+                .or_insert(parsed)
+                .clone()
+        },
     };
 
     // Bucketed outside the lock, so one job's O(spans) resolve does not hold up
