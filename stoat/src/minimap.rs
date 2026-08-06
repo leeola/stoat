@@ -223,6 +223,18 @@ pub struct MinimapContent {
     /// Rows reported changed since the last sweep finished, awaiting the next
     /// sweep. Reset when a sweep consumes it.
     pending_syntax_rows: SweepRows,
+    /// The next built row the edge sweep will re-check, or `None` when idle.
+    ///
+    /// Separate cursor from [`Self::resync_upto`] because the two sweeps answer
+    /// to different versions and a bump of one says nothing about the other. It
+    /// advances [`RESYNC_CHUNK`] rows per sync, like the recolor sweep, so a
+    /// branch switch on a large file does not re-mark every row in one frame.
+    edge_resync_upto: Option<u32>,
+    /// The decoration version an active edge sweep is bringing the strip to.
+    ///
+    /// A bump to a different version restarts the sweep at the top rather than
+    /// widening it, since the rows already swept carry the old version's marks.
+    edge_resync_target: u64,
     queued: Vec<Splice>,
 }
 
@@ -243,6 +255,8 @@ impl MinimapContent {
             resync_end: None,
             resync_target: 0,
             pending_syntax_rows: SweepRows::All,
+            edge_resync_upto: None,
+            edge_resync_target: 0,
             queued: Vec::new(),
         }
     }
@@ -407,9 +421,26 @@ impl MinimapContent {
         // independent of the content sweep. The sweep above paints the marks as
         // of the last decoration sync, so a row whose mark this bump moves is
         // re-spliced here even when the sweep just touched it.
-        if versions.decoration != self.synced_decoration_version {
-            self.resync_edges(new_rope, &tokens_for, &marks);
-            self.synced_decoration_version = versions.decoration;
+        //
+        // Chunked like the recolor sweep, since a branch switch can move a mark
+        // on every row of the file at once.
+        if versions.decoration != self.synced_decoration_version
+            && (self.edge_resync_upto.is_none() || self.edge_resync_target != versions.decoration)
+        {
+            self.edge_resync_target = versions.decoration;
+            self.edge_resync_upto = Some(0);
+        }
+        if let Some(from) = self.edge_resync_upto {
+            let end = self.built_upto;
+            let from = from.min(end);
+            let to = from.saturating_add(RESYNC_CHUNK).min(end);
+            self.resync_edges(new_rope, &tokens_for, &marks, from..to);
+            if to >= end {
+                self.edge_resync_upto = None;
+                self.synced_decoration_version = self.edge_resync_target;
+            } else {
+                self.edge_resync_upto = Some(to);
+            }
         }
     }
 
@@ -466,11 +497,16 @@ impl MinimapContent {
         new_rope: &Rope,
         tokens_for: &impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
         marks: &impl EdgeSource,
+        window: Range<u32>,
     ) {
         let suspect = {
-            let mut rows = marks.marked_rows(0..self.built_upto);
-            rows.extend(self.edges.iter().map(|&(row, _)| row));
-            rows.retain(|&row| row < self.built_upto);
+            let mut rows = marks.marked_rows(window.clone());
+            // Sliced by partition point rather than filtered, so a window costs
+            // its own marks rather than every mark in the file.
+            let from = self.edges.partition_point(|&(row, _)| row < window.start);
+            let to = self.edges.partition_point(|&(row, _)| row < window.end);
+            rows.extend(self.edges[from..to].iter().map(|&(row, _)| row));
+            rows.retain(|row| window.contains(row));
             rows.sort_unstable();
             rows.dedup();
             rows
@@ -2112,6 +2148,52 @@ mod tests {
         assert_eq!(splices.len(), 2, "5-6 merge, 9 stands alone");
         assert_eq!((splices[0].start, splices[0].lines.len()), (5, 2));
         assert_eq!((splices[1].start, splices[1].lines.len()), (9, 1));
+    }
+
+    /// Switching branches moves a mark on every changed row at once, so the
+    /// edge sweep is chunked the way the recolor sweep is. Each sync looks only
+    /// at its own window, and the marks past it wait their turn.
+    #[test]
+    fn an_edge_sweep_covers_a_chunk_per_sync() {
+        let total = RESYNC_CHUNK + RESYNC_CHUNK / 2;
+        let (rope, mut content) = built_recolor_fixture();
+
+        // A mark in each chunk, so a sweep that stopped early is visible.
+        let marked = [1u32, RESYNC_CHUNK + 1];
+        let asked = RefCell::new(Vec::new());
+        let marks = RecordingEdges {
+            marked: &marked,
+            asked: &asked,
+        };
+
+        content.sync(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
+        assert!(
+            asked.borrow().iter().all(|&row| row < RESYNC_CHUNK),
+            "the first sync stays inside its own window",
+        );
+        let first = content.take_queued();
+        assert_eq!(first.len(), 1, "only the first chunk's mark landed");
+        assert_eq!(first[0].start, 1);
+
+        asked.borrow_mut().clear();
+        content.sync(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
+        assert!(
+            asked.borrow().iter().all(|&row| row >= RESYNC_CHUNK),
+            "and the second picks up where the first stopped",
+        );
+        let second = content.take_queued();
+        assert_eq!(second.len(), 1, "the second chunk's mark lands next");
+        assert_eq!(second[0].start, RESYNC_CHUNK + 1);
+
+        // The sweep has reached the end, so a third sync has nothing left.
+        asked.borrow_mut().clear();
+        content.sync(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
+        assert!(
+            asked.borrow().is_empty(),
+            "a settled sweep re-checks nothing",
+        );
+        assert!(content.take_queued().is_empty());
+        assert_eq!(total, RESYNC_CHUNK + RESYNC_CHUNK / 2, "two chunks of rows");
     }
 
     /// A decoration bump runs on every diff recompute and diagnostic batch, and
