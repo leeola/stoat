@@ -27,7 +27,7 @@ use std::{
     sync::Arc,
 };
 use stoat_config::{LineNumbers, WrapMode};
-use stoat_text::{cursor_offset, Anchor, Bias, Point, Rope};
+use stoat_text::{cursor_offset, patch::Patch, Anchor, Bias, Point, Rope};
 use stoatty_protocol::command::IconKind;
 use stoatty_widgets::{
     bar::Bar,
@@ -849,22 +849,16 @@ pub(crate) fn resolve_diagnostic_spans(
     snapshot: &crate::multi_buffer::MultiBufferSnapshot,
 ) -> Vec<ResolvedDiag> {
     let rope = snapshot.rope();
-    let published = set.spans(path);
-    let mut spans: Vec<ResolvedDiag> = set
-        .get(path)
+    let diagnostics = set.get(path);
+    let carried = shift_published_spans(set.spans(path), diagnostics.len(), |version| {
+        snapshot.edits_since(version)
+    });
+
+    let mut spans: Vec<ResolvedDiag> = diagnostics
         .iter()
+        .zip(carried)
         .enumerate()
-        .map(|(index, diag)| {
-            let (start, end) = match published.get(index) {
-                Some(span) => {
-                    let patch = snapshot.edits_since(span.base_version);
-                    (
-                        crate::diagnostics::shift_offset(span.range.start, &patch),
-                        crate::diagnostics::shift_offset(span.range.end, &patch),
-                    )
-                },
-                None => (0, 0),
-            };
+        .map(|(index, (diag, (start, end)))| {
             let start_line = rope.offset_to_point(start.min(rope.len())).row;
             let end_line = rope.offset_to_point(end.min(rope.len())).row;
             ResolvedDiag {
@@ -880,6 +874,40 @@ pub(crate) fn resolve_diagnostic_spans(
         .collect();
     spans.sort_by_key(|s| s.start);
     spans
+}
+
+/// Carry each of `published`'s endpoint pairs forward to the current text,
+/// padding to `count` entries with `(0, 0)` for a diagnostic with no span.
+///
+/// `patch_for` builds the edit patch since a base version. It runs once per run
+/// of spans sharing one, not once per span: a publish stamps all of its
+/// diagnostics with the same base version, and a path's spans arrive grouped by
+/// the server that published them, so equal versions are adjacent. Building one
+/// patch per diagnostic instead means a filtered walk of the fragment tree per
+/// diagnostic, on every keystroke, since the resolution is redone whenever the
+/// buffer moves.
+fn shift_published_spans(
+    published: &[crate::diagnostics::PublishedSpan],
+    count: usize,
+    mut patch_for: impl FnMut(u64) -> Patch<usize>,
+) -> Vec<(usize, usize)> {
+    let mut carried: Option<(u64, Patch<usize>)> = None;
+    (0..count)
+        .map(|index| {
+            let Some(span) = published.get(index) else {
+                return (0, 0);
+            };
+            let reusable = matches!(&carried, Some((version, _)) if *version == span.base_version);
+            if !reusable {
+                carried = Some((span.base_version, patch_for(span.base_version)));
+            }
+            let patch = &carried.as_ref().expect("set above").1;
+            (
+                crate::diagnostics::shift_offset(span.range.start, patch),
+                crate::diagnostics::shift_offset(span.range.end, patch),
+            )
+        })
+        .collect()
 }
 
 /// Rebuild `editor.diagnostic_span_cache` when the diagnostic set or buffer
@@ -2325,6 +2353,95 @@ mod tests {
             message: String::new(),
             ..Default::default()
         }
+    }
+
+    /// The resolution reruns whenever the buffer moves, so a patch per
+    /// diagnostic is a filtered walk of the fragment tree per diagnostic per
+    /// keystroke. One publish stamps one base version, so one patch serves all
+    /// of its diagnostics.
+    #[test]
+    fn spans_from_one_publish_share_a_single_edit_patch() {
+        use crate::diagnostics::PublishedSpan;
+        use stoat_text::patch::{Edit, Patch};
+
+        let published: Vec<PublishedSpan> = (0..5)
+            .map(|i| PublishedSpan {
+                range: (i * 10 + 5)..(i * 10 + 9),
+                base_version: 7,
+            })
+            .collect();
+
+        let mut built = Vec::new();
+        let carried = super::shift_published_spans(&published, published.len(), |version| {
+            built.push(version);
+            Patch::new(vec![Edit {
+                old: 0..0,
+                new: 0..3,
+            }])
+        });
+
+        assert_eq!(built, vec![7], "five spans from one publish, one patch");
+        assert_eq!(
+            carried,
+            vec![(8, 12), (18, 22), (28, 32), (38, 42), (48, 52)],
+            "and every span still carries forward by the inserted bytes",
+        );
+    }
+
+    /// Spans arrive grouped by the server that published them, so a second
+    /// server's base version starts a new run rather than reusing the first's.
+    #[test]
+    fn a_second_publish_version_builds_its_own_patch() {
+        use crate::diagnostics::PublishedSpan;
+        use stoat_text::patch::{Edit, Patch};
+
+        let published = vec![
+            PublishedSpan {
+                range: 5..6,
+                base_version: 7,
+            },
+            PublishedSpan {
+                range: 15..16,
+                base_version: 7,
+            },
+            PublishedSpan {
+                range: 25..26,
+                base_version: 9,
+            },
+            PublishedSpan {
+                range: 35..36,
+                base_version: 9,
+            },
+        ];
+
+        let mut built = Vec::new();
+        let carried = super::shift_published_spans(&published, published.len(), |version| {
+            built.push(version);
+            Patch::new(vec![Edit {
+                old: 0..0,
+                new: 0..1,
+            }])
+        });
+
+        assert_eq!(built, vec![7, 9], "one patch per version, not per span");
+        assert_eq!(carried, vec![(6, 7), (16, 17), (26, 27), (36, 37)]);
+    }
+
+    /// A diagnostic with no published span carries no position, and pads rather
+    /// than shifting the ones after it out of step.
+    #[test]
+    fn a_diagnostic_without_a_span_resolves_to_zero() {
+        use crate::diagnostics::PublishedSpan;
+        use stoat_text::patch::Patch;
+
+        let published = vec![PublishedSpan {
+            range: 4..8,
+            base_version: 1,
+        }];
+
+        let carried = super::shift_published_spans(&published, 3, |_| Patch::new(Vec::<_>::new()));
+
+        assert_eq!(carried, vec![(4, 8), (0, 0), (0, 0)]);
     }
 
     /// The severity map is keyed by buffer row and derived from spans shifted
