@@ -1,4 +1,5 @@
 use crate::{
+    buffer::TextBufferSnapshot,
     display_map::{highlights::HighlightStyle, BlockPlacement, BlockProperties, BlockStyle},
     host::DiffStatus,
 };
@@ -12,7 +13,7 @@ use std::{
     },
 };
 use stoat_text::{
-    Anchor, Bias, ContextLessSummary, Dimension, Dimensions, Item, SeekTarget, SumTree,
+    Anchor, Bias, ContextLessSummary, Dimension, Dimensions, Item, Point, SeekTarget, SumTree,
 };
 
 static DIFF_MAP_VERSION_COUNTER: AtomicUsize = AtomicUsize::new(1);
@@ -242,6 +243,46 @@ impl DiffMap {
     /// Attach base-text syntax highlights for the diff view's left column.
     pub fn set_base_highlights(&mut self, highlights: Arc<BaseHighlights>) {
         self.base_highlights = Some(highlights);
+    }
+
+    /// Pin every hunk's buffer rows to `snapshot`, so a later reader can find
+    /// where those rows have moved to.
+    ///
+    /// A hunk's stored rows are where it sat when the diff was computed. The
+    /// next diff is a background job away, and the reader keeps typing in the
+    /// meantime, so the rows alone go stale the moment the buffer moves.
+    ///
+    /// `snapshot` must be the text the diff was computed against. Anchoring
+    /// against a later one would pin rows the diff never looked at.
+    pub fn anchor_hunks(&mut self, snapshot: &TextBufferSnapshot) {
+        if self.hunks.is_empty() {
+            return;
+        }
+
+        let rope = &snapshot.visible_text;
+        let max_row = rope.max_point().row;
+        let offsets: Vec<usize> = self
+            .hunks
+            .iter()
+            .flat_map(|hunk| [hunk.buffer_line_range.start, hunk.buffer_line_range.end])
+            .map(|row| rope.point_to_offset(Point::new(row.min(max_row), 0)))
+            .collect();
+
+        // Left for the start and right for the end, so text inserted at either
+        // edge falls outside the hunk rather than silently joining it.
+        let starts = snapshot.anchors_at_batch(&offsets[..], Bias::Left);
+        let ends = snapshot.anchors_at_batch(&offsets[..], Bias::Right);
+
+        let anchored: Vec<DiffHunk> = self
+            .hunks
+            .iter()
+            .enumerate()
+            .map(|(i, hunk)| DiffHunk {
+                anchor_range: Some(starts[i * 2]..ends[i * 2 + 1]),
+                ..hunk.clone()
+            })
+            .collect();
+        self.hunks = SumTree::from_iter(anchored, ());
     }
 
     /// Syntax highlight spans for base `line`, or `None` when the base text was
@@ -1076,6 +1117,37 @@ mod tests {
             anchor_range: None,
             token_detail: None,
         }
+    }
+
+    /// The rows a hunk was built with go stale the moment the reader types.
+    /// Its anchors are what still name the same text afterwards.
+    #[test]
+    fn anchored_hunks_follow_the_text_when_a_row_is_inserted_above() {
+        use crate::buffer::{BufferId, TextBuffer};
+
+        let mut buffer = TextBuffer::with_text(BufferId::new(0), "l0\nl1\nl2\nl3\nl4\n");
+        let mut dm = DiffMap::from_hunks([added_hunk(3..4)], None);
+        dm.anchor_hunks(&buffer.snapshot);
+
+        let rows_now = |buffer: &TextBuffer| {
+            let hunk = dm.hunks().next().expect("one hunk");
+            let range = hunk.anchor_range.clone().expect("anchored");
+            let rope = &buffer.snapshot.visible_text;
+            let row_of = |anchor| {
+                rope.offset_to_point(buffer.snapshot.resolve_anchor(&anchor))
+                    .row
+            };
+            row_of(range.start)..row_of(range.end)
+        };
+
+        assert_eq!(rows_now(&buffer), 3..4, "the rows it was built with");
+
+        buffer.edit(0..0, "new\n");
+        assert_eq!(
+            rows_now(&buffer),
+            4..5,
+            "a row inserted above carries the hunk down with the text",
+        );
     }
 
     /// The tally is stepped rather than refolded, so pushing has to move the

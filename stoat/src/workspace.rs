@@ -997,12 +997,9 @@ impl Workspace {
             let Some(path) = self.buffers.path_for(buffer_id).map(Path::to_path_buf) else {
                 continue;
             };
-            let buffer_rope = shared
-                .read()
-                .expect("buffer poisoned")
-                .snapshot
-                .visible_text
-                .clone();
+            // The whole snapshot rather than its rope, since the hunks are
+            // anchored against the text they were diffed from.
+            let buffer_snapshot = shared.read().expect("buffer poisoned").snapshot.clone();
 
             let language = language_registry.for_path(&path);
             let task = executor.spawn_blocking({
@@ -1014,7 +1011,7 @@ impl Workspace {
                 move || {
                     // Materialize the rope only now that the diff is confirmed
                     // stale and a job is committed, off the event-loop thread.
-                    let buffer_text = buffer_rope.to_string();
+                    let buffer_text = buffer_snapshot.visible_text.to_string();
                     let diff_map = compute_diff_map(
                         &*git_host,
                         &git_root,
@@ -1023,7 +1020,11 @@ impl Workspace {
                         language.as_ref(),
                         &syntax_styles,
                         &base_cache,
-                    );
+                    )
+                    .map(|mut diff_map| {
+                        diff_map.anchor_hunks(&buffer_snapshot);
+                        diff_map
+                    });
                     redraw.notify_one();
                     DiffJobOutput {
                         buffer_id,
