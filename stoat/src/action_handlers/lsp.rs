@@ -2954,6 +2954,15 @@ pub(crate) fn pump_lsp_semantic_tokens(stoat: &mut Stoat) -> bool {
     }
 }
 
+/// Anchor a semantic-token reply onto `buffer_id` and paint it, provided the
+/// buffer still reads as it did when the request went out.
+///
+/// `version` is the buffer version the server measured `items` against. The
+/// offsets in them name that text, so anchoring them to a buffer that has moved
+/// since would pin each token to whatever now sits at its offset. A reply that
+/// misses is dropped rather than adjusted. The trigger is keyed on the buffer
+/// version, so the edit that invalidated this reply has already asked for
+/// another.
 fn apply_semantic_tokens(
     stoat: &mut Stoat,
     buffer_id: BufferId,
@@ -2964,6 +2973,15 @@ fn apply_semantic_tokens(
         Option<LspSymbolKind>,
     )>,
 ) {
+    let live = stoat
+        .active_workspace()
+        .buffers
+        .get(buffer_id)
+        .map(|shared| shared.read().expect("buffer poisoned").snapshot.version);
+    if live != Some(version) {
+        return;
+    }
+
     // The highlight channel takes the scope-bearing spans, the symbol-kind index
     // the kind-bearing ones. A token may feed one, both, or (dropped in decode)
     // neither.
@@ -10088,6 +10106,65 @@ mod tests {
         h.advance_clock(Duration::from_millis(550));
         assert_eq!(lsp_token_count(&mut h), 1);
         h.assert_snapshot("semantic_tokens_recolor");
+    }
+
+    /// The offsets in a reply name the text the server measured them against.
+    /// An edit landing while the request is in flight moves that text out from
+    /// under them, and painting them anyway pins each token to whatever now
+    /// sits at its offset.
+    #[test]
+    fn a_semantic_token_reply_is_dropped_when_the_buffer_moved_under_it() {
+        use lsp_types::{SemanticToken, SemanticTokens, SemanticTokensResult};
+        let mut h = TestHarness::with_size(24, 4);
+        enable_semantic_tokens(&h);
+        let root = seed(&mut h, &[("main.rs", "let x = y\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_semantic_tokens_full(
+            path.to_str().unwrap(),
+            SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data: vec![SemanticToken {
+                    delta_line: 0,
+                    delta_start: 8,
+                    length: 1,
+                    token_type: 0,
+                    token_modifiers_bitset: 0,
+                }],
+            }),
+        );
+
+        // Arm the request, then move the buffer while it sits in the debounce.
+        // Editing the registry directly leaves the in-flight task alone, which
+        // is the window a background pump's edit lands in.
+        h.type_keys("escape");
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .edit(0..0, "inserted\n");
+
+        h.advance_clock(Duration::from_millis(550));
+
+        assert_eq!(
+            lsp_token_count(&mut h),
+            0,
+            "the reply measured the text before the insert",
+        );
+
+        // The trigger is keyed on the buffer version, so the edit that dropped
+        // the reply is itself what asks for the next one.
+        super::semantic_tokens_trigger(&mut h.stoat);
+        assert!(
+            h.stoat.pending_semantic_tokens.is_some(),
+            "and a fresh request is already out for the moved text",
+        );
     }
 
     fn tree_sitter_token_count(h: &mut TestHarness) -> usize {
