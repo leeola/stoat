@@ -116,6 +116,19 @@ impl FakeGit {
     /// Snapshot the patches applied to a repo via `apply_to_index`. Useful
     /// for asserting the review-apply flow wrote the expected unified-diff
     /// patch. Empty when no patches have been applied or the repo is unknown.
+    /// How many HEAD or index blobs have been read out of `workdir`'s repo.
+    ///
+    /// Each is a repo-mutex acquisition and a decompression against a real
+    /// backend, so a caller that caches them shows up here as a flat count.
+    pub fn blob_reads(&self, workdir: &Path) -> usize {
+        let state = self.state.lock().unwrap();
+        state
+            .repos
+            .get(workdir)
+            .map(|repo| repo.state.lock().unwrap().blob_reads)
+            .unwrap_or_default()
+    }
+
     pub fn applied_patches(&self, workdir: &Path) -> Vec<String> {
         let state = self.state.lock().unwrap();
         state
@@ -595,6 +608,12 @@ struct FakeRepoState {
     /// [`FakeRepoBuilder::set_rebase_in_progress`]. False by default.
     rebase_in_progress: bool,
     applied_patches: Vec<String>,
+    /// How many times a HEAD or index blob has been read out of this repo.
+    ///
+    /// A real repo pays the repo mutex and a decompression per read, so a test
+    /// asserting a caller caches its blobs needs to see the reads themselves,
+    /// not just the answers.
+    blob_reads: usize,
     /// When `Some`, the next [`GitRepo::apply_to_index`] call returns
     /// `Err(GitApplyError::Backend(_))` with this message. The failing
     /// patch is still pushed to `applied_patches`.
@@ -806,7 +825,8 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn head_contents(&self, paths: &[&Path]) -> Vec<Option<String>> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.blob_reads += paths.len();
         paths
             .iter()
             .map(|path| {
@@ -817,7 +837,8 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn index_content(&self, path: &Path) -> Option<String> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.blob_reads += 1;
         let rel = path.strip_prefix(&self.workdir).ok()?;
         state
             .index_contents

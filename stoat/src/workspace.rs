@@ -237,6 +237,13 @@ pub struct Workspace {
     /// are not retried every frame, and drives re-population when a buffer is
     /// edited past the recorded version.
     diff_versions: HashMap<BufferId, u64>,
+    /// Each diffed file's HEAD and index blobs, keyed by path.
+    ///
+    /// Saves the repo mutex and a blob decompression on every recompute, which
+    /// is otherwise paid per keystroke. Cleared by [`Self::invalidate_all_diffs`],
+    /// which the `.git` watcher drives, so an entry cannot outlive the git state
+    /// it was read from.
+    diff_base_text: HashMap<PathBuf, DiffBaseText>,
     /// The buffer ids [`Self::collect_visible_buffer_ids`] last collected.
     ///
     /// Held rather than returned because both the parse and the diff driver
@@ -287,8 +294,25 @@ struct DiffJob {
 
 struct DiffJobOutput {
     buffer_id: BufferId,
+    /// The file the job diffed, so its base text can be filed under the same
+    /// key the next job for it will look under.
+    path: PathBuf,
     target_version: u64,
     diff_map: Option<DiffMap>,
+    /// The blobs the diff ran against, `None` when the repo or the file's HEAD
+    /// content could not be read and there was nothing to diff.
+    base: Option<DiffBaseText>,
+}
+
+/// A file's HEAD and index blobs as git last reported them.
+///
+/// Neither can change without a write under `.git`, which is watched, so a
+/// diff recomputed for a keystroke can reuse what the last one read rather than
+/// taking the repo mutex and decompressing the same bytes again.
+#[derive(Clone)]
+struct DiffBaseText {
+    head: Arc<String>,
+    index: Arc<String>,
 }
 
 /// A one-pane tree showing a fresh scratch buffer, the shape a workspace and
@@ -365,6 +389,7 @@ impl Workspace {
             parse_jobs: HashMap::new(),
             diff_jobs: HashMap::new(),
             diff_versions: HashMap::new(),
+            diff_base_text: HashMap::new(),
             visible_buffers: Vec::new(),
             index_jobs: HashMap::new(),
             index_debounce: HashMap::new(),
@@ -603,6 +628,9 @@ impl Workspace {
     pub(crate) fn invalidate_all_diffs(&mut self) {
         self.diff_jobs.clear();
         self.diff_versions.clear();
+        // The cached blobs were read from the git state this call is reacting
+        // to having changed, so they are exactly what must not be reused.
+        self.diff_base_text.clear();
     }
 
     /// Whether `id`'s installed diff map was computed for the buffer's current
@@ -648,7 +676,7 @@ impl Workspace {
         };
 
         let language = language_registry.for_path(&path);
-        let diff_map = compute_diff_map(
+        let computed = compute_diff_map(
             &**git_host,
             &self.git_root,
             &path,
@@ -656,7 +684,12 @@ impl Workspace {
             language.as_ref(),
             syntax_styles,
             base_cache,
+            self.diff_base_text.get(&path).cloned(),
         );
+        let diff_map = computed.map(|(diff_map, base)| {
+            self.diff_base_text.insert(path.clone(), base);
+            diff_map
+        });
         if let Some(shared) = self.buffers.get(id) {
             shared.write().expect("buffer poisoned").diff_map = diff_map;
         }
@@ -930,6 +963,9 @@ impl Workspace {
             }
         });
         for out in completed {
+            if let Some(base) = out.base {
+                self.diff_base_text.insert(out.path, base);
+            }
             if let Some(shared) = self.buffers.get(out.buffer_id) {
                 shared.write().expect("buffer poisoned").diff_map = out.diff_map;
             }
@@ -967,17 +1003,19 @@ impl Workspace {
             let buffer_snapshot = shared.read().expect("buffer poisoned").snapshot.clone();
 
             let language = language_registry.for_path(&path);
+            let cached_base = self.diff_base_text.get(&path).cloned();
             let task = executor.spawn_blocking({
                 let git_host = git_host.clone();
                 let git_root = self.git_root.clone();
                 let redraw = redraw_notify.clone();
                 let syntax_styles = syntax_styles.clone();
                 let base_cache = base_cache.clone();
+                let path = path.clone();
                 move || {
                     // Materialize the rope only now that the diff is confirmed
                     // stale and a job is committed, off the event-loop thread.
                     let buffer_text = buffer_snapshot.visible_text.to_string();
-                    let diff_map = compute_diff_map(
+                    let computed = compute_diff_map(
                         &*git_host,
                         &git_root,
                         &path,
@@ -985,16 +1023,23 @@ impl Workspace {
                         language.as_ref(),
                         &syntax_styles,
                         &base_cache,
+                        cached_base,
                     )
-                    .map(|mut diff_map| {
+                    .map(|(mut diff_map, base)| {
                         diff_map.anchor_hunks(&buffer_snapshot);
-                        diff_map
+                        (diff_map, base)
                     });
                     redraw.notify_one();
+                    let (diff_map, base) = match computed {
+                        Some((diff_map, base)) => (Some(diff_map), Some(base)),
+                        None => (None, None),
+                    };
                     DiffJobOutput {
                         buffer_id,
+                        path,
                         target_version: cur_version,
                         diff_map,
+                        base,
                     }
                 }
             });
@@ -1244,6 +1289,7 @@ pub(crate) type BaseHighlightCache = Arc<Mutex<BaseHighlightMemo>>;
 /// Both `discover` and `head_content` do git and filesystem IO, so this must
 /// run on a blocking thread. Uses the language-agnostic line diff, matching
 /// [`changed_byte_ranges`].
+#[allow(clippy::too_many_arguments)]
 fn compute_diff_map(
     git: &dyn GitHost,
     git_root: &Path,
@@ -1252,15 +1298,27 @@ fn compute_diff_map(
     language: Option<&Arc<Language>>,
     syntax_styles: &SyntaxStyles,
     base_cache: &BaseHighlightCache,
-) -> Option<DiffMap> {
-    let repo = git.discover(git_root)?;
-    let base_text = repo.head_content(path)?;
+    cached_base: Option<DiffBaseText>,
+) -> Option<(DiffMap, DiffBaseText)> {
+    // Reading the blobs is what costs. It takes the repo mutex and then
+    // decompresses bytes that a keystroke cannot have changed. The pair is
+    // handed back either way so the caller can file it for the next one.
+    let base = match cached_base {
+        Some(base) => base,
+        None => {
+            let repo = git.discover(git_root)?;
+            let head = Arc::new(repo.head_content(path)?);
+            let index = Arc::new(
+                repo.index_content(path)
+                    .unwrap_or_else(|| String::clone(&head)),
+            );
+            DiffBaseText { head, index }
+        },
+    };
+    let base_text = &*base.head;
+    let index_text = &*base.index;
 
-    let index_text = repo
-        .index_content(path)
-        .unwrap_or_else(|| base_text.clone());
-
-    let result = structural_diff::diff(&base_text, buffer_text);
+    let result = structural_diff::diff(base_text, buffer_text);
 
     // Which buffer lines the index and the buffer disagree on, which is what
     // marks a hunk staged. With nothing staged the index holds HEAD's bytes, so
@@ -1268,10 +1326,10 @@ fn compute_diff_map(
     // one result twice beats diffing the file twice.
     let index_changed: Vec<Range<u32>> = {
         let hunks = if index_text == base_text {
-            changes_to_hunks(&result.changes, &base_text, buffer_text)
+            changes_to_hunks(&result.changes, base_text, buffer_text)
         } else {
-            let index_result = structural_diff::diff(&index_text, buffer_text);
-            changes_to_hunks(&index_result.changes, &index_text, buffer_text)
+            let index_result = structural_diff::diff(index_text, buffer_text);
+            changes_to_hunks(&index_result.changes, index_text, buffer_text)
         };
         hunks
             .into_iter()
@@ -1280,16 +1338,16 @@ fn compute_diff_map(
     };
 
     let mut diff_map =
-        DiffMap::from_structural_changes_staged(result, &base_text, buffer_text, &index_changed);
+        DiffMap::from_structural_changes_staged(result, base_text, buffer_text, &index_changed);
     if let Some(language) = language {
         diff_map.set_base_highlights(compute_base_highlights(
-            &base_text,
+            base_text,
             language,
             syntax_styles,
             base_cache,
         ));
     }
-    Some(diff_map)
+    Some((diff_map, base.clone()))
 }
 
 /// Highlight `base_text` for the diff view's left column, per base line.
@@ -1666,6 +1724,43 @@ mod tests {
             dm.status_for_line(0),
             DiffStatus::Unchanged,
             "the unchanged first line reads unchanged"
+        );
+    }
+
+    /// Neither blob can change without a write under `.git`, which invalidates
+    /// the cache, so a recompute driven by an edit has no reason to read them
+    /// again. Each read is a repo-mutex acquisition and a decompression.
+    #[test]
+    fn a_second_diff_of_one_file_reads_no_blobs() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\nb\n", "a\nc\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.settle_diff_jobs();
+
+        let repo = PathBuf::from("/repo");
+        let first = h.fake_git().blob_reads(&repo);
+        assert!(first > 0, "the first diff has to read the blobs");
+
+        // Move the buffer so the next drive finds the diff stale and recomputes.
+        let ws = h.stoat.active_workspace();
+        let editor_id = match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let buffer_id = ws.editors[editor_id].buffer_id;
+        ws.buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .edit(0..0, "x");
+        h.settle_diff_jobs();
+
+        assert_eq!(
+            h.fake_git().blob_reads(&repo),
+            first,
+            "the second diff reuses the blobs the first one read",
         );
     }
 
