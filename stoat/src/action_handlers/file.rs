@@ -16,6 +16,7 @@ use lsp_types::{
 use std::{
     collections::HashMap,
     future::Future,
+    ops::Range,
     path::{Path, PathBuf},
     pin::Pin,
     str::FromStr,
@@ -24,7 +25,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use stoat_scheduler::{Executor, Task};
-use stoat_text::{Bias, LineEnding, SelectionGoal};
+use stoat_text::{Bias, LineEnding, Rope, SelectionGoal};
 
 /// Write the focused buffer to its backing file via
 /// [`crate::host::FsHost::write_atomic`], clear the dirty flag, and notify the
@@ -591,7 +592,8 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) {
             if appended {
                 guard.edit(old_len..old_len, &new[old_len..]);
             } else {
-                guard.edit(0..old_len, &new);
+                let (old_span, new_span) = changed_span(&guard.snapshot.visible_text, &new);
+                guard.edit(old_span, &new[new_span]);
             }
             guard.mark_clean();
         }
@@ -790,7 +792,8 @@ fn reload_from_disk(stoat: &mut Stoat, id: BufferId, path: &Path) -> ReloadOutco
         }
     } else {
         let mut guard = buffer.write().expect("buffer poisoned");
-        guard.edit(0..old_len, &new);
+        let (old_span, new_span) = changed_span(&guard.snapshot.visible_text, &new);
+        guard.edit(old_span, &new[new_span]);
         guard.mark_clean();
     }
     stoat
@@ -985,6 +988,68 @@ fn common_prefix_len<'a>(chunks: impl Iterator<Item = &'a str>, new: &str) -> us
         }
     }
     matched
+}
+
+/// The number of trailing bytes the rope `chunks` share with `new`.
+///
+/// `chunks` runs back to front, each chunk's own text forward, which is what
+/// [`Rope::reversed_chunks_in_range`] yields. The mirror of
+/// [`common_prefix_len`], and walked the same way so a followed log is never
+/// materialized whole.
+fn common_suffix_len<'a>(chunks: impl Iterator<Item = &'a str>, new: &str) -> usize {
+    let new = new.as_bytes();
+    let mut matched = 0;
+    for chunk in chunks {
+        if matched == new.len() {
+            break;
+        }
+        let chunk = chunk.as_bytes();
+        let head = &new[..new.len() - matched];
+        let n = chunk.len().min(head.len());
+        let common = chunk[chunk.len() - n..]
+            .iter()
+            .rev()
+            .zip(head.iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        matched += common;
+        if common < chunk.len() {
+            break;
+        }
+    }
+    matched
+}
+
+/// The span of `old` that `new` changes, paired with the span of `new` that
+/// replaces it.
+///
+/// Rewriting a buffer wholesale deletes every fragment the anchors point into,
+/// and a deleted fragment resolves to the same offset for all of them, so
+/// cursors, marks, jumplist entries, and folds all collapse together. Trimming
+/// the shared prefix and suffix leaves the edit covering only what moved, and
+/// anchors outside it ride through untouched. Anchors inside it still collapse
+/// to its boundary.
+///
+/// Both splits land on char boundaries in both texts. A boundary in one is not
+/// a boundary in the other, since the byte at the split can differ.
+fn changed_span(old: &Rope, new: &str) -> (Range<usize>, Range<usize>) {
+    let mut prefix = common_prefix_len(old.chunks(), new);
+    while prefix > 0 && !(old.is_char_boundary(prefix) && new.is_char_boundary(prefix)) {
+        prefix -= 1;
+    }
+
+    // The prefix already claimed its bytes, so the suffix can only take what is
+    // left of the shorter text. Without the clamp the two spans would overlap
+    // and describe more text than either holds.
+    let mut suffix = common_suffix_len(old.reversed_chunks_in_range(0..old.len()), new)
+        .min(old.len().min(new.len()) - prefix);
+    while suffix > 0
+        && !(old.is_char_boundary(old.len() - suffix) && new.is_char_boundary(new.len() - suffix))
+    {
+        suffix -= 1;
+    }
+
+    (prefix..old.len() - suffix, prefix..new.len() - suffix)
 }
 
 /// The buffer-line row of `editor`'s primary cursor, resolved through its
@@ -2052,6 +2117,88 @@ mod tests {
             4,
             "a last-line cursor follows the append to the new end"
         );
+    }
+
+    /// Park the cursor, a buffer-local mark, and a jumplist entry on row 3, so
+    /// a reload can be checked against three anchors that ride the same edit.
+    fn anchor_row_3(h: &mut TestHarness, id: BufferId) {
+        let offset = {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            let snapshot = editor.display_map.snapshot();
+            let offset = snapshot
+                .buffer_snapshot()
+                .rope()
+                .point_to_offset(stoat_text::Point::new(3, 0));
+            super::collapse_to_offset(editor, offset, 0);
+            offset
+        };
+
+        let anchor = {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            let snapshot = editor.display_map.snapshot();
+            snapshot
+                .buffer_snapshot()
+                .anchor_at(offset, stoat_text::Bias::Right)
+        };
+        h.stoat.marks.insert((id, 'a'), anchor);
+        crate::action_handlers::jump::push_jump(&mut h.stoat);
+    }
+
+    /// The rows the cursor, the mark, and the jumplist entry parked by
+    /// [`anchor_row_3`] now resolve to.
+    fn anchored_rows(h: &mut TestHarness, id: BufferId) -> (u32, u32, u32) {
+        let cursor = focused_cursor_row(h);
+
+        let mark = *h.stoat.marks.get(&(id, 'a')).expect("mark stored");
+        let jump = {
+            let ws = h.stoat.active_workspace();
+            let pane = ws.panes.pane(ws.panes.focus());
+            let entry = pane.jumplist.entries().last().expect("jump recorded");
+            entry.selections.first().expect("selection").start
+        };
+
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf = snapshot.buffer_snapshot();
+        let row_of = |anchor| buf.rope().offset_to_point(buf.resolve_anchor(&anchor)).row;
+        (cursor, row_of(mark), row_of(jump))
+    }
+
+    /// Replacing the whole buffer deletes every fragment the anchors point
+    /// into, and they all resolve to the same place afterwards. Editing only
+    /// the changed span leaves everything below it where it was.
+    #[test]
+    fn pump_auto_reload_keeps_anchors_below_a_mid_file_change() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-anchors");
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"l0\nl1\nl2\nl3\nl4\n");
+        anchor_row_3(&mut h, id);
+        assert_eq!(
+            anchored_rows(&mut h, id),
+            (3, 3, 3),
+            "all three start on row 3"
+        );
+
+        h.fake_fs().insert_file(&path, b"l0\nCHANGED\nl2\nl3\nl4\n");
+        arm_and_pump(&mut h);
+
+        assert_eq!(buffer_text(&h, id), "l0\nCHANGED\nl2\nl3\nl4\n");
+        assert_eq!(anchored_rows(&mut h, id), (3, 3, 3));
+    }
+
+    #[test]
+    fn reload_keeps_anchors_below_a_mid_file_change() {
+        let mut h = Stoat::test();
+        let root = Path::new("/reload-anchors");
+        let path = root.join("a.txt");
+        let id = open_plain(&mut h, root, "a.txt", b"l0\nl1\nl2\nl3\nl4\n");
+        anchor_row_3(&mut h, id);
+
+        h.fake_fs().insert_file(&path, b"l0\nCHANGED\nl2\nl3\nl4\n");
+        super::reload_focused(&mut h.stoat, false);
+
+        assert_eq!(buffer_text(&h, id), "l0\nCHANGED\nl2\nl3\nl4\n");
+        assert_eq!(anchored_rows(&mut h, id), (3, 3, 3));
     }
 
     #[test]
