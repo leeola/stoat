@@ -2,6 +2,7 @@ use crate::{
     buffer::TextBufferSnapshot,
     display_map::{highlights::HighlightStyle, BlockPlacement, BlockProperties, BlockStyle},
     host::DiffStatus,
+    multi_buffer::MultiBufferSnapshot,
 };
 use std::{
     cmp::Ordering,
@@ -90,6 +91,80 @@ impl DiffHunk {
             .unstaged_lines
             .iter()
             .any(|range| ranges_overlap(range, &(row..row + 1)))
+    }
+}
+
+/// The hunks paired with the buffer rows they now cover, ordered by those rows.
+///
+/// A hunk stores the rows it covered when the diff ran, and the reader has been
+/// typing since. Built by [`DiffMap::live_hunks`], which resolves each hunk's
+/// anchors once, so a caller painting a screenful of rows pays for that walk
+/// once rather than per row.
+pub struct LiveHunks<'a> {
+    hunks: Vec<(&'a DiffHunk, Range<u32>)>,
+}
+
+impl<'a> LiveHunks<'a> {
+    /// The diff mark to paint in the gutter for buffer `line`, or `None` when
+    /// no hunk touches it. The row-level counterpart of
+    /// [`DiffMap::gutter_mark_for_line`], reading live rows rather than stored
+    /// ones.
+    pub fn gutter_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, bool)> {
+        let index = self
+            .hunks
+            .partition_point(|(_, rows)| rows.start <= line)
+            .checked_sub(1)?;
+        let (hunk, rows) = &self.hunks[index];
+
+        if rows.contains(&line) {
+            // The staged rows are recorded in the hunk's own coordinates, so
+            // the live row steps back by however far the hunk has moved.
+            let stored = (line + hunk.buffer_line_range.start).saturating_sub(rows.start);
+            return Some((hunk.status, hunk.line_staged(stored)));
+        }
+        if hunk.status == DiffHunkStatus::Deleted && rows.start == line {
+            return Some((DiffHunkStatus::Deleted, hunk.staged()));
+        }
+        if hunk.status == DiffHunkStatus::Moved && rows.is_empty() && rows.start == line {
+            return Some((DiffHunkStatus::Moved, hunk.staged()));
+        }
+        None
+    }
+
+    /// The diff status of buffer `line`. The row-level counterpart of
+    /// [`DiffMap::status_for_line`], reading live rows rather than stored ones.
+    pub fn status_for_line(&self, line: u32) -> DiffStatus {
+        let Some(index) = self
+            .hunks
+            .partition_point(|(_, rows)| rows.start <= line)
+            .checked_sub(1)
+        else {
+            return DiffStatus::Unchanged;
+        };
+        let (hunk, rows) = &self.hunks[index];
+        if !rows.contains(&line) {
+            return DiffStatus::Unchanged;
+        }
+        match hunk.status {
+            DiffHunkStatus::Added => DiffStatus::Added,
+            DiffHunkStatus::Modified => DiffStatus::Modified,
+            DiffHunkStatus::Moved => DiffStatus::Moved,
+            DiffHunkStatus::Deleted => DiffStatus::Unchanged,
+        }
+    }
+
+    /// The hunks meeting `rows`, each with the rows it now covers.
+    ///
+    /// A hunk covering no rows -- a deletion or move seam -- is included when
+    /// the row it sits at is in range, since that row is where its mark paints.
+    pub fn in_range(&self, rows: Range<u32>) -> impl Iterator<Item = (&'a DiffHunk, Range<u32>)> {
+        let from = self
+            .hunks
+            .partition_point(|(_, live)| live.end < rows.start);
+        self.hunks[from..]
+            .iter()
+            .take_while(move |(_, live)| live.start < rows.end)
+            .map(|(hunk, live)| (*hunk, live.clone()))
     }
 }
 
@@ -342,6 +417,44 @@ impl DiffMap {
             }
         }
         Self::from_hunks(hunks, Some(Arc::new(lhs_text.to_string())))
+    }
+
+    /// The hunks as they sit in `buffer`, for a caller reading many rows.
+    ///
+    /// Resolving every hunk's anchors costs one ordered walk of the buffer's
+    /// fragments. Reading each row against the stored rows instead costs
+    /// nothing, but answers for the text as it was when the diff ran.
+    pub fn live_hunks<'a>(&'a self, buffer: &MultiBufferSnapshot) -> LiveHunks<'a> {
+        // A hunk built before anchoring, or by a caller that never anchored,
+        // keeps its stored rows. Stale, but the only answer available for it.
+        let mut live: Vec<(&DiffHunk, Range<u32>)> = self
+            .hunks
+            .iter()
+            .map(|hunk| (hunk, hunk.buffer_line_range.clone()))
+            .collect();
+
+        let mut anchors = Vec::with_capacity(live.len() * 2);
+        let mut anchored: Vec<usize> = Vec::with_capacity(live.len());
+        for (i, hunk) in self.hunks.iter().enumerate() {
+            if let Some(range) = &hunk.anchor_range {
+                anchored.push(i);
+                anchors.push(range.start);
+                anchors.push(range.end);
+            }
+        }
+
+        if !anchors.is_empty() {
+            let offsets = buffer.resolve_anchors_batch(&anchors);
+            let points = buffer.rope().offsets_to_points_batch(&offsets);
+            for (slot, &i) in anchored.iter().enumerate() {
+                live[i].1 = points[slot * 2].row..points[slot * 2 + 1].row;
+            }
+        }
+
+        // An edit inside one hunk moves it past another only if the diff itself
+        // is stale enough to have overlapping hunks, so this rarely reorders.
+        live.sort_by_key(|(_, rows)| (rows.start, rows.end));
+        LiveHunks { hunks: live }
     }
 
     pub fn version(&self) -> usize {
@@ -1147,6 +1260,46 @@ mod tests {
             rows_now(&buffer),
             4..5,
             "a row inserted above carries the hunk down with the text",
+        );
+    }
+
+    /// The diff runs on a background job spawned per buffer version, so its
+    /// rows are behind for as long as that takes. The gutter has to answer for
+    /// the text on screen in the meantime.
+    #[test]
+    fn a_gutter_mark_follows_its_text_before_the_next_diff_lands() {
+        use crate::{
+            buffer::{BufferId, TextBuffer},
+            multi_buffer::MultiBuffer,
+        };
+        use std::sync::RwLock;
+
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "l0\nl1\nl2\nl3\nl4\n",
+        )));
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+        let mut dm = DiffMap::from_hunks([added_hunk(3..4)], None);
+        dm.anchor_hunks(&shared.read().expect("poisoned").snapshot);
+
+        let marked_row = |dm: &DiffMap| {
+            let snapshot = multi.snapshot();
+            let live = dm.live_hunks(&snapshot);
+            (0..10).find(|&row| live.gutter_mark_for_line(row).is_some())
+        };
+
+        assert_eq!(marked_row(&dm), Some(3), "the row the diff marked");
+
+        shared.write().expect("poisoned").edit(0..0, "new\n");
+        assert_eq!(
+            marked_row(&dm),
+            Some(4),
+            "and the mark rides the inserted row down with its text",
+        );
+        assert!(
+            dm.gutter_mark_for_line(3).is_some(),
+            "while the stored rows still name where the diff ran",
         );
     }
 

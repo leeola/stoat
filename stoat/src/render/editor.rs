@@ -1341,11 +1341,14 @@ pub(crate) fn gutter_diff_marks(
     let Some(diff_map) = snapshot.diff_map() else {
         return BTreeMap::new();
     };
+    // Where the hunks sit now, not where the last diff job left them. It runs
+    // in the background per buffer version, so its rows are already behind.
+    let live = diff_map.live_hunks(snapshot.buffer_snapshot());
     folded
         .iter()
         .filter_map(|&(number, _)| {
             let row = number - 1;
-            diff_map.gutter_mark_for_line(row).map(|mark| (row, mark))
+            live.gutter_mark_for_line(row).map(|mark| (row, mark))
         })
         .collect()
 }

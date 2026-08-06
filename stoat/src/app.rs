@@ -8523,7 +8523,9 @@ impl Stoat {
             minimap_line_tokens(&snapshot, buffer_id, syntax_on, class_table, rows)
         };
         let marks = MinimapEdges {
-            snapshot: &snapshot,
+            diff: snapshot
+                .diff_map()
+                .map(|diff| diff.live_hunks(snapshot.buffer_snapshot())),
             severity_map: &severity_map,
             class_table,
         };
@@ -10110,14 +10112,16 @@ fn minimap_line_tokens(
 /// by row, so which rows are markable at all comes out of one ordered walk
 /// rather than a seek per line of the file.
 struct MinimapEdges<'a> {
-    snapshot: &'a DisplaySnapshot,
+    /// Where the hunks sit now. Resolved once for the pass, since `edge_of`
+    /// runs per row and the diff job's own rows are already behind.
+    diff: Option<crate::diff_map::LiveHunks<'a>>,
     severity_map: &'a std::collections::BTreeMap<u32, lsp_types::DiagnosticSeverity>,
     class_table: &'a crate::minimap::ClassTable,
 }
 
 impl EdgeSource for MinimapEdges<'_> {
     fn edge_of(&self, row: u32) -> Option<u8> {
-        minimap_edge_class(self.snapshot, self.severity_map, self.class_table, row)
+        minimap_edge_class(self.diff.as_ref(), self.severity_map, self.class_table, row)
     }
 
     fn marked_rows(&self, rows: Range<u32>) -> Vec<u32> {
@@ -10127,12 +10131,9 @@ impl EdgeSource for MinimapEdges<'_> {
             .map(|(&row, _)| row)
             .collect();
 
-        if let Some(diff) = self.snapshot.diff_map() {
-            for hunk in diff.hunks_in_range(rows.clone()) {
-                marked.extend(
-                    hunk.buffer_line_range.start.max(rows.start)
-                        ..hunk.buffer_line_range.end.min(rows.end),
-                );
+        if let Some(diff) = self.diff.as_ref() {
+            for (_, hunk_rows) in diff.in_range(rows.clone()) {
+                marked.extend(hunk_rows.start.max(rows.start)..hunk_rows.end.min(rows.end));
             }
         }
 
@@ -10146,7 +10147,7 @@ impl EdgeSource for MinimapEdges<'_> {
 /// A diagnostic on the row wins over its diff status, mirroring the gutter. The
 /// severity or diff status resolves to a class against `class_table`.
 fn minimap_edge_class(
-    snapshot: &DisplaySnapshot,
+    diff: Option<&crate::diff_map::LiveHunks<'_>>,
     severity_map: &std::collections::BTreeMap<u32, lsp_types::DiagnosticSeverity>,
     class_table: &crate::minimap::ClassTable,
     row: u32,
@@ -10163,7 +10164,7 @@ fn minimap_edge_class(
         return Some(class_table.edge_class(kind));
     }
 
-    match snapshot.line_diff_status(row) {
+    match diff?.status_for_line(row) {
         DiffStatus::Added => Some(class_table.edge_class(EdgeClass::Added)),
         DiffStatus::Modified | DiffStatus::Moved => {
             Some(class_table.edge_class(EdgeClass::Modified))
