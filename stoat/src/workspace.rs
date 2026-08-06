@@ -59,14 +59,6 @@ new_key_type! {
     pub struct WorkspaceId;
 }
 
-/// Largest buffer, in bytes, that [`Workspace::drive_parse_jobs`] parses
-/// synchronously on the event-loop thread.
-///
-/// Every tree-sitter parse honors the 1ms deadline, but the captures walk that
-/// follows them does not and is unbounded O(file), so past this cap a buffer
-/// is parsed on the background pool instead of blocking a keystroke.
-const SYNC_PARSE_MAX_BYTES: usize = 256 * 1024;
-
 /// Stable-across-restart workspace identifier. [`WorkspaceId`] is a SlotMap
 /// key whose generation is recycled each run, so it can't serve as an on-disk
 /// filename. [`WorkspaceUid`] is assigned once at construction time from the
@@ -810,56 +802,29 @@ impl Workspace {
                 continue;
             }
 
-            let mut prior = self.buffers.take_syntax(buffer_id);
-            let mut prior_map = self.buffers.take_syntax_map(buffer_id);
+            // Cloned rather than taken, so everything that reads the tree keeps
+            // reading the last landed one while the job flies. Both clones are
+            // refcount bumps. The spans are taken, since only the parse pipeline
+            // reads them and at most one job per buffer is ever in flight.
+            let prior = self.buffers.syntax(buffer_id).cloned();
+            let prior_map = self.buffers.syntax_map(buffer_id).cloned();
             let prior_spans = self.buffers.take_token_spans(buffer_id);
             // The same parse's anchored tokens, index-aligned with the spans,
             // so the incremental path can hand a carried token back its anchor.
             let prior_anchors = self.buffers.tokens_for(buffer_id).map(|(tokens, _)| tokens);
 
-            // Every tree-sitter parse honors the deadline, but the captures
-            // walk after them does not and is unbounded O(file), so a large
-            // buffer skips this synchronous fast path and parses on the
-            // blocking pool below, landing through the job poll instead of
-            // holding the run loop for the whole file.
-            let sync_out = (snapshot.len() <= SYNC_PARSE_MAX_BYTES)
-                .then(|| {
-                    let deadline = executor.now() + std::time::Duration::from_millis(1);
-                    parse_buffer_step(
-                        buffer_id,
-                        snapshot.clone(),
-                        &lang,
-                        &mut prior,
-                        &mut prior_map,
-                        prior_spans.as_deref(),
-                        prior_anchors.as_deref(),
-                        syntax_styles,
-                        Some((deadline, executor)),
-                    )
-                })
-                .flatten();
-            if let Some(out) = sync_out {
-                installed.push((out.buffer_id, out.changed_token_rows.clone()));
-                self.buffers.store_syntax(out.buffer_id, out.syntax);
-                self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
-                self.buffers
-                    .store_token_spans(out.buffer_id, out.token_spans.clone());
-                self.buffers.store_tokens(
-                    out.buffer_id,
-                    out.token_channel.tokens.clone(),
-                    syntax_styles.interner.clone(),
-                );
-                for editor in self.editors.values_mut() {
-                    if editor.buffer_id == out.buffer_id {
-                        editor
-                            .display_map
-                            .set_semantic_token_channel(out.buffer_id, out.token_channel.clone());
-                    }
-                }
-                self.arm_index_debounce(executor, redraw_notify, buffer_id);
-                continue;
-            }
-
+            // Every buffer parses here, whatever its size. The tree-sitter parse
+            // honors a deadline, but the captures walk after it does not and is
+            // unbounded O(file), so parsing inline would hold the run loop for
+            // the whole file on a keystroke.
+            //
+            // The result installs through the job poll a frame later. Until then
+            // the registry still holds the last landed tree and token set, so
+            // auto-indent, textobjects, and the highlight readers answer from
+            // one edit ago rather than from nothing, and the carried tokens are
+            // anchored so they stay on their text. A buffer opened for the first
+            // time has no such state, and renders unstyled until its job lands.
+            //
             // A blocking-pool run rather than a plain spawn, because the parse is
             // one non-yielding stretch of CPU and the app runs a current_thread
             // runtime. A spawned future would poll it on the run-loop thread and
@@ -1444,7 +1409,6 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 mod tests {
     use super::{
         changed_byte_ranges, compute_base_highlights, BaseHighlightMemo, ParseJob, Workspace,
-        SYNC_PARSE_MAX_BYTES,
     };
     use crate::{
         buffer::BufferId, display_map::syntax_theme::SyntaxStyles, host::DiffStatus, pane::View,
@@ -1940,21 +1904,24 @@ mod tests {
         );
     }
 
+    /// The captures walk after a parse is unbounded O(file), so no buffer is
+    /// small enough to be worth running it between keystrokes. A tiny one takes
+    /// the same background path a large one does.
     #[test]
-    fn oversized_buffer_parses_off_the_main_thread() {
+    fn a_small_buffer_parses_off_the_main_thread_too() {
         use crate::action_handlers::dispatch;
         use stoat_action::OpenFile;
 
         let mut h = TestHarness::with_size(24, 4);
-        let root = PathBuf::from("/big");
-        let big: String = "fn f() {}\n".repeat(SYNC_PARSE_MAX_BYTES / 10 + 100);
-        h.fake_fs().insert_file(root.join("big.rs"), big.as_bytes());
+        let root = PathBuf::from("/small");
+        h.fake_fs()
+            .insert_file(root.join("small.rs"), b"fn f() {}\n");
         h.stoat.active_workspace_mut().git_root = root.clone();
 
         dispatch(
             &mut h.stoat,
             &OpenFile {
-                path: root.join("big.rs"),
+                path: root.join("small.rs"),
             },
         );
         // Drive parse jobs once without ticking the scheduler, so the spawned
@@ -1964,15 +1931,15 @@ mod tests {
         let ws = h.stoat.active_workspace();
         let id = ws
             .buffers
-            .id_for_path(&root.join("big.rs"))
-            .expect("the big buffer opened");
+            .id_for_path(&root.join("small.rs"))
+            .expect("the buffer opened");
         assert!(
             ws.parse_jobs.contains_key(&id),
-            "a buffer past the sync-parse cap spawns a background parse job"
+            "every buffer spawns a background parse job"
         );
         assert!(
             ws.buffers.syntax_version(id).is_none(),
-            "and is not parsed inline on the main thread"
+            "and none is parsed inline on the main thread"
         );
 
         // The scheduler tick resolves the blocking task. The second

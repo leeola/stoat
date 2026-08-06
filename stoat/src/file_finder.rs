@@ -1685,12 +1685,16 @@ mod tests {
         h.assert_snapshot("finder_preview_clears_short_file_background");
     }
 
-    /// The preview pane is syntax-highlighted on the first idle frame after the
-    /// selection changes. The parse runs in `drive_background` ahead of the
-    /// scheduler rather than during the paint pass, so the freshly selected
-    /// file is not left in `fallback_style` until the next unrelated event.
+    /// The preview pane is syntax-highlighted once its parse lands, which is a
+    /// frame or two after the selection changes.
+    ///
+    /// A freshly selected file has no prior tree to carry, so the frames before
+    /// its parse completes render in `fallback_style`. That is the price of
+    /// parsing off the input thread, and scrolling a preview list is itself an
+    /// input-latency path, so it is not one to buy back with a synchronous
+    /// first parse.
     #[test]
-    fn snapshot_finder_preview_highlighted_on_first_idle_frame() {
+    fn snapshot_finder_preview_highlighted_once_its_parse_lands() {
         let mut h = TestHarness::with_size(120, 16);
         seed_finder_workspace(
             &mut h,
@@ -1707,7 +1711,11 @@ mod tests {
             .as_mut()
             .expect("finder open")
             .move_selection(1);
-        h.assert_snapshot_one_frame("finder_preview_highlighted_first_frame");
+        // Spawn the preview's parse and run it. The snapshot's own background
+        // drive is the poll that installs the result.
+        h.stoat.drive_background();
+        h.settle();
+        h.assert_snapshot_one_frame("finder_preview_highlighted_after_parse");
     }
 
     #[test]

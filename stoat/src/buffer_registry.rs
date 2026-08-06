@@ -673,17 +673,9 @@ impl BufferRegistry {
         evicted
     }
 
-    /// Move the prior [`SyntaxState`] out of the registry. The caller is
-    /// expected to update it (`tree.edit` + reparse) and put it back via
-    /// [`Self::store_syntax`]. Returns `None` if no state has been stored.
-    pub(crate) fn take_syntax(&mut self, id: BufferId) -> Option<SyntaxState> {
-        self.buffers.get_mut(&id)?.syntax.take()
-    }
-
     /// Borrow the multi-layer [`SyntaxMap`] for `id`, if one has been
-    /// installed by the parse pipeline. Used by the capture-merging
-    /// highlight path.
-    #[allow(dead_code)]
+    /// installed by the parse pipeline. Read by the capture-merging highlight
+    /// path, textobject selection, and sibling navigation.
     pub(crate) fn syntax_map(&self, id: BufferId) -> Option<&SyntaxMap> {
         self.buffers.get(&id)?.syntax_map.as_ref()
     }
@@ -695,13 +687,6 @@ impl BufferRegistry {
         if let Some(entry) = self.buffers.get_mut(&id) {
             entry.syntax_map = Some(map);
         }
-    }
-
-    /// Move the multi-layer [`SyntaxMap`] for `id` out of the
-    /// registry, so the next reparse can interpolate it incrementally
-    /// before reinstalling.
-    pub(crate) fn take_syntax_map(&mut self, id: BufferId) -> Option<SyntaxMap> {
-        self.buffers.get_mut(&id)?.syntax_map.take()
     }
 
     /// Retain a parse's raw token spans for `id`, so the next parse can report

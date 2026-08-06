@@ -2791,13 +2791,12 @@ mod tests {
         h.assert_snapshot("command_palette_arg_typing");
     }
 
-    /// The `:o ` arg-picker preview is syntax-highlighted on the first idle
-    /// frame after the selection changes. Like the file finder, the preview
-    /// parse runs in `drive_background` ahead of the scheduler rather than
-    /// during the paint pass, so it is not left in `fallback_style` until the
-    /// next unrelated event.
+    /// The `:o ` arg-picker preview is syntax-highlighted once its parse lands,
+    /// the same as the file finder's. A freshly selected file has no prior tree
+    /// to carry, so the frames before its parse completes render in
+    /// `fallback_style`.
     #[test]
-    fn snapshot_palette_arg_preview_highlighted_on_first_idle_frame() {
+    fn snapshot_palette_arg_preview_highlighted_once_its_parse_lands() {
         let mut h = TestHarness::with_size(120, 16);
         seed_palette_workspace(
             &mut h,
@@ -2819,7 +2818,11 @@ mod tests {
             .core
             .picklist
             .move_selection(1);
-        h.assert_snapshot_one_frame("palette_arg_preview_highlighted_first_frame");
+        // Spawn the preview's parse and run it. The snapshot's own background
+        // drive is the poll that installs the result.
+        h.stoat.drive_background();
+        h.settle();
+        h.assert_snapshot_one_frame("palette_arg_preview_highlighted_after_parse");
     }
 
     #[test]

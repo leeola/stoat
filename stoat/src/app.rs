@@ -12825,8 +12825,13 @@ mod tests {
                 .expect("open the buffer");
 
         // A parse arms the index debounce rather than extracting, so the
-        // extract lands on a later pass once the buffer has gone quiet.
+        // extract lands on a later pass once the buffer has gone quiet. The
+        // first two drives spawn the parse and poll its output in, since it is
+        // the poll that arms the debounce and the clock has to advance after
+        // the window opens rather than before.
         let drive = |stoat: &mut Stoat| {
+            stoat.drive_parse_jobs();
+            scheduler.run_until_parked();
             stoat.drive_parse_jobs();
             scheduler.run_until_parked();
             scheduler.advance_clock(INDEX_EDIT_DEBOUNCE);
@@ -16639,11 +16644,13 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root;
         action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
-        // The parse job completes during settle, but its result is installed by
-        // drive_background (the per-tick background pass), so drive it to store
-        // the syntax tree before auto-indent reads it.
+        // Three beats, because a parse is spawned and installed by different
+        // passes. The first drive spawns the job, the settle runs it on the
+        // pool, and the second drive polls its output into the registry, which
+        // is where auto-indent reads the tree from.
         h.stoat.drive_background();
         h.settle();
+        h.stoat.drive_background();
     }
 
     #[test]

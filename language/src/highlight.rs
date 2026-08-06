@@ -16,6 +16,12 @@ use tree_sitter::{
     StreamingIterator, TextProvider, Tree,
 };
 
+/// A parsed tree with the text it was parsed from.
+///
+/// Cloning is a refcount bump on the tree's root subtree and on the rope's
+/// chunks, so a caller handing this to a background parse can keep its own copy
+/// readable rather than giving it up for the duration.
+#[derive(Clone)]
 pub struct SyntaxState {
     pub tree: Tree,
     pub version: u64,
