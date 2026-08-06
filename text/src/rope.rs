@@ -433,20 +433,35 @@ impl Rope {
         }
     }
 
+    /// Append `text`, topping up the last chunk before opening new ones.
+    ///
+    /// The tail is filled to the brim only when `text` fits in what is left of
+    /// it. Otherwise it is topped up to [`MIN_BASE`] and no further, so what
+    /// remains is over half a chunk rather than the crumb a brim-full tail
+    /// would leave. That crumb is what strands: the caller appends more chunks
+    /// after it, and nothing merges a chunk that is no longer the last.
     pub fn push(&mut self, mut text: &str) {
         let mut consumed = 0usize;
         self.chunks.update_last(
             |last_chunk| {
-                let available = MAX_BASE.saturating_sub(last_chunk.text.len());
-                if available > 0 && !text.is_empty() {
-                    let mut take = cmp::min(available, text.len());
-                    while take > 0 && !text.is_char_boundary(take) {
-                        take -= 1;
+                if text.is_empty() {
+                    return;
+                }
+                let take = if last_chunk.text.len() + text.len() <= MAX_BASE {
+                    text.len()
+                } else {
+                    // Rounded up, since stopping short of a boundary would put
+                    // the tail back under MIN_BASE.
+                    let mut take =
+                        cmp::min(MIN_BASE.saturating_sub(last_chunk.text.len()), text.len());
+                    while !text.is_char_boundary(take) {
+                        take += 1;
                     }
-                    if take > 0 {
-                        last_chunk.push_str(&text[..take]);
-                        consumed = take;
-                    }
+                    take
+                };
+                if take > 0 {
+                    last_chunk.push_str(&text[..take]);
+                    consumed = take;
                 }
             },
             (),
@@ -504,6 +519,33 @@ impl Rope {
 
     pub fn cursor(&self, offset: usize) -> Cursor<'_> {
         Cursor::new(self, offset)
+    }
+
+    /// Panic unless every chunk but the last carries at least [`MIN_BASE`]
+    /// bytes.
+    ///
+    /// The last is exempt because it is the one a later push can still top up.
+    /// Any other short chunk is stranded, and the count then tracks how many
+    /// edits were made rather than how much text there is, which deepens the
+    /// tree for every descent through it.
+    ///
+    /// Three bytes of slack, since a split rounds up to a character boundary
+    /// and a character is at most four bytes wide.
+    #[cfg(test)]
+    fn assert_chunks_dense(&self) {
+        let mut chunks = self.chunks.iter().peekable();
+        let mut row = 0;
+        while let Some(chunk) = chunks.next() {
+            if chunks.peek().is_some() {
+                assert!(
+                    chunk.text.len() + 3 >= MIN_BASE,
+                    "chunk {row} of {} holds {} bytes, under the {MIN_BASE} floor",
+                    self.chunks.iter().count(),
+                    chunk.text.len(),
+                );
+            }
+            row += 1;
+        }
     }
 
     pub fn replace(&mut self, range: Range<usize>, text: &str) {
@@ -1836,9 +1878,12 @@ impl<'a> Cursor<'a> {
 
         if end_offset > self.chunks.end() {
             self.chunks.next();
-            slice
-                .chunks
-                .append(self.chunks.slice(&end_offset, Bias::Right), ());
+            // Through `append` rather than straight onto the tree, so the
+            // partial chunk pushed above merges with what follows it instead of
+            // being stranded ahead of full chunks.
+            slice.append(Rope {
+                chunks: self.chunks.slice(&end_offset, Bias::Right),
+            });
 
             if let Some(chunk) = self.chunks.item() {
                 let end_ix = end_offset - *self.chunks.start();
@@ -3873,6 +3918,27 @@ mod chunk_density_tests {
         );
     }
 
+    /// Typing runs the same seam over and over. Each keystroke rebuilds the
+    /// rope around one offset, so a chunk left short there is left short again
+    /// by the next one. Scattered edits spread the damage and hide this.
+    #[test]
+    fn typing_at_one_spot_leaves_the_chunk_count_near_the_text() {
+        let mut rope = Rope::from("abcdefghij".repeat(20).as_str());
+        for i in 0..40 {
+            let at = 100 + i;
+            rope.replace(at..at, "x");
+        }
+        rope.assert_chunks_dense();
+
+        let floor = rope.len().div_ceil(MAX_BASE);
+        assert!(
+            chunk_count(&rope) <= floor * 3 / 2,
+            "after 40 inserts at one spot over {} bytes the rope holds {} chunks, against {floor} for the text",
+            rope.len(),
+            chunk_count(&rope),
+        );
+    }
+
     #[test]
     fn scattered_replaces_leave_the_chunk_count_near_the_text() {
         let mut seed = 0x5deece66d_u64;
@@ -3890,6 +3956,7 @@ mod chunk_density_tests {
             let end = rope.clip_offset((at + (next() as usize) % 6).min(len), Bias::Right);
             rope.replace(at..end, "xy");
         }
+        rope.assert_chunks_dense();
 
         let floor = rope.len().div_ceil(MAX_BASE);
         assert!(
