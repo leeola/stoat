@@ -2,7 +2,7 @@ use super::{
     fold_map::FoldPointCursor,
     highlights::Chunk,
     inlay_map::InlayPointCursor,
-    wrap_map::{WrapPointCursor, WrapSnapshot},
+    wrap_map::{WrapPoint, WrapPointCursor, WrapSnapshot},
     Companion, DisplayMapId,
 };
 use crate::{
@@ -1140,7 +1140,7 @@ impl BlockSnapshot {
         }
 
         let wrap_row = input_start.0 + rows_into_transform;
-        let wrap_point = super::wrap_map::WrapPoint::new(wrap_row, point.column);
+        let wrap_point = WrapPoint::new(wrap_row, point.column);
         let tab_point = self.wrap_snapshot.to_tab_point(wrap_point);
         let fold_point = self
             .wrap_snapshot
@@ -1180,9 +1180,7 @@ impl BlockSnapshot {
         }
 
         let wrap_row = input_start.0 + rows_into_transform;
-        let tab_point = self
-            .wrap_snapshot
-            .to_tab_point(super::wrap_map::WrapPoint::new(wrap_row, 0));
+        let tab_point = self.wrap_snapshot.to_tab_point(WrapPoint::new(wrap_row, 0));
         let inlay_point = self
             .wrap_snapshot
             .fold_snapshot()
@@ -1221,12 +1219,38 @@ impl BlockSnapshot {
         }
     }
 
+    /// Wrap row that block row `block_row` shows.
+    ///
+    /// Meaningful only for a row [`Self::classify_row`] reports as
+    /// [`BlockRowKind::BufferRow`]. A block's rows consume no input, so one of
+    /// those answers the wrap row its transform begins at, which belongs to the
+    /// following buffer row instead.
+    fn wrap_row_at(&self, block_row: u32) -> u32 {
+        let target = OutputRow(block_row + 1);
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<InputRow, OutputRow>>(());
+        cursor.seek(&target, Bias::Left);
+
+        let Dimensions(input_start, output_start, _) = cursor.start();
+        input_start.0 + block_row.saturating_sub(output_start.0)
+    }
+
+    /// Move `point` to the nearest position a caret can occupy, preferring the
+    /// side `bias` names.
+    ///
+    /// A block's own rows hold no buffer text, so a point on one moves off the
+    /// block entirely. Every other point clips in wrap space, which clears the
+    /// soft-wrap indent margin, tab expansions, fold placeholders, and inlays
+    /// in turn.
     pub fn clip_point(&self, point: BlockPoint, bias: Bias) -> BlockPoint {
         let row = point.row.min(self.total_rows.saturating_sub(1));
         match self.classify_row(row) {
             BlockRowKind::BufferRow { .. } => {
-                let col = point.column.min(self.line_len(row));
-                BlockPoint::new(row, col)
+                let wrap_point = self
+                    .wrap_snapshot
+                    .clip_point(WrapPoint::new(self.wrap_row_at(row), point.column), bias);
+                BlockPoint::new(row, wrap_point.column())
             },
             BlockRowKind::Block { .. } => {
                 let target = OutputRow(row + 1);
@@ -2001,7 +2025,7 @@ fn block_buffer_row(block: &Block) -> u32 {
 }
 
 fn wrap_row_to_buffer_row(wrap_row: u32, wrap_snapshot: &WrapSnapshot) -> u32 {
-    let tab_point = wrap_snapshot.to_tab_point(super::wrap_map::WrapPoint::new(wrap_row, 0));
+    let tab_point = wrap_snapshot.to_tab_point(WrapPoint::new(wrap_row, 0));
     let inlay_point = wrap_snapshot
         .fold_snapshot()
         .to_inlay_point(super::fold_map::FoldPoint::new(tab_point.row(), 0));

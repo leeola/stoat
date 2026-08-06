@@ -1909,6 +1909,92 @@ mod tests {
     }
 
     #[test]
+    fn clip_point_moves_off_a_fold_placeholder() {
+        use stoat_text::Bias;
+        let mut display_map = create_display_map("fn main() {\n    body;\n}");
+        display_map.toggle_fold(vec![Point::new(0, 11)..Point::new(2, 0)]);
+        let snapshot = display_map.snapshot();
+
+        assert_eq!(
+            snapshot.clip_point(DisplayPoint::new(0, 12), Bias::Left),
+            DisplayPoint::new(0, 11),
+            "a column inside the placeholder falls back to where the fold opens",
+        );
+        assert_eq!(
+            snapshot.clip_point(DisplayPoint::new(0, 12), Bias::Right),
+            DisplayPoint::new(0, 14),
+            "and forward to the character the fold closes before",
+        );
+    }
+
+    #[test]
+    fn clip_point_moves_off_a_tab_expansion() {
+        use stoat_text::Bias;
+        let mut display_map = create_display_map("\thello");
+        let snapshot = display_map.snapshot();
+
+        assert_eq!(
+            snapshot.clip_point(DisplayPoint::new(0, 2), Bias::Left),
+            DisplayPoint::new(0, 0),
+            "a column among the tab's cells falls back to the tab",
+        );
+        assert_eq!(
+            snapshot.clip_point(DisplayPoint::new(0, 2), Bias::Right),
+            DisplayPoint::new(0, 4),
+            "and forward to the stop it runs to",
+        );
+    }
+
+    #[test]
+    fn clip_point_moves_out_of_the_soft_wrap_indent() {
+        use stoat_text::Bias;
+        let mut display_map = create_display_map("    hello world example text");
+        display_map.set_wrap_width(Some(12));
+        let snapshot = display_map.snapshot();
+
+        let indent = snapshot.soft_wrap_indent(1);
+        assert!(indent > 0, "the continuation row carries an indent");
+        assert_eq!(
+            snapshot.clip_point(DisplayPoint::new(1, 0), Bias::Left),
+            DisplayPoint::new(1, indent),
+            "the margin holds no text, so a column in it clamps to the first cell",
+        );
+    }
+
+    /// Clipping names a position the rest of the display map agrees exists.
+    /// A clipped point converts to a buffer point and back to itself, and
+    /// clipping it again leaves it alone.
+    #[test]
+    fn clip_point_settles_on_an_addressable_position() {
+        use stoat_text::Bias;
+        let mut display_map = create_display_map("fn main() {\n\tbody;\n}");
+        display_map.toggle_fold(vec![Point::new(1, 1)..Point::new(1, 5)]);
+        let snapshot = display_map.snapshot();
+
+        for row in 0..snapshot.line_count() {
+            for column in 0..=snapshot.line_len(row) + 1 {
+                for bias in [Bias::Left, Bias::Right] {
+                    let clipped = snapshot.clip_point(DisplayPoint::new(row, column), bias);
+                    assert_eq!(
+                        snapshot.clip_point(clipped, bias),
+                        clipped,
+                        "clipping {row}:{column} again moves it",
+                    );
+
+                    let buffer_point = snapshot
+                        .display_to_buffer(clipped)
+                        .unwrap_or_else(|| panic!("{row}:{column} clips off the buffer"));
+                    assert_eq!(
+                        snapshot.buffer_to_display(buffer_point),
+                        clipped,
+                        "{row}:{column} does not survive the buffer round trip",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn toggle_fold_folds_then_unfolds() {
         let mut display_map = create_display_map("fn main() {\n    body;\n}");
         let range = vec![Point::new(0, 11)..Point::new(2, 0)];

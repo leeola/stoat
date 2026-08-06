@@ -202,12 +202,21 @@ impl TabSnapshot {
         )
     }
 
-    pub fn clip_point(&self, point: TabPoint, _bias: Bias) -> TabPoint {
+    /// Move `point` to the nearest position a caret can occupy, preferring the
+    /// side `bias` names.
+    ///
+    /// A column inside a tab's expansion names no character, so it resolves to
+    /// the tab's own column or to the stop it runs to. Descends into the fold
+    /// layer, which places a column inside a fold placeholder or an inlay on
+    /// one of its edges. Stays on the row it clamped `point` to.
+    pub fn clip_point(&self, point: TabPoint, bias: Bias) -> TabPoint {
         let max_row = self.line_count().saturating_sub(1);
         let row = point.row().min(max_row);
         let max_col = self.line_len(row);
         let col = point.column().min(max_col);
-        TabPoint::new(row, col)
+
+        let fold_point = self.to_fold_point(TabPoint::new(row, col), bias);
+        self.to_tab_point(self.fold_snapshot.clip_point(fold_point, bias))
     }
 
     pub fn write_expand_line(&self, buf: &mut String, fold_row: u32) {

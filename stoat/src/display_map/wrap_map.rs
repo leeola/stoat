@@ -972,7 +972,14 @@ impl WrapSnapshot {
         }
     }
 
-    pub fn clip_point(&self, point: WrapPoint, _bias: Bias) -> WrapPoint {
+    /// Move `point` to the nearest position a caret can occupy, preferring the
+    /// side `bias` names.
+    ///
+    /// Descends into the tab layer, so the result also clears tab expansions,
+    /// fold placeholders, and inlays. The row it clamped `point` to is kept.
+    /// Tab-space clipping snaps onto a character boundary, and a wrap boundary
+    /// is one already, so the column cannot cross either end of the row.
+    pub fn clip_point(&self, point: WrapPoint, bias: Bias) -> WrapPoint {
         let max_row = self.total_rows.saturating_sub(1);
         let row = point.row().min(max_row);
         let max_col = self.line_len(row);
@@ -980,7 +987,12 @@ impl WrapSnapshot {
         // column inside it clamps up to the first real cell.
         let min_col = self.soft_wrap_indent(row).min(max_col);
         let col = point.column().clamp(min_col, max_col);
-        WrapPoint::new(row, col)
+
+        // The row's wrap and tab columns differ by a constant, so the wrap
+        // column takes whatever step the tab column took.
+        let tab_point = self.to_tab_point(WrapPoint::new(row, col));
+        let snapped = self.tab_snapshot.clip_point(tab_point, bias);
+        WrapPoint::new(row, col + snapped.column() - tab_point.column())
     }
 
     pub fn line_len(&self, wrap_row: u32) -> u32 {
