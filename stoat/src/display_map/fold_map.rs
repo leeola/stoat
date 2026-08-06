@@ -352,35 +352,39 @@ impl FoldMap {
             // others, so none of them are reliably as of `last_buffer_version`.
             (self.version == self.last_self_version).then_some(self.last_buffer_version),
         );
-        let mut valid_folds = Vec::new();
-        let mut resolved = Vec::new();
+        let mut stored = Vec::with_capacity(all_folds.len());
+        let mut resolved = Vec::with_capacity(all_folds.len());
         for (i, af) in all_folds.iter().enumerate() {
             let start_pt = all_points[i * 2];
             let end_pt = all_points[i * 2 + 1];
             let start_inlay = inlay_snapshot.to_inlay_point(start_pt);
             let end_inlay = inlay_snapshot.to_inlay_point(end_pt);
-            if start_inlay >= end_inlay {
-                continue;
-            }
             let start_offset = inlay_snapshot
                 .rope()
                 .point_to_offset(inlay_snapshot.to_buffer_point(start_inlay));
             let end_offset = inlay_snapshot
                 .rope()
                 .point_to_offset(inlay_snapshot.to_buffer_point(end_inlay));
-            let mut valid = af.clone();
-            valid.resolved_start = start_offset;
-            valid.resolved_end = end_offset;
-            valid_folds.push(valid);
-            resolved.push(Fold {
-                id: af.id,
-                range: start_inlay..end_inlay,
-                placeholder: af.placeholder.clone(),
-            });
+
+            let mut carried = af.clone();
+            carried.resolved_start = start_offset;
+            carried.resolved_end = end_offset;
+            stored.push(carried);
+
+            // A fold whose endpoints have met covers nothing and renders
+            // nothing, but its record stays. Which regions the reader folded is
+            // their own state, and an edit that swallows one is undoable, so
+            // dropping the record here would lose the fold for good.
+            if start_inlay < end_inlay {
+                resolved.push(Fold {
+                    id: af.id,
+                    range: start_inlay..end_inlay,
+                    placeholder: af.placeholder.clone(),
+                });
+            }
         }
-        let dropped_a_fold = valid_folds.len() != all_folds.len();
-        valid_folds.sort_by_key(|f| f.resolved_start);
-        self.folds = SumTree::from_iter(valid_folds, ());
+        stored.sort_by_key(|f| f.resolved_start);
+        self.folds = SumTree::from_iter(stored, ());
 
         resolved.sort_by_key(|f| f.range.start);
         let resolved_tree = SumTree::from_iter(resolved, ());
@@ -451,9 +455,9 @@ impl FoldMap {
         );
 
         // The map holds anchors and a `None`, so a buffer edit alone cannot
-        // change any entry. Only a toggle, or a fold dropped above for having
-        // collapsed, changes which entries exist.
-        let reuse_metadata = self.version == self.last_self_version && !dropped_a_fold;
+        // change any entry, and the fold set only ever grows or shrinks by a
+        // toggle. Collapsing keeps its record, so it changes no entry either.
+        let reuse_metadata = self.version == self.last_self_version;
         let fold_metadata_by_id = match self.cached_snapshot.as_ref().filter(|_| reuse_metadata) {
             Some(cached) => cached.fold_metadata_by_id.clone(),
             None => {
@@ -2856,7 +2860,7 @@ mod tests {
     }
 
     #[test]
-    fn fold_removed_after_region_deleted() {
+    fn fold_stops_rendering_after_its_region_is_deleted() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2");
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
@@ -2881,7 +2885,12 @@ mod tests {
         let snap2 = multi_buffer.snapshot();
         let inlay2 = InlayMap::new(snap2).1;
         let (fold_snap, _) = fold_map.sync(inlay2, &Patch::empty());
-        assert_eq!(fold_snap.fold_count(), 0);
+        assert_eq!(fold_snap.fold_count(), 0, "nothing is left to render");
+        assert_eq!(
+            fold_map.folds.iter().count(),
+            1,
+            "the record stays, so undoing the delete restores the fold",
+        );
     }
 
     #[test]
@@ -2912,7 +2921,7 @@ mod tests {
     }
 
     #[test]
-    fn fold_collapses_when_endpoints_merge() {
+    fn fold_stops_rendering_when_its_endpoints_merge() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "abcXYZdef");
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
@@ -2935,7 +2944,58 @@ mod tests {
         let snap2 = multi_buffer.snapshot();
         let inlay2 = InlayMap::new(snap2).1;
         let (fold_snap, _) = fold_map.sync(inlay2, &Patch::empty());
-        assert_eq!(fold_snap.fold_count(), 0);
+        assert_eq!(fold_snap.fold_count(), 0, "nothing is left to render");
+        assert_eq!(
+            fold_map.folds.iter().count(),
+            1,
+            "the record stays, so undoing the delete restores the fold",
+        );
+    }
+
+    /// Which regions the reader folded is their own state, so an edit that
+    /// swallows a fold has to be undoable like any other.
+    #[test]
+    fn undoing_the_delete_that_collapsed_a_fold_restores_it() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "abcXYZdef");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+        let snap = multi_buffer.snapshot();
+        let (mut inlay_map, inlay_snapshot) = InlayMap::new(snap.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot);
+
+        fold_map.fold(
+            vec![snap.anchor_at(3, Bias::Right)..snap.anchor_at(6, Bias::Left)],
+            FoldPlaceholder::default(),
+            &snap,
+        );
+
+        // One inlay map across the whole test, as the display map keeps. A fresh
+        // one per sync would hand the fold map an unmoved inlay version and be
+        // served the cached snapshot.
+        let resync = |inlay_map: &mut InlayMap, fold_map: &mut FoldMap| {
+            let (inlay, inlay_edits) = inlay_map.sync(multi_buffer.snapshot(), &Patch::empty());
+            fold_map.sync(inlay, &inlay_edits).0.fold_line(0)
+        };
+
+        assert_eq!(resync(&mut inlay_map, &mut fold_map), "abc...def");
+
+        shared.write().unwrap().edit(3..6, "");
+        assert_eq!(
+            resync(&mut inlay_map, &mut fold_map),
+            "abcdef",
+            "the fold has nothing left to hide",
+        );
+
+        assert!(
+            shared.write().unwrap().undo().is_some(),
+            "the delete undoes"
+        );
+        assert_eq!(
+            resync(&mut inlay_map, &mut fold_map),
+            "abc...def",
+            "and the fold comes back with the text",
+        );
     }
 
     #[test]
