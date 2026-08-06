@@ -1040,7 +1040,10 @@ fn editor_selection_snapshot(stoat: &Stoat, editor_id: EditorId) -> Vec<Selectio
 /// Selections of the focused editor when it still shows `buffer_id`, else empty.
 /// An action that changed focus away from the grouped buffer seals with no
 /// post-selections, so redo revalidates rather than restoring a foreign set.
-fn focused_selection_snapshot(stoat: &Stoat, buffer_id: BufferId) -> Vec<Selection<Anchor>> {
+pub(crate) fn focused_selection_snapshot(
+    stoat: &Stoat,
+    buffer_id: BufferId,
+) -> Vec<Selection<Anchor>> {
     match stoat.focused_editor_ids() {
         Some((editor_id, focused_buffer)) if focused_buffer == buffer_id => {
             editor_selection_snapshot(stoat, editor_id)

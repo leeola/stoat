@@ -219,6 +219,10 @@ fn uri_to_path(uri: &Uri) -> Result<PathBuf, WorkspaceEditError> {
 /// a replace, ending order applies the replace first and leaves the insertion
 /// standing. Ordering by start there would apply the insert into the span the
 /// replace is about to consume, swallowing it.
+///
+/// The whole set lands as one undo step. A server operation is one thing the
+/// reader asked for, and undoing part of it would leave a state neither they nor
+/// the server produced.
 pub(crate) fn apply_text_edits_to_buffer(
     stoat: &mut Stoat,
     path: &Path,
@@ -229,12 +233,20 @@ pub(crate) fn apply_text_edits_to_buffer(
     if edits.is_empty() {
         return Ok(buffer_id);
     }
+
+    // Read before the buffer is borrowed below. Empty for a buffer the reader is
+    // not looking at, which is what a cross-file edit's other documents are.
+    let selections = crate::action_handlers::focused_selection_snapshot(stoat, buffer_id);
+
     let buffer = stoat
         .active_workspace()
         .buffers
         .get(buffer_id)
         .expect("buffer was just opened");
     let mut guard = buffer.write().expect("buffer poisoned");
+    // Any group open here is an insert session, and folding a server edit into
+    // it would make undoing the typing undo the server's work too.
+    guard.begin_group(selections.clone());
 
     let mut converted: Vec<(usize, std::ops::Range<usize>, String)> = edits
         .into_iter()
@@ -249,6 +261,7 @@ pub(crate) fn apply_text_edits_to_buffer(
     for (_, range, new_text) in converted {
         guard.edit(range, &new_text);
     }
+    guard.seal_group(selections);
     Ok(buffer_id)
 }
 
@@ -434,6 +447,94 @@ mod tests {
             change_annotations: None,
         };
         apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
+    }
+
+    fn undo(h: &mut TestHarness, path: &Path) {
+        let id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(path)
+            .expect("buffer open");
+        let buffer = h.stoat.active_workspace().buffers.get(id).expect("buffer");
+        assert!(
+            buffer.write().expect("poisoned").undo().is_some(),
+            "there was a step to undo",
+        );
+    }
+
+    fn redo(h: &mut TestHarness, path: &Path) {
+        let id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(path)
+            .expect("buffer open");
+        let buffer = h.stoat.active_workspace().buffers.get(id).expect("buffer");
+        assert!(
+            buffer.write().expect("poisoned").redo().is_some(),
+            "there was a step to redo",
+        );
+    }
+
+    /// One server operation is one step for the reader, however many edits it
+    /// took. A format returning thirty of them is not thirty presses of undo.
+    #[test]
+    fn a_batch_of_server_edits_undoes_and_redoes_in_one_step() {
+        let mut h = TestHarness::with_size(80, 24);
+        let path = PathBuf::from("/ws/a.rs");
+        open_buffer_with_text(&mut h, &path, "abcdef\n");
+
+        apply_edits(
+            &mut h,
+            &path,
+            vec![text_edit(0, 1, 2, "B"), text_edit(0, 4, 5, "E")],
+        );
+        assert_eq!(buffer_text(&h, &path), "aBcdEf\n");
+
+        undo(&mut h, &path);
+        assert_eq!(buffer_text(&h, &path), "abcdef\n");
+
+        redo(&mut h, &path);
+        assert_eq!(buffer_text(&h, &path), "aBcdEf\n");
+    }
+
+    /// A rename spanning files is one step per file, since undo is per buffer
+    /// and a step covering only part of one buffer's edits would leave it in a
+    /// state the server never produced.
+    #[test]
+    fn a_cross_file_edit_groups_each_buffer_on_its_own() {
+        let mut h = TestHarness::with_size(80, 24);
+        let a = PathBuf::from("/ws/a.rs");
+        let b = PathBuf::from("/ws/b.rs");
+        open_buffer_with_text(&mut h, &a, "abcdef\n");
+        open_buffer_with_text(&mut h, &b, "uvwxyz\n");
+
+        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+        changes.insert(
+            file_uri(&a),
+            vec![text_edit(0, 1, 2, "B"), text_edit(0, 4, 5, "E")],
+        );
+        changes.insert(
+            file_uri(&b),
+            vec![text_edit(0, 1, 2, "V"), text_edit(0, 4, 5, "Y")],
+        );
+        let edit = WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        };
+        apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
+        assert_eq!(buffer_text(&h, &a), "aBcdEf\n");
+        assert_eq!(buffer_text(&h, &b), "uVwxYz\n");
+
+        undo(&mut h, &a);
+        assert_eq!(buffer_text(&h, &a), "abcdef\n");
+        assert_eq!(
+            buffer_text(&h, &b),
+            "uVwxYz\n",
+            "the other file is untouched"
+        );
     }
 
     #[test]
