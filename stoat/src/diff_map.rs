@@ -47,13 +47,13 @@ pub struct ChangeSpan {
     pub move_metadata: Option<Arc<stoat_language::structural_diff::MoveMetadata>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TokenDetail {
     pub buffer_spans: Vec<ChangeSpan>,
     pub base_spans: Vec<ChangeSpan>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiffHunk {
     pub status: DiffHunkStatus,
     pub buffer_start_line: u32,
@@ -459,6 +459,20 @@ impl DiffMap {
 
     pub fn version(&self) -> usize {
         self.version
+    }
+
+    /// Whether `other` would decorate the buffer exactly as this map does.
+    ///
+    /// Compares the hunks and the base text, which is everything rendering
+    /// reads. The base change spans, the staged map, and the staged tally are
+    /// all derived from those two at construction, and the base highlights from
+    /// the base text and the style table.
+    ///
+    /// Deliberately not the version. A version is minted per construction, and
+    /// preserving it across a recompute that changed nothing is the whole point
+    /// of asking.
+    pub(crate) fn renders_same_as(&self, other: &Self) -> bool {
+        self.base_text == other.base_text && self.hunks.iter().eq(other.hunks.iter())
     }
 
     pub fn base_text(&self) -> Option<&Arc<String>> {

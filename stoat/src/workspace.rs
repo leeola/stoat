@@ -983,8 +983,24 @@ impl Workspace {
                 self.diff_base_text.insert(out.path, base);
             }
             if let Some(shared) = self.buffers.get(out.buffer_id) {
-                shared.write().expect("buffer poisoned").diff_map = out.diff_map;
+                let mut guard = shared.write().expect("buffer poisoned");
+                // A recompute landing on the same hunks is not news. Every
+                // decoration consumer keys off the map's version, and the
+                // minimap's edge sweep re-derives the whole file from it, so
+                // installing an identical map costs that for nothing. A write
+                // under .git re-diffs every visible buffer against content that
+                // did not move, which is where this earns its keep.
+                let same = match (&guard.diff_map, &out.diff_map) {
+                    (Some(installed), Some(fresh)) => installed.renders_same_as(fresh),
+                    (None, None) => true,
+                    _ => false,
+                };
+                if !same {
+                    guard.diff_map = out.diff_map;
+                }
             }
+            // Recorded either way, so an unchanged result still counts as
+            // diffed and the buffer is not tried again next frame.
             self.diff_versions.insert(out.buffer_id, out.target_version);
         }
 
@@ -1891,6 +1907,58 @@ mod tests {
             h.fake_git().blob_reads(&repo),
             before,
             "which reuses the cached blobs rather than rereading them",
+        );
+    }
+
+    /// Every decoration consumer keys off the diff map's version, and the
+    /// minimap re-derives the whole file from it, so a version that moves for a
+    /// map nobody can tell apart is work spent on nothing. A write under `.git`
+    /// re-diffs every visible buffer whether or not its content moved.
+    #[test]
+    fn rediffing_untouched_content_keeps_the_installed_map() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\nb\n", "a\nc\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.settle_diff_jobs();
+
+        let ws = h.stoat.active_workspace();
+        let editor_id = match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let buffer_id = ws.editors[editor_id].buffer_id;
+        let map_version = |h: &TestHarness| {
+            let ws = h.stoat.active_workspace();
+            let buffer = ws.buffers.get(buffer_id).expect("buffer");
+            let guard = buffer.read().expect("poisoned");
+            guard.diff_map.as_ref().expect("diffed").version()
+        };
+        let first = map_version(&h);
+
+        // A git write re-diffs every visible buffer, content or no.
+        h.stoat.active_workspace_mut().invalidate_all_diffs();
+        h.settle_diff_jobs();
+        assert_eq!(
+            map_version(&h),
+            first,
+            "a rediff of untouched content keeps the map it already had",
+        );
+
+        // A real change to the hunks has to land.
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .edit(0..0, "new\n");
+        h.settle_diff_jobs();
+        assert_ne!(
+            map_version(&h),
+            first,
+            "and an added line is a different diff",
         );
     }
 
