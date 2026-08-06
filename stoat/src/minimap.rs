@@ -37,6 +37,14 @@ const BUILD_CHUNK: u32 = 4096;
 /// large file's syntax recolor spreads across frames rather than stalling one.
 pub(crate) const RESYNC_CHUNK: u32 = 4096;
 
+/// Changed marks in one window past which they are applied as a batch.
+///
+/// Applying one at a time shifts the entries after it, so a window's cost is
+/// quadratic in how many marks moved. Rebuilding the window's slice instead is
+/// linear but allocates, which is not worth it for the handful a diagnostic
+/// batch usually moves.
+const EDGE_BATCH_MIN: usize = 8;
+
 /// Line count past which a buffer disables its minimap, so a huge file neither
 /// summarizes nor emits.
 const MAX_LINES: usize = 500_000;
@@ -523,6 +531,8 @@ impl MinimapContent {
             return;
         }
 
+        self.apply_edge_changes(window, &changed);
+
         let mut text = String::new();
         for run in contiguous_runs(&changed) {
             let rows = changed[run].iter();
@@ -537,7 +547,6 @@ impl MinimapContent {
                 text.clear();
                 walk.next_into(&mut text);
                 let summary = summarize_line(&text, row_tokens(&tokens, row), new_edge);
-                self.set_edge(row, new_edge);
                 self.replace_line(row, summary);
             }
         }
@@ -654,6 +663,42 @@ impl MinimapContent {
     fn edge_at(&self, row: u32) -> Option<u8> {
         let at = self.edges.binary_search_by_key(&row, |&(r, _)| r).ok()?;
         Some(self.edges[at].1)
+    }
+
+    /// Record every change in `changed`, which must be ascending by row and
+    /// confined to `window`.
+    ///
+    /// A handful go in one at a time. Past that the window's slice of the edge
+    /// list is rebuilt in one pass and spliced back, because each
+    /// [`Self::set_edge`] shifts every entry after the one it touches, and a
+    /// branch switch changes marks by the thousand.
+    fn apply_edge_changes(&mut self, window: Range<u32>, changed: &[(u32, Option<u8>)]) {
+        if changed.len() < EDGE_BATCH_MIN {
+            for &(row, edge) in changed {
+                self.set_edge(row, edge);
+            }
+            return;
+        }
+
+        let from = self.edges.partition_point(|&(row, _)| row < window.start);
+        let to = self.edges.partition_point(|&(row, _)| row < window.end);
+
+        let mut merged: Vec<(u32, u8)> = Vec::with_capacity(to - from + changed.len());
+        let mut old = self.edges[from..to].iter().peekable();
+        for &(row, edge) in changed {
+            while old.peek().is_some_and(|&&(r, _)| r < row) {
+                merged.push(*old.next().expect("peeked"));
+            }
+            // The row's own entry, if it had one, is what `edge` replaces.
+            if old.peek().is_some_and(|&&(r, _)| r == row) {
+                old.next();
+            }
+            if let Some(class) = edge {
+                merged.push((row, class));
+            }
+        }
+        merged.extend(old.copied());
+        self.edges.splice(from..to, merged);
     }
 
     /// Record that `row` now carries `edge`, dropping it from the marked rows
@@ -2194,6 +2239,80 @@ mod tests {
         );
         assert!(content.take_queued().is_empty());
         assert_eq!(total, RESYNC_CHUNK + RESYNC_CHUNK / 2, "two chunks of rows");
+    }
+
+    /// Past a handful of moved marks the window's slice of the edge list is
+    /// rebuilt in one pass rather than poked an entry at a time. The rebuild
+    /// has to land on exactly the marks the source reports, including where a
+    /// row gains one next to a row losing one.
+    #[test]
+    fn a_batched_edge_apply_lands_on_the_marks_the_source_reports() {
+        let rows = 40u32;
+        let text: String = vec!["line"; rows as usize].join("\n");
+        let rope = rope(&text);
+        let mut content = MinimapContent::new(1);
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
+        content.take_queued();
+
+        // Every third row, then every fourth. Some rows keep their mark, some
+        // lose it, some gain one, interleaved the whole way down, and both
+        // changes are far past the batch threshold.
+        let marks_of = |f: fn(u32) -> Option<u8>| -> Vec<(u32, u8)> {
+            (0..rows)
+                .filter_map(|row| f(row).map(|c| (row, c)))
+                .collect()
+        };
+        fn every_third(row: u32) -> Option<u8> {
+            row.is_multiple_of(3).then_some(40)
+        }
+        fn every_fourth(row: u32) -> Option<u8> {
+            row.is_multiple_of(4).then_some(41)
+        }
+
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(1, 0),
+            no_tokens,
+            every_third,
+        );
+        assert_eq!(content.edges, marks_of(every_third));
+
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(2, 0),
+            no_tokens,
+            every_fourth,
+        );
+        assert_eq!(
+            content.edges,
+            marks_of(every_fourth),
+            "the rebuilt slice holds the new marks and nothing of the old",
+        );
+
+        // One row moving takes the per-row path, which has to agree.
+        fn every_fourth_but_eight(row: u32) -> Option<u8> {
+            (row.is_multiple_of(4) && row != 8).then_some(41)
+        }
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(3, 0),
+            no_tokens,
+            every_fourth_but_eight,
+        );
+        assert_eq!(content.edges, marks_of(every_fourth_but_eight));
     }
 
     /// A decoration bump runs on every diff recompute and diagnostic batch, and
