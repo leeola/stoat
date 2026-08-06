@@ -530,7 +530,7 @@ impl TextBuffer {
     /// is not recoverable by the reader, and the counts alone already reject
     /// almost everything.
     ///
-    /// Equal counts do not mean equal text, so the byte walk still decides
+    /// Equal counts do not mean equal text, so a byte comparison still decides
     /// those. It is what a length-preserving edit costs, a case toggle or a
     /// replacement of like for like.
     fn matches_saved_text(&self) -> bool {
@@ -543,10 +543,7 @@ impl TextBuffer {
             && saved_summary.len_utf16 == current_summary.len_utf16
             && saved_summary.lines == current_summary.lines
             && saved_summary.chars == current_summary.chars
-            && saved
-                .chunks()
-                .flat_map(str::bytes)
-                .eq(current.chunks().flat_map(str::bytes))
+            && chunk_streams_match(saved.chunks(), current.chunks())
     }
 
     /// Undo the top edit group, reverting all of its edits as one step. Returns
@@ -864,6 +861,52 @@ fn push_insertion(insertions: &mut Vec<InsertionFragment>, fragment: &Fragment) 
         split_offset: fragment.insertion_offset,
         fragment_id: fragment.id.clone(),
     });
+}
+
+/// Whether two chunk streams spell out the same bytes.
+///
+/// Two ropes holding one text need not be chunked alike, so the chunks cannot
+/// be paired off. The walk compares the overlapping prefix of whichever two are
+/// current and advances the one that runs out, which hands each comparison to
+/// memcmp. Reading a byte at a time instead pushes every byte of the file
+/// through two nested iterator state machines.
+fn chunk_streams_match<'a>(
+    mut left: impl Iterator<Item = &'a str>,
+    mut right: impl Iterator<Item = &'a str>,
+) -> bool {
+    let mut l: &[u8] = &[];
+    let mut r: &[u8] = &[];
+
+    loop {
+        if l.is_empty() {
+            match left.next() {
+                Some(chunk) => l = chunk.as_bytes(),
+                None => break,
+            }
+            continue;
+        }
+        if r.is_empty() {
+            match right.next() {
+                Some(chunk) => r = chunk.as_bytes(),
+                None => break,
+            }
+            continue;
+        }
+
+        let common = l.len().min(r.len());
+        if l[..common] != r[..common] {
+            return false;
+        }
+        l = &l[common..];
+        r = &r[common..];
+    }
+
+    // One stream is spent, so the texts are equal only if the other is too.
+    // Counted rather than probed for a next chunk, since a stream may yield
+    // empty ones.
+    let left_rest = l.len() + left.map(str::len).sum::<usize>();
+    let right_rest = r.len() + right.map(str::len).sum::<usize>();
+    left_rest == right_rest
 }
 
 impl TextBufferSnapshot {
@@ -2103,6 +2146,41 @@ mod tests {
         assert!(
             !b.dirty,
             "content back on the saved bytes reads clean despite a moved frontier"
+        );
+    }
+
+    /// The two ropes are chunked however their edits left them, so the walk
+    /// has to pair bytes rather than chunks. Long enough to span many chunks,
+    /// with the difference in the last byte so nothing short-circuits early.
+    #[test]
+    fn the_chunk_walk_pairs_bytes_across_unlike_layouts() {
+        let text = "the quick brown fox jumps over the lazy dog\n".repeat(40);
+
+        let one_push = stoat_text::Rope::from(text.as_str());
+        let in_pieces = {
+            let mut rope = stoat_text::Rope::new();
+            for piece in text.as_bytes().chunks(7) {
+                rope.push(std::str::from_utf8(piece).expect("ascii fixture"));
+            }
+            rope
+        };
+        assert!(
+            super::chunk_streams_match(one_push.chunks(), in_pieces.chunks()),
+            "the same bytes match however each rope was built",
+        );
+
+        let mut differs = text.clone();
+        differs.pop();
+        differs.push('X');
+        let differs = stoat_text::Rope::from(differs.as_str());
+        assert!(
+            !super::chunk_streams_match(one_push.chunks(), differs.chunks()),
+            "a difference in the last byte is still a difference",
+        );
+
+        assert!(
+            !super::chunk_streams_match(one_push.chunks(), stoat_text::Rope::new().chunks()),
+            "and a spent stream does not match a full one",
         );
     }
 
