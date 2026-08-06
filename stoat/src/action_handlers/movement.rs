@@ -1638,10 +1638,7 @@ where
         }
     }
 
-    let edited_ranges: std::collections::HashMap<usize, (usize, usize)> = edits
-        .iter()
-        .map(|(id, s, _, new_text)| (*id, (*s, *s + new_text.len())))
-        .collect();
+    let edited_ranges = shifted_edit_ranges(&edits);
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
     let new_display = editor.display_map.snapshot();
@@ -1655,6 +1652,26 @@ where
         new
     });
     UpdateEffect::Redraw
+}
+
+/// Where each edit's replacement text ended up, keyed by the selection that
+/// produced it.
+///
+/// `edits` are `(selection id, start, end, replacement)` at the offsets they
+/// were measured at, ascending by start. Every edit before a given one has
+/// changed the text's length by then, so its own start moves by the running
+/// total of those changes.
+fn shifted_edit_ranges(
+    edits: &[(usize, usize, usize, String)],
+) -> std::collections::HashMap<usize, (usize, usize)> {
+    let mut ranges = std::collections::HashMap::with_capacity(edits.len());
+    let mut shift: i64 = 0;
+    for (id, s, e, new_text) in edits {
+        let start = (*s as i64 + shift) as usize;
+        ranges.insert(*id, (start, start + new_text.len()));
+        shift += new_text.len() as i64 - (*e - *s) as i64;
+    }
+    ranges
 }
 
 pub(super) fn increment(stoat: &mut Stoat) -> UpdateEffect {
@@ -1724,10 +1741,7 @@ fn apply_number_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
         }
     }
 
-    let edited_ranges: std::collections::HashMap<usize, (usize, usize)> = edits
-        .iter()
-        .map(|(id, s, _, new_text)| (*id, (*s, *s + new_text.len())))
-        .collect();
+    let edited_ranges = shifted_edit_ranges(&edits);
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
     let new_display = editor.display_map.snapshot();
@@ -5939,17 +5953,24 @@ mod tests {
     }
 
     fn set_three_single_char_selections(h: &mut TestHarness) {
+        set_selections(h, &[(0, 1), (1, 2), (2, 3)]);
+    }
+
+    fn set_selections(h: &mut TestHarness, ranges: &[(usize, usize)]) {
+        let (&(first_start, first_end), rest) = ranges.split_first().expect("at least one range");
         let editor = focused_editor_mut(&mut h.stoat).expect("editor");
         let snapshot = editor.display_map.snapshot();
         let buf = snapshot.buffer_snapshot();
+
         editor.selections.transform(buf, |sel| Selection {
             id: sel.id,
-            start: buf.anchor_at(0, Bias::Right),
-            end: buf.anchor_at(1, Bias::Right),
+            start: buf.anchor_at(first_start, Bias::Right),
+            end: buf.anchor_at(first_end, Bias::Right),
             reversed: false,
             goal: SelectionGoal::None,
         });
-        for (start, end) in [(1usize, 2usize), (2, 3)] {
+
+        for &(start, end) in rest {
             let sel = Selection {
                 id: 0,
                 start: buf.anchor_at(start, Bias::Right),
@@ -5959,6 +5980,41 @@ mod tests {
             };
             editor.selections.insert_range(sel, buf);
         }
+    }
+
+    /// Each edit changes the text's length, so every selection after the first
+    /// has to move by the running total of the changes before it. Single-digit
+    /// increments cannot see this, since their replacements are the same length
+    /// as what they replace.
+    #[test]
+    fn incrementing_several_cursors_leaves_each_over_its_own_number() {
+        let mut h = TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "9 9 9\n");
+        h.open_file(&path);
+        set_selections(&mut h, &[(0, 1), (2, 3), (4, 5)]);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Increment);
+
+        assert_eq!(buffer_string(&mut h), "10 10 10\n");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 2, false), (3, 5, false), (6, 8, false)],
+        );
+    }
+
+    /// Casing a ligature yields two ASCII letters for three bytes, so the
+    /// selections after it shift left rather than right.
+    #[test]
+    fn uppercasing_several_cursors_leaves_each_over_its_own_word() {
+        let mut h = TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "ﬁ ﬁ\n");
+        h.open_file(&path);
+        set_selections(&mut h, &[(0, 3), (4, 7)]);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchToUppercase);
+
+        assert_eq!(buffer_string(&mut h), "FI FI\n");
+        assert_eq!(h.selection_spans(), vec![(0, 2, false), (3, 5, false)]);
     }
 
     #[test]
