@@ -517,13 +517,20 @@ impl TextBuffer {
     /// last [`Self::mark_clean`]. Always false before the first clean point,
     /// when no saved text exists.
     ///
-    /// Compares each rope's summary first, which is O(1) and carries the line
-    /// and character counts, the UTF-16 length, and the longest row alongside
-    /// the byte length. Two texts that differ almost always differ in one of
-    /// those, and that is enough to answer, which matters because this runs
-    /// after every edit and the walk below is O(file).
+    /// Compares each rope's counts first, which is O(1) and carries the line,
+    /// character, and UTF-16 counts alongside the byte length. Two texts that
+    /// differ almost always differ in one of those, and that is enough to
+    /// answer, which matters because this runs after every edit and the walk
+    /// below is O(file).
     ///
-    /// Equal summaries do not mean equal text, so the byte walk still decides
+    /// Only the counts, not the whole summary. A summary also names the longest
+    /// row, which is a fact about the text but is computed by whichever of two
+    /// paths the chunking selects, so a field there is one tie-break away from
+    /// calling identical text different. Wrongly reporting a saved buffer dirty
+    /// is not recoverable by the reader, and the counts alone already reject
+    /// almost everything.
+    ///
+    /// Equal counts do not mean equal text, so the byte walk still decides
     /// those. It is what a length-preserving edit costs, a case toggle or a
     /// replacement of like for like.
     fn matches_saved_text(&self) -> bool {
@@ -531,7 +538,11 @@ impl TextBuffer {
             return false;
         };
         let current = &self.snapshot.visible_text;
-        saved.summary() == current.summary()
+        let (saved_summary, current_summary) = (saved.summary(), current.summary());
+        saved_summary.len == current_summary.len
+            && saved_summary.len_utf16 == current_summary.len_utf16
+            && saved_summary.lines == current_summary.lines
+            && saved_summary.chars == current_summary.chars
             && saved
                 .chunks()
                 .flat_map(str::bytes)

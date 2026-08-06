@@ -351,6 +351,12 @@ impl Chunk {
         }
     }
 
+    /// The widest row in this chunk, as `(row, chars)`.
+    ///
+    /// Walks the rows in order and keeps the first of any tie, which is what
+    /// [`TextSummary::from_str`] does. The two have to agree: a summary is a
+    /// property of the text, and which of them produced it depends only on how
+    /// the text happened to be chunked.
     fn compute_longest_row(
         &self,
         newline_count: u32,
@@ -364,11 +370,6 @@ impl Chunk {
 
         let mut best_row = 0u32;
         let mut best_chars = first_line_chars;
-
-        if last_line_chars > best_chars {
-            best_row = total_rows;
-            best_chars = last_line_chars;
-        }
 
         if newline_count >= 2 {
             let mut remaining = self.newlines;
@@ -395,6 +396,11 @@ impl Chunk {
                 remaining &= remaining - 1;
                 current_row += 1;
             }
+        }
+
+        if last_line_chars > best_chars {
+            best_row = total_rows;
+            best_chars = last_line_chars;
         }
 
         (best_row, best_chars)
@@ -2250,6 +2256,11 @@ mod tests {
             "a\nb\nc\nd\ne",
             "\u{4e16}\u{754c}",
             "a\u{1F600}b",
+            // A middle row tied with the last. Both summarizers have to keep
+            // the same one, or the same text summarizes differently depending
+            // on how it happened to be chunked.
+            "ab\ncccccc\ndddddd",
+            "ab\ndddddd\ncccccc\ndddddd",
         ];
         for text in cases {
             if text.len() > MAX_BASE {
@@ -3949,6 +3960,11 @@ mod summary_identity_tests {
             // Two rows of equal length, which is what the longest-row tie-break
             // decides between.
             "equalrow\nequalrow\nshort\n",
+            // A tie between a middle row and the last, with a shorter row
+            // first. The two summarizers walk the rows in different orders,
+            // and only this shape puts them on different answers.
+            "ab\ncccccc\ndddddd",
+            "ab\ndddddd\ncccccc\ndddddd",
             "trailing newline\n",
             "\n\n\nleading blanks\n",
             &"filler line that runs past a chunk\n".repeat(9),
@@ -3967,12 +3983,15 @@ mod summary_identity_tests {
                 .collect();
             laid_out_differently |= layouts.iter().any(|l| *l != layouts[0]);
 
-            let (_, first) = &built[0];
-            for (label, rope) in &built[1..] {
+            // Against the text's own summary rather than each other, so a
+            // composition that is consistently wrong across every layout is
+            // caught too.
+            let from_str = TextSummary::from_str(text);
+            for (label, rope) in &built {
                 assert_eq!(
                     rope.summary(),
-                    first.summary(),
-                    "{label} summarises {text:?} differently from one push"
+                    &from_str,
+                    "{label} summarises {text:?} differently from the text itself"
                 );
             }
         }
