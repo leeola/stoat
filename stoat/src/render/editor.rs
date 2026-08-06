@@ -182,14 +182,24 @@ pub(crate) fn render_editor_with_overlay(
     let row_severity: &BTreeMap<u32, DiagnosticSeverity> = match diagnostic_info {
         Some((path, set)) => {
             let version = set.version();
+            let buffer_version = snapshot.buffer_snapshot().version();
             let stale = match &editor.gutter_severity_cache {
-                Some(cache) => cache.version != version,
+                Some(cache) => cache.version != version || cache.buffer_version != buffer_version,
                 None => true,
             };
             if stale {
+                // The marks and the underline read the same resolution, so they
+                // cannot disagree about where a diagnostic sits.
+                build_diagnostic_span_cache(editor, set, path, snapshot.buffer_snapshot());
+                let map = editor
+                    .diagnostic_span_cache
+                    .as_ref()
+                    .map(|cache| row_severity_from_spans(&cache.spans))
+                    .unwrap_or_default();
                 editor.gutter_severity_cache = Some(GutterSeverityCache {
                     version,
-                    map: Arc::new(compute_row_severity(set, path)),
+                    buffer_version,
+                    map: Arc::new(map),
                 });
             }
             &editor
@@ -263,7 +273,9 @@ pub(crate) fn render_editor_with_overlay(
                     if row_offset >= inner.height {
                         break;
                     }
-                    let Some(sev) = row_severity.get(&display_row) else {
+                    let Some(sev) = buffer_row_of(&snapshot, display_row)
+                        .and_then(|row| row_severity.get(&row))
+                    else {
                         continue;
                     };
                     let color = match bar_bg {
@@ -281,6 +293,7 @@ pub(crate) fn render_editor_with_overlay(
                 }
             },
             None => paint_diagnostic_gutter(
+                &snapshot,
                 row_severity,
                 inner.x,
                 inner.y,
@@ -726,13 +739,16 @@ pub(crate) fn render_editor_with_overlay(
     }
 }
 
-/// Cached gutter severity map for one diagnostic-set version.
+/// Cached gutter severity map for one diagnostic set against one buffer.
 ///
-/// `map` is the per-buffer-row worst severity. Recomputed only when the
-/// diagnostic set's version changes, so the gutter is not rebuilt from the
-/// full diagnostic list every frame.
+/// `map` is the per-buffer-row worst severity. Rebuilt when either version
+/// moves, so the gutter is not rebuilt from the full diagnostic list every
+/// frame. The buffer version belongs in the key because the rows come from
+/// spans shifted through the edits since each diagnostic was published, so
+/// typing moves them without the server saying anything.
 pub(crate) struct GutterSeverityCache {
     pub(crate) version: u64,
+    buffer_version: u64,
     pub(crate) map: Arc<BTreeMap<u32, DiagnosticSeverity>>,
 }
 
@@ -752,26 +768,23 @@ pub(crate) struct GutterGeometryCache {
     lines: Vec<GutterLine>,
 }
 
-/// Build a per-buffer-row map from `path`'s diagnostics, picking the
-/// worst severity (lowest LSP code) when multiple diagnostics overlap
-/// the same row.
-fn compute_row_severity(
-    set: &crate::diagnostics::DiagnosticSet,
-    path: &Path,
-) -> BTreeMap<u32, DiagnosticSeverity> {
+/// Build a per-buffer-row map from resolved diagnostic spans, picking the worst
+/// severity (lowest LSP code) when several overlap a row.
+///
+/// The rows come from `spans` rather than from the diagnostics themselves so
+/// they name where the text is now. A diagnostic's own rows are where the
+/// server last saw it, and the reader has been typing since.
+fn row_severity_from_spans(spans: &[ResolvedDiag]) -> BTreeMap<u32, DiagnosticSeverity> {
     let mut out: BTreeMap<u32, DiagnosticSeverity> = BTreeMap::new();
-    for diag in set.get(path) {
-        let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
-        let start_line = diag.range.start.line;
-        let end_line = diag.range.end.line;
-        for row in start_line..=end_line {
+    for span in spans {
+        for row in span.start_line..=span.end_line {
             out.entry(row)
                 .and_modify(|cur| {
-                    if severity_rank(sev) < severity_rank(*cur) {
-                        *cur = sev;
+                    if severity_rank(span.severity) < severity_rank(*cur) {
+                        *cur = span.severity;
                     }
                 })
-                .or_insert(sev);
+                .or_insert(span.severity);
         }
     }
     out
@@ -1155,8 +1168,21 @@ fn gutter_background(theme: &crate::theme::Theme, fallback_style: Style) -> Opti
     }))
 }
 
+/// The buffer row shown at `display_row`, or `None` when the row is a block's
+/// own and belongs to no buffer line.
+///
+/// Severity is recorded per buffer row, and soft wrap and blocks both put more
+/// display rows on screen than the buffer has, so the two spaces diverge by
+/// however many extra rows sit above the viewport.
+fn buffer_row_of(snapshot: &DisplaySnapshot, display_row: u32) -> Option<u32> {
+    snapshot
+        .display_to_buffer(DisplayPoint::new(display_row, 0))
+        .map(|point| point.row)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_diagnostic_gutter(
+    snapshot: &DisplaySnapshot,
     row_severity: &BTreeMap<u32, DiagnosticSeverity>,
     x: u16,
     y: u16,
@@ -1171,7 +1197,8 @@ fn paint_diagnostic_gutter(
         if row_offset >= height {
             break;
         }
-        let Some(sev) = row_severity.get(&display_row) else {
+        let Some(sev) = buffer_row_of(snapshot, display_row).and_then(|row| row_severity.get(&row))
+        else {
             continue;
         };
         let style = theme.get(severity_scope(*sev));
@@ -2298,6 +2325,109 @@ mod tests {
             message: String::new(),
             ..Default::default()
         }
+    }
+
+    /// The severity map is keyed by buffer row and derived from spans shifted
+    /// through the edits since each diagnostic was published, so typing above
+    /// one moves its row without the server having said anything.
+    #[test]
+    fn a_diagnostic_row_follows_an_edit_above_it_without_a_republish() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/severity-shift");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        h.seed_diagnostics(&path, vec![diag(1, DiagnosticSeverity::WARNING)]);
+
+        let severity_rows = |h: &mut crate::test_harness::TestHarness| -> Vec<u32> {
+            let _ = h.stoat.render();
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            editor
+                .gutter_severity_cache
+                .as_ref()
+                .expect("built by the paint")
+                .map
+                .keys()
+                .copied()
+                .collect()
+        };
+
+        assert_eq!(
+            severity_rows(&mut h),
+            vec![1],
+            "the row it was published on"
+        );
+
+        let buffer_id = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .edit(0..0, "inserted\n");
+
+        assert_eq!(
+            severity_rows(&mut h),
+            vec![2],
+            "and the mark rides the inserted line down with its text",
+        );
+    }
+
+    /// Severity is recorded per buffer row, and a wrapped line puts more display
+    /// rows on screen than the buffer has, so the mark has to be painted at the
+    /// display row its buffer row occupies.
+    #[test]
+    fn the_glyph_severity_gutter_marks_the_diagnostics_own_display_row() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/severity-wrap");
+        let path = root.join("a.txt");
+        h.fake_fs()
+            .insert_file(&path, b"a long first line that wraps\nsecond\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        editor.display_map.set_wrap_width(Some(8));
+        let snapshot = editor.display_map.snapshot();
+
+        let wrapped_row = snapshot.buffer_to_display(Point::new(1, 0)).row;
+        assert!(
+            wrapped_row > 1,
+            "the first line has to wrap for this to bite"
+        );
+
+        let severity: std::collections::BTreeMap<u32, DiagnosticSeverity> =
+            std::iter::once((1, DiagnosticSeverity::ERROR)).collect();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 12));
+        let theme = h.stoat.theme.clone();
+        super::paint_diagnostic_gutter(
+            &snapshot,
+            &severity,
+            0,
+            0,
+            12,
+            0,
+            snapshot.line_count().min(12),
+            &theme,
+            &mut buf,
+        );
+
+        let marked: Vec<u32> = (0..12)
+            .filter(|&y| buf[(0, y)].symbol() != " ")
+            .map(u32::from)
+            .collect();
+        assert_eq!(
+            marked,
+            vec![wrapped_row],
+            "the mark paints on the wrapped display row of buffer row 1",
+        );
     }
 
     fn open_search_buffer(h: &mut crate::test_harness::TestHarness, contents: &str) {
