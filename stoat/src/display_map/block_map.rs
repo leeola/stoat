@@ -1091,6 +1091,12 @@ impl Deref for BlockSnapshot {
 }
 
 impl BlockSnapshot {
+    /// Display position showing buffer `point`.
+    ///
+    /// A row a block replaces is not shown, so it has no display row of its
+    /// own. Those rows answer the row the replacement starts at, at column 0,
+    /// since that row's columns belong to the replacement's text rather than to
+    /// the buffer.
     pub fn buffer_to_block(&self, point: Point) -> BlockPoint {
         let inlay_point = self
             .wrap_snapshot
@@ -1114,6 +1120,13 @@ impl BlockSnapshot {
         cursor.seek(&target, Bias::Left);
 
         let Dimensions(input, output, _) = cursor.start();
+
+        if let Some(transform) = cursor.item()
+            && transform.block.is_some()
+        {
+            return BlockPoint::new(output.0, 0);
+        }
+
         let rows_into_transform = wrap_row.saturating_sub(input.0);
         let block_row = output.0 + rows_into_transform;
 
@@ -2754,6 +2767,36 @@ mod tests {
             BlockRowKind::BufferRow { buffer_row } => assert_eq!(buffer_row, 4),
             _ => panic!("expected buffer row"),
         }
+    }
+
+    /// The replaced rows are the case the other replace tests skip. They read
+    /// the display rows around a replacement, never the buffer rows under it.
+    #[test]
+    fn buffer_to_block_inside_a_replaced_range_lands_on_the_replacement() {
+        let blocks = vec![text_block(
+            BlockPlacement::Replace { start: 1, end: 3 },
+            "rep0\nrep1",
+        )];
+        let snapshot = create_block_snapshot("r0\nr1\nr2\nr3\nr4", &blocks);
+
+        for row in 1..=3 {
+            assert_eq!(
+                snapshot.buffer_to_block(Point::new(row, 1)),
+                BlockPoint::new(1, 0),
+                "buffer row {row} is replaced",
+            );
+        }
+
+        assert_eq!(
+            snapshot.buffer_to_block(Point::new(0, 1)),
+            BlockPoint::new(0, 1),
+            "the row above the replacement is untouched",
+        );
+        assert_eq!(
+            snapshot.buffer_to_block(Point::new(4, 1)),
+            BlockPoint::new(3, 1),
+            "the row below it shifts by the rows the replacement swallowed",
+        );
     }
 
     /// The sort is unstable, so blocks landing on one row with the same
