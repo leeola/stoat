@@ -642,20 +642,37 @@ impl DisplayMap {
         for highlight in highlights {
             entry.insert(highlight.inlay, (style.clone(), highlight));
         }
+        self.highlights_dirty = true;
     }
 
     /// Remove the inlays named by `remove` and add `insert` (each an anchor
     /// position, display text, and kind), returning the ids of the added
-    /// inlays. A full replace passes the prior ids as `remove`. The next
-    /// [`Self::snapshot`] rebuilds the downstream layers, since [`InlayMap`]
-    /// bumps its version on splice.
+    /// inlays. A full replace passes the prior ids as `remove`.
+    ///
+    /// Syncs the display layers on both sides of the splice, so the added
+    /// inlays are placed before control returns. [`InlayMap`] resolves a
+    /// splice against the buffer as it stands and can only place those offsets
+    /// while its own text still reads the same, so a splice left unsynced is
+    /// stranded by the next edit and costs a rebuild of every row.
     pub fn splice_inlays(
         &mut self,
         remove: Vec<InlayId>,
         insert: Vec<(Anchor, String, InlayKind)>,
     ) -> Vec<InlayId> {
-        let buffer_snapshot = self.multi_buffer.snapshot();
-        self.inlay_map.splice(&buffer_snapshot, remove, insert)
+        // Brings the layers to the version the splice below resolves against.
+        // Costs a refcount bump when they are already there, which is the usual
+        // case, since a caller needs a snapshot to anchor the inlays it passes.
+        self.snapshot();
+
+        let ids = {
+            let buffer_snapshot = self.multi_buffer.snapshot();
+            self.inlay_map.splice(&buffer_snapshot, remove, insert)
+        };
+
+        // The splice bumped the inlay version, so this re-syncs rather than
+        // being served the snapshot the call above cached.
+        self.snapshot();
+        ids
     }
 
     pub fn insert_creases(
@@ -2543,6 +2560,51 @@ mod tests {
         let anchor = hint_at(&display_map, 150);
         display_map.splice_inlays(ids, vec![(anchor, ": u32".to_string(), InlayKind::Hint)]);
         assert_eq!(row_text(&mut display_map, 150), "let x150: u32 = 150");
+    }
+
+    /// A splice resolves its offsets against the buffer as it stands, and the
+    /// inlay layer can only place them while its own text still reads the same.
+    /// An edit arriving first strands them, and the layer falls back to marking
+    /// every row for rebuild, which each layer downstream then repeats.
+    #[test]
+    fn an_edit_after_a_splice_rebuilds_only_the_rows_it_touched() {
+        let text: String = (0..200).map(|i| format!("let x{i:03} = {i}\n")).collect();
+        let buffer = TextBuffer::with_text(BufferId::new(0), &text);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
+        display_map.snapshot();
+
+        let anchor = {
+            let snap = display_map.multi_buffer.snapshot();
+            let offset = snap.rope().point_to_offset(Point::new(150, 8));
+            snap.anchor_at(offset, stoat_text::Bias::Left)
+        };
+        display_map.splice_inlays(
+            Vec::new(),
+            vec![(anchor, ": u32".to_string(), InlayKind::Hint)],
+        );
+
+        shared.write().expect("poisoned").edit(0..0, "x");
+
+        let (wrap_snapshot, wrap_edits, _) = display_map.sync_through_wrap();
+        assert!(!wrap_edits.is_empty(), "the edit itself must be reported");
+        assert!(
+            !wrap_edits
+                .edits()
+                .iter()
+                .any(|edit| edit.new.contains(&150)),
+            "an edit on the first row must not rebuild row 150: {:?}",
+            wrap_edits.edits(),
+        );
+        let painted: String = wrap_snapshot
+            .chunks(150..151, Arc::from(Vec::new()))
+            .map(|chunk| chunk.text.to_string())
+            .collect();
+        assert_eq!(
+            painted, "let x150: u32 = 150",
+            "the spliced hint survives the edit",
+        );
     }
 
     #[test]
