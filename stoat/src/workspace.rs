@@ -43,7 +43,7 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
-    time::UNIX_EPOCH,
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 use stoat_language::{
     extract_highlights, parse, structural_diff, HighlightSpan, Language, LanguageRegistry,
@@ -58,6 +58,14 @@ use tokio::sync::{
 new_key_type! {
     pub struct WorkspaceId;
 }
+
+/// How long a buffer must hold one version before its diff is recomputed.
+///
+/// A diff walks the whole file on a blocking thread and the next keystroke
+/// invalidates it, so a typing burst is worth one diff at the end rather than
+/// one per edit. Short enough that a reader pausing mid-thought still sees the
+/// gutter catch up.
+pub(crate) const DIFF_SETTLE: Duration = Duration::from_millis(250);
 
 /// Stable-across-restart workspace identifier. [`WorkspaceId`] is a SlotMap
 /// key whose generation is recycled each run, so it can't serve as an on-disk
@@ -244,6 +252,12 @@ pub struct Workspace {
     /// which the `.git` watcher drives, so an entry cannot outlive the git state
     /// it was read from.
     diff_base_text: HashMap<PathBuf, DiffBaseText>,
+    /// The version each buffer is currently settling on, and when that version
+    /// was first seen. Read by [`Self::diff_settled`].
+    diff_settle: HashMap<BufferId, (u64, Instant)>,
+    /// The redraw timers [`Self::diff_settled`] arms, held so they are not
+    /// cancelled on drop. Replaced per buffer, so a burst keeps one.
+    diff_settle_timers: HashMap<BufferId, Task<()>>,
     /// The buffer ids [`Self::collect_visible_buffer_ids`] last collected.
     ///
     /// Held rather than returned because both the parse and the diff driver
@@ -390,6 +404,8 @@ impl Workspace {
             diff_jobs: HashMap::new(),
             diff_versions: HashMap::new(),
             diff_base_text: HashMap::new(),
+            diff_settle: HashMap::new(),
+            diff_settle_timers: HashMap::new(),
             visible_buffers: Vec::new(),
             index_jobs: HashMap::new(),
             index_debounce: HashMap::new(),
@@ -994,6 +1010,9 @@ impl Workspace {
             {
                 continue;
             }
+            if !self.diff_settled(executor, redraw_notify, buffer_id, cur_version) {
+                continue;
+            }
 
             let Some(path) = self.buffers.path_for(buffer_id).map(Path::to_path_buf) else {
                 continue;
@@ -1052,6 +1071,44 @@ impl Workspace {
             );
         }
         self.visible_buffers = visible;
+    }
+
+    /// Whether `buffer_id` has held `version` long enough to be worth diffing,
+    /// opening the settle window on the version's first sighting.
+    ///
+    /// A diff costs a blocking thread and a walk of the whole file, and a
+    /// keystroke invalidates whatever the last one produced, so a burst is
+    /// worth one diff rather than one per edit. The window restarts on every
+    /// version change, so it closes only once typing stops.
+    ///
+    /// Opening one arms a redraw timer, because the pass that spawns the job is
+    /// a frame, and a reader who stops typing generates no more of those.
+    fn diff_settled(
+        &mut self,
+        executor: &Executor,
+        redraw_notify: &Arc<Notify>,
+        buffer_id: BufferId,
+        version: u64,
+    ) -> bool {
+        let now = executor.now();
+        match self.diff_settle.get(&buffer_id) {
+            Some((settling, since)) if *settling == version => {
+                if now.duration_since(*since) < DIFF_SETTLE {
+                    return false;
+                }
+                self.diff_settle.remove(&buffer_id);
+                true
+            },
+            _ => {
+                self.diff_settle.insert(buffer_id, (version, now));
+                let timer_executor = executor.clone();
+                let task = executor.spawn_with_redraw(redraw_notify.clone(), async move {
+                    timer_executor.timer(DIFF_SETTLE).await;
+                });
+                self.diff_settle_timers.insert(buffer_id, task);
+                false
+            },
+        }
     }
 
     /// Detect and assign a language to every path-bearing buffer that
@@ -1761,6 +1818,61 @@ mod tests {
             h.fake_git().blob_reads(&repo),
             first,
             "the second diff reuses the blobs the first one read",
+        );
+    }
+
+    /// A diff walks the whole file on a blocking thread and the next keystroke
+    /// invalidates it, so a burst is worth one diff at the end rather than one
+    /// per edit.
+    #[test]
+    fn a_burst_of_edits_diffs_once_after_it_settles() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\nb\n", "a\nc\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.settle_diff_jobs();
+
+        let repo = PathBuf::from("/repo");
+        let ws = h.stoat.active_workspace();
+        let editor_id = match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let buffer_id = ws.editors[editor_id].buffer_id;
+
+        // Typing, with a frame between keystrokes and none of them settling.
+        for _ in 0..5 {
+            h.stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer")
+                .write()
+                .expect("poisoned")
+                .edit(0..0, "x");
+            h.stoat.drive_background();
+            h.settle();
+            assert!(
+                h.stoat.active_workspace().diff_jobs.is_empty(),
+                "a keystroke inside the settle window spawns no diff",
+            );
+        }
+
+        let before = h.fake_git().blob_reads(&repo);
+        h.advance_clock(super::DIFF_SETTLE + std::time::Duration::from_millis(1));
+        h.stoat.drive_background();
+        assert_eq!(
+            h.stoat.active_workspace().diff_jobs.len(),
+            1,
+            "and the settle spawns one job for the whole burst",
+        );
+
+        h.settle();
+        h.stoat.drive_background();
+        assert_eq!(
+            h.fake_git().blob_reads(&repo),
+            before,
+            "which reuses the cached blobs rather than rereading them",
         );
     }
 

@@ -684,6 +684,11 @@ impl TestHarness {
     /// One pass spawns the blocking jobs, [`Self::settle`] runs them, and the
     /// second pass installs the resulting diff maps. Requires `diff_warm_auto`.
     pub(crate) fn settle_diff_jobs(&mut self) {
+        // A diff waits out a settle window before it is spawned, so the first
+        // drive only opens that window. The clock has to clear it before the
+        // drive that spawns the job.
+        self.stoat.drive_background();
+        self.advance_clock(crate::workspace::DIFF_SETTLE + Duration::from_millis(1));
         for _ in 0..2 {
             self.stoat.drive_background();
             self.settle();
