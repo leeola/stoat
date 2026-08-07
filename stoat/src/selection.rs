@@ -4452,6 +4452,48 @@ mod tests {
         assert_eq!(h.primary_head_offset(), 2);
     }
 
+    /// Each cursor scans from itself, so a find keeps a multi-cursor set.
+    ///
+    /// Scanning once from the primary and stamping the result on every
+    /// selection makes them all identical, and identical spans merge, so the
+    /// set collapses to a single cursor on the primary's match.
+    #[test]
+    fn find_next_char_scans_from_each_cursor() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "ax\nax\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AddSelectionBelow);
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 1, false), (3, 4, false)],
+            "one cursor on each row",
+        );
+
+        h.type_keys("f x");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 2, false), (3, 5, false)],
+            "each cursor covers up to the x on its own row",
+        );
+    }
+
+    /// A cursor whose row holds no match stays where it is rather than being
+    /// dragged onto another cursor's target.
+    #[test]
+    fn find_next_char_leaves_unmatched_cursors_alone() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abb\naxb\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AddSelectionBelow);
+
+        h.type_keys("f x");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 1, false), (4, 6, false)],
+            "row 0 has no x so its cursor holds, row 1 covers up to its x",
+        );
+    }
+
     #[test]
     fn find_next_char_no_match_keeps_cursor() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);

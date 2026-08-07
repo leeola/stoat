@@ -3356,10 +3356,63 @@ pub(crate) fn execute_find(
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
+    let count = count.max(1);
 
-    let head_offset = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().head());
-    let tail_offset = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().tail());
-    let cursor = cursor_offset(rope, tail_offset, head_offset);
+    editor
+        .selections
+        .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
+            let cursor = cursor_offset(rope, tail_offset, head_offset);
+            // Each selection scans from its own cursor. Scanning once and
+            // stamping the result on all of them makes every span identical,
+            // and identical spans merge, so the set collapses to one cursor.
+            let Some(target) = find_target(rope, cursor, kind, ch, count) else {
+                // A selection whose line holds no match holds its place rather
+                // than being dragged onto another selection's target.
+                return sel.clone();
+            };
+
+            if extend {
+                // A find is horizontal, so it drops any column a prior vertical
+                // move was holding. Carrying it would send the next vertical
+                // move back to the column the find started from.
+                return extend_head_to_cursor(
+                    sel,
+                    target,
+                    head_offset,
+                    tail_offset,
+                    SelectionGoal::None,
+                    rope,
+                    buffer_snapshot,
+                );
+            }
+
+            // Select from the block cursor to the target rather than collapsing
+            // there, so `dfx`/`yfx` operate on the whole span like Helix.
+            let landed = Selection {
+                id: sel.id,
+                start: cursor,
+                end: cursor,
+                reversed: false,
+                goal: SelectionGoal::None,
+            }
+            .put_cursor(rope, target, true);
+            Selection {
+                id: sel.id,
+                start: buffer_snapshot.anchor_at(landed.start, Bias::Right),
+                end: buffer_snapshot.anchor_at(landed.end, Bias::Left),
+                reversed: landed.reversed,
+                goal: SelectionGoal::None,
+            }
+        });
+    UpdateEffect::Redraw
+}
+
+/// Offset the block cursor lands on for a find or till motion starting at
+/// `cursor`, or `None` when `ch` does not occur on the rest of that line.
+///
+/// The scan never leaves the cursor's own line, which is what keeps `f` and its
+/// siblings within-line motions.
+fn find_target(rope: &Rope, cursor: usize, kind: FindKind, ch: char, count: u32) -> Option<usize> {
     let head_point = rope.offset_to_point(cursor);
     let line_start = rope.point_to_offset(Point::new(head_point.row, 0));
     let max_row = rope.max_point().row;
@@ -3370,7 +3423,6 @@ pub(crate) fn execute_find(
             .saturating_sub(1)
     };
 
-    let count = count.max(1);
     // A till motion whose target sits immediately next to the cursor would land
     // where the cursor already is, so bump the count to skip that adjacent
     // grapheme like Helix. Find motions land on the target and are unaffected.
@@ -3393,7 +3445,7 @@ pub(crate) fn execute_find(
         },
         FindKind::NextChar | FindKind::PrevChar => count,
     };
-    let target = match kind {
+    match kind {
         FindKind::NextChar | FindKind::TillNextChar => {
             let scan_start =
                 cursor.saturating_add(rope.chars_at(cursor).next().map_or(0, |c| c.len_utf8()));
@@ -3413,16 +3465,16 @@ pub(crate) fn execute_find(
                 }
                 offset += c.len_utf8();
             }
-            let Some(target) = found else {
-                return UpdateEffect::None;
-            };
+            let target = found?;
             if matches!(kind, FindKind::TillNextChar) {
-                rope.reversed_chars_at(target)
-                    .next()
-                    .map(|c| target - c.len_utf8())
-                    .unwrap_or(target)
+                Some(
+                    rope.reversed_chars_at(target)
+                        .next()
+                        .map(|c| target - c.len_utf8())
+                        .unwrap_or(target),
+                )
             } else {
-                target
+                Some(target)
             }
         },
         FindKind::PrevChar | FindKind::TillPrevChar => {
@@ -3445,62 +3497,15 @@ pub(crate) fn execute_find(
                     }
                 }
             }
-            let Some(target) = found else {
-                return UpdateEffect::None;
-            };
+            let target = found?;
             if matches!(kind, FindKind::TillPrevChar) {
                 let len = rope.chars_at(target).next().map_or(0, |c| c.len_utf8());
-                target + len
+                Some(target + len)
             } else {
-                target
+                Some(target)
             }
         },
-    };
-
-    if extend {
-        let new_display = editor.display_map.snapshot();
-        let new_buf = new_display.buffer_snapshot();
-        let new_rope = new_buf.rope();
-        editor.selections.transform(new_buf, |sel| {
-            let head_offset = new_buf.resolve_anchor(&sel.head());
-            let tail_offset = new_buf.resolve_anchor(&sel.tail());
-            // A find is horizontal, so it drops any column a prior vertical
-            // move was holding. Carrying it would send the next vertical move
-            // back to the column the find started from.
-            extend_head_to_cursor(
-                sel,
-                target,
-                head_offset,
-                tail_offset,
-                SelectionGoal::None,
-                new_rope,
-                new_buf,
-            )
-        });
-    } else {
-        // Select from the block cursor to the target rather than collapsing
-        // there, so `dfx`/`yfx` operate on the whole span like Helix.
-        let new_display = editor.display_map.snapshot();
-        let new_buf = new_display.buffer_snapshot();
-        let landed = Selection {
-            id: 0,
-            start: cursor,
-            end: cursor,
-            reversed: false,
-            goal: SelectionGoal::None,
-        }
-        .put_cursor(new_buf.rope(), target, true);
-        let new_start = new_buf.anchor_at(landed.start, Bias::Right);
-        let new_end = new_buf.anchor_at(landed.end, Bias::Left);
-        editor.selections.transform(new_buf, |sel| Selection {
-            id: sel.id,
-            start: new_start,
-            end: new_end,
-            reversed: landed.reversed,
-            goal: SelectionGoal::None,
-        });
     }
-    UpdateEffect::Redraw
 }
 
 fn apply_primary_range(editor: &mut EditorState, target: Range<usize>) {
