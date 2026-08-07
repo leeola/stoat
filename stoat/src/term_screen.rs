@@ -108,6 +108,7 @@ pub struct TermScreen {
     parser: Processor,
     replies: Arc<Mutex<Vec<u8>>>,
     clipboard_writes: Arc<Mutex<Vec<String>>>,
+    generation: u64,
 }
 
 impl TermScreen {
@@ -133,7 +134,20 @@ impl TermScreen {
             parser: Processor::new(),
             replies,
             clipboard_writes,
+            generation: 0,
         }
+    }
+
+    /// Counter advanced by every call that can change what the screen shows.
+    ///
+    /// A caller that caches a rendering of this screen compares the counter to
+    /// decide whether the cache still stands, instead of re-rendering and
+    /// diffing the result. It counts calls rather than actual changes, so a feed
+    /// that paints nothing visible still advances it. Erring that way is the safe
+    /// direction. A redundant re-render costs a frame's work, while a missed one
+    /// shows stale output until something else happens to bump the counter.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Feed `bytes` of the VT stream into the parser, mutating the screen, and
@@ -147,6 +161,7 @@ impl TermScreen {
     /// written back to the PTY for interactive programs to behave. The vec is
     /// empty when the input produced no reply.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
+        self.generation += 1;
         self.parser.advance(&mut self.term, bytes);
         self.drain_replies()
     }
@@ -167,6 +182,7 @@ impl TermScreen {
             cols: (cols as usize).max(1),
         };
 
+        self.generation += 1;
         self.term.resize(dimensions);
         self.drain_replies()
     }

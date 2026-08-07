@@ -39,7 +39,7 @@ use crate::{
     run::{CommandMark, GridSelection, PtyNotification, RunId},
     selection::merge_overlapping_spans,
     symbol_finder::SymbolFinder,
-    term_session::{TermId, TermReturnFocus, TermSelection},
+    term_session::{TermId, TermReturnFocus, TermSelection, TermSession},
     ui::RenderFrame,
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
     workspace_picker::WorkspacePicker,
@@ -70,7 +70,10 @@ use stoat_language::{
 };
 use stoat_scheduler::Executor;
 use stoat_text::{patch::Patch, Anchor, Bias, IndentStyle, Rope, Selection};
-use stoatty_protocol::window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent};
+use stoatty_protocol::{
+    command::PoolRegionCommand,
+    window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent},
+};
 use stoatty_widgets::ApcScene;
 use tokio::{
     io::AsyncBufReadExt,
@@ -8239,7 +8242,28 @@ impl Stoat {
                 )
             };
 
-            if !matches!(view, View::Editor(_)) && content.width > 0 && content.height > 0 {
+            let region = PoolRegionCommand {
+                pool: index,
+                top: content.y,
+                left: content.x,
+                width: content.width,
+                height: content.height,
+                window,
+            };
+            // A view whose render reads from a source that counts its own
+            // changes answers "nothing moved" from the counter, and skipping on
+            // that answer skips the render, the copy, and the serialize -- the
+            // work that otherwise runs only to produce the hash deciding it.
+            let input_version =
+                window_content_version(&view, region, is_focused, self.theme_epoch, &ws.terms);
+            let unchanged = input_version
+                .is_some_and(|version| self.smooth_scroll.already_emitted(index, version));
+
+            if !matches!(view, View::Editor(_))
+                && content.width > 0
+                && content.height > 0
+                && !unchanged
+            {
                 let mut buf = Buffer::empty(area);
                 {
                     let mut scene = ApcScene::new();
@@ -8271,20 +8295,15 @@ impl Stoat {
                 }
 
                 let bytes = crate::smooth_scroll::serialize_buffer(&mut content_buf, &self.theme);
-                let content_version = {
+                // A view with no tracked inputs falls back to hashing what it
+                // painted, which still suppresses the fill even though it could
+                // not suppress the paint.
+                let content_version = input_version.unwrap_or_else(|| {
                     let mut hasher = DefaultHasher::new();
                     self.theme_epoch.hash(&mut hasher);
                     bytes.hash(&mut hasher);
                     hasher.finish()
-                };
-                let region = stoatty_protocol::command::PoolRegionCommand {
-                    pool: index,
-                    top: content.y,
-                    left: content.x,
-                    width: content.width,
-                    height: content.height,
-                    window,
-                };
+                });
                 // A non-editor pane holds a single page, so only page 0 fills
                 // and the rest of the buffered window stays empty.
                 crate::smooth_scroll::emit_into(
@@ -8333,7 +8352,7 @@ impl Stoat {
                 bytes.hash(&mut hasher);
                 hasher.finish()
             };
-            let region = stoatty_protocol::command::PoolRegionCommand {
+            let region = PoolRegionCommand {
                 pool: crate::smooth_scroll::non_pane_pool::WINDOW_STATUS + index,
                 top: status.y,
                 left: status.x,
@@ -9071,7 +9090,7 @@ impl Stoat {
         }
 
         if let (Some(list), Some(finder)) = (finder_list, self.file_finder.as_ref()) {
-            let region = stoatty_protocol::command::PoolRegionCommand {
+            let region = PoolRegionCommand {
                 pool: crate::smooth_scroll::non_pane_pool::FINDER,
                 top: list.y,
                 left: list.x,
@@ -9124,7 +9143,7 @@ impl Stoat {
             let filtered = &palette.filtered;
             let match_indices = &palette.match_indices;
             let selected = &palette.selected;
-            let region = stoatty_protocol::command::PoolRegionCommand {
+            let region = PoolRegionCommand {
                 pool: crate::smooth_scroll::non_pane_pool::PALETTE,
                 top: list.y,
                 left: list.x,
@@ -9171,7 +9190,7 @@ impl Stoat {
                 .as_ref()
                 .and_then(|palette| palette.arg_picker.as_ref()),
         ) {
-            let region = stoatty_protocol::command::PoolRegionCommand {
+            let region = PoolRegionCommand {
                 pool: crate::smooth_scroll::non_pane_pool::PALETTE,
                 top: list.y,
                 left: list.x,
@@ -9228,7 +9247,7 @@ impl Stoat {
             commits_region,
             self.workspaces[self.active_workspace].commits.as_ref(),
         ) {
-            let region = stoatty_protocol::command::PoolRegionCommand {
+            let region = PoolRegionCommand {
                 pool: crate::smooth_scroll::non_pane_pool::COMMITS,
                 top: list.y,
                 left: list.x,
@@ -9262,7 +9281,7 @@ impl Stoat {
         }
 
         if let (Some(body), Some(picker)) = (commit_picker_body, self.commit_picker.as_ref()) {
-            let region = stoatty_protocol::command::PoolRegionCommand {
+            let region = PoolRegionCommand {
                 pool: crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_LIST,
                 top: body.y,
                 left: body.x,
@@ -9310,7 +9329,7 @@ impl Stoat {
                 .and_then(|c| picker.preview_sessions.get(&c.sha))
                 .cloned()
         {
-            let region = stoatty_protocol::command::PoolRegionCommand {
+            let region = PoolRegionCommand {
                 pool: crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_PREVIEW,
                 top: rect.y,
                 left: rect.x,
@@ -9359,7 +9378,7 @@ impl Stoat {
         if let Some((prefix, layout)) = completion
             && let Some(popup) = self.pending_completion.as_ref()
         {
-            let region = stoatty_protocol::command::PoolRegionCommand {
+            let region = PoolRegionCommand {
                 pool: crate::smooth_scroll::non_pane_pool::COMPLETION,
                 top: layout.inner.y,
                 left: layout.inner.x,
@@ -9395,7 +9414,7 @@ impl Stoat {
 
         if let (Some(layout), Some(help)) = (help_layout, self.help.as_ref()) {
             let list = layout.list;
-            let list_region = stoatty_protocol::command::PoolRegionCommand {
+            let list_region = PoolRegionCommand {
                 pool: crate::smooth_scroll::non_pane_pool::HELP_LIST,
                 top: list.y,
                 left: list.x,
@@ -9432,7 +9451,7 @@ impl Stoat {
             );
 
             let detail = layout.detail;
-            let detail_region = stoatty_protocol::command::PoolRegionCommand {
+            let detail_region = PoolRegionCommand {
                 pool: crate::smooth_scroll::non_pane_pool::HELP_DETAIL,
                 top: detail.y,
                 left: detail.x,
@@ -9471,7 +9490,7 @@ impl Stoat {
         }
 
         if let (Some((_, inner)), Some(popup)) = (hover_layout, self.pending_hover.as_ref()) {
-            let region = stoatty_protocol::command::PoolRegionCommand {
+            let region = PoolRegionCommand {
                 pool: crate::smooth_scroll::non_pane_pool::HOVER,
                 top: inner.y,
                 left: inner.x,
@@ -9649,9 +9668,7 @@ impl Stoat {
     /// frames; the region is the pane area minus its bottom status row, the same
     /// content area the editor is painted into. The caller pools nothing while a
     /// full-screen overlay mode is active.
-    fn editor_pool_panes(
-        &self,
-    ) -> Vec<(u32, EditorId, stoatty_protocol::command::PoolRegionCommand)> {
+    fn editor_pool_panes(&self) -> Vec<(u32, EditorId, PoolRegionCommand)> {
         let ws = self.active_workspace();
         ws.panes
             .split_panes()
@@ -9683,7 +9700,7 @@ impl Stoat {
                 Some((
                     pane.index,
                     editor_id,
-                    stoatty_protocol::command::PoolRegionCommand {
+                    PoolRegionCommand {
                         pool: pane.index,
                         top: content.y,
                         left: content.x,
@@ -9702,9 +9719,7 @@ impl Stoat {
     /// windowed panes. Each region's coordinates are relative to the pane's own
     /// aux window (`window` is nonzero), and no minimap-strip columns are
     /// reserved since aux windows draw no minimap.
-    fn windowed_editor_pool_panes(
-        &self,
-    ) -> Vec<(u32, EditorId, stoatty_protocol::command::PoolRegionCommand)> {
+    fn windowed_editor_pool_panes(&self) -> Vec<(u32, EditorId, PoolRegionCommand)> {
         let ws = self.active_workspace();
         ws.panes
             .windowed_panes()
@@ -9724,7 +9739,7 @@ impl Stoat {
                 Some((
                     pane.index,
                     editor_id,
-                    stoatty_protocol::command::PoolRegionCommand {
+                    PoolRegionCommand {
                         pool: pane.index,
                         top: content.y,
                         left: content.x,
@@ -9901,6 +9916,47 @@ fn osc_default_colors(theme: &crate::theme::Theme) -> Vec<u8> {
         style_rgb(theme.try_get(scope::UI_BACKGROUND).and_then(|s| s.bg)),
     );
     out
+}
+
+/// Content version of a detached pane's content rows, hashing what its render
+/// reads, or [`None`] for a view whose sources are not tracked.
+///
+/// `None` means the caller has to paint the pane and hash the result to learn
+/// whether anything moved, which is what every view did before any of them
+/// carried a counter. A version answers the same question without painting, so
+/// a pane sitting idle in an aux window costs a hash rather than a render, a
+/// buffer copy, and a serialize per frame.
+///
+/// The region belongs in the hash even though nothing inside the pane draws it.
+/// Acting on a match skips [`emit_into`](crate::smooth_scroll::emit_into)
+/// altogether, and with it the region declaration that a resize or a move to
+/// another window would otherwise emit.
+fn window_content_version(
+    view: &View,
+    region: PoolRegionCommand,
+    is_focused: bool,
+    theme_epoch: u64,
+    terms: &SlotMap<TermId, TermSession>,
+) -> Option<u64> {
+    let mut hasher = DefaultHasher::new();
+    theme_epoch.hash(&mut hasher);
+    region.hash(&mut hasher);
+    is_focused.hash(&mut hasher);
+
+    match view {
+        // The leading tag keeps one view kind's inputs from aliasing another's
+        // after a pane changes view but keeps its index, and so its pool.
+        View::Agent(term_id) | View::Terminal(term_id) => {
+            let term = terms.get(*term_id)?;
+            0u8.hash(&mut hasher);
+            term_id.hash(&mut hasher);
+            term.term.generation().hash(&mut hasher);
+            term.selection.hash(&mut hasher);
+        },
+        View::Editor(_) | View::Run(_) | View::Label(_) => return None,
+    }
+
+    Some(hasher.finish())
 }
 
 /// Content version of a pooled editor page, hashing the inputs whose change
@@ -12950,14 +13006,10 @@ mod tests {
 
         let session: Arc<dyn crate::host::TerminalSession> =
             Arc::new(crate::host::FakeTerminalSession::new());
-        let agent_id =
-            stoat
-                .active_workspace_mut()
-                .terms
-                .insert(crate::term_session::TermSession::new(
-                    crate::term_screen::TermScreen::new(24, 80),
-                    session,
-                ));
+        let agent_id = stoat.active_workspace_mut().terms.insert(TermSession::new(
+            crate::term_screen::TermScreen::new(24, 80),
+            session,
+        ));
         // Show the agent in the focused pane so its output marks the frame dirty.
         let pane = stoat.active_workspace().panes.focus();
         stoat.active_workspace_mut().panes.pane_mut(pane).view = View::Agent(agent_id);
@@ -12983,14 +13035,14 @@ mod tests {
         let mut h = Stoat::test();
         let session: Arc<dyn crate::host::TerminalSession> =
             Arc::new(crate::host::FakeTerminalSession::new());
-        let agent_id =
-            h.stoat
-                .active_workspace_mut()
-                .terms
-                .insert(crate::term_session::TermSession::new(
-                    crate::term_screen::TermScreen::new(24, 80),
-                    session,
-                ));
+        let agent_id = h
+            .stoat
+            .active_workspace_mut()
+            .terms
+            .insert(TermSession::new(
+                crate::term_screen::TermScreen::new(24, 80),
+                session,
+            ));
 
         // OSC 52 set-clipboard with the base64 of "hi", BEL-terminated.
         h.stoat
@@ -13100,14 +13152,10 @@ mod tests {
 
         let fake = Arc::new(crate::host::FakeTerminalSession::new());
         let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
-        let agent_id =
-            stoat
-                .active_workspace_mut()
-                .terms
-                .insert(crate::term_session::TermSession::new(
-                    crate::term_screen::TermScreen::new(24, 80),
-                    session,
-                ));
+        let agent_id = stoat.active_workspace_mut().terms.insert(TermSession::new(
+            crate::term_screen::TermScreen::new(24, 80),
+            session,
+        ));
 
         // A DSR cursor-position query in the PTY output must be answered back
         // to the PTY. A fresh screen reports the cursor at row 1, column 1.
@@ -13128,7 +13176,7 @@ mod tests {
 
         let fake = Arc::new(crate::host::FakeTerminalSession::new());
         let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
-        let agent_id = ws.terms.insert(crate::term_session::TermSession::new(
+        let agent_id = ws.terms.insert(TermSession::new(
             crate::term_screen::TermScreen::new(24, 80),
             session,
         ));
@@ -13161,7 +13209,7 @@ mod tests {
 
         let fake = Arc::new(crate::host::FakeTerminalSession::new());
         let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
-        let agent_id = ws.terms.insert(crate::term_session::TermSession::new(
+        let agent_id = ws.terms.insert(TermSession::new(
             crate::term_screen::TermScreen::new(24, 80),
             session,
         ));
@@ -13189,7 +13237,7 @@ mod tests {
 
         let fake = Arc::new(crate::host::FakeTerminalSession::new());
         let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
-        let term_id = ws.terms.insert(crate::term_session::TermSession::new(
+        let term_id = ws.terms.insert(TermSession::new(
             crate::term_screen::TermScreen::new(24, 80),
             session,
         ));
@@ -13211,7 +13259,7 @@ mod tests {
     fn insert_term_session(ws: &mut Workspace) -> TermId {
         let session: Arc<dyn crate::host::TerminalSession> =
             Arc::new(crate::host::FakeTerminalSession::new());
-        ws.terms.insert(crate::term_session::TermSession::new(
+        ws.terms.insert(TermSession::new(
             crate::term_screen::TermScreen::new(24, 80),
             session,
         ))
@@ -13493,7 +13541,7 @@ mod tests {
         let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
         let ws = stoat.active_workspace_mut();
         let focused = ws.panes.focus();
-        let term_id = ws.terms.insert(crate::term_session::TermSession::new(
+        let term_id = ws.terms.insert(TermSession::new(
             crate::term_screen::TermScreen::new(24, 80),
             session,
         ));
@@ -13933,7 +13981,7 @@ mod tests {
             let ws = h.stoat.active_workspace_mut();
             let pane = ws.panes.focus();
             let at_closed = ws.terms.keys().next().expect("the opened terminal");
-            let above_closed = ws.terms.insert(crate::term_session::TermSession::new(
+            let above_closed = ws.terms.insert(TermSession::new(
                 crate::term_screen::TermScreen::new(24, 80),
                 Arc::new(crate::host::FakeTerminalSession::default()),
             ));
@@ -14119,7 +14167,7 @@ mod tests {
             let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
             let ws = h.stoat.active_workspace_mut();
             let pane = ws.panes.focus();
-            let term_id = ws.terms.insert(crate::term_session::TermSession::new(
+            let term_id = ws.terms.insert(TermSession::new(
                 crate::term_screen::TermScreen::new(24, 80),
                 session,
             ));
@@ -18397,6 +18445,87 @@ mod tests {
         );
     }
 
+    /// Every input the terminal render reads has to reach the version, because
+    /// the version is what decides whether the render runs at all. A field left
+    /// out shows the user a stale pane until something else happens to move.
+    #[test]
+    fn a_terminal_pane_versions_on_everything_its_render_reads() {
+        let session: Arc<dyn crate::host::TerminalSession> =
+            Arc::new(crate::host::FakeTerminalSession::new());
+        let mut terms: SlotMap<TermId, TermSession> = SlotMap::with_key();
+        let term_id = terms.insert(TermSession::new(
+            crate::term_screen::TermScreen::new(24, 80),
+            session,
+        ));
+        let view = View::Terminal(term_id);
+        let region = PoolRegionCommand {
+            pool: 1,
+            top: 0,
+            left: 0,
+            width: 80,
+            height: 23,
+            window: 2,
+        };
+        let version = |terms: &SlotMap<TermId, TermSession>| {
+            window_content_version(&view, region, true, 0, terms).expect("a terminal is versioned")
+        };
+
+        let base = version(&terms);
+        assert_eq!(base, version(&terms), "an untouched terminal holds still");
+
+        assert_ne!(
+            base,
+            window_content_version(&view, region, false, 0, &terms).unwrap(),
+            "focus draws the cursor cell"
+        );
+        assert_ne!(
+            base,
+            window_content_version(&view, region, true, 1, &terms).unwrap(),
+            "the theme recolors every cell"
+        );
+        assert_ne!(
+            base,
+            window_content_version(
+                &view,
+                PoolRegionCommand {
+                    height: 12,
+                    ..region
+                },
+                true,
+                0,
+                &terms
+            )
+            .unwrap(),
+            "a resized pane must re-declare its region"
+        );
+
+        terms[term_id].selection = Some(TermSelection::new(1, 1));
+        let selected = version(&terms);
+        assert_ne!(base, selected, "a selection tints the cells it covers");
+
+        terms[term_id].term.feed(b"output");
+        assert_ne!(selected, version(&terms), "output repaints the screen");
+    }
+
+    /// A view whose sources are untracked has to say so, since the caller reads
+    /// `None` as "paint it and hash what came out" rather than "unchanged".
+    #[test]
+    fn an_untracked_view_kind_reports_no_input_version() {
+        let terms: SlotMap<TermId, TermSession> = SlotMap::with_key();
+        let region = PoolRegionCommand {
+            pool: 1,
+            top: 0,
+            left: 0,
+            width: 80,
+            height: 23,
+            window: 2,
+        };
+        assert_eq!(
+            window_content_version(&View::Label("scratch".into()), region, true, 0, &terms),
+            None
+        );
+    }
+
     #[test]
     fn detached_terminal_ships_a_content_pool_that_repaints_then_goes_quiet() {
         use stoatty_protocol::command::Command;
@@ -18416,7 +18545,7 @@ mod tests {
         let (focused, term_id, index) = {
             let ws = h.stoat.active_workspace_mut();
             let focused = ws.panes.focus();
-            let term_id = ws.terms.insert(crate::term_session::TermSession::new(
+            let term_id = ws.terms.insert(TermSession::new(
                 crate::term_screen::TermScreen::new(24, 80),
                 session,
             ));

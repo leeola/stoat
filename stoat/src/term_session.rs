@@ -26,7 +26,7 @@ new_key_type! {
 /// reaches, both `(row, col)` and viewport-relative. The selection runs in
 /// reading order between the two regardless of drag direction, so a row lying
 /// fully between the endpoints is selected end to end.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TermSelection {
     anchor: (usize, usize),
     head: (usize, usize),

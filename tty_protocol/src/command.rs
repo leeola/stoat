@@ -321,7 +321,7 @@ pub struct ScrollRegionCommand {
 /// regions at once (split panes side by side, a modal stacked over an editor).
 /// Re-declaring an existing id updates that pool's rectangle;
 /// [`Command::PoolDrop`] retires it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct PoolRegionCommand {
     pub pool: u32,
     pub top: u16,

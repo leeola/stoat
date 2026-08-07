@@ -150,6 +150,23 @@ struct PoolEmitState {
 }
 
 impl SmoothScrollState {
+    /// Whether `pool`'s last emit already carried `version`.
+    ///
+    /// Lets a caller whose page bytes are expensive to produce decide not to
+    /// produce them, rather than rendering a page for [`emit_into`] to discard
+    /// on the same comparison. Only sound for a pool whose whole emit is
+    /// determined by the version, which for the single-page window surfaces
+    /// means folding the region into it, since skipping the call skips the
+    /// region declaration too.
+    ///
+    /// False for a pool that has never emitted, so a first display is never
+    /// mistaken for an unchanged one on a version that happens to be zero.
+    pub(crate) fn already_emitted(&self, pool: u32, version: u64) -> bool {
+        self.pools
+            .get(&pool)
+            .is_some_and(|entry| entry.content_version == version)
+    }
+
     /// Retire every tracked pool whose id is not in `active`: emit its
     /// `Gstoatty;pool_drop` into `out` and forget it.
     ///
@@ -1812,6 +1829,33 @@ mod tests {
             Vec::new()
         });
         assert_eq!(entered, vec![1]);
+    }
+
+    /// The never-emitted answer is the one that matters. A caller skipping on
+    /// `true` would never declare the pool at all if a first display could
+    /// report its version as already sent.
+    #[test]
+    fn a_pool_reports_its_last_emitted_version_and_nothing_before_it() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+
+        assert!(
+            !state.already_emitted(1, 0),
+            "an untracked pool has emitted no version, not version zero"
+        );
+
+        emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, false, |_| {
+            Vec::new()
+        });
+        assert!(state.already_emitted(1, 0));
+        assert!(!state.already_emitted(1, 7));
+        assert!(!state.already_emitted(2, 0), "pools answer for themselves");
+
+        emit_into(&mut out, &mut state, region(1, 20), 0.0, 7, false, |_| {
+            Vec::new()
+        });
+        assert!(state.already_emitted(1, 7));
+        assert!(!state.already_emitted(1, 0));
     }
 
     #[test]
