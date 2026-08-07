@@ -904,18 +904,27 @@ impl Workspace {
             );
         }
 
-        // Cap retained highlight state. In-flight parse ids join the visible
-        // set so a completing job cannot repopulate a just-evicted buffer.
+        // Cap retained highlight state, on the passes where a parse landed.
+        // In-flight parse ids join the visible set so a completing job cannot
+        // repopulate a just-evicted buffer.
+        //
+        // Tree-sitter state reaches the registry only through the install
+        // above, so a pass that installed nothing has no new state to cap and
+        // the walk over open buffers would find what the last one left. LSP
+        // token sets are evictable too and install elsewhere, so a buffer
+        // holding only those waits for some buffer's next parse.
         let mut protected = visible;
         protected.extend(self.parse_jobs.keys().copied());
-        let evicted = self.buffers.evict_hidden_highlights(&protected, retention);
-        if !evicted.is_empty() {
-            tracing::debug!(
-                target: "stoat::app",
-                evicted = evicted.len(),
-                cap = retention,
-                "evicted hidden highlight state"
-            );
+        if !installed.is_empty() {
+            let evicted = self.buffers.evict_hidden_highlights(&protected, retention);
+            if !evicted.is_empty() {
+                tracing::debug!(
+                    target: "stoat::app",
+                    evicted = evicted.len(),
+                    cap = retention,
+                    "evicted hidden highlight state"
+                );
+            }
         }
         // Handed back for its capacity alone. The eviction set grew past the
         // visible ids, and the next collect clears it before reading.
