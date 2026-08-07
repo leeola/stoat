@@ -3822,6 +3822,40 @@ mod tests {
         );
     }
 
+    /// The pool grid composites over the live one, so it has to match its size
+    /// before anything is copied into it. A pool that outlived a resize would
+    /// otherwise clip its region against the old dimensions.
+    #[test]
+    fn copy_pool_region_sizes_the_pool_grid_to_the_live_one() {
+        let region = PoolRegionCommand {
+            pool: 0,
+            top: 3,
+            left: 0,
+            width: 2,
+            height: 1,
+            window: 0,
+        };
+        let mut document = Grid::new(1, 2);
+        document.get_mut(0, 0).ch = 'd';
+
+        let live = Grid::new(5, 5);
+        // Left over from before the window grew, too short for the region.
+        let mut pool = Grid::new(2, 2);
+
+        copy_pool_region(&mut pool, &document, &live, region);
+
+        assert_eq!(
+            (pool.rows(), pool.cols()),
+            (5, 5),
+            "the pool grid takes the live grid's size"
+        );
+        assert_eq!(
+            pool.get(3, 0).ch,
+            'd',
+            "a region the old size could not hold now lands"
+        );
+    }
+
     #[test]
     fn copy_pool_region_clips_past_the_viewport() {
         let document = {

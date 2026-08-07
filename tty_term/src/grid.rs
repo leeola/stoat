@@ -2100,6 +2100,26 @@ mod region_blit_tests {
         );
     }
 
+    /// The renderer scissors the composite to the region, so what surrounds it
+    /// is never drawn and must not be reblanked each frame either.
+    #[test]
+    fn a_blit_leaves_the_surround_as_it_found_it() {
+        let mut dst = Grid::new(4, 4);
+        for r in 0..dst.rows() {
+            for c in 0..dst.cols() {
+                dst.get_mut(r, c).ch = 's';
+            }
+        }
+
+        dst.blit_region(&source(), 1, 1, 2);
+
+        assert_eq!(
+            [dst.get(0, 0).ch, dst.get(3, 3).ch, dst.get(1, 1).ch],
+            ['s', 's', 'd'],
+            "only the region's own cells are written"
+        );
+    }
+
     #[test]
     fn a_region_past_the_edge_clips_rather_than_panicking() {
         let mut dst = Grid::new(4, 4);
