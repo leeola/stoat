@@ -750,35 +750,40 @@ impl Routed {
 /// response to us. A `method` with an `id` is a server request. A `method`
 /// without an `id` is a notification.
 fn classify(message: Value) -> Routed {
-    let method = message.get("method").and_then(Value::as_str);
-    let id = message.get("id");
+    // Taken apart rather than read through, so a result tree or a diagnostics
+    // payload moves into the routed message instead of being copied out of one
+    // this function is about to drop.
+    let Value::Object(mut map) = message else {
+        return Routed::Ignore;
+    };
+    let method = map.remove("method");
+    let method = method.as_ref().and_then(Value::as_str);
+    let id = map.remove("id");
 
     match (method, id) {
         (None, Some(id)) => {
             let Some(id) = id.as_i64() else {
                 return Routed::Ignore;
             };
-            if let Some(error) = message.get("error") {
-                Routed::Response {
+            match map.remove("error") {
+                Some(error) => Routed::Response {
                     id,
-                    result: Err(parse_response_error(error)),
-                }
-            } else {
-                let result = message.get("result").cloned().unwrap_or(Value::Null);
-                Routed::Response {
+                    result: Err(parse_response_error(&error)),
+                },
+                None => Routed::Response {
                     id,
-                    result: Ok(result),
-                }
+                    result: Ok(map.remove("result").unwrap_or(Value::Null)),
+                },
             }
         },
         (Some(method), Some(id)) => {
-            let Ok(id) = serde_json::from_value::<NumberOrString>(id.clone()) else {
+            let Ok(id) = serde_json::from_value::<NumberOrString>(id) else {
                 return Routed::Ignore;
             };
-            let params = message.get("params").cloned().unwrap_or(Value::Null);
+            let params = map.remove("params").unwrap_or(Value::Null);
             Routed::Incoming(classify_incoming(id, method, params))
         },
-        (Some(method), None) => match classify_notification(method, message.get("params")) {
+        (Some(method), None) => match classify_notification(method, map.remove("params")) {
             Some(notification) => Routed::Notification(notification),
             None => Routed::Ignore,
         },
@@ -799,57 +804,58 @@ fn parse_response_error(error: &Value) -> LspResponseError {
 }
 
 fn classify_incoming(id: NumberOrString, method: &str, params: Value) -> IncomingRequest {
-    fn typed<T: DeserializeOwned>(params: Value) -> Option<T> {
-        serde_json::from_value(params).ok()
-    }
     match method {
-        "window/showMessageRequest" => {
-            typed(params.clone()).map(|params| IncomingRequest::ShowMessageRequest {
-                id: id.clone(),
-                params,
-            })
+        "window/showMessageRequest" => decode(id, method, params, |id, params| {
+            IncomingRequest::ShowMessageRequest { id, params }
+        }),
+        "window/workDoneProgress/create" => decode(id, method, params, |id, params| {
+            IncomingRequest::WorkDoneProgressCreate { id, params }
+        }),
+        "client/registerCapability" => decode(id, method, params, |id, params| {
+            IncomingRequest::RegisterCapability { id, params }
+        }),
+        "client/unregisterCapability" => decode(id, method, params, |id, params| {
+            IncomingRequest::UnregisterCapability { id, params }
+        }),
+        "workspace/configuration" => decode(id, method, params, |id, params| {
+            IncomingRequest::WorkspaceConfiguration { id, params }
+        }),
+        "workspace/applyEdit" => decode(id, method, params, |id, params| {
+            IncomingRequest::WorkspaceApplyEdit { id, params }
+        }),
+        _ => IncomingRequest::Unknown {
+            id,
+            method: method.to_owned(),
+            params,
         },
-        "window/workDoneProgress/create" => {
-            typed(params.clone()).map(|params| IncomingRequest::WorkDoneProgressCreate {
-                id: id.clone(),
-                params,
-            })
-        },
-        "client/registerCapability" => {
-            typed(params.clone()).map(|params| IncomingRequest::RegisterCapability {
-                id: id.clone(),
-                params,
-            })
-        },
-        "client/unregisterCapability" => {
-            typed(params.clone()).map(|params| IncomingRequest::UnregisterCapability {
-                id: id.clone(),
-                params,
-            })
-        },
-        "workspace/configuration" => {
-            typed(params.clone()).map(|params| IncomingRequest::WorkspaceConfiguration {
-                id: id.clone(),
-                params,
-            })
-        },
-        "workspace/applyEdit" => {
-            typed(params.clone()).map(|params| IncomingRequest::WorkspaceApplyEdit {
-                id: id.clone(),
-                params,
-            })
-        },
-        _ => None,
     }
-    .unwrap_or_else(|| IncomingRequest::Unknown {
-        id,
-        method: method.to_owned(),
-        params,
-    })
 }
 
-fn classify_notification(method: &str, params: Option<&Value>) -> Option<LspNotification> {
-    let params = params?.clone();
+/// Deserialize `params` into the typed request `build` wants, falling back to
+/// [`IncomingRequest::Unknown`] when they do not fit.
+///
+/// The fallback carries no params. Deserializing consumes them, and keeping
+/// them for this path would mean cloning the payload of every request that does
+/// parse. Nothing reads them: an `Unknown` is answered "method not found"
+/// whatever it holds.
+fn decode<T: DeserializeOwned>(
+    id: NumberOrString,
+    method: &str,
+    params: Value,
+    build: impl FnOnce(NumberOrString, T) -> IncomingRequest,
+) -> IncomingRequest {
+    match serde_json::from_value(params) {
+        Ok(params) => build(id, params),
+        Err(_) => IncomingRequest::Unknown {
+            id,
+            method: method.to_owned(),
+            params: Value::Null,
+        },
+    }
+}
+
+fn classify_notification(method: &str, params: Option<Value>) -> Option<LspNotification> {
+    let params = params?;
     match method {
         "textDocument/publishDiagnostics" => {
             let params: PublishDiagnosticsParams = serde_json::from_value(params).ok()?;
@@ -1201,10 +1207,32 @@ mod tests {
             "params": {"x": 1},
         });
         match classify(message) {
-            Routed::Incoming(IncomingRequest::Unknown { method, .. }) => {
+            Routed::Incoming(IncomingRequest::Unknown { method, params, .. }) => {
                 assert_eq!(method, "workspace/somethingNew");
+                assert_eq!(params, json!({"x": 1}), "params reach the fallback intact");
             },
             _ => panic!("expected an unknown request"),
+        }
+    }
+
+    #[test]
+    fn a_known_method_whose_params_do_not_fit_falls_back_without_them() {
+        let message = json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "workspace/configuration",
+            "params": {"items": "not a list"},
+        });
+        match classify(message) {
+            Routed::Incoming(IncomingRequest::Unknown { method, params, .. }) => {
+                assert_eq!(method, "workspace/configuration");
+                assert_eq!(
+                    params,
+                    Value::Null,
+                    "params no reply path reads are dropped rather than carried"
+                );
+            },
+            _ => panic!("expected the unknown fallback"),
         }
     }
 }
