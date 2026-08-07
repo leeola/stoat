@@ -45,7 +45,7 @@ use stoatty_render::{
     render,
 };
 use stoatty_term::{
-    grid::{Bar, Grid, Overlay, Rgb, TextRun},
+    grid::{Grid, Overlay, Rgb},
     term::{Cursor, CursorShape, Damage, PoolView, TermEvent, Terminal},
     theme::Theme,
 };
@@ -2977,8 +2977,6 @@ fn compose_aux_grid(
         grid.clear();
     }
 
-    let mut text_runs = Vec::new();
-    let mut bars = Vec::new();
     for pool in pools {
         if terminal
             .project_pool(pool.id, scratch, pool.scroll_target.pages())
@@ -2987,39 +2985,16 @@ fn compose_aux_grid(
             continue;
         }
 
-        let top = pool.region.top as usize;
-        let left = pool.region.left as usize;
-        let region_rows = (pool.region.height as usize)
-            .min(scratch.rows())
-            .min(grid.rows().saturating_sub(top));
-        let region_cols = (pool.region.width as usize)
-            .min(scratch.cols())
-            .min(grid.cols().saturating_sub(left));
-        if region_cols == 0 {
-            continue;
-        }
-
-        for r in 0..region_rows {
-            grid.row_mut(top + r)[left..left + region_cols]
-                .copy_from_slice(&scratch.row(r)[..region_cols]);
-        }
-
-        let dx = pool.region.left as i16 * 16;
-        let dy = pool.region.top as i16 * 16;
-        text_runs.extend(scratch.text_runs().iter().map(|run| TextRun {
-            col: run.col + dx,
-            row: run.row + dy,
-            ..run.clone()
-        }));
-        bars.extend(scratch.bars().iter().map(|bar| Bar {
-            x: bar.x + dx,
-            y: bar.y + dy,
-            ..*bar
-        }));
+        // The region's own rows only. v1 projects at the scroll target with no
+        // sub-cell glide, so the straddle row `project_pool` composes covers a
+        // sliver nothing here reveals.
+        grid.append_region(
+            scratch,
+            pool.region.top as usize,
+            pool.region.left as usize,
+            pool.region.height as usize,
+        );
     }
-
-    grid.set_text_runs(text_runs);
-    grid.set_bars(bars);
 }
 
 /// Send a window-lifecycle event to the child over the window-event socket.

@@ -1984,3 +1984,145 @@ mod tests {
         assert!(!pool.compose(-1, &mut out));
     }
 }
+
+#[cfg(test)]
+mod region_blit_tests {
+    use super::{Bar, Grid, Polyline, Rgb, TextRun};
+
+    /// A 2x2 source with a sentinel in every cell and one of each decoration
+    /// kind at the region's own origin.
+    fn source() -> Grid {
+        let mut grid = Grid::new(2, 2);
+        for r in 0..grid.rows() {
+            for c in 0..grid.cols() {
+                grid.get_mut(r, c).ch = 'd';
+            }
+        }
+        grid.set_text_runs(vec![TextRun {
+            col: 0,
+            row: 0,
+            scale: 16,
+            color: Rgb::new(1, 2, 3),
+            bg: None,
+            text: "x".into(),
+            seq: 0,
+        }]);
+        grid.set_bars(vec![Bar {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 16,
+            color: Rgb::new(1, 2, 3),
+            seq: 0,
+        }]);
+        grid.set_polylines(vec![Polyline {
+            points: vec![[0, 0], [16, 16]],
+            width: 16,
+            color: Rgb::new(1, 2, 3),
+            seq: 0,
+        }]);
+        grid
+    }
+
+    /// The renderer draws a window grid's polylines, and pool fills carry them,
+    /// so a blit that carries the cells and drops the paths loses commit-graph
+    /// lanes and merge edges with nothing to say it did.
+    #[test]
+    fn a_blit_carries_every_decoration_kind_translated() {
+        let mut dst = Grid::new(4, 4);
+        dst.blit_region(&source(), 1, 2, 2);
+
+        assert_eq!(dst.get(1, 2).ch, 'd', "the cells land at the origin");
+        assert_eq!(
+            (dst.text_runs()[0].col, dst.text_runs()[0].row),
+            (32, 16),
+            "a text run moves by the origin in sixteenths"
+        );
+        assert_eq!(
+            (dst.bars()[0].x, dst.bars()[0].y),
+            (32, 16),
+            "a bar moves with it"
+        );
+        assert_eq!(
+            dst.polylines()[0].points,
+            [[32, 16], [48, 32]],
+            "every point of a path moves with it"
+        );
+    }
+
+    #[test]
+    fn an_append_carries_every_decoration_kind_translated() {
+        let mut dst = Grid::new(4, 4);
+        dst.append_region(&source(), 1, 2, 2);
+
+        assert_eq!(dst.get(1, 2).ch, 'd', "the cells land at the origin");
+        assert_eq!(
+            (dst.text_runs()[0].col, dst.text_runs()[0].row),
+            (32, 16),
+            "a text run moves by the origin in sixteenths"
+        );
+        assert_eq!(
+            (dst.bars()[0].x, dst.bars()[0].y),
+            (32, 16),
+            "a bar moves with it"
+        );
+        assert_eq!(
+            dst.polylines()[0].points,
+            [[32, 16], [48, 32]],
+            "every point of a path moves with it"
+        );
+    }
+
+    #[test]
+    fn a_blit_replaces_the_decorations_it_finds_and_an_append_adds_to_them() {
+        let counts = |mut dst: Grid, append: bool| {
+            dst.set_polylines(vec![Polyline {
+                points: vec![[99, 99]],
+                width: 1,
+                color: Rgb::new(0, 0, 0),
+                seq: 0,
+            }]);
+            if append {
+                dst.append_region(&source(), 0, 0, 2);
+            } else {
+                dst.blit_region(&source(), 0, 0, 2);
+            }
+            dst.polylines().len()
+        };
+
+        assert_eq!(
+            [
+                counts(Grid::new(4, 4), false),
+                counts(Grid::new(4, 4), true)
+            ],
+            [1, 2],
+            "one pool owns the list it writes, several each add their own"
+        );
+    }
+
+    #[test]
+    fn a_region_past_the_edge_clips_rather_than_panicking() {
+        let mut dst = Grid::new(4, 4);
+        dst.blit_region(&source(), 3, 3, 2);
+        assert_eq!(dst.get(3, 3).ch, 'd', "the row and column that fit land");
+
+        dst.blit_region(&source(), 0, 4, 2);
+        assert_eq!(
+            dst.get(0, 0).ch,
+            ' ',
+            "a region starting past the last column copies nothing"
+        );
+    }
+
+    #[test]
+    fn the_caller_says_how_many_rows_to_take() {
+        let mut dst = Grid::new(4, 4);
+        dst.blit_region(&source(), 0, 0, 1);
+
+        assert_eq!(
+            (dst.get(0, 0).ch, dst.get(1, 0).ch),
+            ('d', ' '),
+            "the straddle row a caller does not want is left out"
+        );
+    }
+}
