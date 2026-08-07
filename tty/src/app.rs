@@ -1907,17 +1907,11 @@ impl ApplicationHandler<PtyEvent> for App {
                     // Consume the combo whether or not the clipboard read
                     // succeeds, so encode_key never sends a stray "v".
                     if let Ok(text) = arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-                        let bracketed = {
-                            let mut terminal = state.terminal.lock();
-                            terminal.clear_selection();
-                            // Pasting jumps the view back to the live prompt,
-                            // like typing.
-                            terminal.scroll_to_bottom();
-                            terminal.bracketed_paste()
-                        };
-                        // Written outside the scope above, so the lock the
-                        // reader thread wants is not held across the syscall.
-                        let _ = state.pty.write(&paste_bytes(&text, bracketed));
+                        Input {
+                            terminal: &state.terminal,
+                            pty: &mut state.pty,
+                        }
+                        .paste(&text);
                     }
                     return;
                 }
@@ -1947,18 +1941,11 @@ impl ApplicationHandler<PtyEvent> for App {
                     state.modifiers.control_key(),
                     state.modifiers.shift_key(),
                 ) {
-                    {
-                        let mut terminal = state.terminal.lock();
-                        // Typing supersedes a live selection, so drop the
-                        // highlight before it sits over fresh output.
-                        terminal.clear_selection();
-                        // Typing jumps the view back to the live prompt, the way
-                        // a terminal resets scrollback on input.
-                        terminal.scroll_to_bottom();
+                    Input {
+                        terminal: &state.terminal,
+                        pty: &mut state.pty,
                     }
-                    // Written outside the scope above, so the lock the reader
-                    // thread wants is not held across the syscall.
-                    let _ = state.pty.write(&bytes);
+                    .key(&bytes);
                 }
             },
             WindowEvent::MouseWheel { delta, .. } => {
@@ -2458,6 +2445,58 @@ fn ipc_button(button: MouseButton) -> Option<IpcMouseButton> {
         MouseButton::Back => Some(IpcMouseButton::Back),
         MouseButton::Forward => Some(IpcMouseButton::Forward),
         _ => None,
+    }
+}
+
+/// Somewhere the shell's input goes.
+///
+/// [`Pty`] is the one, and a test cannot have one. The trait is what lets the
+/// input arms below be called with a buffer standing in for the shell.
+pub(crate) trait PtyWrite {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()>;
+}
+
+impl PtyWrite for Pty {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        Pty::write(self, bytes)
+    }
+}
+
+/// The terminal and the shell, borrowed for the length of one input event.
+///
+/// The arms of the winit event loop cannot be reached without a real window, so
+/// what they do lives here instead, where a test can call it with a terminal it
+/// built and a writer it can read back.
+struct Input<'a, W: PtyWrite> {
+    terminal: &'a FairMutex<Terminal>,
+    pty: &'a mut W,
+}
+
+impl<W: PtyWrite> Input<'_, W> {
+    /// Send `bytes` to the shell as typing, which supersedes a live selection
+    /// and returns the view to the live prompt.
+    ///
+    /// The write happens outside the terminal lock, so the lock the reader
+    /// thread wants is not held across a syscall.
+    fn key(&mut self, bytes: &[u8]) {
+        {
+            let mut terminal = self.terminal.lock();
+            terminal.clear_selection();
+            terminal.scroll_to_bottom();
+        }
+        let _ = self.pty.write(bytes);
+    }
+
+    /// Send `text` to the shell as a paste, bracketed when the shell asked for
+    /// it, resetting the view the way typing does.
+    fn paste(&mut self, text: &str) {
+        let bracketed = {
+            let mut terminal = self.terminal.lock();
+            terminal.clear_selection();
+            terminal.scroll_to_bottom();
+            terminal.bracketed_paste()
+        };
+        let _ = self.pty.write(&paste_bytes(text, bracketed));
     }
 }
 
@@ -3561,8 +3600,8 @@ mod tests {
         popover_overflow, refresh_popover_overflows, reposition_scroll, seed_settle_flight,
         selection_copy_text, sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes, step_cursor,
         step_document_scroll, step_grid_scroll, step_popover_scroll, step_region_scroll,
-        step_scrollback_scroll, swallow_super_combo, wheel_lines, CursorAnimation, Visibility,
-        EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
+        step_scrollback_scroll, swallow_super_combo, wheel_lines, CursorAnimation, Input, PtyWrite,
+        Visibility, EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
     };
     #[cfg(unix)]
     use super::{window_socket_path, PathBuf};
@@ -4367,6 +4406,90 @@ mod tests {
                 })
             ),
             "the report carries its window and the button being held"
+        );
+    }
+
+    /// Collects what an input arm sends instead of a shell reading it.
+    #[derive(Default)]
+    struct SpyPty {
+        written: Vec<u8>,
+    }
+
+    impl PtyWrite for SpyPty {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            self.written.extend_from_slice(bytes);
+            Ok(())
+        }
+    }
+
+    /// A terminal holding `text`, scrolled back with a selection over it, which
+    /// is the state an input event is supposed to reset.
+    fn scrolled_back_with_a_selection() -> FairMutex<Terminal> {
+        let mut terminal = Terminal::new(2, 8, Theme::default());
+        terminal.advance(b"one\r\ntwo\r\nthree\r\nfour\r\n");
+        terminal.start_selection(0, 0, false);
+        terminal.update_selection(0, 3, true);
+        terminal.scroll_display(2);
+        assert!(
+            terminal.display_offset() > 0,
+            "the fixture is scrolled back"
+        );
+        FairMutex::new(terminal)
+    }
+
+    #[test]
+    fn typing_reaches_the_shell_and_resets_the_view() {
+        let terminal = scrolled_back_with_a_selection();
+        let mut pty = SpyPty::default();
+
+        Input {
+            terminal: &terminal,
+            pty: &mut pty,
+        }
+        .key(b"x");
+
+        assert_eq!(pty.written, b"x", "the keystroke reaches the shell");
+        let terminal = terminal.lock();
+        assert_eq!(
+            terminal.display_offset(),
+            0,
+            "typing returns the view to the live prompt"
+        );
+        assert!(
+            terminal.selection_text().is_none(),
+            "typing drops the selection it would otherwise sit over"
+        );
+    }
+
+    #[test]
+    fn a_paste_is_bracketed_only_when_the_shell_asked_for_it() {
+        let plain = {
+            let terminal = scrolled_back_with_a_selection();
+            let mut pty = SpyPty::default();
+            Input {
+                terminal: &terminal,
+                pty: &mut pty,
+            }
+            .paste("hi");
+            pty.written
+        };
+
+        let bracketed = {
+            let terminal = scrolled_back_with_a_selection();
+            terminal.lock().advance(b"\x1b[?2004h");
+            let mut pty = SpyPty::default();
+            Input {
+                terminal: &terminal,
+                pty: &mut pty,
+            }
+            .paste("hi");
+            pty.written
+        };
+
+        assert_eq!(plain, b"hi", "an unasked paste goes as its own text");
+        assert_eq!(
+            bracketed, b"\x1b[200~hi\x1b[201~",
+            "a shell that set bracketed paste gets the markers"
         );
     }
 
