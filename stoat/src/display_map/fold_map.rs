@@ -1249,7 +1249,15 @@ fn sync_fold_incremental(
         }
 
         let new_out = new_transforms.summary().output.lines;
-        let new_fold_end = if new_out.column > 0 {
+        let new_fold_end = if new_rows.end >= inlay_snapshot.line_count() {
+            // The mirror of the old end above. A region running to the end of
+            // the tree has to name the tree's line count, and the accumulated
+            // position stops at the last newline rather than counting the empty
+            // row after it. `line_count` is that row plus one by definition, so
+            // an appended row is reported rather than read as a same-size
+            // change.
+            new_out.row + 1
+        } else if new_out.column > 0 {
             new_out.row + 1
         } else {
             new_out.row.max(new_fold_start + 1)

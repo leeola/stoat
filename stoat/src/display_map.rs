@@ -1840,6 +1840,39 @@ mod tests {
         );
     }
 
+    /// An edit appending a row at the very end leaves the map the same length
+    /// as a fresh build.
+    ///
+    /// The row patch each layer hands down says which rows changed and how many
+    /// replaced them. A region running to the end of the buffer has to count
+    /// the empty row after the final newline, which the accumulated position
+    /// stops short of, so a patch built from that position alone reports the
+    /// appended row as a same-size change and the layers above build one row
+    /// short.
+    #[test]
+    fn an_insert_at_the_buffer_end_adds_a_row() {
+        let text: String = (0..5).map(|i| format!("line{i}\n")).collect();
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut map = DisplayMap::new(multi, test_executor(), crate::test_notify());
+        assert_eq!(
+            map.snapshot().line_count(),
+            6,
+            "five lines and the empty one"
+        );
+
+        let len = shared.read().expect("poisoned").rope().len();
+        shared.write().expect("poisoned").edit(len..len, "zz\n");
+
+        let fresh_multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut fresh = DisplayMap::new(fresh_multi, test_executor(), crate::test_notify());
+        assert_eq!(
+            map.snapshot().line_count(),
+            fresh.snapshot().line_count(),
+            "the appended row reaches the incremental map too",
+        );
+    }
+
     /// An edit strictly inside a replacement's hidden rows leaves the block
     /// standing.
     ///
