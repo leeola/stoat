@@ -392,6 +392,75 @@ mod tests {
         );
     }
 
+    /// A forward search resumes from the byte after the cursor, which is inside
+    /// the character whenever the cursor sits on a multibyte one.
+    ///
+    /// The scan is handed that mid-character byte as its lower bound and still
+    /// reports the next match, rather than panicking on it or stepping over a
+    /// match to reach a boundary. Every other search test is ASCII, where the
+    /// byte after the cursor is always a character boundary and this cannot
+    /// come up.
+    #[test]
+    fn find_forward_resumes_from_inside_a_multibyte_character() {
+        let text = stoat_text::Rope::from("\u{FC}ber \u{FC}ber");
+        let regex = super::compile_cursor_regex("\u{FC}ber").expect("valid regex");
+
+        // The cursor is on the two-byte umlaut at 0, so the scan starts at 1.
+        assert_eq!(
+            super::find_forward(&regex, &text, 0),
+            Some(6),
+            "a start inside the umlaut still reaches the next match",
+        );
+        assert_eq!(
+            super::find_forward(&regex, &text, 6),
+            Some(0),
+            "and with nothing after it, wraps rather than stalling there",
+        );
+
+        // Four bytes wide, so the scan starts three bytes into the character.
+        let wide = stoat_text::Rope::from("\u{1F600}x\u{1F600}x");
+        let regex = super::compile_cursor_regex("x").expect("valid regex");
+        assert_eq!(super::find_forward(&regex, &wide, 0), Some(4));
+        assert_eq!(super::find_forward(&regex, &wide, 5), Some(9));
+    }
+
+    /// Case-insensitive search folds non-ASCII pairs, not just ASCII ones.
+    #[test]
+    fn find_forward_folds_non_ascii_case() {
+        let text = stoat_text::Rope::from("a\u{FC}b");
+        let regex = super::compile_cursor_regex("(?i)\u{DC}").expect("valid regex");
+        assert_eq!(
+            super::find_forward(&regex, &text, 0),
+            Some(1),
+            "an uppercase umlaut pattern matches the lowercase one",
+        );
+
+        let sensitive = super::compile_cursor_regex("\u{DC}").expect("valid regex");
+        assert_eq!(
+            super::find_forward(&sensitive, &text, 0),
+            None,
+            "and without the flag it does not, so the fold is what matched",
+        );
+    }
+
+    /// An empty pattern reports a character boundary, never a byte inside a
+    /// character.
+    ///
+    /// It matches everywhere, so the offset it reports is decided entirely by
+    /// where the scan is allowed to start. From a cursor on a multibyte
+    /// character that lower bound is mid-character, and what comes back is the
+    /// boundary after it.
+    #[test]
+    fn find_forward_with_an_empty_pattern_reports_a_boundary() {
+        let text = stoat_text::Rope::from("\u{FC}ber \u{FC}ber");
+        let regex = super::compile_cursor_regex("").expect("valid regex");
+        assert_eq!(
+            super::find_forward(&regex, &text, 0),
+            Some(2),
+            "the boundary after the umlaut, not the byte inside it",
+        );
+    }
+
     /// The reverse walk keeps only two candidates, so pin both the ordinary
     /// pick and the wrap-around against a buffer with matches either side of
     /// the cursor.
