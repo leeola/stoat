@@ -16,6 +16,14 @@ struct Globals {
     // Grid width, which vs_main divides the instance index by to recover the
     // cell coordinate. The cursor draw carries no grid and leaves it zero.
     cols: u32,
+    // Rows the instance buffer is rotated by, and the grid height that rotation
+    // wraps at. Display row r lives at slot (r + row_offset) % rows, so a
+    // scrolled frame moves this number rather than re-uploading every cell.
+    row_offset: u32,
+    rows: u32,
+    // Pads the pair above to a whole slot, keeping cursor_color 16-byte aligned.
+    pad0: u32,
+    pad1: u32,
     cursor_color: vec4<f32>,
 }
 
@@ -78,10 +86,14 @@ fn vs_main(
     // The instance stream is exactly row-major over the grid and both draws start
     // at instance zero, so the coordinate the quad needs is the index itself
     // rather than 8 bytes per cell uploaded to say the same thing.
-    let cell = vec2<f32>(
-        f32(instance_index % globals.cols),
-        f32(instance_index / globals.cols)
-    );
+    //
+    // The rows are rotated by row_offset, which is how a scroll costs an
+    // integer instead of a full re-upload. Slot s therefore holds the row
+    // s - row_offset, wrapped, which is the inverse of where a row is written.
+    let height = max(globals.rows, 1u);
+    let slot_row = instance_index / globals.cols;
+    let row = (slot_row + height - globals.row_offset % height) % height;
+    let cell = vec2<f32>(f32(instance_index % globals.cols), f32(row));
 
     // Snap each cell edge to a whole pixel so consecutive cells share an exact
     // integer boundary and each spans whole pixels, leaving no fractional sliver

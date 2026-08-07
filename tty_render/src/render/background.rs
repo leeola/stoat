@@ -5,7 +5,8 @@
 //! quad corners from the vertex index and the cell coordinate from the instance
 //! index, so the instance stream carries nothing but each cell's packed color.
 //! A uniform supplies the screen resolution, cell size, and column count used to
-//! map cells to clip space.
+//! map cells to clip space, along with the rotation a scrolled frame reads the
+//! rows through.
 //!
 //! [`Cell`]: stoatty_term::grid::Cell
 
@@ -49,11 +50,13 @@ const BG_GLOBALS_SLOTS: usize = GLOBALS_SLOTS + 1;
 
 /// One grid cell's background color, as the bytes the GPU normalizes.
 ///
-/// Carries no grid coordinate. The buffer is exactly row-major over the whole
-/// grid and both draws bind it from instance zero, so the shader recovers the
-/// coordinate by dividing the instance index by the column count. Every full or
-/// scrolled frame re-uploads the whole buffer, and a coordinate is the one thing
-/// in it the GPU can derive for free.
+/// Carries no grid coordinate. The buffer is row-major over the grid and both
+/// draws bind it from instance zero, so the shader recovers the coordinate by
+/// dividing the instance index by the column count. A coordinate is the one
+/// thing in the stream the GPU can derive for free.
+///
+/// Deriving it is also what lets a scroll rotate the rows rather than rewrite
+/// them, since an instance says nothing about where it sits.
 ///
 /// Alpha is always 255, since the cell fill is opaque. The field exists because
 /// a 3-byte vertex format is not one the GPU offers.
@@ -70,9 +73,10 @@ struct BgInstance {
 /// [TL, TR] then [BL, BR] in fractional cell coordinates), the cursor color,
 /// and the grid's eased vertical scroll offset in pixels.
 ///
-/// `scroll_y`, `panel_count`, `occlude_all`, and `cols` fill one 16-byte slot
-/// so the following `cursor_color` lands on the 16-byte offset the uniform
-/// layout requires. The `vec4` corner pairs already sit on 16-byte boundaries.
+/// `scroll_y`, `panel_count`, `occlude_all`, and `cols` fill one 16-byte slot,
+/// and the rotation pair with its padding fills another, so `cursor_color` lands
+/// on the 16-byte offset the uniform layout requires. The `vec4` corner pairs
+/// already sit on 16-byte boundaries.
 ///
 /// Two pipelines share this uniform, so each write site zeroes the fields its own
 /// pipeline does not read. `panel_count` and `occlude_all` are non-zero only on an
@@ -90,6 +94,13 @@ struct Globals {
     panel_count: u32,
     occlude_all: u32,
     cols: u32,
+    /// Rows the instance buffer is rotated by, and the grid height that rotation
+    /// wraps at. Display row `r` lives at slot `(r + row_offset) % rows`.
+    row_offset: u32,
+    rows: u32,
+    /// Pads the pair above to a whole slot, keeping `cursor_color` 16-byte
+    /// aligned the way the shader declares it.
+    pad: [u32; 2],
     cursor_color: [f32; 4],
 }
 
@@ -144,6 +155,12 @@ pub struct BackgroundPass {
     /// Scratch reused each frame to build the cell instances for upload, so a
     /// full rebuild, a damaged row, and a composite frame each allocate none.
     scratch: Vec<BgInstance>,
+    /// Rows the instance buffer is rotated by, so a scrolled frame moves this
+    /// rather than re-uploading every cell.
+    ///
+    /// Display row `r` lives at slot `(r + row_offset) % rows`. Reset wherever
+    /// the buffer is rebuilt whole, so the two cannot drift apart.
+    row_offset: u32,
 }
 
 impl BackgroundPass {
@@ -254,6 +271,7 @@ impl BackgroundPass {
             last_cursor_globals: None,
             metrics,
             scratch: Vec::new(),
+            row_offset: 0,
         }
     }
 
@@ -312,6 +330,31 @@ impl BackgroundPass {
         scrolled_rows: isize,
     ) {
         let cols = grid.cols();
+        let rows = grid.rows();
+        let total = rows * cols;
+
+        // A resize changes the cell count and a grow reallocates (dropping the
+        // buffer's contents), so both rebuild every cell; otherwise rewrite only
+        // the damaged rows. Each cell is one instance, so a row is a fixed slice
+        // of `cols` and can be patched in place.
+        //
+        // A scroll is not among the reasons to rebuild. The instance carries
+        // only a colour and the shader derives the cell from the instance index,
+        // so the rows are rotated under it instead. The scroll advances
+        // `row_offset` and only the rows it exposed are written.
+        let full =
+            matches!(damage, Damage::Full) || total != self.count as usize || total > self.capacity;
+
+        // Settled before the globals below, which carry the offset to the
+        // shader. Deciding it after them would leave the uniform describing a
+        // rotation the buffer no longer has, for one frame.
+        if full {
+            self.row_offset = 0;
+        } else if scrolled_rows != 0 && rows != 0 {
+            let advance = scrolled_rows.rem_euclid(rows as isize) as u32;
+            self.row_offset = (self.row_offset + advance) % rows as u32;
+        }
+
         let c = cursor.corners.unwrap_or([[0.0; 2]; 4]);
         let globals = Globals {
             resolution,
@@ -322,6 +365,9 @@ impl BackgroundPass {
             panel_count: 0,
             occlude_all: 0,
             cols: cols as u32,
+            row_offset: self.row_offset,
+            rows: grid.rows() as u32,
+            pad: [0; 2],
             cursor_color: [
                 cursor.color.r as f32 / 255.0,
                 cursor.color.g as f32 / 255.0,
@@ -342,21 +388,6 @@ impl BackgroundPass {
         );
         self.cursor_visible = cursor.corners.is_some();
 
-        let total = grid.rows() * cols;
-
-        // A resize changes the cell count and a grow reallocates (dropping the
-        // buffer's contents), so both rebuild every cell; otherwise rewrite only
-        // the damaged rows. Each cell is one instance, so row r is the fixed slice
-        // [r*cols, (r+1)*cols) and can be patched in place.
-        //
-        // A scroll rebuilds whole rather than sliding the buffer the way the
-        // glyph passes slide theirs. There is nothing here worth keeping: a
-        // background row is one colour lookup per cell, and every instance bakes
-        // its row, so a slide would have to rewrite the same bytes it moved.
-        let full = matches!(damage, Damage::Full)
-            || scrolled_rows != 0
-            || total != self.count as usize
-            || total > self.capacity;
         if full {
             self.scratch.clear();
             build_instances(grid, &mut self.scratch);
@@ -369,27 +400,28 @@ impl BackgroundPass {
                 self.instances = alloc_instances(device, self.capacity);
             }
             queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.scratch));
-        } else {
-            let rows = grid.rows();
-            let mut row = 0;
-            while row < rows {
-                if !damage.is_dirty(row) {
-                    row += 1;
-                    continue;
-                }
+            return;
+        }
 
-                // Contiguous dirty rows share one contiguous instance range, so
-                // build the whole run and upload it in a single write.
-                let start = row;
-                self.scratch.clear();
-                while row < rows && damage.is_dirty(row) {
-                    build_row_instances(grid, row, &mut self.scratch);
-                    row += 1;
-                }
-
-                let offset = (start * cols * size_of::<BgInstance>()) as u64;
-                queue.write_buffer(&self.instances, offset, bytemuck::cast_slice(&self.scratch));
+        // The rows a scroll kept already sit where the advanced offset points,
+        // which is the whole of what it costs. The ones it uncovered have no
+        // content behind them, and damage names those.
+        let mut row = 0;
+        while row < rows {
+            if !damage.is_dirty(row) {
+                row += 1;
+                continue;
             }
+
+            // Written one row at a time rather than in runs. A run of rows is
+            // contiguous on screen but wraps in the buffer, so the slice it
+            // would write is not one range once the rotation is past the end.
+            self.scratch.clear();
+            build_row_instances(grid, row, &mut self.scratch);
+            let slot = row_slot(row, self.row_offset, rows);
+            let offset = (slot * cols * size_of::<BgInstance>()) as u64;
+            queue.write_buffer(&self.instances, offset, bytemuck::cast_slice(&self.scratch));
+            row += 1;
         }
     }
 
@@ -444,6 +476,11 @@ impl BackgroundPass {
             panel_count,
             occlude_all,
             cols: grid.cols() as u32,
+            // A pool composite builds its instances fresh into its own buffer, so
+            // they are never rotated.
+            row_offset: 0,
+            rows: grid.rows() as u32,
+            pad: [0; 2],
             cursor_color: [0.0; 4],
         };
         queue.write_buffer(
@@ -497,8 +534,11 @@ impl BackgroundPass {
             scroll_y: grid_scroll * self.metrics.height,
             panel_count: 0,
             occlude_all: 0,
-            // Written by a cursor-only draw, which never reads it.
+            // Written by a cursor-only draw, which reads none of the three.
             cols: 0,
+            row_offset: 0,
+            rows: 0,
+            pad: [0; 2],
             cursor_color: [
                 cursor.color.r as f32 / 255.0,
                 cursor.color.g as f32 / 255.0,
@@ -669,6 +709,17 @@ fn build_cursor_pipeline(
     })
 }
 
+/// The instance-buffer slot holding display `row` of a grid `rows` tall.
+///
+/// The inverse of what the shader computes from a slot, so a row written where
+/// this says is the row read back there. A grid of no rows has no slots.
+fn row_slot(row: usize, row_offset: u32, rows: usize) -> usize {
+    if rows == 0 {
+        return 0;
+    }
+    (row + row_offset as usize) % rows
+}
+
 fn build_instances(grid: &Grid, out: &mut Vec<BgInstance>) {
     for row in 0..grid.rows() {
         build_row_instances(grid, row, out);
@@ -686,7 +737,7 @@ fn build_row_instances(grid: &Grid, row: usize, out: &mut Vec<BgInstance>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_instances, build_row_instances, BackgroundPass, BgInstance};
+    use super::{build_instances, build_row_instances, row_slot, BackgroundPass, BgInstance};
     use crate::{gpu::headless_device, render::CellMetrics};
     use stoatty_term::grid::{Flags, Grid, Rgb};
     use wgpu::{
@@ -696,6 +747,66 @@ mod tests {
         },
         TextureFormat,
     };
+
+    /// What `vs_main` computes from a slot, transcribed. A rotation is only
+    /// correct if writing through [`row_slot`] and reading through this round
+    /// trips, and nothing here runs the shader to find out.
+    fn shader_row(slot: usize, row_offset: u32, rows: usize) -> usize {
+        let height = rows.max(1);
+        (slot + height - row_offset as usize % height) % height
+    }
+
+    #[test]
+    fn a_row_is_read_back_from_the_slot_it_was_written_to() {
+        let rows = 5;
+        for row_offset in 0..(2 * rows as u32 + 3) {
+            let round_tripped: Vec<usize> = (0..rows)
+                .map(|row| shader_row(row_slot(row, row_offset, rows), row_offset, rows))
+                .collect();
+
+            assert_eq!(
+                round_tripped,
+                (0..rows).collect::<Vec<_>>(),
+                "at offset {row_offset} every row must land where the shader looks for it"
+            );
+        }
+    }
+
+    #[test]
+    fn every_slot_holds_exactly_one_row() {
+        let rows = 5;
+        for row_offset in 0..(2 * rows as u32 + 3) {
+            let mut slots: Vec<usize> = (0..rows)
+                .map(|row| row_slot(row, row_offset, rows))
+                .collect();
+            slots.sort_unstable();
+
+            assert_eq!(
+                slots,
+                (0..rows).collect::<Vec<_>>(),
+                "at offset {row_offset} the rows must cover the buffer without two sharing a slot"
+            );
+        }
+    }
+
+    /// The rows a scroll kept are already where the advanced offset looks for
+    /// them, which is what leaves only the exposed ones to write.
+    #[test]
+    fn a_scroll_leaves_the_rows_it_kept_where_the_shader_will_find_them() {
+        let rows = 5;
+        let scrolled = 2;
+        let before = 3;
+        let after = (before + scrolled) % rows as u32;
+
+        for row in 0..rows - scrolled as usize {
+            assert_eq!(
+                row_slot(row, after, rows),
+                row_slot(row + scrolled as usize, before, rows),
+                "row {row} after the scroll reads the slot row {} was written to",
+                row + scrolled as usize
+            );
+        }
+    }
 
     #[test]
     fn shader_is_valid_wgsl() {
