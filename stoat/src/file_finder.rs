@@ -2,12 +2,13 @@ use crate::{
     host::{FsHost, GitHost},
     input_view::{InputView, SubmitTarget},
     paths,
-    picker::{PathPicker, PreviewPolicy, Scan},
+    picker::{BaseId, PathPicker, PreviewPolicy, Scan},
     workspace::Workspace,
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::{
-    collections::BTreeMap,
+    collections::{hash_map::DefaultHasher, BTreeMap},
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
 };
 use stoat_scheduler::{Executor, Task};
@@ -126,6 +127,13 @@ pub struct FileFinder {
     pub(crate) scope: FinderScope,
     /// Absolute paths of currently-modified files. Re-queried on scope toggle.
     pub(crate) modified_paths: Vec<PathBuf>,
+    /// Which generation of [`Self::modified_paths`] and [`Self::buffer_paths`]
+    /// the pick list is looking at.
+    ///
+    /// Both lists are fixed between the moments they are replaced, so the
+    /// picker only has to be told when one is, and can otherwise keep the rows
+    /// it derived from them. Restamped wherever either is rebuilt.
+    base_generation: u64,
     /// Absolute paths of currently-open buffers. Captured once at open time;
     /// not re-queried on scope toggle.
     pub(crate) buffer_paths: Vec<PathBuf>,
@@ -153,6 +161,27 @@ pub struct FileFinder {
     pub(crate) content_size: (u16, u16),
 }
 
+/// Source tags for [`base_id`], so two scopes carrying the same generation
+/// never name each other's list.
+const MODIFIED_BASE: u8 = 0;
+const BUFFERS_BASE: u8 = 1;
+const NAMED_BASE: u8 = 2;
+
+/// Name a capped scope's candidate list for [`PathPicker::refilter_with_base`].
+///
+/// `source` says which list, and `generation` which build of it. Together they
+/// hold still for as long as the list does, which is what lets the picker keep
+/// the rows it derived from it across a keystroke.
+fn base_id(source: u8, generation: u64, len: usize) -> BaseId {
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    generation.hash(&mut hasher);
+    BaseId {
+        identity: hasher.finish(),
+        len,
+    }
+}
+
 /// The walked paths a named scope's globset accepted, and how much of the walk
 /// has been tested.
 ///
@@ -165,6 +194,12 @@ pub(crate) struct NamedCache {
     name: String,
     /// Paths accepted so far, in walk order.
     filtered: Vec<PathBuf>,
+    /// Which build of this cache [`Self::filtered`] belongs to.
+    ///
+    /// The list only ever grows within one build, so the pick list can hold the
+    /// rows it derived for it. A rebuild starts a different list under the same
+    /// scope name, and this is what says so.
+    epoch: u64,
     /// How many entries of the walk have been tested.
     ///
     /// Only meaningful while the walk grows by appending. A re-root clears the
@@ -203,6 +238,7 @@ impl FileFinder {
             scope: initial_scope,
             modified_paths,
             buffer_paths,
+            base_generation: crate::picker::next_generation(),
             core,
             browse: None,
             named_scopes: compile_named_scopes(finder_scopes),
@@ -259,6 +295,7 @@ impl FileFinder {
         // skips the git discover call.
         if next == FinderScope::Modified {
             self.modified_paths = query_modified(git_host, &self.core.git_root);
+            self.base_generation = crate::picker::next_generation();
         }
         self.scope = next;
         self.core.picklist.selected = 0;
@@ -315,14 +352,29 @@ impl FileFinder {
                 self.remeasure_content();
                 return pending;
             },
-            FinderScope::Modified => self.core.refilter_with_base(&text, &self.modified_paths),
-            FinderScope::Buffers => self.core.refilter_with_base(&text, &self.buffer_paths),
+            // The tag is what keeps two lists sharing the finder's generation
+            // from reading as each other. A scope flip invalidates, which alone
+            // would do it, but this does not depend on that.
+            FinderScope::Modified => {
+                let id = base_id(
+                    MODIFIED_BASE,
+                    self.base_generation,
+                    self.modified_paths.len(),
+                );
+                self.core
+                    .refilter_with_base(&text, &self.modified_paths, id);
+            },
+            FinderScope::Buffers => {
+                let id = base_id(BUFFERS_BASE, self.base_generation, self.buffer_paths.len());
+                self.core.refilter_with_base(&text, &self.buffer_paths, id);
+            },
             FinderScope::Named(name) => {
                 self.sync_named_cache(&name);
                 // `named_cache` and `core` are disjoint fields, so the matcher
                 // reads the cached base in place rather than cloning it.
                 if let Some(cache) = &self.named_cache {
-                    self.core.refilter_with_base(&text, &cache.filtered);
+                    let id = base_id(NAMED_BASE, cache.epoch, cache.filtered.len());
+                    self.core.refilter_with_base(&text, &cache.filtered, id);
                 }
             },
         }
@@ -371,6 +423,7 @@ impl FileFinder {
                 name: name.to_string(),
                 filtered: Vec::new(),
                 consumed: 0,
+                epoch: crate::picker::next_generation(),
             });
         }
 
@@ -816,6 +869,55 @@ mod tests {
         assert!(base.iter().any(|p| p.ends_with("c.rs")));
         assert!(!base.iter().any(|p| p.ends_with("b.rs")));
         assert_eq!(h.snapshot().mode, "insert");
+    }
+
+    /// A capped scope's base does not move between keystrokes, so the picker
+    /// has to be told that and keep what it derived from it. This fails if a
+    /// caller hands over a fresh identity per call, which is the whole of the
+    /// wiring the picker cannot check for itself.
+    #[test]
+    fn typing_in_a_capped_scope_keeps_the_display_cache() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(
+            &mut h,
+            &[("alpha.rs", "fn a() {}"), ("also_beta.rs", "fn b() {}")],
+        );
+        for rel in ["alpha.rs", "also_beta.rs"] {
+            crate::action_handlers::dispatch(
+                &mut h.stoat,
+                &stoat_action::OpenFile {
+                    path: root.join(rel),
+                },
+            );
+        }
+
+        h.type_keys("space b b");
+        h.type_text("a");
+        let built = {
+            let finder = h.stoat.file_finder.as_ref().expect("finder open");
+            assert_eq!(finder.scope(), &FinderScope::Buffers);
+            finder
+                .core
+                .picklist
+                .display
+                .as_ref()
+                .expect("a cache")
+                .generation
+        };
+
+        h.type_text("l");
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        assert_eq!(
+            finder
+                .core
+                .picklist
+                .display
+                .as_ref()
+                .expect("a cache")
+                .generation,
+            built,
+            "the second keystroke is over the base the first one was"
+        );
     }
 
     #[test]

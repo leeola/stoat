@@ -301,7 +301,22 @@ pub(crate) struct DisplayCache {
     /// the order an empty query lists them in.
     sorted: Vec<usize>,
     /// Bumped on each rebuild, so a test can tell a reuse from a rebuild.
-    generation: u64,
+    pub(crate) generation: u64,
+}
+
+/// Which caller-owned candidate set a [`PathPicker::refilter_with_base`] is over.
+///
+/// `identity` names the set. Two calls carrying the same one are over a base
+/// that has only been appended to since, which is what lets the rows already
+/// derived for it stand. Anything that can reorder or replace entries has to
+/// change it.
+///
+/// `len` is how long the set was, so the append is a tail to derive rather than
+/// a list to rebuild.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct BaseId {
+    pub(crate) identity: u64,
+    pub(crate) len: usize,
 }
 
 impl Default for PickList {
@@ -775,6 +790,13 @@ pub(crate) struct PathPicker {
     /// [`Self::all_paths`] already goes through. The callers that only truncate
     /// it are covered without that, the length no longer agreeing.
     synced_paths: Option<usize>,
+    /// The caller-owned base the last [`PathPicker::refilter_with_base`] was
+    /// over, so the next one can tell whether it is the same set.
+    ///
+    /// Dropped by [`PathPicker::invalidate`], which is what a scope flip and
+    /// every other real base change already go through, so a base swapped
+    /// underneath a stable identity cannot read as unchanged.
+    last_base: Option<BaseId>,
     pub(crate) preview: Preview,
 }
 
@@ -807,6 +829,7 @@ impl PathPicker {
             scan_pending: false,
             _scan_task: None,
             synced_paths: None,
+            last_base: None,
             preview,
         }
     }
@@ -860,6 +883,7 @@ impl PathPicker {
         self.last_filter_text.clear();
         self.filter_valid = false;
         self.synced_paths = None;
+        self.last_base = None;
         self.picklist.clear_results();
     }
 
@@ -1002,20 +1026,51 @@ impl PathPicker {
         }
     }
 
-    /// Refilter over a caller-owned `base` set. The query cache still applies,
-    /// so a caller that changes `base` under a stable query must
-    /// [`Self::invalidate`] first (the finder does this on a scope flip).
-    pub(crate) fn refilter_with_base(&mut self, query: &str, base: &[PathBuf]) {
+    /// Refilter over a caller-owned `base` set, which `id` names.
+    ///
+    /// A call carrying the identity the last one did is over the same set, so
+    /// the pick list keeps the display strings it derived and the rows its
+    /// previous query matched, and narrows those rather than rescoring the base.
+    /// An `id` whose length grew adopts the tail alone.
+    ///
+    /// The query cache still applies, so a caller that changes `base` under a
+    /// stable query must [`Self::invalidate`] first (the finder does this on a
+    /// scope flip).
+    pub(crate) fn refilter_with_base(&mut self, query: &str, base: &[PathBuf], id: BaseId) {
         if query == self.last_filter_text && self.filter_valid {
             return;
         }
 
+        self.adopt_base(base, id);
         // The pick list now holds a caller's set rather than a prefix of the
         // walk, so the next walk-fed refilter starts over.
-        self.picklist.set_base(base.to_vec());
         self.synced_paths = None;
 
         self.run_refilter(query);
+    }
+
+    /// Point the pick list at `base`, keeping whatever of it still applies.
+    ///
+    /// Replacing the base is what costs. The display strings are re-derived and
+    /// re-sorted per row, and the rows the previous query matched are forgotten,
+    /// so the next one rescores the whole set. An identity that has not moved
+    /// says none of that is needed.
+    fn adopt_base(&mut self, base: &[PathBuf], id: BaseId) {
+        let appended = self
+            .last_base
+            .is_some_and(|last| last.identity == id.identity && last.len <= id.len);
+
+        match appended {
+            true => {
+                let held = self.last_base.expect("appended implies one").len;
+                if held < id.len {
+                    self.picklist.extend_base(base[held..].iter().cloned());
+                }
+            },
+            false => self.picklist.set_base(base.to_vec()),
+        }
+
+        self.last_base = Some(id);
     }
 
     /// Run the matcher over whatever base the pick list now holds, and mark the
@@ -1953,6 +2008,85 @@ mod tests {
             "the batch extended the rows rather than rebuilding them"
         );
         assert_eq!(cache.rows.len(), 3, "and the arriving path has a row");
+    }
+
+    /// A capped scope hands over the same list on every keystroke, so what it
+    /// costs turns on whether the picker can tell. Rebuilding re-derives and
+    /// re-sorts a row per path and forgets what the shorter query matched.
+    #[test]
+    fn a_base_handed_over_again_keeps_the_display_cache() {
+        let mut h = crate::Stoat::test();
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        let mut picker = PathPicker::new(ws, executor, p("/repo"), None);
+
+        let base = vec![p("/repo/one.rs"), p("/repo/two.rs")];
+        let id = BaseId {
+            identity: 7,
+            len: base.len(),
+        };
+        picker.refilter_with_base("o", &base, id);
+        let built = picker
+            .picklist
+            .display
+            .as_ref()
+            .expect("a cache")
+            .generation;
+
+        picker.refilter_with_base("on", &base, id);
+        assert_eq!(
+            picker
+                .picklist
+                .display
+                .as_ref()
+                .expect("a cache")
+                .generation,
+            built,
+            "the same base is the same base, whatever the query did"
+        );
+
+        // The set grew, which is what a streaming named scope does between
+        // keystrokes. Its rows still describe what they described. A walk batch
+        // is what stales the results without touching anything else, and is why
+        // the unchanged query still reaches the base below.
+        let grown = vec![p("/repo/one.rs"), p("/repo/two.rs"), p("/repo/on_top.rs")];
+        picker.filter_valid = false;
+        picker.refilter_with_base(
+            "on",
+            &grown,
+            BaseId {
+                identity: 7,
+                len: grown.len(),
+            },
+        );
+        let cache = picker.picklist.display.as_ref().expect("a cache");
+        assert_eq!(
+            cache.generation, built,
+            "growing extended the rows rather than rebuilding them"
+        );
+        assert_eq!(cache.rows.len(), 3, "and the arriving path has a row");
+
+        // A different list under the same length, which is the case an identity
+        // exists to catch.
+        picker.filter_valid = false;
+        picker.refilter_with_base(
+            "on",
+            &grown,
+            BaseId {
+                identity: 8,
+                len: grown.len(),
+            },
+        );
+        assert_ne!(
+            picker
+                .picklist
+                .display
+                .as_ref()
+                .expect("a cache")
+                .generation,
+            built,
+            "a base that is not the one held has to be rebuilt"
+        );
     }
 
     /// A candidate set deeper than the eagerly indexed block, every row of which
