@@ -997,8 +997,17 @@ fn rows_covering_folds(folds: &SumTree<Fold>, rows: Range<u32>) -> Range<u32> {
     loop {
         let start = InlayPoint::new(rows.start, 0);
         let end = InlayPoint::new(rows.end, 0);
+        // A fold ending exactly at the span's start counts as touching it. It
+        // ends where the region begins rather than overlapping it, but the
+        // rebuild still has to own it whole. Left out, the prefix slice stops short
+        // of its placeholder and the gap fill re-emits its bytes as plain text,
+        // while the strict filters downstream decline to re-emit the fold.
+        // The totals balance either way, so nothing downstream would notice.
+        //
+        // Both tests have to allow it. The tree filter decides which folds the
+        // loop below ever sees.
         let mut cursor = folds.filter::<_, FoldStart>((), |summary| {
-            summary.max_end > start && summary.min_start < end
+            summary.max_end >= start && summary.min_start < end
         });
 
         let mut widened = rows.clone();
@@ -1006,7 +1015,7 @@ fn rows_covering_folds(folds: &SumTree<Fold>, rows: Range<u32>) -> Range<u32> {
             if fold.range.start >= end {
                 break;
             }
-            if fold.range.end > start {
+            if fold.range.end >= start {
                 widened.start = widened.start.min(fold.range.start.row());
                 widened.end = widened.end.max(fold.range.end.row() + 1);
             }
@@ -1960,6 +1969,59 @@ mod tests {
         let (inlay_snap1, inlay_edits) = inlay_map.sync(snap1, &buffer_edits);
         let (fold_snap1, _) = fold_map.sync(inlay_snap1, &inlay_edits);
         (fold_snap1, new_len)
+    }
+
+    /// A fold whose end sits on the first row a rebuild touches survives it.
+    ///
+    /// The rebuild span is widened so no fold is cut in half, since a fold is
+    /// one transform. A fold ending exactly at the span's start row is the case
+    /// the widening has to reach and the one it is easiest to miss, because the
+    /// fold ends where the region begins rather than overlapping it. Missing it
+    /// re-emits the folded bytes as ordinary text while the fold is still in the
+    /// set, and the byte totals balance either way, so nothing else notices.
+    #[test]
+    fn a_fold_ending_on_the_rebuilt_rows_survives_an_edit_there() {
+        let content = "aaaa\nbbbb\ncccc\ndddd\n";
+        let buffer = TextBuffer::with_text(BufferId::new(0), content);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let snap0 = multi_buffer.snapshot();
+
+        let fold_range = |snap: &crate::MultiBufferSnapshot| {
+            let start = snap.rope().point_to_offset(stoat_text::Point::new(0, 3));
+            let end = snap.rope().point_to_offset(stoat_text::Point::new(2, 0));
+            snap.anchor_at(start, Bias::Right)..snap.anchor_at(end, Bias::Left)
+        };
+
+        let (mut inlay_map, inlay_snap0) = InlayMap::new(snap0.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snap0.clone());
+        fold_map.fold(vec![fold_range(&snap0)], FoldPlaceholder::default(), &snap0);
+        fold_map.sync(inlay_snap0, &Patch::empty());
+
+        // A same-size edit on row 2, the row the fold ends at, so the rebuild
+        // span starts exactly where the fold stops.
+        let at = snap0.rope().point_to_offset(stoat_text::Point::new(2, 1));
+        shared.write().expect("poisoned").edit(at..at + 1, "X");
+
+        let after = multi_buffer.snapshot();
+        let buffer_edits = after.edits_since(snap0.version());
+        let (inlay_snap1, inlay_edits) = inlay_map.sync(after.clone(), &buffer_edits);
+        let (patched, _) = fold_map.sync(inlay_snap1, &inlay_edits);
+
+        // The same fold over the same final text, with nothing to patch against.
+        let (_, fresh_inlay) = InlayMap::new(after.clone());
+        let (mut fresh_map, _) = FoldMap::new(fresh_inlay.clone());
+        fresh_map.fold(vec![fold_range(&after)], FoldPlaceholder::default(), &after);
+        let (fresh, _) = fresh_map.sync(fresh_inlay, &Patch::empty());
+
+        let rows = |snap: &super::FoldSnapshot| -> Vec<String> {
+            (0..snap.line_count()).map(|r| snap.fold_line(r)).collect()
+        };
+        assert_eq!(
+            rows(&patched),
+            rows(&fresh),
+            "the fold stays folded rather than being repainted as plain text",
+        );
     }
 
     #[test]
