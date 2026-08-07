@@ -562,13 +562,19 @@ fn splice_patch(mut offsets: Vec<usize>, text_len: usize) -> Patch<usize> {
 }
 
 /// Carry each offset in `offsets` across `edits`, flagging in `needs_resolve`
-/// the ones that land inside an edit's replaced range.
+/// the ones an edit could have moved in a way the arithmetic cannot predict.
 ///
 /// One forward pass over both ascending sequences, rather than re-shifting the
 /// whole trailing slice once per edit. An offset ends up carrying the summed
-/// delta of every edit it sits at or after, including one that lands inside an
-/// edit. Those are additionally flagged, and the caller re-resolves them from
-/// their anchors, so their carried value is overwritten rather than used.
+/// delta of every edit it sits at or after.
+///
+/// An edit's boundaries count as ambiguous, not only its interior. An inlay's
+/// anchor is biased, and a `Bias::Left` one -- which is what LSP hints use --
+/// stays put when an insertion lands exactly on it, while the carry would push
+/// it along by the inserted length. Flagging it sends it back to its anchor,
+/// which is the only thing that knows. The carried value of a flagged offset is
+/// overwritten rather than used, so being conservative here costs a resolve and
+/// nothing else.
 ///
 /// `offsets` must be ascending, which is the order the inlay set is kept in.
 fn shift_offsets(offsets: &mut [usize], needs_resolve: &mut [bool], edits: &Patch<usize>) {
@@ -579,7 +585,7 @@ fn shift_offsets(offsets: &mut [usize], needs_resolve: &mut [bool], edits: &Patc
             offsets[i] = ((offsets[i] as isize) + delta).max(0) as usize;
             i += 1;
         }
-        while i < offsets.len() && offsets[i] < edit.old.end {
+        while i < offsets.len() && offsets[i] <= edit.old.end {
             offsets[i] = ((offsets[i] as isize) + delta).max(0) as usize;
             needs_resolve[i] = true;
             i += 1;
@@ -1479,6 +1485,52 @@ mod tests {
     /// A splice now patches the rows it touched rather than rebuilding, so the
     /// patched text has to be held against what a rebuild produces. A dropped
     /// hint and one left beside its replacement both read as ordinary text.
+    /// An insertion landing exactly on a left-biased hint leaves the hint where
+    /// its anchor is.
+    ///
+    /// An insertion's replaced range is empty, so an offset sitting on it is
+    /// neither before the edit nor strictly inside it, and the carry pushes it
+    /// right by the inserted length unflagged. A `Bias::Left` anchor does not
+    /// move, which is the bias LSP hints use, so the carried position and the
+    /// anchor disagree and the hint renders in the wrong place until something
+    /// forces a full resolve.
+    #[test]
+    fn an_insertion_on_a_left_biased_hint_does_not_drag_it() {
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "let x = 5;",
+        )));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let before = multi_buffer.snapshot();
+
+        let hint = (
+            before.anchor_at(5, Bias::Left),
+            ": i32".to_string(),
+            super::InlayKind::Hint,
+        );
+
+        let mut patched = InlayMap::new(before.clone()).0;
+        patched.splice(&before, Vec::new(), vec![hint.clone()]);
+        patched.sync(before.clone(), &Patch::empty());
+
+        shared.write().expect("poisoned").edit(5..5, "y");
+        let after = multi_buffer.snapshot();
+        let edits = after.edits_since(before.version());
+        let (patched_snapshot, _) = patched.sync(after.clone(), &edits);
+
+        // The same hint anchor, resolved against the edited buffer with nothing
+        // to carry forward.
+        let mut rebuilt = InlayMap::new(after.clone()).0;
+        rebuilt.splice(&after, Vec::new(), vec![hint]);
+        let (rebuilt_snapshot, _) = rebuilt.sync(after, &Patch::empty());
+
+        assert_eq!(
+            painted_text(&patched_snapshot),
+            painted_text(&rebuilt_snapshot),
+            "the carried hint must sit where its anchor resolves",
+        );
+    }
+
     #[test]
     fn a_spliced_sync_agrees_with_a_full_rebuild() {
         let buffer = TextBuffer::with_text(BufferId::new(0), "alpha beta\ngamma delta\nepsilon");
@@ -1769,6 +1821,9 @@ mod tests {
     /// then. An offset therefore takes that difference from the last edit it
     /// sits past, and nothing from the ones before, which is what makes this an
     /// answer rather than a second copy of the walk.
+    ///
+    /// An offset sitting exactly on an edit's end is flagged rather than shifted,
+    /// since a biased anchor there may not have moved with the text.
     fn shift_offsets_per_edit(
         offsets: &mut [usize],
         needs_resolve: &mut [bool],
@@ -1777,7 +1832,7 @@ mod tests {
         for (i, offset) in offsets.iter_mut().enumerate() {
             let mut delta = 0isize;
             for edit in edits {
-                if *offset >= edit.old.end {
+                if *offset > edit.old.end {
                     delta = (edit.new.end as isize) - (edit.old.end as isize);
                 } else if *offset >= edit.old.start {
                     needs_resolve[i] = true;
@@ -1804,19 +1859,25 @@ mod tests {
         // 5..8 shrinks to 2 bytes, so everything past it stands at -1. The
         // insert's new range, 19..24, is already stated with that -1 applied,
         // so its own ends give +4 as the total and not as a further step.
+        //
+        // The two offsets on an edit boundary, 8 and 20, are flagged, and a
+        // flagged offset's value is a byproduct rather than an answer: the
+        // caller re-resolves it from its anchor. They are asserted anyway so the
+        // walk stays pinned end to end.
         let edits = Patch::new(vec![edit(5..8, 5..7), edit(20..20, 19..24)]);
         let offsets = [0, 4, 5, 7, 8, 12, 20, 30];
         let (mine, _) = both_shifts(&offsets, &edits);
 
         assert_eq!(
             mine.0,
-            vec![0, 4, 5, 7, 7, 11, 24, 34],
+            vec![0, 4, 5, 7, 8, 11, 19, 34],
             "before the first edit unshifted, after it -1, and past the insert +4",
         );
         assert_eq!(
             mine.1,
-            vec![false, false, true, true, false, false, false, false],
-            "only the offsets inside 5..8 are flagged for re-resolution",
+            vec![false, false, true, true, true, false, true, false],
+            "the offsets 5..8 reaches, boundary included, plus the one the \
+             insertion lands exactly on",
         );
     }
 
