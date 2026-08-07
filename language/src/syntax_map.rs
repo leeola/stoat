@@ -450,15 +450,7 @@ impl SyntaxMap {
         // so the clock decides which of the two happened.
         let out_of_time = || deadline.is_some_and(|(dl, executor)| executor.now() >= dl);
 
-        // A combined injection is one layer over several host ranges, so a walk
-        // that re-found only the ranges inside the filter would install a layer
-        // covering less text than it should, and the carry below would decline
-        // to restore the fuller one it replaced. Absorbing every prior layer the
-        // filter touches makes the walk re-find each of them whole.
-        let expanded_filter = injection_filter_ranges
-            .filter(|ranges| !ranges.is_empty())
-            .map(|ranges| absorb_prior_layers(ranges, &prior_injections));
-        let injection_filter_ranges = expanded_filter.as_deref();
+        let injection_filter_ranges = injection_filter_ranges.filter(|ranges| !ranges.is_empty());
 
         // Where this walk moved the layer set, for a caller narrowing its own
         // work to the ranges a restyle could have reached.
@@ -608,7 +600,49 @@ impl SyntaxMap {
             }
             drop(cursor);
 
-            for (_, (inner_lang, ranges)) in grouped {
+            for (_, (inner_lang, mut ranges)) in grouped {
+                // A filtered walk queried only the host nodes near the edit, so
+                // the ranges it found are the whole layer only by accident. The
+                // rest are recovered from the prior layer's tree, whose included
+                // ranges `SyntaxMap::interpolate` has already shifted into
+                // current coordinates.
+                //
+                // This has to happen before the combined test below, because
+                // that test reads how many host ranges this language has and a
+                // filtered walk sees only the ones it visited. Splicing after it
+                // would send a combined layer down the single-range path the one
+                // time the edit touched one of its nodes.
+                //
+                // Anything the filter reached was re-walked and the fresh answer
+                // stands there, so only untouched ranges carry over.
+                if let Some(filter) = injection_filter_ranges {
+                    let found_start = ranges.iter().map(|r| r.start).min().unwrap_or(0);
+                    let found_end = ranges.iter().map(|r| r.end).max().unwrap_or(0);
+                    let prior = prior_injections.iter().find(|p| {
+                        p.depth == parent_depth + 1
+                            && p.language.name == inner_lang.name
+                            && (p.start_offset as usize) < found_end
+                            && found_start < p.end_offset as usize
+                    });
+                    if let Some(prior) = prior {
+                        ranges.extend(
+                            prior
+                                .tree
+                                .included_ranges()
+                                .into_iter()
+                                .map(|r| r.start_byte..r.end_byte)
+                                .filter(|r| {
+                                    !r.is_empty()
+                                        && !filter
+                                            .iter()
+                                            .any(|f| r.start < f.end && f.start < r.end)
+                                }),
+                        );
+                        ranges.sort_by_key(|r| r.start);
+                        merge_ranges(&mut ranges);
+                    }
+                }
+
                 // Combined injections: if more than one host range,
                 // merge them into a single tree via set_included_ranges.
                 // For a single range we still produce one layer (the
@@ -648,8 +682,8 @@ impl SyntaxMap {
                     // Combined: parse all ranges as one tree.
                     let mut sorted = ranges;
                     sorted.sort_by_key(|r| r.start);
-                    let merged_start = sorted.first().map(|r| r.start).unwrap_or(0);
-                    let merged_end = sorted.last().map(|r| r.end).unwrap_or(0);
+                    let found_start = sorted.first().map(|r| r.start).unwrap_or(0);
+                    let found_end = sorted.last().map(|r| r.end).unwrap_or(0);
 
                     // A combined layer's bounds move whenever a host range is
                     // added or dropped, so it is matched by overlap rather than
@@ -659,9 +693,12 @@ impl SyntaxMap {
                     let prior = prior_injections.iter().find(|p| {
                         p.depth == parent_depth + 1
                             && p.language.name == inner_lang.name
-                            && (p.start_offset as usize) < merged_end
-                            && merged_start < p.end_offset as usize
+                            && (p.start_offset as usize) < found_end
+                            && found_start < p.end_offset as usize
                     });
+
+                    let merged_start = found_start;
+                    let merged_end = found_end;
                     let Some(inner_tree) = parse_rope_combined_ranges(
                         &inner_lang,
                         rope,
@@ -752,42 +789,6 @@ fn record_layer_change(
                 .map(|r| r.start_byte..r.end_byte),
         ),
         None => changes.push(span.clone()),
-    }
-}
-
-/// Grow `filter` to swallow every prior layer it touches, whole.
-///
-/// A layer is the unit a walk can re-find, not a set of bytes. A combined
-/// injection merges several host ranges into one tree, and re-finding a subset
-/// of them yields a layer that is wrong rather than one that is smaller. A
-/// filter reaching any part of such a layer therefore has to reach all of it.
-///
-/// Swallowing one layer can put the filter in contact with another, so this
-/// settles rather than passing once. Each layer is swallowed at most once,
-/// which is what bounds it.
-fn absorb_prior_layers(filter: &[Range<usize>], prior: &[PriorInjection]) -> Vec<Range<usize>> {
-    let overlaps = |a: &Range<usize>, b: &Range<usize>| a.start < b.end && b.start < a.end;
-    let mut ranges: Vec<Range<usize>> = filter.to_vec();
-    let mut absorbed = vec![false; prior.len()];
-
-    loop {
-        let mut grew = false;
-        for (ix, layer) in prior.iter().enumerate() {
-            let span = layer.start_offset as usize..layer.end_offset as usize;
-            if absorbed[ix] || span.is_empty() {
-                continue;
-            }
-            if ranges.iter().any(|r| overlaps(&span, r)) {
-                ranges.push(span);
-                absorbed[ix] = true;
-                grew = true;
-            }
-        }
-        if !grew {
-            return ranges;
-        }
-        ranges.sort_unstable_by_key(|r| r.start);
-        merge_ranges(&mut ranges);
     }
 }
 
@@ -886,7 +887,26 @@ fn carry_unvisited_injections(
             continue;
         }
 
-        if filter.iter().any(|r| overlaps(span.clone(), r)) {
+        // A combined layer's extent runs from its first host node to its last,
+        // with text between them that it does not cover. Testing the extent
+        // would call it re-walked for an edit in one of those gaps, which the
+        // walk never queried, so the host ranges themselves are what decide.
+        // For a single-range layer they clamp back to the extent.
+        let host_ranges: Vec<Range<usize>> = layer
+            .tree
+            .included_ranges()
+            .into_iter()
+            .map(|r| r.start_byte.max(span.start)..r.end_byte.min(span.end))
+            .filter(|r| !r.is_empty())
+            .collect();
+        let walked = if host_ranges.is_empty() {
+            filter.iter().any(|r| overlaps(span.clone(), r))
+        } else {
+            host_ranges
+                .iter()
+                .any(|h| filter.iter().any(|r| overlaps(h.clone(), r)))
+        };
+        if walked {
             layer_changes.push(span);
             continue;
         }
@@ -1180,6 +1200,77 @@ mod tests {
         }];
 
         map.interpolate(&edits, &old_rope, &new_rope);
+        #[allow(clippy::single_range_in_vec_init)]
+        let changed = vec![at..(at + inserted.len())];
+        map.reparse_within_changed_ranges(&new_rope, lang.clone(), 2, Some(&changed), None, None)
+            .unwrap();
+
+        let mut fresh = SyntaxMap::new();
+        fresh.reparse(&new_rope, lang, 2, None, None).unwrap();
+        assert_eq!(layers(&map), layers(&fresh));
+    }
+
+    /// A filtered reparse of a combined layer lands on the same layer set a
+    /// from-scratch parse does.
+    ///
+    /// The walk queries only the edited region, so it re-finds one of the
+    /// layer's host nodes and recovers the rest from the prior tree. Getting
+    /// that splice wrong shows up either as a layer built over too few ranges,
+    /// which the s-expression comparison catches, or as one whose bounds no
+    /// longer describe the text under it.
+    #[test]
+    fn a_filtered_reparse_of_a_combined_layer_matches_a_full_parse() {
+        use stoat_text::patch::Edit as PatchEdit;
+        let lang = rust_lang();
+        let original: String = (0..8)
+            .map(|i| format!("/// doc {i} with **bold** text\nfn f{i}() {{ {i} }}\n\n"))
+            .collect();
+        let old_rope = Rope::from(original.as_str());
+
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
+        let layers = |map: &SyntaxMap| -> Vec<(u32, u32, u32, &'static str, String)> {
+            map.snapshot()
+                .iter_layers()
+                .map(|l| {
+                    (
+                        l.depth,
+                        l.start_offset,
+                        l.end_offset,
+                        l.language.name,
+                        l.tree.root_node().to_sexp(),
+                    )
+                })
+                .collect()
+        };
+        let combined_ranges = map
+            .snapshot()
+            .iter_layers()
+            .find(|l| l.depth == 1 && l.language.name == "markdown")
+            .map(|l| l.tree.included_ranges().len())
+            .expect("a depth-1 markdown layer");
+        assert!(
+            combined_ranges > 4,
+            "the fixture must merge many host ranges into one layer, got {combined_ranges}",
+        );
+
+        // An edit in the middle doc comment, so the splice has untouched ranges
+        // to recover on both sides of the filter.
+        let at = original.find("doc 4").expect("fixture has doc 4") + "doc ".len();
+        let inserted = "number ";
+        let mut text = String::from(&original[..at]);
+        text.push_str(inserted);
+        text.push_str(&original[at..]);
+        let new_rope = Rope::from(text.as_str());
+
+        map.interpolate(
+            &[PatchEdit {
+                old: at..at,
+                new: at..(at + inserted.len()),
+            }],
+            &old_rope,
+            &new_rope,
+        );
         #[allow(clippy::single_range_in_vec_init)]
         let changed = vec![at..(at + inserted.len())];
         map.reparse_within_changed_ranges(&new_rope, lang.clone(), 2, Some(&changed), None, None)
@@ -2000,36 +2091,6 @@ mod tests {
             shapes(&map),
             shapes(&fresh),
             "and must land on the same layers a from-scratch parse would"
-        );
-    }
-
-    #[test]
-    fn absorbing_one_layer_can_reach_a_layer_the_filter_did_not() {
-        // Swallowing a layer widens the filter, and the wider filter can land on
-        // a layer the original missed. That second layer has to come in whole
-        // too, so the absorption settles rather than passing once.
-        //
-        // The chain only needs the extra round when it runs backwards through
-        // the prior list, since a single pass grows its range list as it goes
-        // and would pick up anything still ahead of it. The far layer is first
-        // here for that reason.
-        let lang = rust_lang();
-        let tree = crate::parse(&lang, "fn a() {}", None).expect("parse");
-        let prior = |start: u32, end: u32| PriorInjection {
-            depth: 1,
-            start_offset: start,
-            end_offset: end,
-            language: lang.clone(),
-            tree: tree.clone(),
-        };
-
-        #[allow(clippy::single_range_in_vec_init)]
-        let filter = vec![0..1];
-        let absorbed = absorb_prior_layers(&filter, &[prior(10, 30), prior(0, 15)]);
-        assert_eq!(
-            absorbed,
-            vec![0..30],
-            "the layer reached only after the first was swallowed must come in too"
         );
     }
 
