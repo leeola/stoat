@@ -2347,6 +2347,31 @@ mod tests {
     }
 
     #[test]
+    fn an_unfold_that_removes_nothing_costs_no_wrap_rebuild() {
+        // What the version bump actually buys downstream. A fold-version change
+        // with no text edit alongside is WrapMap::sync's whole-file rebuild
+        // condition, and the whole-range patch it emits invalidates the block
+        // map and every render cache below it.
+        let mut display_map = create_display_map("line0\nline1\nline2\nline3");
+        let _ = display_map.snapshot();
+
+        display_map.unfold(vec![Point::new(0, 0)..Point::new(3, 5)]);
+        let (_, wrap_edits, _, _) = display_map.sync_through_wrap();
+        assert!(
+            wrap_edits.is_empty(),
+            "no fold was there to remove: {:?}",
+            wrap_edits.edits(),
+        );
+
+        // The same call after a fold that does land reports the rebuild, so the
+        // emptiness above is the unfold being a no-op rather than this sync
+        // never reporting anything.
+        display_map.fold(vec![Point::new(2, 0)..Point::new(2, 5)]);
+        let (_, wrap_edits, _, _) = display_map.sync_through_wrap();
+        assert!(!wrap_edits.is_empty(), "a fold that lands rebuilds");
+    }
+
+    #[test]
     fn longest_row_no_blocks() {
         let mut display_map = create_display_map("short\nlonger line\nx");
         let snapshot = display_map.snapshot();

@@ -515,6 +515,13 @@ impl FoldMap {
         let new_ids: Vec<FoldId> = new_folds.iter().map(|f| f.id).collect();
         new_folds.sort_by_key(|f| f.resolved_start);
 
+        // A version that moved with the fold set unchanged reaches WrapMap::sync
+        // as a change with no text edit, which is its whole-file rebuild
+        // condition. Folding nothing must not cost that.
+        if new_folds.is_empty() {
+            return new_ids;
+        }
+
         let edits: Vec<Edit<AnchoredFold>> = new_folds.into_iter().map(Edit::Insert).collect();
         self.folds.edit(edits, ());
 
@@ -525,14 +532,24 @@ impl FoldMap {
     pub fn unfold(&mut self, ranges: Vec<Range<usize>>, buffer_snapshot: &MultiBufferSnapshot) {
         let resolve = |a: &Anchor| buffer_snapshot.resolve_anchor(a);
         let mut new_folds = SumTree::default();
+        let mut removed_any = false;
         for fold in self.folds.iter() {
-            if !ranges
+            if ranges
                 .iter()
                 .any(|r| fold.range.overlaps_range(r, &resolve))
             {
+                removed_any = true;
+            } else {
                 new_folds.push(fold.clone(), ());
             }
         }
+
+        // Unfolding nothing has to leave the version alone, or WrapMap::sync
+        // reads a change with no text edit and rebuilds the whole file for it.
+        if !removed_any {
+            return;
+        }
+
         self.folds = new_folds;
         self.version += 1;
     }
@@ -2995,6 +3012,82 @@ mod tests {
             resync(&mut inlay_map, &mut fold_map),
             "abc...def",
             "and the fold comes back with the text",
+        );
+    }
+
+    #[test]
+    fn a_fold_operation_that_changes_nothing_leaves_the_version_alone() {
+        // The version is what WrapMap::sync reads, and a change it sees with no
+        // text edit alongside is its whole-file rebuild condition. Moving it for
+        // a fold that folded nothing costs that rebuild for no reason.
+        let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\nline3");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+        let snap = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(snap.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot);
+
+        let at_start = fold_map.version;
+        fold_map.fold(Vec::new(), FoldPlaceholder::default(), &snap);
+        assert_eq!(
+            fold_map.version, at_start,
+            "folding no ranges folds nothing"
+        );
+
+        #[allow(clippy::single_range_in_vec_init)]
+        fold_map.unfold(vec![0..snap.rope().len()], &snap);
+        assert_eq!(
+            fold_map.version, at_start,
+            "and unfolding a buffer that holds no folds removes nothing",
+        );
+
+        // A real fold moves it, so the checks above are not passing on a version
+        // that simply never moves.
+        let start_off = snap.rope().point_to_offset(stoat_text::Point::new(2, 0));
+        let end_off = snap.rope().point_to_offset(stoat_text::Point::new(2, 5));
+        fold_map.fold(
+            vec![snap.anchor_at(start_off, Bias::Right)..snap.anchor_at(end_off, Bias::Left)],
+            FoldPlaceholder::default(),
+            &snap,
+        );
+        let after_fold = fold_map.version;
+        assert_ne!(after_fold, at_start, "a fold that lands is a change");
+
+        #[allow(clippy::single_range_in_vec_init)]
+        fold_map.unfold(vec![start_off..end_off], &snap);
+        assert_ne!(fold_map.version, after_fold, "and so is removing it");
+    }
+
+    #[test]
+    fn an_unfold_that_misses_every_fold_leaves_the_version_alone() {
+        // Distinct from unfolding an empty set. Folds exist here, the ranges
+        // just do not reach them, so the filter retains all of them.
+        let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\nline3");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+        let snap = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(snap.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot);
+
+        let start_off = snap.rope().point_to_offset(stoat_text::Point::new(2, 0));
+        let end_off = snap.rope().point_to_offset(stoat_text::Point::new(2, 5));
+        fold_map.fold(
+            vec![snap.anchor_at(start_off, Bias::Right)..snap.anchor_at(end_off, Bias::Left)],
+            FoldPlaceholder::default(),
+            &snap,
+        );
+
+        let after_fold = fold_map.version;
+        let row0 = snap.rope().point_to_offset(stoat_text::Point::new(0, 0));
+        let row0_end = snap.rope().point_to_offset(stoat_text::Point::new(0, 5));
+        #[allow(clippy::single_range_in_vec_init)]
+        fold_map.unfold(vec![row0..row0_end], &snap);
+
+        assert_eq!(
+            fold_map.version, after_fold,
+            "row 0 holds no fold, so the one on row 2 is retained and nothing changed",
         );
     }
 
