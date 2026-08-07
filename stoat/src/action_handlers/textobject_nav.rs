@@ -61,7 +61,8 @@ pub(crate) fn goto_textobject(
         (buffer_id, cursor)
     };
 
-    let starts = collect_capture_starts_for_buffer(ws, buffer_id, cursor, kind.capture_name());
+    let starts =
+        collect_capture_starts_for_buffer(ws, buffer_id, cursor, kind.capture_name(), direction);
     let target = match direction {
         NavDirection::Next => starts.into_iter().find(|&s| s > cursor),
         NavDirection::Prev => starts.into_iter().rev().find(|&s| s < cursor),
@@ -78,6 +79,7 @@ fn collect_capture_starts_for_buffer(
     buffer_id: crate::buffer::BufferId,
     cursor: usize,
     capture_name: &str,
+    direction: NavDirection,
 ) -> Vec<usize> {
     let Some(syntax_map) = ws.buffers.syntax_map(buffer_id) else {
         return Vec::new();
@@ -109,11 +111,20 @@ fn collect_capture_starts_for_buffer(
     let Ok(guard) = buffer.read() else {
         return Vec::new();
     };
+    // Only starts past the cursor answer a forward seek, and only starts before
+    // it answer a backward one, so the other side of the buffer need not be
+    // visited. The enclosing matches each half also returns are dropped by the
+    // caller's comparison, as they were when the whole file was scanned.
+    let bytes = match direction {
+        NavDirection::Next => cursor..guard.rope().len(),
+        NavDirection::Prev => 0..cursor + 1,
+    };
     stoat_language::collect_capture_starts(
         query,
         layer.tree.root_node(),
         guard.rope(),
         capture_name,
+        bytes,
     )
 }
 
