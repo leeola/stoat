@@ -1329,8 +1329,19 @@ fn slice_chunk_to_window<'a>(
             col = next_col;
             continue;
         }
+        // A zero-width char sits at the column the char before it ended on, so
+        // at a row's end it belongs to this row rather than the next. Cutting
+        // here would also carry it into the remainder, where the next row's
+        // start test skips it as already behind.
+        let past_end = |end: u32| {
+            if char_width == 0 {
+                col > end
+            } else {
+                col >= end
+            }
+        };
         if let Some(end) = state.target_end
-            && col >= end
+            && past_end(end)
         {
             byte_end = byte_idx;
             state.done = true;
@@ -1586,6 +1597,53 @@ mod tests {
         assert_eq!(snap.line_count(), 2);
         assert_eq!(snap.line_len(0), 4);
         assert_eq!(snap.line_len(1), 1);
+    }
+
+    /// A combining mark landing on the wrap break rides with its base
+    /// character rather than falling between the two rows.
+    ///
+    /// It has zero width, so it sits at the column its base character ended on,
+    /// which is the first row's end and the second row's start. A bound that
+    /// treats that column as belonging to the next row cuts it from the first,
+    /// and the next row's start test then skips it as already behind, so it is
+    /// painted nowhere.
+    #[test]
+    fn a_combining_mark_on_the_wrap_break_stays_with_its_base() {
+        let snap = make_snapshot("aaaae\u{301}bbb", Some(5));
+        assert_eq!(snap.line_count(), 2);
+        assert_eq!(
+            snap.display_line(0),
+            "aaaae\u{301}",
+            "the accent belongs to the e that ends the row",
+        );
+        assert_eq!(snap.display_line(1), "bbb");
+        assert_eq!(
+            format!("{}{}", snap.display_line(0), snap.display_line(1)),
+            "aaaae\u{301}bbb",
+            "and the rows together are still the source text",
+        );
+    }
+
+    /// The chunk stream places the mark the same way the row text does.
+    ///
+    /// Row text and chunks are sliced by separate code with the same bound, so
+    /// they can disagree about which row the mark lands on. A stream that cut
+    /// it at the break would also carry it into the next row's remainder, where
+    /// that row's start test drops it.
+    #[test]
+    fn chunks_agree_with_the_row_text_about_a_mark_on_the_break() {
+        let snap = make_snapshot("aaaae\u{301}bbb", Some(5));
+        let endpoints: Arc<[_]> = Arc::from(Vec::new());
+
+        for row in 0..snap.line_count() {
+            let chunks: Vec<_> = snap.chunks(row..row + 1, endpoints.clone()).collect();
+            let recovered: String = chunks.iter().flat_map(|c| c.text.chars()).collect();
+            assert_eq!(
+                recovered,
+                snap.display_line(row),
+                "row {row}'s chunks reconstruct its text",
+            );
+        }
     }
 
     #[test]

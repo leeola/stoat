@@ -274,8 +274,20 @@ impl TabSnapshot {
                 column = next_column;
                 continue;
             }
+            // A zero-width char has no column of its own. It sits at the column
+            // the char before it ended on, which at a wrap break is this row's
+            // end, so cutting there would hand it to the next row while its base
+            // char stays here. The next row's start test then skips it as
+            // already behind, and it is painted nowhere.
+            let past_end = |end: u32| {
+                if width == 0 {
+                    column > end
+                } else {
+                    column >= end
+                }
+            };
             if let Some(end) = end_col
-                && column >= end
+                && past_end(end)
             {
                 break;
             }
