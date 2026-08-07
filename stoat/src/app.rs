@@ -7151,18 +7151,7 @@ impl Stoat {
         };
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        editor.selections.transform(new_buf, |s| {
-            match landings.binary_search_by_key(&s.id, |(id, _)| *id) {
-                Ok(found) => action_handlers::movement::forward_block_cursor(
-                    s.id,
-                    landings[found].1,
-                    stoat_text::SelectionGoal::None,
-                    new_buf.rope(),
-                    new_buf,
-                ),
-                Err(_) => s.clone(),
-            }
-        });
+        editor.selections.land_block_cursors(&landings, new_buf);
     }
 
     /// Insert a string per cursor in one multi-edit, mirroring
@@ -7580,18 +7569,7 @@ impl Stoat {
 
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        editor.selections.transform(new_buf, |s| {
-            let found = new_offsets
-                .binary_search_by_key(&s.id, |(id, _)| *id)
-                .expect("every selection was measured before the delete");
-            action_handlers::movement::forward_block_cursor(
-                s.id,
-                new_offsets[found].1,
-                stoat_text::SelectionGoal::None,
-                new_buf.rope(),
-                new_buf,
-            )
-        });
+        editor.selections.land_block_cursors(&new_offsets, new_buf);
     }
 
     /// New offset of `target` after deleting the ascending, disjoint `ranges`.

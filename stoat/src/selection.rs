@@ -1,6 +1,6 @@
 use crate::multi_buffer::MultiBufferSnapshot;
 use serde::{Deserialize, Serialize};
-use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
+use stoat_text::{next_char_boundary, Anchor, Bias, Selection, SelectionGoal};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SelectionsCollection {
@@ -377,6 +377,175 @@ impl SelectionsCollection {
         }
         self.disjoint = deduped.into_iter().map(|r| r.selection).collect();
     }
+
+    /// Land a forward block cursor per selection, from offsets already in hand.
+    ///
+    /// `landings` pairs a selection id with the offset its cursor lands on,
+    /// sorted by id. A selection the list does not name keeps the span and the
+    /// anchors it has.
+    ///
+    /// The clip, sort and merge are [`Self::replace_with`]'s, and the anchors
+    /// come out the same. What it saves is the round trip: a caller that already
+    /// knows where each cursor landed would otherwise mint two anchors per
+    /// cursor, at a root descent each, only for `replace_with` to resolve them
+    /// straight back to the offsets it was handed.
+    pub(crate) fn land_block_cursors(
+        &mut self,
+        landings: &[(usize, usize)],
+        snapshot: &MultiBufferSnapshot,
+    ) {
+        assert!(
+            !self.disjoint.is_empty(),
+            "SelectionsCollection invariant: at least one selection"
+        );
+        let named = |id: usize| landings.binary_search_by_key(&id, |(id, _)| *id);
+
+        // Only the selections no landing names have to be read out of their
+        // anchors. A landed one already knows where it is.
+        let carried = {
+            let anchors: Vec<Anchor> = self
+                .disjoint
+                .iter()
+                .filter(|sel| named(sel.id).is_err())
+                .flat_map(|sel| [sel.start, sel.end])
+                .collect();
+            snapshot.resolve_anchors_batch(&anchors)
+        };
+
+        let rope = snapshot.rope();
+        let mut carried = carried.chunks_exact(2);
+        let mut entries: Vec<Landing> = self
+            .disjoint
+            .iter()
+            .map(|sel| match named(sel.id) {
+                Ok(found) => {
+                    let start = landings[found].1;
+                    Landing {
+                        start,
+                        end: next_char_boundary(rope, start),
+                        id: sel.id,
+                        reversed: false,
+                        goal: SelectionGoal::None,
+                        start_clipped: false,
+                        keep: None,
+                    }
+                },
+                Err(_) => {
+                    let span = carried.next().expect("one span per unnamed selection");
+                    Landing {
+                        start: span[0],
+                        end: span[1],
+                        id: sel.id,
+                        reversed: sel.reversed,
+                        goal: sel.goal,
+                        start_clipped: false,
+                        keep: Some((sel.start, sel.end)),
+                    }
+                },
+            })
+            .collect();
+
+        for entry in &mut entries {
+            let start = rope.clip_to_grapheme_boundary(entry.start, Bias::Left);
+            let end = rope.clip_to_grapheme_boundary(entry.end, Bias::Right);
+            // A clipped endpoint is not where its anchor said, so it gets a new
+            // one. An unclipped one keeps whatever it arrived with.
+            entry.keep = entry
+                .keep
+                .filter(|_| start == entry.start && end == entry.end);
+            entry.start_clipped = start != entry.start;
+            entry.start = start;
+            entry.end = end;
+        }
+        entries.sort_by_key(|e| (e.start, e.id));
+
+        let mut deduped: Vec<Landing> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if let Some(prev) = deduped.last_mut()
+                && (entry.start == prev.start || entry.start < prev.end)
+            {
+                let start = prev.start;
+                let start_clipped = prev.start_clipped;
+                let start_keep = prev.keep;
+                let (end, end_keep) = match entry.end > prev.end {
+                    true => (entry.end, entry.keep),
+                    false => (prev.end, prev.keep),
+                };
+
+                if entry.id > prev.id {
+                    prev.id = entry.id;
+                    prev.reversed = entry.reversed;
+                    prev.goal = entry.goal;
+                }
+
+                prev.start = start;
+                prev.start_clipped = start_clipped;
+                prev.end = end;
+                prev.keep = match (start_keep, end_keep) {
+                    (Some((sa, _)), Some((_, ea))) => Some((sa, ea)),
+                    _ => None,
+                };
+                continue;
+            }
+            deduped.push(entry);
+        }
+
+        // One walk for every endpoint that needs an anchor, split by the bias it
+        // takes. The left-biased call is empty unless something was clipped.
+        let right: Vec<usize> = deduped
+            .iter()
+            .filter(|e| e.keep.is_none())
+            .flat_map(|e| match e.start_clipped {
+                true => vec![e.end],
+                false => vec![e.start, e.end],
+            })
+            .collect();
+        let left: Vec<usize> = deduped
+            .iter()
+            .filter(|e| e.keep.is_none() && e.start_clipped)
+            .map(|e| e.start)
+            .collect();
+        let mut right = snapshot.anchors_at_batch(&right, Bias::Right).into_iter();
+        let mut left = snapshot.anchors_at_batch(&left, Bias::Left).into_iter();
+
+        self.disjoint = deduped
+            .into_iter()
+            .map(|entry| {
+                let (start, end) = match entry.keep {
+                    Some((start, end)) => (start, end),
+                    None => {
+                        let start = match entry.start_clipped {
+                            true => left.next().expect("one per clipped start"),
+                            false => right.next().expect("one per unclipped start"),
+                        };
+                        (start, right.next().expect("one per end"))
+                    },
+                };
+                Selection {
+                    id: entry.id,
+                    start,
+                    end,
+                    reversed: entry.reversed,
+                    goal: entry.goal,
+                }
+            })
+            .collect();
+    }
+}
+
+/// A selection on its way through [`SelectionsCollection::land_block_cursors`],
+/// held as offsets so the pipeline never resolves an anchor it just made.
+///
+/// `keep` carries the anchors of a selection that was not landed, which stand
+/// unless an endpoint moved under the grapheme clip.
+struct Landing {
+    start: usize,
+    end: usize,
+    start_clipped: bool,
+    id: usize,
+    reversed: bool,
+    goal: SelectionGoal,
+    keep: Option<(Anchor, Anchor)>,
 }
 
 /// Collapse overlapping spans into the ranges their union covers, sorted by
@@ -449,6 +618,82 @@ mod tests {
         assert!(sel.is_empty());
         assert_eq!(sel.goal, SelectionGoal::None);
         assert!(sel.start.is_min());
+    }
+
+    #[test]
+    fn landing_from_offsets_matches_landing_through_anchors() {
+        // The offsets path exists to skip minting anchors that replace_with
+        // would resolve straight back, so it has to land on the same anchors,
+        // not merely the same offsets. A combining mark and a regional-indicator
+        // pair put clipping in the way, and cursors landing together exercise
+        // the merge.
+        let text: String = (0..40)
+            .map(|i| match i % 3 {
+                0 => format!("line {i} ascii only\n"),
+                1 => format!("line {i} e\u{301}accented\n"),
+                _ => format!("line {i} \u{1F1EC}\u{1F1E7} flag\n"),
+            })
+            .collect();
+        let multi = singleton(&text);
+        let snapshot = multi.snapshot();
+
+        let seed = |collection: &mut SelectionsCollection| {
+            for row in 0..40 {
+                let at = text
+                    .match_indices('\n')
+                    .nth(row)
+                    .map(|(i, _)| i)
+                    .expect("the fixture has the rows");
+                collection.insert_cursor(
+                    snapshot.anchor_at(at.saturating_sub(row % 7), Bias::Right),
+                    SelectionGoal::None,
+                    &snapshot,
+                );
+            }
+        };
+
+        let mut through_offsets = SelectionsCollection::new();
+        let mut through_anchors = SelectionsCollection::new();
+        seed(&mut through_offsets);
+        seed(&mut through_anchors);
+
+        // Landings on and off grapheme boundaries, some of them colliding so
+        // the dedupe runs.
+        let mut landings: Vec<(usize, usize)> = through_offsets
+            .all_anchors()
+            .iter()
+            .enumerate()
+            .map(|(i, sel)| (sel.id, (i * 13) % text.len()))
+            .collect();
+        landings.sort_unstable_by_key(|(id, _)| *id);
+
+        through_offsets.land_block_cursors(&landings, &snapshot);
+
+        let landed: Vec<Selection<Anchor>> = through_anchors
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                let found = landings
+                    .binary_search_by_key(&sel.id, |(id, _)| *id)
+                    .expect("every selection is named");
+                let target = landings[found].1;
+                let end = next_char_boundary(snapshot.rope(), target);
+                Selection {
+                    id: sel.id,
+                    start: snapshot.anchor_at(target, Bias::Right),
+                    end: snapshot.anchor_at(end, Bias::Right),
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                }
+            })
+            .collect();
+        through_anchors.replace_with(landed, &snapshot);
+
+        assert_eq!(
+            through_offsets.all_anchors(),
+            through_anchors.all_anchors(),
+            "the two routes have to agree on the anchors, not just the offsets",
+        );
     }
 
     #[test]

@@ -624,6 +624,14 @@ impl MultiBufferSnapshot {
         self.buffer_snapshot.resolve_anchors_batch(anchors)
     }
 
+    /// Anchors for every offset, in one walk rather than a root descent apiece.
+    ///
+    /// The counterpart to [`Self::resolve_anchors_batch`], for a caller holding
+    /// offsets it needs to hand on as anchors.
+    pub fn anchors_at_batch(&self, offsets: &[usize], bias: Bias) -> Vec<Anchor> {
+        self.buffer_snapshot.anchors_at_batch(offsets, bias)
+    }
+
     pub fn points_for_anchors_batch(&self, anchors: &[Anchor]) -> Vec<Point> {
         self.buffer_snapshot.points_for_anchors_batch(anchors)
     }
