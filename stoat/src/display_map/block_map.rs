@@ -912,6 +912,7 @@ impl BlockMap {
                 &blocks,
                 &wrap_snapshot,
                 &edits,
+                &self.custom_blocks_by_id,
             )
         } else {
             build_transforms(wrap_line_count, &blocks, &wrap_snapshot)
@@ -1720,6 +1721,7 @@ fn sync_incremental(
     blocks: &[Block],
     wrap_snapshot: &WrapSnapshot,
     wrap_edits: &Patch<u32>,
+    custom_blocks_by_id: &TreeMap<CustomBlockId, Arc<CustomBlock>>,
 ) -> SumTree<Transform> {
     debug_assert!(
         blocks
@@ -1805,13 +1807,39 @@ fn sync_incremental(
             }
         }
 
-        // Discard zero-width block transforms at edit end (matching Zed lines 980-991)
+        let edit_end = new_end.min(wrap_line_count);
+
+        // Discard the zero-width block transforms at the region's end, whose
+        // blocks are re-emitted from `blocks_in_range` below.
+        //
+        // A custom block the edit only shifted is the exception. The extension
+        // loop above runs the region out to the leading isomorphic transform's
+        // far boundary, and a shifted block lands exactly there, because the
+        // region's new end takes the same extension the block's rows took. The
+        // re-emission filter is strict (`block_start < edit_end`), so a block at
+        // that boundary would be dropped and never put back. Keeping its
+        // transform leaves it to the suffix, which relocates it by row
+        // arithmetic. Blocks the edit collapsed, inserted, or removed resolve
+        // inside the region and re-emit normally.
         while let Some(item) = cursor.item() {
-            if item.summary.input_rows == 0 && item.block.is_some() {
-                cursor.next();
-            } else {
+            if item.summary.input_rows != 0 || item.block.is_none() {
                 break;
             }
+
+            if let Some(Block::Custom(stale)) = item.block.as_ref()
+                && let Some(current) = custom_blocks_by_id.get(&stale.id)
+            {
+                let start = placement_wrap_rows(&current.placement, wrap_snapshot).start;
+                if start >= edit_end {
+                    debug_assert_eq!(
+                        start, edit_end,
+                        "a kept boundary block must land exactly at the region end",
+                    );
+                    break;
+                }
+            }
+
+            cursor.next();
         }
 
         let current_rows: InputRow = new_transforms.extent(());
@@ -1819,8 +1847,6 @@ fn sync_incremental(
             let gap = edit.new.start - current_rows.0;
             push_isomorphic(&mut new_transforms, gap);
         }
-
-        let edit_end = new_end.min(wrap_line_count);
 
         let edit_start_buf = wrap_row_to_buffer_row(edit.new.start, wrap_snapshot);
         let edit_end_buf = if edit_end >= wrap_line_count {
