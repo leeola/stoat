@@ -7461,7 +7461,8 @@ impl Stoat {
         // Repeat replays one string, and there is no one string when every
         // cursor continues its own line. The newest cursor's is what the
         // uniform insertion recorded before the others had their own.
-        let newest = match self.newest_cursor_offset(editor_id) {
+        let newest_offset = self.newest_cursor_offset(editor_id);
+        let newest = match newest_offset {
             Some(offset) => self.newline_continuation(buffer_id, offset),
             None => "\n".to_string(),
         };
@@ -7473,7 +7474,13 @@ impl Stoat {
         let insertions: Vec<(usize, usize, String)> = cursors
             .into_iter()
             .map(|(id, offset)| {
-                let text = self.newline_continuation(buffer_id, offset);
+                // Deriving a continuation runs the indent query, and the newest
+                // cursor's was just derived above for the repeat record. The
+                // single-cursor case is every cursor.
+                let text = match newest_offset == Some(offset) {
+                    true => newest.clone(),
+                    false => self.newline_continuation(buffer_id, offset),
+                };
                 (id, offset, text)
             })
             .collect();

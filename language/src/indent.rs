@@ -36,9 +36,31 @@ struct IndentRange {
 /// with the new line rather than staying above it, so the line it lands on is
 /// still outside the region and belongs at the enclosing level.
 pub fn newline_indent(query: &Query, root: Node<'_>, rope: &Rope, cursor_offset: usize) -> String {
+    let ranges = collect_indent_ranges(query, root, rope, newline_window(rope, cursor_offset));
+    newline_indent_from(&ranges, rope, cursor_offset)
+}
+
+/// Bytes the query has to visit for [`newline_indent`] to answer.
+///
+/// The regions it reads open on the cursor's own row, before the cursor, so
+/// their starts all sit here. Their ends can be anywhere below, which costs
+/// nothing, since a match is returned whole once any of it falls in the window.
+///
+/// The outdents that can change one of those regions land here too. Truncating a
+/// region to at or before the cursor is what changes the answer, and the
+/// truncation puts the region's new end at the outdent's own position, which is
+/// then between the region's start and the cursor.
+fn newline_window(rope: &Rope, cursor_offset: usize) -> std::ops::Range<usize> {
+    let row = rope.offset_to_point(cursor_offset).row;
+    rope.point_to_offset(Point::new(row, 0))..cursor_offset + 1
+}
+
+/// Whether a region the cursor sits inside opened on its row, and the
+/// whitespace that follows from it.
+fn newline_indent_from(ranges: &[IndentRange], rope: &Rope, cursor_offset: usize) -> String {
     let row = rope.offset_to_point(cursor_offset).row;
     let base = line_leading_whitespace(rope, row);
-    let opens = collect_indent_ranges(query, root, rope)
+    let opens = ranges
         .iter()
         .any(|r| r.start_row == row && r.start_byte < cursor_offset && r.end_byte > cursor_offset);
     if opens {
@@ -55,15 +77,33 @@ pub fn newline_indent(query: &Query, root: Node<'_>, rope: &Rope, cursor_offset:
 /// previous row indents one level. A closing-token row aligns to its opener's
 /// row. Otherwise the previous row's indentation is copied.
 pub fn suggested_indent(query: &Query, root: Node<'_>, rope: &Rope, row: u32) -> Option<String> {
-    let ranges = collect_indent_ranges(query, root, rope);
+    let ranges = collect_indent_ranges(query, root, rope, suggested_window(rope, row));
+    suggested_indent_from(&ranges, rope, row)
+}
 
+/// Bytes the query has to visit for [`suggested_indent`] to answer.
+///
+/// Every region it reads opens on a row above this one, so no start lies past
+/// the row's first non-whitespace byte. The ends it compares are read off the
+/// returned nodes and can sit anywhere below.
+///
+/// The outdents that can change one of those comparisons are here too. Either
+/// one moves a region's end down to at or before the row's start, or it moves it
+/// into the band just above, and the truncation puts the new end at the
+/// outdent's own position in both cases.
+fn suggested_window(rope: &Rope, row: u32) -> std::ops::Range<usize> {
+    0..row_indent_end(rope, row) + 1
+}
+
+/// The whitespace `row` should carry, given the regions around it.
+fn suggested_indent_from(ranges: &[IndentRange], rope: &Rope, row: u32) -> Option<String> {
     let prev_row = row.saturating_sub(1);
     let prev_start_byte = row_indent_end(rope, prev_row);
     let row_start_byte = row_indent_end(rope, row);
 
     let mut indent_from_prev = false;
     let mut outdent_to_row = u32::MAX;
-    for r in &ranges {
+    for r in ranges {
         if r.start_row >= row {
             continue;
         }
@@ -115,7 +155,19 @@ fn is_line_blank(rope: &Rope, row: u32) -> bool {
         .all(|c| c == ' ' || c == '\t')
 }
 
-fn collect_indent_ranges(query: &Query, root: Node<'_>, rope: &Rope) -> Vec<IndentRange> {
+/// Every multi-row indent region the query finds within `bytes`, with the
+/// outdents inside `bytes` applied.
+///
+/// The range bounds the *matches visited*, not what they report. A match whose
+/// nodes intersect it comes back with its full extents, so a region reaching far
+/// below the window still carries its real end. Each caller passes the bytes its
+/// own decision can read, argued at the window it builds.
+fn collect_indent_ranges(
+    query: &Query,
+    root: Node<'_>,
+    rope: &Rope,
+    bytes: std::ops::Range<usize>,
+) -> Vec<IndentRange> {
     let Some(indent_ix) = query.capture_index_for_name("indent") else {
         return Vec::new();
     };
@@ -125,6 +177,7 @@ fn collect_indent_ranges(query: &Query, root: Node<'_>, rope: &Rope) -> Vec<Inde
 
     let provider = RopeTextProvider { rope };
     let mut cursor = QueryCursorHandle::new();
+    cursor.set_byte_range(bytes);
     let mut matches = cursor.matches(query, root, provider);
 
     let mut ranges: Vec<IndentRange> = Vec::new();
@@ -177,7 +230,10 @@ fn collect_indent_ranges(query: &Query, root: Node<'_>, rope: &Rope) -> Vec<Inde
 
 #[cfg(test)]
 mod tests {
-    use super::{newline_indent, suggested_indent};
+    use super::{
+        collect_indent_ranges, newline_indent, newline_indent_from, newline_window,
+        suggested_indent, suggested_indent_from, suggested_window,
+    };
     use crate::{Language, LanguageRegistry};
     use std::sync::Arc;
     use stoat_text::Rope;
@@ -264,5 +320,46 @@ mod tests {
     fn json_newline_after_open_brace_indents() {
         // Cursor after `{` at offset 1.
         assert_eq!(newline_at("json", "{\n}\n", 1), "\t");
+    }
+
+    /// A window that is too wide costs time and answers correctly, so only
+    /// comparing it against the whole file can say it is not too narrow.
+    ///
+    /// What this catches is a window that misses the decision point, which is
+    /// the mistake available to a reader shortening one. It cannot speak to how
+    /// much further each window reaches. The regions a decision reads all span
+    /// the byte it asks about, so they come back however tight the window is,
+    /// and the one thing that would not is an `@outdent`, which no
+    /// `indents.scm` in the tree captures. The reach is what keeps the answer
+    /// right if one ever does.
+    #[test]
+    fn every_window_answers_what_the_whole_file_answers() {
+        let src = "fn a() {\n\tif b {\n\t\twhile c {\n\t\t\tx;\n\t\t}\n\t\tif d { y; }\n\t\tz;\n\t}\n\tw;\n}\n";
+        let lang = lang("rust");
+        let tree = parse(&lang, src);
+        let rope = Rope::from(src);
+        let query = lang.indent_query.as_ref().expect("indent query");
+        let root = tree.root_node();
+        let whole = 0..src.len();
+
+        for offset in 0..=src.len() {
+            let windowed = collect_indent_ranges(query, root, &rope, newline_window(&rope, offset));
+            let full = collect_indent_ranges(query, root, &rope, whole.clone());
+            assert_eq!(
+                newline_indent_from(&windowed, &rope, offset),
+                newline_indent_from(&full, &rope, offset),
+                "newline_indent disagrees at offset {offset}"
+            );
+        }
+
+        for row in 0..=rope.max_point().row {
+            let windowed = collect_indent_ranges(query, root, &rope, suggested_window(&rope, row));
+            let full = collect_indent_ranges(query, root, &rope, whole.clone());
+            assert_eq!(
+                suggested_indent_from(&windowed, &rope, row),
+                suggested_indent_from(&full, &rope, row),
+                "suggested_indent disagrees at row {row}"
+            );
+        }
     }
 }
