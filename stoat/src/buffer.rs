@@ -387,7 +387,13 @@ fn splice_one_range(
     }
 
     if let Some(fragment) = cursor.item() {
-        if fragment.visible {
+        // A pure insert landing on a fragment's start consumes none of it, so it
+        // stays where it is rather than being re-emitted verbatim under a fresh
+        // id. Its own id keeps its insertions entry valid, and the new text's id
+        // was already chosen to sort ahead of it. Leaving the cursor on it is
+        // what lets a later range starting inside it seek forward.
+        if fragment.visible && overshoot == 0 && delete_remaining == 0 {
+        } else if fragment.visible {
             let fragment_visible_len = fragment.len as usize;
             let remaining_in_fragment = fragment_visible_len - overshoot;
             let to_delete_here = delete_remaining.min(remaining_in_fragment);
