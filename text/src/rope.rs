@@ -619,15 +619,29 @@ impl Rope {
         }
     }
 
+    /// Convert every offset to a [`Point`], in one forward walk of the tree.
+    ///
+    /// The walk only goes forward, so the offsets have to be visited in
+    /// ascending order. Input already in that order is visited as it stands,
+    /// which is what every caller that resolves a sorted set hands over, and
+    /// only input that is actually out of order pays for a permutation.
     pub fn offsets_to_points_batch(&self, offsets: &[usize]) -> Vec<Point> {
-        let mut indexed: Vec<(usize, usize)> = offsets.iter().copied().enumerate().collect();
-        indexed.sort_unstable_by_key(|&(_, off)| off);
+        let ascending_order: Option<Vec<usize>> = (!offsets.is_sorted()).then(|| {
+            let mut order: Vec<usize> = (0..offsets.len()).collect();
+            order.sort_unstable_by_key(|&i| offsets[i]);
+            order
+        });
 
         let mut results = vec![Point::zero(); offsets.len()];
         let mut cursor = self.chunks.cursor::<Dimensions<usize, Point>>(());
         let summary_lines = self.chunks.summary().lines;
 
-        for (original_idx, offset) in indexed {
+        for step in 0..offsets.len() {
+            let original_idx = match &ascending_order {
+                Some(order) => order[step],
+                None => step,
+            };
+            let offset = offsets[original_idx];
             cursor.seek_forward(&offset, Bias::Right);
             let Dimensions(chunk_start_offset, chunk_start_point, ()) = *cursor.start();
             results[original_idx] = match cursor.item() {
@@ -3135,6 +3149,37 @@ mod tests {
             points,
             vec![Point::new(2, 0), Point::new(0, 0), Point::new(1, 0)]
         );
+    }
+
+    #[test]
+    fn a_batch_answers_the_same_however_its_offsets_are_ordered() {
+        // Ascending input skips the permutation and is visited as it stands, so
+        // the two routes through the walk have to land on the same points. A
+        // shuffled copy carries its own answer back into the original order.
+        // Long enough to span many chunks, since a cursor left behind by an
+        // out-of-order offset only lands somewhere visibly wrong once the
+        // offsets are chunks apart.
+        let text: String = (0..40).map(|i| format!("line{i} of the rope\n")).collect();
+        let rope = Rope::from(text.as_str());
+
+        let ascending: Vec<usize> = (0..12).map(|i| i * (rope.len() / 13)).collect();
+        assert!(ascending.is_sorted(), "the sorted route is the one taken");
+
+        let shuffled_order = [7usize, 0, 11, 3, 9, 1, 5, 10, 2, 8, 4, 6];
+        let shuffled: Vec<usize> = shuffled_order.iter().map(|&i| ascending[i]).collect();
+        assert!(!shuffled.is_sorted(), "and the other route for this one");
+
+        let straight = rope.offsets_to_points_batch(&ascending);
+        let permuted = rope.offsets_to_points_batch(&shuffled);
+
+        let restored: Vec<Point> = {
+            let mut back = vec![Point::zero(); ascending.len()];
+            for (slot, &i) in shuffled_order.iter().enumerate() {
+                back[i] = permuted[slot];
+            }
+            back
+        };
+        assert_eq!(straight, restored);
     }
 
     #[test]
