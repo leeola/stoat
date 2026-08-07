@@ -2233,6 +2233,11 @@ fn paint_offset_range(
                 offset += ch.len_utf8();
             }
         } else {
+            // Carried from the segment head rather than re-derived per
+            // character. A point's column counts bytes, so a character moves it
+            // by its own encoded length. A newline ends the segment, so the
+            // row never has to advance here.
+            let mut char_point = point;
             loop {
                 if offset >= range.end {
                     break 'segments;
@@ -2245,7 +2250,7 @@ fn paint_offset_range(
                     continue 'segments;
                 }
                 if Some(offset) != skip_offset {
-                    let display = snapshot.buffer_to_display(rope.offset_to_point(offset));
+                    let display = snapshot.buffer_to_display(char_point);
                     // Advanced from the character's own column rather than from
                     // zero, since a tab's width is the distance to its stop.
                     let mut end_col = display.column;
@@ -2258,6 +2263,7 @@ fn paint_offset_range(
                     paint(display.row, display.column, end_col - display.column);
                 }
                 offset += ch.len_utf8();
+                char_point.column += ch.len_utf8() as u32;
             }
         }
     }
@@ -4814,6 +4820,19 @@ mod tests {
         h.open_file(&path);
         dispatch(&mut h.stoat, &ExtendToLineEnd);
         h.assert_snapshot("selection_over_tab_line");
+    }
+
+    /// A soft-wrapped row leaves the accumulating paint path, so the general
+    /// one resolves each character from a buffer point it carries forward. That
+    /// point's column counts bytes, so an accent moves it two and a drift of one
+    /// per character walks the wash off the text it covers.
+    #[test]
+    fn snapshot_selection_over_a_wrapped_line_of_accents() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 4);
+        let path = h.write_file("s.txt", &format!("{}\n", "\u{e9}".repeat(30)));
+        h.open_file(&path);
+        dispatch(&mut h.stoat, &ExtendToLineEnd);
+        h.assert_snapshot("selection_over_wrapped_accents");
     }
 
     #[test]
