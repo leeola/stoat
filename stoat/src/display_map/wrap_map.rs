@@ -72,16 +72,10 @@ pub enum WrapRowKind {
 struct TransformSummary {
     input_rows: u32,
     output_rows: u32,
-    longest_row: u32,
-    longest_row_chars: u32,
 }
 
 impl ContextLessSummary for TransformSummary {
     fn add_summary(&mut self, other: &Self) {
-        if other.longest_row_chars > self.longest_row_chars {
-            self.longest_row = self.output_rows + other.longest_row;
-            self.longest_row_chars = other.longest_row_chars;
-        }
         self.input_rows += other.input_rows;
         self.output_rows += other.output_rows;
     }
@@ -171,27 +165,6 @@ impl<'a> SeekTarget<'a, TransformSummary, Dimensions<InputRow, OutputRow>> for O
     }
 }
 
-#[derive(Clone, Default)]
-struct LongestInRange {
-    output_rows: u32,
-    longest_row: u32,
-    longest_row_chars: u32,
-}
-
-impl<'a> Dimension<'a, TransformSummary> for LongestInRange {
-    fn zero(_cx: ()) -> Self {
-        Self::default()
-    }
-
-    fn add_summary(&mut self, summary: &'a TransformSummary, _cx: ()) {
-        if summary.longest_row_chars > self.longest_row_chars {
-            self.longest_row = self.output_rows + summary.longest_row;
-            self.longest_row_chars = summary.longest_row_chars;
-        }
-        self.output_rows += summary.output_rows;
-    }
-}
-
 const WRAP_SYNC_THRESHOLD: u32 = 100;
 
 pub struct WrapMap {
@@ -224,8 +197,6 @@ pub struct WrapSnapshot {
     transforms: SumTree<Transform>,
     wrap_width: Option<u32>,
     total_rows: u32,
-    longest_row: u32,
-    longest_row_chars: u32,
     pub interpolated: bool,
 }
 
@@ -577,16 +548,12 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
         };
 
         let output_rows = wrap_columns.len().max(1) as u32;
-        let (local_longest_row, local_longest_chars) =
-            compute_transform_longest(&wrap_columns, tab_line_len, indent);
 
         transforms.push(
             Transform {
                 summary: TransformSummary {
                     input_rows: 1,
                     output_rows,
-                    longest_row: local_longest_row,
-                    longest_row_chars: local_longest_chars,
                 },
                 wrap_columns,
                 tab_line_len,
@@ -596,18 +563,13 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
         );
     }
 
-    let s = transforms.summary();
-    let total_rows = s.output_rows;
-    let longest_row = s.longest_row;
-    let longest_row_chars = s.longest_row_chars;
+    let total_rows = transforms.summary().output_rows;
 
     WrapSnapshot {
         tab_snapshot,
         transforms,
         wrap_width,
         total_rows,
-        longest_row,
-        longest_row_chars,
         interpolated: false,
     }
 }
@@ -650,15 +612,11 @@ fn sync_incremental(
                 },
             };
             let output_rows = wrap_columns.len().max(1) as u32;
-            let (local_longest_row, local_longest_chars) =
-                compute_transform_longest(&wrap_columns, tab_line_len, indent);
             new_transforms.push(
                 Transform {
                     summary: TransformSummary {
                         input_rows: 1,
                         output_rows,
-                        longest_row: local_longest_row,
-                        longest_row_chars: local_longest_chars,
                     },
                     wrap_columns,
                     tab_line_len,
@@ -678,52 +636,17 @@ fn sync_incremental(
 
     new_transforms.append(cursor.suffix(), ());
 
-    let s = new_transforms.summary();
-    let total_rows = s.output_rows;
-    let longest_row = s.longest_row;
-    let longest_row_chars = s.longest_row_chars;
+    let total_rows = new_transforms.summary().output_rows;
 
     let snapshot = WrapSnapshot {
         tab_snapshot,
         transforms: new_transforms,
         wrap_width,
         total_rows,
-        longest_row,
-        longest_row_chars,
         interpolated: false,
     };
 
     (snapshot, wrap_edits)
-}
-
-/// The widest sub-row of a line and its display width.
-///
-/// An empty `wrap_columns` is the non-wrapping line, whose one row is the whole
-/// line, so it answers straight from `tab_line_len` rather than walking.
-fn compute_transform_longest(wrap_columns: &[u32], tab_line_len: u32, indent: u32) -> (u32, u32) {
-    if wrap_columns.is_empty() {
-        return (0, tab_line_len);
-    }
-
-    let mut best_row = 0u32;
-    let mut best_chars = 0u32;
-    for sub_idx in 0..wrap_columns.len() {
-        let text_len = if sub_idx + 1 < wrap_columns.len() {
-            wrap_columns[sub_idx + 1] - wrap_columns[sub_idx]
-        } else {
-            tab_line_len - wrap_columns[sub_idx]
-        };
-        let sub_len = if sub_idx > 0 {
-            text_len + indent
-        } else {
-            text_len
-        };
-        if sub_len > best_chars {
-            best_row = sub_idx as u32;
-            best_chars = sub_len;
-        }
-    }
-    (best_row, best_chars)
 }
 
 /// Break a tab-expanded line into sub-row start columns and its continuation
@@ -854,8 +777,6 @@ impl WrapSnapshot {
                         summary: TransformSummary {
                             input_rows: 1,
                             output_rows: 1,
-                            longest_row: 0,
-                            longest_row_chars: tab_line_len,
                         },
                         wrap_columns: Vec::new(),
                         tab_line_len,
@@ -875,12 +796,9 @@ impl WrapSnapshot {
         new_transforms.append(cursor.suffix(), ());
         drop(cursor);
 
-        let s = new_transforms.summary().clone();
+        self.total_rows = new_transforms.summary().output_rows;
         self.tab_snapshot = new_tab_snapshot;
         self.transforms = new_transforms;
-        self.total_rows = s.output_rows;
-        self.longest_row = s.longest_row;
-        self.longest_row_chars = s.longest_row_chars;
         self.interpolated = true;
 
         wrap_edits
@@ -1120,80 +1038,6 @@ impl WrapSnapshot {
             row_state: None,
             pending_newline: false,
         }))
-    }
-
-    pub fn longest_line(&self) -> (u32, u32) {
-        (self.longest_row, self.longest_row_chars)
-    }
-
-    pub fn longest_in_output_range(&self, start: u32, count: u32) -> (u32, u32) {
-        if count == 0 {
-            return (0, 0);
-        }
-        let end = start + count;
-
-        if self.wrap_width.is_none() {
-            let mut cursor = self
-                .transforms
-                .cursor::<Dimensions<InputRow, OutputRow>>(());
-            cursor.seek(&OutputRow(start + 1), Bias::Left);
-            let result: LongestInRange = cursor.summary(&OutputRow(end), Bias::Right);
-            return (result.longest_row, result.longest_row_chars);
-        }
-
-        let mut cursor = self
-            .transforms
-            .cursor::<Dimensions<InputRow, OutputRow>>(());
-        cursor.seek(&OutputRow(start + 1), Bias::Left);
-
-        let mut best_row = 0u32;
-        let mut best_chars = 0u32;
-
-        let output_start = cursor.start().1 .0;
-        let Some(transform) = cursor.item() else {
-            return (0, 0);
-        };
-
-        let transform_end = output_start + transform.summary.output_rows;
-        let sub_start = (start - output_start) as usize;
-        let sub_end = (end.min(transform_end) - output_start) as usize;
-
-        for sub_idx in sub_start..sub_end {
-            let len = transform_sub_row_len(transform, sub_idx);
-            if len > best_chars {
-                best_row = (output_start + sub_idx as u32) - start;
-                best_chars = len;
-            }
-        }
-
-        if transform_end >= end {
-            return (best_row, best_chars);
-        }
-
-        cursor.next();
-        let middle_start = cursor.start().1 .0;
-
-        let middle: LongestInRange = cursor.summary(&OutputRow(end), Bias::Right);
-        if middle.longest_row_chars > best_chars {
-            best_row = (middle_start - start) + middle.longest_row;
-            best_chars = middle.longest_row_chars;
-        }
-
-        if let Some(transform) = cursor.item() {
-            let t_start = cursor.start().1 .0;
-            if t_start < end {
-                let sub_end = (end - t_start) as usize;
-                for sub_idx in 0..sub_end {
-                    let len = transform_sub_row_len(transform, sub_idx);
-                    if len > best_chars {
-                        best_row = (t_start + sub_idx as u32) - start;
-                        best_chars = len;
-                    }
-                }
-            }
-        }
-
-        (best_row, best_chars)
     }
 
     pub fn line_count(&self) -> u32 {
@@ -1916,8 +1760,6 @@ mod tests {
         let full = super::build_snapshot(tab_snapshot, Some(5));
 
         assert_eq!(incremental.line_count(), full.line_count());
-        assert_eq!(incremental.longest_row, full.longest_row);
-        assert_eq!(incremental.longest_row_chars, full.longest_row_chars);
         for row in 0..full.line_count() {
             assert_eq!(
                 incremental.line_len(row),
@@ -1999,21 +1841,6 @@ mod tests {
                 "round trip for {tab_point:?}",
             );
         }
-
-        assert_eq!(
-            (snap.longest_row, snap.longest_row_chars),
-            (0, 6),
-            "the widest row is the wrapped \"ab cd \", counted across both encodings",
-        );
-
-        // With nothing wrapping at all, every transform stores no columns, so
-        // the widest row is decided entirely from the line lengths.
-        let plain = make_snapshot("ab\nlonger\nx", Some(20));
-        assert_eq!(
-            (plain.longest_row, plain.longest_row_chars),
-            (1, 6),
-            "an unwrapped line's width is its whole length",
-        );
     }
 
     #[test]
@@ -2070,8 +1897,6 @@ mod tests {
         let full = super::build_snapshot(tab_snapshot, Some(new_width));
 
         assert_eq!(incremental.line_count(), full.line_count());
-        assert_eq!(incremental.longest_row, full.longest_row);
-        assert_eq!(incremental.longest_row_chars, full.longest_row_chars);
         for row in 0..full.line_count() {
             assert_eq!(
                 incremental.line_len(row),
@@ -2105,53 +1930,6 @@ mod tests {
         // Total expanded length = 260 + 1 + 6 = 267, which fits in 270.
         let snap = make_snapshot(&content, Some(270));
         assert_eq!(snap.line_count(), 1);
-    }
-
-    fn assert_longest_in_range_matches_linear(content: &str, wrap_width: Option<u32>) {
-        let snap = make_snapshot(content, wrap_width);
-        for start in 0..snap.line_count() {
-            for count in 0..=(snap.line_count() - start) {
-                let (row, chars) = snap.longest_in_output_range(start, count);
-
-                let mut expected_row = 0u32;
-                let mut expected_chars = 0u32;
-                for i in 0..count {
-                    let len = snap.line_len(start + i);
-                    if len > expected_chars {
-                        expected_row = i;
-                        expected_chars = len;
-                    }
-                }
-
-                assert_eq!(
-                    (row, chars),
-                    (expected_row, expected_chars),
-                    "start={start}, count={count}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn longest_in_output_range_no_wrap() {
-        assert_longest_in_range_matches_linear("short\nlonger line here\nab\nmedium", None);
-    }
-
-    #[test]
-    fn longest_in_output_range_with_wrap() {
-        assert_longest_in_range_matches_linear("abcdefghij\nshort\nxy\nmedium text", Some(5));
-    }
-
-    #[test]
-    fn longest_in_output_range_single_line() {
-        assert_longest_in_range_matches_linear("hello", None);
-    }
-
-    #[test]
-    fn longest_in_output_range_empty_count() {
-        let snap = make_snapshot("hello\nworld", None);
-        assert_eq!(snap.longest_in_output_range(0, 0), (0, 0));
-        assert_eq!(snap.longest_in_output_range(1, 0), (0, 0));
     }
 
     #[test]

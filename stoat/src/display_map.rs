@@ -1021,10 +1021,6 @@ impl DisplaySnapshot {
         self.block_snapshot.buffer_snapshot()
     }
 
-    pub fn longest_row(&self) -> (u32, u32) {
-        self.block_snapshot.longest_row()
-    }
-
     pub fn chunks(
         &self,
         display_rows: Range<u32>,
@@ -2477,25 +2473,6 @@ mod tests {
         display_map.fold(vec![Point::new(2, 0)..Point::new(2, 5)]);
         let (_, wrap_edits, _, _) = display_map.sync_through_wrap();
         assert!(!wrap_edits.is_empty(), "a fold that lands rebuilds");
-    }
-
-    #[test]
-    fn longest_row_no_blocks() {
-        let mut display_map = create_display_map("short\nlonger line\nx");
-        let snapshot = display_map.snapshot();
-        let (row, chars) = snapshot.longest_row();
-        assert_eq!(chars, 11);
-        assert_eq!(row, 1);
-    }
-
-    #[test]
-    fn longest_row_with_blocks() {
-        let base = "line1\ndeleted long line here\nline2";
-        let diff = make_diff_with_deletion(0, base, 6..28, 1);
-        let mut display_map = create_display_map_with_diff("line1\nline2", diff);
-        let snapshot = display_map.snapshot();
-        let (_, chars) = snapshot.longest_row();
-        assert!(chars >= 5);
     }
 
     #[test]

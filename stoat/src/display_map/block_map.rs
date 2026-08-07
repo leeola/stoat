@@ -328,9 +328,9 @@ impl Block {
     /// output never varies between calls. The diff and text block closures these
     /// serve are pure over the lines captured at construction and ignore the
     /// block context, so caching the first render is exact. Per-row callers
-    /// (`get_line`, `line_len`, `write_line`, `longest_block_line`) then reuse one
-    /// render instead of re-running the closure for every line. Non-custom blocks
-    /// carry no rendered content here.
+    /// (`get_line`, `line_len`, `write_line`) then reuse one render instead of
+    /// re-running the closure for every line. Non-custom blocks carry no
+    /// rendered content here.
     fn rendered_memo(&self) -> Arc<RenderedBlock> {
         static EMPTY: LazyLock<Arc<RenderedBlock>> =
             LazyLock::new(|| Arc::new(RenderedBlock::new(Vec::new())));
@@ -406,16 +406,10 @@ impl Block {
 pub struct TransformSummary {
     pub input_rows: u32,
     pub output_rows: u32,
-    pub longest_row: u32,
-    pub longest_row_chars: u32,
 }
 
 impl ContextLessSummary for TransformSummary {
     fn add_summary(&mut self, other: &Self) {
-        if other.longest_row_chars > self.longest_row_chars {
-            self.longest_row = self.output_rows + other.longest_row;
-            self.longest_row_chars = other.longest_row_chars;
-        }
         self.input_rows += other.input_rows;
         self.output_rows += other.output_rows;
     }
@@ -1368,11 +1362,6 @@ impl BlockSnapshot {
             .buffer_snapshot()
     }
 
-    pub fn longest_row(&self) -> (u32, u32) {
-        let s = self.transforms.summary();
-        (s.longest_row, s.longest_row_chars)
-    }
-
     pub fn wrap_snapshot(&self) -> &WrapSnapshot {
         &self.wrap_snapshot
     }
@@ -1784,12 +1773,7 @@ fn sync_incremental(
         {
             let transform_rows_before_edit = edit.old.start - cursor.start().0;
             if transform_rows_before_edit > 0 {
-                push_isomorphic(
-                    &mut new_transforms,
-                    transform_rows_before_edit,
-                    cursor.start().0,
-                    wrap_snapshot,
-                );
+                push_isomorphic(&mut new_transforms, transform_rows_before_edit);
             }
         }
 
@@ -1833,7 +1817,7 @@ fn sync_incremental(
         let current_rows: InputRow = new_transforms.extent(());
         if edit.new.start > current_rows.0 {
             let gap = edit.new.start - current_rows.0;
-            push_isomorphic(&mut new_transforms, gap, current_rows.0, wrap_snapshot);
+            push_isomorphic(&mut new_transforms, gap);
         }
 
         let edit_end = new_end.min(wrap_line_count);
@@ -1894,19 +1878,16 @@ fn sync_incremental(
         for &(placement, block) in &blocks_in_range {
             let anchor = placement.start_wrap_row();
             if anchor > row {
-                push_isomorphic(&mut new_transforms, anchor - row, row, wrap_snapshot);
+                push_isomorphic(&mut new_transforms, anchor - row);
                 row = anchor;
             }
 
             let input_rows = placement.input_rows();
-            let (blk_longest_row, blk_longest_chars) = longest_block_line(block);
             new_transforms.push(
                 Transform {
                     summary: TransformSummary {
                         input_rows,
                         output_rows: block.height(),
-                        longest_row: blk_longest_row,
-                        longest_row_chars: blk_longest_chars,
                     },
                     block: Some(block.clone()),
                 },
@@ -1916,7 +1897,7 @@ fn sync_incremental(
         }
 
         if edit_end > row {
-            push_isomorphic(&mut new_transforms, edit_end - row, row, wrap_snapshot);
+            push_isomorphic(&mut new_transforms, edit_end - row);
         }
 
         last_block_idx = end_block_idx;
@@ -1925,14 +1906,11 @@ fn sync_incremental(
     new_transforms.append(cursor.suffix(), ());
 
     if new_transforms.is_empty() && wrap_line_count > 0 {
-        let (longest_row, longest_row_chars) = wrap_snapshot.longest_line();
         new_transforms.push(
             Transform {
                 summary: TransformSummary {
                     input_rows: wrap_line_count,
                     output_rows: wrap_line_count,
-                    longest_row,
-                    longest_row_chars,
                 },
                 block: None,
             },
@@ -1965,14 +1943,11 @@ fn build_transforms(
 
     if blocks.is_empty() {
         if wrap_line_count > 0 {
-            let (longest_row, longest_row_chars) = wrap_snapshot.longest_line();
             transforms.push(
                 Transform {
                     summary: TransformSummary {
                         input_rows: wrap_line_count,
                         output_rows: wrap_line_count,
-                        longest_row,
-                        longest_row_chars,
                     },
                     block: None,
                 },
@@ -2003,24 +1978,16 @@ fn build_transforms(
     for &(placement, block) in &keyed_blocks {
         let anchor = placement.start_wrap_row();
         if anchor > current_wrap_row {
-            push_isomorphic(
-                &mut transforms,
-                anchor - current_wrap_row,
-                current_wrap_row,
-                wrap_snapshot,
-            );
+            push_isomorphic(&mut transforms, anchor - current_wrap_row);
             current_wrap_row = anchor;
         }
 
         let input_rows = placement.input_rows();
-        let (blk_longest_row, blk_longest_chars) = longest_block_line(block);
         transforms.push(
             Transform {
                 summary: TransformSummary {
                     input_rows,
                     output_rows: block.height(),
-                    longest_row: blk_longest_row,
-                    longest_row_chars: blk_longest_chars,
                 },
                 block: Some(block.clone()),
             },
@@ -2031,7 +1998,7 @@ fn build_transforms(
 
     if current_wrap_row < wrap_line_count {
         let rows = wrap_line_count - current_wrap_row;
-        push_isomorphic(&mut transforms, rows, current_wrap_row, wrap_snapshot);
+        push_isomorphic(&mut transforms, rows);
     }
 
     debug_assert_eq!(
@@ -2111,39 +2078,15 @@ pub fn balancing_block(
     })
 }
 
-fn longest_block_line(block: &Block) -> (u32, u32) {
-    let mut best_row = 0u32;
-    let mut best_chars = 0u32;
-    for (i, &len) in block.rendered_memo().line_lens.iter().enumerate() {
-        if len > best_chars {
-            best_row = i as u32;
-            best_chars = len;
-        }
-    }
-    (best_row, best_chars)
-}
-
-fn push_isomorphic(
-    transforms: &mut SumTree<Transform>,
-    rows: u32,
-    start_wrap_row: u32,
-    wrap_snapshot: &WrapSnapshot,
-) {
+fn push_isomorphic(transforms: &mut SumTree<Transform>, rows: u32) {
     if rows == 0 {
         return;
     }
-
-    let (longest_row, longest_row_chars) =
-        wrap_snapshot.longest_in_output_range(start_wrap_row, rows);
 
     let mut merged = false;
     transforms.update_last(
         |last| {
             if last.block.is_none() {
-                if longest_row_chars > last.summary.longest_row_chars {
-                    last.summary.longest_row = last.summary.output_rows + longest_row;
-                    last.summary.longest_row_chars = longest_row_chars;
-                }
                 last.summary.input_rows += rows;
                 last.summary.output_rows += rows;
                 merged = true;
@@ -2158,8 +2101,6 @@ fn push_isomorphic(
                 summary: TransformSummary {
                     input_rows: rows,
                     output_rows: rows,
-                    longest_row,
-                    longest_row_chars,
                 },
                 block: None,
             },
@@ -2481,7 +2422,6 @@ mod tests {
                 "row {row}",
             );
         }
-        assert_eq!(super::longest_block_line(&block), (2, 17));
     }
 
     #[test]
@@ -2637,7 +2577,6 @@ mod tests {
         let snap2 = block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None);
 
         assert_eq!(snap1.total_lines(), snap2.total_lines());
-        assert_eq!(snap1.longest_row(), snap2.longest_row());
     }
 
     #[test]
