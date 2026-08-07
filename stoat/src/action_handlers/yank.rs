@@ -3,7 +3,7 @@ use crate::{
     pane::View,
     register::Register,
 };
-use stoat_text::{Bias, Point, SelectionGoal};
+use stoat_text::{Bias, LineEnding, Point, SelectionGoal};
 
 /// Copy every non-collapsed selection's content into the
 /// caller-selected register (or unnamed when none is set),
@@ -254,6 +254,10 @@ fn paste_clipboard(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
             return UpdateEffect::None;
         },
     };
+    // The clipboard is outside the editor and can hold any line ending, while a
+    // buffer holds LF whatever its file uses. Normalizing here rather than at
+    // each paste site keeps the invariant a property of the read.
+    let content = LineEnding::normalize(&content).into_owned();
     paste_text(stoat, &[content], side)
 }
 
@@ -357,8 +361,12 @@ pub(crate) fn read_register_fragments(
         Register::Unnamed | Register::Named(_) => {
             stoat.registers.read(register).map(<[String]>::to_vec)
         },
+        // Normalized for the same reason as [`paste_clipboard`]: this is the
+        // other place clipboard text enters, and it feeds the insert-mode
+        // register insert and `replace_with_yanked`. The in-memory registers
+        // below hold buffer-sourced text, which is already LF.
         Register::Clipboard => match stoat.clipboard_host().get() {
-            Ok(text) => text.map(|t| vec![t]),
+            Ok(text) => text.map(|t| vec![LineEnding::normalize(&t).into_owned()]),
             Err(err) => {
                 tracing::warn!(target: "stoat::yank", ?err, "clipboard read failed");
                 None
@@ -1000,6 +1008,68 @@ mod tests {
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardAfter);
         assert_eq!(buffer_text(&h, &path), "abcxyz\n");
+    }
+
+    /// Clipboard text arrives normalized, so a CRLF clipboard cannot put a
+    /// carriage return into the buffer.
+    ///
+    /// A buffer holds LF whatever its file uses, and everything downstream is
+    /// built on that. Saving a CRLF-detected file rewrites each `\n` back into
+    /// `\r\n`, so a `\r` that slipped in becomes `\r\r\n`, and row-end logic
+    /// lands between the `\r` and the `\n` because the rope counts `\r` as
+    /// content while `\r\n` is a single grapheme.
+    #[test]
+    fn pasting_crlf_clipboard_text_normalizes_it() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.fake_clipboard().set("x\r\ny\r\n").unwrap();
+        h.type_keys("escape");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardAfter);
+        assert!(
+            !buffer_text(&h, &path).contains('\r'),
+            "no carriage return reaches the buffer, got {:?}",
+            buffer_text(&h, &path),
+        );
+    }
+
+    /// The same for the clipboard register, which is a separate read.
+    #[test]
+    fn inserting_the_clipboard_register_normalizes_crlf() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.fake_clipboard().set("x\r\ny\r\n").unwrap();
+        h.type_keys("escape");
+        h.type_keys("\" * p");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert!(
+            !buffer_text(&h, &path).contains('\r'),
+            "no carriage return reaches the buffer, got {:?}",
+            buffer_text(&h, &path),
+        );
+    }
+
+    /// A paste is linewise only when every fragment ends in a newline.
+    ///
+    /// The reference implementation treats a register as linewise when *any*
+    /// fragment does. Stoat requires all of them, so a mixed register splices
+    /// in place rather than opening lines around content that was not
+    /// line-shaped. The divergence is deliberate and pinned here so it reads as
+    /// a decision rather than a discrepancy to reconcile.
+    #[test]
+    fn a_mixed_register_pastes_characterwise() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.stoat.registers.write(
+            crate::register::Register::Unnamed,
+            vec!["X\n".to_string(), "Y".to_string()],
+        );
+        h.type_keys("escape");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(
+            buffer_text(&h, &path),
+            "aX\nbc\n",
+            "one fragment lacking a newline makes the whole paste characterwise",
+        );
     }
 
     #[test]
