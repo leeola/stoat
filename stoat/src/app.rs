@@ -8720,7 +8720,7 @@ impl Stoat {
             .filter(|picker| {
                 picker
                     .selected_commit()
-                    .is_some_and(|c| picker.preview_sessions.contains_key(&c.sha))
+                    .is_some_and(|c| picker.preview_sessions.get(&c.sha).is_some())
             })
             .and_then(|picker| {
                 crate::render::commit_picker::commit_picker_layout(

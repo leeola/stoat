@@ -456,13 +456,13 @@ fn pending_sha(stoat: &Stoat) -> Option<String> {
 /// Spawn a background [`ReviewSession`] build for the selected commit unless
 /// one is already cached or in flight for that sha.
 fn ensure_selected_preview(stoat: &mut Stoat) {
-    let Some(picker) = stoat.commit_picker.as_ref() else {
+    let Some(picker) = stoat.commit_picker.as_mut() else {
         return;
     };
     let Some(sha) = picker.selected_commit().map(|c| c.sha.clone()) else {
         return;
     };
-    if picker.preview_sessions.contains_key(&sha)
+    if picker.preview_sessions.mark_used(&sha)
         || picker
             .pending_preview
             .as_ref()
