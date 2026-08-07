@@ -6,6 +6,9 @@
 //! each cell's terminal-palette color to concrete channels and touches only the
 //! lines the terminal reports as damaged.
 
+/// What a projection rewrote, which every caller of [`Terminal::project`] reads
+/// from here even though the type belongs to the grid it describes.
+pub use crate::grid::Damage;
 use crate::{
     grid::{
         self, Bar, Border, BorderEdge, BorderId, BorderStyle, Cell, DocumentOffset, Flags, Grid,
@@ -2593,27 +2596,6 @@ fn notification_from_osc(code: u32, payload: &[u8]) -> Option<TermEvent> {
             })
         },
         _ => None,
-    }
-}
-
-/// The set of viewport rows a projection rewrote, returned by
-/// [`Terminal::project`] so a renderer can rebuild only the rows that changed.
-///
-/// [`Damage::Full`] means every row changed (a resize or a terminal-reported
-/// full damage); [`Damage::Partial`] carries a per-row flag indexed by row.
-pub enum Damage {
-    Full,
-    Partial(Vec<bool>),
-}
-
-impl Damage {
-    /// Whether `row` changed this projection. Rows past the flag vector, and
-    /// every row under [`Damage::Full`], read as dirty.
-    pub fn is_dirty(&self, row: usize) -> bool {
-        match self {
-            Damage::Full => true,
-            Damage::Partial(rows) => rows.get(row).copied().unwrap_or(false),
-        }
     }
 }
 

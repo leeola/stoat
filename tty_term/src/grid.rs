@@ -1175,6 +1175,28 @@ fn copy_translated<T: Clone>(dst: &mut Vec<T>, src: &[T], mut shift: impl FnMut(
     }
 }
 
+/// The set of viewport rows a projection rewrote, so a renderer can rebuild
+/// only the rows that changed.
+///
+/// [`Damage::Full`] means every row did, which is what a resize or a
+/// terminal-reported full damage produces. [`Damage::Partial`] carries a flag
+/// per row, indexed by row.
+pub enum Damage {
+    Full,
+    Partial(Vec<bool>),
+}
+
+impl Damage {
+    /// Whether `row` changed this projection. Rows past the flag vector, and
+    /// every row under [`Damage::Full`], read as dirty.
+    pub fn is_dirty(&self, row: usize) -> bool {
+        match self {
+            Damage::Full => true,
+            Damage::Partial(rows) => rows.get(row).copied().unwrap_or(false),
+        }
+    }
+}
+
 /// A scrollable sub-rectangle of the grid.
 ///
 /// The cells inside the `width` by `height` rectangle anchored at (`top`,
