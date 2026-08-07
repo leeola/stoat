@@ -53,26 +53,40 @@ pub(super) const MINIMAP_STRIP_COLS: u16 = 8;
 /// shared constant is worth that imprecision.
 pub(super) const MINIMAP_MIN_PANE_COLS: u16 = 108;
 
-/// Each server name mapped to its negotiated offset encoding, so a diagnostic's
-/// LSP position converts to a byte column through the server that published it.
+/// Paint an editor with none of a pane's decoration: no gutter, no diagnostics,
+/// no minimap, no soft wrap.
+///
+/// For the editors that are not panes. Modal inputs, the dock, the finder
+/// preview, and the rename and reword popups all paint their text this way.
+///
+/// `chrome` is the frame's resolved theme colors. Passing them costs nothing
+/// where a caller already holds a set, and resolving one is around thirty scope
+/// lookups that a caller inside a frame has already paid for. `None` resolves a
+/// fresh set, for a caller outside any frame.
 pub(crate) fn render_editor(
     editor: &mut EditorState,
     inner: Rect,
     fallback_style: Style,
     theme: &crate::theme::Theme,
+    chrome: Option<&ResolvedChrome>,
     buf: &mut Buffer,
     is_focused: bool,
 ) {
-    // A modal, dock, or preview editor paints no gutter and no diagnostics, so
-    // nothing here reads the cached chrome the pane path shares. Resolving one
-    // costs what the overlay path resolved for itself before.
-    let chrome = ResolvedChrome::resolve(theme);
+    let resolved;
+    let chrome = match chrome {
+        Some(chrome) => chrome,
+        None => {
+            resolved = ResolvedChrome::resolve(theme);
+            &resolved
+        },
+    };
+
     render_editor_with_overlay(
         editor,
         inner,
         fallback_style,
         theme,
-        &chrome,
+        chrome,
         buf,
         is_focused,
         false,
@@ -3001,7 +3015,7 @@ mod tests {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let area = Rect::new(0, 0, 20, 2);
         let mut buf = Buffer::empty(area);
-        super::render_editor(editor, area, fallback, &theme, &mut buf, true);
+        super::render_editor(editor, area, fallback, &theme, None, &mut buf, true);
 
         let base = (0..area.width)
             .find(|&x| buf[(x, 0)].symbol() == "\u{6c49}")
@@ -3039,7 +3053,7 @@ mod tests {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let area = Rect::new(0, 0, 20, 2);
         let mut buf = Buffer::empty(area);
-        super::render_editor(editor, area, fallback, &theme, &mut buf, true);
+        super::render_editor(editor, area, fallback, &theme, None, &mut buf, true);
         buf
     }
 
@@ -3291,7 +3305,7 @@ mod tests {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let area = Rect::new(0, 0, 20, 2);
         let mut buf = Buffer::empty(area);
-        super::render_editor(editor, area, fallback, &theme, &mut buf, true);
+        super::render_editor(editor, area, fallback, &theme, None, &mut buf, true);
 
         let base = (0..area.width)
             .find(|&x| buf[(x, 0)].symbol() == "\u{6c49}")
@@ -3339,7 +3353,7 @@ mod tests {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let area = Rect::new(0, 0, 20, 3);
         let mut buf = Buffer::empty(area);
-        super::render_editor(editor, area, fallback, &theme, &mut buf, true);
+        super::render_editor(editor, area, fallback, &theme, None, &mut buf, true);
 
         assert_eq!(
             row_text(&buf, 0, area.width),

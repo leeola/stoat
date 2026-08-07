@@ -53,6 +53,14 @@ pub(crate) fn render_dock_open(
     if let View::Editor(editor_id) = &dock.view
         && let Some(editor) = editors.get_mut(*editor_id)
     {
-        render_editor(editor, inner, border_style, theme, buf, is_focused);
+        render_editor(
+            editor,
+            inner,
+            border_style,
+            theme,
+            Some(frame.chrome),
+            buf,
+            is_focused,
+        );
     }
 }

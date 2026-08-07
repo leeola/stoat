@@ -17,6 +17,7 @@ pub(crate) fn render_code_search(
     finder: &mut CodeSearchFinder,
     ws: &mut Workspace,
     theme: &Theme,
+    chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
     list_percent: u16,
@@ -51,7 +52,16 @@ pub(crate) fn render_code_search(
     let inner = layout.inner;
     let separator_style = theme.get(scope::UI_BORDER_INACTIVE);
 
-    crate::render::picker::filter_header(buf, inner, ">", &finder.input, ws, theme, &mut *scene);
+    crate::render::picker::filter_header(
+        buf,
+        inner,
+        ">",
+        &finder.input,
+        ws,
+        theme,
+        chrome,
+        &mut *scene,
+    );
 
     if let Some(preview_rect) = layout.preview {
         crate::render::chrome::vline(
@@ -62,7 +72,14 @@ pub(crate) fn render_code_search(
             separator_style,
             scene,
         );
-        crate::render::picker::render_picker_preview(&finder.preview, preview_rect, theme, ws, buf);
+        crate::render::picker::render_picker_preview(
+            &finder.preview,
+            preview_rect,
+            theme,
+            chrome,
+            ws,
+            buf,
+        );
     }
 
     finder.viewport_rows = Some(layout.list.height as usize);

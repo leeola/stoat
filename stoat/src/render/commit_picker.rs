@@ -156,6 +156,7 @@ pub(crate) fn render_commit_picker(
     picker: &mut CommitPicker,
     ws: &mut Workspace,
     theme: &Theme,
+    chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
     list_percent: u16,
@@ -191,7 +192,16 @@ pub(crate) fn render_commit_picker(
     let inner = layout.inner;
     let separator_style = theme.get(scope::UI_BORDER_INACTIVE);
 
-    crate::render::picker::filter_header(buf, inner, ">", &picker.input, ws, theme, &mut *scene);
+    crate::render::picker::filter_header(
+        buf,
+        inner,
+        ">",
+        &picker.input,
+        ws,
+        theme,
+        chrome,
+        &mut *scene,
+    );
 
     if let Some(preview_rect) = layout.preview {
         // Spans the modal rather than the table, since the preview below it

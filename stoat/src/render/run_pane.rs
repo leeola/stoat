@@ -10,10 +10,12 @@ use ratatui::{
 };
 use std::path::Path;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_run_pane(
     run_state: &RunState,
     editors: &mut slotmap::SlotMap<crate::editor_state::EditorId, crate::editor_state::EditorState>,
     theme: &crate::theme::Theme,
+    chrome: &crate::render::editor::ResolvedChrome,
     home: Option<&Path>,
     area: Rect,
     is_focused: bool,
@@ -131,6 +133,7 @@ pub(crate) fn render_run_pane(
         is_focused,
         "prompt",
         theme,
+        chrome,
         &std::collections::BTreeMap::new(),
         buf,
     );

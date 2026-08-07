@@ -772,6 +772,14 @@ pub(crate) fn frame(
     code_action::render_code_action(stoat, buf, &mut *scene);
     rename_input::render_rename_input(stoat, buf, &mut *scene);
     symbol_picker::render_symbol_picker(stoat, buf, &mut *scene);
+    // The modals below paint editors of their own, and this is the same set the
+    // pane path already rides down FrameCtx. Bound here because the workspace
+    // borrow on the next line rules out rebuilding a FrameCtx.
+    let chrome = &stoat
+        .chrome
+        .as_ref()
+        .expect("refresh_chrome ran at the top of the frame")
+        .1;
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     badges::sync_agent_badge(&mut ws.badges, ws.agent.as_ref());
     badges::render_badges(
@@ -819,6 +827,7 @@ pub(crate) fn frame(
                     picker,
                     ws,
                     &stoat.theme,
+                    chrome,
                     full,
                     buf,
                     &mut *scene,
@@ -889,6 +898,7 @@ pub(crate) fn frame(
                     picker,
                     ws,
                     &stoat.theme,
+                    chrome,
                     full,
                     zoom,
                     split,
@@ -940,6 +950,7 @@ pub(crate) fn frame(
                     ws,
                     stoat.home.as_deref(),
                     &stoat.theme,
+                    chrome,
                     full,
                     zoom,
                     split,
@@ -965,6 +976,7 @@ pub(crate) fn frame(
                     finder,
                     ws,
                     &stoat.theme,
+                    chrome,
                     &stoat.language_registry,
                     full,
                     modal_zoom_steps(&stoat.modal_zoom, ModalKind::SymbolFinder),
@@ -993,6 +1005,7 @@ pub(crate) fn frame(
                     finder,
                     ws,
                     &stoat.theme,
+                    chrome,
                     full,
                     zoom,
                     split,
@@ -1020,6 +1033,7 @@ pub(crate) fn frame(
                     ws,
                     stoat.home.as_deref(),
                     &stoat.theme,
+                    chrome,
                     full,
                     zoom,
                     buf,
@@ -1045,6 +1059,7 @@ pub(crate) fn frame(
                     &mode,
                     ws,
                     &stoat.theme,
+                    chrome,
                     &stoat.settings.mode_badges,
                     full,
                     modal_zoom_steps(&stoat.modal_zoom, ModalKind::Help),

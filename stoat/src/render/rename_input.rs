@@ -61,8 +61,12 @@ pub(crate) fn render_rename_input(
         .map(|s| s.input.editor_id)
         .expect("checked above");
     let theme = stoat.theme.clone();
-    let ws = stoat.active_workspace_mut();
+    let chrome = stoat.chrome.as_ref().map(|(_, chrome)| chrome);
+
+    // `active_workspace_mut` borrows the whole of `stoat`, which would end the
+    // chrome read above. Indexing the field keeps the two disjoint.
+    let ws = &mut stoat.workspaces[stoat.active_workspace];
     if let Some(editor) = ws.editors.get_mut(editor_id) {
-        render_editor(editor, inner, modal_style, &theme, buf, true);
+        render_editor(editor, inner, modal_style, &theme, chrome, buf, true);
     }
 }

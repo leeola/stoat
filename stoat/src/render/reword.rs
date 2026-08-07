@@ -82,5 +82,13 @@ pub(crate) fn render_reword(
         width: inner.width,
         height: inner.y + inner.height - editor_top,
     };
-    render_editor(editor, editor_rect, body_style, theme, buf, is_focused);
+    render_editor(
+        editor,
+        editor_rect,
+        body_style,
+        theme,
+        Some(frame.chrome),
+        buf,
+        is_focused,
+    );
 }

@@ -67,6 +67,7 @@ pub(crate) fn render_symbol_finder(
     finder: &mut SymbolFinder,
     ws: &mut Workspace,
     theme: &Theme,
+    chrome: &crate::render::editor::ResolvedChrome,
     languages: &LanguageRegistry,
     area: Rect,
     zoom: i8,
@@ -90,7 +91,16 @@ pub(crate) fn render_symbol_finder(
 
     let separator_style = theme.get(scope::UI_BORDER_INACTIVE);
 
-    crate::render::picker::filter_header(buf, inner, ">", &finder.input, ws, theme, &mut *scene);
+    crate::render::picker::filter_header(
+        buf,
+        inner,
+        ">",
+        &finder.input,
+        ws,
+        theme,
+        chrome,
+        &mut *scene,
+    );
 
     if let Some(preview_rect) = preview {
         crate::render::chrome::vline(
@@ -114,7 +124,14 @@ pub(crate) fn render_symbol_finder(
             ),
             None => preview_rect,
         };
-        crate::render::picker::render_picker_preview(&finder.preview, source_rect, theme, ws, buf);
+        crate::render::picker::render_picker_preview(
+            &finder.preview,
+            source_rect,
+            theme,
+            chrome,
+            ws,
+            buf,
+        );
     }
 
     let git_root = ws.git_root.clone();

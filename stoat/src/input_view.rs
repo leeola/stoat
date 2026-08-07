@@ -1,7 +1,11 @@
 use crate::{
     buffer::BufferId,
     editor_state::{EditorId, EditorState},
-    render::{editor::render_editor, pane::mode_segment, text::write_str},
+    render::{
+        editor::{render_editor, ResolvedChrome},
+        pane::mode_segment,
+        text::write_str,
+    },
     theme::{scope, Theme},
     workspace::Workspace,
 };
@@ -321,6 +325,7 @@ impl InputView {
         is_focused: bool,
         current_mode: &str,
         theme: &Theme,
+        chrome: &ResolvedChrome,
         mode_badges: &std::collections::BTreeMap<String, String>,
         buf: &mut Buffer,
     ) {
@@ -340,7 +345,15 @@ impl InputView {
 
         let fallback = theme.get(scope::UI_TEXT);
         if let Some(editor) = editors.get_mut(self.editor_id) {
-            render_editor(editor, body_area, fallback, theme, buf, is_focused);
+            render_editor(
+                editor,
+                body_area,
+                fallback,
+                theme,
+                Some(chrome),
+                buf,
+                is_focused,
+            );
         }
 
         if let Some(status_area) = status_area {

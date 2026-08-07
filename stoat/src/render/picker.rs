@@ -9,7 +9,7 @@ use crate::{
     input_view::InputView,
     picker::{write_row_display, PickList, Preview},
     render::{
-        editor::render_editor,
+        editor::{render_editor, ResolvedChrome},
         text::{write_str, write_str_clipped},
     },
     theme::{scope, Theme},
@@ -27,6 +27,7 @@ use std::{collections::BTreeMap, path::Path};
 /// Every filter modal opens this way, and each lays its body rects out from
 /// that same two-row assumption. One painter is what keeps the assumption true
 /// across all of them at once.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn filter_header(
     buf: &mut Buffer,
     inner: Rect,
@@ -34,6 +35,7 @@ pub(crate) fn filter_header(
     input: &InputView,
     ws: &mut Workspace,
     theme: &Theme,
+    chrome: &ResolvedChrome,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
     write_str(buf, inner.x, inner.y, prompt, theme.get(scope::UI_PROMPT));
@@ -45,6 +47,7 @@ pub(crate) fn filter_header(
         true,
         "prompt",
         theme,
+        chrome,
         &BTreeMap::new(),
         buf,
     );
@@ -213,6 +216,7 @@ pub(crate) fn render_picker_preview(
     preview: &Preview,
     area: Rect,
     theme: &Theme,
+    chrome: &ResolvedChrome,
     ws: &mut Workspace,
     buf: &mut Buffer,
 ) {
@@ -221,7 +225,7 @@ pub(crate) fn render_picker_preview(
     }
     let fallback = theme.get(scope::UI_TEXT);
     if let Some(editor) = ws.editors.get_mut(preview.editor) {
-        render_editor(editor, area, fallback, theme, buf, false);
+        render_editor(editor, area, fallback, theme, Some(chrome), buf, false);
     }
 }
 

@@ -160,13 +160,14 @@ pub(crate) fn render_command_palette(
     ws: &mut Workspace,
     home: Option<&Path>,
     theme: &crate::theme::Theme,
+    chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
     if palette.arg_picker.is_some() && palette.arg_source().is_some() {
-        render_palette_arg_picker(palette, ws, home, theme, area, zoom, buf, scene);
+        render_palette_arg_picker(palette, ws, home, theme, chrome, area, zoom, buf, scene);
         return;
     }
 
@@ -177,7 +178,7 @@ pub(crate) fn render_command_palette(
     if let Some(entry) = palette.command
         && palette.arg_source().is_none()
     {
-        render_palette_free_arg(palette, entry, ws, theme, area, zoom, buf, scene);
+        render_palette_free_arg(palette, entry, ws, theme, chrome, area, zoom, buf, scene);
         return;
     }
 
@@ -199,6 +200,7 @@ pub(crate) fn render_command_palette(
         zoom,
         ws,
         theme,
+        chrome,
         area,
         buf,
         scene,
@@ -218,6 +220,7 @@ fn render_palette_arg_picker(
     ws: &mut Workspace,
     home: Option<&Path>,
     theme: &crate::theme::Theme,
+    chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
     buf: &mut Buffer,
@@ -231,6 +234,7 @@ fn render_palette_arg_picker(
         palette.list_rows_hint(),
         ws,
         theme,
+        chrome,
         area,
         zoom,
         buf,
@@ -261,6 +265,7 @@ fn render_palette_arg_picker(
             &picker.active_core_ref().preview,
             preview_rect,
             theme,
+            chrome,
             ws,
             buf,
         );
@@ -300,6 +305,7 @@ fn render_palette_free_arg(
     entry: &'static RegistryEntry,
     ws: &mut Workspace,
     theme: &crate::theme::Theme,
+    chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
     buf: &mut Buffer,
@@ -312,6 +318,7 @@ fn render_palette_free_arg(
         palette.list_rows_hint(),
         ws,
         theme,
+        chrome,
         area,
         zoom,
         buf,
@@ -378,6 +385,7 @@ fn render_palette_prelude(
     content_rows: u16,
     ws: &mut Workspace,
     theme: &crate::theme::Theme,
+    chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
     buf: &mut Buffer,
@@ -396,7 +404,7 @@ fn render_palette_prelude(
         &mut *scene,
     );
 
-    crate::render::picker::filter_header(buf, layout.inner, ":", input, ws, theme, scene);
+    crate::render::picker::filter_header(buf, layout.inner, ":", input, ws, theme, chrome, scene);
 
     Some(layout)
 }
@@ -412,6 +420,7 @@ fn render_palette_filter(
     zoom: i8,
     ws: &mut Workspace,
     theme: &crate::theme::Theme,
+    chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
@@ -426,6 +435,7 @@ fn render_palette_filter(
         content_rows,
         ws,
         theme,
+        chrome,
         area,
         zoom,
         buf,

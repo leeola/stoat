@@ -93,6 +93,7 @@ pub(crate) fn render_help(
     stoat_mode: &str,
     ws: &mut crate::workspace::Workspace,
     theme: &crate::theme::Theme,
+    chrome: &crate::render::editor::ResolvedChrome,
     mode_badges: &std::collections::BTreeMap<String, String>,
     area: Rect,
     zoom: i8,
@@ -138,6 +139,7 @@ pub(crate) fn render_help(
         true,
         "prompt",
         theme,
+        chrome,
         mode_badges,
         buf,
     );

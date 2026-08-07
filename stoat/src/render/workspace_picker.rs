@@ -35,6 +35,7 @@ pub(crate) fn render_workspace_picker(
     picker: &mut WorkspacePicker,
     ws: &mut Workspace,
     theme: &crate::theme::Theme,
+    chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
@@ -54,7 +55,7 @@ pub(crate) fn render_workspace_picker(
         &mut *scene,
     );
 
-    crate::render::picker::filter_header(buf, inner, ">", &picker.input, ws, theme, scene);
+    crate::render::picker::filter_header(buf, inner, ">", &picker.input, ws, theme, chrome, scene);
 
     const NAME_W: u16 = 12;
     const BUF_W: u16 = 5;
@@ -246,10 +247,12 @@ mod tests {
         buf: &mut Buffer,
         area: Rect,
     ) {
+        let theme = selection_theme();
         render_workspace_picker(
             picker,
             &mut workspaces[active],
-            &selection_theme(),
+            &theme,
+            &crate::render::editor::ResolvedChrome::resolve(&theme),
             area,
             buf,
             &mut stoatty_widgets::ApcScene::new(),

@@ -161,6 +161,7 @@ pub(crate) fn render_pane(
                     run_state,
                     editors,
                     theme,
+                    frame.chrome,
                     frame.home,
                     content_area,
                     is_focused,
