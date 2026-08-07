@@ -896,6 +896,10 @@ impl Rope {
             return offset;
         }
 
+        if self.ascii_pair_brackets(offset) {
+            return offset;
+        }
+
         // The cursor needs the text before `offset` to answer, since whether a
         // boundary exists here depends on what it would be splitting.
         let mut cursor = GraphemeCursor::new(offset, self.len(), true);
@@ -932,6 +936,33 @@ impl Rope {
             Bias::Left => self.prev_grapheme_boundary(offset),
             Bias::Right => self.next_grapheme_boundary(offset),
         }
+    }
+
+    /// Whether the scalars on either side of `offset` are both ASCII and break
+    /// between, which decides a grapheme boundary without a cursor.
+    ///
+    /// Two adjacent scalars below 0x80 always break, save CR before LF. GB3
+    /// joins that one pair, GB4 and GB5 break around the other controls, and
+    /// every remaining rule needs Hangul, Extend, ZWJ, SpacingMark, Prepend,
+    /// Extended_Pictographic, or a regional indicator, none of which any ASCII
+    /// scalar is. A byte below 0x80 is also never a UTF-8 continuation byte, so
+    /// the two reads below identify whole scalars rather than the middle of one.
+    ///
+    /// False when either side lies in a neighbouring chunk. Reaching for it
+    /// would cost the descent this exists to skip, and the caller's slower path
+    /// answers a seam correctly anyway.
+    fn ascii_pair_brackets(&self, offset: usize) -> bool {
+        let Some((chunk, chunk_start)) = self.chunk_at(offset) else {
+            return false;
+        };
+        let local = offset - chunk_start;
+        let bytes = chunk.as_bytes();
+        if local == 0 || local >= bytes.len() {
+            return false;
+        }
+
+        let (before, after) = (bytes[local - 1], bytes[local]);
+        before < 0x80 && after < 0x80 && !(before == b'\r' && after == b'\n')
     }
 
     /// Offset of the first grapheme-cluster boundary after `offset`, or
@@ -3402,6 +3433,99 @@ mod tests {
             assert_eq!(rope.clip_to_grapheme_boundary(rope.len(), bias), rope.len());
             assert_eq!(Rope::new().clip_to_grapheme_boundary(0, bias), 0);
         }
+    }
+
+    #[test]
+    fn clipping_holds_a_crlf_pair_together() {
+        // The one ASCII pair that does not break, so the ASCII shortcut has to
+        // decline it and let the cursor answer.
+        let rope = Rope::from("a\r\nb");
+        assert_eq!(rope.clip_to_grapheme_boundary(2, Bias::Left), 1);
+        assert_eq!(rope.clip_to_grapheme_boundary(2, Bias::Right), 3);
+
+        for offset in [1, 3] {
+            for bias in [Bias::Left, Bias::Right] {
+                assert_eq!(
+                    rope.clip_to_grapheme_boundary(offset, bias),
+                    offset,
+                    "offset {offset} brackets the pair rather than splitting it, under {bias:?}",
+                );
+            }
+        }
+    }
+
+    /// Byte offsets where one chunk of `rope` ends and the next begins.
+    fn chunk_seams(rope: &Rope) -> Vec<usize> {
+        let mut at = 0;
+        rope.chunks()
+            .map(|chunk| {
+                at += chunk.len();
+                at
+            })
+            .filter(|&seam| seam < rope.len())
+            .collect()
+    }
+
+    #[test]
+    fn clipping_answers_an_offset_on_a_chunk_seam() {
+        // Deciding a boundary from one chunk means the two neighbouring bytes
+        // have to be in it, which at a seam they are not. Chunks cap at 16 bytes
+        // under cfg(test), so a plain run of letters is enough to make seams.
+        let rope = grown_rope(&"a".repeat(40));
+        let seams = chunk_seams(&rope);
+        assert!(!seams.is_empty(), "the fixture must span chunks");
+
+        for seam in seams {
+            for bias in [Bias::Left, Bias::Right] {
+                assert_eq!(
+                    rope.clip_to_grapheme_boundary(seam, bias),
+                    seam,
+                    "seam {seam} falls between two ASCII letters, under {bias:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clipping_escapes_a_cluster_a_seam_runs_through() {
+        // A seam can land between a base character and its combining mark, where
+        // the byte before the offset is in the previous chunk and says nothing
+        // about the cluster. Deciding from the chunk holding the offset alone
+        // would call this a boundary, and it is the middle of one.
+        let cluster_split: Vec<usize> = (1..40)
+            .filter(|pad| {
+                let rope = grown_rope(&format!("{}e\u{301}{}", "a".repeat(*pad), "b".repeat(24)));
+                chunk_seams(&rope).contains(&(pad + 1))
+            })
+            .collect();
+        assert!(
+            !cluster_split.is_empty(),
+            "no padding put a seam inside the cluster, so this test proves nothing",
+        );
+
+        for pad in cluster_split {
+            let rope = grown_rope(&format!("{}e\u{301}{}", "a".repeat(pad), "b".repeat(24)));
+            assert_eq!(
+                rope.clip_to_grapheme_boundary(pad + 1, Bias::Left),
+                pad,
+                "clamping back off the acute across the seam at pad {pad}",
+            );
+            assert_eq!(
+                rope.clip_to_grapheme_boundary(pad + 1, Bias::Right),
+                pad + 3,
+                "clamping forward off the acute across the seam at pad {pad}",
+            );
+        }
+    }
+
+    /// A rope built one character at a time, so chunks split where pushing put
+    /// them rather than all at once over the whole string.
+    fn grown_rope(text: &str) -> Rope {
+        let mut rope = Rope::new();
+        for ch in text.chars() {
+            rope.push(&ch.to_string());
+        }
+        rope
     }
 
     #[test]
