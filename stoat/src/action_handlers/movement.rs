@@ -3458,12 +3458,15 @@ pub(crate) fn execute_find(
         editor.selections.transform(new_buf, |sel| {
             let head_offset = new_buf.resolve_anchor(&sel.head());
             let tail_offset = new_buf.resolve_anchor(&sel.tail());
+            // A find is horizontal, so it drops any column a prior vertical
+            // move was holding. Carrying it would send the next vertical move
+            // back to the column the find started from.
             extend_head_to_cursor(
                 sel,
                 target,
                 head_offset,
                 tail_offset,
-                sel.goal,
+                SelectionGoal::None,
                 new_rope,
                 new_buf,
             )
@@ -4081,12 +4084,14 @@ pub(super) fn goto_column(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
         editor.selections.transform(new_buf, |sel| {
             let head_offset = new_buf.resolve_anchor(&sel.head());
             let tail_offset = new_buf.resolve_anchor(&sel.tail());
+            // Naming a column is itself a horizontal move, so it replaces
+            // whatever column a prior vertical move was holding.
             extend_head_to_cursor(
                 sel,
                 target_offset,
                 head_offset,
                 tail_offset,
-                sel.goal,
+                SelectionGoal::None,
                 new_rope,
                 new_buf,
             )

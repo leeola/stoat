@@ -2691,6 +2691,74 @@ mod tests {
         );
     }
 
+    /// An extend that lands exactly on its own tail still covers a cell.
+    ///
+    /// Holding the tail and moving the head onto it would make the two
+    /// endpoints equal, and nothing downstream widens an empty selection, so
+    /// the block cursor would have no cell to paint at all.
+    #[test]
+    fn select_mode_extend_back_onto_the_tail_keeps_a_cell() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "ab cd ef\n");
+        h.open_file(&path);
+        h.type_keys("3 l v l l");
+        assert_eq!(
+            h.selection_spans()[0],
+            (3, 6, false),
+            "the tail sits at the c the backward word motion targets",
+        );
+
+        h.type_keys("b");
+        assert_eq!(
+            h.selection_spans()[0],
+            (3, 4, false),
+            "landing on the tail covers its cell rather than collapsing onto it",
+        );
+    }
+
+    /// The same at a line start, where the target is the tail itself.
+    #[test]
+    fn select_mode_extend_to_line_start_at_column_zero_keeps_a_cell() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "foo bar\n");
+        h.open_file(&path);
+        h.type_keys("v");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendToLineStart);
+        assert_eq!(
+            h.selection_spans()[0],
+            (0, 1, false),
+            "already at column 0, so the cursor keeps its cell",
+        );
+    }
+
+    /// A find is a horizontal move, so it clears the column a prior vertical
+    /// move was holding.
+    ///
+    /// Carrying that column past the find makes the next vertical move return
+    /// to where the cursor was before it, ignoring the column the find landed
+    /// on. Here `j` holds column 0, `f x` moves to column 1, and the second `j`
+    /// has to follow the find rather than snap back to column 0.
+    #[test]
+    fn select_mode_find_clears_the_vertical_goal_column() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "aaaa\nbxaa\ncccc\n");
+        h.open_file(&path);
+        h.type_keys("v j");
+        h.type_keys("f x");
+        assert_eq!(
+            h.selection_spans()[0],
+            (0, 7, false),
+            "the find lands on the x at row 1 column 1",
+        );
+
+        h.type_keys("j");
+        assert_eq!(
+            h.selection_spans()[0],
+            (0, 12, false),
+            "the next row is entered at column 1, the column the find landed on",
+        );
+    }
+
     #[test]
     fn select_mode_t_extends_till_next_char() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
