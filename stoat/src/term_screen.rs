@@ -222,17 +222,37 @@ impl TermScreen {
     ///
     /// Always returns [`Self::cols`] cells. A row index past the viewport
     /// yields a blank row rather than panicking.
+    ///
+    /// See also:
+    /// - [`Self::row_into`] for a caller sweeping the whole screen, which can read every row
+    ///   through one buffer instead of allocating per row.
     pub fn row(&self, idx: usize) -> Vec<StyledCell> {
+        let mut out = Vec::new();
+        self.row_into(idx, &mut out);
+        out
+    }
+
+    /// Replace `out` with the styled cells of viewport row `idx`, left to right.
+    ///
+    /// Leaves exactly [`Self::cols`] cells whatever `out` held before, and a row
+    /// index past the viewport leaves blanks rather than panicking.
+    ///
+    /// Exists for repainting the screen, where each row is read once, in order,
+    /// and dropped before the next is asked for. One buffer carried across that
+    /// loop costs a single allocation rather than one per row, which matters
+    /// because a child streaming output repaints every frame.
+    pub fn row_into(&self, idx: usize, out: &mut Vec<StyledCell>) {
         let cols = self.cols();
+        out.clear();
+
         if idx >= self.rows() {
-            return vec![StyledCell::default(); cols];
+            out.resize(cols, StyledCell::default());
+            return;
         }
 
         let grid = self.term.grid();
         let line = &grid[Line(idx as i32)];
-        (0..cols)
-            .map(|col| convert_cell(&line[Column(col)]))
-            .collect()
+        out.extend((0..cols).map(|col| convert_cell(&line[Column(col)])));
     }
 
     /// The cursor cell, or `None` when the program has hidden it.
@@ -395,6 +415,29 @@ mod tests {
         term.feed(b"ab\r\ncd");
         assert_eq!(text_row(&term, 0), "ab");
         assert_eq!(text_row(&term, 1), "cd");
+    }
+
+    /// The buffer arrives holding whatever the previous row left, and past the
+    /// viewport it is filled rather than read, so both paths have to replace its
+    /// contents instead of adding to them.
+    #[test]
+    fn row_into_replaces_what_the_buffer_held() {
+        let mut term = TermScreen::new(2, 4);
+        term.feed(b"ab\r\ncd");
+
+        let mut cells = vec![StyledCell::default(); 100];
+        let chars = |cells: &[StyledCell]| cells.iter().map(|cell| cell.ch).collect::<String>();
+
+        term.row_into(0, &mut cells);
+        assert_eq!(chars(&cells), "ab  ");
+        term.row_into(1, &mut cells);
+        assert_eq!(chars(&cells), "cd  ");
+        term.row_into(9, &mut cells);
+        assert_eq!(
+            chars(&cells),
+            "    ",
+            "a row past the viewport blanks the buffer"
+        );
     }
 
     #[test]

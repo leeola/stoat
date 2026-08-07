@@ -37,9 +37,10 @@ pub(crate) fn render_term_pane(
     let selection = agent.selection;
     let selection_style = theme.get(crate::theme::scope::UI_SELECTION);
 
+    let mut cells = Vec::new();
     for row_idx in 0..rows {
         let y = area.y + row_idx as u16;
-        let cells = term.row(row_idx);
+        term.row_into(row_idx, &mut cells);
         for (col, cell) in cells.iter().enumerate().take(cols) {
             let x = area.x + col as u16;
             let mut style = Style::default();
