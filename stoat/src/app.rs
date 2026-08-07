@@ -48,7 +48,7 @@ use crate::{
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use futures::FutureExt;
+use futures::{future, FutureExt};
 use ratatui::{
     buffer::Buffer,
     layout::{Position, Rect},
@@ -133,6 +133,11 @@ pub(crate) const CODE_SEARCH_AST_DEBOUNCE: std::time::Duration =
 /// [`Stoat::run`] arms a timer at this cadence while a scroll glide is active,
 /// advancing the inertial scroll one step per fire.
 const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// Backstop on reaping every language server at quit, applied across all of
+/// them together. Exceeds what one host's own shutdown and reap bounds add up
+/// to, so this fires only for a host that hangs somewhere those do not cover.
+const SHUTDOWN_LSP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
 
 /// Frame interval for the LSP work-done spinner popout, about 10 fps. Fast enough
 /// to read as motion, slow enough not to churn repaints while progress streams.
@@ -2516,19 +2521,20 @@ impl Stoat {
         None
     }
 
-    /// Reap the language server on quit. Awaits [`LspHost::shutdown`]
-    /// bounded by a 500ms timeout so a server that ignores the request
-    /// cannot block the editor's exit. [`NoopLsp`] and the test fake
-    /// return immediately, so the call is unconditional. Errors and
-    /// timeouts are ignored -- the process is exiting regardless.
+    /// Reap the language servers on quit.
+    ///
+    /// Every host is shut down at once rather than in turn, so one server that
+    /// drags its exit out cannot spend the budget the others need. [`NoopLsp`]
+    /// and the test fake return immediately, so the call is unconditional.
+    /// Errors are ignored, the process being on its way out regardless.
+    ///
+    /// [`SHUTDOWN_LSP_TIMEOUT`] is only a backstop against a host that hangs
+    /// somewhere its own bounds do not cover. It has to exceed those bounds, or
+    /// it cuts short the kill they exist to reach.
     pub async fn shutdown_lsp(&self) {
         let hosts = self.lsp_registry.hosts();
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async move {
-            for host in hosts {
-                let _ = host.shutdown().await;
-            }
-        })
-        .await;
+        let reaps = future::join_all(hosts.iter().map(|host| host.shutdown()));
+        let _ = tokio::time::timeout(SHUTDOWN_LSP_TIMEOUT, reaps).await;
     }
 
     pub fn active_workspace(&self) -> &Workspace {

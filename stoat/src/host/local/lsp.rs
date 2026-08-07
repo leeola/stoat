@@ -52,13 +52,24 @@ use std::{
         atomic::{AtomicI64, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use stoat_log::TextProtoLog;
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     oneshot, Mutex as TokioMutex, Notify,
 };
+
+/// How long a server has to answer `shutdown` on quit before the editor sends
+/// `exit` regardless.
+const SHUTDOWN_REQUEST_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// How long a server has to exit on its own after `exit` before it is killed.
+const REAP_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// How often the reap looks, so a server that goes promptly is noticed rather
+/// than waited out.
+const REAP_POLL: Duration = Duration::from_millis(10);
 
 type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, LspResponseError>>>>>;
 
@@ -299,13 +310,12 @@ impl LspHost for LocalLsp {
 
     async fn shutdown(&self) -> io::Result<()> {
         let _ = tokio::time::timeout(
-            Duration::from_millis(500),
+            SHUTDOWN_REQUEST_TIMEOUT,
             self.request::<_, Value>("shutdown", Value::Null),
         )
         .await;
         let _ = self.notify("exit", Value::Null);
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let _ = self.child.lock().expect("lsp child poisoned").kill();
+        reap_child(&self.child, REAP_TIMEOUT, REAP_POLL).await;
         Ok(())
     }
 
@@ -649,6 +659,39 @@ fn stderr_loop(stderr: ChildStderr) {
             Err(_) => break,
         }
     }
+}
+
+/// Give `child` up to `timeout` to exit on its own, then kill it. Reports
+/// whether it went by itself.
+///
+/// Polled every `poll` rather than waited out, so a server that honors `exit`
+/// costs the editor's quit only as long as it actually takes. The kill runs on
+/// this side of the bound, which a sleep ahead of it cannot promise: whatever
+/// bounds the caller cuts the sleep short and takes the kill with it.
+///
+/// The kill is followed by a wait, since a signal alone leaves the process a
+/// zombie for as long as the editor outlives it. That wait returns at once,
+/// the child having just been killed.
+async fn reap_child(child: &Mutex<Child>, timeout: Duration, poll: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let exited = {
+            let mut child = child.lock().expect("lsp child poisoned");
+            matches!(child.try_wait(), Ok(Some(_)))
+        };
+        if exited {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(poll).await;
+    }
+
+    let mut child = child.lock().expect("lsp child poisoned");
+    let _ = child.kill();
+    let _ = child.wait();
+    false
 }
 
 /// Frame a JSON-RPC body with the `Content-Length` header the LSP base protocol
@@ -1021,8 +1064,8 @@ fn client_capabilities() -> ClientCapabilities {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify, client_capabilities, encode_message, transcript_slug, transcript_stem,
-        DiagnosticTag, FrameDecoder, Routed,
+        classify, client_capabilities, encode_message, reap_child, transcript_slug,
+        transcript_stem, Command, DiagnosticTag, Duration, FrameDecoder, Instant, Mutex, Routed,
     };
     use crate::host::lsp::{IncomingRequest, LspNotification};
     use serde_json::{json, Value};
@@ -1031,6 +1074,45 @@ mod tests {
         let mut decoder = FrameDecoder::new();
         decoder.push(bytes);
         decoder.next_body().expect("one complete body")
+    }
+
+    #[tokio::test]
+    async fn a_server_that_ignores_exit_is_killed_and_waited_on() {
+        let child = Mutex::new(
+            Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn a child that outlives the bound"),
+        );
+
+        let started = Instant::now();
+        let exited = reap_child(&child, Duration::from_millis(50), Duration::from_millis(10)).await;
+
+        assert!(!exited, "the child was still running when the bound passed");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the reap returns on its own bound, not the child's lifetime"
+        );
+        assert!(
+            matches!(
+                child.lock().expect("child poisoned").try_wait(),
+                Ok(Some(_))
+            ),
+            "the killed child is waited on rather than left a zombie"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_that_exits_is_not_waited_out() {
+        let child = Mutex::new(
+            Command::new("true")
+                .spawn()
+                .expect("spawn a child that exits at once"),
+        );
+
+        let exited = reap_child(&child, Duration::from_secs(5), Duration::from_millis(10)).await;
+
+        assert!(exited, "the child went on its own inside the bound");
     }
 
     #[test]
