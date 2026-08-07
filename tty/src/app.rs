@@ -326,6 +326,46 @@ impl App {
     }
 }
 
+/// Whether a window is on screen, and whether it owes a redraw it could not
+/// draw while it was not.
+///
+/// An occluded window puts nothing in front of anyone, so projecting the grid
+/// and submitting a frame for it is work with no result. Skipping the frame also
+/// ends the animation self-request chain, since a redraw that never runs never
+/// asks for the next one, so a hidden window with a blinking cursor goes quiet
+/// rather than easing against nothing.
+///
+/// Defaults to visible, since some compositors never report occlusion at all.
+/// One that stays silent leaves a window drawing exactly as it would without
+/// this, which is the right way to be wrong.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Visibility {
+    occluded: bool,
+    /// A redraw arrived while occluded and still has to happen. Held rather than
+    /// dropped so the window is current the moment it comes back.
+    owed: bool,
+}
+
+impl Visibility {
+    /// Whether a redraw may draw now, recording it as owed when it may not.
+    fn admit(&mut self) -> bool {
+        if self.occluded {
+            self.owed = true;
+            return false;
+        }
+        true
+    }
+
+    /// Record an occlusion change, reporting whether a redraw is now owed.
+    ///
+    /// True only on becoming visible with one held, so the caller requests a
+    /// frame exactly when there is something to catch up on.
+    fn set_occluded(&mut self, occluded: bool) -> bool {
+        self.occluded = occluded;
+        !occluded && mem::take(&mut self.owed)
+    }
+}
+
 /// A detached pane's aux OS window, a second render target for the window-bound
 /// pools the primary composite omits.
 ///
@@ -347,6 +387,8 @@ struct AuxWindow {
     /// Feeds the app-wide DECSET 1004 report so a switch between stoatty windows
     /// keeps the app focused.
     focused: bool,
+    /// Whether this window is on screen, tracked from `WindowEvent::Occluded`.
+    visibility: Visibility,
     /// The last pointer cell, tracked from `CursorMoved` so a `MouseInput` press
     /// or release -- which carries no position -- reports at the right cell.
     pointer_cell: (u16, u16),
@@ -555,6 +597,9 @@ struct State {
     /// by the wall time actually elapsed rather than a fixed per-frame step.
     /// `None` until the first frame.
     last_redraw: Option<Instant>,
+    /// Whether the main window is on screen, tracked from
+    /// `WindowEvent::Occluded`.
+    visibility: Visibility,
     /// Whether the perf HUD overlay is shown, toggled by the platform modifier
     /// plus Shift+P. Drives both the HUD composite and the redraw keep-alive.
     #[cfg(feature = "perf")]
@@ -940,6 +985,7 @@ impl ApplicationHandler<PtyEvent> for App {
             native_drag: false,
             clipboard: None,
             last_redraw: None,
+            visibility: Visibility::default(),
             #[cfg(feature = "perf")]
             show_perf_hud: false,
         });
@@ -1099,6 +1145,9 @@ impl ApplicationHandler<PtyEvent> for App {
                     let font_size = state.font_size;
                     let scale = state.scale_factor as f32;
                     if let Some(aux) = state.aux.iter_mut().find(|aux| aux.window.id() == id) {
+                        if !aux.visibility.admit() {
+                            return;
+                        }
                         let now = Instant::now();
                         let dt = aux
                             .last_redraw
@@ -1143,6 +1192,19 @@ impl ApplicationHandler<PtyEvent> for App {
                             });
                     if gained && let Some(window) = window {
                         send_window_event(state, WindowIpcEvent::Focused { window });
+                    }
+                    return;
+                },
+                WindowEvent::Occluded(hidden) => {
+                    let hidden = *hidden;
+                    if let Some(aux) = state.aux.iter_mut().find(|aux| aux.window.id() == id)
+                        && aux.visibility.set_occluded(hidden)
+                    {
+                        // The ease step is the gap since the last frame, and the
+                        // gap across a hiding is not one anyone watched, so the
+                        // resumed frame starts its clock fresh.
+                        aux.last_redraw = None;
+                        aux.window.request_redraw();
                     }
                     return;
                 },
@@ -1276,6 +1338,15 @@ impl ApplicationHandler<PtyEvent> for App {
                     state.window.request_user_attention(None);
                 }
             },
+            WindowEvent::Occluded(hidden) => {
+                if state.visibility.set_occluded(hidden) {
+                    // The ease step is the gap since the last frame, and the gap
+                    // across a hiding is not one anyone watched, so the resumed
+                    // frame starts its clock fresh.
+                    state.last_redraw = None;
+                    state.window.request_redraw();
+                }
+            },
             WindowEvent::Resized(size) => {
                 state.gpu.resize(size.width, size.height);
 
@@ -1302,6 +1373,13 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.window.request_redraw();
             },
             WindowEvent::RedrawRequested => {
+                // Every frame goes through here, so one gate covers the lock, the
+                // projection, the render, and the ease self-request below that
+                // would otherwise keep asking for frames nobody sees.
+                if !state.visibility.admit() {
+                    return;
+                }
+
                 // The first redraw drives the first present, so report the total
                 // cold-start time once, then never again.
                 if let Some(start) = state.first_frame_start.take() {
@@ -2568,6 +2646,7 @@ fn open_aux_window(
         grid: Grid::new(0, 0),
         scratch: Grid::new(0, 0),
         focused: false,
+        visibility: Visibility::default(),
         pointer_cell: (0, 0),
         pressed: None,
         wheel_pixels: 0.0,
@@ -3411,7 +3490,7 @@ mod tests {
         refresh_popover_overflows, reposition_scroll, seed_settle_flight, selection_copy_text,
         sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes, step_cursor, step_document_scroll,
         step_grid_scroll, step_popover_scroll, step_region_scroll, step_scrollback_scroll,
-        swallow_super_combo, wheel_lines, CursorAnimation, EASE_BASELINE_FRAME,
+        swallow_super_combo, wheel_lines, CursorAnimation, Visibility, EASE_BASELINE_FRAME,
         SCROLLBACK_MIN_STEP,
     };
     #[cfg(unix)]
@@ -3429,6 +3508,51 @@ mod tests {
         event::MouseScrollDelta,
         keyboard::{Key, ModifiersState, NamedKey},
     };
+
+    #[test]
+    fn a_visible_window_draws_every_frame_it_is_asked_for() {
+        // The default has to be draw-everything, since a platform that never
+        // reports occlusion leaves the flag where it started, and a window that
+        // silently stopped drawing there would just be blank.
+        let mut visibility = Visibility::default();
+
+        assert!(visibility.admit(), "nothing has hidden it");
+        assert!(visibility.admit(), "and it stays that way");
+        assert_eq!(visibility, Visibility::default(), "nothing owed either");
+    }
+
+    #[test]
+    fn a_frame_asked_for_while_hidden_arrives_when_it_comes_back() {
+        // Skipping is only safe because the request is kept. Dropping it would
+        // leave the window showing whatever it last drew before hiding, with
+        // nothing scheduled to correct it.
+        let mut visibility = Visibility::default();
+        assert!(!visibility.set_occluded(true), "hiding owes nothing");
+
+        assert!(!visibility.admit(), "hidden, so no frame runs");
+        assert!(!visibility.admit(), "still hidden, and still none");
+
+        assert!(visibility.set_occluded(false), "the held frame comes due");
+        assert!(visibility.admit(), "and it draws");
+        assert!(
+            !visibility.set_occluded(true) && !visibility.set_occluded(false),
+            "the debt was settled, so hiding again owes nothing on its own",
+        );
+    }
+
+    #[test]
+    fn coming_back_without_a_missed_frame_asks_for_nothing() {
+        // A window hidden and shown with nothing happening in between has
+        // nothing to catch up on, and requesting a frame anyway would restart
+        // the ease self-request chain for no reason.
+        let mut visibility = Visibility::default();
+        visibility.set_occluded(true);
+
+        assert!(
+            !visibility.set_occluded(false),
+            "no redraw was asked for while it was away",
+        );
+    }
 
     #[test]
     fn app_has_focus_tracks_any_window() {
