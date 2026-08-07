@@ -1771,7 +1771,24 @@ fn compute_number_delta(text: &str, kind: NumberKind, delta: i64) -> Option<Stri
     match kind {
         NumberKind::Decimal => {
             let parsed = text.parse::<i64>().ok()?;
-            Some(parsed.saturating_add(delta).to_string())
+            let new_value = parsed.saturating_add(delta);
+
+            // A leading zero marks the literal as a fixed-width field, so the
+            // width is carried over rather than letting the number shrink out
+            // of it. The sign takes one of those columns, which is why crossing
+            // zero moves the width by one.
+            if !text.starts_with('0') && !text.starts_with("-0") {
+                return Some(new_value.to_string());
+            }
+            let width = match (parsed.is_negative(), new_value.is_negative()) {
+                (true, false) => text.len() - 1,
+                (false, true) => text.len() + 1,
+                _ => text.len(),
+            };
+
+            // The `0` flag rather than a `0>` fill, which would pad ahead of
+            // the sign and give `00-7` instead of `-007`.
+            Some(format!("{new_value:0width$}"))
         },
         _ => {
             let mut chars = text.chars();
@@ -6092,6 +6109,29 @@ mod tests {
             h.selection_spans(),
             vec![(0, 2, false), (3, 5, false), (6, 8, false)],
         );
+    }
+
+    /// A decimal written with a leading zero is a fixed-width field, so it
+    /// keeps that width instead of collapsing to the shortest form.
+    ///
+    /// Crossing zero moves the width by one, because the sign occupies a column
+    /// of its own. A literal without a leading zero is left to size itself.
+    #[test]
+    fn incrementing_a_zero_padded_decimal_keeps_its_width() {
+        for (text, delta, want) in [
+            ("007", 1, "008"),
+            ("-08", 1, "-07"),
+            ("-01", 1, "00"),
+            ("01", -2, "-01"),
+            ("09", 1, "10"),
+            ("7", 1, "8"),
+        ] {
+            assert_eq!(
+                compute_number_delta(text, NumberKind::Decimal, delta).as_deref(),
+                Some(want),
+                "{text} incremented by {delta}",
+            );
+        }
     }
 
     /// Casing a ligature yields two ASCII letters for three bytes, so the
