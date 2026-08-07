@@ -8,9 +8,23 @@ use crate::completion::{CompletionContext, CompletionItem, CompletionSource};
 use std::collections::BTreeSet;
 use stoat_text::Rope;
 
+/// Unique matches one fetch keeps before it stops walking the buffer.
+///
+/// The popup shows a screen of rows at a time, so a list this long is already
+/// far past what anyone reads down to. Everything past it costs the rest of the
+/// walk, an allocation apiece, and another pass in every ranking and refine the
+/// list then goes through.
+///
+/// The cap takes the first matches in buffer order rather than the best ones,
+/// which is what makes stopping the walk worth anything. They come back
+/// alphabetical either way.
+const MAX_MATCHES: usize = 500;
+
 /// Collect every word-shaped token in `rope` whose label starts
 /// with `ctx.prefix`. Skips the prefix itself (no point suggesting
 /// what is already typed) and dedupes repeats.
+///
+/// Returns at most [`MAX_MATCHES`], stopping the walk once it has them.
 ///
 /// Returns empty when `ctx.prefix` is empty -- the fallback source
 /// only fires once the user has typed at least one identifier
@@ -28,9 +42,13 @@ pub fn fetch(ctx: &CompletionContext<'_>, rope: &Rope) -> Vec<CompletionItem> {
             current.push(ch);
         } else if !current.is_empty() {
             collect(&mut current, ctx.prefix, &mut seen);
+            // `collect` left the token empty, so the tail below adds nothing.
+            if seen.len() >= MAX_MATCHES {
+                break;
+            }
         }
     }
-    if !current.is_empty() {
+    if !current.is_empty() && seen.len() < MAX_MATCHES {
         collect(&mut current, ctx.prefix, &mut seen);
     }
 
@@ -51,7 +69,10 @@ pub fn fetch(ctx: &CompletionContext<'_>, rope: &Rope) -> Vec<CompletionItem> {
 }
 
 fn collect(current: &mut String, prefix: &str, seen: &mut BTreeSet<String>) {
-    if current.starts_with(prefix) && current != prefix {
+    // Asked with a borrow, so a word already held costs a lookup rather than an
+    // allocation the insert then drops. Most of what a large buffer offers is
+    // repeats of what it offered already.
+    if current.starts_with(prefix) && current != prefix && !seen.contains(current.as_str()) {
         seen.insert(current.clone());
     }
     current.clear();
@@ -153,6 +174,17 @@ mod tests {
         let items = fetch(&c, &rope);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].replace_range, 5..8);
+    }
+
+    /// A one-character prefix in a large buffer matches most of it, and the
+    /// whole set is walked again by every ranking and refine downstream.
+    #[test]
+    fn the_match_set_stops_at_the_cap() {
+        let text: String = (0..MAX_MATCHES + 50).map(|i| format!("foo{i} ")).collect();
+        let rope = Rope::from(text.as_str());
+
+        let items = fetch(&ctx("foo"), &rope);
+        assert_eq!(items.len(), MAX_MATCHES);
     }
 
     #[test]
