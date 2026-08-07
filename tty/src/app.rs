@@ -1999,22 +1999,11 @@ impl ApplicationHandler<PtyEvent> for App {
                     return;
                 }
 
-                // Snapshot the motion-routing modes under one lock, matching the
-                // wheel path, so the branch reads a consistent terminal state.
-                let (sgr, drag, motion) = {
-                    let terminal = state.terminal.lock();
-                    (
-                        terminal.mouse_mode() && terminal.sgr_mouse(),
-                        terminal.mouse_drag(),
-                        terminal.mouse_motion(),
-                    )
-                };
-                let button = state.pressed_button;
-                let report = sgr && ((button.is_some() && drag) || (button.is_none() && motion));
-                if report {
-                    let (col, row) = state.pointer_cell;
-                    let _ = state.pty.write(&sgr_motion_bytes(button, col, row));
+                Input {
+                    terminal: &state.terminal,
+                    pty: &mut state.pty,
                 }
+                .motion(state.pointer_cell, state.pressed_button);
             },
             WindowEvent::MouseInput {
                 state: element_state,
@@ -2507,6 +2496,33 @@ impl<W: PtyWrite> Input<'_, W> {
         let before = terminal.display_offset() as i32;
         terminal.scroll_display(lines * SCROLLBACK_SCROLL_MULTIPLIER);
         Some(terminal.display_offset() as i32 - before)
+    }
+
+    /// Report the pointer at `at` to a mouse-reporting app, when it asked for
+    /// motion of the kind being made. Tells whether anything was sent.
+    ///
+    /// A held `button` makes the move a drag, which an app subscribes to
+    /// separately from bare motion, so one wanting only drags hears nothing
+    /// while the pointer is loose and the other way about.
+    fn motion(&mut self, at: (usize, usize), button: Option<u8>) -> bool {
+        // Snapshot the routing modes under one lock, matching the wheel path,
+        // so the decision reads a consistent terminal state.
+        let (sgr, drag, motion) = {
+            let terminal = self.terminal.lock();
+            (
+                terminal.mouse_mode() && terminal.sgr_mouse(),
+                terminal.mouse_drag(),
+                terminal.mouse_motion(),
+            )
+        };
+
+        let asked_for = if button.is_some() { drag } else { motion };
+        if !sgr || !asked_for {
+            return false;
+        }
+
+        let _ = self.pty.write(&sgr_motion_bytes(button, at.0, at.1));
+        true
     }
 
     /// Send `text` to the shell as a paste, bracketed when the shell asked for
@@ -4589,6 +4605,69 @@ mod tests {
             (shifted_local, shifted_sent),
             (true, Vec::new()),
             "shift keeps the notch for the scrollback"
+        );
+    }
+
+    /// An app subscribes to drags and to bare motion separately, so what it
+    /// hears has to match which it asked for and which the pointer is doing.
+    #[test]
+    fn motion_reaches_only_the_app_that_asked_for_that_kind_of_move() {
+        // 1002 is drag reporting, 1003 any motion, 1006 the SGR encoding the
+        // routing also requires.
+        let reported = |modes: &[u16], button: Option<u8>| {
+            let terminal = scrolled_back_with_a_selection();
+            {
+                let mut terminal = terminal.lock();
+                for mode in modes {
+                    terminal.advance(format!("\x1b[?{mode}h").as_bytes());
+                }
+            }
+            let mut pty = SpyPty::default();
+            let sent = Input {
+                terminal: &terminal,
+                pty: &mut pty,
+            }
+            .motion((1, 2), button);
+            assert_eq!(
+                sent,
+                !pty.written.is_empty(),
+                "what it reports and what it sent have to agree"
+            );
+            sent
+        };
+
+        let held = Some(0);
+        assert_eq!(
+            [
+                reported(&[1002, 1006], held),
+                reported(&[1002, 1006], None),
+                reported(&[1003, 1006], held),
+                reported(&[1003, 1006], None),
+                reported(&[1002], held),
+                reported(&[], held),
+            ],
+            [true, false, true, true, false, false],
+            "drag reporting hears only drags, any-motion hears both, and neither \
+             hears anything without the SGR encoding"
+        );
+    }
+
+    #[test]
+    fn a_reported_motion_carries_the_pointer_cell_and_the_button() {
+        let terminal = scrolled_back_with_a_selection();
+        terminal.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+        let mut pty = SpyPty::default();
+
+        Input {
+            terminal: &terminal,
+            pty: &mut pty,
+        }
+        .motion((4, 9), Some(0));
+
+        assert_eq!(
+            pty.written,
+            sgr_motion_bytes(Some(0), 4, 9),
+            "the report names where the pointer is and what is held"
         );
     }
 
