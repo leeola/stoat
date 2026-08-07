@@ -608,7 +608,9 @@ fn reader_loop(
                 tracing::warn!(target: "stoat::lsp", "dropping unparseable lsp frame");
                 continue;
             };
-            match classify(message) {
+            let routed = classify(message);
+            let wakes = routed.warrants_wake();
+            match routed {
                 Routed::Response { id, result } => {
                     if let Some(tx) = pending
                         .lock()
@@ -622,15 +624,16 @@ fn reader_loop(
                     if notif_tx.send(notification).is_err() {
                         return;
                     }
-                    wake.notify_one();
                 },
                 Routed::Incoming(request) => {
                     if incoming_tx.send(request).is_err() {
                         return;
                     }
-                    wake.notify_one();
                 },
                 Routed::Ignore => {},
+            }
+            if wakes {
+                wake.notify_one();
             }
         }
     }
@@ -717,6 +720,30 @@ enum Routed {
     Notification(LspNotification),
     Incoming(IncomingRequest),
     Ignore,
+}
+
+impl Routed {
+    /// Whether delivering this message has to wake the run loop.
+    ///
+    /// Any wake costs a whole-screen repaint, so a message nothing paints from
+    /// is one the reader delivers quietly. A server logging its way through an
+    /// index pass emits those without pause.
+    ///
+    /// The message is still sent either way. It waits in its channel and is
+    /// drained on the next pass some other event drives, so a skipped wake
+    /// delays the trace line rather than losing it.
+    fn warrants_wake(&self) -> bool {
+        match self {
+            // The oneshot the response goes out on wakes its awaiting task
+            // directly, and that task was spawned against the redraw notify.
+            Routed::Response { .. } | Routed::Ignore => false,
+            Routed::Notification(notification) => !matches!(
+                notification,
+                LspNotification::LogMessage { .. } | LspNotification::LogTrace { .. }
+            ),
+            Routed::Incoming(_) => true,
+        }
+    }
 }
 
 /// Classify one JSON-RPC message by its shape. An `id` without a `method` is a
@@ -992,7 +1019,7 @@ mod tests {
         DiagnosticTag, FrameDecoder, Routed,
     };
     use crate::host::lsp::{IncomingRequest, LspNotification};
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn decode_one(bytes: &[u8]) -> Vec<u8> {
         let mut decoder = FrameDecoder::new();
@@ -1095,6 +1122,47 @@ mod tests {
             },
             _ => panic!("expected a diagnostics notification"),
         }
+    }
+
+    #[test]
+    fn only_the_notifications_the_drain_traces_skip_the_wake() {
+        let notification = |method: &str, params: Value| {
+            json!({
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params,
+            })
+        };
+        let frames = [
+            notification(
+                "window/logMessage",
+                json!({"type": 3, "message": "indexing"}),
+            ),
+            notification("$/logTrace", json!({"message": "textDocument/hover"})),
+            notification(
+                "textDocument/publishDiagnostics",
+                json!({"uri": "file:///a.rs", "diagnostics": []}),
+            ),
+            notification("window/showMessage", json!({"type": 1, "message": "boom"})),
+            notification("$/progress", json!({"token": 1, "value": {"kind": "end"}})),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "workspace/configuration",
+                "params": {"items": []},
+            }),
+        ];
+
+        let wakes: Vec<bool> = frames
+            .into_iter()
+            .map(|frame| classify(frame).warrants_wake())
+            .collect();
+
+        assert_eq!(
+            wakes,
+            [false, false, true, true, true, true],
+            "only the log and trace notifications the drain traces skip the wake",
+        );
     }
 
     #[test]
