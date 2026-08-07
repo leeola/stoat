@@ -460,6 +460,7 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
                 extend_head_to_cursor(
                     sel,
                     cursor_target,
+                    head_offset,
                     tail_offset,
                     SelectionGoal::Column(goal_col),
                     rope,
@@ -629,23 +630,41 @@ fn extend_head(
 /// through this, so the block cursor renders on the cell moved to rather than
 /// one short of it.
 ///
-/// `tail_offset` carries the same requirement as in [`extend_head`], which this
-/// passes it straight through to.
+/// Crossing the tail steps it one cluster, so the anchor's cell stays covered
+/// and the result is never zero-width. Both rules live in
+/// [`Selection::put_cursor`], which this defers to rather than restating.
+///
+/// `head_offset` and `tail_offset` must be where `sel.head()` and `sel.tail()`
+/// resolve. They are parameters because a motion driven by
+/// [`Selections::transform_resolved`] already holds them, and resolving them
+/// here would descend the fragment tree again for every selection.
 fn extend_head_to_cursor(
     sel: &Selection<Anchor>,
     target_cursor: usize,
+    head_offset: usize,
     tail_offset: usize,
     goal: SelectionGoal,
     rope: &Rope,
     buffer: &MultiBufferSnapshot,
 ) -> Selection<Anchor> {
-    let new_head_offset = if target_cursor >= tail_offset {
-        next_char_boundary(rope, target_cursor)
-    } else {
-        target_cursor
+    let (start, end) = match sel.reversed {
+        true => (head_offset, tail_offset),
+        false => (tail_offset, head_offset),
     };
-    let new_head = buffer.anchor_at(new_head_offset, Bias::Right);
-    extend_head(sel, new_head, new_head_offset, tail_offset, goal)
+    let resolved = Selection {
+        id: sel.id,
+        start,
+        end,
+        reversed: sel.reversed,
+        goal: sel.goal,
+    };
+
+    // put_cursor clears the goal as a horizontal move, but the vertical callers
+    // carry a column across rows, so the caller's goal is restored over it.
+    let mut landed = resolved.put_cursor(rope, target_cursor, true);
+    landed.goal = goal;
+
+    anchor_selection(landed, buffer)
 }
 
 /// Re-anchor an offset-based selection produced by the block-cursor helpers.
@@ -1035,6 +1054,7 @@ pub(super) fn goto_first_nonwhitespace(stoat: &mut Stoat, extend: bool) -> Updat
                 extend_head_to_cursor(
                     sel,
                     target_offset,
+                    head_offset,
                     tail_offset,
                     SelectionGoal::None,
                     rope,
@@ -3419,8 +3439,17 @@ pub(crate) fn execute_find(
         let new_buf = new_display.buffer_snapshot();
         let new_rope = new_buf.rope();
         editor.selections.transform(new_buf, |sel| {
+            let head_offset = new_buf.resolve_anchor(&sel.head());
             let tail_offset = new_buf.resolve_anchor(&sel.tail());
-            extend_head_to_cursor(sel, target, tail_offset, sel.goal, new_rope, new_buf)
+            extend_head_to_cursor(
+                sel,
+                target,
+                head_offset,
+                tail_offset,
+                sel.goal,
+                new_rope,
+                new_buf,
+            )
         });
     } else {
         // Select from the block cursor to the target rather than collapsing
@@ -4033,8 +4062,17 @@ pub(super) fn goto_column(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
         let new_buf = new_display.buffer_snapshot();
         let new_rope = new_buf.rope();
         editor.selections.transform(new_buf, |sel| {
+            let head_offset = new_buf.resolve_anchor(&sel.head());
             let tail_offset = new_buf.resolve_anchor(&sel.tail());
-            extend_head_to_cursor(sel, target_offset, tail_offset, sel.goal, new_rope, new_buf)
+            extend_head_to_cursor(
+                sel,
+                target_offset,
+                head_offset,
+                tail_offset,
+                sel.goal,
+                new_rope,
+                new_buf,
+            )
         });
     } else {
         apply_primary_range(editor, target_offset..target_offset);
@@ -4057,10 +4095,12 @@ pub(super) fn goto_last_line(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let target_offset = rope.point_to_offset(Point::new(target_row, 0));
     editor.selections.transform(buffer_snapshot, |sel| {
         if extend {
+            let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
             let tail_offset = buffer_snapshot.resolve_anchor(&sel.tail());
             extend_head_to_cursor(
                 sel,
                 target_offset,
+                head_offset,
                 tail_offset,
                 SelectionGoal::None,
                 rope,
@@ -4558,6 +4598,7 @@ pub(crate) fn clamp_cursor_to_view(editor: &mut EditorState, scrolloff: u32) -> 
                 extend_head_to_cursor(
                     sel,
                     cursor_target,
+                    head_offset,
                     tail_offset,
                     SelectionGoal::Column(goal_col),
                     rope,
@@ -4602,10 +4643,12 @@ pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign, extend: bool) -
     let target_offset = rope.point_to_offset(target_buffer_pt);
     editor.selections.transform(buffer_snapshot, |sel| {
         if extend {
+            let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
             let tail_offset = buffer_snapshot.resolve_anchor(&sel.tail());
             extend_head_to_cursor(
                 sel,
                 target_offset,
+                head_offset,
                 tail_offset,
                 SelectionGoal::None,
                 rope,

@@ -2684,7 +2684,11 @@ mod tests {
         h.type_keys("4 l v");
         h.type_keys("F b");
         let (start, end, reversed) = h.selection_spans()[0];
-        assert_eq!((start, end, reversed), (1, 4, true));
+        assert_eq!(
+            (start, end, reversed),
+            (1, 5, true),
+            "crossing the tail keeps the e the cursor was on covered",
+        );
     }
 
     #[test]
@@ -2706,7 +2710,11 @@ mod tests {
         h.type_keys("4 l v");
         h.type_keys("T b");
         let (start, end, reversed) = h.selection_spans()[0];
-        assert_eq!((start, end, reversed), (2, 4, true));
+        assert_eq!(
+            (start, end, reversed),
+            (2, 5, true),
+            "crossing the tail keeps the e the cursor was on covered",
+        );
     }
 
     #[test]
@@ -2897,7 +2905,11 @@ mod tests {
         h.type_keys("8 l v");
         h.type_keys("g i");
         let (start, end, reversed) = h.selection_spans()[0];
-        assert_eq!((start, end, reversed), (4, 8, true));
+        assert_eq!(
+            (start, end, reversed),
+            (4, 9, true),
+            "crossing the tail keeps the o the cursor was on covered",
+        );
         assert_eq!(h.stoat.focused_mode(), "select");
     }
 
@@ -2938,8 +2950,8 @@ mod tests {
         let (start, end, reversed) = h.selection_spans()[0];
         assert_eq!(
             (start, end, reversed),
-            (0, 4, true),
-            "head extended to row 0; tail at the original cursor row 2"
+            (0, 5, true),
+            "head extended to row 0, and crossing the tail keeps the c on row 2 covered"
         );
         assert_eq!(h.stoat.focused_mode(), "select");
     }

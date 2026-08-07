@@ -2615,7 +2615,11 @@ mod tests {
         dispatch(&mut stoat, &MoveRight);
         assert_eq!(editor::selection_spans(&mut stoat), vec![(5, 6, false)]);
         dispatch(&mut stoat, &ExtendUp);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 5, true)]);
+        assert_eq!(
+            editor::selection_spans(&mut stoat),
+            vec![(1, 6, true)],
+            "crossing the tail keeps the cell the cursor was on covered",
+        );
     }
 
     #[test]
