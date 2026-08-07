@@ -477,6 +477,21 @@ impl WrapMap {
                 if self.should_defer_rewrap() {
                     let tab_snapshot = self.snapshot.tab_snapshot.clone();
                     self.queue_rewrap(tab_snapshot);
+                } else if self.wrap_width != self.snapshot.wrap_width {
+                    // The wanted width moved somewhere deferral cannot follow,
+                    // turning wrapping off being the case that matters, since
+                    // `flush_edits` does nothing without a width and a queued
+                    // entry would never run. Installing the finished wrapping
+                    // here would put a width back that was already turned off,
+                    // over a snapshot an earlier sync had rebuilt correctly.
+                    let old_line_count = self.snapshot.line_count();
+                    let tab_snapshot = self.snapshot.tab_snapshot.clone();
+                    self.snapshot = build_snapshot(tab_snapshot, self.wrap_width);
+                    let new_line_count = self.snapshot.line_count();
+                    self.edits_since_sync = self.edits_since_sync.compose([Edit {
+                        old: 0..old_line_count,
+                        new: 0..new_line_count,
+                    }]);
                 }
 
                 self.flush_edits();
@@ -2040,6 +2055,63 @@ mod tests {
                 "display_line mismatch at row {row}"
             );
         }
+    }
+
+    /// Turning wrapping off while a rewrap is running does not surface the
+    /// width the task was started with.
+    ///
+    /// A width change on a large file is deferred, and the finished snapshot is
+    /// installed whatever the wanted width has become meanwhile. The re-queue
+    /// after that install only fires when both widths are set, so turning
+    /// wrapping off leaves the wrapped result standing and `sync` returns it.
+    #[test]
+    fn a_rewrap_landing_after_wrapping_is_turned_off_returns_unwrapped() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = Executor::new(scheduler.clone());
+
+        // Over the deferral threshold, and long enough that each row wraps.
+        let content: String = (0..150)
+            .map(|i| format!("line{i} aaaaaaaaaaaa\n"))
+            .collect();
+        let buffer = TextBuffer::with_text(BufferId::new(0), &content);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
+        let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
+        let (mut wrap_map, _) =
+            WrapMap::new(tab_snapshot, Some(20), executor, crate::test_notify());
+
+        wrap_map.set_wrap_width(Some(10));
+        resync(&multi_buffer, &mut wrap_map);
+        assert!(
+            wrap_map.background_pending(),
+            "the width change was deferred to the background",
+        );
+
+        wrap_map.set_wrap_width(None);
+        scheduler.run_until_parked();
+
+        // The first sync rebuilds inline, because the wanted width no longer
+        // matches the snapshot's and deferral does not apply without one. The
+        // background result is still sitting unpolled behind it.
+        let rebuilt = resync(&multi_buffer, &mut wrap_map);
+        assert_eq!(rebuilt.wrap_width, None, "the inline rebuild is unwrapped");
+
+        // Now the widths agree, so nothing forces a rebuild and the pending
+        // task is picked up instead, over the top of the correct snapshot.
+        let snapshot = resync(&multi_buffer, &mut wrap_map);
+        assert_eq!(
+            snapshot.wrap_width, None,
+            "the finished rewrap does not reinstate a width that was turned off",
+        );
+        assert_eq!(
+            snapshot.line_count(),
+            151,
+            "and holds one row per buffer line, not the wrapped count",
+        );
     }
 
     #[test]
