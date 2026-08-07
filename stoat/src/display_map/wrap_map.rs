@@ -510,6 +510,11 @@ fn tab_versions(tab: &TabSnapshot) -> (usize, u64, usize) {
 
 fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSnapshot {
     let tab_line_count = tab_snapshot.line_count();
+
+    let Some(width) = wrap_width else {
+        return passthrough_snapshot(tab_snapshot, tab_line_count);
+    };
+
     let mut transforms = SumTree::new(());
 
     // A row's characters are wanted twice, to expand its tabs and to place its
@@ -536,16 +541,13 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
             tab_snapshot.max_expansion_column(),
         );
 
-        let (wrap_columns, indent) = match wrap_width {
-            None => (Vec::new(), 0),
-            Some(width) => compute_wrap_columns(
-                chars.iter().copied(),
-                tab_line_len,
-                width,
-                tab_snapshot.tab_size(),
-                tab_snapshot.max_expansion_column(),
-            ),
-        };
+        let (wrap_columns, indent) = compute_wrap_columns(
+            chars.iter().copied(),
+            tab_line_len,
+            width,
+            tab_snapshot.tab_size(),
+            tab_snapshot.max_expansion_column(),
+        );
 
         let output_rows = wrap_columns.len().max(1) as u32;
 
@@ -574,6 +576,36 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
     }
 }
 
+/// A snapshot for the unwrapped mode, where one tab row is one wrap row.
+///
+/// Every query on such a snapshot answers from the tab layer before it reaches
+/// a transform, so the transforms exist only to hold the row count and to keep
+/// the one-per-row shape [`WrapSnapshot::interpolate`] and [`sync_incremental`]
+/// slice against. Their payload is never read, which is what lets this skip the
+/// per-row character decode that placing wrap breaks would need.
+fn passthrough_snapshot(tab_snapshot: TabSnapshot, tab_line_count: u32) -> WrapSnapshot {
+    let transforms = SumTree::from_iter(
+        (0..tab_line_count).map(|_| Transform {
+            summary: TransformSummary {
+                input_rows: 1,
+                output_rows: 1,
+            },
+            wrap_columns: Vec::new(),
+            tab_line_len: 0,
+            indent: 0,
+        }),
+        (),
+    );
+
+    WrapSnapshot {
+        tab_snapshot,
+        transforms,
+        wrap_width: None,
+        total_rows: tab_line_count,
+        interpolated: false,
+    }
+}
+
 fn sync_incremental(
     old: &WrapSnapshot,
     tab_snapshot: TabSnapshot,
@@ -597,18 +629,21 @@ fn sync_incremental(
         let new_output_start: u32 = new_transforms.summary().output_rows;
 
         for tab_row in edit.new.start..edit.new.end {
-            let tab_line_len = tab_snapshot.line_len(tab_row);
-            let (wrap_columns, indent) = match wrap_width {
-                None => (Vec::new(), 0),
+            // Unwrapped rows answer every query from the tab layer, so their
+            // payload stays zero rather than being measured for nobody.
+            let (tab_line_len, wrap_columns, indent) = match wrap_width {
+                None => (0, Vec::new(), 0),
                 Some(width) => {
+                    let tab_line_len = tab_snapshot.line_len(tab_row);
                     let chars = tab_snapshot.fold_snapshot().fold_line_chars(tab_row);
-                    compute_wrap_columns(
+                    let (wrap_columns, indent) = compute_wrap_columns(
                         chars,
                         tab_line_len,
                         width,
                         tab_snapshot.tab_size(),
                         tab_snapshot.max_expansion_column(),
-                    )
+                    );
+                    (tab_line_len, wrap_columns, indent)
                 },
             };
             let output_rows = wrap_columns.len().max(1) as u32;
@@ -771,7 +806,14 @@ impl WrapSnapshot {
             let new_output_start: u32 = new_transforms.summary().output_rows;
 
             for tab_row in edit.new.start..edit.new.end {
-                let tab_line_len = new_tab_snapshot.line_len(tab_row);
+                // An interpolated wrapped snapshot still answers `line_len` from
+                // the payload, so it has to be measured. An unwrapped one goes
+                // to the tab layer instead, so measuring it would be for nobody.
+                let tab_line_len = if self.wrap_width.is_some() {
+                    new_tab_snapshot.line_len(tab_row)
+                } else {
+                    0
+                };
                 new_transforms.push(
                     Transform {
                         summary: TransformSummary {
@@ -1413,6 +1455,37 @@ mod tests {
         assert_eq!(wp, WrapPoint::new(1, 3));
         let back = snap.to_tab_point(wp);
         assert_eq!(back, tp);
+    }
+
+    /// Unwrapped transforms carry a zero payload, so every query that could read
+    /// one has to reach the tab layer instead. A tab keeps the rows wider than
+    /// their byte length, which a leaked zero or a raw byte count would both miss.
+    #[test]
+    fn none_width_line_len_comes_from_the_tab_layer() {
+        let snap = make_snapshot("a\tbc\nlonger line\nx", None);
+        assert_eq!(snap.line_count(), 3);
+
+        let tab = snap.tab_snapshot();
+        let lens: Vec<u32> = (0..3).map(|row| snap.line_len(row)).collect();
+        assert_eq!(
+            lens,
+            (0..3).map(|row| tab.line_len(row)).collect::<Vec<_>>(),
+            "each row measures what the tab layer says",
+        );
+        assert_eq!(
+            lens,
+            [6, 11, 1],
+            "the tab expands row 0 past its byte length"
+        );
+
+        let tp = TabPoint::new(0, 5);
+        let wp = snap.to_wrap_point(tp);
+        assert_eq!(wp, WrapPoint::new(0, 5));
+        assert_eq!(
+            snap.to_tab_point(wp),
+            tp,
+            "round trip inside the expanded tab"
+        );
     }
 
     #[test]
