@@ -1004,9 +1004,11 @@ fn manages_own_undo_group(kind: ActionKind) -> bool {
 /// seals nothing, and its edits join the session's single undo step.
 fn begin_action_group(stoat: &mut Stoat) -> Option<BufferId> {
     let (editor_id, buffer_id) = stoat.focused_editor_ids()?;
-    let before = editor_selection_snapshot(stoat, editor_id);
     let buffer = stoat.active_workspace().buffers.get(buffer_id)?;
-    let opened = buffer.write().expect("poisoned").try_begin_group(before);
+    let opened = buffer
+        .write()
+        .expect("poisoned")
+        .try_begin_group(|| editor_selection_snapshot(stoat, editor_id));
     opened.then_some(buffer_id)
 }
 

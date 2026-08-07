@@ -549,13 +549,21 @@ impl TextBuffer {
     /// rather than sealed, so a mid-session action's edits join the enclosing
     /// insert session's single undo step instead of splitting it. Returns
     /// `false` when a group was already open, `true` when a fresh one opened.
-    pub(crate) fn try_begin_group(&mut self, selections_before: Vec<Selection<Anchor>>) -> bool {
+    ///
+    /// `selections_before` is called only when a group actually opens. Refusing
+    /// is the common case during an insert session, where every typed character
+    /// asks, so a caller that gathered the selections first would be building a
+    /// list per keystroke for nobody.
+    pub(crate) fn try_begin_group(
+        &mut self,
+        selections_before: impl FnOnce() -> Vec<Selection<Anchor>>,
+    ) -> bool {
         if self.open_group {
             return false;
         }
         self.open_group = true;
         self.open_group_started = false;
-        self.open_group_before = selections_before;
+        self.open_group_before = selections_before();
         true
     }
 
@@ -2148,12 +2156,41 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_group_never_asks_for_the_selections() {
+        // Refusing is the normal case mid-insert-session, once per typed
+        // character, and gathering the selections is what the caller would pay
+        // for each time.
+        let mut b = buf("");
+        b.begin_group(Vec::new());
+
+        let mut asked = 0;
+        assert!(
+            !b.try_begin_group(|| {
+                asked += 1;
+                Vec::new()
+            }),
+            "a group was already open",
+        );
+        assert_eq!(asked, 0, "so nothing was gathered");
+
+        b.seal_group(Vec::new());
+        assert!(
+            b.try_begin_group(|| {
+                asked += 1;
+                Vec::new()
+            }),
+            "and now one opens",
+        );
+        assert_eq!(asked, 1, "which does gather them");
+    }
+
+    #[test]
     fn try_begin_group_leaves_an_open_group_untouched() {
         let mut b = buf("");
         b.begin_group(Vec::new());
         b.edit(0..0, "a");
         assert!(
-            !b.try_begin_group(Vec::new()),
+            !b.try_begin_group(Vec::new),
             "an already-open group is not reopened"
         );
         b.edit(1..1, "b");
@@ -2170,7 +2207,7 @@ mod tests {
     fn try_begin_group_opens_a_group_on_an_idle_buffer() {
         let mut b = buf("");
         assert!(
-            b.try_begin_group(Vec::new()),
+            b.try_begin_group(Vec::new),
             "a fresh group opens when none is active"
         );
         b.edit(0..0, "a");
