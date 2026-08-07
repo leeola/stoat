@@ -2365,6 +2365,23 @@ where
     UpdateEffect::Redraw
 }
 
+/// One row a comment toggle can act on, classified before the set decides
+/// which direction to go.
+///
+/// Blank rows never become a `CommentRow`. They take no edit either way, and
+/// letting one in would drag [`Self::indent_chars`] to zero and pull every
+/// prefix out to the left margin.
+struct CommentRow {
+    line_start: usize,
+    /// Offset of the row's first non-whitespace byte, where its prefix sits or
+    /// would sit if the rows were commented one by one.
+    content_start: usize,
+    /// Leading whitespace counted in characters rather than display columns, so
+    /// a tab counts once no matter how wide it renders.
+    indent_chars: usize,
+    commented: bool,
+}
+
 pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
@@ -2404,12 +2421,13 @@ pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
     rows.sort_unstable();
     rows.dedup();
 
-    let mut edits: Vec<(usize, usize, String)> = Vec::with_capacity(rows.len());
+    let mut commentable: Vec<CommentRow> = Vec::with_capacity(rows.len());
     for row in rows {
         let line_start = rope.point_to_offset(Point::new(row, 0));
         let line_len = rope.line_len(row) as usize;
         let line_end = line_start + line_len;
         let mut content_start = line_start;
+        let mut indent_chars = 0;
         for ch in rope.chars_at(line_start) {
             if content_start >= line_end {
                 break;
@@ -2418,36 +2436,69 @@ pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
                 break;
             }
             content_start += ch.len_utf8();
+            indent_chars += 1;
         }
         if content_start >= line_end {
             continue;
         }
 
         let after_prefix = content_start + prefix.len();
-        let prefix_matches = after_prefix <= line_end
+        let commented = after_prefix <= line_end
             && rope
                 .chars_at(content_start)
                 .take(prefix.chars().count())
                 .collect::<String>()
                 == prefix;
 
-        if prefix_matches {
-            let next_char_offset = after_prefix;
-            let next_char = rope.chars_at(next_char_offset).next();
-            let drop_trailing_space = matches!(next_char, Some(' '));
-            let remove_end = if drop_trailing_space {
-                next_char_offset + 1
-            } else {
-                next_char_offset
-            };
-            edits.push((content_start, remove_end, String::new()));
-        } else {
-            edits.push((content_start, content_start, format!("{prefix} ")));
-        }
+        commentable.push(CommentRow {
+            line_start,
+            content_start,
+            indent_chars,
+            commented,
+        });
     }
 
-    if edits.is_empty() {
+    if commentable.is_empty() {
         return UpdateEffect::None;
+    }
+
+    // One uncommented row commits the whole set to being commented, like Helix.
+    // Deciding per row instead inverts each one, so a mixed block stays mixed
+    // with its two halves swapped and no number of toggles ever unifies it.
+    let comment_all = commentable.iter().any(|r| !r.commented);
+
+    let mut edits: Vec<(usize, usize, String)> = Vec::with_capacity(commentable.len());
+    if comment_all {
+        // Every prefix goes at the shallowest row's indent so the block keeps
+        // its relative indentation. The column is counted in characters, as
+        // Helix counts it, so a tab is one column rather than a tab stop.
+        let shared_indent = commentable
+            .iter()
+            .map(|r| r.indent_chars)
+            .min()
+            .expect("at least one commentable row");
+        for row in &commentable {
+            let mut insert_at = row.line_start;
+            for ch in rope.chars_at(row.line_start).take(shared_indent) {
+                insert_at += ch.len_utf8();
+            }
+            edits.push((insert_at, insert_at, format!("{prefix} ")));
+        }
+    } else {
+        // Removal stays at each row's own prefix rather than the shared column.
+        // Helix removes at the shared column, which eats indentation when the
+        // commented rows are not equally indented, and removing what each row
+        // actually has is what makes the round trip exact.
+        for row in &commentable {
+            let after_prefix = row.content_start + prefix.len();
+            let drop_trailing_space = matches!(rope.chars_at(after_prefix).next(), Some(' '));
+            let remove_end = if drop_trailing_space {
+                after_prefix + 1
+            } else {
+                after_prefix
+            };
+            edits.push((row.content_start, remove_end, String::new()));
+        }
     }
 
     edits.sort_by_key(|(start, _, _)| *start);

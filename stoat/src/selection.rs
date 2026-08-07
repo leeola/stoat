@@ -3101,6 +3101,11 @@ mod tests {
         assert_eq!(focused_buffer_text(&mut h), "let x = 42;\n");
     }
 
+    /// Every prefix lands at the shallowest row's indent, so the block's own
+    /// indentation is preserved inside the comment rather than flattened.
+    ///
+    /// Removal still works off each row's own prefix, which is what lets the
+    /// second toggle restore the original exactly.
     #[test]
     fn toggle_comments_rust_multi_line_selection() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
@@ -3110,8 +3115,16 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleComments);
         assert_eq!(
             focused_buffer_text(&mut h),
-            "// fn main() {\n    // let x = 42;\n// }\n",
-            "prefix added at first non-whitespace on each line"
+            "// fn main() {\n//     let x = 42;\n// }\n",
+            "prefix added at the shared column, indentation kept after it"
+        );
+
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+        assert_eq!(
+            focused_buffer_text(&mut h),
+            "fn main() {\n    let x = 42;\n}\n",
+            "the round trip restores the original indentation"
         );
     }
 
@@ -3129,8 +3142,13 @@ mod tests {
         );
     }
 
+    /// A mixed block commits to being commented, then uncomments as a whole.
+    ///
+    /// Deciding per row would invert each one instead, leaving the block mixed
+    /// after every toggle and swapping its two halves forever. One uncommented
+    /// row is what makes the whole set count as uncommented.
     #[test]
-    fn toggle_comments_rust_independent_per_line_when_mixed() {
+    fn toggle_comments_rust_mixed_block_comments_all_then_uncomments_all() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.rs", "// abc\nxyz\n");
         h.open_file(&path);
@@ -3138,8 +3156,83 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleComments);
         assert_eq!(
             focused_buffer_text(&mut h),
-            "abc\n// xyz\n",
-            "each line toggles independently"
+            "// // abc\n// xyz\n",
+            "the one uncommented row commits the set to being commented"
+        );
+
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+        assert_eq!(
+            focused_buffer_text(&mut h),
+            "// abc\nxyz\n",
+            "now that every row is commented the set uncomments"
+        );
+    }
+
+    /// A blank row takes no edit in either direction, and it must not drag the
+    /// shared column left either.
+    #[test]
+    fn toggle_comments_rust_uncomment_skips_whitespace_only_lines() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "// abc\n   \n// xyz\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+        assert_eq!(
+            focused_buffer_text(&mut h),
+            "abc\n   \nxyz\n",
+            "the blank line neither blocks the uncomment nor gets edited"
+        );
+    }
+
+    /// Two selections reaching the same row comment it once.
+    ///
+    /// The rows are deduped before any edit is built, so a row two selections
+    /// both reach costs one edit rather than one per selection. Without that,
+    /// the second edit would land on the offset the first already used and
+    /// stack a second prefix there.
+    ///
+    /// The selections are set directly rather than driven by keys. Two that
+    /// share a row have to be disjoint in offsets to survive, since any pair
+    /// that overlaps is merged into one, which is a single selection again and
+    /// tests nothing.
+    #[test]
+    fn toggle_comments_rust_two_selections_reaching_a_row_comment_it_once() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "aaa\nbbb\nccc\n");
+        h.open_file(&path);
+
+        {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            let snapshot = editor.display_map.snapshot();
+            let buf_snap = snapshot.buffer_snapshot();
+            editor.selections.set_single_range(
+                buf_snap.anchor_at(0, Bias::Left),
+                buf_snap.anchor_at(5, Bias::Right),
+                SelectionGoal::None,
+            );
+            editor.selections.insert_range(
+                Selection {
+                    id: 0,
+                    start: buf_snap.anchor_at(5, Bias::Left),
+                    end: buf_snap.anchor_at(7, Bias::Right),
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                },
+                buf_snap,
+            );
+        }
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 5, false), (5, 7, false)],
+            "row 1 is reached by both, row 2 by neither",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+        assert_eq!(
+            focused_buffer_text(&mut h),
+            "// aaa\n// bbb\nccc\n",
+            "the shared row takes one prefix, not one per selection"
         );
     }
 
