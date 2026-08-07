@@ -8,7 +8,7 @@
 use std::{
     collections::HashMap,
     mem,
-    ops::{BitOr, BitOrAssign},
+    ops::{BitOr, BitOrAssign, Range},
     sync::Arc,
 };
 use stoatty_protocol::command::{
@@ -23,6 +23,10 @@ use stoatty_protocol::command::{
 /// content.
 pub struct Grid {
     cells: Vec<Cell>,
+    /// The distinct border sets this grid's cells refer to, indexed by
+    /// [`BorderId`] less one. The borderless set is [`BorderId::NONE`] and is
+    /// not stored, so this holds only sets some cell actually carries.
+    border_table: Vec<Borders>,
     rows: usize,
     cols: usize,
     overlays: Vec<Overlay>,
@@ -59,6 +63,7 @@ impl Grid {
     pub fn new(rows: usize, cols: usize) -> Grid {
         Grid {
             cells: vec![Cell::default(); rows * cols],
+            border_table: Vec::new(),
             rows,
             cols,
             overlays: Vec::new(),
@@ -192,6 +197,7 @@ impl Grid {
         self.cols = cols;
         self.cells.clear();
         self.cells.resize(rows * cols, Cell::default());
+        self.border_table.clear();
         self.overlays.clear();
         self.scroll_region = None;
         self.icons.clear();
@@ -210,6 +216,7 @@ impl Grid {
     /// reallocated, so recycling a grid to hold new content allocates nothing.
     pub fn clear(&mut self) {
         self.cells.fill(Cell::default());
+        self.border_table.clear();
         self.overlays.clear();
         self.scroll_region = None;
         self.icons.clear();
@@ -219,6 +226,79 @@ impl Grid {
         self.minimaps.clear();
         self.minimap_contents.clear();
         self.line_heights.clear();
+    }
+
+    /// The border set `id` names, or the borderless set for an id this grid
+    /// never interned.
+    ///
+    /// An id is only meaningful against the grid that produced it, so one
+    /// carried over from another grid resolves to whatever sits at that index
+    /// here. See [`Self::set_border_edge`] for why no cell copied between grids
+    /// carries one.
+    pub fn borders(&self, id: BorderId) -> Borders {
+        match id.0.checked_sub(1) {
+            Some(index) => self.border_table.get(index as usize).copied(),
+            None => None,
+        }
+        .unwrap_or_default()
+    }
+
+    /// The border set on the cell at `row`, `col`.
+    pub fn cell_borders(&self, row: usize, col: usize) -> Borders {
+        self.borders(self.get(row, col).border_id)
+    }
+
+    /// Stamp `border` onto one `edge` of every cell in `cols` on `row`, leaving
+    /// each cell's other edges as they were.
+    ///
+    /// Columns past the grid are skipped, so a caller may name a region wider
+    /// than the screen. Wire coordinates are untrusted and may point anywhere.
+    ///
+    /// Every cell a grid copies in from elsewhere comes from a pool page grid,
+    /// and those never carry borders, since a `Border` command is dropped while
+    /// a fill paints. So an id never has to be translated between tables.
+    pub fn set_border_edge(
+        &mut self,
+        row: usize,
+        cols: Range<usize>,
+        edge: BorderEdge,
+        border: Border,
+    ) {
+        if row >= self.rows {
+            return;
+        }
+        for col in cols.start..cols.end.min(self.cols) {
+            let index = row * self.cols + col;
+            let mut updated = self.borders(self.cells[index].border_id);
+            match edge {
+                BorderEdge::Top => updated.top = Some(border),
+                BorderEdge::Right => updated.right = Some(border),
+                BorderEdge::Bottom => updated.bottom = Some(border),
+                BorderEdge::Left => updated.left = Some(border),
+            }
+            self.cells[index].border_id = self.intern_borders(updated);
+        }
+    }
+
+    /// The id for `borders` in this grid's table, adding it if it is new.
+    ///
+    /// A linear scan, which suits a frame declaring a handful of distinct edge
+    /// sets over the pane edges it draws. A full table returns
+    /// [`BorderId::NONE`], since 65,535 distinct sets on one screen means
+    /// something upstream has gone wrong, and losing a border line is a better
+    /// answer than handing back an id that names someone else's set.
+    fn intern_borders(&mut self, borders: Borders) -> BorderId {
+        if borders == Borders::default() {
+            return BorderId::NONE;
+        }
+        if let Some(index) = self.border_table.iter().position(|set| *set == borders) {
+            return BorderId(index as u16 + 1);
+        }
+        if self.border_table.len() >= usize::from(u16::MAX) {
+            return BorderId::NONE;
+        }
+        self.border_table.push(borders);
+        BorderId(self.border_table.len() as u16)
     }
 
     /// The floating overlay regions drawn above the cells, in draw order.
@@ -666,6 +746,10 @@ impl PagePool {
             let row_in_page = doc_row as usize % page_rows;
             let page = self.page(page_index).expect("validated above");
 
+            // A cell's border_id indexes its own grid's table, so copying one
+            // across would misname a set. Page grids never carry borders, a
+            // Border command being dropped while a fill paints, so every id
+            // moved here is the borderless one.
             let cols = out.cols().min(page.cols());
             out.row_mut(out_row)[..cols].copy_from_slice(&page.row(row_in_page)[..cols]);
         }
@@ -754,7 +838,12 @@ pub struct Cell {
     /// Defaults to the foreground when the program does not set one (SGR 58),
     /// so an underline with no explicit color matches the text.
     pub underline_color: Rgb,
-    pub borders: Borders,
+    /// This cell's border set, held in its grid's table rather than inline.
+    ///
+    /// Resolve it with [`Grid::borders`], or read a cell's set directly with
+    /// [`Grid::cell_borders`]. An id only means anything against the grid that
+    /// interned it.
+    pub border_id: BorderId,
     /// This cell's role in a scaled glyph block.
     ///
     /// [`Scale::Single`] for an ordinary 1x1 cell; the other variants mark the
@@ -789,10 +878,40 @@ impl Default for Cell {
             flags: Flags::empty(),
             underline: UnderlineStyle::None,
             underline_color: Rgb::new(0xcc, 0xcc, 0xcc),
-            borders: Borders::default(),
+            border_id: BorderId::NONE,
             scale: Scale::Single,
         }
     }
+}
+
+/// A cell's border set, as an index into the grid that interned it.
+///
+/// Borders sit on pane edges, a few dozen cells against the thousands a screen
+/// holds, so a set stored inline would cost every cell four optional borders for
+/// the sake of the handful that carry any. Held in a table instead, a cell costs
+/// two bytes and the sets themselves are shared across every edge that matches.
+///
+/// [`BorderId::NONE`] means no borders and occupies no table entry, so the
+/// common cell needs no lookup at all.
+///
+/// See also:
+/// - [`Grid::cell_borders`] to read a cell's set.
+/// - [`Grid::set_border_edge`] to stamp one edge of a run of cells.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct BorderId(u16);
+
+impl BorderId {
+    /// The id of a cell with no borders, which every cell starts at.
+    pub const NONE: BorderId = BorderId(0);
+}
+
+/// Which of a cell's four edges a border is being stamped on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BorderEdge {
+    Top,
+    Right,
+    Bottom,
+    Left,
 }
 
 /// The renderer-native border on each of a cell's four edges.
@@ -1223,8 +1342,8 @@ impl BitOrAssign for Flags {
 #[cfg(test)]
 mod tests {
     use super::{
-        Bar, Cell, Flags, Grid, Icon, IconKind, Overlay, PagePool, Rgb, Scale, ScrollRegion,
-        TextRun,
+        Bar, Border, BorderEdge, BorderId, BorderStyle, Borders, Cell, Flags, Grid, Icon, IconKind,
+        Overlay, PagePool, Rgb, Scale, ScrollRegion, TextRun,
     };
 
     /// The rows the slide vacates have to come back blank rather than holding
@@ -1321,6 +1440,84 @@ mod tests {
         assert_eq!(grid.get(1, 2).ch, 'x');
         assert_eq!(grid.get(0, 0).fg, Rgb::new(1, 2, 3));
         assert_eq!(*grid.get(0, 1), Cell::default());
+    }
+
+    #[test]
+    fn cells_sharing_a_border_set_share_one_id() {
+        // The whole point of the table. A pane edge stamps the same border down a
+        // run of cells, so storing it once is what keeps the table to the handful
+        // of distinct sets a frame declares.
+        let mut grid = Grid::new(2, 4);
+        let light = Border {
+            style: BorderStyle::Light,
+            color: Rgb::new(1, 2, 3),
+        };
+        grid.set_border_edge(0, 0..4, BorderEdge::Top, light);
+
+        let ids: Vec<_> = (0..4).map(|col| grid.get(0, col).border_id).collect();
+        assert_eq!(ids, vec![ids[0]; 4], "one id across the run");
+        assert_ne!(ids[0], BorderId::NONE, "and not the borderless one");
+        assert_eq!(grid.cell_borders(0, 0).top, Some(light));
+
+        // A second edge on one cell is a different set, so it takes its own id
+        // while the rest of the run keeps theirs.
+        grid.set_border_edge(0, 1..2, BorderEdge::Left, light);
+        assert_ne!(grid.get(0, 1).border_id, ids[0], "two edges is a new set");
+        assert_eq!(grid.get(0, 2).border_id, ids[0], "its neighbour is unmoved");
+        assert_eq!(grid.cell_borders(0, 1).top, Some(light), "kept its top");
+        assert_eq!(grid.cell_borders(0, 1).left, Some(light), "gained a left");
+    }
+
+    #[test]
+    fn an_untouched_cell_reads_as_borderless() {
+        let mut grid = Grid::new(1, 2);
+        grid.set_border_edge(
+            0,
+            0..1,
+            BorderEdge::Top,
+            Border {
+                style: BorderStyle::Light,
+                color: Rgb::new(1, 2, 3),
+            },
+        );
+
+        assert_eq!(grid.get(0, 1).border_id, BorderId::NONE);
+        assert_eq!(grid.cell_borders(0, 1), Borders::default());
+    }
+
+    #[test]
+    fn clearing_drops_the_border_table_with_the_cells() {
+        // A table that outlived its cells would keep handing sets to ids that
+        // nothing refers to, and grow a little on every recycled frame.
+        let mut grid = Grid::new(1, 1);
+        grid.set_border_edge(
+            0,
+            0..1,
+            BorderEdge::Top,
+            Border {
+                style: BorderStyle::Light,
+                color: Rgb::new(1, 2, 3),
+            },
+        );
+        assert_ne!(grid.get(0, 0).border_id, BorderId::NONE);
+
+        grid.clear();
+        assert_eq!(grid.get(0, 0).border_id, BorderId::NONE);
+        assert_eq!(grid.cell_borders(0, 0), Borders::default());
+        assert_eq!(grid.border_table, Vec::new(), "the table went with them");
+    }
+
+    #[test]
+    fn a_cell_stays_small() {
+        // Every damaged-row copy in project, every slide-diff row compare, every
+        // scroll_by rotate and every pool page grid moves cells in bulk, so the
+        // struct's width is bandwidth. A field added here costs all of them, and
+        // a rare attribute belongs behind an id like BorderId rather than inline.
+        assert_eq!(
+            size_of::<Cell>(),
+            20,
+            "grew past its budget; hold rare attributes out of line",
+        );
     }
 
     #[test]

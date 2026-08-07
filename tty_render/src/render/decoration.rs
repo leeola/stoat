@@ -387,7 +387,7 @@ fn build_border_row_into(grid: &Grid, row: usize, out: &mut Vec<BorderInstance>)
     out.clear();
     out.extend(
         (0..grid.cols())
-            .filter_map(|col| cell_instance([col as f32, row as f32], grid.get(row, col).borders)),
+            .filter_map(|col| cell_instance([col as f32, row as f32], grid.cell_borders(row, col))),
     );
 }
 
@@ -454,7 +454,7 @@ mod tests {
         build_border_instances, build_border_row, build_border_row_into, BorderInstance,
         EDGE_BOTTOM_BIT, EDGE_LEFT_BIT, EDGE_TOP_BIT, STYLE_HEAVY, STYLE_LIGHT, STYLE_ROUNDED,
     };
-    use stoatty_term::grid::{Border, BorderStyle, Grid, Rgb};
+    use stoatty_term::grid::{Border, BorderEdge, BorderId, BorderStyle, Grid, Rgb};
     use wgpu::naga::{
         front::wgsl,
         valid::{Capabilities, ValidationFlags, Validator},
@@ -475,15 +475,22 @@ mod tests {
     #[test]
     fn a_reused_row_holds_only_the_borders_the_row_carries_now() {
         let mut grid = Grid::new(1, 2);
-        grid.get_mut(0, 0).borders.top = Some(Border {
-            style: BorderStyle::Heavy,
-            color: Rgb::new(255, 0, 0),
-        });
+        grid.set_border_edge(
+            0,
+            0..1,
+            BorderEdge::Top,
+            Border {
+                style: BorderStyle::Heavy,
+                color: Rgb::new(255, 0, 0),
+            },
+        );
 
         let mut row = build_border_row(&grid, 0);
         assert_eq!(row.len(), 1, "the one bordered cell builds one instance");
 
-        grid.get_mut(0, 0).borders.top = None;
+        // What the projection does to a cell whose borders are no longer
+        // declared, which is the only way an edge is taken back.
+        grid.get_mut(0, 0).border_id = BorderId::NONE;
         build_border_row_into(&grid, 0, &mut row);
 
         assert_eq!(
@@ -496,15 +503,24 @@ mod tests {
     #[test]
     fn cell_instance_packs_present_edges() {
         let mut grid = Grid::new(1, 2);
-        let cell = grid.get_mut(0, 1);
-        cell.borders.top = Some(Border {
-            style: BorderStyle::Heavy,
-            color: Rgb::new(255, 0, 0),
-        });
-        cell.borders.bottom = Some(Border {
-            style: BorderStyle::Light,
-            color: Rgb::new(0, 255, 0),
-        });
+        grid.set_border_edge(
+            0,
+            1..2,
+            BorderEdge::Top,
+            Border {
+                style: BorderStyle::Heavy,
+                color: Rgb::new(255, 0, 0),
+            },
+        );
+        grid.set_border_edge(
+            0,
+            1..2,
+            BorderEdge::Bottom,
+            Border {
+                style: BorderStyle::Light,
+                color: Rgb::new(0, 255, 0),
+            },
+        );
 
         let instances = build_border_instances(&grid);
 
@@ -526,15 +542,12 @@ mod tests {
     fn rounded_corner_packs_rounded_style_per_edge() {
         let mut grid = Grid::new(1, 1);
         let teal = Rgb::new(10, 20, 30);
-        let cell = grid.get_mut(0, 0);
-        cell.borders.top = Some(Border {
+        let rounded = Border {
             style: BorderStyle::Rounded,
             color: teal,
-        });
-        cell.borders.left = Some(Border {
-            style: BorderStyle::Rounded,
-            color: teal,
-        });
+        };
+        grid.set_border_edge(0, 0..1, BorderEdge::Top, rounded);
+        grid.set_border_edge(0, 0..1, BorderEdge::Left, rounded);
 
         let instances = build_border_instances(&grid);
 

@@ -15,7 +15,7 @@ use stoatty_render::{
     render::cell_size,
 };
 use stoatty_term::{
-    grid::{Border, BorderStyle, Grid, Rgb, UnderlineStyle},
+    grid::{Border, BorderEdge, BorderStyle, Grid, Rgb, UnderlineStyle},
     term::Damage,
 };
 use wgpu::{
@@ -174,11 +174,14 @@ fn set_border(grid: &mut Grid, row: usize, col: usize, color: Rgb) {
         style: BorderStyle::Light,
         color,
     };
-    let cell = grid.get_mut(row, col);
-    cell.borders.top = Some(border);
-    cell.borders.right = Some(border);
-    cell.borders.bottom = Some(border);
-    cell.borders.left = Some(border);
+    for edge in [
+        BorderEdge::Top,
+        BorderEdge::Right,
+        BorderEdge::Bottom,
+        BorderEdge::Left,
+    ] {
+        grid.set_border_edge(row, col..col + 1, edge, border);
+    }
 }
 
 /// Copy `texture` into a mappable buffer and return its RGBA bytes, row-major

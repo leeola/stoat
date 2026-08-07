@@ -12,8 +12,8 @@ use stoatty_render::gpu::{
 };
 use stoatty_term::{
     grid::{
-        Bar, Border, BorderStyle, Grid, Icon, IconKind, Overlay, Panel, PanelShadow, Rgb,
-        ScrollRegion, TextRun,
+        Bar, Border, BorderEdge, BorderStyle, Grid, Icon, IconKind, Overlay, Panel, PanelShadow,
+        Rgb, ScrollRegion, TextRun,
     },
     term::Damage,
 };
@@ -68,10 +68,15 @@ fn builds_passes_and_draws_a_frame_off_screen() {
     let (rows, cols) = renderer.grid_size();
     let mut grid = Grid::new(rows, cols);
     grid.get_mut(0, 0).ch = 'A';
-    grid.get_mut(0, 0).borders.top = Some(Border {
-        style: BorderStyle::Rounded,
-        color: Rgb::new(255, 0, 0),
-    });
+    grid.set_border_edge(
+        0,
+        0..1,
+        BorderEdge::Top,
+        Border {
+            style: BorderStyle::Rounded,
+            color: Rgb::new(255, 0, 0),
+        },
+    );
     // Two overlays: a scaled one, and a taller one whose content overflows its
     // box, so the per-overlay scissored sub-range draws and a non-zero per-overlay
     // scroll offset both run against the real device.

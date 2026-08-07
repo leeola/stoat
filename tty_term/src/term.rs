@@ -8,9 +8,9 @@
 
 use crate::{
     grid::{
-        self, Bar, Border, BorderStyle, Borders, Cell, DocumentOffset, Flags, Grid, Icon, IconKind,
-        Minimap, MinimapView, Overlay, PagePool, Panel, PanelShadow, Polyline, Rgb, Scale,
-        ScrollRegion, TextRun, UnderlineStyle,
+        self, Bar, Border, BorderEdge, BorderId, BorderStyle, Cell, DocumentOffset, Flags, Grid,
+        Icon, IconKind, Minimap, MinimapView, Overlay, PagePool, Panel, PanelShadow, Polyline, Rgb,
+        Scale, ScrollRegion, TextRun, UnderlineStyle,
     },
     theme::Theme,
 };
@@ -2649,7 +2649,7 @@ fn project_cell(
         underline_color,
         // Borders and scale come from the stoatty APC, not the VT stream, so a
         // projected cell carries neither.
-        borders: Borders::default(),
+        border_id: BorderId::NONE,
         scale: Scale::Single,
     }
 }
@@ -2838,18 +2838,14 @@ fn frame_region(grid: &mut Grid, command: &BorderCommand, rows_dirty: &Damage) {
     let right = left + command.width as usize - 1;
     let last_col = right.min(cols.saturating_sub(1));
 
-    // A horizontal edge is one contiguous run, so it takes one bounds check for the
-    // row rather than one per column.
+    // A horizontal edge is one contiguous run, so it takes one call for the row
+    // rather than one per column.
     if left < cols {
         if top < rows && rows_dirty.is_dirty(top) {
-            for cell in &mut grid.row_mut(top)[left..=last_col] {
-                cell.borders.top = Some(border);
-            }
+            grid.set_border_edge(top, left..last_col + 1, BorderEdge::Top, border);
         }
         if bottom < rows && rows_dirty.is_dirty(bottom) {
-            for cell in &mut grid.row_mut(bottom)[left..=last_col] {
-                cell.borders.bottom = Some(border);
-            }
+            grid.set_border_edge(bottom, left..last_col + 1, BorderEdge::Bottom, border);
         }
     }
 
@@ -2857,12 +2853,8 @@ fn frame_region(grid: &mut Grid, command: &BorderCommand, rows_dirty: &Damage) {
         if !rows_dirty.is_dirty(row) {
             continue;
         }
-        if left < cols {
-            grid.get_mut(row, left).borders.left = Some(border);
-        }
-        if right < cols {
-            grid.get_mut(row, right).borders.right = Some(border);
-        }
+        grid.set_border_edge(row, left..left + 1, BorderEdge::Left, border);
+        grid.set_border_edge(row, right..right + 1, BorderEdge::Right, border);
     }
 }
 
@@ -4459,11 +4451,11 @@ mod tests {
             style: BorderStyle::Light,
             color: Rgb::new(255, 0, 0),
         });
-        assert_eq!(grid.get(0, 0).borders.top, edge);
-        assert_eq!(grid.get(0, 0).borders.left, edge);
-        assert_eq!(grid.get(1, 2).borders.bottom, edge);
-        assert_eq!(grid.get(1, 2).borders.right, edge);
-        assert_eq!(grid.get(1, 1).borders.top, None);
+        assert_eq!(grid.cell_borders(0, 0).top, edge);
+        assert_eq!(grid.cell_borders(0, 0).left, edge);
+        assert_eq!(grid.cell_borders(1, 2).bottom, edge);
+        assert_eq!(grid.cell_borders(1, 2).right, edge);
+        assert_eq!(grid.cell_borders(1, 1).top, None);
     }
 
     #[test]
@@ -4683,7 +4675,11 @@ mod tests {
         terminal.advance(b"hi");
         terminal.advance(&frame);
         terminal.project(&mut grid);
-        assert_eq!(grid.get(0, 0).borders.top, edge, "frame after plain output");
+        assert_eq!(
+            grid.cell_borders(0, 0).top,
+            edge,
+            "frame after plain output"
+        );
 
         // A query preceded by plain bytes in one chunk: memchr seeks to the ESC.
         let mut terminal = Terminal::new(2, 8, Theme::default());
@@ -4712,8 +4708,8 @@ mod tests {
         terminal.advance(&encode_reset());
         terminal.project(&mut grid);
 
-        assert_eq!(grid.get(0, 0).borders.top, None);
-        assert_eq!(grid.get(0, 0).borders.left, None);
+        assert_eq!(grid.cell_borders(0, 0).top, None);
+        assert_eq!(grid.cell_borders(0, 0).left, None);
     }
 
     #[test]
@@ -4733,7 +4729,7 @@ mod tests {
         terminal.project(&mut grid);
 
         assert_eq!(
-            grid.get(0, 0).borders.top,
+            grid.cell_borders(0, 0).top,
             Some(Border {
                 style: BorderStyle::Rounded,
                 color: Rgb::new(1, 2, 3),
@@ -5081,7 +5077,7 @@ mod tests {
         let mut grid = Grid::new(2, 3);
         terminal.advance(&frame);
         terminal.project(&mut grid);
-        assert_eq!(grid.get(0, 0).borders.top, edge);
+        assert_eq!(grid.cell_borders(0, 0).top, edge);
 
         // Writing text damages row 0, so its cells are reset; the border must be
         // re-stamped even though no new border command arrived.
@@ -5089,7 +5085,7 @@ mod tests {
         terminal.project(&mut grid);
         assert_eq!(grid.get(0, 0).ch, 'X');
         assert_eq!(
-            grid.get(0, 0).borders.top,
+            grid.cell_borders(0, 0).top,
             edge,
             "border re-stamped on the damaged row"
         );
@@ -5120,7 +5116,7 @@ mod tests {
         terminal.advance(&frame);
         terminal.project(&mut grid);
         assert_eq!(
-            (grid.get(2, 0).borders.top, grid.get(3, 0).borders.bottom),
+            (grid.cell_borders(2, 0).top, grid.cell_borders(3, 0).bottom),
             (edge, edge),
             "the declared border stamps on arrival",
         );
@@ -5132,9 +5128,9 @@ mod tests {
         assert_eq!(
             (
                 grid.get(0, 0).ch,
-                grid.get(2, 0).borders.top,
-                grid.get(3, 0).borders.bottom,
-                grid.get(2, 2).borders.right,
+                grid.cell_borders(2, 0).top,
+                grid.cell_borders(3, 0).bottom,
+                grid.cell_borders(2, 2).right,
             ),
             ('X', edge, edge, edge),
             "the border survives a projection that never touched its rows",
@@ -5200,7 +5196,7 @@ mod tests {
         terminal.project(&mut grid);
         assert_eq!((grid.rows(), grid.cols()), (4, 6));
         assert_eq!(
-            grid.get(0, 0).borders.top,
+            grid.cell_borders(0, 0).top,
             edge,
             "border re-applied after resize"
         );
@@ -5657,7 +5653,7 @@ mod tests {
 
         terminal.project(&mut grid);
         assert_eq!(
-            grid.get(0, 0).borders.top,
+            grid.cell_borders(0, 0).top,
             None,
             "page border spares the live grid"
         );
