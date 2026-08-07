@@ -2329,10 +2329,16 @@ impl EscScanner {
                     };
                 },
 
+                // APC carries whole screens from stoat, so the payload between
+                // terminators is taken in one run. Landing on the terminator
+                // rather than past it leaves the arms below to read it.
                 EscState::Apc => match byte {
                     ESC => self.state = EscState::ApcEscape,
                     BEL => self.finish_apc(i + 1, emit),
-                    _ => self.push_apc(byte),
+                    _ => {
+                        i += self.push_apc_run(payload_run(&bytes[i..]));
+                        continue;
+                    },
                 },
                 EscState::ApcEscape => match byte {
                     STRING_TERMINATOR => self.finish_apc(i + 1, emit),
@@ -2383,7 +2389,10 @@ impl EscScanner {
                 EscState::OscBuffer => match byte {
                     ESC => self.state = EscState::OscBufferEscape,
                     BEL => self.finish_osc(emit),
-                    _ => self.push_osc(byte),
+                    _ => {
+                        i += self.push_osc_run(payload_run(&bytes[i..]));
+                        continue;
+                    },
                 },
                 EscState::OscBufferEscape => match byte {
                     STRING_TERMINATOR => self.finish_osc(emit),
@@ -2396,7 +2405,10 @@ impl EscScanner {
                 EscState::OscSkip => match byte {
                     ESC => self.state = EscState::OscSkipEscape,
                     BEL => self.state = EscState::Ground,
-                    _ => {},
+                    _ => {
+                        i += payload_run(&bytes[i..]).len();
+                        continue;
+                    },
                 },
                 EscState::OscSkipEscape => match byte {
                     STRING_TERMINATOR => self.state = EscState::Ground,
@@ -2408,17 +2420,21 @@ impl EscScanner {
         }
     }
 
-    /// Buffer one APC payload byte, abandoning the frame if it overruns the cap.
+    /// Buffer a run of APC payload bytes, abandoning the frame if it overruns
+    /// the cap, and report how many bytes of input the run consumed.
     ///
     /// The cap is [`MAX_APC_PAYLOAD`], shared with the encoders so a frame they emit
-    /// can never be the thing this discards.
-    fn push_apc(&mut self, byte: u8) {
-        if self.payload.len() < MAX_APC_PAYLOAD {
-            self.payload.push(byte);
+    /// can never be the thing this discards. Overrunning discards the whole frame,
+    /// so the bytes buffered before the cap was reached are of no use and the run
+    /// is dropped entire rather than filled to the brim first.
+    fn push_apc_run(&mut self, run: &[u8]) -> usize {
+        if self.payload.len() + run.len() <= MAX_APC_PAYLOAD {
+            self.payload.extend_from_slice(run);
         } else {
             self.payload.clear();
             self.state = EscState::Ground;
         }
+        run.len()
     }
 
     /// Emit the buffered APC payload, ending one past its terminator at `end`.
@@ -2431,14 +2447,20 @@ impl EscScanner {
         self.state = EscState::Ground;
     }
 
-    /// Buffer one OSC payload byte, marking overflow past the cap so the sequence
-    /// is dropped at its terminator rather than reported truncated.
-    fn push_osc(&mut self, byte: u8) {
-        if self.payload.len() < MAX_OSC_NOTIFY_BYTES {
-            self.payload.push(byte);
-        } else {
+    /// Buffer a run of OSC payload bytes, marking overflow past the cap so the
+    /// sequence is dropped at its terminator rather than reported truncated, and
+    /// report how many bytes of input the run consumed.
+    ///
+    /// Unlike an APC overrun this keeps scanning, so what fits is still buffered.
+    /// The sequence is discarded at its terminator instead, which is where the
+    /// overflow flag is read.
+    fn push_osc_run(&mut self, run: &[u8]) -> usize {
+        let room = MAX_OSC_NOTIFY_BYTES - self.payload.len();
+        if run.len() > room {
             self.overflow = true;
         }
+        self.payload.extend_from_slice(&run[..run.len().min(room)]);
+        run.len()
     }
 
     /// Emit the buffered OSC payload unless it overran the cap, then reset.
@@ -2452,6 +2474,19 @@ impl EscScanner {
         self.payload.clear();
         self.overflow = false;
         self.state = EscState::Ground;
+    }
+}
+
+/// The leading bytes of `rest` that belong to a string payload, stopping at the
+/// terminator that ends it or at the end of what has arrived.
+///
+/// Empty exactly when `rest` opens on a terminator, which is why the callers
+/// take a run only from a byte they have already seen is not one. A zero-length
+/// run would leave the scan position where it was.
+fn payload_run(rest: &[u8]) -> &[u8] {
+    match memchr::memchr2(ESC, BEL, rest) {
+        Some(end) => &rest[..end],
+        None => rest,
     }
 }
 
@@ -3252,7 +3287,7 @@ fn cube_channel(level: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cursor, CursorShape, Damage, EscEvent, EscScanner, TermEvent, Terminal,
+        Cursor, CursorShape, Damage, EscEvent, EscScanner, TermEvent, Terminal, MAX_APC_PAYLOAD,
         MAX_OSC_NOTIFY_BYTES, XTVERSION_REPLY,
     };
     use crate::{
@@ -4306,6 +4341,49 @@ mod tests {
         assert_eq!(
             scan_collect(&mut scanner, b"\x1b_a\x1b\\\x1b_b\x1b\\"),
             vec![(b"a".to_vec(), 5), (b"b".to_vec(), 10)]
+        );
+    }
+
+    #[test]
+    fn apc_scan_discards_over_the_cap() {
+        // Without this the payload buffer grows with whatever a child sends,
+        // since an APC frame is only bounded by its terminator arriving.
+        let mut scanner = EscScanner::default();
+        let mut seq = b"\x1b_".to_vec();
+        seq.resize(seq.len() + MAX_APC_PAYLOAD + 1, b'a');
+        seq.extend_from_slice(b"\x1b\\");
+        assert!(
+            scan_collect(&mut scanner, &seq).is_empty(),
+            "a payload past the cap is dropped",
+        );
+        assert_eq!(
+            scan_collect(&mut scanner, b"\x1b_ok\x1b\\"),
+            vec![(b"ok".to_vec(), 6)],
+            "the scanner recovers for the next frame",
+        );
+    }
+
+    #[test]
+    fn scans_a_large_payload_split_across_calls() {
+        // A pool fill arrives as several reads, so a run taken from one chunk
+        // has to leave the payload open for the next rather than ending at the
+        // chunk edge. The halves are uneven so a run that assumed it saw the
+        // whole payload would land the frame short.
+        let payload: Vec<u8> = (0..40_000u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let mut input = vec![b'\x1b', b'_'];
+        input.extend_from_slice(&payload);
+        input.extend_from_slice(b"\x1b\\");
+
+        let split = 9_000;
+        let mut scanner = EscScanner::default();
+        assert!(
+            scan_collect(&mut scanner, &input[..split]).is_empty(),
+            "no terminator has arrived yet",
+        );
+        assert_eq!(
+            scan_collect(&mut scanner, &input[split..]),
+            vec![(payload, input.len() - split)],
+            "the whole payload, ending one past the terminator in the second chunk",
         );
     }
 
