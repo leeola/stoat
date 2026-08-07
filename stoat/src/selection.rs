@@ -105,8 +105,19 @@ impl SelectionsCollection {
         mut selection: Selection<Anchor>,
         snapshot: &MultiBufferSnapshot,
     ) {
-        let start = snapshot.resolve_anchor(&selection.start);
-        let end = snapshot.resolve_anchor(&selection.end);
+        // Copying a selection onto another row works by column, and the target
+        // row can hold different text, so a column that was a boundary on the
+        // source can land inside a cluster here. This path never reaches
+        // [`Self::replace_with`], so it applies that same clip itself: starts
+        // clamp down and ends clamp up, growing a span out to the character it
+        // was splitting.
+        let rope = snapshot.rope();
+        let start =
+            rope.clip_to_grapheme_boundary(snapshot.resolve_anchor(&selection.start), Bias::Left);
+        let end =
+            rope.clip_to_grapheme_boundary(snapshot.resolve_anchor(&selection.end), Bias::Right);
+        selection.start = snapshot.anchor_at(start, Bias::Left);
+        selection.end = snapshot.anchor_at(end, Bias::Right);
 
         let pos = self
             .disjoint
@@ -311,8 +322,14 @@ impl SelectionsCollection {
 
         // A motion walks codepoints, and a combining mark is a codepoint that
         // categorizes apart from the letter it sits on, so a word motion stops
-        // between the two. Every producer of selections could be taught the
-        // rule separately, or it can hold here, where all of them arrive.
+        // between the two. Almost every producer of selections arrives here, so
+        // this is where the rule is applied rather than in each of them.
+        //
+        // The exceptions write into `disjoint` directly and each carry the rule
+        // themselves. [`Self::insert_range`] applies the same bias pair as this
+        // does. [`Self::insert_cursor`] and [`Self::seed_cursor`] widen through
+        // `Selection::min_width_1`, which lands on whole clusters.
+        // [`Self::restore`] replays anchors an earlier pass already clipped.
         //
         // Starts clamp down and ends clamp up, so a selection only ever grows
         // out to the character it was cutting, and start stays at or below end
@@ -1320,6 +1337,48 @@ mod tests {
             spans.len(),
             4,
             "3C from 1 cursor should leave 4 cursors total (got {spans:?})"
+        );
+    }
+
+    /// `insert_range` snaps a span that splits a cluster.
+    ///
+    /// This is the one selection producer that writes into `disjoint` without
+    /// passing through `replace_with`, so the clip it would have received has to
+    /// be applied here. Its only production caller resolves its offsets through
+    /// the display layer, which already snaps, so this exercises the contract
+    /// directly rather than through a path that cannot violate it.
+    #[test]
+    fn insert_range_snaps_a_span_that_splits_a_cluster() {
+        let multi = singleton("ae\u{301}b\n");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+
+        // Offset 2 is between the e and its acute. The cluster spans 1..4.
+        let split = Selection {
+            id: 0,
+            start: snapshot.anchor_at(2, Bias::Right),
+            end: snapshot.anchor_at(2, Bias::Right),
+            reversed: false,
+            goal: SelectionGoal::None,
+        };
+        collection.insert_range(split, &snapshot);
+
+        let stored = collection
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                (
+                    snapshot.resolve_anchor(&sel.start),
+                    snapshot.resolve_anchor(&sel.end),
+                )
+            })
+            .find(|&(start, _)| start != 0)
+            .expect("the inserted range is stored alongside the default cursor");
+
+        assert_eq!(
+            stored,
+            (1, 4),
+            "the span grows out to the cluster it was splitting",
         );
     }
 
