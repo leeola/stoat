@@ -211,6 +211,12 @@ pub struct Terminal {
     /// written back. Reusing it keeps that comparison from allocating a row per
     /// row per frame.
     row_scratch: Vec<Cell>,
+    /// Row-flag buffers handed back by [`Terminal::recycle_damage`], for the next
+    /// frame that needs one.
+    ///
+    /// A frame carries at most two, the VT damage and the decoration damage, so
+    /// this settles at that depth rather than growing.
+    row_flags_spare: Vec<Vec<bool>>,
     /// The byte buffer an open content capture streams into, held here between
     /// captures so a run of them shares one allocation.
     ///
@@ -643,6 +649,7 @@ impl Terminal {
             last_decoration_footprint: Vec::new(),
             footprint_scratch: Vec::new(),
             row_scratch: Vec::new(),
+            row_flags_spare: Vec::new(),
             capture_scratch: Vec::new(),
             last_selection_span: None,
             decoration_damage: Vec::new(),
@@ -998,6 +1005,19 @@ impl Terminal {
     /// [`Self::project`]; the caller drains this right after projecting.
     pub fn take_decoration_damage(&mut self) -> Damage {
         Damage::Partial(mem::take(&mut self.decoration_damage))
+    }
+
+    /// Give a [`Damage`] back once the frame that read it is done, so its row
+    /// buffer serves the next one.
+    ///
+    /// A frame's damage is read and dropped, and building the flags for the one
+    /// after it would then allocate again. Returning it instead is what makes
+    /// that allocation once rather than per damaged frame. A caller that
+    /// forgets simply pays what it paid before.
+    pub fn recycle_damage(&mut self, damage: Damage) {
+        if let Damage::Partial(rows) = damage {
+            self.row_flags_spare.push(rows);
+        }
     }
 
     /// Apply a decoded stoatty command to the terminal.
@@ -1976,7 +1996,7 @@ impl Terminal {
             matches!(dirty, Damage::Full) && !resized && offset == 0 && grew > 0 && grew < rows;
         if sliding {
             grid.scroll_by(grew as isize);
-            dirty = Damage::Partial(vec![false; rows]);
+            dirty = Damage::Partial(row_flags(&mut self.row_flags_spare, rows));
         }
 
         // Visit only the rows damage marked, and read their cells straight from
@@ -2122,7 +2142,7 @@ impl Terminal {
             self.last_decoration_footprint.resize(rows, false);
         }
         if self.decoration_damage.len() != rows {
-            self.decoration_damage = vec![false; rows];
+            self.decoration_damage = row_flags(&mut self.row_flags_spare, rows);
         }
         // The footprint is a pure function of the three decoration lists and the row
         // count, and none of those can move while this is false, so the retained
@@ -2179,7 +2199,7 @@ impl Terminal {
                 if lines.peek().is_none() {
                     return Damage::Partial(Vec::new());
                 }
-                let mut rows_dirty = vec![false; rows];
+                let mut rows_dirty = row_flags(&mut self.row_flags_spare, rows);
                 for bounds in lines {
                     if let Some(slot) = rows_dirty.get_mut(bounds.line) {
                         *slot = true;
@@ -2662,6 +2682,19 @@ fn project_term_cells(
 ///
 /// `offset` is the display offset the projection ran at, converting the
 /// selection's terminal lines to viewport rows the same way the cell loop does.
+/// A cleared row-flag buffer `rows` long, reusing one a past frame gave back
+/// through [`Terminal::recycle_damage`] when `spare` holds one.
+///
+/// Takes the pool rather than the whole terminal so a caller can reach it while
+/// the terminal's own content or damage is borrowed, which every call site is
+/// in the middle of.
+fn row_flags(spare: &mut Vec<Vec<bool>>, rows: usize) -> Vec<bool> {
+    let mut flags = spare.pop().unwrap_or_default();
+    flags.clear();
+    flags.resize(rows, false);
+    flags
+}
+
 fn selection_span(range: &SelectionRange, offset: i32, rows: usize) -> Option<(usize, usize)> {
     let top = (range.start.line.0 + offset).max(0) as usize;
     let bottom = (range.end.line.0 + offset).max(0) as usize;
@@ -3407,6 +3440,43 @@ mod tests {
         assert!(
             matches!(&damage, Damage::Partial(rows) if rows[0]),
             "the row still names itself, the skip having left the damage alone"
+        );
+    }
+
+    /// A reused buffer carries the marks of the frame that gave it back, so
+    /// what it must not do is hand them to the frame that takes it.
+    #[test]
+    fn a_reused_row_buffer_is_cleared_and_sized_before_it_is_handed_out() {
+        let mut spare = vec![vec![true, true, true]];
+
+        assert_eq!(
+            super::row_flags(&mut spare, 2),
+            [false, false],
+            "the marks are gone and the buffer fits the rows asked for"
+        );
+        assert!(spare.is_empty(), "the buffer handed out left the pool");
+        assert_eq!(
+            super::row_flags(&mut spare, 3),
+            [false, false, false],
+            "an empty pool still answers, by allocating"
+        );
+    }
+
+    #[test]
+    fn only_a_damage_carrying_a_buffer_returns_one() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+
+        terminal.recycle_damage(Damage::Full);
+        assert!(
+            terminal.row_flags_spare.is_empty(),
+            "a full damage names no rows, so it has no buffer to give back"
+        );
+
+        terminal.recycle_damage(Damage::Partial(vec![true; 8]));
+        assert_eq!(
+            super::row_flags(&mut terminal.row_flags_spare, 2),
+            [false, false],
+            "the returned buffer serves the next request"
         );
     }
 

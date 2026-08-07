@@ -559,6 +559,13 @@ struct State {
     pools_scratch: Vec<PoolView>,
     active_scratch: Vec<ActivePool>,
     overflows_scratch: Vec<Option<f32>>,
+    /// Row-flag buffers from the frame before, handed back to the terminal at
+    /// the start of the next one so its damage flags land in the same
+    /// allocation rather than a fresh one.
+    ///
+    /// Held here rather than in the terminal because the frame owns them once
+    /// it is handed them, and reads them after the lock is released.
+    damage_spares: Vec<Damage>,
     /// The grid popovers epoch [`Self::overflows_scratch`] was filled against, so a
     /// frame whose overlays were not re-applied keeps the answers already in it.
     /// `None` until the first redraw fills it.
@@ -972,6 +979,7 @@ impl ApplicationHandler<PtyEvent> for App {
             region_scroll: 0.0,
             last_region_offset: 0.0,
             pool_anims: BTreeMap::new(),
+            damage_spares: Vec::new(),
             pools_scratch: Vec::new(),
             active_scratch: Vec::new(),
             overflows_scratch: Vec::new(),
@@ -1413,6 +1421,11 @@ impl ApplicationHandler<PtyEvent> for App {
                     // Read under the projection's lock, so the clear color and
                     // the cells it surrounds come from one view of the terminal.
                     let clear_colors = (terminal.default_background(), terminal.default_cursor());
+                    // Last frame's row flags, back before anything asks for
+                    // this frame's.
+                    for spare in state.damage_spares.drain(..) {
+                        terminal.recycle_damage(spare);
+                    }
                     let display_offset = terminal.display_offset();
                     // Scrolled back, the frame renders the composed history
                     // window instead of this grid, so projecting into it is a
@@ -1815,6 +1828,10 @@ impl ApplicationHandler<PtyEvent> for App {
                 };
 
                 state.active_scratch = active;
+                // Held for the next frame, which hands them back before it asks
+                // the terminal for its damage.
+                state.damage_spares.push(damage);
+                state.damage_spares.push(decoration_damage);
 
                 // Keep the vsync-paced loop running while the cursor eases, a
                 // popover scrolls, or the grid, scrollback, a region, or a pool
