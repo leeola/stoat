@@ -2109,65 +2109,14 @@ fn copy_pool_region(
         pool_grid.resize(live_grid.rows(), live_grid.cols());
     }
 
-    let top = region.top as usize;
-    let left = region.left as usize;
-    let cols = document_grid
-        .cols()
-        .min(pool_grid.cols().saturating_sub(left));
-    let rows = document_grid
-        .rows()
-        .min(pool_grid.rows().saturating_sub(top));
-    if cols == 0 {
-        return;
-    }
-
-    for r in 0..rows {
-        pool_grid.row_mut(top + r)[left..left + cols]
-            .copy_from_slice(&document_grid.row(r)[..cols]);
-    }
-
-    let dx = region.left as i16 * 16;
-    let dy = region.top as i16 * 16;
-    copy_translated(
-        pool_grid.text_runs_mut(),
-        document_grid.text_runs(),
-        |run| {
-            run.col += dx;
-            run.row += dy;
-        },
+    // Every row the term composed, the straddle one included, since a sub-cell
+    // glide reveals it at the region's bottom edge.
+    pool_grid.blit_region(
+        document_grid,
+        region.top as usize,
+        region.left as usize,
+        document_grid.rows(),
     );
-    copy_translated(pool_grid.bars_mut(), document_grid.bars(), |bar| {
-        bar.x += dx;
-        bar.y += dy;
-    });
-    copy_translated(
-        pool_grid.polylines_mut(),
-        document_grid.polylines(),
-        |polyline| {
-            for point in &mut polyline.points {
-                point[0] += dx;
-                point[1] += dy;
-            }
-        },
-    );
-}
-
-/// Overwrite `dst` with `src`, then shift each entry into the pool's region.
-///
-/// A gliding pool rewrites these lists every frame, so the entries `dst`
-/// already holds are overwritten rather than dropped for freshly collected
-/// ones. `clone_from` is what carries that down into an entry's own
-/// allocations, keeping a path's point list off the allocator too.
-fn copy_translated<T: Clone>(dst: &mut Vec<T>, src: &[T], mut shift: impl FnMut(&mut T)) {
-    dst.truncate(src.len());
-    for (out, item) in dst.iter_mut().zip(src) {
-        out.clone_from(item);
-    }
-    dst.extend_from_slice(&src[dst.len()..]);
-
-    for item in dst {
-        shift(item);
-    }
 }
 
 /// The cursor's cell position for the renderer, or `None` when it is hidden.

@@ -479,6 +479,93 @@ impl Grid {
 
     /// The path list, for a caller rewriting it from another grid.s. See
     /// [`Self::text_runs_mut`].
+    /// Copy `rows` rows of `src` in at (`top`, `left`), replacing whatever
+    /// decorations this grid held with `src`'s, shifted to land there.
+    ///
+    /// For a destination one source fills on its own. The decoration lists are
+    /// overwritten rather than added to, so a source that has dropped a bar
+    /// clears the one this grid was showing instead of leaving it behind.
+    ///
+    /// `rows` is the caller's, not `src`'s. A pool composes one row past its
+    /// region to cover the sliver a sub-cell glide reveals, and whether that row
+    /// belongs in the destination is the caller's question, not this one's.
+    /// Rows and columns past this grid's edge are dropped, so a region declared
+    /// past the viewport clips rather than panicking.
+    pub fn blit_region(&mut self, src: &Grid, top: usize, left: usize, rows: usize) {
+        let Some((rows, cols)) = self.region_extent(src, top, left, rows) else {
+            return;
+        };
+        self.copy_cells(src, top, left, rows, cols);
+
+        let (dx, dy) = decoration_shift(top, left);
+        copy_translated(&mut self.text_runs, src.text_runs(), |run| {
+            run.col += dx;
+            run.row += dy;
+        });
+        copy_translated(&mut self.bars, src.bars(), |bar| {
+            bar.x += dx;
+            bar.y += dy;
+        });
+        copy_translated(&mut self.polylines, src.polylines(), |polyline| {
+            shift_polyline(polyline, dx, dy);
+        });
+    }
+
+    /// Copy `rows` rows of `src` in at (`top`, `left`), adding `src`'s
+    /// decorations to this grid's rather than replacing them.
+    ///
+    /// For a destination several sources compose into, each owning its own
+    /// rectangle. The caller blanks the grid once before the run, so what
+    /// accumulates is that run's and nothing older.
+    ///
+    /// See [`Self::blit_region`] for what `rows` means and how the edges clip.
+    pub fn append_region(&mut self, src: &Grid, top: usize, left: usize, rows: usize) {
+        let Some((rows, cols)) = self.region_extent(src, top, left, rows) else {
+            return;
+        };
+        self.copy_cells(src, top, left, rows, cols);
+
+        let (dx, dy) = decoration_shift(top, left);
+        self.text_runs.extend(src.text_runs().iter().map(|run| {
+            let mut run = run.clone();
+            run.col += dx;
+            run.row += dy;
+            run
+        }));
+        self.bars.extend(src.bars().iter().map(|bar| {
+            let mut bar = *bar;
+            bar.x += dx;
+            bar.y += dy;
+            bar
+        }));
+        self.polylines
+            .extend(src.polylines().iter().map(|polyline| {
+                let mut polyline = polyline.clone();
+                shift_polyline(&mut polyline, dx, dy);
+                polyline
+            }));
+    }
+
+    /// The rows and columns of `src` that fit at (`top`, `left`), or `None`
+    /// when nothing does.
+    fn region_extent(
+        &self,
+        src: &Grid,
+        top: usize,
+        left: usize,
+        rows: usize,
+    ) -> Option<(usize, usize)> {
+        let rows = rows.min(src.rows()).min(self.rows().saturating_sub(top));
+        let cols = src.cols().min(self.cols().saturating_sub(left));
+        (cols > 0).then_some((rows, cols))
+    }
+
+    fn copy_cells(&mut self, src: &Grid, top: usize, left: usize, rows: usize, cols: usize) {
+        for r in 0..rows {
+            self.row_mut(top + r)[left..left + cols].copy_from_slice(&src.row(r)[..cols]);
+        }
+    }
+
     pub fn polylines_mut(&mut self) -> &mut Vec<Polyline> {
         &mut self.polylines
     }
@@ -1053,6 +1140,39 @@ pub struct Panel {
     /// a higher `seq` than its panel while a lower box's components carry a lower
     /// one, letting the renderer occlude what a box covers.
     pub seq: u32,
+}
+
+/// The sixteenths a decoration moves by to land at cell (`top`, `left`).
+///
+/// Off-grid decorations are placed in sixteenths of a cell, so a whole-cell
+/// origin is sixteen of them.
+fn decoration_shift(top: usize, left: usize) -> (i16, i16) {
+    (left as i16 * 16, top as i16 * 16)
+}
+
+fn shift_polyline(polyline: &mut Polyline, dx: i16, dy: i16) {
+    for point in &mut polyline.points {
+        point[0] += dx;
+        point[1] += dy;
+    }
+}
+
+/// Overwrite `dst` with `src`, then shift each entry into place.
+///
+/// A gliding pool rewrites these lists every frame, so the entries `dst`
+/// already holds are overwritten rather than dropped for freshly collected
+/// ones. `clone_from` is what carries that down into an entry's own
+/// allocations, keeping a path's point list off the allocator too.
+fn copy_translated<T: Clone>(dst: &mut Vec<T>, src: &[T], mut shift: impl FnMut(&mut T)) {
+    dst.truncate(src.len());
+    for (out, item) in dst.iter_mut().zip(src) {
+        out.clone_from(item);
+    }
+    dst.extend_from_slice(&src[dst.len()..]);
+
+    for item in dst {
+        shift(item);
+    }
 }
 
 /// A scrollable sub-rectangle of the grid.
