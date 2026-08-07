@@ -37,6 +37,12 @@ pub enum WorkspaceStatus {
 pub struct WorkspacePicker {
     pub(crate) input: InputView,
     entries: Vec<PickerEntry>,
+    /// What a query is matched against, one per entry and parallel to them.
+    ///
+    /// Derived from `entries`, which are written once at construction, so these
+    /// are built there too. Ranking runs from the idle tick, and rebuilding
+    /// them per call would allocate a string per workspace a frame.
+    haystacks: Vec<String>,
     /// Indices into `entries` in display order after fuzzy filtering. An empty
     /// query lists every entry in the status-grouped order.
     filtered: Vec<usize>,
@@ -45,6 +51,9 @@ pub struct WorkspacePicker {
     match_indices: Vec<Vec<u32>>,
     /// Cursor into [`Self::filtered`].
     selected: usize,
+    /// Query the current ranking came from, so the idle tick's repeat call
+    /// re-ranks nothing. `None` until the first ranking.
+    last_filter_query: Option<String>,
     /// Rows the last render painted, stamped by the renderer and read by
     /// [`Self::page`]. `None` until the first frame, since the modal sizes
     /// itself to its entries and only render knows how many fit.
@@ -159,12 +168,19 @@ impl WorkspacePicker {
             .position(|e| e.status == WorkspaceStatus::Active)
             .unwrap_or(0);
 
+        let haystacks = entries
+            .iter()
+            .map(|e| format!("{} {}", e.basename, e.git_root.display()))
+            .collect();
+
         let mut picker = Self {
             input,
             entries,
+            haystacks,
             filtered: Vec::new(),
             match_indices: Vec::new(),
             selected,
+            last_filter_query: None,
             viewport_rows: None,
         };
         picker.refilter("");
@@ -194,15 +210,17 @@ impl WorkspacePicker {
     /// The haystack per row is `"{basename} {git_root}"`, so a query narrows on
     /// either the workspace name or any part of its root path. Match highlights
     /// land only on name-column indices when painted.
+    ///
+    /// Re-ranking for an unchanged query is skipped, so the idle tick this runs
+    /// from costs nothing while the picker sits open.
     pub(crate) fn refilter(&mut self, query: &str) {
-        // The only haystack here is built rather than stored, so it is
-        // materialized once and lent to the matcher.
-        let haystacks: Vec<String> = self
-            .entries
-            .iter()
-            .map(|e| format!("{} {}", e.basename, e.git_root.display()))
-            .collect();
-        let items = haystacks
+        if self.last_filter_query.as_deref() == Some(query) {
+            return;
+        }
+        self.last_filter_query = Some(query.to_owned());
+
+        let items = self
+            .haystacks
             .iter()
             .enumerate()
             .map(|(idx, haystack)| (idx, haystack.as_str()));
@@ -546,6 +564,9 @@ mod tests {
                 crate::test_notify(),
             ));
             workspaces[id].id = id;
+            // Cleared so the row's name falls back to the path basename. The
+            // default is derived from the uid, which differs run to run.
+            workspaces[id].name = String::new();
             first.get_or_insert(id);
         }
         let active = first.expect("at least one workspace");
@@ -608,5 +629,32 @@ mod tests {
 
         picker.refilter("");
         assert_eq!(picker.filtered().len(), 3, "empty query restores every row");
+    }
+
+    #[test]
+    fn an_unchanged_query_reuses_the_ranking() {
+        let mut picker = picker_with_roots(&["/tmp/alpha", "/tmp/beta"]);
+        picker.filtered.clear();
+
+        picker.refilter("");
+        assert!(
+            picker.filtered.is_empty(),
+            "the same query ranks nothing again"
+        );
+
+        picker.refilter("alpha");
+        assert_eq!(picker.filtered.len(), 1, "a changed query ranks afresh");
+    }
+
+    #[test]
+    fn a_query_narrows_on_the_root_path_as_well_as_the_name() {
+        let mut picker = picker_with_roots(&["/tmp/alpha", "/elsewhere/beta"]);
+        picker.refilter("elsewhere");
+        assert_eq!(
+            picker.selected_entry().map(|e| e.basename.as_str()),
+            Some("beta"),
+            "the stored haystack carries the root path, not just the name"
+        );
+        assert_eq!(picker.filtered.len(), 1, "the other root does not match");
     }
 }
