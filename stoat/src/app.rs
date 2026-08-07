@@ -21,6 +21,7 @@ use crate::{
         EnvHost, FsHost, FsWatchHost, GitHost, GitRepo, LanguageServerFeature, LocalEnv, LocalFs,
         LocalGit, LspHost, NoopFsWatcher,
     },
+    input_view::InputView,
     keymap::{Keymap, ResolvedAction, StateValue},
     keymap_state::{
         active_modal, debug_assert_modal_exclusivity, modal_predicate, normalize_shift_event,
@@ -39,7 +40,7 @@ use crate::{
     run::{CommandMark, GridSelection, PtyNotification, RunId},
     selection::merge_overlapping_spans,
     symbol_finder::SymbolFinder,
-    term_session::{TermId, TermReturnFocus, TermSelection, TermSession},
+    term_session::{TermId, TermReturnFocus, TermSelection},
     ui::RenderFrame,
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
     workspace_picker::WorkspacePicker,
@@ -8255,7 +8256,7 @@ impl Stoat {
             // that answer skips the render, the copy, and the serialize -- the
             // work that otherwise runs only to produce the hash deciding it.
             let input_version =
-                window_content_version(&view, region, is_focused, self.theme_epoch, &ws.terms);
+                window_content_version(&view, region, is_focused, self.theme_epoch, ws);
             let unchanged = input_version
                 .is_some_and(|version| self.smooth_scroll.already_emitted(index, version));
 
@@ -9936,7 +9937,7 @@ fn window_content_version(
     region: PoolRegionCommand,
     is_focused: bool,
     theme_epoch: u64,
-    terms: &SlotMap<TermId, TermSession>,
+    ws: &Workspace,
 ) -> Option<u64> {
     let mut hasher = DefaultHasher::new();
     theme_epoch.hash(&mut hasher);
@@ -9947,16 +9948,61 @@ fn window_content_version(
         // The leading tag keeps one view kind's inputs from aliasing another's
         // after a pane changes view but keeps its index, and so its pool.
         View::Agent(term_id) | View::Terminal(term_id) => {
-            let term = terms.get(*term_id)?;
+            let term = ws.terms.get(*term_id)?;
             0u8.hash(&mut hasher);
             term_id.hash(&mut hasher);
             term.term.generation().hash(&mut hasher);
             term.selection.hash(&mut hasher);
         },
-        View::Editor(_) | View::Run(_) | View::Label(_) => return None,
+        View::Run(run_id) => {
+            let run = ws.runs.get(*run_id)?;
+            1u8.hash(&mut hasher);
+            run_id.hash(&mut hasher);
+            run.scroll_offset.hash(&mut hasher);
+            run.cwd.hash(&mut hasher);
+            run.blocks.len().hash(&mut hasher);
+            for block in &run.blocks {
+                // Only the grid needs a counter. Every other field the block
+                // renders is a scalar or a short string, cheap enough to hash
+                // outright and safer than tracking who writes it.
+                block.grid.generation().hash(&mut hasher);
+                block.command.hash(&mut hasher);
+                block.cwd.hash(&mut hasher);
+                block.finished.hash(&mut hasher);
+                block.exit_status.hash(&mut hasher);
+                block.error.hash(&mut hasher);
+                block.selection.hash(&mut hasher);
+            }
+            input_view_version(&run.input, ws, &mut hasher)?;
+        },
+        View::Editor(_) | View::Label(_) => return None,
     }
 
     Some(hasher.finish())
+}
+
+/// Fold an input line's rendered state into `hasher`, or return [`None`] when
+/// its editor or buffer is gone and the version cannot be trusted.
+///
+/// The line is an editor over a one-row buffer, so what it draws moves on a
+/// text edit, a cursor move, and a horizontal scroll. The buffer version, the
+/// selection anchors, and the scroll row cover those in turn.
+///
+/// Hashing raw anchors rather than the offsets they resolve to is enough. An
+/// edit can move where an anchor lands without changing the anchor itself, but
+/// it bumps the buffer version in the same breath.
+fn input_view_version(input: &InputView, ws: &Workspace, hasher: &mut DefaultHasher) -> Option<()> {
+    let editor = ws.editors.get(input.editor_id)?;
+    editor.scroll_row.hash(hasher);
+    for selection in editor.selections.all_anchors() {
+        selection.start.hash(hasher);
+        selection.end.hash(hasher);
+    }
+
+    let buffer = ws.buffers.get(editor.buffer_id)?;
+    let version = buffer.read().ok()?.version();
+    version.hash(hasher);
+    Some(())
 }
 
 /// Content version of a pooled editor page, hashing the inputs whose change
@@ -11185,6 +11231,7 @@ mod tests {
         buffer::TextBuffer,
         display_map::highlights::HighlightStyleId,
         input_view::{InputView, SubmitTarget},
+        term_session::TermSession,
         test_harness::apc::decode_apc_stream,
     };
     use std::path::{Path, PathBuf};
@@ -18445,83 +18492,155 @@ mod tests {
         );
     }
 
-    /// Every input the terminal render reads has to reach the version, because
-    /// the version is what decides whether the render runs at all. A field left
-    /// out shows the user a stale pane until something else happens to move.
-    #[test]
-    fn a_terminal_pane_versions_on_everything_its_render_reads() {
-        let session: Arc<dyn crate::host::TerminalSession> =
-            Arc::new(crate::host::FakeTerminalSession::new());
-        let mut terms: SlotMap<TermId, TermSession> = SlotMap::with_key();
-        let term_id = terms.insert(TermSession::new(
-            crate::term_screen::TermScreen::new(24, 80),
-            session,
-        ));
-        let view = View::Terminal(term_id);
-        let region = PoolRegionCommand {
+    fn window_region() -> PoolRegionCommand {
+        PoolRegionCommand {
             pool: 1,
             top: 0,
             left: 0,
             width: 80,
             height: 23,
             window: 2,
-        };
-        let version = |terms: &SlotMap<TermId, TermSession>| {
-            window_content_version(&view, region, true, 0, terms).expect("a terminal is versioned")
+        }
+    }
+
+    /// Every input the terminal render reads has to reach the version, because
+    /// the version is what decides whether the render runs at all. A field left
+    /// out shows the user a stale pane until something else happens to move.
+    #[test]
+    fn a_terminal_pane_versions_on_everything_its_render_reads() {
+        let mut h = Stoat::test();
+        let session: Arc<dyn crate::host::TerminalSession> =
+            Arc::new(crate::host::FakeTerminalSession::new());
+        let term_id = h
+            .stoat
+            .active_workspace_mut()
+            .terms
+            .insert(TermSession::new(
+                crate::term_screen::TermScreen::new(24, 80),
+                session,
+            ));
+
+        let view = View::Terminal(term_id);
+        let region = window_region();
+        let version = |ws: &Workspace, focused, epoch, region| {
+            window_content_version(&view, region, focused, epoch, ws)
+                .expect("a terminal is versioned")
         };
 
-        let base = version(&terms);
-        assert_eq!(base, version(&terms), "an untouched terminal holds still");
-
+        let ws = h.stoat.active_workspace();
+        let base = version(ws, true, 0, region);
+        assert_eq!(
+            base,
+            version(ws, true, 0, region),
+            "an untouched terminal holds still"
+        );
         assert_ne!(
             base,
-            window_content_version(&view, region, false, 0, &terms).unwrap(),
+            version(ws, false, 0, region),
             "focus draws the cursor cell"
         );
         assert_ne!(
             base,
-            window_content_version(&view, region, true, 1, &terms).unwrap(),
+            version(ws, true, 1, region),
             "the theme recolors every cell"
         );
         assert_ne!(
             base,
-            window_content_version(
-                &view,
+            version(
+                ws,
+                true,
+                0,
                 PoolRegionCommand {
                     height: 12,
                     ..region
-                },
-                true,
-                0,
-                &terms
-            )
-            .unwrap(),
+                }
+            ),
             "a resized pane must re-declare its region"
         );
 
-        terms[term_id].selection = Some(TermSelection::new(1, 1));
-        let selected = version(&terms);
+        h.stoat.active_workspace_mut().terms[term_id].selection = Some(TermSelection::new(1, 1));
+        let selected = version(h.stoat.active_workspace(), true, 0, region);
         assert_ne!(base, selected, "a selection tints the cells it covers");
 
-        terms[term_id].term.feed(b"output");
-        assert_ne!(selected, version(&terms), "output repaints the screen");
+        h.stoat.active_workspace_mut().terms[term_id]
+            .term
+            .feed(b"output");
+        assert_ne!(
+            selected,
+            version(h.stoat.active_workspace(), true, 0, region),
+            "output repaints the screen"
+        );
+    }
+
+    /// Every input the run render reads has to reach the version, on the same
+    /// terms as the terminal sibling above.
+    #[test]
+    fn a_run_pane_versions_on_everything_its_render_reads() {
+        let mut h = Stoat::test();
+        let exec = h.stoat.executor.clone();
+        let run_id = {
+            let ws = h.stoat.active_workspace_mut();
+            let state = crate::run::RunState::new(PathBuf::from("/work"), ws, exec);
+            ws.runs.insert(state)
+        };
+
+        let view = View::Run(run_id);
+        let region = window_region();
+        let version = |ws: &Workspace| {
+            window_content_version(&view, region, true, 0, ws).expect("a run pane is versioned")
+        };
+
+        let base = version(h.stoat.active_workspace());
+        assert_eq!(
+            base,
+            version(h.stoat.active_workspace()),
+            "an idle run pane holds still"
+        );
+
+        h.stoat.active_workspace_mut().runs[run_id]
+            .blocks
+            .push(crate::run::OutputBlock::new(
+                "ls".into(),
+                PathBuf::from("/work"),
+                80,
+            ));
+        let submitted = version(h.stoat.active_workspace());
+        assert_ne!(base, submitted, "a submitted command adds a prompt line");
+
+        h.stoat.active_workspace_mut().runs[run_id].blocks[0].feed(b"a.txt\n");
+        let fed = version(h.stoat.active_workspace());
+        assert_ne!(submitted, fed, "output fills the block's grid");
+
+        h.stoat.active_workspace_mut().runs[run_id].blocks[0].exit_status = Some(1);
+        let exited = version(h.stoat.active_workspace());
+        assert_ne!(fed, exited, "the exit code flags the next prompt");
+
+        h.stoat.active_workspace_mut().runs[run_id].scroll_offset = 3;
+        let scrolled = version(h.stoat.active_workspace());
+        assert_ne!(exited, scrolled, "scrolling picks different output lines");
+
+        let input_editor = h.stoat.active_workspace().runs[run_id].input.editor_id;
+        h.stoat.active_workspace_mut().editors[input_editor].scroll_row = 1;
+        assert_ne!(
+            scrolled,
+            version(h.stoat.active_workspace()),
+            "the input line scrolls under a long command"
+        );
     }
 
     /// A view whose sources are untracked has to say so, since the caller reads
     /// `None` as "paint it and hash what came out" rather than "unchanged".
     #[test]
     fn an_untracked_view_kind_reports_no_input_version() {
-        let terms: SlotMap<TermId, TermSession> = SlotMap::with_key();
-        let region = PoolRegionCommand {
-            pool: 1,
-            top: 0,
-            left: 0,
-            width: 80,
-            height: 23,
-            window: 2,
-        };
+        let h = Stoat::test();
         assert_eq!(
-            window_content_version(&View::Label("scratch".into()), region, true, 0, &terms),
+            window_content_version(
+                &View::Label("scratch".into()),
+                window_region(),
+                true,
+                0,
+                h.stoat.active_workspace(),
+            ),
             None
         );
     }

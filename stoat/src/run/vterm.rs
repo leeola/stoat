@@ -59,6 +59,7 @@ pub struct VtermGrid {
     /// arrival order. Callers drain after [`Self::feed`] and adopt the last
     /// as the run pane's current directory.
     pub cwd_reports: Vec<PathBuf>,
+    generation: u64,
 }
 
 impl VtermGrid {
@@ -76,7 +77,20 @@ impl VtermGrid {
             clipboard_writes: Vec::new(),
             command_marks: Vec::new(),
             cwd_reports: Vec::new(),
+            generation: 0,
         }
+    }
+
+    /// Counter advanced by every [`Self::feed`], the only call that can change
+    /// what the grid holds.
+    ///
+    /// A caller that caches a rendering of this grid compares the counter rather
+    /// than re-rendering and diffing. It counts feeds rather than actual cell
+    /// changes, so output that lands on identical cells still advances it.
+    /// Erring that way is the safe direction. A redundant re-render costs a
+    /// frame's work, while a missed one shows stale output.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn line_count(&self) -> usize {
@@ -172,6 +186,7 @@ impl VtermGrid {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.generation += 1;
         let mut parser = std::mem::take(&mut self.parser);
         parser.advance(self, bytes);
         self.parser = parser;
@@ -508,7 +523,7 @@ fn first_param(params: &[u16], default: u16) -> u16 {
 /// coords before constructing the selection. `anchor` is the click
 /// position; `head` follows the drag. [`Self::bounds`] normalizes the
 /// pair for row-major iteration regardless of drag direction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GridSelection {
     pub anchor: (u16, u16),
     pub head: (u16, u16),
