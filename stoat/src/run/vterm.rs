@@ -21,6 +21,15 @@ impl Default for StyledCell {
     }
 }
 
+/// Rows of output a run block's grid keeps before the oldest scroll off the
+/// top, matching what a terminal emulator retains by default.
+pub(crate) const MAX_SCROLLBACK_ROWS: usize = 10_000;
+
+/// How far past [`MAX_SCROLLBACK_ROWS`] the grid runs before it is trimmed back
+/// to the cap, so the cost of dropping rows is paid once per this many lines
+/// rather than once per line.
+pub(crate) const SCROLLBACK_SLACK: usize = 512;
+
 /// Shell-integration command boundary decoded from OSC 133 in the input
 /// stream.
 ///
@@ -60,6 +69,10 @@ pub struct VtermGrid {
     /// as the run pane's current directory.
     pub cwd_reports: Vec<PathBuf>,
     generation: u64,
+    /// Rows dropped off the front during the running [`VtermGrid::feed`], which
+    /// reports it so a caller can move what it anchored to a row index. Reset
+    /// at the start of each feed.
+    trimmed_rows: usize,
 }
 
 impl VtermGrid {
@@ -78,6 +91,7 @@ impl VtermGrid {
             command_marks: Vec::new(),
             cwd_reports: Vec::new(),
             generation: 0,
+            trimmed_rows: 0,
         }
     }
 
@@ -185,11 +199,18 @@ impl VtermGrid {
         lines.join("\n")
     }
 
-    pub fn feed(&mut self, bytes: &[u8]) {
+    /// Advance the terminal by `bytes`, reporting how many rows scrolled off
+    /// the front to stay inside the scrollback cap.
+    ///
+    /// A caller holding a row index into this grid moves it down by the count,
+    /// or drops it when it addressed a row that is gone.
+    pub fn feed(&mut self, bytes: &[u8]) -> usize {
         self.generation += 1;
+        self.trimmed_rows = 0;
         let mut parser = std::mem::take(&mut self.parser);
         parser.advance(self, bytes);
         self.parser = parser;
+        self.trimmed_rows
     }
 
     fn ensure_row(&mut self, row: usize) {
@@ -197,6 +218,26 @@ impl VtermGrid {
             self.cells
                 .push(vec![StyledCell::default(); self.width as usize]);
         }
+        self.trim_scrollback();
+    }
+
+    /// Drop the oldest rows once the grid has run past its cap.
+    ///
+    /// Waits for [`SCROLLBACK_SLACK`] rows past [`MAX_SCROLLBACK_ROWS`] before
+    /// trimming back to the cap. Draining a row for each new one would move the
+    /// whole buffer for every line a command prints.
+    ///
+    /// The cursor moves down with the rows so it still addresses the same row of
+    /// output. Every caller re-reads it rather than holding what it passed to
+    /// [`Self::ensure_row`], so the adjustment reaches all of them.
+    fn trim_scrollback(&mut self) {
+        if self.cells.len() <= MAX_SCROLLBACK_ROWS + SCROLLBACK_SLACK {
+            return;
+        }
+        let excess = self.cells.len() - MAX_SCROLLBACK_ROWS;
+        self.cells.drain(..excess);
+        self.cursor_row = self.cursor_row.saturating_sub(excess);
+        self.trimmed_rows += excess;
     }
 
     fn put_char(&mut self, ch: char) {
@@ -530,6 +571,23 @@ pub struct GridSelection {
 }
 
 impl GridSelection {
+    /// The selection after `rows` have scrolled off the front of the grid, or
+    /// `None` when all of it went with them.
+    ///
+    /// An endpoint that fell off clamps to row 0 rather than dropping the whole
+    /// selection, so one that straddled the trim keeps covering what is left of
+    /// what the user marked.
+    pub fn shifted_up(self, rows: usize) -> Option<Self> {
+        let rows = u16::try_from(rows).unwrap_or(u16::MAX);
+        if self.anchor.1 < rows && self.head.1 < rows {
+            return None;
+        }
+        Some(Self {
+            anchor: (self.anchor.0, self.anchor.1.saturating_sub(rows)),
+            head: (self.head.0, self.head.1.saturating_sub(rows)),
+        })
+    }
+
     /// Returns `(low, high)` in row-major order: lower-row first, and
     /// within the same row, lower-column first. Independent of the
     /// drag direction the selection was constructed from.
@@ -595,8 +653,16 @@ impl OutputBlock {
         }
     }
 
+    /// Advance the block's terminal by `bytes`, moving any selection down with
+    /// the rows that scrolled off the front.
+    ///
+    /// A selection whose rows all fell off is dropped, since it no longer marks
+    /// anything the grid still holds.
     pub fn feed(&mut self, bytes: &[u8]) {
-        self.grid.feed(bytes);
+        let trimmed = self.grid.feed(bytes);
+        if trimmed > 0 {
+            self.selection = self.selection.and_then(|sel| sel.shifted_up(trimmed));
+        }
     }
 
     /// Rows this block occupies in the run pane, counting its prompt line, its

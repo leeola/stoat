@@ -19,6 +19,9 @@ new_key_type! {
     pub struct RunId;
 }
 
+/// Output rows one wheel notch moves the run pane's scrollback.
+const WHEEL_STEP_ROWS: usize = 3;
+
 pub struct RunState {
     pub(crate) input: InputView,
     pub blocks: Vec<OutputBlock>,
@@ -92,6 +95,22 @@ impl RunState {
     /// avoid leaking editor slots.
     pub fn dispose(&self, ws: &mut Workspace) {
         self.input.dispose(ws);
+    }
+
+    /// Move the output scroll by one wheel step, for a pane whose output area
+    /// is `page` rows tall.
+    ///
+    /// Clamped on the way down as well as up. Trimming a block's scrollback
+    /// shrinks the range under an offset already held, and without the clamp a
+    /// scroll down would spend its steps walking a stale offset back into range
+    /// rather than moving the view.
+    pub fn wheel_scroll(&mut self, down: bool, page: usize) {
+        let max = self.output_line_total().saturating_sub(page);
+        self.scroll_offset = if down {
+            self.scroll_offset.min(max).saturating_sub(WHEEL_STEP_ROWS)
+        } else {
+            (self.scroll_offset + WHEEL_STEP_ROWS).min(max)
+        };
     }
 
     /// Total run-pane output rows across every block, matching what the
@@ -209,6 +228,7 @@ fn abbreviate_component(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{buffer::BufferId, editor_state::EditorId};
     use ratatui::style::Color;
 
     #[test]
@@ -516,5 +536,165 @@ mod tests {
             head: (2, 2),
         };
         assert_eq!(grid.text_for_selection(&sel), "pha\nbeta\ngam");
+    }
+
+    /// Well past the cap, so a trim has certainly run.
+    fn flood() -> String {
+        "x\r\n".repeat(vterm::MAX_SCROLLBACK_ROWS * 2)
+    }
+
+    #[test]
+    fn a_flood_of_output_stops_growing_at_the_scrollback_cap() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(flood().as_bytes());
+        assert!(
+            grid.line_count() <= vterm::MAX_SCROLLBACK_ROWS + vterm::SCROLLBACK_SLACK,
+            "{} rows held past a {}-row cap",
+            grid.line_count(),
+            vterm::MAX_SCROLLBACK_ROWS
+        );
+    }
+
+    #[test]
+    fn the_cursor_still_writes_the_newest_row_after_a_trim() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(flood().as_bytes());
+        grid.feed(b"tail");
+
+        let last = grid.line_count() - 1;
+        let row: String = grid.row(last).iter().take(4).map(|c| c.ch).collect();
+        assert_eq!(row, "tail", "output after a trim lands on the last row");
+    }
+
+    #[test]
+    fn feed_reports_the_rows_it_dropped() {
+        let mut grid = VtermGrid::new(10);
+        let trimmed = grid.feed(flood().as_bytes());
+
+        assert!(trimmed > 0, "a flood past the cap drops rows");
+        assert_eq!(grid.feed(b"more"), 0, "a feed inside the cap drops none");
+    }
+
+    #[test]
+    fn command_marks_survive_a_trim() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(flood().as_bytes());
+        grid.feed(b"\x1b]133;D;7\x07");
+
+        assert_eq!(
+            grid.command_marks,
+            vec![CommandMark::Done { exit: Some(7) }],
+            "marks carry no row index, so trimming rows cannot lose them"
+        );
+    }
+
+    #[test]
+    fn a_selection_moves_down_with_the_rows_that_scrolled_off() {
+        let sel = GridSelection {
+            anchor: (2, 30),
+            head: (5, 40),
+        };
+        assert_eq!(
+            sel.shifted_up(10),
+            Some(GridSelection {
+                anchor: (2, 20),
+                head: (5, 30)
+            }),
+            "both endpoints move by what fell off, columns untouched"
+        );
+    }
+
+    #[test]
+    fn a_selection_survives_a_trim_only_while_some_of_it_remains() {
+        let sel = GridSelection {
+            anchor: (2, 3),
+            head: (5, 8),
+        };
+        assert_eq!(
+            [sel.shifted_up(9), sel.shifted_up(5)],
+            [
+                None,
+                Some(GridSelection {
+                    anchor: (2, 0),
+                    head: (5, 3)
+                })
+            ],
+            "gone when every row fell off, clamped to the top when only some did"
+        );
+    }
+
+    /// A run state holding `blocks` one-line blocks, without a workspace behind
+    /// it. Only the scroll arithmetic reads these.
+    fn scrollable(blocks: usize, scroll_offset: usize) -> RunState {
+        let mut run = RunState {
+            input: InputView {
+                editor_id: EditorId::default(),
+                buffer_id: BufferId::new(0),
+                target: SubmitTarget::Run,
+                max_height: 1,
+            },
+            blocks: Vec::new(),
+            scroll_offset,
+            cwd: PathBuf::from("/repo"),
+            shell_handle: None,
+            history: Vec::new(),
+            history_cursor: None,
+            title: None,
+        };
+        for n in 0..blocks {
+            let mut block = OutputBlock::new(format!("cmd{n}"), PathBuf::from("/repo"), 10);
+            block.feed(b"out");
+            run.blocks.push(block);
+        }
+        run
+    }
+
+    #[test]
+    fn a_wheel_walks_the_scrollback_and_stops_at_its_ends() {
+        let mut run = scrollable(20, 0);
+        let page = 5;
+
+        run.wheel_scroll(false, page);
+        run.wheel_scroll(false, page);
+        assert_eq!(run.scroll_offset, 6, "two notches walk back six rows");
+
+        for _ in 0..20 {
+            run.wheel_scroll(false, page);
+        }
+        assert_eq!(
+            run.scroll_offset,
+            run.output_line_total() - page,
+            "scrolling back stops with a page still shown"
+        );
+    }
+
+    #[test]
+    fn a_wheel_down_over_a_shrunken_scrollback_moves_the_view_at_once() {
+        let mut run = scrollable(4, 5_000);
+        let page = 5;
+        let max = run.output_line_total() - page;
+
+        run.wheel_scroll(true, page);
+
+        assert_eq!(
+            run.scroll_offset,
+            max.saturating_sub(3),
+            "an offset left over from a longer scrollback moves on the first notch"
+        );
+    }
+
+    #[test]
+    fn a_blocks_selection_follows_its_grid_through_a_trim() {
+        let mut block = OutputBlock::new("cmd".to_owned(), PathBuf::from("/repo"), 10);
+        block.selection = Some(GridSelection {
+            anchor: (0, 0),
+            head: (0, 1),
+        });
+        block.feed(flood().as_bytes());
+
+        assert_eq!(
+            block.selection, None,
+            "a selection on rows long since scrolled off is dropped"
+        );
     }
 }

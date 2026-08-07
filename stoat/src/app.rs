@@ -5121,13 +5121,7 @@ impl Stoat {
                 let Some(run_state) = ws.runs.get_mut(id) else {
                     return UpdateEffect::None;
                 };
-                let page = (area.height as usize).saturating_sub(1);
-                let max = run_state.output_line_total().saturating_sub(page);
-                run_state.scroll_offset = if down {
-                    run_state.scroll_offset.saturating_sub(3)
-                } else {
-                    (run_state.scroll_offset + 3).min(max)
-                };
+                run_state.wheel_scroll(down, (area.height as usize).saturating_sub(1));
                 UpdateEffect::Redraw
             },
             _ => UpdateEffect::None,
