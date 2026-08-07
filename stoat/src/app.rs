@@ -7078,10 +7078,12 @@ impl Stoat {
             return;
         };
         {
-            let mut guard = buffer.write().expect("poisoned");
-            for (_, offset) in inserts.iter().rev() {
-                guard.edit(*offset..*offset, text);
-            }
+            let edits: Vec<(Range<usize>, &str)> = inserts
+                .iter()
+                .rev()
+                .map(|(_, offset)| (*offset..*offset, text))
+                .collect();
+            buffer.write().expect("poisoned").edit_batch(&edits);
         }
 
         // Each cursor lands after its own inserted text. The k-th insertion in
@@ -7177,10 +7179,12 @@ impl Stoat {
             return;
         };
         {
-            let mut guard = buffer.write().expect("poisoned");
-            for (_, offset, text) in insertions.iter().rev() {
-                guard.edit(*offset..*offset, text);
-            }
+            let edits: Vec<(Range<usize>, &str)> = insertions
+                .iter()
+                .rev()
+                .map(|(_, offset, text)| (*offset..*offset, text.as_str()))
+                .collect();
+            buffer.write().expect("poisoned").edit_batch(&edits);
         }
 
         // Each cursor lands after its own text, shifted by everything inserted
@@ -7538,10 +7542,12 @@ impl Stoat {
         let merged = merge_overlapping_spans(ranges);
 
         {
-            let mut guard = buffer.write().expect("poisoned");
-            for (start, end) in merged.iter().rev() {
-                guard.edit(*start..*end, "");
-            }
+            let edits: Vec<(Range<usize>, &str)> = merged
+                .iter()
+                .rev()
+                .map(|(start, end)| (*start..*end, ""))
+                .collect();
+            buffer.write().expect("poisoned").edit_batch(&edits);
         }
 
         // Bytes deleted by everything before each range, computed once for the
