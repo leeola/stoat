@@ -805,6 +805,12 @@ impl TextBuffer {
     /// Close the open undo group, recording `selections_after` to restore on
     /// redo. A group that took no edits was never materialized, so a non-editing
     /// action leaves no undo step behind.
+    /// Whether an undo group is open, so a caller that seals one can tell
+    /// whether there was anything to seal.
+    pub(crate) fn group_open(&self) -> bool {
+        self.open_group
+    }
+
     pub(crate) fn seal_group(&mut self, selections_after: Vec<Selection<Anchor>>) {
         if !self.open_group {
             return;
@@ -888,6 +894,14 @@ impl TextBuffer {
     /// undoing a freshly opened file with no user edits returns `None` and
     /// leaves the file intact rather than emptying it.
     pub fn undo(&mut self) -> Option<Vec<Selection<Anchor>>> {
+        // An open group names the top of the history, and undoing moves that
+        // top. Leaving it open would hand the next edit to whichever group the
+        // pop exposed, so the group is closed against the history it was
+        // opened over. The selections are the caller's to supply on redo, and
+        // undo answers with the group's own `selections_before`, so an empty
+        // set here is not a value anything reads back.
+        self.seal_group(Vec::new());
+
         if self.edit_history.len() <= self.undo_floor {
             return None;
         }
@@ -903,6 +917,13 @@ impl TextBuffer {
     /// Returns the editor selections captured when the group sealed, or `None`
     /// when there is nothing to redo.
     pub fn redo(&mut self) -> Option<Vec<Selection<Anchor>>> {
+        // Symmetry with [`Self::undo`], and unreachable rather than load-bearing:
+        // every edit path clears the redo history first, so a group that has
+        // taken an edit and a group waiting to be redone cannot both exist. The
+        // seal costs nothing and keeps the two entry points from having to be
+        // reasoned about separately.
+        self.seal_group(Vec::new());
+
         let group = self.redo_history.pop()?;
         self.apply_undo_toggles(group.edits.iter().copied(), BufferOp::Redo);
         let selections = group.selections_after.clone();
@@ -2489,6 +2510,38 @@ mod tests {
         assert_eq!(b.snapshot.visible_text.to_string(), "ab");
         assert!(b.redo().is_some());
         assert_eq!(b.snapshot.visible_text.to_string(), "abc");
+    }
+
+    /// An edit made after an undo is its own step, not an addition to whatever
+    /// group the undo exposed.
+    ///
+    /// An open group names the top of the history. Undoing moves that top, so a
+    /// group left open afterwards points at a group the caller never opened, and
+    /// the next edit joins it. On a fresh buffer the exposed group is the seed
+    /// the undo floor protects, which would make the edit un-undoable entirely.
+    #[test]
+    fn an_edit_after_an_undo_undoes_on_its_own() {
+        let mut b = buf("seed");
+        b.begin_group(Vec::new());
+        b.edit(4..4, "X");
+        assert_eq!(b.snapshot.visible_text.to_string(), "seedX");
+
+        assert!(b.undo().is_some(), "the open group is undoable");
+        assert_eq!(b.snapshot.visible_text.to_string(), "seed");
+
+        b.edit(4..4, "Y");
+        assert_eq!(b.snapshot.visible_text.to_string(), "seedY");
+        assert!(b.undo().is_some(), "the post-undo edit is its own step");
+        assert_eq!(
+            b.snapshot.visible_text.to_string(),
+            "seed",
+            "and undoing it leaves the seed content",
+        );
+        assert!(
+            b.undo().is_none(),
+            "nothing below the floor is undoable, so the seed survives",
+        );
+        assert_eq!(b.snapshot.visible_text.to_string(), "seed");
     }
 
     #[test]

@@ -2287,8 +2287,16 @@ pub(super) fn commit_undo_checkpoint(stoat: &mut Stoat) -> UpdateEffect {
 
     // Seal the open insert group and reopen a fresh one, so the edits before and
     // after the checkpoint undo as two separate steps like Helix's Ctrl-s.
+    //
+    // Reopening only when there was a group to seal is what keeps this a pure
+    // checkpoint outside insert mode. This action runs unwrapped, so a group it
+    // opened in normal mode is one nothing would ever close, and it would go on
+    // collecting later edits into a step they do not belong to.
+    let was_open = guard.group_open();
     guard.seal_group(selections.clone());
-    guard.begin_group(selections);
+    if was_open {
+        guard.begin_group(selections);
+    }
     guard.checkpoint(None);
     UpdateEffect::None
 }

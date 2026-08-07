@@ -23475,6 +23475,66 @@ mod tests {
         );
     }
 
+    /// A checkpoint taken in normal mode does not swallow later edits.
+    ///
+    /// Ctrl-s exists to split an insert session in two, so outside one there is
+    /// nothing to split and it is a plain checkpoint. It runs without the
+    /// action-group wrapper, so a group it opened in normal mode is one nothing
+    /// would close, and every later edit would keep joining it -- including
+    /// across an undo, which is what makes those edits reachable only as part of
+    /// a step they do not belong to.
+    #[test]
+    fn a_normal_mode_checkpoint_leaves_later_edits_undoable() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abcdef\n");
+
+        h.type_keys("ctrl-s");
+        h.type_keys("d");
+        assert_eq!(buffer_text(&h, &path), "bcdef\n", "d deletes one character");
+        h.type_keys("u");
+        assert_eq!(buffer_text(&h, &path), "abcdef\n", "and undoes");
+
+        // A second edit, since x is SelectLineBelow here and would not make one.
+        h.type_keys("d");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "bcdef\n",
+            "the post-undo edit lands"
+        );
+
+        h.type_keys("u");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "abcdef\n",
+            "the edit made after the undo undoes on its own",
+        );
+    }
+
+    /// Edits after a normal-mode checkpoint stay separate undo steps.
+    ///
+    /// The action-group wrapper leaves an already-open group alone so a
+    /// mid-session action joins the insert step it sits in. A group Ctrl-s
+    /// opened in normal mode has no session to belong to and nothing to seal it,
+    /// so every later action would keep joining it and the whole run would
+    /// collapse into one step.
+    #[test]
+    fn edits_after_a_normal_mode_checkpoint_undo_separately() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abcdef\n");
+
+        h.type_keys("ctrl-s");
+        h.type_keys("d");
+        h.type_keys("d");
+        assert_eq!(buffer_text(&h, &path), "cdef\n", "two characters deleted");
+
+        h.type_keys("u");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "bcdef\n",
+            "one undo reverts only the second delete",
+        );
+    }
+
     #[test]
     fn insert_types_at_every_cursor() {
         let mut h = Stoat::test();
