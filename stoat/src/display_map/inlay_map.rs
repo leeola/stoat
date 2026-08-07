@@ -6,6 +6,7 @@ use std::{
     borrow::Cow,
     cmp::Ordering,
     collections::{HashMap, HashSet},
+    mem,
     ops::{Add, AddAssign, Deref, Range, Sub},
     sync::Arc,
 };
@@ -158,6 +159,18 @@ pub struct InlayMap {
     last_self_version: usize,
     inlays_sorted: bool,
     cached_offsets: Vec<usize>,
+    /// The inlays as the layers below read them, kept so a sync that only moved
+    /// them can write the new positions in place.
+    ///
+    /// Everything else on an [`Inlay`] is copied out of [`Self::inlays`], so
+    /// this is only reusable while that set is unchanged.
+    /// [`Self::resolved_for_version`] is what says so.
+    resolved_inlays: Vec<Inlay>,
+    resolved_for_version: usize,
+    /// Reused by [`Self::resolve_incremental`], which would otherwise allocate
+    /// both on every sync.
+    offsets_scratch: Vec<usize>,
+    needs_resolve_scratch: Vec<bool>,
     /// Buffer offsets where [`Self::splice`] added or dropped an inlay since
     /// the last sync.
     ///
@@ -208,6 +221,10 @@ impl InlayMap {
             last_self_version: 0,
             inlays_sorted: true,
             cached_offsets: Vec::new(),
+            resolved_inlays: Vec::new(),
+            resolved_for_version: 0,
+            offsets_scratch: Vec::new(),
+            needs_resolve_scratch: Vec::new(),
             spliced_offsets: Vec::new(),
         };
         (map, snapshot)
@@ -232,7 +249,7 @@ impl InlayMap {
         // they only describe this one while the text has not moved. Only the
         // version says that. An empty edit patch does not, since a caller can
         // hand over a newer buffer without one.
-        let spliced = std::mem::take(&mut self.spliced_offsets);
+        let spliced = mem::take(&mut self.spliced_offsets);
         let text_still_matches = buffer_snapshot.version() == self.last_buffer_version;
         let splice_edits = (!spliced.is_empty() && text_still_matches)
             .then(|| splice_patch(spliced, buffer_snapshot.rope().len()));
@@ -244,11 +261,16 @@ impl InlayMap {
             && self.inlays_sorted
             && self.cached_offsets.len() == self.inlays.len();
 
-        let (resolved, inlay_offsets) = if can_incremental {
-            self.resolve_incremental(&buffer_snapshot, edits_in)
+        // Both paths leave their answer on the map, so what follows reads it
+        // rather than carrying it, which is what lets the resolved inlays be
+        // updated in place instead of returned fresh.
+        if can_incremental {
+            self.resolve_incremental(&buffer_snapshot, edits_in);
         } else {
-            self.resolve_all(&buffer_snapshot)
-        };
+            self.resolve_all(&buffer_snapshot);
+        }
+        let resolved = &self.resolved_inlays;
+        let inlay_offsets = &self.cached_offsets;
 
         let (transforms, edits) = if can_incremental {
             let old_snapshot = self
@@ -259,8 +281,8 @@ impl InlayMap {
                 old_snapshot,
                 &buffer_snapshot,
                 edits_in,
-                &resolved,
-                &inlay_offsets,
+                resolved,
+                inlay_offsets,
             )
         } else {
             let old_line_count = self
@@ -268,7 +290,7 @@ impl InlayMap {
                 .as_ref()
                 .map(|s| s.line_count())
                 .unwrap_or(0);
-            let transforms = build_transforms(buffer_snapshot.rope(), &resolved);
+            let transforms = build_transforms(buffer_snapshot.rope(), resolved);
             let new_line_count = if transforms.is_empty() {
                 buffer_snapshot.line_count()
             } else {
@@ -281,7 +303,7 @@ impl InlayMap {
             (transforms, edits)
         };
 
-        self.cached_offsets = inlay_offsets;
+        // cached_offsets was written by the resolve above.
         self.snapshot_version += 1;
         let snapshot = Arc::new(InlaySnapshot {
             buffer: buffer_snapshot,
@@ -296,7 +318,7 @@ impl InlayMap {
         (snapshot, edits)
     }
 
-    fn resolve_all(&mut self, buffer_snapshot: &MultiBufferSnapshot) -> (Vec<Inlay>, Vec<usize>) {
+    fn resolve_all(&mut self, buffer_snapshot: &MultiBufferSnapshot) {
         let anchors: Vec<Anchor> = self.inlays.iter().map(|ai| ai.position).collect();
         let text_len = buffer_snapshot.rope().len();
         let offsets: Vec<usize> = buffer_snapshot
@@ -341,7 +363,15 @@ impl InlayMap {
             self.inlays_sorted = true;
         }
 
-        resolved.into_iter().map(|(offset, i)| (i, offset)).unzip()
+        // A full resolve may have just reordered the set, so the resolved inlays
+        // are rebuilt outright rather than written over.
+        self.cached_offsets.clear();
+        self.resolved_inlays.clear();
+        for (offset, inlay) in resolved {
+            self.cached_offsets.push(offset);
+            self.resolved_inlays.push(inlay);
+        }
+        self.resolved_for_version = self.version;
     }
 
     /// Only re-resolve anchors for inlays within edit ranges; adjust the rest
@@ -350,10 +380,15 @@ impl InlayMap {
         &mut self,
         buffer_snapshot: &MultiBufferSnapshot,
         buffer_edits: &Patch<usize>,
-    ) -> (Vec<Inlay>, Vec<usize>) {
-        let mut offsets = self.cached_offsets.clone();
+    ) {
         let text_len = buffer_snapshot.rope().len();
-        let mut needs_resolve: Vec<bool> = vec![false; offsets.len()];
+
+        let mut offsets = mem::take(&mut self.offsets_scratch);
+        offsets.clear();
+        offsets.extend_from_slice(&self.cached_offsets);
+        let mut needs_resolve = mem::take(&mut self.needs_resolve_scratch);
+        needs_resolve.clear();
+        needs_resolve.resize(offsets.len(), false);
 
         shift_offsets(&mut offsets, &mut needs_resolve, buffer_edits);
 
@@ -368,27 +403,48 @@ impl InlayMap {
             let anchors: Vec<Anchor> = affected.iter().map(|(_, a)| *a).collect();
             let resolved_offsets = buffer_snapshot.resolve_anchors_batch(&anchors);
             for ((idx, _), offset) in affected.iter().zip(resolved_offsets) {
-                offsets[*idx] = offset.min(text_len);
+                offsets[*idx] = offset;
             }
         }
+        for offset in &mut offsets {
+            *offset = (*offset).min(text_len);
+        }
 
-        let inlay_offsets: Vec<usize> = offsets.iter().map(|&o| o.min(text_len)).collect();
-        let points = buffer_snapshot
-            .rope()
-            .offsets_to_points_batch(&inlay_offsets);
-        let resolved: Vec<Inlay> = self
-            .inlays
-            .iter()
-            .zip(points)
-            .map(|(ai, position)| Inlay {
+        let points = buffer_snapshot.rope().offsets_to_points_batch(&offsets);
+        self.install_resolved(&points);
+
+        self.cached_offsets.clear();
+        self.cached_offsets.extend_from_slice(&offsets);
+        self.offsets_scratch = offsets;
+        self.needs_resolve_scratch = needs_resolve;
+    }
+
+    /// Put `points` onto the resolved inlays, rebuilding them when the inlay set
+    /// itself has moved since they were last built.
+    ///
+    /// A position is all an incremental resolve changes, so the common case is a
+    /// write per inlay rather than a fresh vec and an `Arc` clone apiece. Only
+    /// [`Self::splice`] changes the rest, and it bumps the version this checks.
+    fn install_resolved(&mut self, points: &[Point]) {
+        let reusable = self.resolved_for_version == self.version
+            && self.resolved_inlays.len() == self.inlays.len();
+
+        if reusable {
+            for (inlay, &position) in self.resolved_inlays.iter_mut().zip(points) {
+                inlay.position = position;
+            }
+            return;
+        }
+
+        self.resolved_inlays.clear();
+        self.resolved_inlays
+            .extend(self.inlays.iter().zip(points).map(|(ai, &position)| Inlay {
                 id: ai.id,
                 position,
                 text: Arc::clone(&ai.text),
                 kind: ai.kind,
-            })
-            .collect();
-
-        (resolved, inlay_offsets)
+            }));
+        self.resolved_for_version = self.version;
     }
 
     pub fn version_unchanged(&self) -> bool {
@@ -1335,6 +1391,52 @@ mod tests {
             "the set follows its offsets, and the removed hint is gone",
         );
         assert!(map.inlays_sorted);
+    }
+
+    #[test]
+    fn swapping_one_hint_for_another_replaces_its_text() {
+        // The resolved inlays are kept and written over, which only holds while
+        // the set behind them is the same one. A splice that drops a hint and
+        // adds another leaves the count alone, so length cannot tell, and
+        // reusing here would keep the old id and the old text under a new
+        // position.
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "line0\nline1\n",
+        )));
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi.snapshot();
+        let (mut map, _) = InlayMap::new(buffer_snapshot.clone());
+
+        let hint = |offset: usize, text: &str| {
+            (
+                buffer_snapshot.anchor_at(offset, Bias::Right),
+                text.to_string(),
+                super::InlayKind::Hint,
+            )
+        };
+
+        let ids = map.splice(&buffer_snapshot, Vec::new(), vec![hint(3, "old")]);
+        map.sync(buffer_snapshot.clone(), &Patch::empty());
+        assert_eq!(
+            map.resolved_inlays
+                .iter()
+                .map(|i| i.text.to_string())
+                .collect::<Vec<_>>(),
+            vec!["old"],
+        );
+
+        map.splice(&buffer_snapshot, ids, vec![hint(3, "new")]);
+        map.sync(buffer_snapshot, &Patch::empty());
+
+        assert_eq!(
+            map.resolved_inlays
+                .iter()
+                .map(|i| i.text.to_string())
+                .collect::<Vec<_>>(),
+            vec!["new"],
+            "one hint out and one in leaves the count alone, but not the text",
+        );
     }
 
     /// Hints arrive in batches while typing, and a patch spanning the file
