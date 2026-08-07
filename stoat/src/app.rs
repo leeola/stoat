@@ -7515,14 +7515,23 @@ impl Stoat {
         let buf_snapshot = display_snapshot.buffer_snapshot();
         let rope = buf_snapshot.rope();
 
+        let ends = {
+            let anchors: Vec<Anchor> = editor
+                .selections
+                .all_anchors()
+                .iter()
+                .flat_map(|sel| [sel.tail(), sel.head()])
+                .collect();
+            buf_snapshot.resolve_anchors_batch(&anchors)
+        };
+
         let per_sel: Vec<(usize, usize, usize)> = editor
             .selections
             .all_anchors()
             .iter()
-            .map(|sel| {
-                let tail = buf_snapshot.resolve_anchor(&sel.tail());
-                let head = buf_snapshot.resolve_anchor(&sel.head());
-                let cursor = stoat_text::cursor_offset(rope, tail, head);
+            .zip(ends.chunks_exact(2))
+            .map(|(sel, ends)| {
+                let cursor = stoat_text::cursor_offset(rope, ends[0], ends[1]);
                 let (start, end) = range_for(rope, cursor);
                 (sel.id, start, end)
             })
@@ -23206,6 +23215,9 @@ mod tests {
         h.type_keys("backspace");
         assert_eq!(buffer_text(&h, &path), "a\nb\n");
         assert_eq!(h.head_offsets(), vec![0, 2]);
+        // The sorted heads above are the same set however the cursors are
+        // permuted, so only a named cursor shows each landed at its own delete.
+        assert_eq!(h.primary_head_offset(), 2, "cursor added below");
     }
 
     #[test]
