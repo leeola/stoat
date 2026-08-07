@@ -8,6 +8,20 @@ use stoat_text::{
     Locator, Point, Rope, Selection, SumTree, UndoMap, UndoOperation,
 };
 
+/// Op-log length past which [`TextBuffer::history`] persists a compacted seed
+/// rather than the whole log.
+///
+/// The log is unbounded in the live buffer, so without a ceiling a long session
+/// writes every keystroke it ever took into `state.ron` and replays them all on
+/// reopen. Compaction buys that bound by giving up undo past the threshold,
+/// which is the trade helix and zed already make by persisting no log at all.
+pub(crate) const OPS_COMPACT_THRESHOLD: usize = 4096;
+
+/// Timestamp a compacted history's seed edit takes when replayed. Replay starts
+/// from a fresh [`TextBuffer`] and assigns timestamps sequentially from one, so
+/// the seed is always the first.
+const SEED_TIMESTAMP: u64 = 1;
+
 pub struct TextBuffer {
     pub snapshot: TextBufferSnapshot,
     pub dirty: bool,
@@ -57,6 +71,10 @@ pub struct TextBuffer {
     /// [`TextBuffer`] reconstructs an identical fragment tree, anchors, and
     /// undo map, which is how workspace save/restore preserves selections and
     /// undo stack across sessions.
+    ///
+    /// Grows without bound in a live session. [`Self::history`] is where the
+    /// ceiling is applied, so what persists past [`OPS_COMPACT_THRESHOLD`] is a
+    /// seed rather than this log.
     ops: Vec<BufferOp>,
     next_checkpoint_id: u32,
     /// Named markers on the op log placed by `commit_undo_checkpoint`. Read by
@@ -96,6 +114,12 @@ struct UndoGroup {
 
 /// Serializable buffer state for persistence. Holds the op log plus the
 /// last-clean edit frontier, replayed via [`TextBuffer::from_history`].
+///
+/// The log is either the buffer's own or, past [`OPS_COMPACT_THRESHOLD`], a
+/// single seed edit standing in for it. A seed reproduces the text but not the
+/// fragment tree, so anchors taken against the live buffer do not survive it.
+/// [`Self::compacted`] is how a holder of such anchors learns it has to
+/// re-express them.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct BufferHistory {
     pub ops: Vec<BufferOp>,
@@ -112,6 +136,12 @@ pub struct BufferHistory {
     /// file is next reopened via [`TextBuffer::with_text`].
     #[serde(default)]
     pub undo_floor: usize,
+    /// Whether [`Self::ops`] is a compacted seed rather than the buffer's own
+    /// log. This describes how the value was produced rather than what it
+    /// holds, so it is not part of the on-disk format. A history read back from
+    /// disk is just a log to replay, and reads `false`.
+    #[serde(skip)]
+    pub compacted: bool,
 }
 
 /// Stable identifier for a [`Checkpoint`] within a single [`TextBuffer`].
@@ -767,13 +797,45 @@ impl TextBuffer {
     }
 
     /// Snapshot the op log and clean-frontier marker for persistence. Replay
-    /// the result with [`Self::from_history`] to reconstruct an identical
-    /// buffer.
+    /// the result with [`Self::from_history`] to reconstruct the buffer.
+    ///
+    /// A log longer than [`OPS_COMPACT_THRESHOLD`] is replaced by a single seed
+    /// edit carrying the current text, which bounds what a long session writes
+    /// to disk and replays on reopen. The reconstruction is then faithful in
+    /// text and dirty state but not in history. The seed is the oldest state
+    /// reachable, so undo stops there and redo has nothing to offer.
+    ///
+    /// A seed also rebuilds the fragment tree from scratch, which invalidates
+    /// anchors taken against this buffer. Callers holding any must re-express
+    /// them, and [`BufferHistory::compacted`] reports when that is needed.
     pub fn history(&self) -> BufferHistory {
+        if self.ops.len() > OPS_COMPACT_THRESHOLD {
+            return self.compacted_history();
+        }
         BufferHistory {
             ops: self.ops.clone(),
             saved_marker: self.saved_marker,
             undo_floor: self.undo_floor,
+            compacted: false,
+        }
+    }
+
+    /// The current text as a one-edit log, protected from undo by the same
+    /// floor [`Self::with_text`] gives a freshly loaded file.
+    ///
+    /// Replay reaches the seed's frontier at [`SEED_TIMESTAMP`], so naming that
+    /// as the clean marker restores a clean buffer clean. A buffer with unsaved
+    /// changes gets no marker at all, leaving the restored frontier diverged and
+    /// the buffer modified, so the changes still prompt on quit.
+    fn compacted_history(&self) -> BufferHistory {
+        BufferHistory {
+            ops: vec![BufferOp::Edit {
+                old: 0..0,
+                text: self.snapshot.visible_text.to_string(),
+            }],
+            saved_marker: (!self.dirty).then_some(SEED_TIMESTAMP),
+            undo_floor: 1,
+            compacted: true,
         }
     }
 
@@ -1296,7 +1358,7 @@ pub type SharedBuffer = Arc<std::sync::RwLock<TextBuffer>>;
 
 #[cfg(test)]
 mod tests {
-    use super::TextBuffer;
+    use super::{TextBuffer, OPS_COMPACT_THRESHOLD};
     use std::{cmp::Ordering, mem, ops::Range};
     use stoat_text::{Anchor, Bias, BufferId, IndentStyle, Point, Selection, SelectionGoal};
 
@@ -2238,6 +2300,58 @@ mod tests {
             "the restored seed stays protected"
         );
         assert_eq!(restored.snapshot.visible_text.to_string(), "hello");
+    }
+
+    /// The threshold is a boundary, so a log that merely reaches it must still
+    /// persist whole. Asserting only the compacted side would pass against a
+    /// buffer that compacts every history it hands out.
+    #[test]
+    fn an_op_log_past_the_threshold_persists_as_one_seed_edit() {
+        let mut b = buf("");
+        while b.ops.len() < OPS_COMPACT_THRESHOLD {
+            let end = b.snapshot.visible_text.len();
+            b.edit(end..end, "x");
+        }
+
+        let full = b.history();
+        assert!(!full.compacted, "a log at the threshold persists whole");
+        assert_eq!(full.ops.len(), OPS_COMPACT_THRESHOLD);
+
+        let end = b.snapshot.visible_text.len();
+        b.edit(end..end, "y");
+
+        let compacted = b.history();
+        assert!(compacted.compacted, "one op past the threshold compacts");
+        assert_eq!(compacted.ops.len(), 1, "the log persists as a single op");
+
+        let mut restored = TextBuffer::from_history(BufferId::new(0), &compacted);
+        assert_eq!(
+            restored.snapshot.visible_text.to_string(),
+            b.snapshot.visible_text.to_string(),
+            "the seed restores the text the log built"
+        );
+        assert!(
+            restored.undo().is_none(),
+            "the seed is the oldest reachable state"
+        );
+    }
+
+    /// A clean buffer must not reopen with unsaved changes it does not have,
+    /// and a dirty one must still prompt.
+    #[test]
+    fn a_compacted_history_carries_the_dirty_state() {
+        let mut b = buf("seed\n");
+        while b.ops.len() <= OPS_COMPACT_THRESHOLD {
+            let end = b.snapshot.visible_text.len();
+            b.edit(end..end, "x");
+        }
+
+        let dirty = TextBuffer::from_history(BufferId::new(0), &b.history());
+        assert!(dirty.dirty, "unsaved edits restore modified");
+
+        b.mark_clean();
+        let clean = TextBuffer::from_history(BufferId::new(0), &b.history());
+        assert!(!clean.dirty, "a saved buffer restores unmodified");
     }
 
     #[test]

@@ -752,10 +752,15 @@ impl BufferRegistry {
         }
     }
 
-    /// Capture the registry state for persistence. Each entry carries its
-    /// full [`BufferHistory`] so replay on restore reconstructs identical
-    /// fragment trees and anchors. Scratch buffers (no path) are included so
-    /// their edit history also round-trips.
+    /// Capture the registry state for persistence. Each entry carries a
+    /// [`BufferHistory`] whose replay reconstructs the buffer's text and, for a
+    /// log short enough to persist whole, its fragment tree and anchors too.
+    /// Scratch buffers (no path) are included so their edit history also
+    /// round-trips.
+    ///
+    /// An entry whose history came back compacted has no anchors to restore.
+    /// See [`TextBuffer::history`] for what compaction gives up and who is
+    /// responsible for the anchors it invalidates.
     pub(crate) fn snapshot(&self) -> BufferRegistrySnapshot {
         let mut entries: Vec<BufferEntrySnap> = self
             .buffers
@@ -822,8 +827,9 @@ impl BufferRegistry {
 
 /// Serializable view of [`BufferRegistry`]. Each entry carries its
 /// [`BufferHistory`] (the replayable op log) so restoration reconstructs the
-/// fragment tree, anchors, undo stack, and dirty state exactly. Syntax and
-/// diff caches are regenerable and deliberately not persisted.
+/// fragment tree, anchors, undo stack, and dirty state exactly, except where the
+/// log was compacted and only text and dirty state survive. Syntax and diff
+/// caches are regenerable and deliberately not persisted.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct BufferRegistrySnapshot {
     pub entries: Vec<BufferEntrySnap>,

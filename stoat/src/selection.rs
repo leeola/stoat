@@ -34,6 +34,24 @@ impl SelectionsCollection {
             .expect("SelectionsCollection invariant: at least one selection")
     }
 
+    /// Rewrite every selection endpoint through `remap`.
+    ///
+    /// Moves a selection set onto a buffer state whose fragment tree was
+    /// rebuilt rather than edited. The anchors name insertions that no longer
+    /// exist there, so carrying them across would resolve to unrelated
+    /// positions. Ordinary edits need nothing of the sort, since anchors are
+    /// built to ride those.
+    ///
+    /// The caller decides what an endpoint maps to, so nothing here checks that
+    /// the result stays ordered or deduplicated. Feeding it a
+    /// position-preserving map keeps both.
+    pub(crate) fn reanchor(&mut self, mut remap: impl FnMut(&Anchor) -> Anchor) {
+        for selection in &mut self.disjoint {
+            selection.start = remap(&selection.start);
+            selection.end = remap(&selection.end);
+        }
+    }
+
     pub(crate) fn insert_cursor(
         &mut self,
         head: Anchor,

@@ -17,6 +17,7 @@
 //! by design.
 
 use crate::{
+    buffer::TextBuffer,
     buffer_registry::{BufferRegistry, BufferRegistrySnapshot},
     dump::snapshot::ActiveRebaseSnap,
     editor_state::{EditorId, EditorState, EditorStateSnapshot},
@@ -221,11 +222,14 @@ impl Workspace {
     /// Build a serializable snapshot of everything the workspace currently
     /// knows how to round-trip.
     pub(crate) fn to_state(&self) -> WorkspaceStateV1 {
-        let editors: Vec<(EditorId, EditorStateSnapshot)> = self
+        let mut editors: Vec<(EditorId, EditorStateSnapshot)> = self
             .editors
             .iter()
             .map(|(id, state)| (id, state.snapshot()))
             .collect();
+
+        let buffers = self.buffers.snapshot();
+        reanchor_compacted_selections(&self.buffers, &buffers, &mut editors);
 
         let rebase_active = self
             .rebase_active
@@ -242,7 +246,7 @@ impl Workspace {
                 FocusTarget::Dock(id) => FocusTargetSnap::Dock(id),
             },
             editors,
-            buffers: self.buffers.snapshot(),
+            buffers,
             rebase: self.rebase.clone(),
             rebase_active,
             name: self.name.clone(),
@@ -420,6 +424,47 @@ impl Workspace {
         }
         // Which tab to toggle back to is session state, not layout.
         self.last_tab = None;
+    }
+}
+
+/// Re-express selections into buffers whose history is persisting compacted.
+///
+/// A selection endpoint is an anchor naming an insertion in the fragment tree
+/// the op log builds, and a compacted history replays a seed instead of that
+/// log. The restored tree holds one insertion the saved anchors never mention,
+/// so carrying them across would leave the cursor at a position unrelated to
+/// where the user left it. Resolving each against the live buffer and re-taking
+/// it against the seed keeps the position, which is the whole point of
+/// persisting selections.
+///
+/// The seed is built rather than synthesized so the anchors come from the same
+/// code any other anchor does, including at the buffer ends where the sentinels
+/// take over. It costs one buffer build per compacted buffer some editor is
+/// showing, on the save path only.
+fn reanchor_compacted_selections(
+    registry: &BufferRegistry,
+    snap: &BufferRegistrySnapshot,
+    editors: &mut [(EditorId, EditorStateSnapshot)],
+) {
+    for entry in snap.entries.iter().filter(|e| e.history.compacted) {
+        if !editors.iter().any(|(_, ed)| ed.buffer_id == entry.id) {
+            continue;
+        }
+        let Some(live) = registry.get(entry.id) else {
+            continue;
+        };
+
+        let live = live.read().expect("buffer poisoned");
+        let seed = TextBuffer::from_history(entry.id, &entry.history);
+
+        for (_, editor) in editors
+            .iter_mut()
+            .filter(|(_, ed)| ed.buffer_id == entry.id)
+        {
+            editor
+                .selections
+                .reanchor(|anchor| seed.anchor_at(live.resolve_anchor(anchor), anchor.bias));
+        }
     }
 }
 
@@ -1095,6 +1140,117 @@ mod tests {
             },
             other => panic!("expected single Edit op, got {other:?}"),
         }
+    }
+
+    /// The op log is what carries selections across a restart, so bounding it
+    /// and keeping the cursor where the user left it are one property, not two.
+    /// The discriminating cursor is the one inside the appended run. Its anchor
+    /// names a one-byte insertion the seed does not contain, so a compaction
+    /// that did not re-anchor would land it at the top of the file.
+    #[test]
+    fn a_compacted_buffer_persists_bounded_and_keeps_its_selections() {
+        use crate::{
+            buffer::OPS_COMPACT_THRESHOLD, multi_buffer::MultiBuffer,
+            selection::SelectionsCollection,
+        };
+        use stoat_text::{Bias, SelectionGoal};
+
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let file = ws_dir.join("long.txt");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let (id, buffer) = ws.buffers.open(&file, "abcdefghij\n");
+        {
+            let mut guard = buffer.write().expect("buffer poisoned");
+            for _ in 0..OPS_COMPACT_THRESHOLD {
+                let end = guard.rope().len();
+                guard.edit(end..end, "x");
+            }
+        }
+
+        let editor_id = ws.editors.insert(EditorState::new(
+            id,
+            buffer.clone(),
+            exec.clone(),
+            crate::test_notify(),
+        ));
+        let multi = MultiBuffer::singleton(id, buffer.clone());
+        let multi_snap = multi.snapshot();
+        let mut selections = SelectionsCollection::new();
+        for offset in [3, OPS_COMPACT_THRESHOLD] {
+            selections.insert_cursor(
+                multi_snap.anchor_at(offset, Bias::Right),
+                SelectionGoal::None,
+                &multi_snap,
+            );
+        }
+        ws.editors[editor_id].selections = selections;
+
+        let spans_before: Vec<(usize, usize)> = ws.editors[editor_id]
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|s| {
+                (
+                    multi_snap.resolve_anchor(&s.start),
+                    multi_snap.resolve_anchor(&s.end),
+                )
+            })
+            .collect();
+
+        let root = ws.panes.focus();
+        ws.panes.pane_mut(root).view = View::Editor(editor_id);
+
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+
+        let restored_editor_id = fresh
+            .panes
+            .split_pane_ids()
+            .into_iter()
+            .find_map(|pid| match fresh.panes.pane(pid).view {
+                View::Editor(eid) => Some(eid),
+                _ => None,
+            })
+            .expect("pane with editor view");
+        let restored_bid = fresh.editors[restored_editor_id].buffer_id;
+        let restored_buffer = fresh.buffers.get(restored_bid).expect("buffer missing");
+
+        assert_eq!(
+            buffer_text(&fresh, restored_bid),
+            multi_snap.text(),
+            "the seed restores the text the log built"
+        );
+        assert_eq!(
+            restored_buffer
+                .read()
+                .expect("buffer poisoned")
+                .history()
+                .ops
+                .len(),
+            1,
+            "the persisted log stays bounded across the restart"
+        );
+
+        let restored_multi = MultiBuffer::singleton(restored_bid, restored_buffer);
+        let restored_snap = restored_multi.snapshot();
+        let spans_after: Vec<(usize, usize)> = fresh.editors[restored_editor_id]
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|s| {
+                (
+                    restored_snap.resolve_anchor(&s.start),
+                    restored_snap.resolve_anchor(&s.end),
+                )
+            })
+            .collect();
+        assert_eq!(spans_after, spans_before);
     }
 
     #[test]
