@@ -31,6 +31,15 @@ fn char_is_word(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
 
+/// Category for the long-word (`W`/`B`) motions, where everything that is not
+/// whitespace is one class.
+///
+/// This is vim's WORD, so `W` runs straight through a symbol like `foo→bar` and
+/// treats it as a single word. Helix instead breaks at symbols outside the word
+/// and punctuation classes, so the two disagree on such text. The vim reading is
+/// deliberate. The point of `W` is to ignore the fine-grained classes `w` uses,
+/// and a third class that only some symbols fall into makes the motion harder to
+/// predict than either rule alone.
 fn long_word_category(ch: char) -> CharCategory {
     if char_is_line_ending(ch) {
         CharCategory::Eol
@@ -533,6 +542,17 @@ mod tests {
             ("  ab cd", 0, 1, (0, 2)),
             // A leading newline run skips the anchor past it. Head runs the word.
             ("\n\nab cd", 0, 1, (2, 5)),
+            // A longer whitespace run behaves like the two-space one. Its target
+            // is only reached after the head has moved, so the anchor stays.
+            ("   ab cd", 0, 1, (0, 3)),
+            // Newlines and spaces alternating. The anchor follows the first
+            // newline run, and the head stops at the next newline rather than
+            // running through the space between them.
+            (" \n \nab", 0, 1, (2, 3)),
+            // Starting inside a punctuation run. The boundary onto the word is
+            // reached while the head is still at its start, so the anchor moves
+            // onto the word rather than keeping the rest of the run.
+            ("ab..cd ef", 3, 4, (4, 7)),
         ];
         for (text, anchor, head, expected) in cases {
             assert_eq!(
@@ -554,6 +574,30 @@ mod tests {
         assert_eq!(second, (4, 8));
     }
 
+    /// A counted motion that runs out of buffer settles rather than drifting.
+    ///
+    /// The handler threads each result back in as the next origin and stops when
+    /// a step returns its input unchanged, so a count larger than the words
+    /// remaining depends on the scan reaching a fixed point rather than, say,
+    /// walking the anchor forward each time.
+    #[test]
+    fn next_word_start_range_settles_when_the_count_overshoots() {
+        let r = rope("ab cd");
+        let first = next_word_start_range(&r, 0, 1);
+        assert_eq!(first, (0, 3));
+        let second = next_word_start_range(&r, first.0, first.1);
+        assert_eq!(
+            second,
+            (3, 5),
+            "the last word, with the anchor on its start"
+        );
+        assert_eq!(
+            next_word_start_range(&r, second.0, second.1),
+            second,
+            "a further step is a no-op, which is what ends a counted motion",
+        );
+    }
+
     #[test]
     fn prev_word_start_range_excludes_a_cursor_newline() {
         // `b` with the block cursor on the newline retreats the anchor onto the
@@ -573,6 +617,15 @@ mod tests {
             ("ab cd", 4, 3, (3, 0)),
             // A trailing newline run retreats the anchor past it.
             ("ab\n\ncd", 5, 4, (2, 0)),
+            // From inside whitespace the anchor stays at the block edge, since
+            // the boundary out of the run is not a backward target.
+            ("ab   cd", 4, 3, (4, 0)),
+            // From a word start with punctuation behind it, the anchor retreats
+            // onto the seed and the head reaches the run's start.
+            ("ab..cd", 5, 4, (4, 2)),
+            // Newlines and spaces alternating, mirroring the forward case. The
+            // head stops at the space run rather than crossing to the newlines.
+            ("ab\n\n  cd", 7, 6, (6, 4)),
         ];
         for (text, anchor_in, seed, expected) in cases {
             assert_eq!(
@@ -899,6 +952,21 @@ mod tests {
         let r = rope("foo.bar baz");
         assert_eq!(fwd_head(&r, 0, next_long_word_start_range), 8);
         assert_eq!(fwd_head(&r, 0, next_word_start_range), 3);
+    }
+
+    #[test]
+    fn next_long_word_start_crosses_a_symbol() {
+        // "foo→bar" is one long word, because everything non-whitespace is one
+        // class. Helix breaks at the arrow, so this pins the divergence rather
+        // than leaving it to be read as an oversight. The arrow is three bytes,
+        // putting the next word start at 10.
+        let r = rope("foo\u{2192}bar baz");
+        assert_eq!(fwd_head(&r, 0, next_long_word_start_range), 10);
+        assert_eq!(
+            fwd_head(&r, 0, next_word_start_range),
+            3,
+            "the short-word motion does stop at the arrow",
+        );
     }
 
     #[test]
