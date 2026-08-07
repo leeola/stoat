@@ -1953,38 +1953,19 @@ impl ApplicationHandler<PtyEvent> for App {
                     render::cell_size(state.font_size, state.scale_factor as f32)[1] as f64;
                 let lines = wheel_lines(delta, &mut state.wheel_pixels, cell_height);
                 if lines != 0 {
-                    // Snapshot the wheel-routing modes under one lock so the
-                    // branch reads a consistent terminal state.
-                    let (mouse_report, alternate_scroll) = {
-                        let terminal = state.terminal.lock();
-                        (
-                            terminal.mouse_mode() && terminal.sgr_mouse(),
-                            terminal.is_alt_screen() && terminal.alternate_scroll(),
-                        )
-                    };
-                    if mouse_report {
-                        // A mouse-reporting app wants the wheel as a button press
-                        // at the pointer, not scrolling; its redraw follows its
-                        // response.
-                        let (col, row) = state.pointer_cell;
-                        let _ = state.pty.write(&sgr_wheel_bytes(lines, col, row));
-                    } else if !state.modifiers.shift_key() && alternate_scroll {
-                        // An alt-screen pager with alternate-scroll on expects
-                        // arrow keys; Shift forces local scrollback instead.
-                        let _ = state.pty.write(&alternate_scroll_bytes(lines));
-                    } else {
-                        // Advance the whole-cell scrollback target by the rows the
-                        // move actually shifted the viewport, an idiomatic multiple
-                        // of the wheel's line delta (clamped at the history edge).
-                        // The render loop eases the visual position toward it,
-                        // scrolling the history window through every row, so the
-                        // motion is smooth and lands cell-aligned.
-                        let moved = {
-                            let mut terminal = state.terminal.lock();
-                            let before = terminal.display_offset() as i32;
-                            terminal.scroll_display(lines * SCROLLBACK_SCROLL_MULTIPLIER);
-                            terminal.display_offset() as i32 - before
-                        };
+                    let moved = Input {
+                        terminal: &state.terminal,
+                        pty: &mut state.pty,
+                    }
+                    .wheel(
+                        lines,
+                        state.pointer_cell,
+                        state.modifiers.shift_key(),
+                    );
+
+                    // A notch the scrollback took is one this window has to
+                    // repaint for. One the shell took redraws on its answer.
+                    if let Some(moved) = moved {
                         state.scrollback_target += moved as f32;
                         state.window.request_redraw();
                     }
@@ -2485,6 +2466,47 @@ impl<W: PtyWrite> Input<'_, W> {
             terminal.scroll_to_bottom();
         }
         let _ = self.pty.write(bytes);
+    }
+
+    /// Route a wheel notch of `lines` at pointer cell `at`, reporting the rows
+    /// the viewport moved through history.
+    ///
+    /// `None` when the notch went to the shell rather than the scrollback,
+    /// which is what a mouse-reporting app gets and what an alt-screen pager
+    /// with alternate scroll on gets unless `shift` overrides it. Those redraw
+    /// on the shell's answer, so there is nothing for the caller to do.
+    ///
+    /// `Some(0)` still means the scrollback handled it, the viewport having
+    /// been at the edge of the history it could reach.
+    fn wheel(&mut self, lines: i32, at: (usize, usize), shift: bool) -> Option<i32> {
+        // Snapshot the routing modes under one lock so the branch below reads a
+        // consistent terminal state.
+        let (mouse_report, alternate_scroll) = {
+            let terminal = self.terminal.lock();
+            (
+                terminal.mouse_mode() && terminal.sgr_mouse(),
+                terminal.is_alt_screen() && terminal.alternate_scroll(),
+            )
+        };
+
+        if mouse_report {
+            let _ = self.pty.write(&sgr_wheel_bytes(lines, at.0, at.1));
+            return None;
+        }
+        if !shift && alternate_scroll {
+            // An alt-screen pager with alternate-scroll on expects arrow keys.
+            let _ = self.pty.write(&alternate_scroll_bytes(lines));
+            return None;
+        }
+
+        // The whole-cell scrollback target advances by the rows the move
+        // actually shifted the viewport, which is an idiomatic multiple of the
+        // wheel's delta until the history edge clamps it. The render loop eases
+        // the visual position toward it, so the motion lands cell-aligned.
+        let mut terminal = self.terminal.lock();
+        let before = terminal.display_offset() as i32;
+        terminal.scroll_display(lines * SCROLLBACK_SCROLL_MULTIPLIER);
+        Some(terminal.display_offset() as i32 - before)
     }
 
     /// Send `text` to the shell as a paste, bracketed when the shell asked for
@@ -4490,6 +4512,83 @@ mod tests {
         assert_eq!(
             bracketed, b"\x1b[200~hi\x1b[201~",
             "a shell that set bracketed paste gets the markers"
+        );
+    }
+
+    #[test]
+    fn a_wheel_notch_scrolls_the_history_when_nothing_claims_it() {
+        let terminal = scrolled_back_with_a_selection();
+        let before = terminal.lock().display_offset() as i32;
+        let mut pty = SpyPty::default();
+
+        let moved = Input {
+            terminal: &terminal,
+            pty: &mut pty,
+        }
+        .wheel(1, (0, 0), false);
+
+        assert_eq!(
+            terminal.lock().display_offset() as i32 - before,
+            moved.expect("the scrollback took the notch"),
+            "the rows reported are the rows the viewport moved"
+        );
+        assert!(pty.written.is_empty(), "nothing went to the shell");
+    }
+
+    #[test]
+    fn a_mouse_reporting_app_gets_the_wheel_as_a_button() {
+        let terminal = scrolled_back_with_a_selection();
+        // SGR mouse reporting on, which is what routes the wheel to the shell.
+        terminal.lock().advance(b"\x1b[?1000h\x1b[?1006h");
+        let before = terminal.lock().display_offset();
+        let mut pty = SpyPty::default();
+
+        let moved = Input {
+            terminal: &terminal,
+            pty: &mut pty,
+        }
+        .wheel(1, (2, 3), false);
+
+        assert_eq!(moved, None, "the shell took the notch, so nothing to ease");
+        assert_eq!(
+            pty.written,
+            sgr_wheel_bytes(1, 2, 3),
+            "the notch goes as a button press at the pointer"
+        );
+        assert_eq!(
+            terminal.lock().display_offset(),
+            before,
+            "the viewport stays where it was"
+        );
+    }
+
+    #[test]
+    fn shift_takes_the_wheel_back_from_an_alternate_scroll_pager() {
+        let routed = |shift: bool| {
+            let terminal = scrolled_back_with_a_selection();
+            // Alt screen with alternate scroll on, which a pager sets.
+            terminal.lock().advance(b"\x1b[?1049h\x1b[?1007h");
+            let mut pty = SpyPty::default();
+            let moved = Input {
+                terminal: &terminal,
+                pty: &mut pty,
+            }
+            .wheel(1, (0, 0), shift);
+            (moved.is_some(), pty.written)
+        };
+
+        let (plain_local, plain_sent) = routed(false);
+        let (shifted_local, shifted_sent) = routed(true);
+
+        assert_eq!(
+            (plain_local, plain_sent),
+            (false, alternate_scroll_bytes(1)),
+            "the pager gets arrow keys"
+        );
+        assert_eq!(
+            (shifted_local, shifted_sent),
+            (true, Vec::new()),
+            "shift keeps the notch for the scrollback"
         );
     }
 
