@@ -393,14 +393,14 @@ fn matching<'a>(
     let items: Vec<&CompletionItem> = items.collect();
     let haystacks: Vec<&str> = items.iter().map(|item| match_against(item)).collect();
 
-    let Some(ranked) = fuzzy::match_and_rank(
+    let Some(scored) = fuzzy::score_only(
         prefix,
         haystacks.iter().enumerate().map(|(idx, hay)| (idx, *hay)),
     ) else {
         return items.into_iter().cloned().collect();
     };
 
-    let mut keep: Vec<usize> = ranked.into_iter().map(|m| m.item).collect();
+    let mut keep: Vec<usize> = scored.into_iter().map(|(idx, _)| idx).collect();
     keep.sort_unstable();
     keep.into_iter().map(|idx| items[idx].clone()).collect()
 }
@@ -821,12 +821,12 @@ fn rank_by_prefix(items: &mut Vec<CompletionItem>, prefix: &str) {
     let mut scores = vec![0u32; items.len()];
     {
         let haystacks: Vec<&str> = items.iter().map(match_against).collect();
-        let ranked = fuzzy::match_and_rank(
+        let scored = fuzzy::score_only(
             prefix,
             haystacks.iter().enumerate().map(|(idx, hay)| (idx, *hay)),
         );
-        for m in ranked.into_iter().flatten() {
-            scores[m.item] = m.score;
+        for (idx, score) in scored.into_iter().flatten() {
+            scores[idx] = score;
         }
     }
 

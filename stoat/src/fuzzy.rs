@@ -129,6 +129,44 @@ pub fn match_and_rank<'a, T>(
     Some(out)
 }
 
+/// Scores every `(item, haystack)` pair against `query`, keeping the matches.
+///
+/// The raw nucleo score, without the bonuses [`match_and_rank`] layers on. Both
+/// of those read the matched indices, and deriving those is the score-matrix
+/// traceback plus a vector per atom, so a caller that ranks by score and paints
+/// its own highlights spends the bulk of a match on an answer it discards.
+///
+/// Dropping them is not free. The in-order-token bonus only separates
+/// multi-atom queries and the basename bonus only separates haystacks holding a
+/// `/`, so a caller whose queries are single atoms over haystacks without paths
+/// gets the same order either way. Anything else may reshuffle.
+///
+/// Returns `None` on a query with no usable atoms and the matches unsorted
+/// otherwise, both as [`match_and_rank`] does.
+///
+/// See also:
+/// - [`rank_indexing_best`] to keep the bonuses for the rows that lead a list while skipping the
+///   traceback below them.
+pub(crate) fn score_only<'a, T>(
+    query: &str,
+    items: impl IntoIterator<Item = (T, &'a str)>,
+) -> Option<Vec<(T, u32)>> {
+    let pattern = parse_query(query)?;
+    Some(with_matcher(|matcher| {
+        let mut hay_buf: Vec<char> = Vec::new();
+        let mut out: Vec<(T, u32)> = Vec::new();
+
+        for (item, haystack) in items {
+            let hay = Utf32Str::new(haystack, &mut hay_buf);
+            if let Some(score) = pattern.score(hay, matcher) {
+                out.push((item, score));
+            }
+        }
+
+        out
+    }))
+}
+
 /// Matches ordered best-first, indexed only as deep as `indexed`.
 ///
 /// See [`rank_indexing_best`], which produces this.
@@ -383,6 +421,58 @@ mod tests {
     fn match_and_rank_with_no_query_returns_none() {
         let items = vec![(0usize, "foo.rs")];
         assert!(match_and_rank("", items).is_none());
+    }
+
+    /// Skipping the traceback drops the two bonuses with it, and what a caller
+    /// gives up has to stop there. A single-atom query over haystacks holding
+    /// no path keeps both the same candidates and the same order.
+    #[test]
+    fn score_only_ranks_a_pathless_single_atom_query_as_the_bonuses_would() {
+        let labels = [
+            "apply_theme",
+            "a_pretty_pear",
+            "zebra_handler",
+            "app",
+            "unrelated",
+        ];
+        let pairs = || labels.iter().copied().enumerate();
+
+        let order = |mut scored: Vec<(usize, u32)>| {
+            scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| labels[a.0].cmp(labels[b.0])));
+            scored
+                .into_iter()
+                .map(|(idx, _)| labels[idx])
+                .collect::<Vec<_>>()
+        };
+
+        let bonused = match_and_rank("app", pairs()).expect("a real query");
+        let raw = score_only("app", pairs()).expect("a real query");
+
+        assert_eq!(
+            order(bonused.iter().map(|m| (m.item, m.score)).collect()),
+            order(raw.clone()),
+            "the substitution has to leave completion's ordering alone"
+        );
+        assert_eq!(
+            raw.iter().map(|&(idx, _)| labels[idx]).collect::<Vec<_>>(),
+            bonused.iter().map(|m| labels[m.item]).collect::<Vec<_>>(),
+            "and reject exactly what the bonused pass rejects"
+        );
+    }
+
+    /// The bonuses are gone, not reimplemented. A haystack whose every matched
+    /// character sits in the basename earns the flat 50 from the bonused pass
+    /// and nothing from this one.
+    #[test]
+    fn score_only_withholds_the_bonuses_the_indices_pay_for() {
+        let items = [(0usize, "src/apply.rs")];
+
+        let bonused = match_and_rank("app", items).expect("a real query");
+        let raw = score_only("app", items).expect("a real query");
+
+        assert_eq!(bonused.len(), 1);
+        assert_eq!(raw.len(), 1);
+        assert_eq!(bonused[0].score, raw[0].1.saturating_mul(5) / 4 + 50);
     }
 
     /// The index buffers are reused across candidates, so a candidate that
