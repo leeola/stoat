@@ -22,7 +22,9 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-use stoat_language::{extract_references, extract_symbols, parse_rope, Language, LanguageRegistry};
+use stoat_language::{
+    extract_references, extract_symbols, parse_rope, Language, LanguageRegistry, Tree,
+};
 use stoat_scheduler::{Executor, Task};
 use stoat_text::Rope;
 use tokio::sync::{mpsc::UnboundedSender, Notify};
@@ -197,6 +199,11 @@ pub(crate) struct ReindexTarget {
     pub(crate) language: Arc<Language>,
     pub(crate) path: PathBuf,
     pub(crate) text: Rope,
+    /// The tree the parse pipeline already built for exactly `text`, when it has
+    /// one. Extraction reuses it rather than re-parsing the file, which is the
+    /// dominant cost of a reindex. `None` means the caller could not vouch that a
+    /// stored tree describes this text.
+    pub(crate) tree: Option<Tree>,
 }
 
 /// Spawn a job to re-extract one edited buffer and deliver its
@@ -218,10 +225,11 @@ pub(crate) fn reindex_buffer(
             language,
             path,
             text,
+            tree,
         } = target;
-        // Materialize the rope off the main thread, right before extraction.
-        let text = text.to_string();
-        if let Some((rel_path, shard)) = extract_shard(&language, &git_root, &path, &text) {
+        if let Some((rel_path, shard)) =
+            extract_shard(&language, &git_root, &path, &text, tree.as_ref())
+        {
             let file = file_id(&rel_path);
             let _ = tx.send(IndexUpdate::Reindex {
                 workspace,
@@ -349,7 +357,7 @@ fn index_file(
     let mut bytes = Vec::new();
     fs.read(path, &mut bytes).ok()?;
     let text = String::from_utf8(bytes).ok()?;
-    extract_shard(&language, git_root, path, &text)
+    extract_shard(&language, git_root, path, &Rope::from(text.as_str()), None)
 }
 
 /// Parse `text` as `language` and build the file's shard, or `None` when
@@ -361,30 +369,40 @@ pub(crate) fn extract_shard(
     language: &Language,
     git_root: &Path,
     path: &Path,
-    text: &str,
+    rope: &Rope,
+    tree: Option<&Tree>,
 ) -> Option<(String, FileShard)> {
     let rel_path = relpath(git_root, path)?;
 
-    let rope = Rope::from(text);
-    let tree = parse_rope(language, &rope, None)?;
+    let parsed;
+    let tree = match tree {
+        Some(tree) => tree,
+        None => {
+            parsed = parse_rope(language, rope, None)?;
+            &parsed
+        },
+    };
     let root = tree.root_node();
 
     let defs = language
         .outline_query
         .as_ref()
-        .map(|query| extract_symbols(query, root, &rope))
+        .map(|query| extract_symbols(query, root, rope))
         .unwrap_or_default();
     let refs = language
         .tags_query
         .as_ref()
-        .map(|query| extract_references(query, root, &rope))
+        .map(|query| extract_references(query, root, rope))
         .unwrap_or_default();
 
+    // The shard hashes the whole file and each symbol's body by byte range, so
+    // this one materialization is what those need and is not avoidable here.
+    let text = rope.to_string();
     let shard = build_shard(
         file_id(&rel_path),
         &rel_path,
-        fingerprint_bytes(text),
-        text,
+        fingerprint_bytes(&text),
+        &text,
         defs,
         refs,
     );
@@ -401,6 +419,7 @@ mod tests {
     };
     use std::{collections::HashMap, path::Path};
     use stoat_language::LanguageRegistry;
+    use stoat_text::Rope;
 
     #[test]
     fn index_file_extracts_a_rust_shard() {
@@ -431,6 +450,63 @@ mod tests {
             .filter(|e| e.kind == codegraph::EdgeKind::Calls)
             .count();
         assert_eq!(calls, 1);
+    }
+
+    /// Handing extraction the tree the parse pipeline already built produces the
+    /// same shard as parsing from scratch.
+    ///
+    /// The reindex path takes this shortcut on every quiet window, so a shard
+    /// that differed would put the code graph's symbols and call edges somewhere
+    /// the from-scratch path never would, and only for buffers that had been open
+    /// long enough to be parsed.
+    #[test]
+    fn a_supplied_tree_extracts_the_same_shard_as_parsing() {
+        let source = "fn helper() {}\n\nfn main() {\n    helper();\n}\n";
+        let rope = Rope::from(source);
+        let language = LanguageRegistry::standard()
+            .for_path(Path::new("/repo/src/a.rs"))
+            .unwrap();
+
+        let fresh = super::extract_shard(
+            &language,
+            Path::new("/repo"),
+            Path::new("/repo/src/a.rs"),
+            &rope,
+            None,
+        )
+        .unwrap();
+
+        let tree = stoat_language::parse_rope(&language, &rope, None).unwrap();
+        let carried = super::extract_shard(
+            &language,
+            Path::new("/repo"),
+            Path::new("/repo/src/a.rs"),
+            &rope,
+            Some(&tree),
+        )
+        .unwrap();
+
+        let shape = |(rel, shard): &(String, codegraph::FileShard)| {
+            (
+                rel.clone(),
+                shard.content_hash,
+                shard
+                    .symbols
+                    .iter()
+                    .map(|s| (s.name.clone(), s.kind, s.def_range.clone(), s.body_hash))
+                    .collect::<Vec<_>>(),
+                shard
+                    .edges
+                    .iter()
+                    .map(|e| (e.kind, e.from, format!("{:?}", e.to)))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(shape(&carried), shape(&fresh));
+        assert!(
+            !carried.1.symbols.is_empty(),
+            "the fixture must extract symbols, or the comparison proves nothing",
+        );
     }
 
     #[test]

@@ -3321,9 +3321,13 @@ impl Stoat {
             return;
         };
         let git_root = ws.git_root.clone();
-        let Some((rel_path, shard)) =
-            crate::code_index::build::extract_shard(&language, &git_root, path, text)
-        else {
+        let Some((rel_path, shard)) = crate::code_index::build::extract_shard(
+            &language,
+            &git_root,
+            path,
+            &Rope::from(text),
+            None,
+        ) else {
             return;
         };
         let Ok(dir) = crate::code_index::store::index_dir_for(&git_root, self.fs_host.as_ref())

@@ -46,7 +46,7 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 use stoat_language::{
-    extract_highlights, parse, structural_diff, HighlightSpan, Language, LanguageRegistry,
+    extract_highlights, parse, structural_diff, HighlightSpan, Language, LanguageRegistry, Tree,
 };
 use stoat_scheduler::{Executor, Task};
 use stoat_text::{Point, Rope};
@@ -1191,17 +1191,33 @@ impl Workspace {
 
         for buffer_id in fired {
             self.index_debounce.remove(&buffer_id);
-            let text = self.buffers.get(buffer_id).map(|shared| {
-                shared
-                    .read()
-                    .expect("buffer poisoned")
-                    .snapshot
-                    .visible_text
-                    .clone()
+            let snapshot = self.buffers.get(buffer_id).map(|shared| {
+                let guard = shared.read().expect("buffer poisoned");
+                (guard.snapshot.visible_text.clone(), guard.snapshot.version)
             });
-            if let Some(text) = text {
-                self.enqueue_reindex(executor, index_update_tx, redraw_notify, buffer_id, text);
-            }
+            let Some((text, version)) = snapshot else {
+                continue;
+            };
+
+            // The debounce fires after the parse for this version landed, so the
+            // stored tree normally describes exactly this text and extraction can
+            // skip re-parsing the file. An edit inside the window leaves the
+            // versions apart, and a tree built from other text would put every
+            // symbol range somewhere else, so that case parses as before.
+            let tree = self
+                .buffers
+                .syntax(buffer_id)
+                .filter(|syntax| syntax.version == version)
+                .map(|syntax| syntax.tree.clone());
+
+            self.enqueue_reindex(
+                executor,
+                index_update_tx,
+                redraw_notify,
+                buffer_id,
+                text,
+                tree,
+            );
         }
     }
 
@@ -1217,6 +1233,7 @@ impl Workspace {
         redraw_notify: &Arc<Notify>,
         buffer_id: BufferId,
         text: Rope,
+        tree: Option<Tree>,
     ) {
         let Some(path) = self.buffers.path_for(buffer_id).map(|p| p.to_path_buf()) else {
             return;
@@ -1230,6 +1247,7 @@ impl Workspace {
             language,
             path,
             text,
+            tree,
         };
         let task = reindex_buffer(
             executor,
