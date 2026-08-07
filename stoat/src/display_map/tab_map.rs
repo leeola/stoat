@@ -87,9 +87,13 @@ impl TabMap {
                     }
                 }
 
+                // The extra row goes on both sides. Taking the old end from the
+                // new range's length instead would restate the old range in new
+                // coordinates, which reads as "no rows were added" to every
+                // layer below and leaves them unable to grow.
+                let extension = new_end - edit.new.end;
                 let new_edit = stoat_text::patch::Edit {
-                    old: edit.old.start
-                        ..edit.old.end.max(new_end - edit.new.start + edit.old.start),
+                    old: edit.old.start..edit.old.end + extension,
                     new: edit.new.start..new_end,
                 };
 
@@ -891,6 +895,61 @@ mod tests {
         assert!(
             covered.iter().any(|&(start, end)| start <= 1 && 1 < end),
             "row 1 carries the edit, so its expansion must be rebuilt: {covered:?}",
+        );
+    }
+
+    /// An emitted edit states its old range in old coordinates.
+    ///
+    /// Every layer below reads the row delta off the difference between the two
+    /// ranges. Restating the old range in new coordinates makes an insertion read
+    /// as a same-size replacement, and the layers below then never grow.
+    #[test]
+    fn an_inserted_row_keeps_its_delta_in_the_emitted_edit() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "one\ntwo\nthree\n");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let (mut inlay_map, inlay_snapshot) = InlayMap::new(multi_buffer.snapshot());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot);
+        let mut tab_map = TabMap::new(NonZeroU32::new(4).unwrap());
+
+        let before = multi_buffer.snapshot();
+        tab_map.sync(
+            fold_map
+                .sync(
+                    inlay_map.sync(before.clone(), &Patch::empty()).0,
+                    &Patch::empty(),
+                )
+                .0,
+            Patch::empty(),
+        );
+
+        shared.write().expect("poisoned").edit(0..0, "a\nb\nc\n");
+
+        let after = multi_buffer.snapshot();
+        let buffer_edits = after.edits_since(before.version());
+        let (inlay_snapshot, inlay_edits) = inlay_map.sync(after, &buffer_edits);
+        let (fold_snapshot, fold_edits) = fold_map.sync(inlay_snapshot, &inlay_edits);
+        let fold_delta: i64 = fold_edits
+            .edits()
+            .iter()
+            .map(|e| (e.new.end - e.new.start) as i64 - (e.old.end - e.old.start) as i64)
+            .sum();
+        let (_, tab_edits) = tab_map.sync(fold_snapshot, fold_edits);
+
+        let tab_delta: i64 = tab_edits
+            .edits()
+            .iter()
+            .map(|e| (e.new.end - e.new.start) as i64 - (e.old.end - e.old.start) as i64)
+            .sum();
+        assert_eq!(
+            (fold_delta, tab_delta),
+            (3, 3),
+            "three inserted rows survive into the tab edit: {:?}",
+            tab_edits
+                .edits()
+                .iter()
+                .map(|e| (e.old.clone(), e.new.clone()))
+                .collect::<Vec<_>>(),
         );
     }
 
