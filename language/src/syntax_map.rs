@@ -820,6 +820,20 @@ fn merge_ranges(ranges: &mut Vec<Range<usize>>) {
 /// info string). Restoring it would resurrect highlighting for text that
 /// no longer holds that language.
 ///
+/// What each dropped layer contributes to `layer_changes` differs by why it was
+/// dropped. A layer a fresh one supersedes reports only where the two extents
+/// disagree, since [`record_layer_change`] has already diffed the trees over the
+/// extent they share, and that diff is blind only to text the layer no longer
+/// covers. A layer with no successor is gone outright and reports its whole
+/// span, which nothing else names.
+///
+/// The distinction is what keeps a keystroke cheap. A combined injection spans
+/// its first host node to its last, so reporting that whole span would re-query
+/// most of a markdown file, or everything between the outermost doc comments of
+/// a Rust one, for a one-character edit. In steady-state typing the two extents
+/// agree, because [`SyntaxMap::interpolate`] has already carried the prior
+/// bounds onto the fresh ones, so a superseded layer reports nothing at all.
+///
 /// `prior` bounds must already be in `rope` coordinates, which
 /// [`SyntaxMap::interpolate`] is responsible for.
 fn carry_unvisited_injections(
@@ -841,21 +855,38 @@ fn carry_unvisited_injections(
             continue;
         }
 
-        if filter.iter().any(|r| overlaps(span.clone(), r)) {
-            layer_changes.push(span);
-            continue;
-        }
-
         // A combined injection merges several host ranges into one layer
         // spanning all of them, so a fresh layer can cover a prior one at a
         // different offset. Matching on overlap rather than equality keeps
         // that from producing two layers over the same text.
-        let superseded = layers.iter().any(|l| {
-            l.depth == layer.depth
-                && l.language.name == layer.language.name
-                && overlaps(l.start_offset as usize..l.end_offset as usize, &span)
-        });
-        if superseded {
+        let superseding = layers
+            .iter()
+            .filter(|l| {
+                l.depth == layer.depth
+                    && l.language.name == layer.language.name
+                    && overlaps(l.start_offset as usize..l.end_offset as usize, &span)
+            })
+            .fold(None::<Range<usize>>, |acc, l| {
+                let extent = l.start_offset as usize..l.end_offset as usize;
+                Some(match acc {
+                    Some(a) => a.start.min(extent.start)..a.end.max(extent.end),
+                    None => extent,
+                })
+            });
+
+        if let Some(fresh) = superseding {
+            for gap in [
+                span.start.min(fresh.start)..span.start.max(fresh.start),
+                span.end.min(fresh.end)..span.end.max(fresh.end),
+            ] {
+                if !gap.is_empty() {
+                    layer_changes.push(gap);
+                }
+            }
+            continue;
+        }
+
+        if filter.iter().any(|r| overlaps(span.clone(), r)) {
             layer_changes.push(span);
             continue;
         }
@@ -1828,6 +1859,72 @@ mod tests {
         );
 
         budgeted
+    }
+
+    /// A keystroke inside a combined injection reports what the edit touched,
+    /// not the span the layer happens to reach across.
+    ///
+    /// A combined layer runs from its first host node to its last, so in a file
+    /// with doc comments top and bottom that is nearly everything. Reporting it
+    /// whole makes every keystroke re-query the file, re-mint every token
+    /// anchor, and re-sort the full lists. The extent the fresh layer and the
+    /// carried one share is already covered by the tree diff, so only their
+    /// disagreement needs reporting, and in steady-state typing there is none.
+    #[test]
+    fn a_keystroke_in_a_combined_layer_reports_only_the_edit() {
+        use stoat_text::patch::Edit as PatchEdit;
+        let lang = rust_lang();
+        let source = "/// one **bold**\nfn a() {}\n/// two **bold**\nfn b() {}\n\
+                      /// three **bold**\nfn c() {}\n";
+        let old_rope = Rope::from(source);
+
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
+
+        let layer_span = map
+            .snapshot()
+            .iter_layers()
+            .find(|l| l.depth == 1 && l.language.name == "markdown")
+            .map(|l| l.start_offset as usize..l.end_offset as usize)
+            .expect("a depth-1 markdown layer");
+        assert!(
+            layer_span.end - layer_span.start > source.len() / 2,
+            "the fixture must have a layer spanning most of the file, got {layer_span:?}",
+        );
+
+        let at = source.find("**bold**").expect("fixture has bold") + "**".len();
+        let inserted = "very ";
+        let mut text = String::from(&source[..at]);
+        text.push_str(inserted);
+        text.push_str(&source[at..]);
+        let new_rope = Rope::from(text.as_str());
+        let edit = at..(at + inserted.len());
+
+        map.interpolate(
+            &[PatchEdit {
+                old: at..at,
+                new: edit.clone(),
+            }],
+            &old_rope,
+            &new_rope,
+        );
+
+        #[allow(clippy::single_range_in_vec_init)]
+        let changed = vec![edit.clone()];
+        let layer_changes = map
+            .reparse_within_changed_ranges(&new_rope, lang, 2, Some(&changed), None, None)
+            .expect("the reparse must complete");
+
+        // A quarter of the layer rather than merely less than it, so a report
+        // that grew back part of the way still fails. The steady-state answer is
+        // the edit itself, which is a fifteenth of this fixture's layer.
+        let reported: usize = layer_changes.iter().map(|r| r.end - r.start).sum();
+        let layer_len = layer_span.end - layer_span.start;
+        assert!(
+            reported * 4 < layer_len,
+            "a one-word edit must report a small fraction of the combined span; \
+             got {layer_changes:?} totalling {reported} against a layer of {layer_span:?}",
+        );
     }
 
     #[test]
