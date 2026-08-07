@@ -223,9 +223,13 @@ impl TextBuffer {
         let mut buf = Self::new(buffer_id);
         if !text.is_empty() {
             buf.edit(0..0, text);
-            buf.mark_clean();
-            buf.undo_floor = buf.edit_history.len();
         }
+        // Empty content is a baseline too. Skipping this leaves `saved_text`
+        // unset, and the content comparison that clears a round-trip edit
+        // answers false whenever there is nothing to compare against, so the
+        // buffer would read modified while holding exactly the saved bytes.
+        buf.mark_clean();
+        buf.undo_floor = buf.edit_history.len();
         buf.detect_indent_style();
         buf
     }
@@ -2818,6 +2822,27 @@ mod tests {
             !super::chunk_streams_match(one_push.chunks(), stoat_text::Rope::new().chunks()),
             "and a spent stream does not match a full one",
         );
+    }
+
+    /// A buffer opened from an empty file reads clean once its content is back
+    /// to the empty bytes on disk.
+    ///
+    /// The round trip leaves the frontier moved, so only the content check can
+    /// clear it, and that check answers false whenever no baseline was ever
+    /// recorded. A non-empty file records one and heals. An empty one has to as
+    /// well, or it reports modified while holding exactly what was saved.
+    #[test]
+    fn round_trip_edit_on_an_empty_file_reads_clean() {
+        let mut b = buf("");
+        b.edit(0..0, "a");
+        assert!(
+            b.dirty,
+            "inserting a character diverges from the empty file"
+        );
+
+        b.edit(0..1, "");
+        assert_eq!(b.snapshot.visible_text.to_string(), "");
+        assert!(!b.dirty, "the content is the empty bytes on disk again");
     }
 
     #[test]
