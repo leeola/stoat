@@ -3866,21 +3866,7 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
         _ => return UpdateEffect::None,
     };
 
-    let (buffer_id, head_offset, ch) = {
-        let editor = ws.editors.get_mut(editor_id).expect("editor");
-        let buffer_id = editor.buffer_id;
-        let display_snapshot = editor.display_map.snapshot();
-        let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let rope = buffer_snapshot.rope();
-        let sel = editor.selections.newest_anchor().clone();
-        let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
-        let head_off = buffer_snapshot.resolve_anchor(&sel.head());
-        let head_offset = cursor_offset(rope, tail_off, head_off);
-        let Some(ch) = rope.chars_at(head_offset).next() else {
-            return UpdateEffect::None;
-        };
-        (buffer_id, head_offset, ch)
-    };
+    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
 
     let tree_opt: Option<stoat_language::Tree> = ws
         .buffers
@@ -3892,60 +3878,60 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
         .as_ref()
         .and_then(|lang| lang.bracket_query.as_ref());
 
-    // A brackets query captures only structural delimiters, so a bracket inside
-    // a string, char, or comment literal resolves to no pair instead of
-    // false-matching. When the language ships one it is authoritative and matches
-    // from within a pair, not only on a delimiter, so the char under the cursor
-    // does not gate the query path. The text scanner below only runs for
-    // languages without a query (e.g. toml).
-    if let (Some(query), Some(tree)) = (bracket_query, tree_opt.as_ref()) {
-        let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
-        let display_snapshot = editor.display_map.snapshot();
-        let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let rope = buffer_snapshot.rope();
-
-        let Some(target) =
-            stoat_language::matching_bracket(query, tree.root_node(), rope, head_offset)
-        else {
-            return UpdateEffect::None;
-        };
-
-        apply_primary_range(editor, target..target);
-        return UpdateEffect::Redraw;
-    }
-
-    // No brackets query (e.g. toml). The text scan matches only when the cursor
-    // is on a bracket delimiter, Helix's plaintext behavior. From-within
-    // matching is a syntax-path feature.
-    let Some((open, close, forward)) = bracket_pair(ch) else {
-        return UpdateEffect::None;
-    };
-
-    if let Some(ref tree) = tree_opt
-        && is_in_string_or_comment(tree, head_offset)
-    {
-        return UpdateEffect::None;
-    }
-
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
 
-    let Some(target) = scan_bracket_match(
-        rope,
-        head_offset,
-        ch,
-        open,
-        close,
-        forward,
-        tree_opt.as_ref(),
-    ) else {
-        return UpdateEffect::None;
-    };
-
-    apply_primary_range(editor, target..target);
+    editor
+        .selections
+        .transform_resolved(buffer_snapshot, |sel, head_off, tail_off| {
+            // Every cursor pairs its own bracket. Resolving one partner and
+            // landing it on all of them makes every span identical, and
+            // identical spans merge, so the set collapses to one cursor.
+            let cursor = cursor_offset(rope, tail_off, head_off);
+            let Some(target) = bracket_partner(rope, cursor, bracket_query, tree_opt.as_ref())
+            else {
+                // A cursor sitting in no pair holds its place rather than being
+                // pulled onto another cursor's partner.
+                return sel.clone();
+            };
+            land_block_cursor(sel.id, target, SelectionGoal::None, rope, buffer_snapshot)
+        });
     UpdateEffect::Redraw
+}
+
+/// Offset of the bracket partnering the one the cursor sits in, or `None` when
+/// it sits in no pair.
+///
+/// A brackets query captures only structural delimiters, so a bracket inside a
+/// string, char, or comment literal resolves to no pair instead of
+/// false-matching. When the language ships one it is authoritative and matches
+/// from within a pair, not only on a delimiter, so the char under the cursor
+/// does not gate the query path.
+///
+/// The text scan below only runs for languages without a query (e.g. toml), and
+/// matches only when the cursor is on a delimiter, which is the plaintext
+/// behavior. From-within matching is a syntax-path feature.
+fn bracket_partner(
+    rope: &Rope,
+    cursor: usize,
+    query: Option<&stoat_language::Query>,
+    tree: Option<&stoat_language::Tree>,
+) -> Option<usize> {
+    let ch = rope.chars_at(cursor).next()?;
+
+    if let (Some(query), Some(tree)) = (query, tree) {
+        return stoat_language::matching_bracket(query, tree.root_node(), rope, cursor);
+    }
+
+    let (open, close, forward) = bracket_pair(ch)?;
+    if let Some(tree) = tree
+        && is_in_string_or_comment(tree, cursor)
+    {
+        return None;
+    }
+    scan_bracket_match(rope, cursor, ch, open, close, forward, tree)
 }
 
 /// How far a pair scan walks before giving up, in characters each way.

@@ -5036,6 +5036,70 @@ mod tests {
         assert_eq!(h.primary_head_offset(), 5);
     }
 
+    /// Every cursor jumps to the partner of its own bracket.
+    ///
+    /// Resolving one partner from the newest selection and landing it on the
+    /// rest makes every span identical, and identical spans merge, so the set
+    /// collapses to a single cursor.
+    #[test]
+    fn match_brackets_pairs_each_cursor_separately() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "(a)\n(b)\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AddSelectionBelow);
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 1, false), (4, 5, false)],
+            "one cursor on each opening paren",
+        );
+
+        h.type_keys("m m");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(2, 3, false), (6, 7, false)],
+            "each cursor lands on the closing paren of its own pair",
+        );
+    }
+
+    /// A cursor on no bracket holds its place while the others jump.
+    #[test]
+    fn match_brackets_keeps_cursors_with_no_pair() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "(a)\nxyz\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AddSelectionBelow);
+
+        h.type_keys("m m");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(2, 3, false), (4, 5, false)],
+            "row 0 jumps to its closing paren, row 1 has no bracket and stays",
+        );
+    }
+
+    /// The same for a language shipping a brackets query, which resolves its
+    /// partner through the syntax tree rather than the text scan.
+    #[test]
+    fn match_brackets_pairs_each_cursor_separately_with_a_query() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\n");
+        h.open_file(&path);
+        h.type_keys("4 l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AddSelectionBelow);
+        assert_eq!(
+            h.selection_spans(),
+            vec![(4, 5, false), (14, 15, false)],
+            "one cursor on each opening paren",
+        );
+
+        h.type_keys("m m");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(5, 6, false), (15, 16, false)],
+            "each cursor lands on the closing paren of its own pair",
+        );
+    }
+
     #[test]
     fn match_brackets_no_op_off_bracket() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
