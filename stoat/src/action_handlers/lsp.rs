@@ -4190,13 +4190,19 @@ pub(crate) fn pump_symbol_finder_doc(stoat: &mut Stoat) -> bool {
 /// file or its live buffer for workspace scope), scrolls it so the symbol line
 /// sits a third down the pane, and lands the preview cursor at the symbol offset
 /// so the target line is markable. Clears the pane when nothing is selected.
+///
+/// Runs once per ranking, selection, and pane height. The per-frame sync above
+/// would otherwise redo all of it every frame the modal stays open.
 fn sync_symbol_finder_preview(stoat: &mut Stoat) {
-    let Some((buffer_id, rows, entry)) = stoat.symbol_finder.as_ref().map(|finder| {
-        (
-            finder.buffer_id,
-            finder.preview_rows.unwrap_or(24),
-            finder.selected_entry().map(|e| (e.line, e.target.clone())),
-        )
+    let Some((buffer_id, rows, entry)) = stoat.symbol_finder.as_mut().and_then(|finder| {
+        let rows = finder.preview_rows.unwrap_or(24);
+        finder.preview_needs_sync(rows).then(|| {
+            (
+                finder.buffer_id,
+                rows,
+                finder.selected_entry().map(|e| (e.line, e.target.clone())),
+            )
+        })
     }) else {
         return;
     };

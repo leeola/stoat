@@ -9,7 +9,10 @@ use crate::{
     workspace::Workspace,
 };
 use lsp_types::{Position, SymbolKind};
-use std::path::PathBuf;
+use std::{
+    hash::{DefaultHasher, Hash, Hasher},
+    path::PathBuf,
+};
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::{Executor, Task};
 
@@ -110,6 +113,22 @@ pub(crate) struct SymbolFinder {
     /// query-specific hits, so reading the live count would resize the box under
     /// the user as they type.
     pub(crate) content_rows: u16,
+    /// Bumped wherever [`Self::set_entries`] replaces the symbol list, so a
+    /// ranking memoized against the old list is never reused for the new one.
+    entries_generation: u64,
+    /// Query and entry-list generation the current ranking came from.
+    ///
+    /// The ranking is a pure function of those two, so an unchanged key means
+    /// an identical outcome. Ranking runs from the per-frame sync and walks
+    /// every entry with a fuzzy traceback, so a modal left sitting over a
+    /// workspace's symbols would otherwise re-rank thousands of them a frame.
+    last_filter_key: Option<u64>,
+    /// Ranking, selection, and pane height the preview pane was last built for.
+    ///
+    /// The ranking key belongs in it because a new query repoints the same
+    /// selection index at a different symbol, and the pane height because the
+    /// scroll puts the symbol a third of the way down a pane a resize moves.
+    preview_for: Option<(Option<u64>, usize, usize)>,
 }
 
 impl SymbolFinder {
@@ -141,6 +160,9 @@ impl SymbolFinder {
             doc_markdown: None,
             doc_lines: None,
             content_rows: 0,
+            entries_generation: 0,
+            last_filter_key: None,
+            preview_for: None,
         }
     }
 
@@ -150,17 +172,47 @@ impl SymbolFinder {
             self.content_rows = u16::try_from(entries.len()).unwrap_or(u16::MAX);
         }
         self.entries = entries;
+        self.entries_generation = self.entries_generation.wrapping_add(1);
         self.refilter(query);
     }
 
     /// Re-rank `entries` for `query`, matches first by score descending then
     /// title ascending. An empty or whitespace-only query lists every entry in
     /// document order with no highlights.
+    ///
+    /// Re-ranking the same list for the same query is skipped, so the per-frame
+    /// sync a modal drives costs nothing while the query sits still.
     pub(crate) fn refilter(&mut self, query: &str) {
+        let key = {
+            let mut hasher = DefaultHasher::new();
+            query.hash(&mut hasher);
+            self.entries_generation.hash(&mut hasher);
+            hasher.finish()
+        };
+        if self.last_filter_key == Some(key) {
+            return;
+        }
+        self.last_filter_key = Some(key);
+
         let (filtered, match_indices) = rank_entries(&self.entries, query);
         self.filtered = filtered;
         self.match_indices = match_indices;
         self.clamp_selected();
+    }
+
+    /// Whether the preview pane has to be rebuilt for a pane `rows` tall, and
+    /// record that it was.
+    ///
+    /// True once per ranking, selection, and pane height, so a modal sitting
+    /// still reloads and re-scrolls the pane once rather than every frame the
+    /// run loop drives.
+    pub(crate) fn preview_needs_sync(&mut self, rows: usize) -> bool {
+        let key = (self.last_filter_key, self.selected, rows);
+        if self.preview_for == Some(key) {
+            return false;
+        }
+        self.preview_for = Some(key);
+        true
     }
 
     /// Adjust the selection cursor by `delta`, saturating at list bounds.
@@ -290,6 +342,9 @@ mod tests {
             doc_markdown: None,
             doc_lines: None,
             content_rows: titles.len() as u16,
+            entries_generation: 0,
+            last_filter_key: None,
+            preview_for: None,
         };
         f.refilter("");
         f
@@ -357,6 +412,50 @@ mod tests {
         assert!(
             !indices[0].is_empty(),
             "the top match carries highlight offsets"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_query_reuses_the_ranking() {
+        let mut f = finder(&["alpha", "beta"]);
+        f.filtered.clear();
+
+        f.refilter("");
+        assert!(f.filtered.is_empty(), "the same query ranks nothing again");
+
+        f.refilter("alph");
+        assert_eq!(f.filtered, vec![0], "a changed query ranks afresh");
+    }
+
+    #[test]
+    fn replacing_the_entries_ranks_the_same_query_again() {
+        let mut f = finder(&["alpha"]);
+        f.set_entries(vec![entry("beta"), entry("gamma")], "");
+        assert_eq!(
+            f.filtered,
+            vec![0, 1],
+            "a new list outranks a memo held for the old one"
+        );
+    }
+
+    #[test]
+    fn the_preview_rebuilds_once_per_ranking_selection_and_pane_height() {
+        let mut f = finder(&["alpha", "alpine"]);
+        assert!(f.preview_needs_sync(20), "the first sync builds the pane");
+        assert!(!f.preview_needs_sync(20), "a still modal rebuilds nothing");
+
+        f.move_selection(1);
+        assert!(
+            f.preview_needs_sync(20),
+            "a moved selection is a new symbol"
+        );
+        assert!(f.preview_needs_sync(24), "a resized pane re-centers it");
+
+        f.refilter("al");
+        assert_eq!(f.selected, 1, "both entries still match, so it holds");
+        assert!(
+            f.preview_needs_sync(24),
+            "a new ranking points the held index at a different symbol"
         );
     }
 
