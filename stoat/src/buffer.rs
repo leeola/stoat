@@ -4,8 +4,8 @@ use std::{cmp::Ordering, collections::HashMap, ops::Range, sync::Arc};
 pub use stoat_text::BufferId;
 use stoat_text::{
     patch::{Edit, Patch},
-    Anchor, Bias, Dimensions, Fragment, IndentStyle, InsertionFragment, InsertionFragmentKey,
-    Locator, Point, Rope, Selection, SumTree, UndoMap, UndoOperation,
+    Anchor, Bias, Cursor, Dimensions, Fragment, IndentStyle, InsertionFragment,
+    InsertionFragmentKey, Locator, Point, Rope, Selection, SumTree, UndoMap, UndoOperation,
 };
 
 /// Op-log length past which [`TextBuffer::history`] persists a compacted seed
@@ -256,167 +256,21 @@ impl TextBuffer {
         let mut cursor = old_fragments.cursor::<usize>(cx);
         let mut deleted_rope = DeletedRebuild::new(range.start);
 
-        // Copy all fragments before the edit start
-        let prefix = cursor.slice(&range.start, Bias::Right);
-        deleted_rope.carry(&self.snapshot.deleted_text, prefix.summary().text.deleted);
-        new_fragments.append(prefix, cx);
-
-        let mut delete_remaining = range.end - range.start;
-        let overshoot = cursor.item().map_or(0, |_| range.start - *cursor.start());
-
-        if let Some(fragment) = cursor.item().filter(|f| overshoot > 0 && f.visible) {
-            let prefix = Fragment {
-                id: Locator::between(last_id(&new_fragments, cx), &fragment.id),
-                timestamp: fragment.timestamp,
-                insertion_offset: fragment.insertion_offset,
-                len: overshoot as u32,
-                visible: true,
-                deletions: fragment.deletions.clone(),
-                max_undos: fragment.max_undos,
-            };
-            push_insertion(&mut new_insertions, &prefix);
-            new_fragments.push(prefix, cx);
-        }
-
-        // The new text goes ahead of everything this edit deletes, so an anchor
-        // inside the replaced range resolves past the replacement rather than
-        // before it. Fragments already deleted at this position fall behind it
-        // for the same reason. They stand for text that is gone, and the new
-        // text takes its place.
-        if !text.is_empty() {
-            let next_id = cursor.item().map(|f| &f.id).unwrap_or(Locator::max_ref());
-            let new_frag_id = Locator::between(last_id(&new_fragments, cx), next_id);
-            let new_frag = Fragment {
-                id: new_frag_id.clone(),
+        splice_one_range(
+            SpliceRange {
+                range: range.clone(),
+                text,
                 timestamp,
-                insertion_offset: 0,
-                len: text.len() as u32,
-                visible: true,
-                deletions: Default::default(),
-                max_undos: 0,
-            };
-            new_insertions.push(InsertionFragment {
-                timestamp,
-                split_offset: 0,
-                fragment_id: new_frag_id,
-            });
-            new_fragments.push(new_frag, cx);
-        }
-
-        if let Some(fragment) = cursor.item() {
-            if fragment.visible {
-                let fragment_visible_len = fragment.len as usize;
-                let remaining_in_fragment = fragment_visible_len - overshoot;
-                let to_delete_here = delete_remaining.min(remaining_in_fragment);
-
-                if to_delete_here > 0 {
-                    let next_id = cursor
-                        .next_item()
-                        .map(|f| &f.id)
-                        .unwrap_or(Locator::max_ref());
-                    let mut deleted = fragment.clone();
-                    deleted.id = Locator::between(last_id(&new_fragments, cx), next_id);
-                    deleted.insertion_offset = fragment.insertion_offset + overshoot as u32;
-                    deleted.len = to_delete_here as u32;
-                    deleted.visible = false;
-                    deleted.deletions.push(timestamp);
-                    push_insertion(&mut new_insertions, &deleted);
-                    new_fragments.push(deleted, cx);
-                    deleted_rope.take(&self.snapshot.visible_text, to_delete_here);
-                    delete_remaining -= to_delete_here;
-                }
-
-                let suffix_len = remaining_in_fragment.saturating_sub(to_delete_here);
-                if suffix_len > 0 && delete_remaining == 0 {
-                    let next_id = cursor
-                        .next_item()
-                        .map(|f| &f.id)
-                        .unwrap_or(Locator::max_ref());
-                    let suffix_id = Locator::between(last_id(&new_fragments, cx), next_id);
-                    let suffix = Fragment {
-                        id: suffix_id.clone(),
-                        timestamp: fragment.timestamp,
-                        insertion_offset: fragment.insertion_offset
-                            + overshoot as u32
-                            + to_delete_here as u32,
-                        len: suffix_len as u32,
-                        visible: true,
-                        deletions: fragment.deletions.clone(),
-                        max_undos: fragment.max_undos,
-                    };
-                    new_insertions.push(InsertionFragment {
-                        timestamp: suffix.timestamp,
-                        split_offset: suffix.insertion_offset,
-                        fragment_id: suffix_id,
-                    });
-                    new_fragments.push(suffix, cx);
-                }
-
-                cursor.next();
-            } else {
-                deleted_rope.carry(&self.snapshot.deleted_text, fragment.len as usize);
-                new_fragments.push(fragment.clone(), cx);
-                cursor.next();
-            }
-        }
-
-        // Continue deleting through subsequent fragments
-        while delete_remaining > 0 {
-            match cursor.item() {
-                Some(fragment) if fragment.visible => {
-                    let frag_len = fragment.len as usize;
-                    if frag_len <= delete_remaining {
-                        let mut deleted = fragment.clone();
-                        deleted.visible = false;
-                        deleted.deletions.push(timestamp);
-                        new_fragments.push(deleted, cx);
-                        deleted_rope.take(&self.snapshot.visible_text, frag_len);
-                        delete_remaining -= frag_len;
-                        cursor.next();
-                    } else {
-                        let mut deleted_part = fragment.clone();
-                        deleted_part.id =
-                            Locator::between(last_id(&new_fragments, cx), &fragment.id);
-                        deleted_part.len = delete_remaining as u32;
-                        deleted_part.visible = false;
-                        deleted_part.deletions.push(timestamp);
-                        push_insertion(&mut new_insertions, &deleted_part);
-                        new_fragments.push(deleted_part, cx);
-                        deleted_rope.take(&self.snapshot.visible_text, delete_remaining);
-
-                        let next_id = cursor
-                            .next_item()
-                            .map(|f| &f.id)
-                            .unwrap_or(Locator::max_ref());
-                        let remaining_id = Locator::between(last_id(&new_fragments, cx), next_id);
-                        let remaining = Fragment {
-                            id: remaining_id.clone(),
-                            timestamp: fragment.timestamp,
-                            insertion_offset: fragment.insertion_offset + delete_remaining as u32,
-                            len: (frag_len - delete_remaining) as u32,
-                            visible: true,
-                            deletions: fragment.deletions.clone(),
-                            max_undos: fragment.max_undos,
-                        };
-                        new_insertions.push(InsertionFragment {
-                            timestamp: remaining.timestamp,
-                            split_offset: remaining.insertion_offset,
-                            fragment_id: remaining_id,
-                        });
-                        new_fragments.push(remaining, cx);
-
-                        delete_remaining = 0;
-                        cursor.next();
-                    }
-                },
-                Some(fragment) => {
-                    deleted_rope.carry(&self.snapshot.deleted_text, fragment.len as usize);
-                    new_fragments.push(fragment.clone(), cx);
-                    cursor.next();
-                },
-                None => break,
-            }
-        }
+            },
+            &mut SpliceState {
+                cursor: &mut cursor,
+                new_fragments: &mut new_fragments,
+                new_insertions: &mut new_insertions,
+                deleted_rope: &mut deleted_rope,
+            },
+            &self.snapshot.visible_text,
+            &self.snapshot.deleted_text,
+        );
 
         // Copy remaining fragments
         let suffix = cursor.suffix();
@@ -440,7 +294,214 @@ impl TextBuffer {
         self.record_edit(timestamp);
         self.recompute_dirty();
     }
+}
 
+/// One range's replacement, as [`splice_one_range`] consumes it.
+struct SpliceRange<'a> {
+    range: Range<usize>,
+    text: &'a str,
+    timestamp: u64,
+}
+
+/// The fragment-tree surgery in progress, shared across every range of one pass.
+///
+/// The cursor walks the old tree once, so a batch hands the same state to each
+/// range in turn rather than starting over.
+struct SpliceState<'a, 'b, 'c> {
+    cursor: &'a mut Cursor<'b, 'c, Fragment, usize>,
+    new_fragments: &'a mut SumTree<Fragment>,
+    new_insertions: &'a mut Vec<InsertionFragment>,
+    deleted_rope: &'a mut DeletedRebuild,
+}
+
+/// Splice one range's replacement into the fragment tree being built, advancing
+/// the cursor past what it consumed.
+///
+/// The cursor must sit at or before `range.start` in the old tree, and the
+/// coordinates are the old tree's, which is what lets a caller apply several
+/// disjoint ranges against one walk without adjusting any of them.
+fn splice_one_range(
+    edit: SpliceRange<'_>,
+    state: &mut SpliceState<'_, '_, '_>,
+    visible_text: &Rope,
+    deleted_text: &Rope,
+) {
+    let SpliceRange {
+        range,
+        text,
+        timestamp,
+    } = edit;
+    let cx = &None;
+    let SpliceState {
+        cursor,
+        new_fragments,
+        new_insertions,
+        deleted_rope,
+    } = state;
+
+    // Copy all fragments before the edit start
+    let prefix = cursor.slice(&range.start, Bias::Right);
+    deleted_rope.carry(deleted_text, prefix.summary().text.deleted);
+    new_fragments.append(prefix, cx);
+
+    let mut delete_remaining = range.end - range.start;
+    let overshoot = cursor.item().map_or(0, |_| range.start - *cursor.start());
+
+    if let Some(fragment) = cursor.item().filter(|f| overshoot > 0 && f.visible) {
+        let prefix = Fragment {
+            id: Locator::between(last_id(new_fragments, cx), &fragment.id),
+            timestamp: fragment.timestamp,
+            insertion_offset: fragment.insertion_offset,
+            len: overshoot as u32,
+            visible: true,
+            deletions: fragment.deletions.clone(),
+            max_undos: fragment.max_undos,
+        };
+        push_insertion(new_insertions, &prefix);
+        new_fragments.push(prefix, cx);
+    }
+
+    // The new text goes ahead of everything this edit deletes, so an anchor
+    // inside the replaced range resolves past the replacement rather than
+    // before it. Fragments already deleted at this position fall behind it
+    // for the same reason. They stand for text that is gone, and the new
+    // text takes its place.
+    if !text.is_empty() {
+        let next_id = cursor.item().map(|f| &f.id).unwrap_or(Locator::max_ref());
+        let new_frag_id = Locator::between(last_id(new_fragments, cx), next_id);
+        let new_frag = Fragment {
+            id: new_frag_id.clone(),
+            timestamp,
+            insertion_offset: 0,
+            len: text.len() as u32,
+            visible: true,
+            deletions: Default::default(),
+            max_undos: 0,
+        };
+        new_insertions.push(InsertionFragment {
+            timestamp,
+            split_offset: 0,
+            fragment_id: new_frag_id,
+        });
+        new_fragments.push(new_frag, cx);
+    }
+
+    if let Some(fragment) = cursor.item() {
+        if fragment.visible {
+            let fragment_visible_len = fragment.len as usize;
+            let remaining_in_fragment = fragment_visible_len - overshoot;
+            let to_delete_here = delete_remaining.min(remaining_in_fragment);
+
+            if to_delete_here > 0 {
+                let next_id = cursor
+                    .next_item()
+                    .map(|f| &f.id)
+                    .unwrap_or(Locator::max_ref());
+                let mut deleted = fragment.clone();
+                deleted.id = Locator::between(last_id(new_fragments, cx), next_id);
+                deleted.insertion_offset = fragment.insertion_offset + overshoot as u32;
+                deleted.len = to_delete_here as u32;
+                deleted.visible = false;
+                deleted.deletions.push(timestamp);
+                push_insertion(new_insertions, &deleted);
+                new_fragments.push(deleted, cx);
+                deleted_rope.take(visible_text, to_delete_here);
+                delete_remaining -= to_delete_here;
+            }
+
+            let suffix_len = remaining_in_fragment.saturating_sub(to_delete_here);
+            if suffix_len > 0 && delete_remaining == 0 {
+                let next_id = cursor
+                    .next_item()
+                    .map(|f| &f.id)
+                    .unwrap_or(Locator::max_ref());
+                let suffix_id = Locator::between(last_id(new_fragments, cx), next_id);
+                let suffix = Fragment {
+                    id: suffix_id.clone(),
+                    timestamp: fragment.timestamp,
+                    insertion_offset: fragment.insertion_offset
+                        + overshoot as u32
+                        + to_delete_here as u32,
+                    len: suffix_len as u32,
+                    visible: true,
+                    deletions: fragment.deletions.clone(),
+                    max_undos: fragment.max_undos,
+                };
+                new_insertions.push(InsertionFragment {
+                    timestamp: suffix.timestamp,
+                    split_offset: suffix.insertion_offset,
+                    fragment_id: suffix_id,
+                });
+                new_fragments.push(suffix, cx);
+            }
+
+            cursor.next();
+        } else {
+            deleted_rope.carry(deleted_text, fragment.len as usize);
+            new_fragments.push(fragment.clone(), cx);
+            cursor.next();
+        }
+    }
+
+    // Continue deleting through subsequent fragments
+    while delete_remaining > 0 {
+        match cursor.item() {
+            Some(fragment) if fragment.visible => {
+                let frag_len = fragment.len as usize;
+                if frag_len <= delete_remaining {
+                    let mut deleted = fragment.clone();
+                    deleted.visible = false;
+                    deleted.deletions.push(timestamp);
+                    new_fragments.push(deleted, cx);
+                    deleted_rope.take(visible_text, frag_len);
+                    delete_remaining -= frag_len;
+                    cursor.next();
+                } else {
+                    let mut deleted_part = fragment.clone();
+                    deleted_part.id = Locator::between(last_id(new_fragments, cx), &fragment.id);
+                    deleted_part.len = delete_remaining as u32;
+                    deleted_part.visible = false;
+                    deleted_part.deletions.push(timestamp);
+                    push_insertion(new_insertions, &deleted_part);
+                    new_fragments.push(deleted_part, cx);
+                    deleted_rope.take(visible_text, delete_remaining);
+
+                    let next_id = cursor
+                        .next_item()
+                        .map(|f| &f.id)
+                        .unwrap_or(Locator::max_ref());
+                    let remaining_id = Locator::between(last_id(new_fragments, cx), next_id);
+                    let remaining = Fragment {
+                        id: remaining_id.clone(),
+                        timestamp: fragment.timestamp,
+                        insertion_offset: fragment.insertion_offset + delete_remaining as u32,
+                        len: (frag_len - delete_remaining) as u32,
+                        visible: true,
+                        deletions: fragment.deletions.clone(),
+                        max_undos: fragment.max_undos,
+                    };
+                    new_insertions.push(InsertionFragment {
+                        timestamp: remaining.timestamp,
+                        split_offset: remaining.insertion_offset,
+                        fragment_id: remaining_id,
+                    });
+                    new_fragments.push(remaining, cx);
+
+                    delete_remaining = 0;
+                    cursor.next();
+                }
+            },
+            Some(fragment) => {
+                deleted_rope.carry(deleted_text, fragment.len as usize);
+                new_fragments.push(fragment.clone(), cx);
+                cursor.next();
+            },
+            None => break,
+        }
+    }
+}
+
+impl TextBuffer {
     /// Record `timestamp` in the open group, or as its own singleton group when
     /// no group is open (the from_history replay and any unwrapped edit).
     fn record_edit(&mut self, timestamp: u64) {
