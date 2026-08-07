@@ -16,7 +16,7 @@ use crate::{
     buffer_registry::{BufferRegistry, LspSymbolKindIndex},
     display_map::{
         syntax_theme, DisplayPoint, DisplaySnapshot, HighlightKey, HighlightLayer, HighlightStyle,
-        InlayKind, SemanticTokenHighlight,
+        HighlightStyleId, InlayKind, SemanticTokenHighlight,
     },
     editor_state::{EditorId, ScrollGlide},
     host::{LanguageServerFeature, LocalLsp, LspHost, LspTranscript, OffsetEncoding},
@@ -3023,20 +3023,37 @@ fn apply_semantic_tokens(
     // Ids come from the shared theme table rather than a per-response interner,
     // so a stored token means the same scope after a theme switch and can be
     // recolored by swapping the table instead of re-requesting it.
-    let styled: Vec<(std::ops::Range<usize>, _)> = items
-        .iter()
-        .filter_map(|(range, scope, _)| {
-            let id = syntax_theme::highlight_id_for_key((*scope)?)?;
-            let style = stoat.syntax_styles.id_for_highlight(id)?;
-            Some((range.clone(), style))
-        })
-        .collect();
-    let interner = stoat.syntax_styles.interner.clone();
+    //
+    // Split into the shapes `anchors_at_batch` and the zip below want in one
+    // walk. Holding the spans first would clone a range per token only to copy
+    // its endpoints back out, and both payloads here are `Copy`. Each vector is
+    // reserved against the token count, which bounds it above and is the only
+    // allocation it takes.
+    let mut token_starts: Vec<usize> = Vec::with_capacity(items.len());
+    let mut token_ends: Vec<usize> = Vec::with_capacity(items.len());
+    let mut token_styles: Vec<HighlightStyleId> = Vec::with_capacity(items.len());
+    let mut kind_starts: Vec<usize> = Vec::with_capacity(items.len());
+    let mut kind_ends: Vec<usize> = Vec::with_capacity(items.len());
+    let mut kinds_seen: Vec<LspSymbolKind> = Vec::with_capacity(items.len());
 
-    let kind_spans: Vec<(std::ops::Range<usize>, LspSymbolKind)> = items
-        .iter()
-        .filter_map(|(range, _, kind)| kind.map(|kind| (range.clone(), kind)))
-        .collect();
+    for (range, scope, kind) in &items {
+        if let Some(style) = (*scope)
+            .and_then(syntax_theme::highlight_id_for_key)
+            .and_then(|id| stoat.syntax_styles.id_for_highlight(id))
+        {
+            token_starts.push(range.start);
+            token_ends.push(range.end);
+            token_styles.push(style);
+        }
+
+        if let Some(kind) = *kind {
+            kind_starts.push(range.start);
+            kind_ends.push(range.end);
+            kinds_seen.push(kind);
+        }
+    }
+
+    let interner = stoat.syntax_styles.interner.clone();
 
     let ws = stoat.active_workspace_mut();
     let Some(shared) = ws.buffers.get(buffer_id) else {
@@ -3049,25 +3066,21 @@ fn apply_semantic_tokens(
     let (tokens, kinds): (Arc<[SemanticTokenHighlight]>, LspSymbolKindIndex) = {
         let buf_snap = shared.read().expect("buffer poisoned").snapshot.clone();
 
-        let t_starts: Vec<usize> = styled.iter().map(|(range, _)| range.start).collect();
-        let t_ends: Vec<usize> = styled.iter().map(|(range, _)| range.end).collect();
-        let tokens: Arc<[SemanticTokenHighlight]> = styled
+        let tokens: Arc<[SemanticTokenHighlight]> = token_styles
             .into_iter()
-            .zip(buf_snap.anchors_at_batch(&t_starts, Bias::Right))
-            .zip(buf_snap.anchors_at_batch(&t_ends, Bias::Left))
-            .map(|(((_, style), start), end)| SemanticTokenHighlight {
+            .zip(buf_snap.anchors_at_batch(&token_starts, Bias::Right))
+            .zip(buf_snap.anchors_at_batch(&token_ends, Bias::Left))
+            .map(|((style, start), end)| SemanticTokenHighlight {
                 range: start..end,
                 style,
             })
             .collect();
 
-        let k_starts: Vec<usize> = kind_spans.iter().map(|(range, _)| range.start).collect();
-        let k_ends: Vec<usize> = kind_spans.iter().map(|(range, _)| range.end).collect();
-        let kinds: LspSymbolKindIndex = kind_spans
+        let kinds: LspSymbolKindIndex = kinds_seen
             .into_iter()
-            .zip(buf_snap.anchors_at_batch(&k_starts, Bias::Right))
-            .zip(buf_snap.anchors_at_batch(&k_ends, Bias::Left))
-            .map(|(((_, kind), start), end)| (start..end, kind))
+            .zip(buf_snap.anchors_at_batch(&kind_starts, Bias::Right))
+            .zip(buf_snap.anchors_at_batch(&kind_ends, Bias::Left))
+            .map(|((kind, start), end)| (start..end, kind))
             .collect();
 
         (tokens, kinds)
@@ -10176,6 +10189,83 @@ mod tests {
         h.advance_clock(Duration::from_millis(550));
         assert_eq!(lsp_token_count(&mut h), 1);
         h.assert_snapshot("semantic_tokens_recolor");
+    }
+
+    /// A token can carry a scope, a kind, or both, so the styled and the kinded
+    /// subsets of one reply are different sequences. Anchoring walks each of
+    /// them as its own run of offsets, and a run built against the wrong subset
+    /// pairs every payload past the first divergence with someone else's span.
+    #[test]
+    fn a_reply_anchors_its_styles_and_kinds_onto_their_own_spans() {
+        let mut h = TestHarness::default();
+        let root = seed(&mut h, &[("main.rs", "alpha beta gamma delta\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path);
+
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        let version = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .read()
+            .expect("buffer poisoned")
+            .snapshot
+            .version;
+
+        // The first token styles without a kind and the second kinds without a
+        // style, so the two sequences diverge before the third, which is in
+        // both.
+        super::apply_semantic_tokens(
+            &mut h.stoat,
+            buffer_id,
+            version,
+            vec![
+                (0..5, Some("function"), None),
+                (6..10, None, Some(LspSymbolKind::Type)),
+                (11..16, Some("function"), Some(LspSymbolKind::Function)),
+            ],
+        );
+
+        let ws = h.stoat.active_workspace();
+        let snapshot = ws
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .read()
+            .expect("buffer poisoned")
+            .snapshot
+            .clone();
+        let (_, tokens, _) = ws.buffers.lsp_tokens_for(buffer_id).expect("tokens stored");
+
+        let spans: Vec<(usize, usize)> = tokens
+            .iter()
+            .map(|token| {
+                (
+                    snapshot.resolve_anchor(&token.range.start),
+                    snapshot.resolve_anchor(&token.range.end),
+                )
+            })
+            .collect();
+        assert_eq!(
+            spans,
+            [(0, 5), (11, 16)],
+            "the styled tokens keep the spans they arrived on, skipping the kind-only one"
+        );
+
+        assert_eq!(
+            ws.buffers.lsp_symbol_kind_at(buffer_id, 7),
+            Some(Some(LspSymbolKind::Type)),
+            "the kind-only token indexes on its own span"
+        );
+        assert_eq!(
+            ws.buffers.lsp_symbol_kind_at(buffer_id, 12),
+            Some(Some(LspSymbolKind::Function)),
+            "and the token carrying both lands its kind where its style went"
+        );
     }
 
     /// The offsets in a reply name the text the server measured them against.
