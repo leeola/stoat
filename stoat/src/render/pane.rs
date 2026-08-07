@@ -304,19 +304,48 @@ pub(crate) fn render_pane(
 /// left unchanged, so such terminals simply do not dim. `amount` is expected in
 /// `0.0..=1.0`.
 pub(crate) fn dim_pane_content(buf: &mut Buffer, area: Rect, bg: [u8; 3], amount: f32) {
+    // With `bg` and `amount` fixed for the pass, the blend is a function of the
+    // cell's own color, and themed text runs long stretches of one. A channel
+    // keeps its own last answer, since a run of one foreground is not a run of
+    // the same background.
+    let mut last_fg = None;
+    let mut last_bg = None;
+
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             let cell = &mut buf[(x, y)];
             if let Color::Rgb(r, g, b) = cell.fg {
-                let [r, g, b] = dim_rgb([r, g, b], bg, amount);
+                let [r, g, b] = dim_memoized(&mut last_fg, [r, g, b], bg, amount);
                 cell.set_fg(Color::Rgb(r, g, b));
             }
             if let Color::Rgb(r, g, b) = cell.bg {
-                let [r, g, b] = dim_rgb([r, g, b], bg, amount);
+                let [r, g, b] = dim_memoized(&mut last_bg, [r, g, b], bg, amount);
                 cell.set_bg(Color::Rgb(r, g, b));
             }
         }
     }
+}
+
+/// [`dim_rgb`] answered from `last` when it holds the same input, and recorded
+/// there when it does not.
+///
+/// A caller only reaches this for a color it is going to blend, so a cell left
+/// alone never displaces the answer a run of blended ones is sharing.
+fn dim_memoized(
+    last: &mut Option<([u8; 3], [u8; 3])>,
+    color: [u8; 3],
+    bg: [u8; 3],
+    amount: f32,
+) -> [u8; 3] {
+    if let Some((input, output)) = *last
+        && input == color
+    {
+        return output;
+    }
+
+    let output = dim_rgb(color, bg, amount);
+    *last = Some((color, output));
+    output
 }
 
 /// Minimal status bar for overlay panes (commits/rebase/reword/conflict).
@@ -1569,6 +1598,74 @@ mod tests {
             "rgb bg dims toward bg"
         );
         assert_eq!(buf[(1, 0)].fg, Color::Blue, "indexed color left unchanged");
+    }
+
+    /// The memo answers a repeat of the colour before it, so what it must not
+    /// do is answer a repeat of one further back, or carry an answer across a
+    /// cell it never blended.
+    #[test]
+    fn dim_pane_content_matches_blending_every_cell() {
+        use super::dim_pane_content;
+        use crate::render::review::dim_rgb;
+        use ratatui::{
+            buffer::Buffer,
+            layout::Rect,
+            style::{Color, Style},
+        };
+
+        let area = Rect::new(0, 0, 6, 3);
+        let bg = [20, 20, 30];
+        let amount = 0.25;
+
+        // Runs of one colour, alternation between two, a foreground repeating
+        // under a changing background, and indexed cells breaking the runs.
+        let palette = [
+            Some([200, 100, 40]),
+            Some([200, 100, 40]),
+            Some([10, 200, 90]),
+            None,
+            Some([200, 100, 40]),
+            Some([10, 200, 90]),
+        ];
+        let mut buf = Buffer::empty(area);
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let fg = palette[usize::from(x)];
+                let cell_bg = palette[usize::from((x + y) % area.width)];
+                let mut style = Style::default();
+                style = match fg {
+                    Some([r, g, b]) => style.fg(Color::Rgb(r, g, b)),
+                    None => style.fg(Color::Blue),
+                };
+                style = match cell_bg {
+                    Some([r, g, b]) => style.bg(Color::Rgb(r, g, b)),
+                    None => style.bg(Color::Green),
+                };
+                buf[(x, y)].set_style(style);
+            }
+        }
+
+        let mut expected = buf.clone();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let cell = &mut expected[(x, y)];
+                if let Color::Rgb(r, g, b) = cell.fg {
+                    let [r, g, b] = dim_rgb([r, g, b], bg, amount);
+                    cell.set_fg(Color::Rgb(r, g, b));
+                }
+                if let Color::Rgb(r, g, b) = cell.bg {
+                    let [r, g, b] = dim_rgb([r, g, b], bg, amount);
+                    cell.set_bg(Color::Rgb(r, g, b));
+                }
+            }
+        }
+
+        dim_pane_content(&mut buf, area, bg, amount);
+
+        assert_eq!(
+            buf, expected,
+            "the memoized pass agrees with blending every cell"
+        );
     }
 
     #[test]
