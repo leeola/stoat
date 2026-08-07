@@ -1873,6 +1873,69 @@ mod tests {
         );
     }
 
+    /// Splicing an inlay onto a row above a fold leaves the fold collapsed.
+    ///
+    /// A splice reports the row it lands on as changed, and the region rebuilt
+    /// for it ends where the next row begins. A fold starting on exactly that
+    /// row sits outside the region, so the rebuild does not re-emit it and the
+    /// old transform tree is expected to carry it. The transform the cursor
+    /// rests on at that point is the fold's own placeholder, and re-emitting
+    /// what follows the region as ordinary text unfolds it.
+    #[test]
+    fn an_inlay_spliced_above_a_fold_leaves_it_folded() {
+        let text: String = (0..30).map(|i| format!("line{i}\n")).collect();
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut map = DisplayMap::new(multi, test_executor(), crate::test_notify());
+
+        map.fold(vec![Point::new(5, 0)..Point::new(8, 0)]);
+        let folded = map.snapshot().fold_snapshot().line_count();
+        assert_eq!(folded, 28, "three rows collapsed out of thirty-one");
+
+        let anchor = {
+            let snap = map.multi_buffer.snapshot();
+            let offset = snap.rope().point_to_offset(Point::new(4, 0));
+            snap.anchor_at(offset, stoat_text::Bias::Left)
+        };
+        map.splice_inlays(
+            Vec::new(),
+            vec![(anchor, ": u32".to_string(), InlayKind::Hint)],
+        );
+
+        assert_eq!(
+            map.snapshot().fold_snapshot().line_count(),
+            folded,
+            "the inlay carries no newline, so no row is added or removed",
+        );
+
+        // The line count alone would pass a tree that lost the fold and gained
+        // it back elsewhere, and it is the rows that reach the reader.
+        let rows = |map: &mut DisplayMap| {
+            let snapshot = map.snapshot();
+            (0..snapshot.line_count())
+                .map(|row| snapshot.display_line(row))
+                .collect::<Vec<_>>()
+        };
+
+        let fresh = |shared: &Arc<RwLock<TextBuffer>>| {
+            let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+            let mut fresh = DisplayMap::new(multi, test_executor(), crate::test_notify());
+            fresh.fold(vec![Point::new(5, 0)..Point::new(8, 0)]);
+            fresh.splice_inlays(
+                Vec::new(),
+                vec![(anchor, ": u32".to_string(), InlayKind::Hint)],
+            );
+            rows(&mut fresh)
+        };
+        assert_eq!(rows(&mut map), fresh(&shared), "against a fresh build");
+
+        // An unfolded tree survives its own sync, so the divergence only
+        // reaches the reader on the next one.
+        let len = shared.read().expect("poisoned").rope().len();
+        shared.write().expect("poisoned").edit(len..len, "tail\n");
+        assert_eq!(rows(&mut map), fresh(&shared), "and after a later edit");
+    }
+
     /// An edit strictly inside a replacement's hidden rows leaves the block
     /// standing.
     ///

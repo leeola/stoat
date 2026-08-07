@@ -1271,7 +1271,24 @@ fn sync_fold_incremental(
         // Handle tail of current transform
         if let Some(item) = cursor.item() {
             let cursor_end = cursor.start().0 + item.summary.input.len;
-            if next_region_old_start.is_none_or(|start| old_row_to_offset(start) >= cursor_end) {
+
+            // A fold beginning exactly where the region ends lies wholly
+            // outside the rebuild, and the strict filter above left it out on
+            // the grounds that the old tree still carries it. Leaving the
+            // cursor on it is what makes that true, since the suffix append
+            // below then takes it over whole. Re-emitting its bytes as
+            // ordinary text unfolds it instead, and nothing puts it back.
+            //
+            // A fold the region ends inside is the opposite case and keeps the
+            // re-emission. Only a fold that moved or was dropped can land
+            // there, because a surviving one would have widened the region past
+            // itself, so what remains of it is no longer folded text.
+            let carried_whole =
+                item.placeholder_text.is_some() && cursor.start().0 >= old_end_offset;
+
+            if !carried_whole
+                && next_region_old_start.is_none_or(|start| old_row_to_offset(start) >= cursor_end)
+            {
                 let tail = cursor_end - old_end_offset;
                 let tail_end_new = new_end_offset + tail;
                 let current_pos = new_transforms.summary().input.len;
