@@ -7530,6 +7530,13 @@ impl Stoat {
             .map(|(sel, ends)| {
                 let cursor = stoat_text::cursor_offset(rope, ends[0], ends[1]);
                 let (start, end) = range_for(rope, cursor);
+                // Word motions stop mid-cluster deliberately, leaving the snap to
+                // wherever their answer lands. This path writes bytes rather than
+                // selections, so `SelectionsCollection::replace_with`'s snap never
+                // runs. The same rule applies here, so a deletion only ever grows out
+                // to the character it was cutting and never splits one.
+                let start = rope.clip_to_grapheme_boundary(start, Bias::Left);
+                let end = rope.clip_to_grapheme_boundary(end, Bias::Right);
                 (sel.id, start, end)
             })
             .collect();
@@ -23241,6 +23248,45 @@ mod tests {
         h.type_keys("alt-backspace");
         assert_eq!(buffer_text(&h, &path), "o\n");
         assert_eq!(h.head_offsets(), vec![0]);
+    }
+
+    /// A word deletion never cuts a grapheme cluster in half.
+    ///
+    /// Word motions stop mid-cluster on purpose, deferring the snap to wherever
+    /// their answer is written. Writing a selection snaps, and splicing the rope
+    /// does not, so a deletion driven straight off a motion has to snap for
+    /// itself or it orphans a combining mark onto whatever text survives.
+    #[test]
+    fn a_word_delete_forward_keeps_a_combining_mark_with_its_base() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "cafe\u{301} bar");
+        h.type_keys("i");
+        h.type_keys("alt-d");
+        assert_eq!(
+            buffer_text(&h, &path),
+            " bar",
+            "the acute goes with the e it sits on, not onto the space",
+        );
+    }
+
+    /// The backward sibling, where the motion's endpoint lands inside a cluster
+    /// rather than after one.
+    ///
+    /// `prev_word_start` stops between the `e` and its acute, so the snap grows
+    /// the deletion out to the cluster's start and takes both. Leaving the base
+    /// behind without its mark, which is what an unsnapped splice does, would
+    /// silently rewrite the surviving character.
+    #[test]
+    fn a_word_delete_backward_keeps_a_combining_mark_with_its_base() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "cafe\u{301}x");
+        h.type_keys("A");
+        h.type_keys("alt-backspace");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "caf",
+            "the accented e goes whole rather than leaving a bare e behind",
+        );
     }
 
     #[test]
