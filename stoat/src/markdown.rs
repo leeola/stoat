@@ -13,7 +13,7 @@ use stoat_language::{Language, LanguageRegistry};
 
 /// One rendered line as an ordered list of styled spans. An empty list is a
 /// blank line.
-type StyledLine = Vec<(String, Style)>;
+pub(crate) type StyledLine = Vec<(String, Style)>;
 
 /// Two spaces of indent per markdown list nesting level.
 const INDENT: &str = "  ";

@@ -1,4 +1,5 @@
 use crate::{
+    markdown::StyledLine,
     paths,
     render::text::write_str_clipped,
     symbol_finder::{SymbolFinder, SymbolFinderScope, SymbolTarget},
@@ -67,6 +68,7 @@ pub(crate) fn render_symbol_finder(
     finder: &mut SymbolFinder,
     ws: &mut Workspace,
     theme: &Theme,
+    theme_epoch: u64,
     chrome: &crate::render::editor::ResolvedChrome,
     languages: &LanguageRegistry,
     area: Rect,
@@ -112,16 +114,8 @@ pub(crate) fn render_symbol_finder(
             scene,
         );
         finder.preview_rows = Some(preview_rect.height as usize);
-        let source_rect = match &finder.doc_markdown {
-            Some(doc) => render_doc_pane(
-                doc,
-                preview_rect,
-                separator_style,
-                theme,
-                languages,
-                buf,
-                scene,
-            ),
+        let source_rect = match finder.styled_doc_lines(theme_epoch, theme, languages) {
+            Some(lines) => render_doc_pane(lines, preview_rect, separator_style, buf, scene),
             None => preview_rect,
         };
         crate::render::picker::render_picker_preview(
@@ -231,19 +225,20 @@ fn paint_symbol_rows(
     }
 }
 
-/// Render the hover doc `markdown` into the top half of `area`, with an hline
-/// below it, and return the rect the source preview should fill in the lower
-/// rows. Lines beyond the pane width are clipped.
+/// Paint the hover doc `lines` into the top half of `area`, with an hline below
+/// them, and return the rect the source preview should fill in the lower rows.
+/// Lines beyond the pane width are clipped.
+///
+/// Takes the lines already styled rather than the markdown behind them. This
+/// runs on every paint the modal is up for, and rendering markdown parses each
+/// fenced code block and builds a style per byte.
 fn render_doc_pane(
-    markdown: &str,
+    lines: &[StyledLine],
     area: Rect,
     separator_style: Style,
-    theme: &Theme,
-    languages: &LanguageRegistry,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) -> Rect {
-    let lines = crate::markdown::render_markdown(markdown, theme, languages);
     let max_doc_rows = (area.height / 2).max(1);
     let doc_rows = (lines.len() as u16).min(max_doc_rows);
     if doc_rows == 0 {
@@ -310,9 +305,8 @@ fn symbol_kind_label(kind: Option<SymbolKind>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{render_doc_pane, symbol_finder_layout};
-    use crate::{render::picker::DEFAULT_LIST_PERCENT, theme::Theme};
+    use crate::render::picker::DEFAULT_LIST_PERCENT;
     use ratatui::{buffer::Buffer, layout::Rect, style::Style};
-    use stoat_language::LanguageRegistry;
 
     /// The doc pane used to pass no scene, so its separator fell back to dash
     /// glyphs while every sibling separator in the same modal drew a hairline.
@@ -325,15 +319,8 @@ mod tests {
         let mut scene = stoatty_widgets::ApcScene::new();
         let rgb = Style::default().fg(ratatui::style::Color::Rgb(1, 2, 3));
 
-        let source = render_doc_pane(
-            "one line of doc",
-            area,
-            rgb,
-            &Theme::empty(),
-            &LanguageRegistry::standard(),
-            &mut buf,
-            &mut scene,
-        );
+        let doc = vec![vec![("one line of doc".to_string(), Style::default())]];
+        let source = render_doc_pane(&doc, area, rgb, &mut buf, &mut scene);
 
         let separator_row = source.y - 1;
         let painted: String = (area.x..area.x + area.width)

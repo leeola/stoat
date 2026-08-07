@@ -4076,6 +4076,7 @@ fn sync_symbol_finder_doc(stoat: &mut Stoat) {
 
     if let Some(finder) = stoat.symbol_finder.as_mut() {
         finder.doc_markdown = None;
+        finder.doc_lines = None;
     }
     if in_flight {
         return;
@@ -4159,6 +4160,7 @@ pub(crate) fn pump_symbol_finder_doc(stoat: &mut Stoat) -> bool {
             let sel_key = finder.selected_entry().map(|_| finder.selected);
             if finder.doc_for == sel_key {
                 finder.doc_markdown = doc;
+                finder.doc_lines = None;
             }
             true
         },

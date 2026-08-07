@@ -976,6 +976,7 @@ pub(crate) fn frame(
                     finder,
                     ws,
                     &stoat.theme,
+                    stoat.theme_epoch,
                     chrome,
                     &stoat.language_registry,
                     full,

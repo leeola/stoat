@@ -3,11 +3,14 @@ use crate::{
     fuzzy,
     host::OffsetEncoding,
     input_view::{InputView, SubmitTarget},
+    markdown::StyledLine,
     picker::Preview,
+    theme::Theme,
     workspace::Workspace,
 };
 use lsp_types::{Position, SymbolKind};
 use std::path::PathBuf;
+use stoat_language::LanguageRegistry;
 use stoat_scheduler::{Executor, Task};
 
 /// Whether the finder lists the focused buffer's document symbols or the whole
@@ -90,6 +93,14 @@ pub(crate) struct SymbolFinder {
     /// Resolved hover markdown for the selected symbol, rendered above the source
     /// preview. `None` when unresolved, empty, or the request failed.
     pub(crate) doc_markdown: Option<String>,
+    /// [`Self::doc_markdown`] rendered, and the theme epoch it was styled under.
+    ///
+    /// Rendering it parses every fenced code block and builds a style per byte,
+    /// and the renderer would otherwise do that on every paint the modal is up
+    /// for a document that cannot have changed. Cleared wherever the markdown
+    /// is written, and rebuilt by [`Self::styled_doc_lines`] when the theme
+    /// moves under it.
+    pub(crate) doc_lines: Option<(u64, Vec<StyledLine>)>,
     /// Rows the modal's list would need for the whole symbol set, which the
     /// renderer sizes the box against.
     ///
@@ -128,6 +139,7 @@ impl SymbolFinder {
             pending_doc: None,
             doc_for: None,
             doc_markdown: None,
+            doc_lines: None,
             content_rows: 0,
         }
     }
@@ -169,6 +181,33 @@ impl SymbolFinder {
         self.entries.get(idx)
     }
 
+    /// The selected symbol's documentation as styled lines, or `None` when it
+    /// has none.
+    ///
+    /// Renders [`Self::doc_markdown`] only when nothing is held for
+    /// `theme_epoch`, so a modal painting frame after frame over one symbol
+    /// renders it once. The styles are baked into the lines, which is why a
+    /// theme change rebuilds them rather than reusing what it finds.
+    pub(crate) fn styled_doc_lines(
+        &mut self,
+        theme_epoch: u64,
+        theme: &Theme,
+        languages: &LanguageRegistry,
+    ) -> Option<&[StyledLine]> {
+        let markdown = self.doc_markdown.as_deref()?;
+
+        let held = self
+            .doc_lines
+            .as_ref()
+            .is_some_and(|(epoch, _)| *epoch == theme_epoch);
+        if !held {
+            let lines = crate::markdown::render_markdown(markdown, theme, languages);
+            self.doc_lines = Some((theme_epoch, lines));
+        }
+
+        self.doc_lines.as_ref().map(|(_, lines)| lines.as_slice())
+    }
+
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         self.input.dispose(ws);
         self.preview.dispose(ws);
@@ -206,7 +245,9 @@ fn rank_entries(entries: &[SymbolFinderEntry], query: &str) -> (Vec<usize>, Vec<
 
 #[cfg(test)]
 mod tests {
-    use super::{rank_entries, SymbolFinder, SymbolFinderEntry, SymbolFinderScope, SymbolTarget};
+    use super::{
+        rank_entries, StyledLine, SymbolFinder, SymbolFinderEntry, SymbolFinderScope, SymbolTarget,
+    };
     use crate::{
         buffer::BufferId,
         editor_state::EditorId,
@@ -247,10 +288,47 @@ mod tests {
             pending_doc: None,
             doc_for: None,
             doc_markdown: None,
+            doc_lines: None,
             content_rows: titles.len() as u16,
         };
         f.refilter("");
         f
+    }
+
+    /// The renderer asks per frame while the modal is up, and rendering the
+    /// markdown parses every fenced code block in it, so a second ask over the
+    /// same document must not render again.
+    ///
+    /// The held lines are overwritten between the asks, which a re-render would
+    /// replace and a reuse hands straight back.
+    #[test]
+    fn doc_lines_render_once_until_the_theme_moves() {
+        use ratatui::style::Style;
+        use stoat_language::LanguageRegistry;
+
+        let mut f = finder(&["alpha"]);
+        f.doc_markdown = Some("# heading\n\n```rust\nfn a() {}\n```".to_string());
+        let theme = crate::theme::Theme::empty();
+        let languages = LanguageRegistry::standard();
+
+        assert!(
+            f.styled_doc_lines(3, &theme, &languages).is_some(),
+            "the first ask renders the markdown"
+        );
+
+        let held: Vec<StyledLine> = vec![vec![("held".to_string(), Style::default())]];
+        f.doc_lines = Some((3, held.clone()));
+        assert_eq!(
+            f.styled_doc_lines(3, &theme, &languages),
+            Some(held.as_slice()),
+            "the same theme reuses what is held rather than rendering again"
+        );
+
+        assert_ne!(
+            f.styled_doc_lines(4, &theme, &languages),
+            Some(held.as_slice()),
+            "a new theme restyles every span, so the held lines no longer describe it"
+        );
     }
 
     #[test]
