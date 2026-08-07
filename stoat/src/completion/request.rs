@@ -340,7 +340,7 @@ enum Refine {
 /// authoritative at the moment it answered, but between answers the client is
 /// what narrows, so a cached item the prefix no longer matches goes rather than
 /// sinking down the list.
-fn refine_open_popup(stoat: &Stoat, owned: &ContextOwned) -> Refine {
+fn refine_open_popup(stoat: &mut Stoat, owned: &ContextOwned) -> Refine {
     let Some(popup) = &stoat.pending_completion else {
         return Refine::Fresh;
     };
@@ -352,28 +352,29 @@ fn refine_open_popup(stoat: &Stoat, owned: &ContextOwned) -> Refine {
         return Refine::Fresh;
     }
 
-    let kept: Vec<CompletionItem> = {
-        let stale: &[String] = &popup.incomplete;
-        let survives = |item: &CompletionItem| {
-            item.server
-                .as_deref()
-                .is_none_or(|name| !stale.iter().any(|s| s == name))
-        };
-        matching(
-            popup.items.iter().filter(|item| survives(item)),
-            &owned.prefix,
-        )
-    };
-
+    // A server that stopped early is re-asked, and `ask_again` does not replace
+    // the popup until its request lands a debounce later, so the popup stays
+    // where it is and its survivors are copied. Taking it would blank the popup
+    // for that window, on most keystrokes, since servers mark their lists
+    // incomplete routinely.
     if !popup.incomplete.is_empty() {
+        let stale = popup.incomplete.clone();
+        let carried = surviving(popup.items.iter().cloned(), &stale, &owned.prefix).0;
         return Refine::Ask {
-            servers: popup.incomplete.clone(),
-            carried: kept,
+            servers: stale,
+            carried,
         };
     }
 
-    let mut items = kept;
-    rank_by_prefix(&mut items, &owned.prefix);
+    // Nothing is re-asked, so this call replaces the popup outright and its
+    // items move into the refined one rather than being copied out of it.
+    let popup = stoat
+        .pending_completion
+        .take()
+        .expect("borrowed one just above");
+
+    let (mut items, scores) = surviving(popup.items.into_iter(), &[], &owned.prefix);
+    rank_scored(&mut items, scores);
 
     Refine::Done(CompletionPopup {
         items,
@@ -385,24 +386,40 @@ fn refine_open_popup(stoat: &Stoat, owned: &ContextOwned) -> Refine {
     })
 }
 
-/// The items `prefix` still matches, in the order they were given.
-fn matching<'a>(
-    items: impl Iterator<Item = &'a CompletionItem>,
+/// The items `prefix` still matches, in the order they were given, with what
+/// each scored.
+///
+/// Items from a server named in `stale` are dropped whatever they score. That
+/// server is being asked again, and its own answer supersedes what it said
+/// before.
+///
+/// Scoring and filtering are the same pass because the score is what decides
+/// the match. A caller that ranks what comes back therefore has its scores
+/// already and does not go over the haystacks twice.
+fn surviving(
+    items: impl Iterator<Item = CompletionItem>,
+    stale: &[String],
     prefix: &str,
-) -> Vec<CompletionItem> {
-    let items: Vec<&CompletionItem> = items.collect();
-    let haystacks: Vec<&str> = items.iter().map(|item| match_against(item)).collect();
+) -> (Vec<CompletionItem>, Vec<u32>) {
+    let fresh: Vec<CompletionItem> = items
+        .filter(|item| {
+            item.server
+                .as_deref()
+                .is_none_or(|name| !stale.iter().any(|s| s == name))
+        })
+        .collect();
 
-    let Some(scored) = fuzzy::score_only(
-        prefix,
-        haystacks.iter().enumerate().map(|(idx, hay)| (idx, *hay)),
-    ) else {
-        return items.into_iter().cloned().collect();
-    };
+    let scored = scores_against(&fresh, prefix);
+    let mut kept = Vec::with_capacity(fresh.len());
+    let mut scores = Vec::with_capacity(fresh.len());
+    for (item, score) in fresh.into_iter().zip(scored) {
+        if let Some(score) = score {
+            kept.push(item);
+            scores.push(score);
+        }
+    }
 
-    let mut keep: Vec<usize> = scored.into_iter().map(|(idx, _)| idx).collect();
-    keep.sort_unstable();
-    keep.into_iter().map(|idx| items[idx].clone()).collect()
+    (kept, scores)
 }
 
 /// Ask `servers` again for a prefix they answered incompletely, carrying the
@@ -816,18 +833,26 @@ fn rank_by_prefix(items: &mut Vec<CompletionItem>, prefix: &str) {
         return;
     }
 
-    order_by_sort_text(items);
+    let scores = scores_against(items, prefix)
+        .into_iter()
+        .map(|score| score.unwrap_or(0))
+        .collect();
+    rank_scored(items, scores);
+}
 
-    let mut scores = vec![0u32; items.len()];
-    {
-        let haystacks: Vec<&str> = items.iter().map(match_against).collect();
-        let scored = fuzzy::score_only(
-            prefix,
-            haystacks.iter().enumerate().map(|(idx, hay)| (idx, *hay)),
-        );
-        for (idx, score) in scored.into_iter().flatten() {
-            scores[idx] = score;
-        }
+/// Order `items` by their servers' sort text, then by `scores` descending.
+///
+/// `scores` is parallel to `items` and is permuted alongside them, so scoring
+/// can happen before the ordering rather than between its two passes. A caller
+/// that already knows what its candidates scored does not have to score them
+/// again to rank them.
+fn rank_scored(items: &mut Vec<CompletionItem>, mut scores: Vec<u32>) {
+    debug_assert_eq!(items.len(), scores.len(), "one score per item");
+
+    let sorted = sort_text_order(items);
+    if let Some(order) = sorted {
+        scores = order.iter().map(|&from| scores[from]).collect();
+        apply_order(items, &order);
     }
 
     // Stable, so items the score cannot separate keep what the sort-text pass
@@ -835,7 +860,29 @@ fn rank_by_prefix(items: &mut Vec<CompletionItem>, prefix: &str) {
     let mut order: Vec<usize> = (0..items.len()).collect();
     order.sort_by(|&a, &b| scores[b].cmp(&scores[a]));
 
-    apply_order(items, order);
+    apply_order(items, &order);
+}
+
+/// What each item scores against `prefix`, `None` where it does not match.
+///
+/// A match scoring zero and no match at all are different answers, and the
+/// refine path drops on the second, so they stay apart here rather than
+/// collapsing onto zero.
+fn scores_against(items: &[CompletionItem], prefix: &str) -> Vec<Option<u32>> {
+    let haystacks: Vec<&str> = items.iter().map(match_against).collect();
+    let Some(scored) = fuzzy::score_only(
+        prefix,
+        haystacks.iter().enumerate().map(|(idx, hay)| (idx, *hay)),
+    ) else {
+        // No usable atoms, so nothing is being asked and nothing is rejected.
+        return vec![Some(0); items.len()];
+    };
+
+    let mut out = vec![None; items.len()];
+    for (idx, score) in scored {
+        out[idx] = Some(score);
+    }
+    out
 }
 
 /// The text an item is matched against, which is its `filterText` when the
@@ -847,19 +894,20 @@ fn match_against(item: &CompletionItem) -> &str {
         .unwrap_or(&item.label)
 }
 
-/// Reorder the items carrying a `sortText` among themselves, leaving every
-/// other item where it is.
+/// The permutation putting the items carrying a `sortText` in that order among
+/// themselves and leaving every other item where it is, or `None` when fewer
+/// than two carry one and there is nothing to reorder.
 ///
 /// Only LSP items have one, so ordering the whole list by it would have to
 /// decide how an item with a sort text ranks against an item without, and any
 /// answer to that shuffles items across sources for no reason. Confining the
 /// reorder to the items that have one asks no such question.
-fn order_by_sort_text(items: &mut Vec<CompletionItem>) {
+fn sort_text_order(items: &[CompletionItem]) -> Option<Vec<usize>> {
     let slots: Vec<usize> = (0..items.len())
         .filter(|&idx| sort_text(&items[idx]).is_some())
         .collect();
     if slots.len() < 2 {
-        return;
+        return None;
     }
 
     let mut sorted = slots.clone();
@@ -876,7 +924,7 @@ fn order_by_sort_text(items: &mut Vec<CompletionItem>) {
         order[slot] = from;
     }
 
-    apply_order(items, order);
+    Some(order)
 }
 
 fn sort_text(item: &CompletionItem) -> Option<&str> {
@@ -886,12 +934,12 @@ fn sort_text(item: &CompletionItem) -> Option<&str> {
 }
 
 /// Permute `items` so that position `n` holds what `order`'s `n`th index names.
-fn apply_order(items: &mut Vec<CompletionItem>, order: Vec<usize>) {
+fn apply_order(items: &mut Vec<CompletionItem>, order: &[usize]) {
     let mut taken: Vec<Option<CompletionItem>> = items.drain(..).map(Some).collect();
     items.extend(
         order
-            .into_iter()
-            .map(|from| taken[from].take().expect("each index is named once")),
+            .iter()
+            .map(|&from| taken[from].take().expect("each index is named once")),
     );
 }
 
@@ -1725,6 +1773,37 @@ mod harness_tests {
             labels(&popup.items).contains(&"foobarred".to_string()),
             "and what it then offered is shown: {:?}",
             labels(&popup.items)
+        );
+    }
+
+    /// Re-asking a server replaces the popup only when its answer lands, a
+    /// debounce later, so refining has to leave the old one standing rather
+    /// than taking it. Taking it blanks the popup for that window, and servers
+    /// mark their lists incomplete routinely enough for that to be most
+    /// keystrokes.
+    #[test]
+    fn re_asking_a_server_leaves_the_popup_up_while_it_answers() {
+        let mut h = TestHarness::default();
+        enable_completion(&h);
+        open_scratch(&mut h, "");
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 0, 3, &["foobar"]);
+        h.fake_lsp().set_completions_incomplete("/ws/buf.rs", 0, 3);
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 0, 4, &["foobarred"]);
+
+        h.type_keys("i");
+        h.type_text("foo");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+        assert!(
+            h.stoat.pending_completion.is_some(),
+            "the popup is up before the keystroke that re-asks"
+        );
+
+        h.type_text("b");
+        assert!(
+            h.stoat.pending_completion.is_some(),
+            "and holds while the re-query is in flight, rather than blanking"
         );
     }
 
