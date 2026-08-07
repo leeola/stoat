@@ -1415,9 +1415,28 @@ impl ApplicationHandler<PtyEvent> for App {
                     // Read under the projection's lock, so the clear color and
                     // the cells it surrounds come from one view of the terminal.
                     let clear_colors = (terminal.default_background(), terminal.default_cursor());
-                    let (cursor, scroll_delta, damage) = terminal.project(&mut state.grid);
-                    let decoration_damage = terminal.take_decoration_damage();
                     let display_offset = terminal.display_offset();
+                    // Scrolled back, the frame renders the composed history
+                    // window instead of this grid, so projecting into it is a
+                    // full pass nothing draws. The damage the skipped
+                    // projections would have consumed accumulates, so returning
+                    // to the bottom repaints exactly the rows that moved.
+                    //
+                    // Zero scroll is what the projection reports at a non-zero
+                    // offset anyway, the viewport being pinned to its content,
+                    // so standing in for it costs nothing.
+                    let (cursor, scroll_delta, damage) = if display_offset > 0 {
+                        let changed = terminal.take_damage_flag();
+                        let damage = if changed {
+                            Damage::Full
+                        } else {
+                            Damage::Partial(Vec::new())
+                        };
+                        (terminal.cursor(), 0, damage)
+                    } else {
+                        terminal.project(&mut state.grid)
+                    };
+                    let decoration_damage = terminal.take_decoration_damage();
                     let mut pools = mem::take(&mut state.pools_scratch);
                     terminal.pools_into(&mut pools);
 

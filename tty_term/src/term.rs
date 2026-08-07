@@ -184,6 +184,10 @@ pub struct Terminal {
     /// so a projection re-stamps only the components that changed rather than all
     /// of them every frame.
     decorations_dirty: DecorationDirty,
+    /// Output has arrived since the last projection. Set from [`Terminal::advance`]
+    /// when it reports a redraw, and taken by [`Terminal::take_damage_flag`] for a
+    /// frame that renders something other than the projected grid.
+    output_since_project: bool,
     /// The grid rows the cell-stamped decorations (borders, scales) occupied when one
     /// of them last changed, so a moved or cleared decoration can damage the rows it
     /// used to cover and erase its stale footprint.
@@ -635,6 +639,7 @@ impl Terminal {
             minimap_journal: Vec::new(),
             decoration_seq: 1,
             decorations_dirty: DecorationDirty::default(),
+            output_since_project: false,
             last_decoration_footprint: Vec::new(),
             footprint_scratch: Vec::new(),
             row_scratch: Vec::new(),
@@ -680,6 +685,7 @@ impl Terminal {
     /// recognizes it and buffers [`XTVERSION_REPLY`] for [`Self::take_responses`].
     pub fn advance(&mut self, bytes: &[u8]) -> bool {
         let redraw = self.advance_inner(bytes);
+        self.output_since_project |= redraw;
         self.drain_listener_events();
         self.drain_staged();
         redraw
@@ -1778,6 +1784,32 @@ impl Terminal {
         self.term.grid().display_offset()
     }
 
+    /// Whether output has arrived since the last projection, without touching
+    /// the grid.
+    ///
+    /// Stands in for [`Self::project`] on a frame rendering something other
+    /// than the projected grid, which a scrolled-back view does. Projecting
+    /// there is a full pass into cells nothing draws.
+    ///
+    /// The damage is deliberately left where it is. It accumulates until a
+    /// projection resets it, so the one that eventually runs repaints exactly
+    /// the rows that moved while it was being skipped, and nothing has to
+    /// remember a repaint owed. Reading it here would not work anyway: the
+    /// terminal damages the cursor's row on every read, so a frame with no
+    /// output looks the same as one with some.
+    pub fn take_damage_flag(&mut self) -> bool {
+        mem::take(&mut self.output_since_project)
+    }
+
+    /// The cursor [`Self::project`] would report, without projecting.
+    ///
+    /// For a frame that skipped the projection but still has to place something
+    /// against the cursor's cell.
+    pub fn cursor(&self) -> Cursor {
+        let content = self.term.renderable_content();
+        project_cursor(content.cursor, content.display_offset as i32)
+    }
+
     /// Reset the viewport to the live bottom of history, so the next
     /// [`Self::project`] shows current output again. Used to pin the view on
     /// keyboard input.
@@ -1897,6 +1929,7 @@ impl Terminal {
             grid.resize(rows, cols);
         }
 
+        self.output_since_project = false;
         let mut dirty = self.collect_damage(rows, resized);
 
         let content = self.term.renderable_content();
@@ -3323,6 +3356,58 @@ mod tests {
         let (cursor, _scroll, _damage) = terminal.project(&mut grid);
 
         (grid, cursor)
+    }
+
+    /// The scrolled-back frame renders a composed history window, so the live
+    /// grid is projected into for nothing. Skipping that has to leave the grid
+    /// untouched and still report that output arrived.
+    #[test]
+    fn taking_the_damage_flag_reports_output_and_leaves_the_grid_alone() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+
+        terminal.advance(b"ab");
+        terminal.project(&mut grid);
+        assert!(
+            !terminal.take_damage_flag(),
+            "the projection consumed what had arrived"
+        );
+
+        terminal.advance(b"cd");
+        assert!(terminal.take_damage_flag(), "the new output is reported");
+        assert_eq!(
+            (grid.get(0, 0).ch, grid.get(0, 1).ch),
+            ('a', 'b'),
+            "the grid still holds what the projection put there"
+        );
+        assert!(
+            !terminal.take_damage_flag(),
+            "taking it reports the output once"
+        );
+    }
+
+    #[test]
+    fn output_a_skipped_projection_missed_lands_in_the_next_one() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+        terminal.project(&mut grid);
+
+        // The cursor ends on row 1, so row 0 is damaged only by the text. A
+        // skip that consumed the damage would leave nothing to say so, since
+        // the terminal damages the cursor's row on every read regardless.
+        terminal.advance(b"hi\r\n");
+        terminal.take_damage_flag();
+        let (_cursor, _scroll, damage) = terminal.project(&mut grid);
+
+        assert_eq!(
+            (grid.get(0, 0).ch, grid.get(0, 1).ch),
+            ('h', 'i'),
+            "what the skipped projection did not paint is painted here"
+        );
+        assert!(
+            matches!(&damage, Damage::Partial(rows) if rows[0]),
+            "the row still names itself, the skip having left the damage alone"
+        );
     }
 
     #[test]
