@@ -1893,11 +1893,14 @@ impl ApplicationHandler<PtyEvent> for App {
                         let bracketed = {
                             let mut terminal = state.terminal.lock();
                             terminal.clear_selection();
+                            // Pasting jumps the view back to the live prompt,
+                            // like typing.
+                            terminal.scroll_to_bottom();
                             terminal.bracketed_paste()
                         };
+                        // Written outside the scope above, so the lock the
+                        // reader thread wants is not held across the syscall.
                         let _ = state.pty.write(&paste_bytes(&text, bracketed));
-                        // Pasting jumps the view back to the live prompt, like typing.
-                        state.terminal.lock().scroll_to_bottom();
                     }
                     return;
                 }
@@ -1927,13 +1930,18 @@ impl ApplicationHandler<PtyEvent> for App {
                     state.modifiers.control_key(),
                     state.modifiers.shift_key(),
                 ) {
-                    // Typing supersedes a live selection, so drop the highlight
-                    // before it sits over fresh output.
-                    state.terminal.lock().clear_selection();
+                    {
+                        let mut terminal = state.terminal.lock();
+                        // Typing supersedes a live selection, so drop the
+                        // highlight before it sits over fresh output.
+                        terminal.clear_selection();
+                        // Typing jumps the view back to the live prompt, the way
+                        // a terminal resets scrollback on input.
+                        terminal.scroll_to_bottom();
+                    }
+                    // Written outside the scope above, so the lock the reader
+                    // thread wants is not held across the syscall.
                     let _ = state.pty.write(&bytes);
-                    // Typing jumps the view back to the live prompt, the way a
-                    // terminal resets scrollback on input.
-                    state.terminal.lock().scroll_to_bottom();
                 }
             },
             WindowEvent::MouseWheel { delta, .. } => {
