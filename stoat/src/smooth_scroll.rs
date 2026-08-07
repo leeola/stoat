@@ -1823,8 +1823,8 @@ mod tests {
             Vec::new()
         });
 
-        // Overlays pass hold_when_idle false, so a content change refills the full
-        // window even while the target is stationary.
+        // A pool passing hold_when_idle false refills the full window on a
+        // content change even while the target is stationary.
         let entered = emit_into(&mut out, &mut state, region(1, 20), 40.0, 1, false, |_| {
             Vec::new()
         });

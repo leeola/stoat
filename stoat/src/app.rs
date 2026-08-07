@@ -8937,7 +8937,7 @@ impl Stoat {
                 content_version,
                 // Editor panes refill constantly at rest for the cursor line,
                 // focus dim, and diagnostics, so they hold the window until the
-                // glide starts. Overlays stay static at rest and pass false.
+                // glide starts.
                 true,
                 // Editor and review pages both fill asynchronously below, so the
                 // synchronous render emits nothing here.
@@ -9106,7 +9106,7 @@ impl Stoat {
                 region,
                 scroll_row as f32,
                 content_version,
-                false,
+                true,
                 |page| {
                     crate::smooth_scroll::render_finder_page(
                         finder,
@@ -9150,7 +9150,7 @@ impl Stoat {
                 region,
                 scroll_row as f32,
                 content_version,
-                false,
+                true,
                 |page| {
                     crate::smooth_scroll::render_palette_page(
                         filtered,
@@ -9210,7 +9210,7 @@ impl Stoat {
                 region,
                 scroll_row as f32,
                 content_version,
-                false,
+                true,
                 |page| {
                     crate::smooth_scroll::render_arg_page(
                         picker,
@@ -9378,7 +9378,7 @@ impl Stoat {
                 region,
                 scroll_row as f32,
                 content_version,
-                false,
+                true,
                 |page| {
                     crate::smooth_scroll::render_completion_page(
                         &popup.items,
@@ -18683,6 +18683,76 @@ mod tests {
                 pool: crate::smooth_scroll::non_pane_pool::FINDER,
             })),
             "closing the finder retires its pool"
+        );
+    }
+
+    /// The pool paints rows the live grid paints anyway, so a keystroke that
+    /// re-filters the list has nothing worth filling until the target moves.
+    ///
+    /// Both halves are load-bearing. A pool that stopped refilling altogether
+    /// would satisfy the first assertion, so the second moves the selection past
+    /// the visible page and requires the deferred window back.
+    #[test]
+    fn typing_in_the_finder_defers_its_pool_refill_until_the_list_scrolls() {
+        use stoat_action::OpenFileFinder;
+        use stoatty_protocol::command::Command;
+
+        fn finder_fills(cmds: &[Command]) -> Vec<u64> {
+            cmds.iter()
+                .filter_map(|cmd| match cmd {
+                    Command::Fill(fill)
+                        if fill.pool == crate::smooth_scroll::non_pane_pool::FINDER =>
+                    {
+                        Some(fill.index)
+                    },
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = std::path::PathBuf::from("/holdfinder");
+        for i in 0..200 {
+            h.fake_fs()
+                .insert_file(root.join(format!("a{i}.rs")), b"x\n");
+        }
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        // The first display prefills the whole window, which is the state a
+        // keystroke arrives into.
+        h.stoat.emit_smooth_scroll();
+        let _ = drain_apc(&mut rx);
+
+        h.type_text("a");
+        h.settle();
+        h.stoat.emit_smooth_scroll();
+        let typed = finder_fills(&drain_apc(&mut rx));
+        assert!(
+            typed.is_empty(),
+            "a keystroke into a resting finder fills no page, got {typed:?}"
+        );
+
+        // Selecting past the visible page moves the scroll target, which is
+        // where the deferred content change applies.
+        let list_height = finder_layout(&h).list.height as usize;
+        h.stoat
+            .file_finder
+            .as_mut()
+            .expect("the finder is open")
+            .active_core()
+            .picklist
+            .selected = list_height;
+        h.stoat.emit_smooth_scroll();
+        assert!(
+            !finder_fills(&drain_apc(&mut rx)).is_empty(),
+            "the deferred window fills once the list scrolls"
         );
     }
 
