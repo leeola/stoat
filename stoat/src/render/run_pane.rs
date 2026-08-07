@@ -1,6 +1,6 @@
 use crate::{
     render::text::write_str,
-    run::{GridSelection, RunState},
+    run::{GridSelection, OutputBlock, RunState},
 };
 use ratatui::{
     buffer::Buffer,
@@ -8,7 +8,7 @@ use ratatui::{
     style::{Modifier, Style},
     widgets::{Clear, Widget},
 };
-use std::path::Path;
+use std::{ops::Range, path::Path};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_run_pane(
@@ -28,88 +28,85 @@ pub(crate) fn render_run_pane(
     let input_row = area.y + area.height - 1;
     let output_height = area.height.saturating_sub(1);
 
-    let mut output_lines: Vec<OutputLine<'_>> = Vec::new();
+    let total = run_state.output_line_total();
+    let visible = output_height as usize;
+    let start = total.saturating_sub(visible + run_state.scroll_offset);
+    let window = start..start + visible;
+
+    // Walked block by block rather than flattened first. A block's grid holds
+    // its whole scrollback, so materializing the rows would cost the history
+    // on every paint to draw a pane's worth of it.
+    let mut base = 0;
     for (i, block) in run_state.blocks.iter().enumerate() {
         let prev_exit = i
             .checked_sub(1)
             .and_then(|prev| run_state.blocks[prev].exit_status);
-        output_lines.push(OutputLine::Prompt {
-            cwd: &block.cwd,
-            prev_exit,
-            command: block.command.as_str(),
-        });
-        for row_idx in 0..block.grid.rendered_line_count() {
-            output_lines.push(OutputLine::GridRow(
-                &block.grid,
-                row_idx,
-                block.selection.as_ref(),
-            ));
-        }
-        if let Some(err) = &block.error {
-            output_lines.push(OutputLine::Error(err.as_str()));
-        }
-    }
+        let grid_rows = block.grid.rendered_line_count();
+        let span = block.rendered_line_span();
 
-    let total = run_state.output_line_total();
-    let visible = output_height as usize;
-    let start = total.saturating_sub(visible + run_state.scroll_offset);
-    for (i, line) in output_lines.iter().skip(start).take(visible).enumerate() {
-        let y = area.y + i as u16;
-        match line {
-            OutputLine::Prompt {
-                cwd,
-                prev_exit,
-                command,
-            } => {
-                let abbrev = crate::run::abbreviate_path(cwd, home);
-                let pw = write_prompt(buf, area.x, y, &abbrev, *prev_exit, theme);
-                let max_w = (area.width as usize).saturating_sub(pw as usize);
-                let display: String = command.chars().take(max_w).collect();
-                write_str(buf, area.x + pw, y, &display, Style::default());
-            },
-            OutputLine::GridRow(grid, row_idx, selection) => {
-                let row = grid.row(*row_idx);
-                let w = (area.width as usize).min(grid.width() as usize);
-                let row_u16 = u16::try_from(*row_idx).unwrap_or(u16::MAX);
-                for (col, cell) in row.iter().enumerate().take(w) {
-                    let col_u16 = u16::try_from(col).unwrap_or(u16::MAX);
-                    let selected = selection.is_some_and(|sel| sel.contains(col_u16, row_u16));
-                    let blank = cell.ch == ' '
-                        && cell.fg.is_none()
-                        && cell.bg.is_none()
-                        && cell.modifiers.is_empty();
-                    if blank && !selected {
-                        continue;
+        for offset in window_offsets(base, span, &window) {
+            let y = area.y + (base + offset - start) as u16;
+            let Some(line) = block_line(block, grid_rows, offset, prev_exit) else {
+                continue;
+            };
+            match &line {
+                OutputLine::Prompt {
+                    cwd,
+                    prev_exit,
+                    command,
+                } => {
+                    let abbrev = crate::run::abbreviate_path(cwd, home);
+                    let pw = write_prompt(buf, area.x, y, &abbrev, *prev_exit, theme);
+                    let max_w = (area.width as usize).saturating_sub(pw as usize);
+                    let display: String = command.chars().take(max_w).collect();
+                    write_str(buf, area.x + pw, y, &display, Style::default());
+                },
+                OutputLine::GridRow(grid, row_idx, selection) => {
+                    let row = grid.row(*row_idx);
+                    let w = (area.width as usize).min(grid.width() as usize);
+                    let row_u16 = u16::try_from(*row_idx).unwrap_or(u16::MAX);
+                    for (col, cell) in row.iter().enumerate().take(w) {
+                        let col_u16 = u16::try_from(col).unwrap_or(u16::MAX);
+                        let selected = selection.is_some_and(|sel| sel.contains(col_u16, row_u16));
+                        let blank = cell.ch == ' '
+                            && cell.fg.is_none()
+                            && cell.bg.is_none()
+                            && cell.modifiers.is_empty();
+                        if blank && !selected {
+                            continue;
+                        }
+                        let mut style = Style::default();
+                        if let Some(fg) = cell.fg {
+                            style = style.fg(fg);
+                        }
+                        if let Some(bg) = cell.bg {
+                            style = style.bg(bg);
+                        }
+                        style = style.add_modifier(cell.modifiers);
+                        if selected {
+                            style = style.add_modifier(Modifier::REVERSED);
+                        }
+                        let x = area.x + col as u16;
+                        if x < area.x + area.width {
+                            buf[(x, y)].set_char(cell.ch).set_style(style);
+                        }
                     }
-                    let mut style = Style::default();
-                    if let Some(fg) = cell.fg {
-                        style = style.fg(fg);
-                    }
-                    if let Some(bg) = cell.bg {
-                        style = style.bg(bg);
-                    }
-                    style = style.add_modifier(cell.modifiers);
-                    if selected {
-                        style = style.add_modifier(Modifier::REVERSED);
-                    }
-                    let x = area.x + col as u16;
-                    if x < area.x + area.width {
-                        buf[(x, y)].set_char(cell.ch).set_style(style);
-                    }
-                }
-            },
-            OutputLine::Error(msg) => {
-                let max_w = area.width as usize;
-                let display: String = msg.chars().take(max_w).collect();
-                write_str(
-                    buf,
-                    area.x,
-                    y,
-                    &display,
-                    theme.get(crate::theme::scope::UI_ERROR),
-                );
-            },
+                },
+                OutputLine::Error(msg) => {
+                    let max_w = area.width as usize;
+                    let display: String = msg.chars().take(max_w).collect();
+                    write_str(
+                        buf,
+                        area.x,
+                        y,
+                        &display,
+                        theme.get(crate::theme::scope::UI_ERROR),
+                    );
+                },
+            }
         }
+
+        base += span;
     }
 
     let last_exit = run_state
@@ -137,6 +134,45 @@ pub(crate) fn render_run_pane(
         &std::collections::BTreeMap::new(),
         buf,
     );
+}
+
+/// The block-local row offsets that fall inside `window`, for a block occupying
+/// `base..base + span` of the pane's output rows.
+///
+/// Empty for a block wholly outside the window, which is what lets the caller
+/// walk every block without materializing the rows between them.
+fn window_offsets(base: usize, span: usize, window: &Range<usize>) -> Range<usize> {
+    let first = window.start.saturating_sub(base);
+    let last = window.end.saturating_sub(base).min(span);
+    first..last.max(first)
+}
+
+/// The line drawn at `offset` within a block's span, where `grid_rows` is the
+/// block's rendered grid height.
+///
+/// The span is the prompt, then the grid, then an error line if the block has
+/// one, so this and [`crate::run::OutputBlock::rendered_line_span`] describe the
+/// same rows and have to agree. `None` for an offset past them, which the
+/// caller's window bounds already exclude.
+fn block_line(
+    block: &OutputBlock,
+    grid_rows: usize,
+    offset: usize,
+    prev_exit: Option<i32>,
+) -> Option<OutputLine<'_>> {
+    match offset.checked_sub(1) {
+        None => Some(OutputLine::Prompt {
+            cwd: &block.cwd,
+            prev_exit,
+            command: block.command.as_str(),
+        }),
+        Some(row) if row < grid_rows => Some(OutputLine::GridRow(
+            &block.grid,
+            row,
+            block.selection.as_ref(),
+        )),
+        Some(_) => block.error.as_deref().map(OutputLine::Error),
+    }
 }
 
 enum OutputLine<'a> {
@@ -275,4 +311,115 @@ pub(crate) fn render_modal_run(
         theme.get(crate::theme::scope::UI_BADGE_ACTIVE)
     };
     write_str(buf, inner.x, status_row, &status, status_style);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{block_line, window_offsets, OutputBlock, OutputLine};
+    use std::path::PathBuf;
+
+    /// The `(block, offset)` pairs the pane draws, built the obvious way: lay
+    /// every block's rows out flat, then take the window out of the middle.
+    fn flat_oracle(spans: &[usize], start: usize, visible: usize) -> Vec<(usize, usize)> {
+        let rows: Vec<(usize, usize)> = spans
+            .iter()
+            .enumerate()
+            .flat_map(|(block, span)| (0..*span).map(move |offset| (block, offset)))
+            .collect();
+        rows.into_iter().skip(start).take(visible).collect()
+    }
+
+    /// The same pairs, walked block by block the way the renderer does.
+    fn walked(spans: &[usize], start: usize, visible: usize) -> Vec<(usize, usize)> {
+        let window = start..start + visible;
+        let mut base = 0;
+        let mut rows = Vec::new();
+        for (block, span) in spans.iter().enumerate() {
+            rows.extend(window_offsets(base, *span, &window).map(|offset| (block, offset)));
+            base += span;
+        }
+        rows
+    }
+
+    #[test]
+    fn the_walked_window_matches_a_flat_layout_of_the_same_blocks() {
+        let spans = [3, 1, 40, 2, 7, 1, 12];
+        let total: usize = spans.iter().sum();
+
+        for start in 0..=total {
+            for visible in [0, 1, 5, 24, total] {
+                assert_eq!(
+                    walked(&spans, start, visible),
+                    flat_oracle(&spans, start, visible),
+                    "window {start}..{} over {spans:?}",
+                    start + visible
+                );
+            }
+        }
+    }
+
+    /// Names the line without needing the block it borrows from.
+    fn tag(line: Option<OutputLine<'_>>) -> String {
+        match line {
+            None => "none".to_owned(),
+            Some(OutputLine::Prompt { .. }) => "prompt".to_owned(),
+            Some(OutputLine::GridRow(_, row, _)) => format!("grid{row}"),
+            Some(OutputLine::Error(_)) => "error".to_owned(),
+        }
+    }
+
+    fn block_with(rows: &str, error: Option<&str>) -> OutputBlock {
+        let mut block = OutputBlock::new("cmd".to_owned(), PathBuf::from("/repo"), 20);
+        block.grid.feed(rows.as_bytes());
+        block.error = error.map(str::to_owned);
+        block
+    }
+
+    #[test]
+    fn a_blocks_span_reads_prompt_then_grid_rows_then_its_error() {
+        let block = block_with("a\r\nb\r\nc", Some("boom"));
+        let grid_rows = block.grid.rendered_line_count();
+        let span = block.rendered_line_span();
+
+        let lines: Vec<String> = (0..span)
+            .map(|offset| tag(block_line(&block, grid_rows, offset, None)))
+            .collect();
+
+        assert_eq!(
+            lines,
+            ["prompt", "grid0", "grid1", "grid2", "error"],
+            "each offset maps to its own row, the grid starting one past the prompt"
+        );
+    }
+
+    #[test]
+    fn a_block_without_an_error_ends_at_its_last_grid_row() {
+        let block = block_with("a\r\nb", None);
+        let grid_rows = block.grid.rendered_line_count();
+        let span = block.rendered_line_span();
+
+        let lines: Vec<String> = (0..span)
+            .map(|offset| tag(block_line(&block, grid_rows, offset, None)))
+            .collect();
+
+        assert_eq!(
+            lines,
+            ["prompt", "grid0", "grid1"],
+            "the span stops at the grid when there is no error line to follow it"
+        );
+    }
+
+    #[test]
+    fn a_block_outside_the_window_contributes_nothing() {
+        let window = 10..20;
+        assert_eq!(
+            [
+                window_offsets(0, 5, &window).count(),
+                window_offsets(30, 5, &window).count(),
+                window_offsets(8, 5, &window).count(),
+            ],
+            [0, 0, 3],
+            "a block before or after the window is skipped, one straddling it is clipped"
+        );
+    }
 }
