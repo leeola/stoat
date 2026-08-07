@@ -1111,6 +1111,16 @@ impl BlockSnapshot {
             .to_fold_point(inlay_point, Bias::Right);
         let tab_point = self.wrap_snapshot.tab_snapshot().to_tab_point(fold_point);
         let wrap_point = self.wrap_snapshot.to_wrap_point(tab_point);
+        self.wrap_to_block(wrap_point)
+    }
+
+    /// Block position of `wrap_point`, the last leg of what
+    /// [`Self::buffer_to_block`] walks.
+    ///
+    /// Separate so a caller that already holds a wrap position can join the
+    /// chain here. The legs before it expand tabs by walking the row from its
+    /// start, which a caller stepping along that row has already done.
+    pub fn wrap_to_block(&self, wrap_point: WrapPoint) -> BlockPoint {
         let wrap_row = wrap_point.row();
 
         let target = InputRow(wrap_row + 1);

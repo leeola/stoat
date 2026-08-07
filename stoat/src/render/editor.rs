@@ -1,7 +1,7 @@
 use super::TEXT_SCALE_COMPACT;
 use crate::{
     diff_map::DiffHunkStatus,
-    display_map::{display_width, tab_map, BlockRowKind, DisplayPoint, DisplaySnapshot},
+    display_map::{display_width, tab_map, BlockRowKind, DisplayPoint, DisplaySnapshot, TabPoint},
     editor_state::{EditorState, SearchMatchCache},
     minimap::color_to_rgb,
     render::{
@@ -2209,10 +2209,12 @@ fn paint_offset_range(
         let single_display_row = !snapshot.is_wrap_continuation(display.row)
             && (display.row + 1 >= line_count || !snapshot.is_wrap_continuation(display.row + 1));
 
-        let simple_row = first_fold_row.is_none_or(|fold_row| point.row < fold_row)
-            && single_display_row
+        // Neither a fold before this row nor an inlay on it, so the row's
+        // characters land where the buffer says and the column can be
+        // accumulated rather than resolved.
+        let accumulable_row = first_fold_row.is_none_or(|fold_row| point.row < fold_row)
             && !(any_inlays && inlay_snapshot.has_inlays_in_row_range(point.row..point.row + 1));
-        if simple_row {
+        if accumulable_row && single_display_row {
             let row = display.row;
             let mut col = display.column;
             loop {
@@ -2232,6 +2234,48 @@ fn paint_offset_range(
                     paint(row, start_col, col - start_col);
                 }
                 offset += ch.len_utf8();
+            }
+        } else if accumulable_row {
+            // A soft-wrapped row rebases its columns per display row, so the
+            // accumulated column is not the display one and each character has
+            // to be placed. The accumulation still pays off: it is the
+            // tab-expanded column, which is the leg of the resolution that
+            // walks the row from its start.
+            let tab_point = snapshot.buffer_to_tab_point(point);
+            let tab_row = tab_point.row();
+            let mut tab_col = tab_point.column();
+            let mut char_point = point;
+            loop {
+                if offset >= range.end {
+                    break 'segments;
+                }
+                let Some(ch) = chars.next() else {
+                    break 'segments;
+                };
+                if ch == '\n' {
+                    offset += 1;
+                    continue 'segments;
+                }
+                let start_col = tab_col;
+                tab_map::advance_column_for_char(&mut tab_col, ch, tab_size, max_expansion_column);
+                if Some(offset) != skip_offset {
+                    let display = snapshot.tab_to_display(TabPoint::new(tab_row, start_col));
+                    debug_assert_eq!(
+                        display,
+                        snapshot.buffer_to_display(char_point),
+                        "the accumulated tab column places the character where its buffer point does"
+                    );
+                    let mut end_col = display.column;
+                    tab_map::advance_column_for_char(
+                        &mut end_col,
+                        ch,
+                        tab_size,
+                        max_expansion_column,
+                    );
+                    paint(display.row, display.column, end_col - display.column);
+                }
+                offset += ch.len_utf8();
+                char_point.column += ch.len_utf8() as u32;
             }
         } else {
             // Carried from the segment head rather than re-derived per
@@ -4834,6 +4878,25 @@ mod tests {
         h.open_file(&path);
         dispatch(&mut h.stoat, &ExtendToLineEnd);
         h.assert_snapshot("selection_over_wrapped_accents");
+    }
+
+    /// Tabs and wide glyphs on a wrapped row are where an accumulated column is
+    /// likeliest to part ways with a resolved one. A tab's width depends on
+    /// where it starts, and a wide glyph moves the column by two.
+    ///
+    /// The paint loop's debug assertion turns this into a per-character
+    /// comparison against the authoritative mapping. The snapshot pins the
+    /// cells that come out of it.
+    #[test]
+    fn snapshot_selection_over_a_wrapped_line_of_tabs_and_wide_chars() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file(
+            "s.txt",
+            "\u{4e16}\u{754c}\ta\u{4e16}b\t\u{754c}cd\u{4e16}\te\u{754c}f\n",
+        );
+        h.open_file(&path);
+        dispatch(&mut h.stoat, &ExtendToLineEnd);
+        h.assert_snapshot("selection_over_wrapped_tabs_and_wide");
     }
 
     #[test]

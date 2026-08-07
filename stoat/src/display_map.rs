@@ -1207,6 +1207,31 @@ impl DisplaySnapshot {
         DisplayPoint::new(block.row, block.column)
     }
 
+    /// Tab-space position of `point`, the halfway house
+    /// [`Self::buffer_to_display`] passes through.
+    ///
+    /// A caller stepping along a row can take this once for the row's start and
+    /// accumulate the column itself, then finish with [`Self::tab_to_display`].
+    /// The alternative is re-entering at the buffer each time, and the tab leg
+    /// walks the row from its start to expand tabs, so doing that per character
+    /// is quadratic in the row.
+    pub fn buffer_to_tab_point(&self, point: Point) -> TabPoint {
+        let fold_snapshot = self.fold_snapshot();
+        let inlay_point = fold_snapshot.inlay_snapshot().to_inlay_point(point);
+        let fold_point = fold_snapshot.to_fold_point(inlay_point, Bias::Right);
+        self.tab_snapshot().to_tab_point(fold_point)
+    }
+
+    /// Display position of a tab-space position, for a caller that already
+    /// knows the tab-expanded column.
+    ///
+    /// See [`Self::buffer_to_tab_point`] for why a caller would hold one.
+    pub fn tab_to_display(&self, tab_point: TabPoint) -> DisplayPoint {
+        let wrap_point = self.wrap_snapshot().to_wrap_point(tab_point);
+        let block = self.block_snapshot.wrap_to_block(wrap_point);
+        DisplayPoint::new(block.row, block.column)
+    }
+
     pub fn display_to_buffer(&self, point: DisplayPoint) -> Option<Point> {
         self.block_snapshot
             .block_to_buffer(BlockPoint::new(point.row, point.column))
