@@ -1,4 +1,7 @@
-use crate::display_map::{BlockStyle, FoldPlaceholder};
+use crate::{
+    display_map::{fold_map, BlockStyle, FoldPlaceholder},
+    multi_buffer::MultiBufferSnapshot,
+};
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
@@ -189,6 +192,13 @@ pub struct CreaseMap {
     creases: SumTree<CreaseItem>,
     next_id: usize,
     id_to_range: HashMap<CreaseId, Range<Anchor>>,
+    /// Buffer version the stored offsets were last known good against, which is
+    /// what lets a sync carry them across an edit rather than re-resolve them.
+    ///
+    /// `None` whenever the crease set itself changed, since `insert` resolves
+    /// through a caller's closure and `remove` drops items, and neither names a
+    /// version the carry could start from.
+    last_synced_version: Option<u64>,
 }
 
 impl Default for CreaseMap {
@@ -197,6 +207,7 @@ impl Default for CreaseMap {
             creases: SumTree::new(()),
             next_id: 0,
             id_to_range: HashMap::new(),
+            last_synced_version: None,
         }
     }
 }
@@ -255,6 +266,7 @@ impl CreaseMap {
             tree
         };
         self.creases = new_tree;
+        self.last_synced_version = None;
 
         new_ids
     }
@@ -282,31 +294,121 @@ impl CreaseMap {
             .cloned()
             .collect();
         self.creases = SumTree::from_iter(items, ());
+        self.last_synced_version = None;
 
         removed
     }
 
-    pub fn sync(&mut self, resolve_batch: &impl Fn(&[Anchor]) -> Vec<usize>) {
+    /// Bring every crease's resolved offsets up to date with `buffer`.
+    ///
+    /// Creases come from LSP folding ranges, one per foldable region, so a large
+    /// file holds thousands and this runs on every buffer version change. When
+    /// the offsets can be carried across the edits since the last sync, only the
+    /// anchors the carry could not vouch for are resolved, and an edit that
+    /// moved nothing leaves the tree alone entirely.
+    pub fn sync(&mut self, buffer: &MultiBufferSnapshot) {
+        let version = buffer.version();
         if self.creases.is_empty() {
+            self.last_synced_version = Some(version);
             return;
         }
 
-        let mut items: Vec<CreaseItem> = self.creases.iter().cloned().collect();
-
-        let anchors: Vec<Anchor> = items
+        let items: Vec<CreaseItem> = self.creases.iter().cloned().collect();
+        let stored: Vec<usize> = items
             .iter()
-            .flat_map(|item| [item.crease.range().start, item.crease.range().end])
+            .flat_map(|item| [item.resolved_start, item.resolved_end])
             .collect();
-        let resolved = resolve_batch(&anchors);
 
+        let resolved = match self.last_synced_version {
+            Some(since) => carry_resolved(&items, &stored, buffer, since),
+            None => {
+                let anchors: Vec<Anchor> = items
+                    .iter()
+                    .flat_map(|item| [item.crease.range().start, item.crease.range().end])
+                    .collect();
+                buffer.resolve_anchors_batch(&anchors)
+            },
+        };
+
+        self.last_synced_version = Some(version);
+        if resolved == stored {
+            return;
+        }
+        self.install_resolved(items, &resolved);
+    }
+
+    /// Write `resolved` onto `items` and rebuild the tree in offset order.
+    ///
+    /// `resolved` interleaves each crease's start and end, matching `items`. A
+    /// carry is monotone so the order usually survives it, but an edit that
+    /// swallows a range collapses its start onto another's, and the tree is
+    /// keyed on that order.
+    fn install_resolved(&mut self, mut items: Vec<CreaseItem>, resolved: &[usize]) {
         for (item, pair) in items.iter_mut().zip(resolved.chunks_exact(2)) {
             item.resolved_start = pair[0];
             item.resolved_end = pair[1];
         }
-
         items.sort_by_key(|c| c.resolved_start);
         self.creases = SumTree::from_iter(items, ());
     }
+}
+
+/// Carry `stored` across the edits `buffer` has taken since `since`, resolving
+/// only the anchors the carry could not place itself.
+///
+/// The carry cannot vouch for an offset an edit touched the boundary of, since a
+/// crease's anchor bias decides whether it moved and only the anchor knows.
+/// Those go back to the buffer. The rest are arithmetic.
+///
+/// `stored` interleaves each crease's start and end, matching `items`.
+fn carry_resolved(
+    items: &[CreaseItem],
+    stored: &[usize],
+    buffer: &MultiBufferSnapshot,
+    since: u64,
+) -> Vec<usize> {
+    let edits = buffer.edits_since(since);
+    let mut offsets = stored.to_vec();
+    let mut needs_resolve = vec![false; offsets.len()];
+
+    // carry_offsets walks one ascending sequence, and an earlier edit can leave
+    // the stored offsets crossed, so an index permutation is sorted instead.
+    let mut order: Vec<usize> = (0..offsets.len()).collect();
+    order.sort_unstable_by_key(|&i| offsets[i]);
+    let mut sorted: Vec<usize> = order.iter().map(|&i| offsets[i]).collect();
+    let mut sorted_flags = vec![false; sorted.len()];
+    fold_map::carry_offsets(&mut sorted, &mut sorted_flags, &edits);
+    for (slot, &i) in order.iter().enumerate() {
+        offsets[i] = sorted[slot];
+        needs_resolve[i] = sorted_flags[slot];
+    }
+
+    let affected: Vec<usize> = needs_resolve
+        .iter()
+        .enumerate()
+        .filter(|&(_, &needs)| needs)
+        .map(|(i, _)| i)
+        .collect();
+    if affected.is_empty() {
+        return offsets;
+    }
+
+    let anchor_at = |i: usize| {
+        let range = items[i / 2].crease.range();
+        match i % 2 {
+            0 => range.start,
+            _ => range.end,
+        }
+    };
+    let to_resolve: Vec<Anchor> = affected.iter().map(|&i| anchor_at(i)).collect();
+    for (&i, offset) in affected
+        .iter()
+        .zip(buffer.resolve_anchors_batch(&to_resolve))
+    {
+        offsets[i] = offset;
+    }
+
+    offsets
 }
 
 #[derive(Clone)]
@@ -383,7 +485,12 @@ impl CreaseSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{Crease, CreaseMap, FoldPlaceholder};
+    use super::{Crease, CreaseItem, CreaseMap, FoldPlaceholder, Range};
+    use crate::{
+        buffer::{BufferId, SharedBuffer, TextBuffer},
+        multi_buffer::MultiBuffer,
+    };
+    use std::sync::{Arc, RwLock};
     use stoat_text::{Anchor, Bias, Point};
 
     fn anchor(_timestamp: u64, offset: usize) -> Anchor {
@@ -393,6 +500,133 @@ mod tests {
             bias: Bias::Left,
             buffer_id: None,
         }
+    }
+
+    /// A crease map over a real buffer, holding one crease per line body, with
+    /// the shared buffer returned so a test can edit it.
+    fn map_over(text: &str, ranges: &[Range<usize>]) -> (CreaseMap, SharedBuffer, MultiBuffer) {
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), text)));
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let snap = multi.snapshot();
+
+        let mut map = CreaseMap::new();
+        map.insert(
+            ranges.iter().map(|r| {
+                Crease::inline(
+                    snap.anchor_at(r.start, Bias::Right)..snap.anchor_at(r.end, Bias::Left),
+                    FoldPlaceholder::default(),
+                )
+            }),
+            &|a: &Anchor| snap.resolve_anchor(a),
+        );
+        map.sync(&snap);
+
+        (map, shared, multi)
+    }
+
+    fn starts_and_ends(map: &CreaseMap) -> Vec<(usize, usize)> {
+        map.creases
+            .iter()
+            .map(|i| (i.resolved_start, i.resolved_end))
+            .collect()
+    }
+
+    #[test]
+    fn carrying_offsets_lands_where_resolving_them_all_does() {
+        // The carry is arithmetic over a patch rather than a walk per anchor, so
+        // the only thing making it safe is that it agrees with the walk.
+        let text = "line0 body\nline1 body\nline2 body\nline3 body\n";
+        for edit_at in [0usize, 6, 11, 22, 33, 43] {
+            let ranges = [6..10, 17..21, 28..32];
+            let (mut carried, shared, multi) = map_over(text, &ranges);
+            let (mut resolved, _, _) = map_over(text, &ranges);
+
+            shared
+                .write()
+                .expect("poisoned")
+                .edit(edit_at..edit_at, "XY");
+            let after = multi.snapshot();
+
+            carried.sync(&after);
+            // Forgetting the version is what sends a sync back to resolving
+            // every anchor, which is the answer being compared against.
+            resolved.last_synced_version = None;
+            resolved.sync(&after);
+
+            assert_eq!(
+                starts_and_ends(&carried),
+                starts_and_ends(&resolved),
+                "carried and fully resolved disagree for an edit at {edit_at}",
+            );
+        }
+    }
+
+    #[test]
+    fn an_edit_past_every_crease_moves_no_offset() {
+        // What the carry buys. Typing at the end of a file with a crease on
+        // every foldable region used to re-resolve all of them.
+        let text = "line0 body\nline1 body\nline2 body\n";
+        let (mut map, shared, multi) = map_over(text, &[6..10, 17..21]);
+        let before = starts_and_ends(&map);
+
+        let end = text.len();
+        shared.write().expect("poisoned").edit(end..end, "tail\n");
+        map.sync(&multi.snapshot());
+
+        assert_eq!(
+            starts_and_ends(&map),
+            before,
+            "nothing before the edit moved"
+        );
+    }
+
+    #[test]
+    fn a_crease_inserted_after_an_unsynced_edit_is_not_carried_twice() {
+        // insert resolves against whatever snapshot the caller holds, which can
+        // already be past the version the carry would start from. Carrying the
+        // new crease from there would apply an edit it had already accounted
+        // for, so a crease-set change has to send the next sync back to
+        // resolving everything.
+        let text = "line0 body\nline1 body\n";
+        #[allow(clippy::single_range_in_vec_init)]
+        let (mut map, shared, multi) = map_over(text, &[6..10]);
+
+        shared.write().expect("poisoned").edit(0..0, "XY");
+        let after = multi.snapshot();
+
+        // Resolved against the edited buffer, while the map's carry point still
+        // names the version before it.
+        map.insert(
+            [Crease::inline(
+                after.anchor_at(19, Bias::Right)..after.anchor_at(23, Bias::Left),
+                FoldPlaceholder::default(),
+            )],
+            &|a: &Anchor| after.resolve_anchor(a),
+        );
+        map.sync(&after);
+
+        assert_eq!(
+            starts_and_ends(&map),
+            vec![(8, 12), (19, 23)],
+            "the first crease shifts by the edit, the second is already past it",
+        );
+    }
+
+    #[test]
+    fn an_edit_before_a_crease_shifts_it() {
+        let text = "line0 body\nline1 body\n";
+        #[allow(clippy::single_range_in_vec_init)]
+        let (mut map, shared, multi) = map_over(text, &[17..21]);
+        assert_eq!(starts_and_ends(&map), vec![(17, 21)]);
+
+        shared.write().expect("poisoned").edit(0..0, "XY");
+        map.sync(&multi.snapshot());
+
+        assert_eq!(
+            starts_and_ends(&map),
+            vec![(19, 23)],
+            "two inserted bytes ahead of it carry it two along",
+        );
     }
 
     #[test]
@@ -452,21 +686,19 @@ mod tests {
             &resolve_initial,
         );
 
-        let resolve_after = |anchors: &[Anchor]| {
-            anchors
-                .iter()
-                .map(|a| {
-                    if a.offset == 20 {
-                        2
-                    } else if a.offset == 25 {
-                        7
-                    } else {
-                        a.offset as usize
-                    }
-                })
-                .collect::<Vec<usize>>()
-        };
-        map.sync(&resolve_after);
+        // Resolution that moves the second crease in front of the first, which
+        // a real edit reaches only by collapsing the text between them.
+        let items: Vec<CreaseItem> = map.creases.iter().cloned().collect();
+        let resolved: Vec<usize> = items
+            .iter()
+            .flat_map(|item| [item.crease.range().start, item.crease.range().end])
+            .map(|a| match a.offset {
+                20 => 2,
+                25 => 7,
+                other => other as usize,
+            })
+            .collect();
+        map.install_resolved(items, &resolved);
 
         let snap = map.snapshot();
         let offsets: Vec<usize> = snap.items.iter().map(|i| i.resolved_start).collect();

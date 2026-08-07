@@ -898,8 +898,7 @@ impl DisplayMap {
         );
 
         if buffer_version != self.last_crease_sync_version {
-            self.crease_map
-                .sync(&|anchors| buffer_snapshot.resolve_anchors_batch(anchors));
+            self.crease_map.sync(&buffer_snapshot);
             self.last_crease_sync_version = buffer_version;
         }
 

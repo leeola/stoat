@@ -822,7 +822,11 @@ fn push_fold_isomorphic(tree: &mut SumTree<Transform>, summary: TransformSummary
 ///
 /// `offsets` must be ascending. The caller sorts an index permutation, since an
 /// edit can leave the previous sync's fold offsets crossed.
-fn carry_offsets(offsets: &mut [usize], needs_resolve: &mut [bool], edits: &Patch<usize>) {
+pub(super) fn carry_offsets(
+    offsets: &mut [usize],
+    needs_resolve: &mut [bool],
+    edits: &Patch<usize>,
+) {
     let mut delta: isize = 0;
     let mut i = 0;
     for edit in edits {
