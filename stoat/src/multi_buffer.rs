@@ -347,12 +347,16 @@ impl MultiBuffer {
             let cx = ();
             let mut tree = SumTree::new(cx);
             let mut ids = SumTree::new(cx);
+            // Borrowed, and walked once rather than per excerpt. Each entry
+            // carries a buffer snapshot and a text summary, so materializing
+            // them to read one locator apiece is quadratic in those clones.
+            let stored: Vec<&ExcerptEntry> = self.excerpt_tree.iter().collect();
             for (i, live) in self.live_excerpts.iter().enumerate() {
                 let buf = live.buffer.read().expect("buffer lock poisoned");
                 let text_summary = buf.snapshot.visible_text.summary().clone();
-                let locator = self
-                    .excerpt_tree
-                    .items(())
+                // live_excerpts outruns the stored tree when excerpts were just
+                // inserted, and those get a locator of their own.
+                let locator = stored
                     .get(i)
                     .map(|e| e.locator.clone())
                     .unwrap_or_else(|| Locator::between(Locator::min_ref(), Locator::max_ref()));
@@ -788,6 +792,40 @@ mod tests {
 
         let back = snapshot.multi_buffer_point_to_point(mb_point);
         assert_eq!(back, point);
+    }
+
+    #[test]
+    fn a_multi_excerpt_snapshot_keeps_every_excerpt_on_its_own_locator() {
+        // Snapshotting rebuilds the excerpt tree against fresh buffer snapshots
+        // and carries each excerpt's stored locator across by position. Reading
+        // the wrong position hands an excerpt its neighbour's locator, which
+        // orders the rebuilt tree by something other than the excerpts.
+        let (id, buffer) = create_test_buffer("alpha\nbeta\ngamma\n");
+        let mut multi = MultiBuffer::singleton(id, buffer.clone());
+        // The excerpt a singleton starts with is ExcerptId(0), which is also the
+        // ExcerptId::min sentinel that excerpt_locator_for_id answers without
+        // consulting the tree, so only the inserted ones can be read back.
+        let inserted = multi.insert_excerpts(id, buffer, vec![0..6, 6..11, 11..17]);
+        assert!(inserted.len() > 1, "one excerpt cannot be mispaired");
+
+        let stored: Vec<_> = multi
+            .excerpt_tree
+            .iter()
+            .map(|entry| (entry.id, entry.locator.clone()))
+            .collect();
+        let snapshot = multi.snapshot();
+
+        for excerpt in inserted {
+            let (_, locator) = stored
+                .iter()
+                .find(|(id, _)| *id == excerpt)
+                .expect("every inserted excerpt is in the tree");
+            assert_eq!(
+                snapshot.excerpt_locator_for_id(excerpt),
+                Some(locator),
+                "excerpt {excerpt:?} kept its own locator",
+            );
+        }
     }
 
     #[test]
