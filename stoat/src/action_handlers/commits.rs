@@ -158,7 +158,7 @@ fn maybe_spawn_next_page(stoat: &mut Stoat) {
 /// not already cached or in flight. Also populates the file-change
 /// summary synchronously (cheap: one tree-diff).
 fn ensure_selected_preview(stoat: &mut Stoat) {
-    let Some(state) = stoat.active_workspace().commits.as_ref() else {
+    let Some(state) = stoat.active_workspace_mut().commits.as_mut() else {
         return;
     };
     let Some(sha) = state.selected_sha().map(str::to_string) else {
@@ -166,7 +166,7 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
     };
     let workdir = state.workdir.clone();
     let need_summary = !state.summaries.contains_key(&sha);
-    let need_preview = !state.preview_sessions.contains_key(&sha)
+    let need_preview = !state.preview_sessions.mark_used(&sha)
         && state.pending_preview.as_ref().is_none_or(|p| p.sha != sha);
 
     if !need_summary && !need_preview {

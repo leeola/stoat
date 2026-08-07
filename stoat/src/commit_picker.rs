@@ -1,27 +1,18 @@
 use crate::{
     commit_graph::{self, GraphRow},
-    commit_list::PendingPreview,
+    commit_list::{PendingPreview, PreviewCache},
     fuzzy,
     host::CommitInfo,
     input_view::{InputView, SubmitTarget},
-    review_session::ReviewSession,
     workspace::Workspace,
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
     mem,
     path::PathBuf,
-    sync::Arc,
 };
 use stoat_scheduler::Executor;
-
-/// Commits whose built preview the picker keeps around.
-///
-/// Small because only the selected commit is ever rendered. The rest are held
-/// so stepping back over ground already walked is instant, which a handful
-/// covers.
-const PREVIEW_CACHE_CAP: usize = 8;
 
 /// What selecting a row in a [`CommitPicker`] does.
 ///
@@ -136,63 +127,6 @@ pub(crate) struct CommitScope {
     selected: usize,
     query: String,
     filter_column: Option<CommitColumn>,
-}
-
-/// Built diff previews for the commits a picker's selection has rested on,
-/// capped so a long history cannot grow one without bound.
-///
-/// A [`ReviewSession`] carries both sides' text and span vectors for every file
-/// its commit touched, so these are not cheap to keep and walking a few hundred
-/// commits would keep all of them. Past [`PREVIEW_CACHE_CAP`] the least
-/// recently used is dropped, and rebuilt from scratch if the selection returns
-/// to it.
-#[derive(Default)]
-pub(crate) struct PreviewCache {
-    sessions: HashMap<String, Arc<ReviewSession>>,
-    /// Cached shas, least recently used first, so eviction takes the front.
-    recent: VecDeque<String>,
-}
-
-impl PreviewCache {
-    /// Whether `sha` is cached, marking it most recently used when it is.
-    ///
-    /// This is the call the preview sync makes to decide whether to build, so
-    /// asking and recording are the same act and no caller can do one without
-    /// the other.
-    pub(crate) fn mark_used(&mut self, sha: &str) -> bool {
-        if !self.sessions.contains_key(sha) {
-            return false;
-        }
-        if let Some(at) = self.recent.iter().position(|held| held == sha) {
-            self.recent.remove(at);
-        }
-        self.recent.push_back(sha.to_owned());
-        true
-    }
-
-    /// The session built for `sha`, without counting as a use.
-    ///
-    /// Render reads this per frame for the selected commit alone, which would
-    /// say nothing [`Self::mark_used`] has not already said for that same sha.
-    pub(crate) fn get(&self, sha: &str) -> Option<&Arc<ReviewSession>> {
-        self.sessions.get(sha)
-    }
-
-    /// Cache `session` as the most recently used, dropping the least recently
-    /// used when that puts the cache over the cap.
-    pub(crate) fn insert(&mut self, sha: String, session: Arc<ReviewSession>) {
-        if let Some(at) = self.recent.iter().position(|held| *held == sha) {
-            self.recent.remove(at);
-        }
-        self.recent.push_back(sha.clone());
-        self.sessions.insert(sha, session);
-
-        while self.recent.len() > PREVIEW_CACHE_CAP {
-            if let Some(oldest) = self.recent.pop_front() {
-                self.sessions.remove(&oldest);
-            }
-        }
-    }
 }
 
 /// Modal listing a ref's first-parent history, fuzzy-filtered, with the
@@ -659,8 +593,7 @@ impl CommitPicker {
 #[cfg(test)]
 mod tests {
     use super::{
-        age_label, Arc, CommitColumn, CommitPicker, CommitPickerRole, PreviewCache, ReviewSession,
-        COMMIT_COLUMNS, PREVIEW_CACHE_CAP,
+        age_label, CommitColumn, CommitPicker, CommitPickerRole, PreviewCache, COMMIT_COLUMNS,
     };
     use crate::{
         app::{ModalKind, MIN_PREVIEW_ROWS},
@@ -670,70 +603,10 @@ mod tests {
         host::CommitInfo,
         input_view::{InputView, SubmitTarget},
         render::commit_picker::MIN_LIST_ROWS,
-        review_session::ReviewSource,
     };
     use crossterm::event::{MouseButton, MouseEventKind};
     use std::{collections::HashMap, path::PathBuf};
     use stoatty_protocol::command::PolylineCommand;
-
-    impl PreviewCache {
-        fn cache_session(&mut self, sha: &str) {
-            let source = ReviewSource::Commit {
-                workdir: PathBuf::from("/repo"),
-                sha: sha.to_owned(),
-            };
-            self.insert(sha.to_owned(), Arc::new(ReviewSession::new(source)));
-        }
-    }
-
-    /// A cache holding `count` sessions, `sha0` the least recently used.
-    fn filled_cache(count: usize) -> PreviewCache {
-        let mut cache = PreviewCache::default();
-        for n in 0..count {
-            cache.cache_session(&format!("sha{n}"));
-        }
-        cache
-    }
-
-    fn held(cache: &PreviewCache, shas: &[&str]) -> Vec<bool> {
-        shas.iter().map(|sha| cache.get(sha).is_some()).collect()
-    }
-
-    #[test]
-    fn caching_past_the_cap_drops_the_least_recently_used() {
-        let mut cache = filled_cache(PREVIEW_CACHE_CAP);
-        cache.cache_session("overflow");
-
-        assert_eq!(
-            held(&cache, &["sha0", "sha1", "overflow"]),
-            [false, true, true],
-            "the oldest goes, the rest and the newcomer stay"
-        );
-    }
-
-    #[test]
-    fn marking_an_older_sha_used_spares_it_from_the_next_eviction() {
-        let mut cache = filled_cache(PREVIEW_CACHE_CAP);
-
-        assert!(cache.mark_used("sha0"), "the oldest is still cached");
-        cache.cache_session("overflow");
-
-        assert_eq!(
-            held(&cache, &["sha0", "sha1", "overflow"]),
-            [true, false, true],
-            "the sha just used is spared and the one behind it goes instead"
-        );
-    }
-
-    #[test]
-    fn marking_a_sha_that_was_never_cached_reports_it_missing() {
-        let mut cache = filled_cache(1);
-        assert_eq!(
-            [cache.mark_used("sha0"), cache.mark_used("absent")],
-            [true, false],
-            "only a cached sha counts as a use"
-        );
-    }
 
     fn commit(sha: &str, summary: &str) -> CommitInfo {
         CommitInfo {

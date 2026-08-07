@@ -3,7 +3,7 @@ use crate::{
     review_session::ReviewSession,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     future::Future,
     path::PathBuf,
     pin::Pin,
@@ -11,6 +11,13 @@ use std::{
     task::{Context, Poll},
 };
 use stoat_scheduler::Task;
+
+/// Commits whose built preview a surface keeps around.
+///
+/// Small because only the selected commit is ever rendered. The rest are held
+/// so stepping back over ground already walked is instant, which a handful
+/// covers.
+const PREVIEW_CACHE_CAP: usize = 8;
 
 /// Commit-listing state owned by a [`crate::workspace::Workspace`] while
 /// the user is in `"commits"` mode.
@@ -41,7 +48,7 @@ pub(crate) struct CommitListState {
     pub viewport_rows: usize,
     pub pending_load: Option<Task<Vec<CommitInfo>>>,
     pub summaries: HashMap<String, Vec<CommitFileChange>>,
-    pub preview_sessions: HashMap<String, Arc<ReviewSession>>,
+    pub preview_sessions: PreviewCache,
     pub pending_preview: Option<PendingPreview>,
     /// Last sha the user requested a preview for. Tracked so a stale
     /// pending task (if the user scrolled past) can be discarded on
@@ -52,6 +59,78 @@ pub(crate) struct CommitListState {
 pub(crate) struct PendingPreview {
     pub sha: String,
     pub task: Task<Option<ReviewSession>>,
+}
+
+/// Built diff previews for the commits a surface's selection has rested on,
+/// capped so a long history cannot grow one without bound.
+///
+/// A [`ReviewSession`] carries both sides' text and span vectors for every file
+/// its commit touched, so these are not cheap to keep and walking a few hundred
+/// commits would keep all of them. Past [`PREVIEW_CACHE_CAP`] the least
+/// recently used is dropped, and rebuilt from scratch if the selection returns
+/// to it.
+///
+/// Shared by the commits view and the commit picker, which both build previews
+/// the same way. [`PendingPreview`] is the in-flight half of it.
+#[derive(Default)]
+pub(crate) struct PreviewCache {
+    sessions: HashMap<String, Arc<ReviewSession>>,
+    /// Cached shas, least recently used first, so eviction takes the front.
+    recent: VecDeque<String>,
+}
+
+impl PreviewCache {
+    /// Whether `sha` is cached, marking it most recently used when it is.
+    ///
+    /// This is the call a preview sync makes to decide whether to build, so
+    /// asking and recording are the same act and no caller can do one without
+    /// the other.
+    pub(crate) fn mark_used(&mut self, sha: &str) -> bool {
+        if !self.sessions.contains_key(sha) {
+            return false;
+        }
+        if let Some(at) = self.recent.iter().position(|held| held == sha) {
+            self.recent.remove(at);
+        }
+        self.recent.push_back(sha.to_owned());
+        true
+    }
+
+    /// The session built for `sha`, without counting as a use.
+    ///
+    /// Render reads this per frame for the selected commit alone, which would
+    /// say nothing [`Self::mark_used`] has not already said for that same sha.
+    pub(crate) fn get(&self, sha: &str) -> Option<&Arc<ReviewSession>> {
+        self.sessions.get(sha)
+    }
+
+    /// Cache `session` as the most recently used, dropping the least recently
+    /// used when that puts the cache over the cap.
+    pub(crate) fn insert(&mut self, sha: String, session: Arc<ReviewSession>) {
+        if let Some(at) = self.recent.iter().position(|held| *held == sha) {
+            self.recent.remove(at);
+        }
+        self.recent.push_back(sha.clone());
+        self.sessions.insert(sha, session);
+
+        while self.recent.len() > PREVIEW_CACHE_CAP {
+            if let Some(oldest) = self.recent.pop_front() {
+                self.sessions.remove(&oldest);
+            }
+        }
+    }
+
+    /// Drop every cached session, for a walk starting over on different
+    /// commits.
+    ///
+    /// The use order goes with them. Leaving it would corrupt nothing, since a
+    /// stale name only ever evicts a session already gone, but it would leave
+    /// the two halves describing different sets for any later change to trip
+    /// over.
+    pub(crate) fn clear(&mut self) {
+        self.sessions.clear();
+        self.recent.clear();
+    }
 }
 
 impl CommitListState {
@@ -65,7 +144,7 @@ impl CommitListState {
             viewport_rows: 0,
             pending_load: None,
             summaries: HashMap::new(),
-            preview_sessions: HashMap::new(),
+            preview_sessions: PreviewCache::default(),
             pending_preview: None,
             requested_preview: None,
         }
@@ -169,7 +248,84 @@ impl CommitListState {
 
 #[cfg(test)]
 mod tests {
-    use crate::{app::Stoat, host::GitHost, test_harness::CommitSpec};
+    use super::{PreviewCache, PREVIEW_CACHE_CAP};
+    use crate::{
+        app::Stoat,
+        host::GitHost,
+        review_session::{ReviewSession, ReviewSource},
+        test_harness::CommitSpec,
+    };
+    use std::{path::PathBuf, sync::Arc};
+
+    impl PreviewCache {
+        fn cache_session(&mut self, sha: &str) {
+            let source = ReviewSource::Commit {
+                workdir: PathBuf::from("/repo"),
+                sha: sha.to_owned(),
+            };
+            self.insert(sha.to_owned(), Arc::new(ReviewSession::new(source)));
+        }
+    }
+
+    /// A cache holding `count` sessions, `sha0` the least recently used.
+    fn filled_cache(count: usize) -> PreviewCache {
+        let mut cache = PreviewCache::default();
+        for n in 0..count {
+            cache.cache_session(&format!("sha{n}"));
+        }
+        cache
+    }
+
+    fn held(cache: &PreviewCache, shas: &[&str]) -> Vec<bool> {
+        shas.iter().map(|sha| cache.get(sha).is_some()).collect()
+    }
+
+    #[test]
+    fn caching_past_the_cap_drops_the_least_recently_used() {
+        let mut cache = filled_cache(PREVIEW_CACHE_CAP);
+        cache.cache_session("overflow");
+
+        assert_eq!(
+            held(&cache, &["sha0", "sha1", "overflow"]),
+            [false, true, true],
+            "the oldest goes, the rest and the newcomer stay"
+        );
+    }
+
+    #[test]
+    fn marking_an_older_sha_used_spares_it_from_the_next_eviction() {
+        let mut cache = filled_cache(PREVIEW_CACHE_CAP);
+
+        assert!(cache.mark_used("sha0"), "the oldest is still cached");
+        cache.cache_session("overflow");
+
+        assert_eq!(
+            held(&cache, &["sha0", "sha1", "overflow"]),
+            [true, false, true],
+            "the sha just used is spared and the one behind it goes instead"
+        );
+    }
+
+    #[test]
+    fn marking_a_sha_that_was_never_cached_reports_it_missing() {
+        let mut cache = filled_cache(1);
+        assert_eq!(
+            [cache.mark_used("sha0"), cache.mark_used("absent")],
+            [true, false],
+            "only a cached sha counts as a use"
+        );
+    }
+
+    #[test]
+    fn clearing_drops_every_session() {
+        let mut cache = filled_cache(3);
+        cache.clear();
+        assert_eq!(
+            held(&cache, &["sha0", "sha1", "sha2"]),
+            [false, false, false],
+            "a restarted walk previews nothing it cached for the old one"
+        );
+    }
 
     /// Three-commit linear history for the working-directory path
     /// `/repo` with the oldest commit at the bottom, matching git's
@@ -273,7 +429,7 @@ mod tests {
             .as_ref()
             .map(|s| s.source.clone())
         {
-            Some(crate::review_session::ReviewSource::Commit { sha, .. }) => sha,
+            Some(ReviewSource::Commit { sha, .. }) => sha,
             other => panic!("expected Commit source, got {other:?}"),
         };
         assert_eq!(session_sha, "c1000002");
@@ -490,7 +646,7 @@ mod tests {
 
         let mut h = Stoat::test();
         h.resize(90, 16);
-        let workdir = std::path::PathBuf::from("/repo");
+        let workdir = PathBuf::from("/repo");
         h.fake_git
             .add_repo(workdir.clone())
             .commit_with_message("parent", "prev", &[("a.rs", "base\n")])
@@ -575,7 +731,7 @@ mod tests {
         assert_eq!(state.selected, 1);
         let sha = state.commits[state.selected].sha.clone();
         assert!(
-            state.preview_sessions.contains_key(&sha),
+            state.preview_sessions.get(&sha).is_some(),
             "preview for selected sha must be cached after settle"
         );
         assert!(
