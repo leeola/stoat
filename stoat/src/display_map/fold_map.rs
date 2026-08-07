@@ -290,6 +290,10 @@ pub struct FoldMap {
     version: usize,
     cached_snapshot: Option<Arc<FoldSnapshot>>,
     last_inlay_version: usize,
+    /// Inlay *set* version the cached resolved folds were placed against. A
+    /// `Fold`'s range is in inlay space, so an inlay spliced ahead of one moves
+    /// it without touching its buffer offset, and only this notices.
+    last_inlay_set_version: usize,
     last_self_version: usize,
     /// Buffer version the stored folds. `resolved_start` and `resolved_end`
     /// were measured against, so the next sync can carry them across exactly
@@ -310,6 +314,7 @@ impl FoldMap {
         let empty_folds = SumTree::new(());
         let transforms = build_fold_transforms(&inlay_snapshot, &empty_folds);
         let inlay_version = inlay_snapshot.inlay_version;
+        let inlay_set_version = inlay_snapshot.inlay_set_version;
         let buffer_version = inlay_snapshot.buffer_snapshot().version();
         let snapshot = Arc::new(FoldSnapshot {
             inlay_snapshot,
@@ -324,6 +329,7 @@ impl FoldMap {
             version: 0,
             cached_snapshot: Some(Arc::clone(&snapshot)),
             last_inlay_version: inlay_version,
+            last_inlay_set_version: inlay_set_version,
             last_self_version: 0,
             last_buffer_version: buffer_version,
         };
@@ -344,7 +350,7 @@ impl FoldMap {
 
         let buffer = inlay_snapshot.buffer_snapshot();
         let all_folds: Vec<AnchoredFold> = self.folds.iter().cloned().collect();
-        let all_points = resolve_fold_points(
+        let (all_points, all_offsets) = resolve_fold_points(
             &all_folds,
             buffer,
             // A toggle leaves the stored folds' offsets on mixed footing:
@@ -352,42 +358,56 @@ impl FoldMap {
             // others, so none of them are reliably as of `last_buffer_version`.
             (self.version == self.last_self_version).then_some(self.last_buffer_version),
         );
-        let mut stored = Vec::with_capacity(all_folds.len());
-        let mut resolved = Vec::with_capacity(all_folds.len());
-        for (i, af) in all_folds.iter().enumerate() {
-            let start_pt = all_points[i * 2];
-            let end_pt = all_points[i * 2 + 1];
-            let start_inlay = inlay_snapshot.to_inlay_point(start_pt);
-            let end_inlay = inlay_snapshot.to_inlay_point(end_pt);
-            let start_offset = inlay_snapshot
-                .rope()
-                .point_to_offset(inlay_snapshot.to_buffer_point(start_inlay));
-            let end_offset = inlay_snapshot
-                .rope()
-                .point_to_offset(inlay_snapshot.to_buffer_point(end_inlay));
+        // Nothing about where the folds sit has moved. Their buffer offsets came
+        // back the same, and with the inlay set unchanged the same offsets map to
+        // the same inlay points. So the resolved tree the cache holds is the tree
+        // this would rebuild, and `self.folds` already carries these offsets.
+        let placement_held = all_offsets
+            .chunks_exact(2)
+            .zip(all_folds.iter())
+            .all(|(pair, af)| pair[0] == af.resolved_start && pair[1] == af.resolved_end)
+            && inlay_snapshot.inlay_set_version == self.last_inlay_set_version
+            && self.version == self.last_self_version;
 
-            let mut carried = af.clone();
-            carried.resolved_start = start_offset;
-            carried.resolved_end = end_offset;
-            stored.push(carried);
+        let resolved_tree = match self.cached_snapshot.as_ref().filter(|_| placement_held) {
+            Some(cached) => cached.folds.clone(),
+            None => {
+                let mut stored = Vec::with_capacity(all_folds.len());
+                let mut resolved = Vec::with_capacity(all_folds.len());
+                for (i, af) in all_folds.iter().enumerate() {
+                    let start_pt = all_points[i * 2];
+                    let end_pt = all_points[i * 2 + 1];
+                    let start_inlay = inlay_snapshot.to_inlay_point(start_pt);
+                    let end_inlay = inlay_snapshot.to_inlay_point(end_pt);
 
-            // A fold whose endpoints have met covers nothing and renders
-            // nothing, but its record stays. Which regions the reader folded is
-            // their own state, and an edit that swallows one is undoable, so
-            // dropping the record here would lose the fold for good.
-            if start_inlay < end_inlay {
-                resolved.push(Fold {
-                    id: af.id,
-                    range: start_inlay..end_inlay,
-                    placeholder: af.placeholder.clone(),
-                });
-            }
-        }
-        stored.sort_by_key(|f| f.resolved_start);
-        self.folds = SumTree::from_iter(stored, ());
+                    // The offsets these points were made from, rather than the
+                    // round trip back out through inlay space, which lands on the
+                    // same answer by way of four more descents per fold.
+                    let mut carried = af.clone();
+                    carried.resolved_start = all_offsets[i * 2];
+                    carried.resolved_end = all_offsets[i * 2 + 1];
+                    stored.push(carried);
 
-        resolved.sort_by_key(|f| f.range.start);
-        let resolved_tree = SumTree::from_iter(resolved, ());
+                    // A fold whose endpoints have met covers nothing and renders
+                    // nothing, but its record stays. Which regions the reader
+                    // folded is their own state, and an edit that swallows one is
+                    // undoable, so dropping the record here would lose the fold
+                    // for good.
+                    if start_inlay < end_inlay {
+                        resolved.push(Fold {
+                            id: af.id,
+                            range: start_inlay..end_inlay,
+                            placeholder: af.placeholder.clone(),
+                        });
+                    }
+                }
+                stored.sort_by_key(|f| f.resolved_start);
+                self.folds = SumTree::from_iter(stored, ());
+
+                resolved.sort_by_key(|f| f.range.start);
+                SumTree::from_iter(resolved, ())
+            },
+        };
 
         // A fold toggle moves no inlay row, so the rows it changed have to be
         // derived from the fold set itself. Without this every toggle falls to
@@ -483,6 +503,7 @@ impl FoldMap {
             version: self.version,
         });
         self.last_inlay_version = snapshot.inlay_snapshot.inlay_version;
+        self.last_inlay_set_version = snapshot.inlay_snapshot.inlay_set_version;
         self.last_self_version = self.version;
         self.last_buffer_version = snapshot.inlay_snapshot.buffer_snapshot().version();
         self.cached_snapshot = Some(Arc::clone(&snapshot));
@@ -865,7 +886,7 @@ fn resolve_fold_points(
     folds: &[AnchoredFold],
     buffer: &MultiBufferSnapshot,
     carry_from: Option<u64>,
-) -> Vec<Point> {
+) -> (Vec<Point>, Vec<usize>) {
     let anchors = || -> Vec<Anchor> {
         folds
             .iter()
@@ -874,7 +895,8 @@ fn resolve_fold_points(
     };
 
     let Some(since) = carry_from else {
-        return buffer.points_for_anchors_batch(&anchors());
+        let offsets = buffer.resolve_anchors_batch(&anchors());
+        return (buffer.rope().offsets_to_points_batch(&offsets), offsets);
     };
 
     let edits = buffer.edits_since(since);
@@ -915,7 +937,7 @@ fn resolve_fold_points(
     for offset in &mut offsets {
         *offset = (*offset).min(len);
     }
-    buffer.rope().offsets_to_points_batch(&offsets)
+    (buffer.rope().offsets_to_points_batch(&offsets), offsets)
 }
 
 /// The inlay rows whose fold coverage differs between two resolved fold sets,
@@ -2346,7 +2368,7 @@ mod tests {
             // The same folds, resolved from their anchors with no carrying.
             let final_snapshot = multi_buffer.snapshot();
             let all: Vec<super::AnchoredFold> = fold_map.folds.iter().cloned().collect();
-            let points = super::resolve_fold_points(&all, &final_snapshot, None);
+            let (points, _) = super::resolve_fold_points(&all, &final_snapshot, None);
             let full: Vec<(FoldId, Range<usize>)> = all
                 .iter()
                 .enumerate()
@@ -3061,6 +3083,101 @@ mod tests {
         #[allow(clippy::single_range_in_vec_init)]
         fold_map.unfold(vec![start_off..end_off], &snap);
         assert_ne!(fold_map.version, after_fold, "and so is removing it");
+    }
+
+    #[test]
+    fn an_inlay_spliced_ahead_of_a_fold_still_moves_it() {
+        // A Fold's range is in inlay space, so an inlay added before one shifts
+        // it while leaving its buffer offsets exactly where they were. Reusing
+        // the cached resolved tree on unchanged offsets alone would keep the
+        // fold at the row it used to occupy.
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "line0\nline1\nline2\n",
+        )));
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let buffer_snapshot = multi.snapshot();
+        let at = |row: u32, col: u32| {
+            buffer_snapshot
+                .rope()
+                .point_to_offset(stoat_text::Point::new(row, col))
+        };
+
+        let (mut inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot);
+        fold_map.fold(
+            vec![
+                buffer_snapshot.anchor_at(at(2, 0), Bias::Right)
+                    ..buffer_snapshot.anchor_at(at(2, 5), Bias::Left),
+            ],
+            FoldPlaceholder::default(),
+            &buffer_snapshot,
+        );
+        let (inlay_snap, _) = inlay_map.sync(buffer_snapshot.clone(), &Patch::empty());
+        let (before, _) = fold_map.sync(inlay_snap, &Patch::empty());
+        let placed_before = before.folds.iter().next().expect("the fold").range.clone();
+
+        // A multi-row hint on row 0, which pushes every inlay row below it down
+        // without moving a single buffer offset.
+        inlay_map.splice(
+            &buffer_snapshot,
+            Vec::new(),
+            vec![(
+                buffer_snapshot.anchor_at(at(0, 5), Bias::Right),
+                "\nhint\n".to_string(),
+                InlayKind::Hint,
+            )],
+        );
+        let (inlay_snap, inlay_edits) = inlay_map.sync(buffer_snapshot, &Patch::empty());
+        let (after, _) = fold_map.sync(inlay_snap, &inlay_edits);
+        let placed_after = after.folds.iter().next().expect("the fold").range.clone();
+
+        assert_ne!(
+            placed_before, placed_after,
+            "the hint's rows sit above the fold, so its inlay range moved",
+        );
+    }
+
+    #[test]
+    fn an_edit_past_every_fold_keeps_them_where_they_were() {
+        // The case the reuse is for. Typing at the end of a file with folds
+        // above moves none of them, so the resolved tree the cache holds is the
+        // one a rebuild would produce.
+        let text = "line0\nline1\nline2\n";
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), text)));
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let snap = multi.snapshot();
+        let at = |row: u32, col: u32| {
+            snap.rope()
+                .point_to_offset(stoat_text::Point::new(row, col))
+        };
+
+        let (mut inlay_map, inlay_snapshot) = InlayMap::new(snap.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot);
+        fold_map.fold(
+            vec![snap.anchor_at(at(0, 0), Bias::Right)..snap.anchor_at(at(0, 5), Bias::Left)],
+            FoldPlaceholder::default(),
+            &snap,
+        );
+        let (inlay_snap, _) = inlay_map.sync(snap, &Patch::empty());
+        let (before, _) = fold_map.sync(inlay_snap, &Patch::empty());
+        let placed_before: Vec<_> = before.folds.iter().map(|f| f.range.clone()).collect();
+
+        let end = text.len();
+        shared.write().expect("poisoned").edit(end..end, "tail\n");
+        let edited = multi.snapshot();
+        let (inlay_snap, inlay_edits) = inlay_map.sync(edited, &Patch::empty());
+        let (after, _) = fold_map.sync(inlay_snap, &inlay_edits);
+
+        assert_eq!(
+            after
+                .folds
+                .iter()
+                .map(|f| f.range.clone())
+                .collect::<Vec<_>>(),
+            placed_before,
+            "an edit past every fold leaves all of them where they were",
+        );
     }
 
     #[test]

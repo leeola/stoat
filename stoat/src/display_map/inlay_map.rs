@@ -171,7 +171,14 @@ pub struct InlaySnapshot {
     buffer: MultiBufferSnapshot,
     transforms: SumTree<Transform>,
     inlay_count: usize,
+    /// Bumped every time a snapshot is rebuilt, including for a buffer edit that
+    /// added or removed no inlay. A consumer asking "is this the same snapshot"
+    /// wants this one.
     pub inlay_version: usize,
+    /// Bumped only when an inlay is added or removed. A consumer asking whether
+    /// the buffer-to-inlay mapping still places a given buffer position the same
+    /// way wants this one, since a rebuild alone does not move it.
+    pub inlay_set_version: usize,
 }
 
 impl Deref for InlaySnapshot {
@@ -189,6 +196,7 @@ impl InlayMap {
             transforms,
             inlay_count: 0,
             inlay_version: 0,
+            inlay_set_version: 0,
         });
         let map = InlayMap {
             inlays: Vec::new(),
@@ -280,6 +288,7 @@ impl InlayMap {
             transforms,
             inlay_count,
             inlay_version: self.snapshot_version,
+            inlay_set_version: self.version,
         });
         self.last_buffer_version = snapshot.buffer.version();
         self.last_self_version = self.version;
