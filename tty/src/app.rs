@@ -1231,16 +1231,14 @@ impl ApplicationHandler<PtyEvent> for App {
                         .and_then(|aux| {
                             let (rows, cols) = aux.gpu.as_ref()?.grid_size();
                             let (col, row) = cell_at(position.x, position.y, cell_size, rows, cols);
-                            aux.pointer_cell = (col as u16, row as u16);
-                            aux.pressed
-                                .and_then(ipc_button)
-                                .map(|button| WindowIpcEvent::Mouse {
-                                    window: aux.id,
-                                    kind: MouseKind::Drag(button),
-                                    col: col as u16,
-                                    row: row as u16,
-                                    mods,
-                                })
+                            let cell = (col as u16, row as u16);
+                            let event =
+                                aux_drag_event(aux.id, aux.pointer_cell, cell, aux.pressed, mods);
+                            // Recorded wherever the pointer is, not only where a
+                            // drag was reported, since the wheel and button arms
+                            // read it for the cell under the pointer.
+                            aux.pointer_cell = cell;
+                            event
                         });
                     if let Some(event) = event {
                         send_window_event(state, event);
@@ -2438,6 +2436,35 @@ fn ipc_button(button: MouseButton) -> Option<IpcMouseButton> {
     }
 }
 
+/// The drag an aux window reports for a pointer that moved from `previous` to
+/// `cell`, or `None` when there is nothing to say.
+///
+/// A drag names a cell, so a pointer travelling inside one carries nothing the
+/// last report did not. Winit delivers a move per pointer poll, and each report
+/// is a formatted socket line and a write, so the ones that would repeat
+/// themselves are worth not making. The primary window's pointer path gates on
+/// the same crossing.
+fn aux_drag_event(
+    window: u32,
+    previous: (u16, u16),
+    cell: (u16, u16),
+    pressed: Option<MouseButton>,
+    mods: u8,
+) -> Option<WindowIpcEvent> {
+    if cell == previous {
+        return None;
+    }
+
+    let button = ipc_button(pressed?)?;
+    Some(WindowIpcEvent::Mouse {
+        window,
+        kind: MouseKind::Drag(button),
+        col: cell.0,
+        row: cell.1,
+        mods,
+    })
+}
+
 /// Pack the active keyboard modifiers into a bitmask, with shift at `0x1`,
 /// control at `0x2`, alt at `0x4`, and super at `0x8`.
 fn modifier_bits(mods: ModifiersState) -> u8 {
@@ -3503,14 +3530,14 @@ fn reposition_scroll(current: f32, target: u64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        alternate_scroll_bytes, anchored_cursor_pos, app_has_focus, bell_should_ring,
-        block_corners, cell_at, copy_pool_region, cursor_in_region, ease, ease_corners, encode_key,
-        font_step, forwards_zoom, ipc_button, modifier_bits, paste_bytes, popover_overflow,
-        refresh_popover_overflows, reposition_scroll, seed_settle_flight, selection_copy_text,
-        sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes, step_cursor, step_document_scroll,
-        step_grid_scroll, step_popover_scroll, step_region_scroll, step_scrollback_scroll,
-        swallow_super_combo, wheel_lines, CursorAnimation, Visibility, EASE_BASELINE_FRAME,
-        SCROLLBACK_MIN_STEP,
+        alternate_scroll_bytes, anchored_cursor_pos, app_has_focus, aux_drag_event,
+        bell_should_ring, block_corners, cell_at, copy_pool_region, cursor_in_region, ease,
+        ease_corners, encode_key, font_step, forwards_zoom, ipc_button, modifier_bits, paste_bytes,
+        popover_overflow, refresh_popover_overflows, reposition_scroll, seed_settle_flight,
+        selection_copy_text, sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes, step_cursor,
+        step_document_scroll, step_grid_scroll, step_popover_scroll, step_region_scroll,
+        step_scrollback_scroll, swallow_super_combo, wheel_lines, CursorAnimation, Visibility,
+        EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
     };
     #[cfg(unix)]
     use super::{window_socket_path, PathBuf};
@@ -4275,6 +4302,46 @@ mod tests {
             sgr_motion_bytes(None, 0, 0),
             b"\x1b[<35;1;1M".to_vec(),
             "buttonless any-motion is the no-button code 3+32=35 at the origin"
+        );
+    }
+
+    #[test]
+    fn an_aux_drag_reports_only_where_the_pointer_crosses_a_cell() {
+        use stoatty_protocol::window_ipc::{
+            MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent,
+        };
+        use winit::event::MouseButton;
+
+        let held = Some(MouseButton::Left);
+        let reported = |previous, cell, pressed| {
+            aux_drag_event(7, previous, cell, pressed, 0).map(|event| match event {
+                WindowIpcEvent::Mouse { col, row, .. } => (col, row),
+                other => panic!("expected a mouse event, got {other:?}"),
+            })
+        };
+
+        assert_eq!(
+            [
+                reported((3, 4), (3, 4), held),
+                reported((3, 4), (4, 4), held),
+                reported((3, 4), (3, 5), held),
+                reported((3, 4), (4, 4), None),
+            ],
+            [None, Some((4, 4)), Some((3, 5)), None],
+            "a move inside a cell says nothing, a crossing names the new cell, \
+             and nothing is dragging with no button down"
+        );
+
+        assert!(
+            matches!(
+                aux_drag_event(7, (0, 0), (1, 0), held, 0),
+                Some(WindowIpcEvent::Mouse {
+                    window: 7,
+                    kind: MouseKind::Drag(IpcMouseButton::Left),
+                    ..
+                })
+            ),
+            "the report carries its window and the button being held"
         );
     }
 
