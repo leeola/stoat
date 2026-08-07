@@ -32,8 +32,8 @@ pub use movement::{
 pub use offset_utf16::OffsetUtf16;
 pub use point::{Point, PointUtf16};
 pub use rope::{
-    BytesInRange, CharsAt, ChunksInLine, ChunksInRange, FindIter, Lines, ReversedCharsAt, Rope,
-    TextSummary,
+    BytesInRange, CharsAt, ChunksInLine, ChunksInRange, Cursor as RopeCursor, FindIter, Lines,
+    ReversedCharsAt, Rope, TextSummary,
 };
 pub use selection::{cursor_offset, next_char_boundary, Selection, SelectionGoal};
 pub use sum_tree::{

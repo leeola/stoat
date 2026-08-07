@@ -5,7 +5,8 @@ pub use stoat_text::BufferId;
 use stoat_text::{
     patch::{Edit, Patch},
     Anchor, Bias, Cursor, Dimensions, Fragment, IndentStyle, InsertionFragment,
-    InsertionFragmentKey, Locator, Point, Rope, Selection, SumTree, UndoMap, UndoOperation,
+    InsertionFragmentKey, Locator, Point, Rope, RopeCursor, Selection, SumTree, UndoMap,
+    UndoOperation,
 };
 
 /// Op-log length past which [`TextBuffer::history`] persists a compacted seed
@@ -238,6 +239,144 @@ impl TextBuffer {
     /// content, falling back to the default when the content shows no evidence.
     fn detect_indent_style(&mut self) {
         self.indent_style = stoat_text::detect_indent_style(self.rope()).unwrap_or_default();
+    }
+
+    /// Apply several disjoint replacements in one pass over the fragment tree.
+    ///
+    /// `edits` are pre-edit coordinates sorted descending by start, which is what
+    /// applying them right to left needs and what every caller already builds.
+    /// Ranges must not overlap. Touching ranges and repeated empty ranges at one
+    /// offset are fine.
+    ///
+    /// An empty range sharing an offset with a deleting range's start is out of
+    /// contract. Sequentially, whichever ran first decides whether
+    /// the inserted text lands before or after the run the other deletes, and a
+    /// single forward pass builds the tree left to right, so it cannot place a
+    /// later fragment ahead of one it has already pushed. Both orders are
+    /// defensible and the callers never produce the shape, so it is rejected
+    /// rather than silently resolved.
+    ///
+    /// The result is indistinguishable from calling [`Self::edit`] on each in the
+    /// given order. The recorded ops, their timestamps, and the undo grouping all
+    /// come out the same, because the pass reads the old tree, against which every
+    /// range's coordinates are correct whichever order they are visited in. What
+    /// it saves is the N-1 extra tree rebuilds, rope rebuilds, and dirty
+    /// recomputations that N separate calls pay for one keystroke.
+    pub fn edit_batch(&mut self, edits: &[(Range<usize>, &str)]) {
+        if edits.is_empty() {
+            return;
+        }
+        if edits.len() == 1 {
+            let (range, text) = &edits[0];
+            self.edit(range.clone(), text);
+            return;
+        }
+
+        self.redo_history.clear();
+
+        // Ops and timestamps follow the caller's descending order, so the
+        // recorded history is byte-identical to the sequential calls.
+        let base = self.next_timestamp;
+        for (k, (range, text)) in edits.iter().enumerate() {
+            self.ops.push(BufferOp::Edit {
+                old: range.clone(),
+                text: (*text).to_owned(),
+            });
+            self.record_edit(base + k as u64);
+        }
+        self.next_timestamp = base + edits.len() as u64;
+
+        // The walk reads the old tree, so it runs ascending while the timestamps
+        // stay attached to the range they were assigned to.
+        //
+        // Reversed, so two ranges at one offset are applied last-first. That is
+        // what puts the later insert ahead of the earlier, matching where
+        // inserting at an offset that already holds new text lands.
+        let ascending: Vec<(usize, &(Range<usize>, &str))> =
+            edits.iter().enumerate().rev().collect();
+        debug_assert!(
+            ascending
+                .windows(2)
+                .all(|w| w[0].1 .0.end <= w[1].1 .0.start),
+            "edit_batch takes disjoint ranges sorted descending by start",
+        );
+        debug_assert!(
+            ascending
+                .windows(2)
+                .all(|w| w[0].1 .0.start != w[1].1 .0.start
+                    || w[0].1 .0.is_empty() == w[1].1 .0.is_empty()),
+            "an empty range sharing a start with a deleting one is out of contract",
+        );
+
+        let cx = &None;
+        let mut new_insertions = Vec::new();
+
+        let boundaries = {
+            let mut all: Vec<usize> = ascending
+                .iter()
+                .flat_map(|(_, (range, _))| [range.start, range.end])
+                .collect();
+            all.sort_unstable();
+            all.dedup();
+            all
+        };
+
+        let old_fragments = split_at_boundaries(
+            std::mem::replace(&mut self.snapshot.fragments, SumTree::new(cx)),
+            &boundaries,
+            &mut new_insertions,
+        );
+
+        let mut new_fragments = SumTree::new(cx);
+        let mut cursor = old_fragments.cursor::<usize>(cx);
+        let mut deleted_rope = DeletedRebuild::new(ascending[0].1 .0.start);
+
+        for (k, (range, text)) in &ascending {
+            deleted_rope.skip_to(range.start);
+            splice_one_range(
+                SpliceRange {
+                    range: range.clone(),
+                    text,
+                    timestamp: base + *k as u64,
+                },
+                &mut SpliceState {
+                    cursor: &mut cursor,
+                    new_fragments: &mut new_fragments,
+                    new_insertions: &mut new_insertions,
+                    deleted_rope: &mut deleted_rope,
+                },
+                &self.snapshot.visible_text,
+                &self.snapshot.deleted_text,
+            );
+        }
+
+        let suffix = cursor.suffix();
+        deleted_rope.carry(&self.snapshot.deleted_text, suffix.summary().text.deleted);
+        new_fragments.append(suffix, cx);
+
+        let mut all_insertions = self.snapshot.insertions.clone();
+        for ins in new_insertions {
+            all_insertions.insert_or_replace(ins, ());
+        }
+
+        let visible_text = {
+            let mut out = Rope::new();
+            let mut reader = RopeCursor::new(&self.snapshot.visible_text, 0);
+            for (_, (range, text)) in &ascending {
+                out.append(reader.slice(range.start));
+                out.push(text);
+                reader.seek_forward(range.end);
+            }
+            out.append(reader.suffix());
+            out
+        };
+
+        self.snapshot.visible_text = visible_text;
+        self.snapshot.deleted_text = deleted_rope.text;
+        self.snapshot.fragments = new_fragments;
+        self.snapshot.insertions = all_insertions;
+        self.snapshot.version = self.next_timestamp - 1;
+        self.recompute_dirty();
     }
 
     pub fn edit(&mut self, range: Range<usize>, text: &str) {
@@ -505,6 +644,96 @@ fn splice_one_range(
             None => break,
         }
     }
+}
+
+/// Rebuild `old` so that no visible offset in `boundaries` falls strictly
+/// inside a fragment.
+///
+/// [`splice_one_range`] consumes whole fragments, emitting an untouched tail as
+/// a new fragment and advancing past it. That is fine for one range and fatal
+/// for several sharing a walk, because a later range landing in that tail would
+/// need the cursor to seek backward. Cutting every boundary ahead of time means each
+/// range starts and ends on a fragment edge, so the tail branches never fire and
+/// every seek is forward.
+///
+/// Splitting a fragment leaves the right half its original id and gives the left
+/// half a fresh one ordered before it, so document order is preserved and the id
+/// an anchor already resolved to still names text at the same place. Both halves
+/// re-record their insertions entry, since the key is `(timestamp, split_offset)`
+/// and the left half's offset is unchanged while the right half's has moved.
+///
+/// Only visible fragments can hold a boundary strictly inside, since boundaries
+/// are visible offsets, so the deleted rope and the visible rope are untouched.
+fn split_at_boundaries(
+    old: SumTree<Fragment>,
+    boundaries: &[usize],
+    new_insertions: &mut Vec<InsertionFragment>,
+) -> SumTree<Fragment> {
+    let cx = &None;
+    let mut new_fragments = SumTree::new(cx);
+    let mut cursor = old.cursor::<usize>(cx);
+
+    // A fragment can hold several boundaries, which is the ordinary case for
+    // carets in a freshly opened buffer, so the right half of a split is held
+    // back rather than pushed. The cursor has already moved past it, so only
+    // this can offer it to the next boundary.
+    let mut pending: Option<(Fragment, usize)> = None;
+
+    for &boundary in boundaries {
+        if let Some((held, start)) = pending.take() {
+            let end = start + held.len as usize;
+            if boundary > start && boundary < end {
+                let left_len = boundary - start;
+                let mut right = held.clone();
+                right.insertion_offset += left_len as u32;
+                right.len -= left_len as u32;
+
+                let mut left = held;
+                left.id = Locator::between(last_id(&new_fragments, cx), &right.id);
+                left.len = left_len as u32;
+                push_insertion(new_insertions, &left);
+                new_fragments.push(left, cx);
+
+                pending = Some((right, boundary));
+                continue;
+            }
+
+            push_insertion(new_insertions, &held);
+            new_fragments.push(held, cx);
+        }
+
+        new_fragments.append(cursor.slice(&boundary, Bias::Right), cx);
+
+        let Some(fragment) = cursor.item() else {
+            continue;
+        };
+        let start = *cursor.start();
+        if start >= boundary || !fragment.visible {
+            continue;
+        }
+
+        let left_len = boundary - start;
+        let mut right = fragment.clone();
+        right.insertion_offset += left_len as u32;
+        right.len -= left_len as u32;
+
+        let mut left = fragment.clone();
+        left.id = Locator::between(last_id(&new_fragments, cx), &right.id);
+        left.len = left_len as u32;
+        push_insertion(new_insertions, &left);
+        new_fragments.push(left, cx);
+
+        pending = Some((right, boundary));
+        cursor.next();
+    }
+
+    if let Some((held, _)) = pending {
+        push_insertion(new_insertions, &held);
+        new_fragments.push(held, cx);
+    }
+
+    new_fragments.append(cursor.suffix(), cx);
+    new_fragments
 }
 
 impl TextBuffer {
@@ -990,6 +1219,20 @@ impl DeletedRebuild {
         self.text.append(old_visible.slice(self.being_deleted..end));
         self.being_deleted = end;
     }
+
+    /// Move the read position to where the next range starts deleting.
+    ///
+    /// One pass over several disjoint ranges shares a rebuild, and the bytes
+    /// between two of them are never deleted, so nothing reads them. Only a
+    /// forward move is meaningful. The ranges arrive ascending, so a backward
+    /// one would mean they overlap.
+    fn skip_to(&mut self, offset: usize) {
+        debug_assert!(
+            offset >= self.being_deleted,
+            "ranges are applied ascending, so the delete position only moves forward",
+        );
+        self.being_deleted = offset;
+    }
 }
 
 fn push_insertion(insertions: &mut Vec<InsertionFragment>, fragment: &Fragment) {
@@ -1439,6 +1682,180 @@ mod tests {
 
     fn buf(content: &str) -> TextBuffer {
         TextBuffer::with_text(BufferId::new(0), content)
+    }
+
+    /// Everything an `edit_batch` must reproduce, read off a buffer.
+    ///
+    /// Comparing final text alone would pass a batch that corrupted the fragment
+    /// tree, since the rope is built separately from it. The anchors and the
+    /// `edits_since` patch are what read the tree back out.
+    fn observable(b: &TextBuffer, pre_version: u64) -> String {
+        let snap = &b.snapshot;
+        let len = snap.visible_text.len();
+        let anchors: Vec<usize> = (0..=len)
+            .filter(|o| snap.visible_text.is_char_boundary(*o))
+            .flat_map(|o| [(o, Bias::Left), (o, Bias::Right)])
+            .map(|(o, bias)| snap.resolve_anchor(&snap.anchor_at(o, bias)))
+            .collect();
+        let patch: Vec<(Range<usize>, Range<usize>)> = snap
+            .edits_since(pre_version)
+            .edits()
+            .iter()
+            .map(|e| (e.old.clone(), e.new.clone()))
+            .collect();
+
+        format!(
+            "text={:?}\ndeleted={:?}\nversion={}\nops={:?}\nanchors={:?}\npatch={:?}",
+            snap.visible_text.to_string(),
+            snap.deleted_text.to_string(),
+            snap.version,
+            b.ops,
+            anchors,
+            patch,
+        )
+    }
+
+    /// `edit_batch` is indistinguishable from the sequential calls it replaces.
+    ///
+    /// The fixtures are the shapes that break a shared cursor walk. Several carets
+    /// sit in a buffer that is still one fragment, ranges touch end to start,
+    /// inserts repeat at one offset, and a tree arrives already fragmented by
+    /// prior edits and an undo.
+    fn assert_batch_matches_sequential(content: &str, edits: &[(Range<usize>, &str)]) {
+        let mut batched = buf(content);
+        let mut sequential = buf(content);
+        let pre_version = batched.snapshot.version;
+
+        batched.edit_batch(edits);
+        for (range, text) in edits {
+            sequential.edit(range.clone(), text);
+        }
+
+        assert_eq!(
+            observable(&batched, pre_version),
+            observable(&sequential, pre_version),
+            "batch diverged from sequential on {content:?} with {edits:?}",
+        );
+
+        // Undo and redo read the op log and the fragment tree together, so a
+        // tree that merely looks right at the end still fails here.
+        for step in 0..3 {
+            batched.undo();
+            sequential.undo();
+            assert_eq!(
+                observable(&batched, pre_version),
+                observable(&sequential, pre_version),
+                "undo {step} diverged on {content:?}",
+            );
+        }
+        for step in 0..3 {
+            batched.redo();
+            sequential.redo();
+            assert_eq!(
+                observable(&batched, pre_version),
+                observable(&sequential, pre_version),
+                "redo {step} diverged on {content:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn batch_matches_sequential_for_carets_in_one_fragment() {
+        // This is the case the shared-cursor attempt panicked on. A fresh buffer
+        // is one fragment, so every caret sits inside it.
+        assert_batch_matches_sequential(
+            "hello world here",
+            &[(12..12, "X"), (6..6, "X"), (0..0, "X")],
+        );
+    }
+
+    #[test]
+    fn batch_matches_sequential_for_repeated_offsets_and_touching_ranges() {
+        assert_batch_matches_sequential("abcdefghij", &[(4..4, "Y"), (4..4, "X")]);
+        assert_batch_matches_sequential("abcdefghij", &[(5..7, "Z"), (3..5, "Y")]);
+    }
+
+    #[test]
+    fn batch_matches_sequential_over_a_fragmented_tree() {
+        let mut fragmented = buf("one two three four five");
+        fragmented.edit(8..8, "AA");
+        fragmented.edit(0..0, "BB");
+        fragmented.edit(4..6, "");
+        fragmented.undo();
+        let content = fragmented.snapshot.visible_text.to_string();
+
+        assert_batch_matches_sequential(&content, &[(18..20, "Q"), (10..12, ""), (2..2, "P")]);
+    }
+
+    #[test]
+    fn batch_matches_sequential_over_random_edits() {
+        // A cheap deterministic generator avoids a rand dependency, and the fixed
+        // seed keeps a failure reproducible.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = |bound: usize| -> usize {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            if bound == 0 {
+                0
+            } else {
+                state as usize % bound
+            }
+        };
+
+        let content = "the quick brown fox jumps over the lazy dog\nand back again\n";
+        for _ in 0..200 {
+            let count = 2 + next(3);
+            let mut cuts: Vec<usize> = (0..count * 2)
+                .map(|_| next(content.len() + 1))
+                .filter(|o| content.is_char_boundary(*o))
+                .collect();
+            cuts.sort_unstable();
+            cuts.dedup();
+            if cuts.len() < 2 {
+                continue;
+            }
+
+            let texts = ["", "X", "hello", "\n"];
+            let mut edits: Vec<(Range<usize>, &str)> = cuts
+                .chunks_exact(2)
+                .map(|w| (w[0]..w[1], texts[next(texts.len())]))
+                .collect();
+            edits.reverse();
+
+            assert_batch_matches_sequential(content, &edits);
+        }
+    }
+
+    /// The pre-split rewrites fragment ids and insertion offsets, so it has to
+    /// leave everything a reader can see untouched.
+    #[test]
+    fn splitting_at_boundaries_changes_nothing_observable() {
+        let mut b = buf("one two three four five six seven");
+        b.edit(8..8, "AA");
+        b.edit(0..0, "BB");
+        b.edit(4..6, "");
+        let pre_version = b.snapshot.version;
+        let before = observable(&b, pre_version);
+
+        let len = b.snapshot.visible_text.len();
+        let boundaries: Vec<usize> = (0..=len).step_by(3).collect();
+        let mut new_insertions = Vec::new();
+        let split = super::split_at_boundaries(
+            mem::replace(&mut b.snapshot.fragments, super::SumTree::new(&None)),
+            &boundaries,
+            &mut new_insertions,
+        );
+        b.snapshot.fragments = split;
+        for ins in new_insertions {
+            b.snapshot.insertions.insert_or_replace(ins, ());
+        }
+
+        assert_eq!(
+            before,
+            observable(&b, pre_version),
+            "the split is invisible"
+        );
     }
 
     #[test]
