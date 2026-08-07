@@ -1861,7 +1861,7 @@ fn delete_selection_impl(stoat: &mut Stoat, yank: bool) -> UpdateEffect {
     // ws is borrowed below.
     if yank
         && let Some(fragments) = crate::action_handlers::yank::selection_fragments(stoat)
-        && !fragments.is_empty()
+        && fragments.iter().any(|f| !f.is_empty())
     {
         let target = stoat.consume_selected_register();
         crate::action_handlers::yank::write_fragments_to_register(stoat, target, fragments);
@@ -1898,14 +1898,27 @@ fn delete_selection_impl(stoat: &mut Stoat, yank: bool) -> UpdateEffect {
 
     deletions.sort_by_key(|(_, s, _)| *s);
 
-    {
-        // Selections are merged where they overlap, but these are offsets the
-        // anchors resolve to now, and text deleted between two selections
-        // collapses them onto each other without any selection change to
-        // notice it. Editing an overlap twice takes as much text again beyond
-        // it, so the spans are unioned before anything is removed.
-        let spans = merge_overlapping_spans(deletions.iter().map(|&(_, s, e)| (s, e)).collect());
+    // Selections are merged where they overlap, but these are offsets the
+    // anchors resolve to now, and text deleted between two selections
+    // collapses them onto each other without any selection change to notice
+    // it. Editing an overlap twice takes as much text again beyond it, so the
+    // spans are unioned before anything is removed.
+    let spans = merge_overlapping_spans(
+        deletions
+            .iter()
+            .filter(|(_, s, e)| s < e)
+            .map(|&(_, s, e)| (s, e))
+            .collect(),
+    );
 
+    // An empty range still costs an edit, which discards the redo history and
+    // records an undo step. A delete that covers no text has to stop short of
+    // that rather than rely on the buffer to ignore it.
+    if spans.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
         for (s, e) in spans.iter().rev() {
@@ -2222,6 +2235,12 @@ pub(crate) fn execute_replace(stoat: &mut Stoat, ch: char) -> UpdateEffect {
             .collect();
         (buffer_id, entries)
     };
+
+    // A selection covering no character produces no replacement, and editing it
+    // would still discard the redo history and record an undo step. Dropping it
+    // here leaves its anchors alone, since the transform below only moves a
+    // selection it finds an entry for.
+    entries.retain(|(_, _, _, replacement)| !replacement.is_empty());
 
     if entries.is_empty() {
         return UpdateEffect::None;

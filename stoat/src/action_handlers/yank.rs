@@ -568,6 +568,30 @@ mod tests {
         )
     }
 
+    /// Delete yanks what it removes, so deleting nothing must not reach the
+    /// register at all. On an empty buffer the sole selection is collapsed and
+    /// yields one empty fragment, which is not the same as having something to
+    /// store.
+    #[test]
+    fn deleting_a_collapsed_selection_leaves_the_register_alone() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["kept".to_string()]);
+        h.type_keys("escape");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::DeleteSelection);
+        assert_eq!(
+            h.stoat
+                .registers
+                .read(crate::register::Register::Unnamed)
+                .map(<[String]>::to_vec),
+            Some(vec!["kept".to_string()]),
+            "a delete that removed nothing does not overwrite the register",
+        );
+    }
+
     #[test]
     fn yank_stores_primary_selection_in_unnamed() {
         let mut h = TestHarness::with_size(40, 10);

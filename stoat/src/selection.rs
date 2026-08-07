@@ -3430,6 +3430,49 @@ mod tests {
         assert_eq!(focused_buffer_text(&mut h), "");
     }
 
+    /// An empty buffer holds one collapsed selection, because `min_width_1` has
+    /// no grapheme to widen over in either direction. Deleting it covers no
+    /// text, so the redo it would otherwise discard has to survive.
+    #[test]
+    fn deleting_a_collapsed_selection_keeps_the_redo() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "");
+        h.open_file(&path);
+        h.type_keys("i h e l l o escape");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Undo);
+        assert_eq!(focused_buffer_text(&mut h), "", "undo empties the buffer");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Redo);
+        assert_eq!(
+            focused_buffer_text(&mut h),
+            "hello",
+            "the redo outlives the delete"
+        );
+    }
+
+    /// Replacing a collapsed selection writes as many characters as it covers,
+    /// which is none, so it must leave the redo alone for the same reason.
+    #[test]
+    fn replacing_a_collapsed_selection_keeps_the_redo() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "");
+        h.open_file(&path);
+        h.type_keys("i h e l l o escape");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Undo);
+        assert_eq!(focused_buffer_text(&mut h), "", "undo empties the buffer");
+
+        h.type_keys("r x");
+        assert_eq!(focused_buffer_text(&mut h), "", "nothing to replace");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Redo);
+        assert_eq!(
+            focused_buffer_text(&mut h),
+            "hello",
+            "the redo outlives the replace"
+        );
+    }
+
     #[test]
     fn redo_with_empty_redo_stack_is_noop() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
