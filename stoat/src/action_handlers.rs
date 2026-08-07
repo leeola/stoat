@@ -2657,7 +2657,11 @@ mod tests {
         }
         assert_eq!(editor::selection_spans(&mut stoat), vec![(6, 7, false)]);
         dispatch(&mut stoat, &ExtendPrevWordStart);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 6, true)]);
+        assert_eq!(
+            editor::selection_spans(&mut stoat),
+            vec![(4, 7, true)],
+            "crossing the tail keeps the r the cursor was on covered"
+        );
     }
 
     #[test]
@@ -2669,7 +2673,11 @@ mod tests {
         }
         assert_eq!(editor::selection_spans(&mut stoat), vec![(6, 7, false)]);
         dispatch(&mut stoat, &ExtendPrevWordEnd);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 6, true)]);
+        assert_eq!(
+            editor::selection_spans(&mut stoat),
+            vec![(2, 7, true)],
+            "crossing the tail keeps the r the cursor was on covered"
+        );
     }
 
     #[test]
@@ -2701,7 +2709,11 @@ mod tests {
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &ExtendToLineStart);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, true)]);
+        assert_eq!(
+            editor::selection_spans(&mut stoat),
+            vec![(0, 4, true)],
+            "crossing the tail keeps the cell the cursor was on covered"
+        );
     }
 
     #[test]
@@ -2720,7 +2732,11 @@ mod tests {
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &ExtendToFileStart);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, true)]);
+        assert_eq!(
+            editor::selection_spans(&mut stoat),
+            vec![(0, 4, true)],
+            "crossing the tail keeps the cell the cursor was on covered"
+        );
     }
 
     #[test]
@@ -3467,7 +3483,12 @@ mod tests {
         dispatch(&mut stoat, &HalfPageDown);
         // Half of viewport 4 is two rows, so the anchor holds at the top and
         // the head extends down to row 2 rather than collapsing there.
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 5, false)]);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(2, 0)],
+            "the block cursor covers row 2's cell, not the newline before it",
+        );
     }
 
     #[test]

@@ -2936,7 +2936,11 @@ mod tests {
         h.type_keys("j j j v");
         h.type_keys("g k");
         let (start, end, reversed) = h.selection_spans()[0];
-        assert_eq!((start, end, reversed), (0, 6, true));
+        assert_eq!(
+            (start, end, reversed),
+            (0, 7, true),
+            "crossing the tail keeps the cell the cursor was on covered"
+        );
         assert_eq!(h.stoat.focused_mode(), "select");
     }
 

@@ -528,18 +528,25 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
             let shift_to_prev_grapheme = || rope.prev_grapheme_boundary(head);
 
             if extend {
-                let new_head_offset = if matches!(target, WordTarget::PrevEnd) {
+                // The extend wants the cell to land the block cursor on, not the
+                // scan's head. Forward the head sits one past the last cell, so it
+                // steps back. Backward it is already on the cell, except at a word
+                // end, where it stopped on the boundary after it.
+                let target_cursor = if matches!(target, WordTarget::PrevEnd) {
                     shift_to_prev_grapheme()
-                } else {
+                } else if is_prev {
                     head
+                } else {
+                    cursor_offset(rope, anchor, head)
                 };
-                let head_anchor = buffer_snapshot.anchor_at(new_head_offset, Bias::Right);
-                return extend_head(
+                return extend_head_to_cursor(
                     sel,
-                    head_anchor,
-                    new_head_offset,
+                    target_cursor,
+                    head_offset,
                     tail_offset,
                     SelectionGoal::None,
+                    rope,
+                    buffer_snapshot,
                 );
             }
 
@@ -590,35 +597,6 @@ fn word_range_step(rope: &Rope, target: WordTarget, anchor: usize, head: usize) 
         WordTarget::PrevLongStart => prev_long_word_start_range(rope, anchor, head),
         WordTarget::PrevLongEnd => prev_long_word_end_range(rope, anchor, head),
     }
-}
-
-/// Move `sel`'s head to `new_head`, keeping its tail, and reverse it when the
-/// head lands before the tail.
-///
-/// `tail_offset` must be where `sel.tail()` resolves. It is a parameter because
-/// a motion closure driven by [`Selections::transform_resolved`] already holds
-/// that offset from the batch, and resolving it here would descend the fragment
-/// tree again for every selection.
-fn extend_head(
-    sel: &Selection<Anchor>,
-    new_head: Anchor,
-    new_head_offset: usize,
-    tail_offset: usize,
-    goal: SelectionGoal,
-) -> Selection<Anchor> {
-    let tail_anchor = sel.tail();
-    let mut new = sel.clone();
-    new.goal = goal;
-    if new_head_offset < tail_offset {
-        new.start = new_head;
-        new.end = tail_anchor;
-        new.reversed = true;
-    } else {
-        new.start = tail_anchor;
-        new.end = new_head;
-        new.reversed = false;
-    }
-    new
 }
 
 /// Extend `sel` so its block cursor lands on the cell at `target_cursor`.
@@ -998,15 +976,24 @@ fn goto_line_boundary(stoat: &mut Stoat, boundary: LineBoundary, extend: bool) -
                 },
             };
             if extend {
-                // Extend to the boundary. A forward selection's block cursor already
-                // rests on the last visible char via cursor_offset, so no step-back.
-                let anchor = buffer_snapshot.anchor_at(boundary_offset, Bias::Right);
-                extend_head(
+                // The end boundary sits one past the line's last character, and the
+                // block cursor has to land on a cell rather than the boundary. An
+                // empty line has no cell to step back to.
+                let target_cursor = match boundary {
+                    LineBoundary::Start => line_start,
+                    LineBoundary::End if boundary_offset > line_start => {
+                        rope.prev_grapheme_boundary(boundary_offset)
+                    },
+                    LineBoundary::End => boundary_offset,
+                };
+                extend_head_to_cursor(
                     sel,
-                    anchor,
-                    boundary_offset,
+                    target_cursor,
+                    head_offset,
                     tail_offset,
                     SelectionGoal::None,
+                    rope,
+                    buffer_snapshot,
                 )
             } else {
                 // The block cursor rests on the last visible character, one
@@ -1116,11 +1103,20 @@ pub(super) fn goto_file_start(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let target_offset = 0;
+    let rope = buffer_snapshot.rope();
     editor.selections.transform(buffer_snapshot, |sel| {
-        let anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
         if extend {
+            let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
             let tail_offset = buffer_snapshot.resolve_anchor(&sel.tail());
-            extend_head(sel, anchor, target_offset, tail_offset, SelectionGoal::None)
+            extend_head_to_cursor(
+                sel,
+                target_offset,
+                head_offset,
+                tail_offset,
+                SelectionGoal::None,
+                rope,
+                buffer_snapshot,
+            )
         } else {
             land_block_cursor(
                 sel.id,
@@ -3133,14 +3129,26 @@ pub(super) fn select_sibling(stoat: &mut Stoat, dir: SiblingDir, extend: bool) -
     if extend {
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        let head_offset = match dir {
-            SiblingDir::Next => target.end,
+        let new_rope = new_buf.rope();
+        // The sibling's end is one past its last character, so going forward
+        // steps back onto the cell the block cursor should cover. Going
+        // backward the node's start is already that cell.
+        let target_cursor = match dir {
+            SiblingDir::Next => new_rope.prev_grapheme_boundary(target.end),
             SiblingDir::Prev => target.start,
         };
-        let new_head = new_buf.anchor_at(head_offset, Bias::Right);
         editor.selections.transform(new_buf, |sel| {
+            let head_offset = new_buf.resolve_anchor(&sel.head());
             let tail_offset = new_buf.resolve_anchor(&sel.tail());
-            extend_head(sel, new_head, head_offset, tail_offset, sel.goal)
+            extend_head_to_cursor(
+                sel,
+                target_cursor,
+                head_offset,
+                tail_offset,
+                sel.goal,
+                new_rope,
+                new_buf,
+            )
         });
     } else {
         apply_primary_range(editor, target);
@@ -3284,10 +3292,19 @@ pub(super) fn move_to_parent_bound(
     if extend {
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        let new_head = new_buf.anchor_at(target_offset, Bias::Right);
+        let new_rope = new_buf.rope();
         editor.selections.transform(new_buf, |sel| {
+            let head_offset = new_buf.resolve_anchor(&sel.head());
             let tail_offset = new_buf.resolve_anchor(&sel.tail());
-            extend_head(sel, new_head, target_offset, tail_offset, sel.goal)
+            extend_head_to_cursor(
+                sel,
+                target_offset,
+                head_offset,
+                tail_offset,
+                sel.goal,
+                new_rope,
+                new_buf,
+            )
         });
     } else {
         apply_primary_range(editor, target_offset..target_offset);
@@ -4188,9 +4205,17 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
         if extend {
             // In select mode the page motion grows the selection by holding the
             // anchor and moving the head to the target row like Helix.
-            let anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
+            let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
             let tail_offset = buffer_snapshot.resolve_anchor(&sel.tail());
-            extend_head(sel, anchor, target_offset, tail_offset, SelectionGoal::None)
+            extend_head_to_cursor(
+                sel,
+                target_offset,
+                head_offset,
+                tail_offset,
+                SelectionGoal::None,
+                rope,
+                buffer_snapshot,
+            )
         } else {
             land_block_cursor(
                 sel.id,
