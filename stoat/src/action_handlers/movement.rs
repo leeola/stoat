@@ -3140,12 +3140,15 @@ pub(super) fn select_sibling(stoat: &mut Stoat, dir: SiblingDir, extend: bool) -
         editor.selections.transform(new_buf, |sel| {
             let head_offset = new_buf.resolve_anchor(&sel.head());
             let tail_offset = new_buf.resolve_anchor(&sel.tail());
+            // Crossing to a sibling moves horizontally, so it drops any column
+            // a prior vertical move was holding. Keeping it would send the next
+            // vertical move back to the column the sibling was reached from.
             extend_head_to_cursor(
                 sel,
                 target_cursor,
                 head_offset,
                 tail_offset,
-                sel.goal,
+                SelectionGoal::None,
                 new_rope,
                 new_buf,
             )
@@ -3296,12 +3299,15 @@ pub(super) fn move_to_parent_bound(
         editor.selections.transform(new_buf, |sel| {
             let head_offset = new_buf.resolve_anchor(&sel.head());
             let tail_offset = new_buf.resolve_anchor(&sel.tail());
+            // Landing on a node's bound moves horizontally, so it drops any
+            // column a prior vertical move was holding, for the same reason as
+            // the sibling motion above.
             extend_head_to_cursor(
                 sel,
                 target_offset,
                 head_offset,
                 tail_offset,
-                sel.goal,
+                SelectionGoal::None,
                 new_rope,
                 new_buf,
             )

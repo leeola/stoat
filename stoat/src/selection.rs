@@ -2840,6 +2840,72 @@ mod tests {
         assert_eq!(h.selection_spans()[0], (0, 2, false));
     }
 
+    /// A buffer whose second statement spans two rows.
+    ///
+    /// Both structural motions resolve their target from the node covering the
+    /// whole selection, so a vertical step has to leave the selection inside one
+    /// node that still has a parent or a sibling. Spanning two top-level items
+    /// instead resolves to the root, which has neither, and the motion does
+    /// nothing at all. A statement broken across two lines is the shape that
+    /// keeps them moving.
+    fn two_row_statement_source() -> &'static str {
+        "fn m() {\n    let aaa =\n        1;\n    let bbbbbbbbbbbbbbbb = 2;\n    let ccccccccccccccccccccc = 3;\n}\n"
+    }
+
+    /// Moving to the next sibling is horizontal, so it drops the column a prior
+    /// vertical move was holding.
+    ///
+    /// Here `j` holds column 8, the sibling extend moves the head to column 28,
+    /// and the second `j` has to follow the sibling rather than snap back.
+    #[test]
+    fn select_mode_next_sibling_clears_the_vertical_goal_column() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 8);
+        let path = h.write_file("s.rs", two_row_statement_source());
+        h.open_file(&path);
+        h.type_keys("j 8 l v j");
+        assert_eq!(
+            h.selection_spans()[0],
+            (17, 32, false),
+            "the head sits on row 2 column 8",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendSelectNextSibling);
+        assert_eq!(
+            h.selection_spans()[0],
+            (17, 63, false),
+            "the sibling extend moves the head to row 3 column 28",
+        );
+
+        h.type_keys("j");
+        assert_eq!(
+            h.selection_spans()[0],
+            (17, 93, false),
+            "the next row is entered at column 28, where the sibling extend left the head",
+        );
+    }
+
+    /// The same for the move to a parent node's start, which goes backward.
+    #[test]
+    fn select_mode_parent_node_start_clears_the_vertical_goal_column() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 8);
+        let path = h.write_file("s.rs", two_row_statement_source());
+        h.open_file(&path);
+        h.type_keys("j 8 l v j");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendMoveParentNodeStart);
+        assert_eq!(
+            h.selection_spans()[0],
+            (7, 18, true),
+            "the parent extend moves the head back to the block's brace on row 0",
+        );
+
+        h.type_keys("j");
+        assert_eq!(
+            h.selection_spans()[0],
+            (16, 18, true),
+            "the next row is entered at column 7, the brace's column, not the held column 8",
+        );
+    }
+
     #[test]
     fn select_mode_alt_n_extends_to_next_sibling() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
