@@ -1769,6 +1769,77 @@ mod tests {
         assert_eq!(display_map.snapshot().line_count(), 4);
     }
 
+    /// Many blocks shifted by one edit land where a from-scratch build puts them.
+    ///
+    /// Where a single block ends up is a weak check. A sync that leaves the
+    /// transform tree stale can still get one block right. Comparing every row of
+    /// an incrementally-synced map against a map built fresh over the same final
+    /// text is what pins the tree itself, and it is the shape that catches a
+    /// block silently dropped at a rebuild region's boundary.
+    #[test]
+    fn many_blocks_shifted_by_an_edit_match_a_fresh_build() {
+        let text: String = (0..60).map(|i| format!("line{i}\n")).collect();
+
+        // Anchored below row 5 and up, so the edit at the top slides every one
+        // of them and collapses none. A block inside the edited range has its
+        // own behaviour, covered by the sibling tests.
+        let blocks_at = |shift: u32| -> Vec<BlockProperties> {
+            (5..55)
+                .map(|i| {
+                    BlockProperties::from_text(
+                        BlockPlacement::Below(i + shift),
+                        vec![format!("marker{i}")],
+                        BlockStyle::Fixed,
+                    )
+                })
+                .collect()
+        };
+
+        let rows = |map: &mut DisplayMap| {
+            let snapshot = map.snapshot();
+            (0..snapshot.line_count())
+                .map(|row| match snapshot.classify_row(row) {
+                    BlockRowKind::BufferRow { buffer_row } => format!("buf{buffer_row}"),
+                    BlockRowKind::Block { block, line_index } => {
+                        block.get_line(line_index).to_string()
+                    },
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let fresh = |content: &str, shift: u32| {
+            let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+                BufferId::new(0),
+                content,
+            )));
+            let multi = MultiBuffer::singleton(BufferId::new(0), shared);
+            let mut map = DisplayMap::new(multi, test_executor(), crate::test_notify());
+            map.insert_blocks(blocks_at(shift));
+            rows(&mut map)
+        };
+
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
+        display_map.insert_blocks(blocks_at(0));
+        assert_eq!(rows(&mut display_map), fresh(&text, 0), "before any edit");
+
+        shared.write().expect("poisoned").edit(0..0, "a\nb\nc\n");
+        let inserted = format!("a\nb\nc\n{text}");
+        assert_eq!(
+            rows(&mut display_map),
+            fresh(&inserted, 3),
+            "three rows inserted above all 50 blocks, which carry down three rows",
+        );
+
+        shared.write().expect("poisoned").edit(0..6, "");
+        assert_eq!(
+            rows(&mut display_map),
+            fresh(&text, 0),
+            "and removed again, back to the original",
+        );
+    }
+
     /// A block marks a row, not a row number, so an edit that moves the text
     /// under it has to move the block with it. Otherwise it stays where the
     /// row used to be and marks whatever slid into its place, and only the

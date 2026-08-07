@@ -713,9 +713,13 @@ impl BlockMap {
         order.sort_unstable_by_key(|&i| rows[i]);
 
         let mut ascending: Vec<u32> = order.iter().map(|&i| rows[i]).collect();
-        carry_rows(&mut ascending, buffer_row_edits);
-        for (&i, &row) in order.iter().zip(&ascending) {
-            rows[i] = row;
+        let mut ascending_touch = vec![false; ascending.len()];
+        carry_rows(&mut ascending, &mut ascending_touch, buffer_row_edits);
+
+        let mut needs_touch = vec![false; rows.len()];
+        for (slot, &i) in order.iter().enumerate() {
+            rows[i] = ascending[slot];
+            needs_touch[i] = ascending_touch[slot];
         }
 
         for (i, block) in self.custom_blocks.iter_mut().enumerate() {
@@ -730,7 +734,12 @@ impl BlockMap {
                 continue;
             }
 
-            self.touched_placements.push(placement);
+            // A block that only shifted is carried by the transform trees'
+            // own prefix and suffix relocation, so it needs no rebuild region.
+            // Only a collapsed endpoint changed position relative to the text.
+            if needs_touch[i * 2] || needs_touch[i * 2 + 1] {
+                self.touched_placements.push(placement);
+            }
 
             let moved = Arc::new(CustomBlock {
                 id: block.id,
@@ -1691,7 +1700,13 @@ fn merge_by_start_row(
 ///
 /// `rows` must be ascending, and stays ascending: rows outside an edit all move
 /// by the same delta, and rows inside one collapse to a single value.
-fn carry_rows(rows: &mut [u32], edits: &Patch<u32>) {
+///
+/// `needs_touch` is set for exactly the collapsed rows. A row that only shifted
+/// keeps its position relative to the text around it, which the transform trees
+/// below reproduce on their own by relocating whole prefixes and suffixes. A
+/// collapsed row does not. Where it used to sit no longer exists, so whatever
+/// caches its position has to be told.
+fn carry_rows(rows: &mut [u32], needs_touch: &mut [bool], edits: &Patch<u32>) {
     let mut delta: i64 = 0;
     let mut i = 0;
 
@@ -1702,6 +1717,7 @@ fn carry_rows(rows: &mut [u32], edits: &Patch<u32>) {
         }
         while i < rows.len() && rows[i] < edit.old.end {
             rows[i] = edit.new.start;
+            needs_touch[i] = true;
             i += 1;
         }
         // Assigned, not accumulated. A patch states new ranges in
@@ -2156,9 +2172,14 @@ mod tests {
             },
         ]);
         let mut rows = [0, 1, 5, 20];
-        super::carry_rows(&mut rows, &edits);
+        let mut touch = [false; 4];
+        super::carry_rows(&mut rows, &mut touch, &edits);
 
         assert_eq!(rows, [0, 1, 6, 22]);
+        assert_eq!(
+            touch, [false; 4],
+            "both edits are pure insertions, so every row only shifted",
+        );
     }
 
     #[test]
@@ -2170,9 +2191,15 @@ mod tests {
             new: 3..4,
         }]);
         let mut rows = [1, 4, 5, 9];
-        super::carry_rows(&mut rows, &edits);
+        let mut touch = [false; 4];
+        super::carry_rows(&mut rows, &mut touch, &edits);
 
         assert_eq!(rows, [1, 3, 3, 7]);
+        assert_eq!(
+            touch,
+            [false, true, true, false],
+            "only the two rows inside the replaced range collapsed",
+        );
     }
 
     use crate::{
@@ -2203,6 +2230,39 @@ mod tests {
         let mut block_map = BlockMap::new();
         block_map.insert(props.to_vec());
         block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None)
+    }
+
+    /// A touch is what turns a block into a rebuilt region, so an edit that only
+    /// slides blocks must produce none. Only a block whose anchor row the edit
+    /// replaced has moved relative to the text, and that one still touches.
+    #[test]
+    fn only_a_collapsed_block_is_touched() {
+        let shift = Patch::new(vec![stoat_text::patch::Edit {
+            old: 2..2,
+            new: 2..5,
+        }]);
+        let collapse = Patch::new(vec![stoat_text::patch::Edit {
+            old: 8..12,
+            new: 8..9,
+        }]);
+
+        let touched_by = |edits: &Patch<u32>| {
+            let mut block_map = BlockMap::new();
+            block_map.insert(vec![
+                text_block(BlockPlacement::Below(10), "a"),
+                text_block(BlockPlacement::Below(15), "b"),
+            ]);
+            block_map.touched_placements.clear();
+            block_map.carry_block_placements(edits);
+            block_map.touched_placements.len()
+        };
+
+        assert_eq!(
+            (touched_by(&shift), touched_by(&collapse)),
+            (0, 1),
+            "three rows inserted above both blocks touches neither; \
+             replacing rows 8..12 collapses the block anchored at 10",
+        );
     }
 
     fn text_block(placement: BlockPlacement, content: &str) -> BlockProperties {
