@@ -1729,7 +1729,17 @@ impl Terminal {
     ///
     /// The next [`Self::project`] finds its grid no longer matches and repaints
     /// it wholesale at the new size, so the grid follows without a separate call.
+    ///
+    /// Resizing to the size already held does nothing. A window drag reports a
+    /// resize per pixel of travel, and most of those land on the same cell
+    /// dimensions. Emptying the pools for one would abandon a half-painted page
+    /// with nothing to prompt a repaint, since the shell is signalled only when
+    /// the geometry actually moves.
     pub fn resize(&mut self, rows: usize, cols: usize) {
+        if rows == self.term.screen_lines() && cols == self.term.columns() {
+            return;
+        }
+
         self.term.resize(GridSize { rows, cols });
         // Pages are sized to each pool's region, not the viewport, so a viewport
         // resize only empties them: the app re-declares regions and refills as
@@ -5581,6 +5591,64 @@ mod tests {
             painted,
             ["ab", "cd", "ef"],
             "each painted row lands on its own page row"
+        );
+    }
+
+    /// A window drag reports a resize per pixel, and most land on the cell
+    /// dimensions already held. The shell is signalled only on a real change,
+    /// so wiping for one of those leaves a half-painted page with nothing to
+    /// prompt the repaint that would replace it.
+    #[test]
+    fn a_resize_to_the_size_already_held_leaves_a_fill_in_progress() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+
+        declare_pool(&mut terminal, 0, 2, 4);
+        terminal.advance(&encode_fill(&FillCommand { pool: 0, index: 3 }));
+        terminal.advance(b"ab");
+
+        let version = terminal.pool_content_version(0).expect("pool declared");
+        terminal.resize(2, 4);
+        assert_eq!(
+            terminal.pool_content_version(0),
+            Some(version),
+            "nothing changed, so nothing is a new version of anything"
+        );
+
+        // Committing the page is what advances the version, so this is measured
+        // after the comparison above rather than around it.
+        terminal.advance(&encode_fill_end());
+        let page = pool_page(&terminal, 0, 3);
+        assert_eq!(
+            (page.get(0, 0).ch, page.get(0, 1).ch),
+            ('a', 'b'),
+            "the fill kept its page and finished into it"
+        );
+    }
+
+    #[test]
+    fn a_resize_that_changes_either_dimension_still_empties_the_pools() {
+        // Whether the buffered page went and whether the version moved.
+        let emptied = |rows: usize, cols: usize| {
+            let mut terminal = Terminal::new(2, 4, Theme::default());
+
+            declare_pool(&mut terminal, 0, 2, 4);
+            terminal.advance(&encode_fill(&FillCommand { pool: 0, index: 3 }));
+            terminal.advance(b"ab");
+            terminal.advance(&encode_fill_end());
+
+            let version = terminal.pool_content_version(0).expect("pool declared");
+            terminal.resize(rows, cols);
+
+            (
+                terminal.pools[&0].page_pool.page(3).is_none(),
+                terminal.pool_content_version(0) != Some(version),
+            )
+        };
+
+        assert_eq!(
+            [emptied(3, 4), emptied(2, 5)],
+            [(true, true), (true, true)],
+            "a change in either dimension drops the page and moves the version"
         );
     }
 
