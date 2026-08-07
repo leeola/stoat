@@ -467,13 +467,27 @@ fn render_pane_status(
     render_status_segments(area, base_style, frame, &left, &right, buf, scene);
 }
 
-/// Paint a pane's status bar into `buf` as plain cells, for a detached pane's
-/// aux window where no rich APC scene is available.
+/// Everything a detached pane's status bar draws, assembled but not yet
+/// painted.
 ///
-/// Shares the segment assembly ([`status_segments`]) with [`render_pane_status`]
-/// but always takes the cell fallback rather than the rich components.
+/// The pair `(base_style, left, right)` determines the painted row exactly,
+/// given the rectangle. A caller that caches the painted bytes can therefore
+/// compare this instead of repainting and diffing, which is why the assembly is
+/// exposed apart from [`paint_pane_status_cells`].
+pub(crate) struct PaneStatusCells {
+    /// Fill style of the row, and the style every plain segment inherits.
+    pub(crate) base_style: Style,
+    pub(crate) left: Vec<StatusSeg>,
+    pub(crate) right: Vec<StatusSeg>,
+}
+
+/// Assemble a detached pane's status bar for [`paint_pane_status_cells`].
+///
+/// Shares [`status_segments`] with [`render_pane_status`], adding the numeric
+/// selection badge that only a detached pane needs, since it cannot host the
+/// primary scene's digit popover.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn paint_pane_status_cells(
+pub(crate) fn pane_status_cells(
     view: &View,
     is_focused: bool,
     area: Rect,
@@ -481,29 +495,16 @@ pub(crate) fn paint_pane_status_cells(
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     badge: Option<u32>,
-    buf: &mut Buffer,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-
+) -> PaneStatusCells {
     let base_style = if is_focused {
         frame.theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
     } else {
         frame.theme.get(crate::theme::scope::UI_STATUSBAR_UNFOCUSED)
     };
 
-    let y = area.y;
-    let end_x = area.x + area.width;
-    for x in area.x..end_x {
-        buf[(x, y)].set_char(' ').set_style(base_style);
-    }
-
     let (mut left, right) =
         status_segments(view, is_focused, area, frame, editors, buffers, &mut None);
 
-    // A detached pane cannot host a primary-scene digit popover, so its numeric
-    // selection badge rides the status row instead.
     if let Some(digit) = badge {
         let badge_style = frame
             .theme
@@ -512,7 +513,27 @@ pub(crate) fn paint_pane_status_cells(
         left.insert(0, (format!("[{digit}]"), badge_style));
     }
 
-    paint_status_fallback(buf, area, &left, &right);
+    PaneStatusCells {
+        base_style,
+        left,
+        right,
+    }
+}
+
+/// Paint assembled status segments into `buf` as plain cells, for a detached
+/// pane's aux window where no rich APC scene is available.
+pub(crate) fn paint_pane_status_cells(cells: &PaneStatusCells, area: Rect, buf: &mut Buffer) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let y = area.y;
+    let end_x = area.x + area.width;
+    for x in area.x..end_x {
+        buf[(x, y)].set_char(' ').set_style(cells.base_style);
+    }
+
+    paint_status_fallback(buf, area, &cells.left, &cells.right);
 }
 
 /// Render the built status segments as rich APC components inside stoatty, or

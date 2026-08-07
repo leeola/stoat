@@ -8334,25 +8334,6 @@ impl Stoat {
                 .map(|position| (position as u32 + 1) % 10);
 
             let row = Rect::new(0, 0, status.width, 1);
-            let mut buf = Buffer::empty(row);
-            crate::render::pane::paint_pane_status_cells(
-                &view,
-                is_focused,
-                row,
-                frame,
-                &mut ws.editors,
-                &ws.buffers,
-                badge,
-                &mut buf,
-            );
-
-            let bytes = crate::smooth_scroll::serialize_buffer(&mut buf, &self.theme);
-            let content_version = {
-                let mut hasher = DefaultHasher::new();
-                self.theme_epoch.hash(&mut hasher);
-                bytes.hash(&mut hasher);
-                hasher.finish()
-            };
             let region = PoolRegionCommand {
                 pool: crate::smooth_scroll::non_pane_pool::WINDOW_STATUS + index,
                 top: status.y,
@@ -8361,6 +8342,39 @@ impl Stoat {
                 height: 1,
                 window,
             };
+
+            // The segments are the row's content, so hashing them answers
+            // whether it moved without painting it. Assembling a handful of
+            // short strings is the cheap half of what the row used to cost
+            // every frame. Filling its cells and serializing them is the rest.
+            let cells = crate::render::pane::pane_status_cells(
+                &view,
+                is_focused,
+                row,
+                frame,
+                &mut ws.editors,
+                &ws.buffers,
+                badge,
+            );
+            let content_version = {
+                let mut hasher = DefaultHasher::new();
+                self.theme_epoch.hash(&mut hasher);
+                region.hash(&mut hasher);
+                cells.base_style.hash(&mut hasher);
+                cells.left.hash(&mut hasher);
+                cells.right.hash(&mut hasher);
+                hasher.finish()
+            };
+            if self
+                .smooth_scroll
+                .already_emitted(region.pool, content_version)
+            {
+                continue;
+            }
+
+            let mut buf = Buffer::empty(row);
+            crate::render::pane::paint_pane_status_cells(&cells, row, &mut buf);
+            let bytes = crate::smooth_scroll::serialize_buffer(&mut buf, &self.theme);
             crate::smooth_scroll::emit_into(
                 out,
                 &mut self.smooth_scroll,
@@ -18448,6 +18462,73 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, Command::PoolCursor(_))),
             "an unchanged frame ships no pool cursor"
+        );
+    }
+
+    /// Acting on an unchanged version now skips `emit_into` outright, and with
+    /// it the region declaration that used to go out regardless. So the region
+    /// has to be part of what the version is computed from.
+    ///
+    /// Only the row count changes here. The segments are laid out against the
+    /// row's width, so they come back identical and the region is the only thing
+    /// that moved.
+    #[test]
+    fn a_moved_status_row_redeclares_its_region_though_its_segments_match() {
+        use stoatty_protocol::command::Command;
+
+        let status_base = crate::smooth_scroll::non_pane_pool::WINDOW_STATUS;
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.window_ipc_connected = true;
+
+        let root = std::path::PathBuf::from("/status-move");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"hello\nworld\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+        h.type_action("SplitRight()");
+        h.settle();
+        h.type_action("DetachPane()");
+
+        let panes = &h.stoat.active_workspace().panes;
+        let window = match &panes.pane(panes.focus()).placement {
+            Placement::Window(window) => *window,
+            other => panic!("the pane detaches into a window, got {other:?}"),
+        };
+        h.stoat
+            .handle_window_ipc(WindowIpc::Event(WindowIpcEvent::Resized {
+                window,
+                cols: 80,
+                rows: 24,
+            }));
+        h.stoat.emit_smooth_scroll();
+        while rx.try_recv().is_ok() {}
+
+        h.stoat.emit_smooth_scroll();
+        assert!(
+            !drain_apc(&mut rx)
+                .iter()
+                .any(|c| matches!(c, Command::PoolRegion(r) if r.pool >= status_base)),
+            "an unchanged status row re-declares nothing"
+        );
+
+        h.stoat
+            .handle_window_ipc(WindowIpc::Event(WindowIpcEvent::Resized {
+                window,
+                cols: 80,
+                rows: 18,
+            }));
+        h.stoat.emit_smooth_scroll();
+        let moved = drain_apc(&mut rx);
+        assert!(
+            moved
+                .iter()
+                .any(|c| matches!(c, Command::PoolRegion(r) if r.pool >= status_base)),
+            "a shorter window moves the status row up, got {moved:?}"
         );
     }
 
