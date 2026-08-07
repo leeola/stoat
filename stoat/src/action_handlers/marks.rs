@@ -62,14 +62,16 @@ fn set_mark_at_cursor(stoat: &mut Stoat, ch: char) -> UpdateEffect {
             .buffers
             .path_for(buffer_id)
             .map(|p| p.to_path_buf());
+        // A scratch buffer has no path to record, so it keeps only the
+        // buffer-local anchor below and the mark works in-session.
         if let Some(path) = path {
             stoat.global_marks.insert(ch, (path, cursor));
-            return UpdateEffect::Redraw;
         }
-        // Scratch buffer (no path): fall through to buffer-local
-        // storage so the mark still works in-session.
     }
 
+    // Every mark also records an anchor, uppercase included. The offset stored
+    // above is what outlives the buffer, but it cannot follow edits made while
+    // the buffer is still open, and the anchor can.
     stoat.marks.insert((buffer_id, ch), cursor_anchor);
     UpdateEffect::Redraw
 }
@@ -78,7 +80,7 @@ fn goto_stored_mark(stoat: &mut Stoat, request: MarkRequest, ch: char) -> Update
     if ch.is_uppercase()
         && let Some((path, offset)) = stoat.global_marks.get(&ch).cloned()
     {
-        return goto_global(stoat, request, path, offset);
+        return goto_global(stoat, request, ch, path, offset);
     }
 
     let Some(buffer_id) = focused_editor_mut(stoat).map(|e| e.buffer_id) else {
@@ -100,6 +102,7 @@ fn goto_stored_mark(stoat: &mut Stoat, request: MarkRequest, ch: char) -> Update
 fn goto_global(
     stoat: &mut Stoat,
     request: MarkRequest,
+    ch: char,
     path: PathBuf,
     stored_offset: usize,
 ) -> UpdateEffect {
@@ -122,13 +125,26 @@ fn goto_global(
         }
     }
 
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
+    let (buffer_id, snapshot) = {
+        let Some(editor) = focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        (editor.buffer_id, editor.display_map.snapshot())
     };
-    let snapshot = editor.display_map.snapshot();
     let buf_snap = snapshot.buffer_snapshot();
     let rope = buf_snap.rope();
-    let target = resolve_target(rope, stored_offset, request);
+
+    // An anchor is here only while the buffer has stayed open since the mark
+    // was set, and it has moved with every edit since. Once the buffer has been
+    // closed its id is retired, so no later buffer can match this key and the
+    // stored offset is what remains.
+    let offset = stoat
+        .marks
+        .get(&(buffer_id, ch))
+        .map(|anchor| buf_snap.resolve_anchor(anchor))
+        .unwrap_or(stored_offset);
+
+    let target = resolve_target(rope, offset, request);
     movement::jump_to_offset(stoat, target)
 }
 
@@ -298,6 +314,56 @@ mod tests {
         h.type_keys("a");
         assert_eq!(focused_path(&h), b);
         assert_eq!(cursor_offset(&mut h), before);
+    }
+
+    /// An uppercase mark moves with the text like a lowercase one, for as long
+    /// as its buffer stays open.
+    ///
+    /// The global map stores a raw offset so a mark outlives its buffer, but
+    /// that offset says nothing about edits made while the buffer is still
+    /// there. This mirrors [`mark_survives_edit_before_position`], the
+    /// buffer-local equivalent.
+    #[test]
+    fn uppercase_mark_survives_edit_before_position() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\ndef\n");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::MoveRight);
+        assert_eq!(cursor_offset(&mut h), 5);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SetMark);
+        h.type_keys("A");
+
+        h.edit_focused(0..0, "// ");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::GotoMarkExact);
+        h.type_keys("A");
+        assert_eq!(cursor_offset(&mut h), 8);
+    }
+
+    /// Coming back to a marked file from another one lands on the marked text,
+    /// not the offset it sat at before the edit.
+    #[test]
+    fn uppercase_mark_tracks_an_edit_made_before_leaving_the_file() {
+        let mut h = TestHarness::with_size(40, 10);
+        let (a, b) = seed_two_files(&mut h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::MoveRight);
+        assert_eq!(cursor_offset(&mut h), 5);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SetMark);
+        h.type_keys("A");
+
+        h.edit_focused(0..0, "// ");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &OpenFile { path: b.clone() });
+        h.settle();
+        assert_eq!(focused_path(&h), b);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::GotoMarkExact);
+        h.type_keys("A");
+        assert_eq!(focused_path(&h), a);
+        assert_eq!(cursor_offset(&mut h), 8);
     }
 
     #[test]
