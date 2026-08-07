@@ -14,6 +14,7 @@ use std::{
     ffi::{c_char, CStr, OsString},
     io::{self, Read, Write},
     mem::MaybeUninit,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::Path,
     ptr,
     sync::{
@@ -108,8 +109,15 @@ impl Pty {
         tracing::info!(program, pid = ?child.process_id(), "spawned child over pty");
         let master_writer = pair.master.take_writer().map_err(io::Error::other)?;
         let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
+        let poll_fd = dup_for_polling(pair.master.as_ref());
 
-        let reader_thread = thread::spawn(move || read_loop(reader, sink));
+        let reader_thread = thread::spawn(move || {
+            read_loop(
+                reader,
+                || poll_fd.as_ref().is_some_and(fd_readable_now),
+                sink,
+            )
+        });
 
         let write_queue_depth = Arc::new(AtomicUsize::new(0));
         Ok(Pty {
@@ -288,25 +296,111 @@ fn prepend_path(dir: &Path, existing: Option<OsString>) -> OsString {
     path
 }
 
-/// Size of the reader thread's buffer. Each read fills up to this many bytes
-/// before a chunk is handed on, so a larger buffer means proportionally fewer
-/// reads, allocations, and sink calls under firehose output. Sized in tens of
-/// KiB to batch a `yes`/`cat` flood without large per-chunk allocations or
-/// latency, and to stay well within the thread stack.
-const READ_BUF_SIZE: usize = 64 * 1024;
+/// How much output one burst may accumulate before the reader hands it on.
+///
+/// A pty's line discipline returns a few KiB per read, while the sink takes the
+/// terminal lock and runs a whole parse pass, so the buffer's job is to bound
+/// how much of a flood is folded into one of those. Large enough that a `cat` of
+/// a big file costs a handful of parses rather than hundreds, small enough that
+/// the lock is never held for an unbounded stretch. Heap-allocated because a
+/// quarter-megabyte would not fit comfortably on the reader thread's stack.
+const READ_BUF_SIZE: usize = 256 * 1024;
 
-/// Pump `reader` to `sink` until end of input: read into a reused buffer and
-/// hand each fill on as a [`PtyOutput::Data`] chunk, then one [`PtyOutput::Eof`]
-/// once the shell closes its end or the read errors.
-fn read_loop(mut reader: impl Read, mut sink: impl FnMut(PtyOutput<'_>)) {
-    let mut buf = [0u8; READ_BUF_SIZE];
+/// Pump `reader` to `sink` until end of input, accumulating what arrives
+/// together into one [`PtyOutput::Data`] chunk, then one [`PtyOutput::Eof`] once
+/// the shell closes its end or the read errors.
+///
+/// `readable_now` reports whether more output is already waiting, and is the
+/// only thing holding a burst open. One that always answers false hands every
+/// read on by itself, which is what to pass when nothing can tell.
+fn read_loop(
+    mut reader: impl Read,
+    readable_now: impl FnMut() -> bool,
+    sink: impl FnMut(PtyOutput<'_>),
+) {
+    accumulate_loop(move |buf| reader.read(buf), readable_now, sink);
+}
+
+/// [`read_loop`]'s pump with the IO lifted into closures, so the accumulation
+/// rule can be exercised without a pty.
+///
+/// Reads into the unfilled tail of one reused buffer, and keeps reading while
+/// `readable_now` says more is already pending. Pending means the next read
+/// returns without blocking, so folding it into this burst costs no latency.
+/// Flushes when nothing more is waiting or the buffer fills, and flushes
+/// whatever it holds before reporting the end of input.
+fn accumulate_loop(
+    mut read: impl FnMut(&mut [u8]) -> io::Result<usize>,
+    mut readable_now: impl FnMut() -> bool,
+    mut sink: impl FnMut(PtyOutput<'_>),
+) {
+    let mut buf = vec![0u8; READ_BUF_SIZE].into_boxed_slice();
+    let mut filled = 0;
+
     loop {
-        match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => sink(PtyOutput::Data(&buf[..n])),
+        // The arms below flush and reset the moment the buffer fills, so this
+        // slice is never empty and a read cannot return zero for want of room,
+        // which would read as end of input.
+        match read(&mut buf[filled..]) {
+            Ok(0) | Err(_) => {
+                if filled > 0 {
+                    sink(PtyOutput::Data(&buf[..filled]));
+                }
+                break;
+            },
+            Ok(n) => {
+                filled += n;
+                if filled < buf.len() && readable_now() {
+                    continue;
+                }
+                sink(PtyOutput::Data(&buf[..filled]));
+                filled = 0;
+            },
         }
     }
+
     sink(PtyOutput::Eof);
+}
+
+/// Whether `fd` has output waiting, answered without blocking.
+///
+/// False on any answer other than a definite yes. A poll error or a descriptor
+/// the kernel rejects leaves the caller flushing per read, which is correct and
+/// merely misses the batching.
+fn fd_readable_now(fd: &OwnedFd) -> bool {
+    let mut poll_fd = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one initialized pollfd, borrowed for the length of the call, with
+    // a zero timeout so it cannot block.
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, 0) };
+    ready > 0 && poll_fd.revents & libc::POLLNVAL == 0 && poll_fd.revents & libc::POLLIN != 0
+}
+
+/// A private duplicate of the pty master's descriptor for the reader thread to
+/// poll, or `None` if the master has no descriptor or the dup fails.
+///
+/// Duplicated rather than borrowed so polling it cannot race the master being
+/// closed or resized from the main thread.
+fn dup_for_polling(master: &(dyn MasterPty + Send)) -> Option<OwnedFd> {
+    dup_fd(master.as_raw_fd()?)
+}
+
+/// Duplicate `raw`, or `None` if the kernel refuses.
+///
+/// The duplicate is a descriptor nobody else holds, so the returned [`OwnedFd`]
+/// is solely responsible for closing it and the original is untouched.
+fn dup_fd(raw: i32) -> Option<OwnedFd> {
+    // SAFETY: dup is called on a descriptor its owner still holds open, and it
+    // returns a fresh one that no other value claims.
+    let duped = unsafe { libc::dup(raw) };
+    match duped < 0 {
+        true => None,
+        // SAFETY: from_raw_fd takes the sole ownership dup just handed over.
+        false => Some(unsafe { OwnedFd::from_raw_fd(duped) }),
+    }
 }
 
 /// Leave `tail` holding the newest `cap` bytes of itself followed by `bytes`.
@@ -469,9 +563,10 @@ fn passwd_shell() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        configure_child_env, prepend_path, push_tail, read_loop, shell_command, shell_or_default,
-        spawn_writer, strip_escapes, wait_exit_status, Child, CommandBuilder, ExitStatus,
-        PtyOutput, MULTIPLEXER_ENV_VARS, READ_BUF_SIZE,
+        accumulate_loop, configure_child_env, dup_fd, dup_for_polling, fd_readable_now,
+        prepend_path, push_tail, read_loop, shell_command, shell_or_default, spawn_writer,
+        strip_escapes, wait_exit_status, AsRawFd, Child, CommandBuilder, ExitStatus, PtyOutput,
+        PtySize, MULTIPLEXER_ENV_VARS, READ_BUF_SIZE,
     };
     use portable_pty::ChildKiller;
     use std::{
@@ -619,15 +714,135 @@ mod tests {
         );
     }
 
+    /// Drive [`accumulate_loop`] over `reads`, each entry one read's bytes, with
+    /// `readable_now` answered from `pending`. Returns the chunks the sink saw
+    /// and whether it ended with `Eof`.
+    fn accumulated(reads: &[&[u8]], pending: &[bool]) -> (Vec<Vec<u8>>, bool) {
+        let mut next_read = 0;
+        let mut next_pending = 0;
+        let mut chunks = Vec::new();
+        let mut eof = false;
+
+        accumulate_loop(
+            |buf| {
+                let Some(bytes) = reads.get(next_read) else {
+                    return Ok(0);
+                };
+                next_read += 1;
+                let n = bytes.len().min(buf.len());
+                buf[..n].copy_from_slice(&bytes[..n]);
+                Ok(n)
+            },
+            || {
+                let answer = pending.get(next_pending).copied().unwrap_or(false);
+                next_pending += 1;
+                answer
+            },
+            |out| match out {
+                PtyOutput::Data(chunk) => chunks.push(chunk.to_vec()),
+                PtyOutput::Eof => eof = true,
+            },
+        );
+
+        (chunks, eof)
+    }
+
+    #[test]
+    fn reads_arriving_together_reach_the_sink_as_one_chunk() {
+        // The point of the accumulation. Three reads with more already pending
+        // after the first two cost one parse rather than three.
+        let (chunks, eof) = accumulated(&[b"one", b"two", b"three"], &[true, true, false]);
+
+        assert_eq!(chunks, vec![b"onetwothree".to_vec()]);
+        assert!(eof, "ends with Eof");
+    }
+
+    #[test]
+    fn a_lull_flushes_rather_than_waiting_for_more() {
+        // Accumulating past what is already waiting would trade latency for
+        // batching, so a read with nothing behind it goes on by itself.
+        let (chunks, eof) = accumulated(&[b"one", b"two"], &[false, false]);
+
+        assert_eq!(chunks, vec![b"one".to_vec(), b"two".to_vec()]);
+        assert!(eof, "ends with Eof");
+    }
+
+    #[test]
+    fn a_full_buffer_flushes_mid_burst() {
+        // Output still pending cannot hold the flush off forever, or the burst
+        // would have no bound and the sink would hold the lock for all of it.
+        let flood = vec![b'x'; READ_BUF_SIZE];
+        let (chunks, eof) = accumulated(&[&flood, b"tail"], &[true, true]);
+
+        assert_eq!(
+            chunks.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![READ_BUF_SIZE, 4],
+            "the buffer's worth, then what came after it",
+        );
+        assert!(eof, "ends with Eof");
+    }
+
+    #[test]
+    fn bytes_held_when_the_shell_closes_reach_the_sink_first() {
+        // A burst interrupted by end of input still has to be handed on, or the
+        // child's last output is lost with it.
+        let (chunks, eof) = accumulated(&[b"parting"], &[true]);
+
+        assert_eq!(chunks, vec![b"parting".to_vec()]);
+        assert!(eof, "ends with Eof");
+    }
+
+    #[test]
+    fn a_descriptor_reads_as_pending_only_once_something_is_waiting() {
+        // What decides whether a burst keeps accumulating. Answering yes on an
+        // empty descriptor would park the reader in a blocking read holding
+        // bytes the sink has not seen.
+        let (reader, mut writer) = io::pipe().expect("pipe");
+        let fd = dup_fd(reader.as_raw_fd()).expect("dup a pipe end");
+
+        assert!(!fd_readable_now(&fd), "nothing written yet");
+        writer.write_all(b"x").expect("write");
+        assert!(fd_readable_now(&fd), "a byte is waiting");
+    }
+
+    #[test]
+    fn a_real_pty_master_hands_out_a_descriptor_to_poll() {
+        // The batching hinges on this. A master that stopped exposing its
+        // descriptor would drop the reader back to flushing per read silently,
+        // with every other test still passing.
+        let pair = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+
+        assert!(dup_for_polling(pair.master.as_ref()).is_some());
+    }
+
+    #[test]
+    fn a_descriptor_the_kernel_rejects_leaves_nothing_to_poll() {
+        // The degradation the accumulation leans on. With no descriptor to ask,
+        // the reader hands every read on by itself, which is correct and merely
+        // unbatched.
+        assert!(dup_fd(-1).is_none(), "there is nothing to duplicate");
+    }
+
     #[test]
     fn read_loop_chunks_at_the_buffer_boundary_then_signals_eof() {
         let data = vec![b'a'; READ_BUF_SIZE + 100];
         let mut sizes = Vec::new();
         let mut eof = false;
-        read_loop(Cursor::new(data), |out| match out {
-            PtyOutput::Data(chunk) => sizes.push(chunk.len()),
-            PtyOutput::Eof => eof = true,
-        });
+        read_loop(
+            Cursor::new(data),
+            || false,
+            |out| match out {
+                PtyOutput::Data(chunk) => sizes.push(chunk.len()),
+                PtyOutput::Eof => eof = true,
+            },
+        );
 
         assert_eq!(
             sizes,
@@ -731,12 +946,16 @@ mod tests {
         let mut chunks = 0usize;
         let mut bytes = 0usize;
         let start = std::time::Instant::now();
-        read_loop(reader, |out| {
-            if let PtyOutput::Data(chunk) = out {
-                chunks += 1;
-                bytes += chunk.len();
-            }
-        });
+        read_loop(
+            reader,
+            || false,
+            |out| {
+                if let PtyOutput::Data(chunk) = out {
+                    chunks += 1;
+                    bytes += chunk.len();
+                }
+            },
+        );
         let elapsed = start.elapsed();
         feeder.join().unwrap();
 
