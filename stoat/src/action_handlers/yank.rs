@@ -152,6 +152,11 @@ pub(super) fn replace_with_yanked(stoat: &mut Stoat) -> UpdateEffect {
                 let (lo, hi) = if s <= e { (s, e) } else { (e, s) };
                 (sel.id, lo, hi)
             })
+            // Dropped before the payloads are cut so a selection covering
+            // nothing consumes no fragment, rather than merely being edited
+            // with one. Editing it would insert the fragment outright, since
+            // there is no text in the range for it to replace.
+            .filter(|(_, lo, hi)| lo < hi)
             .collect();
         entries.sort_by_key(|(_, start, _)| *start);
         (buffer_id, entries)
@@ -1418,6 +1423,62 @@ mod tests {
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
         assert_eq!(buffer_text(&h, &path), "abc\n");
+    }
+
+    /// A replace covering no text has nothing to replace, so it must not insert
+    /// the fragment instead. An empty buffer holds one collapsed selection,
+    /// which is the whole selection set here.
+    #[test]
+    fn replace_with_yanked_over_a_collapsed_selection_is_a_noop() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["X".to_string()]);
+        h.type_keys("escape");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
+        assert_eq!(buffer_text(&h, &path), "", "nothing was covered to replace");
+    }
+
+    /// A collapsed selection consumes no fragment, so the ones after it are not
+    /// pushed onto the wrong fragment.
+    ///
+    /// Replacing with an empty fragment leaves that selection covering nothing,
+    /// and no widening runs afterwards. The next replace therefore sees a
+    /// collapsed selection beside a live one on a buffer that is not empty, so
+    /// the state under test is reachable rather than hypothetical.
+    #[test]
+    fn replace_with_yanked_gives_the_first_fragment_to_the_first_live_selection() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
+        h.stoat.registers.write(
+            crate::register::Register::Unnamed,
+            vec![String::new(), "X".to_string()],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
+        assert_eq!(
+            buffer_text(&h, &path),
+            "\nX\n",
+            "the first selection is emptied"
+        );
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 0, false), (1, 2, false)],
+            "the emptied selection is left collapsed",
+        );
+
+        h.stoat.registers.write(
+            crate::register::Register::Unnamed,
+            vec!["P".to_string(), "Q".to_string()],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
+        assert_eq!(
+            buffer_text(&h, &path),
+            "\nP\n",
+            "the live selection takes the first fragment and the collapsed one takes none",
+        );
     }
 
     #[test]
