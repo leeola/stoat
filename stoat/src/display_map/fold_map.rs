@@ -1415,6 +1415,18 @@ impl FoldSnapshot {
         self.folds.summary().count
     }
 
+    /// Buffer row the earliest fold starts on, or `None` when nothing is
+    /// folded.
+    ///
+    /// A fold moves everything after it, so a caller whose shortcut assumes
+    /// display positions follow the buffer's can keep taking it for rows above
+    /// this one. Read off the fold summary rather than by walking, so asking is
+    /// as cheap as [`Self::fold_count`].
+    pub fn first_fold_row(&self) -> Option<u32> {
+        let summary = self.folds.summary();
+        (summary.count > 0).then(|| self.inlay_snapshot.to_buffer_point(summary.min_start).row)
+    }
+
     /// Byte offset of the start of `fold_row` in fold-offset space.
     ///
     /// Returns the snapshot's total length if `fold_row` is past the last
@@ -3431,6 +3443,47 @@ mod tests {
 
         let (fold_snap2, _) = fold_map.sync(inlay_snap2, &Patch::empty());
         assert!(fold_snap2.inlay_snapshot().has_inlays());
+    }
+
+    #[test]
+    fn the_first_fold_row_is_the_earliest_one_folded() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\nline3");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, unfolded) = FoldMap::new(inlay_snapshot.clone());
+
+        assert_eq!(
+            unfolded.first_fold_row(),
+            None,
+            "an unfolded buffer names no row"
+        );
+
+        let to_anchor = |row: u32, col: u32, bias: Bias| {
+            let off = buffer_snapshot
+                .rope()
+                .point_to_offset(stoat_text::Point::new(row, col));
+            buffer_snapshot.anchor_at(off, bias)
+        };
+
+        // Folded later-first, so a snapshot reading the tree in insertion order
+        // rather than by position would answer 3.
+        fold_map.fold(
+            vec![
+                to_anchor(3, 0, Bias::Right)..to_anchor(3, 3, Bias::Left),
+                to_anchor(1, 0, Bias::Right)..to_anchor(1, 3, Bias::Left),
+            ],
+            FoldPlaceholder::default(),
+            &buffer_snapshot,
+        );
+        let (snap, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
+
+        assert_eq!(
+            snap.first_fold_row(),
+            Some(1),
+            "the earlier of the two folds names the row"
+        );
     }
 
     #[test]

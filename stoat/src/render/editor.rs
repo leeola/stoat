@@ -2166,10 +2166,11 @@ fn paint_offset_range(
     buf: &mut Buffer,
     runs: Option<&mut Vec<(u16, u16, u16)>>,
 ) {
-    // Folds shift columns across the whole buffer, so they force the general
-    // path everywhere. Inlays only shift the row they sit on, so the fast path
-    // is checked per segment against that row rather than the whole buffer.
-    let no_folds = snapshot.fold_snapshot().fold_count() == 0;
+    // A fold moves everything after it, so rows from the first one on go the
+    // general way whether or not they hold a fold themselves. Rows above it are
+    // untouched. Inlays only shift the row they sit on, so that check is per
+    // segment rather than against the whole buffer.
+    let first_fold_row = snapshot.fold_snapshot().first_fold_row();
     let inlay_snapshot = snapshot.inlay_snapshot();
     let any_inlays = inlay_snapshot.has_inlays();
     let tab_size = snapshot.tab_snapshot().tab_size();
@@ -2208,7 +2209,7 @@ fn paint_offset_range(
         let single_display_row = !snapshot.is_wrap_continuation(display.row)
             && (display.row + 1 >= line_count || !snapshot.is_wrap_continuation(display.row + 1));
 
-        let simple_row = no_folds
+        let simple_row = first_fold_row.is_none_or(|fold_row| point.row < fold_row)
             && single_display_row
             && !(any_inlays && inlay_snapshot.has_inlays_in_row_range(point.row..point.row + 1));
         if simple_row {
