@@ -95,17 +95,20 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
 
     let end_x = inner.x + inner.width;
     let popup = stoat.pending_hover.as_ref().expect("layout placed a popup");
-    let body: Vec<Vec<(String, Style)>> = popup
-        .lines
-        .iter()
-        .skip(scroll)
-        .take(inner.height as usize)
-        .map(|line| truncate_line(line, inner.width as usize))
-        .collect();
+    // Clipped where it is painted rather than gathered first, so the visible
+    // text stays borrowed from the popup for a repaint that only reads it.
+    let visible = || {
+        popup
+            .lines
+            .iter()
+            .skip(scroll)
+            .take(inner.height as usize)
+            .map(|line| clip_line(line, inner.width as usize))
+    };
 
     match (scene.live(), modal_fg, run_bg) {
         (true, Some(modal_fg), Some(run_bg)) => {
-            for (row_idx, line) in body.iter().enumerate() {
+            for (row_idx, line) in visible().enumerate() {
                 let row = inner.y + row_idx as u16;
                 let selection = sel_rgb.and_then(|rgb| {
                     hover_line_selection(popup, scroll + row_idx).map(|(c0, c1)| (c0, c1, rgb))
@@ -172,7 +175,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
             }
         },
         _ => {
-            for (row_idx, line) in body.iter().enumerate() {
+            for (row_idx, line) in visible().enumerate() {
                 let row = inner.y + row_idx as u16;
                 let mut x = inner.x;
                 for (text, style) in line {
@@ -184,7 +187,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
                         row,
                         text,
                         (end_x - x) as usize,
-                        modal_style.patch(*style),
+                        modal_style.patch(style),
                     );
                     x = next_x;
                 }
@@ -498,6 +501,37 @@ pub(crate) fn line_width(line: &[(String, Style)]) -> usize {
     line.iter().map(|(text, _)| text.chars().count()).sum()
 }
 
+/// The spans of `line` that fit in `width` characters, borrowed from it.
+///
+/// The span crossing the limit is sliced at a character boundary and the ones
+/// past it are dropped. Nothing is copied, which is what lets a hover repaint
+/// without rebuilding the text it is showing.
+fn clip_line(line: &[(String, Style)], width: usize) -> impl Iterator<Item = (&str, Style)> {
+    let mut used = 0;
+    line.iter().map_while(move |(text, style)| {
+        if used >= width {
+            return None;
+        }
+
+        let remaining = width - used;
+        let chars = text.chars().count();
+        if chars <= remaining {
+            used += chars;
+            return Some((text.as_str(), *style));
+        }
+
+        // Byte offset of the character that would overshoot, which is where the
+        // span is cut. Taking `remaining` characters instead would collect them
+        // into a string of their own.
+        let end = text
+            .char_indices()
+            .nth(remaining)
+            .map_or(text.len(), |(idx, _)| idx);
+        used = width;
+        Some((&text[..end], *style))
+    })
+}
+
 /// Truncate a styled line to `width` characters, clipping the span that crosses
 /// the limit and dropping the rest.
 fn truncate_line(line: &[(String, Style)], width: usize) -> Vec<(String, Style)> {
@@ -518,4 +552,82 @@ fn truncate_line(line: &[(String, Style)], width: usize) -> Vec<(String, Style)>
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clip_line;
+    use ratatui::style::{Color, Style};
+
+    fn line(spans: &[&str]) -> Vec<(String, Style)> {
+        spans
+            .iter()
+            .enumerate()
+            .map(|(i, text)| {
+                let style = Style::default().fg(if i % 2 == 0 { Color::Red } else { Color::Blue });
+                ((*text).to_owned(), style)
+            })
+            .collect()
+    }
+
+    fn clipped(spans: &[&str], width: usize) -> Vec<String> {
+        clip_line(&line(spans), width)
+            .map(|(text, _)| text.to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_line_inside_the_width_keeps_every_span() {
+        assert_eq!(
+            clipped(&["abc", "de"], 10),
+            ["abc", "de"],
+            "nothing is cut when the line fits"
+        );
+    }
+
+    #[test]
+    fn the_span_crossing_the_width_is_cut_and_the_rest_dropped() {
+        assert_eq!(
+            clipped(&["abc", "defgh", "ij"], 6),
+            ["abc", "def"],
+            "the crossing span keeps the characters that fit, the next one goes"
+        );
+    }
+
+    #[test]
+    fn a_crossing_span_is_cut_on_a_character_not_a_byte() {
+        assert_eq!(
+            clipped(&["\u{e9}\u{e9}\u{e9}\u{e9}"], 2),
+            ["\u{e9}\u{e9}"],
+            "two accents are four bytes, so cutting at byte two would split one"
+        );
+    }
+
+    #[test]
+    fn a_span_ending_exactly_on_the_width_keeps_the_whole_span() {
+        assert_eq!(
+            clipped(&["abc", "def"], 3),
+            ["abc"],
+            "the span that fills the width is kept whole and stops the line"
+        );
+    }
+
+    #[test]
+    fn no_width_yields_nothing() {
+        assert!(
+            clipped(&["abc"], 0).is_empty(),
+            "a zero width shows no text"
+        );
+    }
+
+    #[test]
+    fn styles_ride_along_with_the_spans_they_came_from() {
+        let spans = line(&["ab", "cdef"]);
+        let styles: Vec<Option<Color>> = clip_line(&spans, 4).map(|(_, s)| s.fg).collect();
+        assert_eq!(
+            styles,
+            [Some(Color::Red), Some(Color::Blue)],
+            "a cut span keeps its own style"
+        );
+    }
 }
