@@ -970,13 +970,18 @@ fn parse_rope_combined_ranges(
         })
         .collect();
     // A combined tree is only reused when it was built over the very ranges
-    // being asked for again. Handing one back under a different range set
-    // yields a tree that disagrees with a from-scratch parse of the same text,
-    // since the subtrees it carries forward were positioned against the layout
-    // it had before. An edit inside an existing host range keeps the set equal,
-    // because `SyntaxMap::interpolate` shifts the prior tree's ranges exactly
-    // as the fresh query shifts the discovered ones, and that is the case worth
-    // reusing for.
+    // being asked for again. An edit inside an existing host range keeps the set
+    // equal, because `SyntaxMap::interpolate` shifts the prior tree's ranges
+    // exactly as the fresh query shifts the discovered ones, and that is the
+    // case worth reusing for.
+    //
+    // Reuse across a moved set is not sound here, however cheap it would make
+    // typing a new paragraph. A range set changes when a host node is added or
+    // dropped, and the prior tree carries no nodes for text the layer did not
+    // previously include, while no `Tree::edit` describes a range set changing.
+    // Dropping the guard passes this crate's own equivalence fixtures and still
+    // diverges from a from-scratch parse at step 12 of
+    // `app::tests::a_carried_parse_tracks_a_fresh_parse_across_injection_layers`.
     let old_tree = old_tree.filter(|t| t.included_ranges() == ts_ranges);
     parse_rope_inner(language, rope, old_tree, Some(&ts_ranges), deadline)
 }
@@ -1279,6 +1284,121 @@ mod tests {
         let mut fresh = SyntaxMap::new();
         fresh.reparse(&new_rope, lang, 2, None, None).unwrap();
         assert_eq!(layers(&map), layers(&fresh));
+    }
+
+    /// Typing a new host node into a combined layer still lands on the layer set
+    /// a from-scratch parse produces.
+    ///
+    /// Adding or dropping a host node moves the layer's range set, which is the
+    /// case the splice has to rebuild rather than carry, and the case
+    /// `parse_rope_combined_ranges` declines to reuse a prior tree across. The
+    /// steps run in sequence so each starts from the tree the last one left,
+    /// which is where a layer whose ranges had drifted from its text would
+    /// compound instead of washing out.
+    #[test]
+    fn a_new_host_node_typed_into_a_combined_layer_matches_a_full_parse() {
+        use stoat_text::patch::Edit as PatchEdit;
+        let lang = rust_lang();
+        let original: String = (0..6)
+            .map(|i| format!("/// doc {i} with **bold** text\nfn f{i}() {{ {i} }}\n\n"))
+            .collect();
+        let old_rope = Rope::from(original.as_str());
+
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
+        let ranges_of = |map: &SyntaxMap| -> usize {
+            map.snapshot()
+                .iter_layers()
+                .find(|l| l.depth == 1 && l.language.name == "markdown")
+                .map(|l| l.tree.included_ranges().len())
+                .expect("a depth-1 markdown layer")
+        };
+        let before = ranges_of(&map);
+
+        let layers = |map: &SyntaxMap| -> Vec<(u32, u32, u32, &'static str, String)> {
+            map.snapshot()
+                .iter_layers()
+                .map(|l| {
+                    (
+                        l.depth,
+                        l.start_offset,
+                        l.end_offset,
+                        l.language.name,
+                        l.tree.root_node().to_sexp(),
+                    )
+                })
+                .collect()
+        };
+
+        // Whole doc comments rather than text inside one, so the layer gains and
+        // loses host ranges rather than merely growing them. Each step reuses the
+        // tree the previous step left, so a carried tree that had drifted from
+        // the text would compound rather than wash out.
+        let added = "/// a brand new *doc* line\n";
+        let steps: Vec<(&str, Range<usize>, &str)> = vec![
+            ("add before f3", 0..0, added),
+            ("add before f1", 0..0, added),
+            ("remove the first", 0..added.len(), ""),
+        ];
+
+        let mut rope = old_rope;
+        let mut source = original.clone();
+        let mut version = 1;
+        for (step, _, replacement) in steps {
+            let anchor = match step {
+                "add before f3" => source.find("fn f3").expect("fixture has f3"),
+                "add before f1" => source.find("fn f1").expect("fixture has f1"),
+                _ => source
+                    .find("/// a brand new")
+                    .expect("an added line to drop"),
+            };
+            let removed = if replacement.is_empty() {
+                added.len()
+            } else {
+                0
+            };
+
+            let mut text = String::from(&source[..anchor]);
+            text.push_str(replacement);
+            text.push_str(&source[anchor + removed..]);
+            let new_rope = Rope::from(text.as_str());
+
+            map.interpolate(
+                &[PatchEdit {
+                    old: anchor..(anchor + removed),
+                    new: anchor..(anchor + replacement.len()),
+                }],
+                &rope,
+                &new_rope,
+            );
+            version += 1;
+            #[allow(clippy::single_range_in_vec_init)]
+            let changed = vec![anchor..(anchor + replacement.len().max(1))];
+            map.reparse_within_changed_ranges(
+                &new_rope,
+                lang.clone(),
+                version,
+                Some(&changed),
+                None,
+                None,
+            )
+            .unwrap();
+
+            let mut fresh = SyntaxMap::new();
+            fresh
+                .reparse(&new_rope, lang.clone(), version, None, None)
+                .unwrap();
+            assert_eq!(layers(&map), layers(&fresh), "after {step}");
+
+            source = text;
+            rope = new_rope;
+        }
+
+        assert_eq!(
+            ranges_of(&map),
+            before + 1,
+            "two doc lines added and one removed must leave one more host range",
+        );
     }
 
     #[test]
