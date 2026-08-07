@@ -27,7 +27,10 @@ pub(super) fn yank(stoat: &mut Stoat) -> UpdateEffect {
     let Some(fragments) = selection_fragments(stoat) else {
         return UpdateEffect::None;
     };
-    if fragments.is_empty() {
+    // A collapsed selection yields an empty fragment rather than no fragment,
+    // so a set that is only collapsed arrives here as a vector of empty
+    // strings. Copying that would overwrite the register with nothing.
+    if fragments.iter().all(|f| f.is_empty()) {
         return UpdateEffect::None;
     }
     let count = fragments.len();
@@ -597,6 +600,37 @@ mod tests {
         );
     }
 
+    /// Yanking a selection that covers nothing stores nothing and claims
+    /// nothing.
+    ///
+    /// A collapsed selection still yields a fragment, just an empty one, so a
+    /// guard that only rejects a fragmentless set lets it overwrite whatever
+    /// the register held. The delete side is pinned by
+    /// [`deleting_a_collapsed_selection_leaves_the_register_alone`].
+    #[test]
+    fn yanking_a_collapsed_selection_leaves_the_register_alone() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["kept".to_string()]);
+        h.type_keys("escape");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        assert_eq!(
+            h.stoat
+                .registers
+                .read(crate::register::Register::Unnamed)
+                .map(<[String]>::to_vec),
+            Some(vec!["kept".to_string()]),
+            "a yank that copied nothing does not overwrite the register",
+        );
+        assert_eq!(
+            h.stoat.pending_message, None,
+            "and does not report a yank that did not happen",
+        );
+    }
+
     #[test]
     fn yank_stores_primary_selection_in_unnamed() {
         let mut h = TestHarness::with_size(40, 10);
@@ -622,24 +656,6 @@ mod tests {
             .read(crate::register::Register::Unnamed)
             .map(|f| f.join("\n"));
         assert_eq!(stored, Some("a".to_string()));
-    }
-
-    #[test]
-    fn yank_on_empty_buffer_yanks_one_empty_fragment() {
-        let mut h = TestHarness::with_size(40, 10);
-        seed(&mut h, "");
-        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
-        assert_eq!(
-            h.stoat
-                .registers
-                .read(crate::register::Register::Unnamed)
-                .map(<[String]>::to_vec),
-            Some(vec![String::new()])
-        );
-        assert_eq!(
-            h.stoat.pending_message,
-            Some("yanked 1 selection(s)".to_string())
-        );
     }
 
     #[test]
