@@ -542,13 +542,17 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
                 );
             }
 
-            if !is_prev {
-                let tail_anchor = buffer_snapshot.anchor_at(anchor, Bias::Right);
-                let head_anchor = buffer_snapshot.anchor_at(head, Bias::Right);
+            // A scan with nothing left to cover returns an empty range, which at
+            // the buffer end is what a forward motion on the trailing newline
+            // produces. Widening it here keeps the min-width-1 block cursor every
+            // other landing path maintains, and makes the motion a no-op there
+            // rather than a collapse. A range that covered anything is returned
+            // untouched, direction included.
+            let landed = if !is_prev {
                 Selection {
                     id: sel.id,
-                    start: tail_anchor,
-                    end: head_anchor,
+                    start: anchor,
+                    end: head,
                     reversed: false,
                     goal: SelectionGoal::None,
                 }
@@ -558,16 +562,15 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
                 } else {
                     head
                 };
-                let head_anchor = buffer_snapshot.anchor_at(resolved_head_offset, Bias::Right);
-                let tail_anchor = buffer_snapshot.anchor_at(anchor, Bias::Right);
                 Selection {
                     id: sel.id,
-                    start: head_anchor,
-                    end: tail_anchor,
+                    start: resolved_head_offset,
+                    end: anchor,
                     reversed: true,
                     goal: SelectionGoal::None,
                 }
-            }
+            };
+            anchor_selection(landed.min_width_1(rope), buffer_snapshot)
         });
     UpdateEffect::Redraw
 }

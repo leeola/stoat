@@ -658,6 +658,30 @@ mod tests {
         assert_eq!(fwd_head(&r, 5, next_word_start_range), 5);
     }
 
+    /// A forward scan starting on a trailing newline yields an empty range at
+    /// the buffer end.
+    ///
+    /// The anchor tracks the newline the scan began after, and with nothing left
+    /// to scan the head never leaves it, so both ends land on the length. That is
+    /// this layer's answer and not a defect: widening an empty landing to the
+    /// one-cell block cursor belongs to whoever writes the selection, since only
+    /// there is it known whether a cursor or a range is being produced.
+    #[test]
+    fn next_word_start_on_a_trailing_newline_yields_an_empty_range() {
+        let r = rope("foo\n");
+        let start = forward_scan_start(&r, 3);
+        assert_eq!(
+            next_word_start_range(&r, start, start),
+            (4, 4),
+            "nothing left to scan, so the range collapses onto the end",
+        );
+        assert_eq!(
+            next_word_end_range(&r, start, start),
+            (4, 4),
+            "and the word-end variant agrees",
+        );
+    }
+
     #[test]
     fn next_word_start_empty_rope() {
         let r = rope("");

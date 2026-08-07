@@ -2351,6 +2351,26 @@ mod tests {
         assert_eq!(editor::selection_spans(&mut stoat), vec![(45, 48, false)]);
     }
 
+    /// A word motion that cannot advance still leaves a selection a block cursor
+    /// can sit on.
+    ///
+    /// The raw range returns an empty span at the buffer end, since there is
+    /// nothing left to scan. Every other landing path repairs that to one cell
+    /// wide, and the anchoring here has to as well, or the cursor renders with no
+    /// width at all.
+    #[test]
+    fn a_word_motion_at_the_buffer_end_keeps_a_one_cell_cursor() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "foo\n");
+        dispatch(&mut stoat, &MoveNextWordStart);
+        dispatch(&mut stoat, &MoveNextWordStart);
+        assert_eq!(
+            editor::selection_spans(&mut stoat),
+            vec![(3, 4, false)],
+            "the cursor stays on the trailing newline rather than collapsing",
+        );
+    }
+
     #[test]
     fn count_next_word_start_crosses_newlines() {
         let mut stoat = stoat();
