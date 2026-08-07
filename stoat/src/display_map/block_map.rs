@@ -1760,14 +1760,19 @@ fn sync_incremental(
     let mut edits = wrap_edits.edits().iter().peekable();
 
     while let Some(edit) = edits.next() {
-        new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Left), ());
+        // The rebuild region can start earlier than the edit does, when the edit
+        // lands inside a replacement. Both coordinates move together below.
+        let old_start = edit.old.start;
+        let mut new_start = edit.new.start;
+
+        new_transforms.append(cursor.slice(&InputRow(old_start), Bias::Left), ());
 
         // Preserve transforms ending exactly at edit start (matching Zed lines 902-920)
         let mut kept_below_blocks_at_start = false;
         if let Some(item) = cursor.item() {
             let item_end = cursor.start().0 + item.summary.input_rows;
             if item.summary.input_rows > 0
-                && item_end == edit.old.start
+                && item_end == old_start
                 && !item.block.as_ref().is_some_and(|b| b.is_replacement())
             {
                 new_transforms.push(item.clone(), ());
@@ -1785,13 +1790,22 @@ fn sync_incremental(
             }
         }
 
-        // Handle isomorphic prefix if edit starts within a transform
-        if let Some(item) = cursor.item()
-            && item.block.is_none()
-        {
-            let transform_rows_before_edit = edit.old.start - cursor.start().0;
+        // The region has to begin on a transform boundary, and the edit may
+        // start partway into one.
+        if let Some(item) = cursor.item() {
+            let transform_rows_before_edit = old_start - cursor.start().0;
             if transform_rows_before_edit > 0 {
-                push_isomorphic(&mut new_transforms, transform_rows_before_edit);
+                if item.block.is_none() {
+                    push_isomorphic(&mut new_transforms, transform_rows_before_edit);
+                } else {
+                    // A block hiding rows cannot be cut in half, so an edit
+                    // landing among them pulls the region back to where the
+                    // replacement starts. Splitting it instead would leave the
+                    // rows before the edit emitted as ordinary text, and the
+                    // block itself outside the region that re-emits it.
+                    debug_assert!(item.summary.input_rows > 0);
+                    new_start -= transform_rows_before_edit;
+                }
             }
         }
 
@@ -1859,12 +1873,12 @@ fn sync_incremental(
         }
 
         let current_rows: InputRow = new_transforms.extent(());
-        if edit.new.start > current_rows.0 {
-            let gap = edit.new.start - current_rows.0;
+        if new_start > current_rows.0 {
+            let gap = new_start - current_rows.0;
             push_isomorphic(&mut new_transforms, gap);
         }
 
-        let edit_start_buf = wrap_row_to_buffer_row(edit.new.start, wrap_snapshot);
+        let edit_start_buf = wrap_row_to_buffer_row(new_start, wrap_snapshot);
         let edit_end_buf = if edit_end >= wrap_line_count {
             u32::MAX
         } else {
@@ -1903,9 +1917,9 @@ fn sync_incremental(
                     // outside the edit, so without this it finds that one too and
                     // emits it a second time.
                     let first_row = if kept_below_blocks_at_start {
-                        edit.new.start + 1
+                        new_start + 1
                     } else {
-                        edit.new.start
+                        new_start
                     };
                     if block_start < edit_end && block_end >= first_row {
                         Some((placement, b))

@@ -1840,6 +1840,65 @@ mod tests {
         );
     }
 
+    /// An edit strictly inside a replacement's hidden rows leaves the block
+    /// standing.
+    ///
+    /// Such an edit moves neither endpoint, so nothing carries the block over
+    /// and the region has to be rebuilt. The rebuild begins wherever the edit
+    /// does, which is inside the block, so the rows it hides get re-emitted as
+    /// ordinary text and the block itself is never put back.
+    #[test]
+    fn an_edit_inside_a_replacement_keeps_the_block() {
+        let text: String = (0..10).map(|i| format!("line{i}\n")).collect();
+
+        let block = || {
+            vec![BlockProperties::from_text(
+                BlockPlacement::Replace { start: 2, end: 6 },
+                vec!["replacement".to_string()],
+                BlockStyle::Fixed,
+            )]
+        };
+
+        let rows = |map: &mut DisplayMap| {
+            let snapshot = map.snapshot();
+            (0..snapshot.line_count())
+                .map(|row| match snapshot.classify_row(row) {
+                    BlockRowKind::BufferRow { buffer_row } => format!("buf{buffer_row}"),
+                    BlockRowKind::Block { block, line_index } => {
+                        block.get_line(line_index).to_string()
+                    },
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let fresh = |content: &str| {
+            let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+                BufferId::new(0),
+                content,
+            )));
+            let multi = MultiBuffer::singleton(BufferId::new(0), shared);
+            let mut map = DisplayMap::new(multi, test_executor(), crate::test_notify());
+            map.insert_blocks(block());
+            rows(&mut map)
+        };
+
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
+        display_map.insert_blocks(block());
+        assert_eq!(rows(&mut display_map), fresh(&text), "before any edit");
+
+        // Row 4 is the third of the five hidden rows, so this touches neither
+        // endpoint of the replacement. Same length, so no row count changes.
+        let edited = text.replace("line4", "LINE4");
+        shared.write().expect("poisoned").edit(24..29, "LINE4");
+        assert_eq!(
+            rows(&mut display_map),
+            fresh(&edited),
+            "an edit between the replacement's endpoints leaves it standing",
+        );
+    }
+
     /// A block marks a row, not a row number, so an edit that moves the text
     /// under it has to move the block with it. Otherwise it stays where the
     /// row used to be and marks whatever slid into its place, and only the
