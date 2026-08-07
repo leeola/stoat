@@ -23,6 +23,7 @@ use crate::{
     location_picker::{LocationEntry, LocationPicker},
     lsp::{servers::ServerSource, LspSymbolKind},
     picker::PreviewSource,
+    render::hover,
     symbol_finder::{SymbolFinder, SymbolFinderEntry, SymbolFinderScope, SymbolTarget},
     theme::scope,
     workspace::{WorkspaceId, WorkspaceUid},
@@ -1310,6 +1311,44 @@ pub(crate) struct HoverPopup {
     /// built, so a new hover gets a new stamp and the per-frame version is O(1)
     /// instead of a walk of every line's text.
     pub(crate) generation: u64,
+    /// Characters in the widest of [`Self::lines`], measured at construction on
+    /// the same immutability the generation stamp relies on.
+    ///
+    /// The popup's box is sized from this every frame, twice, and measuring it
+    /// there would walk every span of every line for a body that cannot have
+    /// changed since the last frame asked.
+    pub(crate) max_line_width: usize,
+}
+
+impl HoverPopup {
+    /// Build a popup around `lines`, measuring them and claiming a generation
+    /// stamp before anything paints.
+    ///
+    /// The measurement is why this exists rather than a struct literal.
+    /// [`Self::max_line_width`] has to agree with [`Self::lines`], and a caller
+    /// free to set both can silently disagree, which mis-sizes the box without
+    /// failing anything. The fields a render stamps later start empty.
+    pub(crate) fn new(
+        lines: Vec<Vec<(String, Style)>>,
+        anchor_offset: usize,
+        editor_id: EditorId,
+    ) -> Self {
+        Self {
+            max_line_width: lines
+                .iter()
+                .map(|line| hover::line_width(line))
+                .max()
+                .unwrap_or(0),
+            lines,
+            anchor_offset,
+            editor_id,
+            scroll_half_pages: 0,
+            area: Rect::default(),
+            inner: Rect::default(),
+            selection: None,
+            generation: crate::picker::next_generation(),
+        }
+    }
 }
 
 /// Issue a `textDocument/hover` request for the symbol under the
@@ -1613,16 +1652,11 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
                     &stoat.language_registry,
                 )
             };
-            stoat.pending_hover = Some(HoverPopup {
+            stoat.pending_hover = Some(HoverPopup::new(
                 lines,
-                anchor_offset: response.anchor_offset,
-                editor_id: response.editor_id,
-                scroll_half_pages: 0,
-                area: Rect::default(),
-                inner: Rect::default(),
-                selection: None,
-                generation: crate::picker::next_generation(),
-            });
+                response.anchor_offset,
+                response.editor_id,
+            ));
             true
         },
         Poll::Ready(HoverOutcome::Empty) => {
@@ -4940,6 +4974,40 @@ mod tests {
     };
     use stoat_action::OpenFile;
     use tokio::sync::oneshot;
+
+    /// The layout reads the stored width instead of measuring, so it has to be
+    /// what measuring would have found. The fixture puts the widest line in the
+    /// middle and splits lines across spans, since taking the first, the last,
+    /// or one span per line all give a plausible wrong answer.
+    #[test]
+    fn a_popup_stores_the_width_measuring_its_lines_would_find() {
+        use super::HoverPopup;
+        use crate::{editor_state::EditorId, render::hover};
+
+        let span = |text: &str| (text.to_string(), Style::default());
+        let lines = vec![
+            vec![span("short")],
+            vec![span("four"), span("teen chars")],
+            vec![span("middling")],
+        ];
+
+        let popup = HoverPopup::new(lines.clone(), 0, EditorId::default());
+        assert_eq!(popup.max_line_width, 14);
+        assert_eq!(
+            popup.max_line_width,
+            lines
+                .iter()
+                .map(|line| hover::line_width(line))
+                .max()
+                .unwrap_or(0),
+        );
+
+        assert_eq!(
+            HoverPopup::new(Vec::new(), 0, EditorId::default()).max_line_width,
+            0,
+            "an empty body measures zero rather than panicking"
+        );
+    }
 
     fn seed(h: &mut TestHarness, files: &[(&str, &str)]) -> PathBuf {
         let root = PathBuf::from("/lsp-did-open-test");

@@ -345,13 +345,10 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
 
     // A truncated line's width is its content width capped at the interior, and
     // truncation is one-to-one per line, so the geometry never rebuilds a body.
+    // Every line meets the same cap, so capping the widest gives what capping
+    // each and taking the widest would.
     let popup = stoat.pending_hover.as_ref()?;
-    let max_line_width = popup
-        .lines
-        .iter()
-        .map(|line| line_width(line).min(interior_width as usize))
-        .max()
-        .unwrap_or(0) as u16;
+    let max_line_width = popup.max_line_width.min(interior_width as usize) as u16;
     let body_len = popup.lines.len();
 
     let popup_width = (max_line_width + 2).clamp(3, frame.width.clamp(3, MAX_WIDTH));
@@ -497,7 +494,7 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
 }
 
 /// Total character width of a styled line, summed across its spans.
-fn line_width(line: &[(String, Style)]) -> usize {
+pub(crate) fn line_width(line: &[(String, Style)]) -> usize {
     line.iter().map(|(text, _)| text.chars().count()).sum()
 }
 

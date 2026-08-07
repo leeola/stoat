@@ -16889,7 +16889,7 @@ mod tests {
     #[test]
     fn emit_smooth_scroll_pools_the_hover_and_retires_it_on_close() {
         use crate::action_handlers::lsp::HoverPopup;
-        use ratatui::{layout::Rect, style::Style};
+        use ratatui::style::Style;
         use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
@@ -16906,16 +16906,11 @@ mod tests {
         h.stoat.active_workspace_mut().layout(size);
 
         let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
-        h.stoat.pending_hover = Some(HoverPopup {
-            lines: vec![vec![("hovered".to_string(), Style::default())]],
-            anchor_offset: 0,
+        h.stoat.pending_hover = Some(HoverPopup::new(
+            vec![vec![("hovered".to_string(), Style::default())]],
+            0,
             editor_id,
-            scroll_half_pages: 0,
-            area: Rect::default(),
-            inner: Rect::default(),
-            selection: None,
-            generation: 0,
-        });
+        ));
         h.stoat.emit_smooth_scroll();
         let opened = drain_apc(&mut rx);
         assert!(
@@ -16959,16 +16954,7 @@ mod tests {
             .map(|_| vec![(text.clone(), Style::default())])
             .collect();
         let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
-        h.stoat.pending_hover = Some(HoverPopup {
-            lines,
-            anchor_offset: 0,
-            editor_id,
-            scroll_half_pages: 0,
-            area: Rect::default(),
-            inner: Rect::default(),
-            selection: None,
-            generation: 0,
-        });
+        h.stoat.pending_hover = Some(HoverPopup::new(lines, 0, editor_id));
         crate::render::hover::hover_popup_layout(&mut h.stoat).expect("hover layout")
     }
 
@@ -17019,16 +17005,11 @@ mod tests {
         let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
 
         // A hover wider than the left pane.
-        h.stoat.pending_hover = Some(HoverPopup {
-            lines: vec![vec![("x".repeat(60), Style::default())]],
-            anchor_offset: 0,
+        h.stoat.pending_hover = Some(HoverPopup::new(
+            vec![vec![("x".repeat(60), Style::default())]],
+            0,
             editor_id,
-            scroll_half_pages: 0,
-            area: Rect::default(),
-            inner: Rect::default(),
-            selection: None,
-            generation: 0,
-        });
+        ));
 
         let (popup, _) = crate::render::hover::hover_popup_layout(&mut h.stoat).expect("layout");
         assert!(
@@ -17124,16 +17105,11 @@ mod tests {
 
         // Anchor on the top pane's last visible row (each "x\n" line is 2 bytes).
         let last_row_line = top_content.height as usize - 1;
-        h.stoat.pending_hover = Some(HoverPopup {
-            lines: vec![vec![("hi".to_string(), Style::default())]],
-            anchor_offset: last_row_line * 2,
+        h.stoat.pending_hover = Some(HoverPopup::new(
+            vec![vec![("hi".to_string(), Style::default())]],
+            last_row_line * 2,
             editor_id,
-            scroll_half_pages: 0,
-            area: Rect::default(),
-            inner: Rect::default(),
-            selection: None,
-            generation: 0,
-        });
+        ));
 
         let (popup, _) = crate::render::hover::hover_popup_layout(&mut h.stoat).expect("layout");
         let cursor_row = top_content.y + last_row_line as u16;
@@ -17156,29 +17132,28 @@ mod tests {
         scroll_half_pages: usize,
     ) -> action_handlers::lsp::HoverPopup {
         use ratatui::style::Style;
-        action_handlers::lsp::HoverPopup {
-            lines: lines
+        let mut popup = action_handlers::lsp::HoverPopup::new(
+            lines
                 .iter()
                 .map(|l| vec![(l.to_string(), Style::default())])
                 .collect(),
-            anchor_offset: 0,
-            editor_id: EditorId::default(),
-            scroll_half_pages,
-            area: Rect {
-                x: 9,
-                y: 1,
-                width: 22,
-                height: 7,
-            },
-            inner: Rect {
-                x: 10,
-                y: 2,
-                width: 20,
-                height: 5,
-            },
-            selection: None,
-            generation: 0,
-        }
+            0,
+            EditorId::default(),
+        );
+        popup.scroll_half_pages = scroll_half_pages;
+        popup.area = Rect {
+            x: 9,
+            y: 1,
+            width: 22,
+            height: 7,
+        };
+        popup.inner = Rect {
+            x: 10,
+            y: 2,
+            width: 20,
+            height: 5,
+        };
+        popup
     }
 
     #[test]
@@ -17216,16 +17191,11 @@ mod tests {
         let mut h = Stoat::test();
         let _ = open_scratch_file(&mut h, "alpha beta gamma\n");
         let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
-        h.stoat.pending_hover = Some(HoverPopup {
-            lines: vec![vec![("hover".to_string(), Style::default())]],
-            anchor_offset: 0,
+        h.stoat.pending_hover = Some(HoverPopup::new(
+            vec![vec![("hover".to_string(), Style::default())]],
+            0,
             editor_id,
-            scroll_half_pages: 0,
-            area: Rect::default(),
-            inner: Rect::default(),
-            selection: None,
-            generation: 0,
-        });
+        ));
 
         // The first render stamps the popup's real screen rect.
         let _ = h.stoat.render();
@@ -17301,20 +17271,16 @@ mod tests {
         use crate::action_handlers::lsp::HoverPopup;
         use ratatui::style::Style;
 
-        let popup = HoverPopup {
-            lines: vec![vec![("x".repeat(60), Style::default())]],
-            anchor_offset: 0,
-            editor_id: EditorId::default(),
-            scroll_half_pages: 0,
-            area: Rect::default(),
-            inner: Rect {
-                x: 0,
-                y: 0,
-                width: 50,
-                height: 3,
-            },
-            selection: None,
-            generation: 0,
+        let mut popup = HoverPopup::new(
+            vec![vec![("x".repeat(60), Style::default())]],
+            0,
+            EditorId::default(),
+        );
+        popup.inner = Rect {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 3,
         };
         for cell in 0..40u16 {
             let (line, col) = crate::render::hover::hover_hit_test(&popup, cell, 0);
@@ -17342,20 +17308,17 @@ mod tests {
         h.stoat.active_workspace_mut().layout(size);
 
         let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
-        h.stoat.pending_hover = Some(HoverPopup {
-            lines: vec![vec![("hello world".to_string(), Style::default())]],
-            anchor_offset: 0,
+        let mut popup = HoverPopup::new(
+            vec![vec![("hello world".to_string(), Style::default())]],
+            0,
             editor_id,
-            scroll_half_pages: 0,
-            area: Rect::default(),
-            inner: Rect::default(),
-            selection: Some(HoverSelection {
-                anchor: (0, 0),
-                head: (0, 4),
-                dragging: false,
-            }),
-            generation: 0,
+        );
+        popup.selection = Some(HoverSelection {
+            anchor: (0, 0),
+            head: (0, 4),
+            dragging: false,
         });
+        h.stoat.pending_hover = Some(popup);
 
         let buf = h.stoat.render();
         let inner = h.stoat.pending_hover.as_ref().unwrap().inner;
@@ -17449,7 +17412,7 @@ mod tests {
     #[test]
     fn a_live_hover_selection_retires_the_pool() {
         use crate::action_handlers::lsp::{HoverPopup, HoverSelection};
-        use ratatui::{layout::Rect, style::Style};
+        use ratatui::style::Style;
         use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
@@ -17465,16 +17428,11 @@ mod tests {
         h.stoat.active_workspace_mut().layout(size);
 
         let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
-        h.stoat.pending_hover = Some(HoverPopup {
-            lines: vec![vec![("hovered".to_string(), Style::default())]],
-            anchor_offset: 0,
+        h.stoat.pending_hover = Some(HoverPopup::new(
+            vec![vec![("hovered".to_string(), Style::default())]],
+            0,
             editor_id,
-            scroll_half_pages: 0,
-            area: Rect::default(),
-            inner: Rect::default(),
-            selection: None,
-            generation: 0,
-        });
+        ));
         h.stoat.emit_smooth_scroll();
         let opened = drain_apc(&mut rx);
         assert!(
@@ -22591,16 +22549,11 @@ mod tests {
         // open a popup there. Its empty area makes any click land outside it.
         h.stoat.focus_at(right_area.x + 1, right_area.y + 1);
         let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
-        h.stoat.pending_hover = Some(HoverPopup {
-            lines: vec![vec![("hi".to_string(), Style::default())]],
-            anchor_offset: 0,
+        h.stoat.pending_hover = Some(HoverPopup::new(
+            vec![vec![("hi".to_string(), Style::default())]],
+            0,
             editor_id,
-            scroll_half_pages: 0,
-            area: Rect::default(),
-            inner: Rect::default(),
-            selection: None,
-            generation: 0,
-        });
+        ));
 
         // A left-button Down over the other pane moves focus and closes it.
         h.stoat.update(mouse_event(
