@@ -327,8 +327,11 @@ impl SelectionsCollection {
         //
         // The exceptions write into `disjoint` directly and each carry the rule
         // themselves. [`Self::insert_range`] applies the same bias pair as this
-        // does. [`Self::insert_cursor`] and [`Self::seed_cursor`] widen through
+        // does. [`Self::insert_cursor`] widens through
         // `Selection::min_width_1`, which lands on whole clusters.
+        // [`Self::set_block_cursor`] and [`Self::seed_cursor`] go through
+        // [`block_cursor_at`], which clamps down before widening because
+        // widening alone would start from wherever a click landed.
         // [`Self::restore`] replays anchors an earlier pass already clipped.
         //
         // Starts clamp down and ends clamp up, so a selection only ever grows
@@ -593,6 +596,13 @@ fn block_cursor_at(
     id: usize,
     snapshot: &MultiBufferSnapshot,
 ) -> Selection<Anchor> {
+    // A mouse click resolves through a display clip that walks codepoints, so
+    // it can name an offset inside a cluster. Widening from there would jump to
+    // the cluster's end and cover only its tail. Clamping down first is
+    // `replace_with`'s start rule, and it is what a click means: the cell
+    // belongs to the cluster it is drawn inside.
+    let rope = snapshot.rope();
+    let offset = rope.clip_to_grapheme_boundary(offset, Bias::Left);
     let widened = Selection {
         id,
         start: offset,
@@ -600,7 +610,7 @@ fn block_cursor_at(
         reversed: false,
         goal,
     }
-    .min_width_1(snapshot.rope());
+    .min_width_1(rope);
     Selection {
         id,
         start: snapshot.anchor_at(widened.start, Bias::Right),
@@ -1379,6 +1389,41 @@ mod tests {
             stored,
             (1, 4),
             "the span grows out to the cluster it was splitting",
+        );
+    }
+
+    /// `set_block_cursor` snaps an offset landing inside a cluster.
+    ///
+    /// This is the mouse click's landing point, and the display clip chain
+    /// ahead of it walks codepoints, so a click on an interior cell of a joined
+    /// sequence arrives mid-cluster. Widening from there jumps to the cluster's
+    /// end instead, leaving a span that covers only its tail, and deleting that
+    /// would strand the codepoints before it.
+    #[test]
+    fn set_block_cursor_snaps_an_offset_inside_a_cluster() {
+        // A man, woman, girl sequence joined by zero-width joiners: five
+        // codepoints over eighteen bytes, whose only boundaries are 0 and 18.
+        let multi = singleton("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}b\n");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+
+        // Byte 7 is the woman codepoint, four bytes into the sequence.
+        collection.set_block_cursor(7, &snapshot);
+
+        let stored: Vec<(usize, usize)> = collection
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                (
+                    snapshot.resolve_anchor(&sel.start),
+                    snapshot.resolve_anchor(&sel.end),
+                )
+            })
+            .collect();
+        assert_eq!(
+            stored,
+            vec![(0, 18)],
+            "the cursor covers the whole sequence the cell was drawn inside",
         );
     }
 

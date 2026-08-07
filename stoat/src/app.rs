@@ -24449,6 +24449,33 @@ mod tests {
         assert!(h.stoat.editor_drag.is_some(), "drag state armed");
     }
 
+    /// Clicking any cell a joined sequence is drawn over lands on the whole
+    /// sequence.
+    ///
+    /// The display clip walks codepoints, so an interior cell resolves to a
+    /// byte offset inside the sequence. Landing there would leave the cursor
+    /// covering only its tail, and a delete would strand the codepoints before
+    /// it.
+    #[test]
+    fn editor_mouse_down_inside_a_cluster_lands_on_the_whole_cluster() {
+        // Five codepoints over eighteen bytes, rendered across six cells.
+        for cell in 1..6 {
+            let mut h = Stoat::test();
+            let _ = open_scratch_file(&mut h, &format!("{FAMILY}b\n"));
+            let area = focused_editor_pane_area(&h);
+            h.stoat.update(mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                area.x + cell,
+                area.y,
+            ));
+            assert_eq!(
+                focused_primary_offsets(&mut h),
+                (0, 18),
+                "a click on cell {cell} covers the whole sequence",
+            );
+        }
+    }
+
     /// Open a location picker over `count` candidates in a seeded file, each
     /// row's text naming its 1-based position, and return the file's path.
     fn open_location_picker(h: &mut crate::test_harness::TestHarness, count: usize) -> PathBuf {
