@@ -23497,6 +23497,41 @@ mod tests {
         assert_eq!(h.head_offsets(), before, "undo restores both selections");
     }
 
+    /// One undo reverts a whole multi-cursor insert session, and redo restores it.
+    ///
+    /// The delete sibling above pins that side. An insert session is grouped
+    /// differently. Its group opens on entering insert mode and seals on leaving
+    /// it, rather than being wrapped around one action, so the two paths can fail
+    /// independently.
+    #[test]
+    fn an_insert_session_undoes_and_redoes_at_every_cursor() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "ab\nab\n");
+        h.type_keys("l");
+        h.type_keys("C");
+        let before = h.head_offsets();
+
+        h.type_keys("i");
+        h.type_text("XY");
+        h.type_keys("esc");
+        assert_eq!(buffer_text(&h, &path), "aXYb\naXYb\n");
+
+        h.type_keys("u");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "ab\nab\n",
+            "one undo reverts the session at both cursors",
+        );
+        assert_eq!(h.head_offsets(), before, "and restores both selections");
+
+        h.type_keys("shift-U");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "aXYb\naXYb\n",
+            "one redo reapplies the session at both cursors",
+        );
+    }
+
     #[test]
     fn ctrl_s_splits_the_insert_session_into_two_undo_steps() {
         let mut h = Stoat::test();
@@ -23590,6 +23625,51 @@ mod tests {
         h.type_text("XY");
         assert_eq!(buffer_text(&h, &path), "XYaa\nXYbb\n");
         assert_eq!(h.head_offsets(), vec![2, 7]);
+    }
+
+    /// Two cursors on one line each land after their own inserted text.
+    ///
+    /// The landing arithmetic and the batch's descending order are exercised by
+    /// the one-cursor-per-line tests too, since both work in offsets and a later
+    /// cursor carries the earlier insertions wherever it sits. What is untested
+    /// is the shape itself. Nothing else drives two cursors into a single line, so
+    /// a change that started treating rows separately would go unnoticed.
+    #[test]
+    fn same_line_cursors_each_land_after_their_own_insert() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc");
+        h.type_keys("l");
+        insert_cursor_at(&mut h, 2);
+        h.type_keys("i");
+        h.type_text("X");
+        assert_eq!(buffer_text(&h, &path), "aXbXc");
+        assert_eq!(
+            h.head_offsets(),
+            vec![2, 4],
+            "the later cursor carries the earlier insertion as well as its own",
+        );
+    }
+
+    /// Adjacent cursors backspacing collapse onto one deletion.
+    ///
+    /// Their delete ranges touch end to start, which no other end-to-end test
+    /// produces. `merge_overlapping_spans` leaves them alone, since touching is not
+    /// overlapping, and `edit_batch` takes them as two ranges. Both cursors then
+    /// land on the same offset and reduce to one.
+    #[test]
+    fn adjacent_cursors_backspacing_merge_into_one() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abcd");
+        h.type_keys("l");
+        insert_cursor_at(&mut h, 2);
+        h.type_keys("i");
+        h.type_keys("backspace");
+        assert_eq!(buffer_text(&h, &path), "cd", "both leading characters go");
+        assert_eq!(
+            h.head_offsets(),
+            vec![0],
+            "the two cursors land on the same offset and dedupe",
+        );
     }
 
     #[test]
