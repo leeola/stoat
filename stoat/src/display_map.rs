@@ -769,12 +769,25 @@ impl DisplayMap {
     }
 
     /// Sync the layers up to wrapping, returning the wrap snapshot, the wrap
-    /// rows the sync changed, and the same edits restated in buffer rows.
+    /// rows the sync changed, the same edits restated in buffer rows, and the
+    /// buffer snapshot the whole sync ran against.
     ///
     /// The buffer-row patch is what the block map needs. Block placements are
     /// buffer rows, so a wrap-row patch cannot tell it how far an edit moved
     /// them, and by the time the wrap layer has run the buffer patch is gone.
-    pub fn sync_through_wrap(&mut self) -> (Arc<WrapSnapshot>, Patch<u32>, Patch<u32>) {
+    ///
+    /// The buffer snapshot comes back so a caller with more to do against the
+    /// same text reuses it. Building another would rebuild the excerpt tree
+    /// against the live buffers to arrive at the same answer, this sync leaving
+    /// the multi-buffer untouched.
+    pub fn sync_through_wrap(
+        &mut self,
+    ) -> (
+        Arc<WrapSnapshot>,
+        Patch<u32>,
+        Patch<u32>,
+        MultiBufferSnapshot,
+    ) {
         let buffer_snapshot = self.multi_buffer.snapshot();
         let buffer_edits = buffer_snapshot.edits_since(self.last_buffer_version);
         let buffer_row_edits = match self.last_buffer_snapshot.take() {
@@ -785,11 +798,12 @@ impl DisplayMap {
         self.last_buffer_version = buffer_snapshot.version();
         self.last_buffer_snapshot = Some(buffer_snapshot.clone());
 
-        let (inlay_snapshot, inlay_edits) = self.inlay_map.sync(buffer_snapshot, &buffer_edits);
+        let (inlay_snapshot, inlay_edits) =
+            self.inlay_map.sync(buffer_snapshot.clone(), &buffer_edits);
         let (fold_snapshot, fold_edits) = self.fold_map.sync(inlay_snapshot, &inlay_edits);
         let (tab_snapshot, tab_edits) = self.tab_map.sync(fold_snapshot, fold_edits);
         let (wrap_snapshot, wrap_edits) = self.wrap_map.sync(tab_snapshot, &tab_edits);
-        (wrap_snapshot, wrap_edits, buffer_row_edits)
+        (wrap_snapshot, wrap_edits, buffer_row_edits, buffer_snapshot)
     }
 
     pub fn snapshot(&mut self) -> DisplaySnapshot {
@@ -831,8 +845,9 @@ impl DisplayMap {
             return cached.clone();
         }
 
-        let (wrap_snapshot, wrap_edits, buffer_row_edits) = self.sync_through_wrap();
-        let diff_map = self.multi_buffer.snapshot().diff_map.clone();
+        let (wrap_snapshot, wrap_edits, buffer_row_edits, buffer_snapshot) =
+            self.sync_through_wrap();
+        let diff_map = buffer_snapshot.diff_map.clone();
         let diff_version = diff_map.as_ref().map(|dm| dm.version()).unwrap_or(0);
         if diff_version != self.last_diff_version
             || self.show_deleted_blocks != self.last_show_deleted_blocks
@@ -874,9 +889,8 @@ impl DisplayMap {
         );
 
         if buffer_version != self.last_crease_sync_version {
-            let buffer_snapshot_for_crease = self.multi_buffer.snapshot();
             self.crease_map
-                .sync(&|anchors| buffer_snapshot_for_crease.resolve_anchors_batch(anchors));
+                .sync(&|anchors| buffer_snapshot.resolve_anchors_batch(anchors));
             self.last_crease_sync_version = buffer_version;
         }
 
@@ -2587,7 +2601,7 @@ mod tests {
 
         shared.write().expect("poisoned").edit(0..0, "x");
 
-        let (wrap_snapshot, wrap_edits, _) = display_map.sync_through_wrap();
+        let (wrap_snapshot, wrap_edits, _, _) = display_map.sync_through_wrap();
         assert!(!wrap_edits.is_empty(), "the edit itself must be reported");
         assert!(
             !wrap_edits
