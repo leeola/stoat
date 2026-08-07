@@ -4827,6 +4827,50 @@ mod tests {
         );
     }
 
+    /// A column is a grapheme cluster, not a codepoint.
+    ///
+    /// A letter carrying a combining mark is two codepoints and one column, so
+    /// counting codepoints walks into the middle of the cluster and stops a
+    /// column early. Here the third column is the `y`, not the `x`.
+    #[test]
+    fn goto_column_counts_graphemes_not_codepoints() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "e\u{301}xyz\n");
+        h.open_file(&path);
+        h.type_keys("3 g |");
+        assert_eq!(h.cursor_display_positions(), vec![(0, 2)]);
+        assert_eq!(
+            h.primary_head_offset(),
+            4,
+            "the y, one past the two-codepoint cluster and the x",
+        );
+    }
+
+    /// Every cursor takes the column on its own row.
+    ///
+    /// Computing one target from the newest selection and stamping it on the
+    /// rest makes every span identical, and identical spans merge, so the set
+    /// collapses to a single cursor.
+    #[test]
+    fn goto_column_lands_each_cursor_on_its_own_row() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcdef\nghijkl\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AddSelectionBelow);
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 1, false), (7, 8, false)],
+            "one cursor on each row",
+        );
+
+        h.type_keys("3 g |");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(2, 3, false), (9, 10, false)],
+            "each cursor lands on column 3 of its own row",
+        );
+    }
+
     #[test]
     fn count_survives_setmode_chord() {
         let mut split = crate::test_harness::TestHarness::with_size(20, 5);

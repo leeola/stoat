@@ -4071,45 +4071,53 @@ pub(super) fn goto_column(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
 
-    let head_offset = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().head());
-    let tail_offset = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().tail());
-    let cursor = cursor_offset(rope, tail_offset, head_offset);
-    let row = rope.offset_to_point(cursor).row;
-    let line_start = rope.point_to_offset(Point::new(row, 0));
-    let line_end = rope.point_to_offset(Point::new(row, rope.line_len(row)));
-
     let steps = count.saturating_sub(1) as usize;
-    let mut target_offset = line_start;
-    for ch in rope.chars_at(line_start).take(steps) {
-        let next = target_offset + ch.len_utf8();
-        if next > line_end {
-            break;
-        }
-        target_offset = next;
-    }
 
-    if extend {
-        let new_display = editor.display_map.snapshot();
-        let new_buf = new_display.buffer_snapshot();
-        let new_rope = new_buf.rope();
-        editor.selections.transform(new_buf, |sel| {
-            let head_offset = new_buf.resolve_anchor(&sel.head());
-            let tail_offset = new_buf.resolve_anchor(&sel.tail());
-            // Naming a column is itself a horizontal move, so it replaces
-            // whatever column a prior vertical move was holding.
-            extend_head_to_cursor(
-                sel,
-                target_offset,
-                head_offset,
-                tail_offset,
-                SelectionGoal::None,
-                new_rope,
-                new_buf,
-            )
+    editor
+        .selections
+        .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
+            // Each cursor names the column on its own row. Computing one target
+            // and stamping it on all of them makes every span identical, and
+            // identical spans merge, so the set collapses to one cursor.
+            let cursor = cursor_offset(rope, tail_offset, head_offset);
+            let row = rope.offset_to_point(cursor).row;
+            let line_start = rope.point_to_offset(Point::new(row, 0));
+            let line_end = rope.point_to_offset(Point::new(row, rope.line_len(row)));
+
+            // A column is a grapheme cluster. Stepping codepoints instead walks
+            // into the middle of a letter carrying a combining mark and stops a
+            // column short of the one asked for.
+            let mut target_offset = line_start;
+            for _ in 0..steps {
+                let next = rope.next_grapheme_boundary(target_offset);
+                if next > line_end || next == target_offset {
+                    break;
+                }
+                target_offset = next;
+            }
+
+            if extend {
+                // Naming a column is itself a horizontal move, so it replaces
+                // whatever column a prior vertical move was holding.
+                extend_head_to_cursor(
+                    sel,
+                    target_offset,
+                    head_offset,
+                    tail_offset,
+                    SelectionGoal::None,
+                    rope,
+                    buffer_snapshot,
+                )
+            } else {
+                land_block_cursor(
+                    sel.id,
+                    target_offset,
+                    SelectionGoal::None,
+                    rope,
+                    buffer_snapshot,
+                )
+            }
         });
-    } else {
-        apply_primary_range(editor, target_offset..target_offset);
-    }
     UpdateEffect::Redraw
 }
 
