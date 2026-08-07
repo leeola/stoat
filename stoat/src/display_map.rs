@@ -33,6 +33,7 @@ pub use highlights::{
 pub use inlay_map::{InlayId, InlayKind, InlayMap, InlayOffset, InlayPoint, InlaySnapshot};
 use std::{
     collections::{BTreeMap, HashMap},
+    mem,
     ops::Range,
     sync::{
         atomic::{AtomicU64, Ordering as AtomicOrdering},
@@ -825,10 +826,7 @@ impl DisplayMap {
         &mut self,
         companion_wrap_data: Option<(&WrapSnapshot, &Patch<u32>)>,
     ) -> DisplaySnapshot {
-        if self.highlights_dirty {
-            self.cached_snapshot = None;
-            self.highlights_dirty = false;
-        }
+        let highlights_dirty = mem::take(&mut self.highlights_dirty);
         let buffer_version = self.multi_buffer.buffer_version();
         let diff_version_now = self.multi_buffer.diff_version();
         // A settled background rewrap moves none of these versions, so the
@@ -840,9 +838,20 @@ impl DisplayMap {
             && self.inlay_map.version_unchanged()
             && !self.wrap_map.background_pending()
             && companion_wrap_data.is_none()
-            && let Some(ref cached) = self.cached_snapshot
+            && let Some(cached) = self.cached_snapshot.clone()
         {
-            return cached.clone();
+            // Highlights are the one thing a snapshot carries that no layer's
+            // geometry depends on, so a change to them is answered by rewriting
+            // those fields on the cached snapshot. A parse installs a token
+            // channel per keystroke, and rebuilding five layers to receive an
+            // Arc is what that used to cost.
+            if !highlights_dirty {
+                return cached;
+            }
+            let mut refreshed = cached;
+            self.refresh_highlights(&mut refreshed);
+            self.cached_snapshot = Some(refreshed.clone());
+            return refreshed;
         }
 
         let (wrap_snapshot, wrap_edits, buffer_row_edits, buffer_snapshot) =
@@ -911,6 +920,20 @@ impl DisplayMap {
         };
         self.cached_snapshot = Some(snapshot.clone());
         snapshot
+    }
+
+    /// Rewrite `snapshot`'s highlight fields from the current ones.
+    ///
+    /// These are exactly the fields the construction above reads off `self`
+    /// rather than off a layer, which is what makes them safe to replace on a
+    /// snapshot whose geometry is still current. The two lists have to agree, so
+    /// a field added to one belongs in the other.
+    fn refresh_highlights(&self, snapshot: &mut DisplaySnapshot) {
+        snapshot.text_highlights = self.text_highlights.clone();
+        snapshot.semantic_token_highlights = self.semantic_token_highlights.clone();
+        snapshot.lsp_token_highlights = self.lsp_token_highlights.clone();
+        snapshot.inlay_highlights = self.inlay_highlights.clone();
+        snapshot.syntax_highlighting = self.syntax_highlighting;
     }
 }
 
@@ -1440,7 +1463,8 @@ impl Iterator for ReversedBufferCharsAt<'_> {
 mod tests {
     use super::{
         BlockPlacement, BlockProperties, BlockRowKind, BlockStyle, DisplayMap, DisplayPoint,
-        DisplayRow, InlayKind, InlayPoint,
+        DisplayRow, DisplaySnapshot, HighlightStyle, HighlightStyleInterner, InlayKind, InlayPoint,
+        SemanticTokenHighlight,
     };
     use crate::{
         buffer::{BufferId, TextBuffer},
@@ -2344,6 +2368,66 @@ mod tests {
         let waker = futures::task::noop_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         fut.as_mut().poll(&mut cx).is_ready()
+    }
+
+    #[test]
+    fn a_highlight_change_keeps_the_layers_it_did_not_touch() {
+        // A parse installs a token channel on every keystroke in a highlighted
+        // file, so this is the difference between a typed character paying the
+        // five-layer pipeline once or twice.
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "fn alpha() {}\nfn beta() {}\n",
+        )));
+        let mut display_map = DisplayMap::new(
+            MultiBuffer::singleton(BufferId::new(0), shared.clone()),
+            test_executor(),
+            crate::test_notify(),
+        );
+
+        let (tokens, interner) = {
+            let snap = display_map.multi_buffer.snapshot();
+            let mut interner = HighlightStyleInterner::default();
+            let style = interner.push(HighlightStyle::default());
+            let tokens: Arc<[SemanticTokenHighlight]> = [(3usize, 8usize)]
+                .iter()
+                .map(|&(start, end)| SemanticTokenHighlight {
+                    range: snap.anchor_at(start, stoat_text::Bias::Right)
+                        ..snap.anchor_at(end, stoat_text::Bias::Left),
+                    style,
+                })
+                .collect();
+            (tokens, Arc::new(interner))
+        };
+
+        // The block snapshot derefs through an Arc, so the address of what it
+        // points at says whether the layers below were rebuilt or handed over.
+        let layers = |snapshot: &DisplaySnapshot| std::ptr::from_ref(&*snapshot.block_snapshot);
+
+        let before = display_map.snapshot();
+        assert!(
+            display_map
+                .semantic_token_highlights
+                .get(&BufferId::new(0))
+                .is_none(),
+            "nothing is installed yet",
+        );
+
+        display_map.set_semantic_token_highlights(BufferId::new(0), tokens, interner);
+        let after = display_map.snapshot();
+
+        assert_eq!(
+            layers(&before),
+            layers(&after),
+            "no edit happened, so the layers are the same ones",
+        );
+        assert!(
+            after
+                .semantic_token_highlights
+                .get(&BufferId::new(0))
+                .is_some(),
+            "and the snapshot carries the highlights that were installed",
+        );
     }
 
     #[test]
