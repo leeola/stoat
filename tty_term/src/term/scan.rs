@@ -1,0 +1,666 @@
+//! The sequences the vte parser hands back to nobody, recognized in one walk.
+//!
+//! `alacritty_terminal` drops APC strings, the private XTVERSION query, and OSC 9
+//! / OSC 777 notifications, yet all three carry meaning to stoatty. [`EscScanner`]
+//! watches the same byte stream the parser reads and emits an [`EscEvent`] as each
+//! one completes.
+
+use super::TermEvent;
+use stoatty_protocol::frame::MAX_APC_PAYLOAD;
+
+pub(super) const ESC: u8 = 0x1b;
+/// Byte after `ESC` that opens an APC string (`ESC _`).
+const APC_INTRODUCER: u8 = b'_';
+/// Byte after `ESC` that closes a string control (`ESC \`, the ST).
+const STRING_TERMINATOR: u8 = b'\\';
+/// Bell, accepted as an alternate string terminator.
+const BEL: u8 = 0x07;
+/// A sequence the fused scanner recognized, emitted as it completes.
+///
+/// The payloads borrow the scanner's reused buffer, so each is valid only for the
+/// call that yields it.
+pub(super) enum EscEvent<'a> {
+    /// An APC string's payload, the bytes between the introducer and the
+    /// terminator, paired with the offset one past that terminator.
+    ///
+    /// The offset lets a caller split the input at frame boundaries to route the
+    /// content between frames. A payload split across calls is retained until its
+    /// terminator arrives, and its offset is then relative to the call it
+    /// completes in.
+    Apc { payload: &'a [u8], end: usize },
+    /// An XTVERSION query (`CSI > Ps q`) completed. The parameters are dropped,
+    /// since the reply is fixed.
+    XtVersion,
+    /// An OSC 9 or OSC 777 notification, as its code and the bytes after the
+    /// code's `;`.
+    OscNotify { code: u32, payload: &'a [u8] },
+}
+
+/// Recognizes the escape sequences the vte parser does not hand back, in one walk
+/// of the stream.
+///
+/// Three kinds go unreported by `alacritty_terminal`, so the driver watches the
+/// bytes for them itself: APC strings (`ESC _ ... ESC \`), which carry stoatty's own
+/// protocol; XTVERSION queries (`CSI > Ps q`), which vte dispatches in the plain
+/// `CSI Ps q` form but not this one; and OSC 9 / OSC 777 desktop notifications,
+/// where vte handles OSC 0/1/2/4/52 and drops these. Each is framed across
+/// [`Terminal::advance`] calls, so a sequence split between chunks completes on the
+/// chunk that ends it.
+///
+/// All three open on the byte after `ESC`, and no two can be open at once, so one
+/// state machine recognizes all of them for the cost of the one walk. A sequence
+/// written inside another's payload is part of that payload rather than a sequence
+/// of its own, which is how the vte parser reads the same bytes.
+///
+/// Recognizing a stoatty frame among the APC payloads is the decoder's job, not this
+/// scanner's. Mapping a notification to an event is [`notification_from_osc`]'s.
+#[derive(Default)]
+pub(super) struct EscScanner {
+    state: EscState,
+    /// The payload of whichever sequence is open, shared because the APC and OSC
+    /// states that fill it are mutually exclusive.
+    payload: Vec<u8>,
+    /// The OSC code being accumulated, then the one a buffered payload belongs to.
+    code: u32,
+    /// Set when an OSC payload outgrew its cap, so it is dropped at its terminator
+    /// rather than reported truncated.
+    overflow: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+enum EscState {
+    #[default]
+    Ground,
+    Escape,
+    /// Seen `ESC _`, buffering the APC payload.
+    Apc,
+    /// Seen `ESC` inside an APC payload, awaiting the `\` that terminates it.
+    ApcEscape,
+    /// Seen `ESC [`, waiting on the `>` that marks the private query.
+    CsiEntry,
+    /// Seen `ESC [ >`, consuming parameter bytes until the final byte.
+    CsiGt,
+    /// Seen `ESC ]`, accumulating the numeric code up to its `;`.
+    OscPrefix,
+    /// Inside an OSC 9 or 777 payload, which is buffered.
+    OscBuffer,
+    /// Seen `ESC` inside a buffered OSC payload.
+    OscBufferEscape,
+    /// Inside any other OSC, skipped to its terminator so a large clipboard write
+    /// is never copied.
+    OscSkip,
+    /// Seen `ESC` inside a skipped OSC.
+    OscSkipEscape,
+}
+
+impl EscScanner {
+    /// Whether no sequence is open, so a caller may skip a chunk containing no
+    /// `ESC` without missing one.
+    pub(super) fn is_idle(&self) -> bool {
+        matches!(self.state, EscState::Ground)
+    }
+
+    /// Feed `bytes`, invoking `emit` for each sequence that completes within them.
+    pub(super) fn scan(&mut self, bytes: &[u8], emit: &mut impl FnMut(EscEvent<'_>)) {
+        let mut i = 0;
+
+        while i < bytes.len() {
+            let byte = bytes[i];
+            match self.state {
+                // Nothing is open, so jump to the next ESC and skip the plain bytes
+                // between rather than stepping each one.
+                EscState::Ground => match memchr::memchr(ESC, &bytes[i..]) {
+                    Some(off) => {
+                        self.state = EscState::Escape;
+                        i += off;
+                    },
+                    None => break,
+                },
+                EscState::Escape => {
+                    self.state = match byte {
+                        APC_INTRODUCER => {
+                            self.payload.clear();
+                            EscState::Apc
+                        },
+                        b'[' => EscState::CsiEntry,
+                        OSC_INTRODUCER => {
+                            self.code = 0;
+                            self.payload.clear();
+                            self.overflow = false;
+                            EscState::OscPrefix
+                        },
+                        ESC => EscState::Escape,
+                        _ => EscState::Ground,
+                    };
+                },
+
+                // APC carries whole screens from stoat, so the payload between
+                // terminators is taken in one run. Landing on the terminator
+                // rather than past it leaves the arms below to read it.
+                EscState::Apc => match byte {
+                    ESC => self.state = EscState::ApcEscape,
+                    BEL => self.finish_apc(i + 1, emit),
+                    _ => {
+                        i += self.push_apc_run(payload_run(&bytes[i..]));
+                        continue;
+                    },
+                },
+                EscState::ApcEscape => match byte {
+                    STRING_TERMINATOR => self.finish_apc(i + 1, emit),
+                    ESC => self.state = EscState::ApcEscape,
+                    _ => {
+                        self.payload.clear();
+                        self.state = EscState::Ground;
+                    },
+                },
+
+                EscState::CsiEntry => {
+                    self.state = match byte {
+                        b'>' => EscState::CsiGt,
+                        _ => EscState::Ground,
+                    }
+                },
+                EscState::CsiGt => {
+                    self.state = match byte {
+                        // Parameter and intermediate bytes keep the sequence open.
+                        0x20..=0x3f => EscState::CsiGt,
+                        b'q' => {
+                            emit(EscEvent::XtVersion);
+                            EscState::Ground
+                        },
+                        ESC => EscState::Escape,
+                        _ => EscState::Ground,
+                    }
+                },
+
+                EscState::OscPrefix => match byte {
+                    b'0'..=b'9' => {
+                        self.code = self
+                            .code
+                            .saturating_mul(10)
+                            .saturating_add(u32::from(byte - b'0'));
+                    },
+                    b';' => {
+                        self.state = if self.code == 9 || self.code == 777 {
+                            EscState::OscBuffer
+                        } else {
+                            EscState::OscSkip
+                        };
+                    },
+                    ESC => self.state = EscState::OscSkipEscape,
+                    BEL => self.state = EscState::Ground,
+                    _ => self.state = EscState::OscSkip,
+                },
+                EscState::OscBuffer => match byte {
+                    ESC => self.state = EscState::OscBufferEscape,
+                    BEL => self.finish_osc(emit),
+                    _ => {
+                        i += self.push_osc_run(payload_run(&bytes[i..]));
+                        continue;
+                    },
+                },
+                EscState::OscBufferEscape => match byte {
+                    STRING_TERMINATOR => self.finish_osc(emit),
+                    ESC => self.state = EscState::OscBufferEscape,
+                    _ => {
+                        self.payload.clear();
+                        self.state = EscState::Ground;
+                    },
+                },
+                EscState::OscSkip => match byte {
+                    ESC => self.state = EscState::OscSkipEscape,
+                    BEL => self.state = EscState::Ground,
+                    _ => {
+                        i += payload_run(&bytes[i..]).len();
+                        continue;
+                    },
+                },
+                EscState::OscSkipEscape => match byte {
+                    STRING_TERMINATOR => self.state = EscState::Ground,
+                    ESC => self.state = EscState::OscSkipEscape,
+                    _ => self.state = EscState::OscSkip,
+                },
+            }
+            i += 1;
+        }
+    }
+
+    /// Buffer a run of APC payload bytes, abandoning the frame if it overruns
+    /// the cap, and report how many bytes of input the run consumed.
+    ///
+    /// The cap is [`MAX_APC_PAYLOAD`], shared with the encoders so a frame they emit
+    /// can never be the thing this discards. Overrunning discards the whole frame,
+    /// so the bytes buffered before the cap was reached are of no use and the run
+    /// is dropped entire rather than filled to the brim first.
+    fn push_apc_run(&mut self, run: &[u8]) -> usize {
+        if self.payload.len() + run.len() <= MAX_APC_PAYLOAD {
+            self.payload.extend_from_slice(run);
+        } else {
+            self.payload.clear();
+            self.state = EscState::Ground;
+        }
+        run.len()
+    }
+
+    /// Emit the buffered APC payload, ending one past its terminator at `end`.
+    fn finish_apc(&mut self, end: usize, emit: &mut impl FnMut(EscEvent<'_>)) {
+        emit(EscEvent::Apc {
+            payload: &self.payload,
+            end,
+        });
+        self.payload.clear();
+        self.state = EscState::Ground;
+    }
+
+    /// Buffer a run of OSC payload bytes, marking overflow past the cap so the
+    /// sequence is dropped at its terminator rather than reported truncated, and
+    /// report how many bytes of input the run consumed.
+    ///
+    /// Unlike an APC overrun this keeps scanning, so what fits is still buffered.
+    /// The sequence is discarded at its terminator instead, which is where the
+    /// overflow flag is read.
+    fn push_osc_run(&mut self, run: &[u8]) -> usize {
+        let room = MAX_OSC_NOTIFY_BYTES - self.payload.len();
+        if run.len() > room {
+            self.overflow = true;
+        }
+        self.payload.extend_from_slice(&run[..run.len().min(room)]);
+        run.len()
+    }
+
+    /// Emit the buffered OSC payload unless it overran the cap, then reset.
+    fn finish_osc(&mut self, emit: &mut impl FnMut(EscEvent<'_>)) {
+        if !self.overflow {
+            emit(EscEvent::OscNotify {
+                code: self.code,
+                payload: &self.payload,
+            });
+        }
+        self.payload.clear();
+        self.overflow = false;
+        self.state = EscState::Ground;
+    }
+}
+
+/// The leading bytes of `rest` that belong to a string payload, stopping at the
+/// terminator that ends it or at the end of what has arrived.
+///
+/// Empty exactly when `rest` opens on a terminator, which is why the callers
+/// take a run only from a byte they have already seen is not one. A zero-length
+/// run would leave the scan position where it was.
+fn payload_run(rest: &[u8]) -> &[u8] {
+    match memchr::memchr2(ESC, BEL, rest) {
+        Some(end) => &rest[..end],
+        None => rest,
+    }
+}
+
+/// The XTVERSION reply naming this terminal, answering `CSI > Ps q`.
+///
+/// A DCS string (`ESC P > | name ESC \`) carrying the terminal name and version,
+/// the response xterm defined for XTVERSION. Programs such as fish query it at
+/// startup and gate optional features on the answer; the vte parser does not
+/// dispatch it, so the driver synthesizes this reply itself.
+pub(super) const XTVERSION_REPLY: &str =
+    concat!("\x1bP>|stoatty(", env!("CARGO_PKG_VERSION"), ")\x1b\\");
+
+/// Byte after `ESC` that opens an OSC string (`ESC ]`).
+const OSC_INTRODUCER: u8 = b']';
+
+/// Cap on a buffered OSC 9 / OSC 777 notification payload, bounding memory
+/// against a sequence that never terminates. A larger notification is discarded.
+const MAX_OSC_NOTIFY_BYTES: usize = 4096;
+
+/// Map a scanned OSC notification `(code, payload)` to a [`TermEvent::Notification`].
+///
+/// OSC 9 carries only a body. OSC 777's payload is `kind;title;body`, where only
+/// the `notify` kind yields an event and a `;` inside the body is preserved. A
+/// code or kind that is not a notification yields `None`.
+pub(super) fn notification_from_osc(code: u32, payload: &[u8]) -> Option<TermEvent> {
+    match code {
+        9 => Some(TermEvent::Notification {
+            title: None,
+            body: String::from_utf8_lossy(payload).into_owned(),
+        }),
+        777 => {
+            let text = String::from_utf8_lossy(payload);
+            let mut parts = text.splitn(3, ';');
+            if parts.next()? != "notify" {
+                return None;
+            }
+            let title = parts.next()?.to_owned();
+            let body = parts.next().unwrap_or_default().to_owned();
+            Some(TermEvent::Notification {
+                title: Some(title),
+                body,
+            })
+        },
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EscEvent, EscScanner, MAX_APC_PAYLOAD, MAX_OSC_NOTIFY_BYTES};
+
+    #[test]
+    fn osc_notify_scan_takes_both_terminators() {
+        let mut bel = EscScanner::default();
+        assert_eq!(
+            scan_osc(&mut bel, b"\x1b]9;hi\x07"),
+            vec![(9, b"hi".to_vec())]
+        );
+
+        let mut st = EscScanner::default();
+        assert_eq!(
+            scan_osc(&mut st, b"\x1b]9;hi\x1b\\"),
+            vec![(9, b"hi".to_vec())]
+        );
+    }
+
+    #[test]
+    fn osc_notify_scan_retains_a_split_sequence() {
+        let mut scanner = EscScanner::default();
+        assert!(scan_osc(&mut scanner, b"\x1b]9;he").is_empty());
+        assert_eq!(
+            scan_osc(&mut scanner, b"llo\x07"),
+            vec![(9, b"hello".to_vec())]
+        );
+    }
+
+    #[test]
+    fn osc_notify_scan_skips_other_codes_unbuffered() {
+        let mut scanner = EscScanner::default();
+        assert_eq!(
+            scan_osc(&mut scanner, b"\x1b]52;c;QUJD\x07\x1b]9;ping\x07"),
+            vec![(9, b"ping".to_vec())],
+            "an OSC 52 write is skipped and the following OSC 9 is still found"
+        );
+    }
+
+    #[test]
+    fn osc_notify_scan_discards_over_the_cap() {
+        let mut scanner = EscScanner::default();
+        let mut seq = b"\x1b]9;".to_vec();
+        seq.resize(seq.len() + MAX_OSC_NOTIFY_BYTES + 1, b'a');
+        seq.push(0x07);
+        assert!(
+            scan_osc(&mut scanner, &seq).is_empty(),
+            "a payload past the cap is dropped"
+        );
+        assert_eq!(
+            scan_osc(&mut scanner, b"\x1b]9;ok\x07"),
+            vec![(9, b"ok".to_vec())],
+            "the scanner recovers for the next sequence"
+        );
+    }
+
+    #[test]
+    fn osc_notify_scan_skips_long_plain_runs() {
+        let mut scanner = EscScanner::default();
+        let mut input = vec![b'.'; 8192];
+        input.extend_from_slice(b"\x1b]9;ping\x07");
+
+        assert_eq!(scan_osc(&mut scanner, &input), vec![(9, b"ping".to_vec())]);
+    }
+
+    #[test]
+    fn osc_notify_scan_output_is_split_invariant() {
+        let input = b"log\x1b]9;alpha\x07gap\x1b]52;c;QQ==\x07\x1b]777;notify;t;b\x1b\\end";
+        let whole = scan_osc(&mut EscScanner::default(), input);
+
+        for split in 0..=input.len() {
+            let mut scanner = EscScanner::default();
+            let mut got = scan_osc(&mut scanner, &input[..split]);
+            got.extend(scan_osc(&mut scanner, &input[split..]));
+            assert_eq!(got, whole, "split at {split} changed the notifications");
+        }
+    }
+
+    #[test]
+    fn xtversion_scan_skips_long_plain_runs() {
+        let mut scanner = EscScanner::default();
+        let mut input = vec![b'.'; 8192];
+        input.extend_from_slice(b"\x1b[>q");
+
+        assert_eq!(scan_xtversion(&mut scanner, &input), 1);
+    }
+
+    #[test]
+    fn xtversion_scan_output_is_split_invariant() {
+        let input = b"a\x1b[>4;1mb\x1b[>qc\x1b[>0q";
+        let whole = scan_xtversion(&mut EscScanner::default(), input);
+        assert_eq!(whole, 2, "two queries; the modify-keys CSI is not one");
+
+        for split in 0..=input.len() {
+            let mut scanner = EscScanner::default();
+            let got = scan_xtversion(&mut scanner, &input[..split])
+                + scan_xtversion(&mut scanner, &input[split..]);
+            assert_eq!(got, whole, "split at {split} changed the hit count");
+        }
+    }
+
+    /// One walk finds all three sequence kinds, whatever order they arrive in.
+    #[test]
+    fn one_scan_finds_every_kind_interleaved() {
+        let mut scanner = EscScanner::default();
+        let input =
+            b"a\x1b_Gstoatty;x\x1b\\b\x1b[>0q\x1b]9;ping\x07c\x1b_second\x07\x1b[>q\x1b]777;notify;t;b\x1b\\";
+
+        let mut apc = Vec::new();
+        let mut queries = 0;
+        let mut notes = Vec::new();
+        scanner.scan(input, &mut |event| match event {
+            EscEvent::Apc { payload, .. } => apc.push(payload.to_vec()),
+            EscEvent::XtVersion => queries += 1,
+            EscEvent::OscNotify { code, payload } => notes.push((code, payload.to_vec())),
+        });
+
+        assert_eq!(
+            (apc, queries, notes),
+            (
+                vec![b"Gstoatty;x".to_vec(), b"second".to_vec()],
+                2,
+                vec![(9, b"ping".to_vec()), (777, b"notify;t;b".to_vec()),],
+            ),
+            "each sequence is recognized once, in one pass over the chunk",
+        );
+    }
+
+    /// A sequence written inside another's payload belongs to that payload.
+    ///
+    /// One state machine reads the stream the way the vte parser does, so an APC
+    /// payload holding what looks like a query is payload, not a query. Only
+    /// malformed input can reach this, since a well-formed stream closes a sequence
+    /// before opening the next.
+    #[test]
+    fn a_sequence_inside_a_payload_is_not_its_own() {
+        let mut scanner = EscScanner::default();
+
+        // The interior ESC abandons the APC frame, and the query bytes after it are
+        // the abandoned payload's rather than a query of their own.
+        assert_eq!(
+            scan_xtversion(&mut scanner, b"\x1b_pay\x1b[>qload\x1b\\"),
+            0,
+            "a query inside an APC payload is part of the payload"
+        );
+
+        // An OSC 52 write is skipped to its terminator, so an APC frame drawn inside
+        // it is skipped with it.
+        let mut scanner = EscScanner::default();
+        assert!(
+            scan_collect(&mut scanner, b"\x1b]52;c;\x1b_Gstoatty;x\x1b\\\x07").is_empty(),
+            "an APC frame inside an OSC payload is part of that payload"
+        );
+    }
+
+    /// The APC payloads and their end offsets one scan of `bytes` completes.
+    fn scan_collect(scanner: &mut EscScanner, bytes: &[u8]) -> Vec<(Vec<u8>, usize)> {
+        let mut out = Vec::new();
+        scanner.scan(bytes, &mut |event| {
+            if let EscEvent::Apc { payload, end } = event {
+                out.push((payload.to_vec(), end));
+            }
+        });
+        out
+    }
+
+    /// How many XTVERSION queries one scan of `bytes` completes.
+    fn scan_xtversion(scanner: &mut EscScanner, bytes: &[u8]) -> usize {
+        let mut hits = 0;
+        scanner.scan(bytes, &mut |event| {
+            if matches!(event, EscEvent::XtVersion) {
+                hits += 1;
+            }
+        });
+        hits
+    }
+
+    /// The OSC notifications one scan of `bytes` completes, as `(code, payload)`.
+    fn scan_osc(scanner: &mut EscScanner, bytes: &[u8]) -> Vec<(u32, Vec<u8>)> {
+        let mut out = Vec::new();
+        scanner.scan(bytes, &mut |event| {
+            if let EscEvent::OscNotify { code, payload } = event {
+                out.push((code, payload.to_vec()));
+            }
+        });
+        out
+    }
+
+    #[test]
+    fn scans_single_apc_frame() {
+        let mut scanner = EscScanner::default();
+
+        assert_eq!(
+            scan_collect(&mut scanner, b"\x1b_Gstoatty;border\x1b\\"),
+            vec![(b"Gstoatty;border".to_vec(), 19)]
+        );
+    }
+
+    #[test]
+    fn scans_frame_split_across_calls() {
+        let mut scanner = EscScanner::default();
+
+        assert!(scan_collect(&mut scanner, b"\x1b_Gstoat").is_empty());
+        assert_eq!(
+            scan_collect(&mut scanner, b"ty;x\x1b\\"),
+            vec![(b"Gstoatty;x".to_vec(), 6)]
+        );
+    }
+
+    #[test]
+    fn scans_bel_terminated_frame() {
+        let mut scanner = EscScanner::default();
+
+        assert_eq!(
+            scan_collect(&mut scanner, b"\x1b_foo\x07"),
+            vec![(b"foo".to_vec(), 6)]
+        );
+    }
+
+    #[test]
+    fn scans_frame_between_text() {
+        let mut scanner = EscScanner::default();
+
+        assert_eq!(
+            scan_collect(&mut scanner, b"a\x1b_foo\x1b\\b"),
+            vec![(b"foo".to_vec(), 8)]
+        );
+    }
+
+    #[test]
+    fn scans_two_frames_in_one_chunk() {
+        let mut scanner = EscScanner::default();
+
+        assert_eq!(
+            scan_collect(&mut scanner, b"\x1b_a\x1b\\\x1b_b\x1b\\"),
+            vec![(b"a".to_vec(), 5), (b"b".to_vec(), 10)]
+        );
+    }
+
+    #[test]
+    fn apc_scan_discards_over_the_cap() {
+        // Without this the payload buffer grows with whatever a child sends,
+        // since an APC frame is only bounded by its terminator arriving.
+        let mut scanner = EscScanner::default();
+        let mut seq = b"\x1b_".to_vec();
+        seq.resize(seq.len() + MAX_APC_PAYLOAD + 1, b'a');
+        seq.extend_from_slice(b"\x1b\\");
+        assert!(
+            scan_collect(&mut scanner, &seq).is_empty(),
+            "a payload past the cap is dropped",
+        );
+        assert_eq!(
+            scan_collect(&mut scanner, b"\x1b_ok\x1b\\"),
+            vec![(b"ok".to_vec(), 6)],
+            "the scanner recovers for the next frame",
+        );
+    }
+
+    #[test]
+    fn scans_a_large_payload_split_across_calls() {
+        // A pool fill arrives as several reads, so a run taken from one chunk
+        // has to leave the payload open for the next rather than ending at the
+        // chunk edge. The halves are uneven so a run that assumed it saw the
+        // whole payload would land the frame short.
+        let payload: Vec<u8> = (0..40_000u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let mut input = vec![b'\x1b', b'_'];
+        input.extend_from_slice(&payload);
+        input.extend_from_slice(b"\x1b\\");
+
+        let split = 9_000;
+        let mut scanner = EscScanner::default();
+        assert!(
+            scan_collect(&mut scanner, &input[..split]).is_empty(),
+            "no terminator has arrived yet",
+        );
+        assert_eq!(
+            scan_collect(&mut scanner, &input[split..]),
+            vec![(payload, input.len() - split)],
+            "the whole payload, ending one past the terminator in the second chunk",
+        );
+    }
+
+    #[test]
+    fn csi_and_plain_text_yield_no_frames() {
+        let mut scanner = EscScanner::default();
+
+        assert!(scan_collect(&mut scanner, b"hello\x1b[31mworld").is_empty());
+    }
+
+    #[test]
+    fn apc_scan_skips_long_plain_runs() {
+        let mut scanner = EscScanner::default();
+        let mut input = vec![b'.'; 8192];
+        input.extend_from_slice(b"\x1b_frame\x07");
+        let offset = input.len();
+
+        assert_eq!(
+            scan_collect(&mut scanner, &input),
+            vec![(b"frame".to_vec(), offset)]
+        );
+    }
+
+    #[test]
+    fn apc_scan_payloads_are_split_invariant() {
+        let input = b"pre\x1b_alpha\x1b\\mid\x1b_beta\x07post";
+        let whole: Vec<Vec<u8>> = scan_collect(&mut EscScanner::default(), input)
+            .into_iter()
+            .map(|(payload, _)| payload)
+            .collect();
+
+        for split in 0..=input.len() {
+            let mut scanner = EscScanner::default();
+            let mut got: Vec<Vec<u8>> = scan_collect(&mut scanner, &input[..split])
+                .into_iter()
+                .map(|(payload, _)| payload)
+                .collect();
+            got.extend(
+                scan_collect(&mut scanner, &input[split..])
+                    .into_iter()
+                    .map(|(p, _)| p),
+            );
+            assert_eq!(got, whole, "split at {split} changed the payloads");
+        }
+    }
+}
