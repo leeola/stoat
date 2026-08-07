@@ -361,22 +361,47 @@ pub(crate) fn parse_rope_inner(
 /// is how much text was replaced, which is the distance from the start to the
 /// old end rather than the old end itself.
 pub fn edit_tree(tree: &mut Tree, edits: &[PatchEdit<usize>], old_rope: &Rope, new_rope: &Rope) {
+    apply_input_edits(tree, &input_edits(edits, old_rope, new_rope));
+}
+
+/// The tree-sitter edits `edits` describe against `old_rope` and `new_rope`.
+///
+/// Nothing here reads a tree, so a caller with several trees over one buffer
+/// derives this once and applies it to each. Each edit costs three rope point
+/// lookups, which a layered buffer would otherwise pay per layer.
+///
+/// See [`edit_tree`] for what the coordinates mean.
+pub(crate) fn input_edits(
+    edits: &[PatchEdit<usize>],
+    old_rope: &Rope,
+    new_rope: &Rope,
+) -> Vec<InputEdit> {
+    edits
+        .iter()
+        .map(|edit| {
+            let start_byte = edit.new.start;
+            let start_position = new_rope.offset_to_point(start_byte);
+            // Point's own subtraction carries rows and columns the way a span
+            // between two positions does, so this is the operators rather than
+            // arithmetic on the fields.
+            let replaced =
+                old_rope.offset_to_point(edit.old.end) - old_rope.offset_to_point(edit.old.start);
+            InputEdit {
+                start_byte,
+                old_end_byte: start_byte + edit.old.len(),
+                new_end_byte: edit.new.end,
+                start_position: stoat_to_ts(start_position),
+                old_end_position: stoat_to_ts(start_position + replaced),
+                new_end_position: stoat_to_ts(new_rope.offset_to_point(edit.new.end)),
+            }
+        })
+        .collect()
+}
+
+/// Apply edits already derived by [`input_edits`] to `tree`, in patch order.
+pub(crate) fn apply_input_edits(tree: &mut Tree, edits: &[InputEdit]) {
     for edit in edits {
-        let start_byte = edit.new.start;
-        let start_position = new_rope.offset_to_point(start_byte);
-        // Point's own subtraction carries rows and columns the way a span
-        // between two positions does, so this is the operators rather than
-        // arithmetic on the fields.
-        let replaced =
-            old_rope.offset_to_point(edit.old.end) - old_rope.offset_to_point(edit.old.start);
-        tree.edit(&InputEdit {
-            start_byte,
-            old_end_byte: start_byte + edit.old.len(),
-            new_end_byte: edit.new.end,
-            start_position: stoat_to_ts(start_position),
-            old_end_position: stoat_to_ts(start_position + replaced),
-            new_end_position: stoat_to_ts(new_rope.offset_to_point(edit.new.end)),
-        });
+        tree.edit(edit);
     }
 }
 

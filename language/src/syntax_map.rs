@@ -29,8 +29,9 @@
 //! single-tree state.
 
 use crate::{
-    edit_tree,
-    highlight::{parse_rope_inner, QueryCursorHandle, RopeTextProvider},
+    highlight::{
+        apply_input_edits, input_edits, parse_rope_inner, QueryCursorHandle, RopeTextProvider,
+    },
     language::InjectionInner,
     language_for_fence_token, parse_rope_range, Language,
 };
@@ -244,10 +245,10 @@ impl SyntaxMap {
 
     /// Replay `edits` onto every layer so the map describes `new_rope`.
     ///
-    /// Each layer's [`Tree`] is edited via [`crate::edit_tree`], leaving it
-    /// positioned to act as `old_tree` for an incremental
-    /// [`reparse`](Self::reparse), and its `start_offset`/`end_offset` are
-    /// moved to the same text's new position. Both halves matter: the tree
+    /// Each layer's [`Tree`] replays `edits`, leaving it positioned to act as
+    /// `old_tree` for an incremental [`reparse`](Self::reparse), and its
+    /// `start_offset`/`end_offset` are moved to the same text's new
+    /// position. Both halves matter: the tree
     /// alone would leave the layer record pointing at whatever text now
     /// occupies its old byte range, which
     /// [`SyntaxSnapshot::captures`] reads to decide whether a layer covers
@@ -269,6 +270,8 @@ impl SyntaxMap {
         let Some(first_edit) = edits.first().map(|edit| edit.old.start) else {
             return;
         };
+        let ts_edits = input_edits(edits, old_rope, new_rope);
+
         let mut new_layers: Vec<SyntaxLayer> = Vec::with_capacity(self.snapshot.layer_count());
         for layer in self.snapshot.layers.iter() {
             let mut next = layer.clone();
@@ -277,7 +280,7 @@ impl SyntaxMap {
                 continue;
             }
 
-            edit_tree(&mut next.tree, edits, old_rope, new_rope);
+            apply_input_edits(&mut next.tree, &ts_edits);
 
             next.start_offset = translate_offset(edits, layer.start_offset as usize) as u32;
             next.end_offset =
@@ -937,7 +940,7 @@ fn stoat_to_ts(p: stoat_text::Point) -> tree_sitter::Point {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{parse_rope, LanguageRegistry};
+    use crate::{edit_tree, parse_rope, LanguageRegistry};
     use std::time::Duration;
     use stoat_scheduler::TestScheduler;
 
