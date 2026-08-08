@@ -21,6 +21,18 @@ use std::{collections::HashMap, ops::Range, str::Chars};
 /// the char diff can be quadratic in the worst case.
 const MAX_REFINE_LINE_BYTES: usize = 1024;
 
+/// A pair taller than this many lines is left unrefined.
+///
+/// Every paired line costs an interning pass and a diff of its own, so a block
+/// replaced wholesale would run one per line to arrive at spans covering the
+/// block anyway. Leaving the spans empty falls through to the whole-range
+/// display this module's doc describes.
+///
+/// The height is what tells the two cases apart. Refinement exists so a reader
+/// can see the word that changed, which is a question worth asking of an edit
+/// they could have made by hand and not of one where the answer is all of it.
+const MAX_REFINE_PAIR_LINES: usize = 32;
+
 /// Changed char regions closer than this many unchanged chars merge into one,
 /// so a scattered edit reads as one span rather than confetti.
 const MERGE_GAP: usize = 3;
@@ -75,11 +87,21 @@ fn refine_pair(
     rhs: &str,
     rhs_base: usize,
 ) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+    // Counted the way `lines_with_offsets` splits, which always yields a final
+    // segment, so the cap is measured against the lines the loop below walks.
+    // Counted before splitting, so an over-cap pair does not pay for that
+    // either.
+    let height = |text: &str| text.bytes().filter(|&b| b == b'\n').count() + 1;
+    if height(lhs) > MAX_REFINE_PAIR_LINES || height(rhs) > MAX_REFINE_PAIR_LINES {
+        return (Vec::new(), Vec::new());
+    }
+
     let lhs_lines = lines_with_offsets(lhs, lhs_base);
     let rhs_lines = lines_with_offsets(rhs, rhs_base);
 
     let mut lhs_spans = Vec::new();
     let mut rhs_spans = Vec::new();
+    let mut offsets = Vec::new();
 
     let paired = lhs_lines.len().min(rhs_lines.len());
     for i in 0..paired {
@@ -90,7 +112,7 @@ fn refine_pair(
             push_whole_line(&mut rhs_spans, r_text, r_start);
             continue;
         }
-        let (l_local, r_local) = char_diff(l_text, r_text);
+        let (l_local, r_local) = char_diff(l_text, r_text, &mut offsets);
         extend_absolute(&mut lhs_spans, &l_local, l_start);
         extend_absolute(&mut rhs_spans, &r_local, r_start);
     }
@@ -106,7 +128,14 @@ fn refine_pair(
 
 /// Char-diff two single lines, returning the changed char byte ranges
 /// (line-local) on each side, with near-adjacent regions merged.
-fn char_diff(lhs: &str, rhs: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+///
+/// `offsets` is scratch the char-to-byte mapping builds in, held by the caller
+/// so a pair's lines share one buffer rather than each taking two of their own.
+fn char_diff(
+    lhs: &str,
+    rhs: &str,
+    offsets: &mut Vec<usize>,
+) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
     if lhs == rhs {
         return (Vec::new(), Vec::new());
     }
@@ -120,8 +149,8 @@ fn char_diff(lhs: &str, rhs: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
         },
     );
     (
-        char_regions_to_bytes(&merge_regions(lhs_regions), lhs),
-        char_regions_to_bytes(&merge_regions(rhs_regions), rhs),
+        char_regions_to_bytes(&merge_regions(lhs_regions), lhs, offsets),
+        char_regions_to_bytes(&merge_regions(rhs_regions), rhs, offsets),
     )
 }
 
@@ -144,8 +173,16 @@ fn merge_regions(mut regions: Vec<Range<usize>>) -> Vec<Range<usize>> {
 /// Map char-index regions to line-local byte ranges. `line.char_indices()`
 /// yields each char's byte offset. The appended `line.len()` closes the last
 /// region.
-fn char_regions_to_bytes(regions: &[Range<usize>], line: &str) -> Vec<Range<usize>> {
-    let mut offsets: Vec<usize> = line.char_indices().map(|(i, _)| i).collect();
+///
+/// `offsets` is refilled here rather than allocated, so the two calls a line
+/// makes and every line of a pair share one buffer.
+fn char_regions_to_bytes(
+    regions: &[Range<usize>],
+    line: &str,
+    offsets: &mut Vec<usize>,
+) -> Vec<Range<usize>> {
+    offsets.clear();
+    offsets.extend(line.char_indices().map(|(i, _)| i));
     offsets.push(line.len());
     regions
         .iter()
@@ -222,7 +259,54 @@ impl Sink for CharRegionSink {
 
 #[cfg(test)]
 mod tests {
-    use super::refine_pair;
+    use super::{refine_pair, MAX_REFINE_PAIR_LINES};
+
+    /// A block replaced wholesale gets no sub-line marks, which display reads
+    /// as the whole range. Both sides of the cap, since one tested only far
+    /// from its edge is satisfied by the wrong comparison.
+    #[test]
+    fn a_pair_taller_than_the_cap_refines_to_nothing() {
+        // One word changed on the last line, so a refined pair has exactly one
+        // span to find and an unrefined one comes back empty.
+        let block = |lines: usize| -> (String, String) {
+            let mut lhs = "same\n".repeat(lines - 1);
+            let mut rhs = lhs.clone();
+            lhs.push_str("call(alpha)");
+            rhs.push_str("call(OMEGA)");
+            (lhs, rhs)
+        };
+
+        let (lhs, rhs) = block(MAX_REFINE_PAIR_LINES);
+        let (_, rhs_spans) = refine_pair(&lhs, 0, &rhs, 0);
+        assert_eq!(
+            rhs_spans
+                .iter()
+                .map(|s| &rhs[s.clone()])
+                .collect::<Vec<_>>(),
+            ["OMEGA"],
+            "a pair at the cap still narrows to the word that changed",
+        );
+
+        let (lhs, rhs) = block(MAX_REFINE_PAIR_LINES + 1);
+        assert_eq!(
+            refine_pair(&lhs, 0, &rhs, 0),
+            (Vec::new(), Vec::new()),
+            "one line taller contributes nothing and falls back to the whole range",
+        );
+
+        // A trailing newline opens a final empty line, which the split the
+        // loop walks yields and `str::lines` does not. The cap has to count
+        // the work, so this pair is over it despite holding the same text as
+        // the one at it above.
+        let (mut lhs, mut rhs) = block(MAX_REFINE_PAIR_LINES);
+        lhs.push('\n');
+        rhs.push('\n');
+        assert_eq!(
+            refine_pair(&lhs, 0, &rhs, 0),
+            (Vec::new(), Vec::new()),
+            "the empty line a trailing newline opens counts toward the cap",
+        );
+    }
 
     #[test]
     fn refines_an_inserted_word_to_just_that_word() {
