@@ -796,6 +796,30 @@ async fn run_request(
         executor.timer(COMPLETION_DEBOUNCE).await;
     }
 
+    // Started before the sources are walked, so the whole-rope scan runs beside
+    // the LSP round trips rather than after the last of them has landed. Word is
+    // the last source when it applies, so appending its items once the loop is
+    // done leaves them exactly where walking in order would have put them.
+    //
+    // A request the next keystroke replaces may now have started a scan whose
+    // answer nobody reads. That is the cost of taking the scan off the critical
+    // path of every request that does complete.
+    debug_assert!(
+        sources.last() == Some(&CompletionSource::Word)
+            || !sources.contains(&CompletionSource::Word),
+        "word items are appended after the loop, so word has to be the last source",
+    );
+    let words = sources.contains(&CompletionSource::Word).then(|| {
+        executor.spawn_blocking({
+            let owned = owned.clone();
+            let rope = rope.clone();
+            move || {
+                let ctx = owned.as_borrowed();
+                crate::completion::word::fetch(&ctx, &rope)
+            }
+        })
+    });
+
     let ctx = owned.as_borrowed();
     let mut items: Vec<CompletionItem> = Vec::new();
     let mut incomplete: Vec<String> = Vec::new();
@@ -841,20 +865,13 @@ async fn run_request(
                     }
                 }
             },
-            CompletionSource::Word => {
-                let words = executor
-                    .spawn_blocking({
-                        let owned = owned.clone();
-                        let rope = rope.clone();
-                        move || {
-                            let ctx = owned.as_borrowed();
-                            crate::completion::word::fetch(&ctx, &rope)
-                        }
-                    })
-                    .await;
-                items.extend(words);
-            },
+            // Spawned ahead of this loop and collected below.
+            CompletionSource::Word => {},
         }
+    }
+
+    if let Some(words) = words {
+        items.extend(words.await);
     }
 
     rank_by_prefix(&mut items, &owned.prefix);
@@ -1611,6 +1628,29 @@ mod harness_tests {
             server: Some("test".to_string()),
             ..word(label)
         }
+    }
+
+    /// An identifier context asks the server and the buffer both, and the scan
+    /// of the second runs beside the first rather than after it has answered.
+    /// Both sets still have to reach the popup.
+    #[test]
+    fn an_identifier_popup_carries_the_servers_items_and_the_buffers_words() {
+        let mut h = TestHarness::default();
+        enable_completion(&h);
+        open_scratch(&mut h, "foxtrot\n");
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 0, 10, &["foobar"]);
+
+        // Typed at the end of the line, so the word already on it is a token of
+        // its own for the scan to find rather than part of the prefix.
+        h.type_keys("A");
+        h.type_text(" fo");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+
+        let popup = h.stoat.pending_completion.as_ref().expect("popup armed");
+        let mut got = labels(&popup.items);
+        got.sort();
+        assert_eq!(got, ["foobar", "foxtrot"]);
     }
 
     /// A popup over `prefix`, anchored at the start of the line.
