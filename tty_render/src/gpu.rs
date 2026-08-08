@@ -749,6 +749,7 @@ impl Renderer {
             &self.pool_occluders,
             resolution,
             shift_rows,
+            content_changed,
             pool,
             slot,
         );
@@ -759,6 +760,7 @@ impl Renderer {
             &self.pool_occluders,
             resolution,
             shift_rows,
+            content_changed,
             pool,
             slot,
         );

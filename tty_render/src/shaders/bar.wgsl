@@ -10,8 +10,10 @@ struct Globals {
     // 1 discards a fragment inside any occluder regardless of seq, for a pool
     // composite that sits under every box; 0 keeps the seq test.
     occlude_all: u32,
+    // Cell fractions every origin is shifted down by, so a gliding pool moves
+    // its bars without rebuilding them. Zero for the live grid.
+    shift_rows: f32,
     pad0: u32,
-    pad1: u32,
 }
 
 @group(0) @binding(0)
@@ -61,9 +63,10 @@ fn vs_main(
     // is fractional at most font sizes, so an unsnapped bar drifts up to a pixel
     // off its row. Each edge is floored a pixel apart so a sub-pixel bar (the
     // hairline separator is 1/16 of a cell) never rounds away to nothing.
-    let min_px = round(origin * globals.cell_size);
+    let shifted = origin + vec2<f32>(0.0, globals.shift_rows);
+    let min_px = round(shifted * globals.cell_size);
     let max_px = max(
-        round((origin + size) * globals.cell_size),
+        round((shifted + size) * globals.cell_size),
         min_px + vec2<f32>(1.0, 1.0)
     );
     let pixel = min_px + corner * (max_px - min_px);

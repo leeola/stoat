@@ -54,7 +54,14 @@ struct Globals {
     cell_size: [f32; 2],
     panel_count: u32,
     occlude_all: u32,
-    _pad: [u32; 2],
+    /// Rows every bar is shifted down by, in cell fractions, which the vertex
+    /// stage adds to each origin.
+    ///
+    /// Carried here rather than baked into the instances so a gliding pool can
+    /// reuse the instances it built when its content last changed. A glide moves
+    /// every bar by the same amount, so nothing per-instance has to change.
+    shift_rows: f32,
+    _pad: u32,
 }
 
 /// The instanced color-bar pipeline and its per-frame buffers.
@@ -75,9 +82,9 @@ pub struct BarPass {
     /// Where a composited pool's bars are built, separate from [`Self::built`] so a
     /// pool draw leaves the live comparison intact.
     ///
-    /// A pool's bars carry its eased shift in their origins, so they are rebuilt on
-    /// every frame the pool glides rather than only when its content changes. Holding
-    /// the buffer is what keeps that from allocating per tick.
+    /// Rebuilt only on a frame whose content changed, the eased shift riding the
+    /// globals instead, so a glide leaves this alone. Holding the buffer is what
+    /// keeps a rebuild that does happen from allocating.
     composite_built: Vec<BarInstance>,
     count: u32,
     /// Per-pool bars of the pools composited over the live grid, one slot per
@@ -243,11 +250,13 @@ impl BarPass {
             cell_size: [self.metrics.width, self.metrics.height],
             panel_count: occluders.len() as u32,
             occlude_all: 0,
-            _pad: [0; 2],
+            // The live grid does not glide, so its bars sit where they are given.
+            shift_rows: 0.0,
+            _pad: 0,
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
-        build_bar_instances_into(bars, 0.0, &mut self.built);
+        build_bar_instances_into(bars, &mut self.built);
         self.count = self.built.len() as u32;
         if self.built.is_empty() {
             return;
@@ -294,8 +303,11 @@ impl BarPass {
         self.last_occluders.extend_from_slice(occluders);
     }
 
-    /// Upload one instance per bar of a pool grid being composited, offset down
-    /// by the pool's eased `shift_rows` so the bars glide with the page cells.
+    /// Upload one instance per bar of a pool grid being composited.
+    ///
+    /// The pool's eased `shift_rows` goes to the globals, which the vertex stage
+    /// adds to every origin, so a frame that only glides writes the uniform and
+    /// keeps the instances `content_changed` last rebuilt.
     ///
     /// Writes `slot`'s buffer, separate from the live [`Self::prepare`] and from
     /// the other pools', reusing the shared globals uniform the live pass already
@@ -319,6 +331,7 @@ impl BarPass {
         occluders: &[Occluder],
         resolution: [f32; 2],
         shift_rows: f32,
+        content_changed: bool,
         pool: u32,
         slot: usize,
     ) {
@@ -330,7 +343,8 @@ impl BarPass {
             cell_size: [self.metrics.width, self.metrics.height],
             panel_count,
             occlude_all,
-            _pad: [0; 2],
+            shift_rows,
+            _pad: 0,
         };
         queue.write_buffer(
             &self.globals,
@@ -338,7 +352,14 @@ impl BarPass {
             bytemuck::bytes_of(&globals),
         );
 
-        build_bar_instances_into(bars, shift_rows, &mut self.composite_built);
+        // A glide moves every bar by the same amount, which the globals write
+        // above has just re-applied, so unchanged content reuses last frame's
+        // instances rather than rebuilding and re-uploading all of them.
+        if !content_changed {
+            return;
+        }
+
+        build_bar_instances_into(bars, &mut self.composite_built);
 
         let target = self.composite_slots.entry(pool, || new_slot(device));
         target.count = self.composite_built.len() as u32;
@@ -457,18 +478,13 @@ fn make_bind_group(
 /// `out` is cleared first, so a caller holding it across frames sees only this
 /// frame's bars.
 ///
-/// `shift_rows` offsets each bar down by that many cells, baked into the origin.
-/// The live path passes zero. A pool composite passes the eased sub-cell scroll
-/// so slot-bound bars glide with the page, since the bar shader carries no
-/// scroll uniform of its own. A gliding pool therefore rebuilds every frame,
-/// since the shift lives in the instances rather than in a uniform.
-fn build_bar_instances_into(bars: &[Bar], shift_rows: f32, out: &mut Vec<BarInstance>) {
+/// Origins are given as declared. A pool composite glides its bars through the
+/// `shift_rows` uniform rather than through their origins, so instances built
+/// here outlive every frame that only moves the pool.
+fn build_bar_instances_into(bars: &[Bar], out: &mut Vec<BarInstance>) {
     out.clear();
     out.extend(bars.iter().map(|bar| BarInstance {
-        origin: [
-            f32::from(bar.x) / SIXTEENTHS,
-            f32::from(bar.y) / SIXTEENTHS + shift_rows,
-        ],
+        origin: [f32::from(bar.x) / SIXTEENTHS, f32::from(bar.y) / SIXTEENTHS],
         size: [
             f32::from(bar.width) / SIXTEENTHS,
             f32::from(bar.height) / SIXTEENTHS,
@@ -488,18 +504,28 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_bar_instances_into, BarInstance};
+    use super::{build_bar_instances_into, BarInstance, BarPass};
+    use crate::{gpu::headless_device, render::CellMetrics};
     use stoatty_term::grid::{Bar, Rgb};
-    use wgpu::naga::{
-        front::wgsl,
-        valid::{Capabilities, ValidationFlags, Validator},
+    use wgpu::{
+        naga::{
+            front::wgsl,
+            valid::{Capabilities, ValidationFlags, Validator},
+        },
+        TextureFormat,
     };
+
+    /// The vertex stage's shift, mirrored here so a test can check the origins it
+    /// builds still land where the baked-in shift used to put them.
+    fn shader_origin(origin: [f32; 2], shift_rows: f32) -> [f32; 2] {
+        [origin[0], origin[1] + shift_rows]
+    }
 
     /// [`build_bar_instances_into`] into a fresh buffer, for the assertions that only
     /// want one frame's instances and have no buffer to reuse.
-    fn build_bar_instances(bars: &[Bar], shift_rows: f32) -> Vec<BarInstance> {
+    fn build_bar_instances(bars: &[Bar]) -> Vec<BarInstance> {
         let mut instances = Vec::new();
-        build_bar_instances_into(bars, shift_rows, &mut instances);
+        build_bar_instances_into(bars, &mut instances);
         instances
     }
 
@@ -522,13 +548,13 @@ mod tests {
             seq: 7,
         }];
 
-        let mut scratch = build_bar_instances(&bars, 0.0);
-        scratch.extend(build_bar_instances(&bars, 0.0));
-        build_bar_instances_into(&bars, 0.0, &mut scratch);
+        let mut scratch = build_bar_instances(&bars);
+        scratch.extend(build_bar_instances(&bars));
+        build_bar_instances_into(&bars, &mut scratch);
 
         assert_eq!(
             bytemuck::cast_slice::<BarInstance, u8>(&scratch),
-            bytemuck::cast_slice::<BarInstance, u8>(&build_bar_instances(&bars, 0.0)),
+            bytemuck::cast_slice::<BarInstance, u8>(&build_bar_instances(&bars)),
             "reuse clears the stale bars and rebuilds only the frame's own"
         );
     }
@@ -548,19 +574,19 @@ mod tests {
             color: Rgb::new(220, 50, 47),
             seq: 7,
         }];
-        let first = build_bar_instances(&bars, 0.0);
+        let first = build_bar_instances(&bars);
         assert!(
-            !upload_needed(&build_bar_instances(&bars, 0.0), &first),
+            !upload_needed(&build_bar_instances(&bars), &first),
             "an unchanged bar rebuilds to the same bytes, so no upload is needed",
         );
 
         let moved = [Bar { x: 9, ..bars[0] }];
         assert!(
-            upload_needed(&build_bar_instances(&moved, 0.0), &first),
+            upload_needed(&build_bar_instances(&moved), &first),
             "a moved bar must reach the GPU",
         );
         assert!(
-            upload_needed(&build_bar_instances(&[], 0.0), &first),
+            upload_needed(&build_bar_instances(&[]), &first),
             "so must dropping the bar entirely",
         );
     }
@@ -576,7 +602,7 @@ mod tests {
             seq: 7,
         }];
 
-        let instances = build_bar_instances(&bars, 0.0);
+        let instances = build_bar_instances(&bars);
 
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].origin, [0.5, 1.0]);
@@ -599,12 +625,78 @@ mod tests {
             seq: 0,
         }];
 
-        let instances = build_bar_instances(&bars, -0.5);
+        let instances = build_bar_instances(&bars);
 
         assert_eq!(
             instances[0].origin,
+            [0.0, 1.0],
+            "the built origin is where the bar was declared, shift or no shift",
+        );
+        assert_eq!(
+            shader_origin(instances[0].origin, -0.5),
             [0.0, 0.5],
-            "row 1 shifted up half a cell lands at 0.5"
+            "row 1 shifted up half a cell lands at 0.5 once the shader applies it",
+        );
+    }
+
+    /// A pool composite glides its bars by writing `shift_rows` into the globals.
+    /// What a shift-only frame must leave alone is the instances the last content
+    /// change built, which is the one part of that a test can observe.
+    #[test]
+    fn a_shift_only_composite_frame_rebuilds_no_bars() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("bar composite test: no wgpu adapter, skipping");
+            return;
+        };
+        let mut pass = BarPass::new(
+            &device,
+            TextureFormat::Rgba8Unorm,
+            CellMetrics {
+                font_size: 10.0,
+                width: 6.0,
+                height: 12.0,
+            },
+        );
+        let bar = |y: i16| Bar {
+            x: 0,
+            y,
+            width: 2,
+            height: 16,
+            color: Rgb::new(1, 2, 3),
+            seq: 0,
+        };
+
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &[bar(16)],
+            &[],
+            [64.0, 64.0],
+            0.0,
+            true,
+            0,
+            0,
+        );
+        let built = pass.composite_built.clone();
+
+        // Different bars on purpose. A rebuild that ran anyway would put these in
+        // the buffer, so matching proves the gate and not just the arithmetic.
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &[bar(32), bar(48)],
+            &[],
+            [64.0, 64.0],
+            -0.5,
+            false,
+            0,
+            0,
+        );
+
+        assert_eq!(
+            bytemuck::cast_slice::<BarInstance, u8>(&pass.composite_built),
+            bytemuck::cast_slice::<BarInstance, u8>(&built),
+            "a frame that only glides leaves the instances where the last one left them",
         );
     }
 }

@@ -57,7 +57,14 @@ struct Globals {
     cell_size: [f32; 2],
     panel_count: u32,
     occlude_all: u32,
-    _pad: [u32; 2],
+    /// Rows every endpoint is shifted down by, in cell fractions, which the
+    /// vertex stage adds before converting to pixels.
+    ///
+    /// Carried here rather than baked into the instances so a gliding pool can
+    /// reuse the segments it built when its content last changed. A glide moves
+    /// every endpoint by the same amount, so nothing per-instance has to change.
+    shift_rows: f32,
+    _pad: u32,
 }
 
 /// The instanced stroked-path pipeline and its per-frame buffers.
@@ -78,9 +85,9 @@ pub struct PolylinePass {
     /// Where a composited pool's segments are built, separate from [`Self::built`] so
     /// a pool draw leaves the live comparison intact.
     ///
-    /// A pool's paths carry its eased shift in their endpoints, so they are rebuilt on
-    /// every frame the pool glides rather than only when its content changes. Holding
-    /// the buffer is what keeps that from allocating per tick.
+    /// Rebuilt only on a frame whose content changed, the eased shift riding the
+    /// globals instead, so a glide leaves this alone. Holding the buffer is what
+    /// keeps a rebuild that does happen from allocating.
     composite_built: Vec<PolylineInstance>,
     count: u32,
     /// Per-pool segments of the pools composited over the live grid, one slot per
@@ -251,11 +258,13 @@ impl PolylinePass {
             cell_size: [self.metrics.width, self.metrics.height],
             panel_count: occluders.len() as u32,
             occlude_all: 0,
-            _pad: [0; 2],
+            // The live grid does not glide, so its paths sit where they are given.
+            shift_rows: 0.0,
+            _pad: 0,
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
-        build_polyline_instances_into(polylines, 0.0, &mut self.built);
+        build_polyline_instances_into(polylines, &mut self.built);
         self.count = self.built.len() as u32;
         if self.built.is_empty() {
             return;
@@ -302,9 +311,11 @@ impl PolylinePass {
         self.last_occluders.extend_from_slice(occluders);
     }
 
-    /// Upload one instance per segment of a pool grid being composited, offset
-    /// down by the pool's eased `shift_rows` so the paths glide with the page
-    /// cells.
+    /// Upload one instance per segment of a pool grid being composited.
+    ///
+    /// The pool's eased `shift_rows` goes to the globals, which the vertex stage
+    /// adds to every endpoint, so a frame that only glides writes the uniform and
+    /// keeps the segments `content_changed` last rebuilt.
     ///
     /// Writes `slot`'s buffer, separate from the live [`Self::prepare`] and from
     /// the other pools', reusing the shared globals uniform the live pass already
@@ -326,6 +337,7 @@ impl PolylinePass {
         occluders: &[Occluder],
         resolution: [f32; 2],
         shift_rows: f32,
+        content_changed: bool,
         pool: u32,
         slot: usize,
     ) {
@@ -337,7 +349,8 @@ impl PolylinePass {
             cell_size: [self.metrics.width, self.metrics.height],
             panel_count,
             occlude_all,
-            _pad: [0; 2],
+            shift_rows,
+            _pad: 0,
         };
         queue.write_buffer(
             &self.globals,
@@ -345,7 +358,14 @@ impl PolylinePass {
             bytemuck::bytes_of(&globals),
         );
 
-        build_polyline_instances_into(polylines, shift_rows, &mut self.composite_built);
+        // A glide moves every endpoint by the same amount, which the globals
+        // write above has just re-applied, so unchanged content reuses last
+        // frame's segments rather than rebuilding and re-uploading all of them.
+        if !content_changed {
+            return;
+        }
+
+        build_polyline_instances_into(polylines, &mut self.composite_built);
 
         let target = self.composite_slots.entry(pool, || new_slot(device));
         target.count = self.composite_built.len() as u32;
@@ -467,24 +487,13 @@ fn make_bind_group(
 /// A single-point path yields one zero-length segment, which the capsule SDF
 /// draws as a dot. An empty path yields nothing.
 ///
-/// `shift_rows` offsets every endpoint down by that many cells, baked in here.
-/// The live path passes zero. A pool composite passes the eased sub-cell scroll
-/// so slot-bound paths glide with the page, since the shader carries no scroll
-/// uniform of its own. A gliding pool therefore rebuilds every frame, since the
-/// shift lives in the instances rather than in a uniform.
-fn build_polyline_instances_into(
-    polylines: &[Polyline],
-    shift_rows: f32,
-    out: &mut Vec<PolylineInstance>,
-) {
+/// Endpoints are given as declared. A pool composite glides its paths through the
+/// `shift_rows` uniform rather than through their endpoints, so instances built
+/// here outlive every frame that only moves the pool.
+fn build_polyline_instances_into(polylines: &[Polyline], out: &mut Vec<PolylineInstance>) {
     out.clear();
     for polyline in polylines {
-        let point = |[x, y]: [i16; 2]| {
-            [
-                f32::from(x) / SIXTEENTHS,
-                f32::from(y) / SIXTEENTHS + shift_rows,
-            ]
-        };
+        let point = |[x, y]: [i16; 2]| [f32::from(x) / SIXTEENTHS, f32::from(y) / SIXTEENTHS];
         let half_width = f32::from(polyline.width) / SIXTEENTHS / 2.0;
         let color = rgb_f32(polyline.color);
 
@@ -518,11 +527,15 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_polyline_instances_into, PolylineInstance};
+    use super::{build_polyline_instances_into, PolylineInstance, PolylinePass};
+    use crate::{gpu::headless_device, render::CellMetrics};
     use stoatty_term::grid::{Polyline, Rgb};
-    use wgpu::naga::{
-        front::wgsl,
-        valid::{Capabilities, ValidationFlags, Validator},
+    use wgpu::{
+        naga::{
+            front::wgsl,
+            valid::{Capabilities, ValidationFlags, Validator},
+        },
+        TextureFormat,
     };
 
     fn path(points: &[[i16; 2]]) -> Polyline {
@@ -534,11 +547,17 @@ mod tests {
         }
     }
 
+    /// The vertex stage's shift, mirrored here so a test can check the endpoints it
+    /// builds still land where the baked-in shift used to put them.
+    fn shader_point(point: [f32; 2], shift_rows: f32) -> [f32; 2] {
+        [point[0], point[1] + shift_rows]
+    }
+
     /// [`build_polyline_instances_into`] into a fresh buffer, for the assertions that
     /// only want one frame's instances and have no buffer to reuse.
-    fn build_polyline_instances(polylines: &[Polyline], shift_rows: f32) -> Vec<PolylineInstance> {
+    fn build_polyline_instances(polylines: &[Polyline]) -> Vec<PolylineInstance> {
         let mut instances = Vec::new();
-        build_polyline_instances_into(polylines, shift_rows, &mut instances);
+        build_polyline_instances_into(polylines, &mut instances);
         instances
     }
 
@@ -555,20 +574,20 @@ mod tests {
     fn a_reused_polyline_scratch_holds_only_this_frame_s_segments() {
         let paths = [path(&[[0, 0], [0, 16], [16, 32]])];
 
-        let mut scratch = build_polyline_instances(&paths, 0.0);
-        scratch.extend(build_polyline_instances(&paths, 0.0));
-        build_polyline_instances_into(&paths, 0.0, &mut scratch);
+        let mut scratch = build_polyline_instances(&paths);
+        scratch.extend(build_polyline_instances(&paths));
+        build_polyline_instances_into(&paths, &mut scratch);
 
         assert_eq!(
             bytemuck::cast_slice::<PolylineInstance, u8>(&scratch),
-            bytemuck::cast_slice::<PolylineInstance, u8>(&build_polyline_instances(&paths, 0.0)),
+            bytemuck::cast_slice::<PolylineInstance, u8>(&build_polyline_instances(&paths)),
             "reuse clears the stale segments and rebuilds only the frame's own"
         );
     }
 
     #[test]
     fn instances_map_sixteenths_to_cell_fractions() {
-        let instances = build_polyline_instances(&[path(&[[8, 16], [24, 32]])], 0.0);
+        let instances = build_polyline_instances(&[path(&[[8, 16], [24, 32]])]);
 
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].p0, [0.5, 1.0]);
@@ -583,7 +602,7 @@ mod tests {
 
     #[test]
     fn a_path_becomes_one_instance_per_segment() {
-        let instances = build_polyline_instances(&[path(&[[0, 0], [0, 16], [16, 32]])], 0.0);
+        let instances = build_polyline_instances(&[path(&[[0, 0], [0, 16], [16, 32]])]);
 
         assert_eq!(instances.len(), 2, "three points span two segments");
         assert_eq!(instances[0].p0, [0.0, 0.0]);
@@ -597,7 +616,7 @@ mod tests {
 
     #[test]
     fn a_single_point_becomes_one_zero_length_segment() {
-        let instances = build_polyline_instances(&[path(&[[8, 8]])], 0.0);
+        let instances = build_polyline_instances(&[path(&[[8, 8]])]);
 
         assert_eq!(instances.len(), 1);
         assert_eq!(
@@ -608,15 +627,72 @@ mod tests {
 
     #[test]
     fn an_empty_path_yields_no_instances() {
-        assert!(build_polyline_instances(&[path(&[])], 0.0).is_empty());
+        assert!(build_polyline_instances(&[path(&[])]).is_empty());
     }
 
     #[test]
     fn composite_shift_offsets_both_endpoints_by_whole_cells() {
-        let instances = build_polyline_instances(&[path(&[[0, 16], [0, 32]])], -0.5);
+        let instances = build_polyline_instances(&[path(&[[0, 16], [0, 32]])]);
 
-        assert_eq!(instances[0].p0, [0.0, 0.5]);
-        assert_eq!(instances[0].p1, [0.0, 1.5], "the far end shifts equally");
+        assert_eq!(
+            (instances[0].p0, instances[0].p1),
+            ([0.0, 1.0], [0.0, 2.0]),
+            "the built endpoints are where the path was declared, shift or no shift",
+        );
+        assert_eq!(
+            (
+                shader_point(instances[0].p0, -0.5),
+                shader_point(instances[0].p1, -0.5),
+            ),
+            ([0.0, 0.5], [0.0, 1.5]),
+            "both ends shift equally once the shader applies it",
+        );
+    }
+
+    /// A pool composite glides its paths by writing `shift_rows` into the globals.
+    /// What a shift-only frame must leave alone is the segments the last content
+    /// change built, which is the one part of that a test can observe.
+    #[test]
+    fn a_shift_only_composite_frame_rebuilds_no_segments() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("polyline composite test: no wgpu adapter, skipping");
+            return;
+        };
+        let mut pass = PolylinePass::new(
+            &device,
+            TextureFormat::Rgba8Unorm,
+            CellMetrics {
+                font_size: 10.0,
+                width: 6.0,
+                height: 12.0,
+            },
+        );
+
+        let first = [path(&[[0, 16], [0, 32]])];
+        pass.prepare_composite(&device, &queue, &first, &[], [64.0, 64.0], 0.0, true, 0, 0);
+        let built = pass.composite_built.clone();
+
+        // A different path on purpose. A rebuild that ran anyway would put its
+        // segments in the buffer, so matching proves the gate and not just the
+        // arithmetic.
+        let moved = [path(&[[0, 48], [0, 64], [16, 80]])];
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &moved,
+            &[],
+            [64.0, 64.0],
+            -0.5,
+            false,
+            0,
+            0,
+        );
+
+        assert_eq!(
+            bytemuck::cast_slice::<PolylineInstance, u8>(&pass.composite_built),
+            bytemuck::cast_slice::<PolylineInstance, u8>(&built),
+            "a frame that only glides leaves the segments where the last one left them",
+        );
     }
 
     /// The pass skips its GPU write when the rebuilt instances match the last
@@ -627,19 +703,19 @@ mod tests {
         use crate::render::upload_needed;
 
         let paths = [path(&[[0, 0], [0, 16]])];
-        let first = build_polyline_instances(&paths, 0.0);
+        let first = build_polyline_instances(&paths);
         assert!(
-            !upload_needed(&build_polyline_instances(&paths, 0.0), &first),
+            !upload_needed(&build_polyline_instances(&paths), &first),
             "an unchanged path rebuilds to the same bytes, so no upload is needed",
         );
 
         let moved = [path(&[[1, 0], [0, 16]])];
         assert!(
-            upload_needed(&build_polyline_instances(&moved, 0.0), &first),
+            upload_needed(&build_polyline_instances(&moved), &first),
             "a moved endpoint must reach the GPU",
         );
         assert!(
-            upload_needed(&build_polyline_instances(&[], 0.0), &first),
+            upload_needed(&build_polyline_instances(&[]), &first),
             "so must dropping the path entirely",
         );
     }

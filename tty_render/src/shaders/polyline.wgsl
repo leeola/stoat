@@ -21,8 +21,10 @@ struct Globals {
     // 1 discards a fragment inside any occluder regardless of seq, for a pool
     // composite that sits under every box; 0 keeps the seq test.
     occlude_all: u32,
+    // Cell fractions every endpoint is shifted down by, so a gliding pool moves
+    // its paths without rebuilding them. Zero for the live grid.
+    shift_rows: f32,
     pad0: u32,
-    pad1: u32,
 }
 
 @group(0) @binding(0)
@@ -79,8 +81,9 @@ fn vs_main(
     );
     let corner = corners[vertex_index];
 
-    let p0 = p0_cells * globals.cell_size;
-    let p1 = p1_cells * globals.cell_size;
+    let shift = vec2<f32>(0.0, globals.shift_rows);
+    let p0 = (p0_cells + shift) * globals.cell_size;
+    let p1 = (p1_cells + shift) * globals.cell_size;
     let half_width_px = half_width * globals.cell_size.x;
 
     // A zero-length segment has no direction to orient by, so it falls back to
