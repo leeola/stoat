@@ -461,19 +461,12 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
                 return sel.clone();
             };
             let offset = rope.point_to_offset(buffer_pt);
+            // Both arms land on the same cell. Extending decides whether the
+            // anchor is left behind, never where the cursor ends up.
             if extend {
-                // Keep the block cursor on the last character when the goal column
-                // overruns the line, rather than on the line break past it.
-                let cursor_target = if col > 0 && rope.chars_at(offset).next() == Some('\n') {
-                    rope.reversed_chars_at(offset)
-                        .next()
-                        .map_or(offset, |c| offset - c.len_utf8())
-                } else {
-                    offset
-                };
                 extend_head_to_cursor(
                     sel,
-                    cursor_target,
+                    offset,
                     head_offset,
                     tail_offset,
                     SelectionGoal::Column(goal_col),
@@ -4752,16 +4745,9 @@ pub(crate) fn clamp_cursor_to_view(editor: &mut EditorState, scrolloff: u32) -> 
             };
             let offset = rope.point_to_offset(buffer_pt);
             if extend {
-                let cursor_target = if col > 0 && rope.chars_at(offset).next() == Some('\n') {
-                    rope.reversed_chars_at(offset)
-                        .next()
-                        .map_or(offset, |c| offset - c.len_utf8())
-                } else {
-                    offset
-                };
                 extend_head_to_cursor(
                     sel,
-                    cursor_target,
+                    offset,
                     head_offset,
                     tail_offset,
                     SelectionGoal::Column(goal_col),
@@ -5747,6 +5733,40 @@ mod tests {
         );
     }
 
+    /// A scroll clamp lands its cursor on the same cell whether or not it is
+    /// dragging an anchor behind it.
+    ///
+    /// The clamp places a cursor the way a vertical motion does, so select mode
+    /// changes what the selection covers, never where the clamp puts its far
+    /// end.
+    #[test]
+    fn clamp_cursor_to_view_extends_onto_the_cell_a_move_lands_on() {
+        let cell_after = |select: bool| {
+            let mut h = TestHarness::with_size(40, 12);
+            let mut body = String::from("0123456789\n");
+            body.push_str(&"ab\n".repeat(99));
+            let path = h.write_file("mixed.rs", &body);
+            h.open_file(&path);
+            {
+                let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+                editor.viewport_rows = Some(10);
+                if select {
+                    editor.mode = "select".to_string();
+                }
+                place_cursor(editor, 0, 6);
+                editor.scroll_row = 40;
+                assert!(clamp_cursor_to_view(editor, 3), "the clamp fires");
+            }
+            focused_cursor_point(&mut h)
+        };
+
+        assert_eq!(
+            cell_after(true),
+            cell_after(false),
+            "extending to the band top covers the cell moving there lands on",
+        );
+    }
+
     #[test]
     fn snapshot_count_jump_keeps_cursor_visible() {
         let mut h = TestHarness::with_size(40, 12);
@@ -5864,6 +5884,74 @@ mod tests {
             focused_cursor_point(&mut h),
             Point::new(2, 4),
             "and the column comes back on the line that can hold it",
+        );
+    }
+
+    /// A goal column that overruns the landing line clamps onto that line's
+    /// break, and extending covers the same cell as moving does.
+    ///
+    /// The two arms differ only in whether the anchor is left behind, never in
+    /// which cell the cursor ends up on. An extend that stopped a cell short
+    /// would make a select-mode motion cover less than the plain motion it
+    /// mirrors, so `vjd` and `jd` would disagree about the line break.
+    #[test]
+    fn vertical_move_and_extend_agree_on_the_cell_at_a_short_line_end() {
+        let cell_after = |extend: bool| {
+            let mut h = TestHarness::with_size(40, 12);
+            let path = h.write_file("short.rs", "abcdef\nxy\n");
+            h.open_file(&path);
+            {
+                let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+                place_cursor(editor, 0, 5);
+            }
+            move_vertical(&mut h.stoat, 1, extend);
+            focused_cursor_point(&mut h)
+        };
+
+        assert_eq!(
+            cell_after(false),
+            Point::new(1, 2),
+            "the goal overruns \"xy\", so j lands on its line break",
+        );
+        assert_eq!(
+            cell_after(true),
+            cell_after(false),
+            "and vj lands there too"
+        );
+    }
+
+    /// The same agreement where the landing line's last cell is a decomposed
+    /// accent, which spans more than one codepoint.
+    ///
+    /// A cell and a codepoint are the same distance on the ASCII line above, so
+    /// only a line like this one distinguishes a landing measured in cells from
+    /// one measured in codepoints. A codepoint-sized offset from the line break
+    /// falls inside the cluster, and the anchor layer resolves that to the
+    /// cluster's start, leaving the cursor a whole cell short.
+    #[test]
+    fn vertical_move_and_extend_agree_at_an_accented_line_end() {
+        // Line 0 is "a" then e-plus-combining-acute: four bytes, two cells.
+        let cell_after = |extend: bool| {
+            let mut h = TestHarness::with_size(40, 12);
+            let path = h.write_file("accent.rs", "ae\u{301}\nabcdefgh\n");
+            h.open_file(&path);
+            {
+                let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+                place_cursor(editor, 1, 6);
+            }
+            move_vertical(&mut h.stoat, -1, extend);
+            focused_cursor_point(&mut h)
+        };
+
+        assert_eq!(
+            cell_after(false),
+            Point::new(0, 4),
+            "the goal overruns the accented line, so k lands on its line break",
+        );
+        assert_eq!(
+            cell_after(true),
+            cell_after(false),
+            "and vk lands there too, not back on the accented cluster",
         );
     }
 

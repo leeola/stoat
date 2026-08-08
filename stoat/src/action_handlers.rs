@@ -2594,9 +2594,17 @@ mod tests {
         }
         assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 7)]);
         dispatch(&mut stoat, &ExtendDown);
-        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(1, 1)]);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(1, 2)],
+            "the goal overruns \"xx\", so the cell is its line break, as for a move",
+        );
         dispatch(&mut stoat, &ExtendDown);
-        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(2, 7)]);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(2, 7)],
+            "and the goal survives the short line rather than the cell it sat on",
+        );
     }
 
     #[test]
