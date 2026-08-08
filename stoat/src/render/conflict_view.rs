@@ -1,6 +1,6 @@
 use crate::{
     conflict_session::ConflictViewState,
-    display_map::{BlockRowKind, CachedHighlightEndpoints, DisplaySnapshot},
+    display_map::{CachedHighlightEndpoints, DisplaySnapshot},
     editor_state::EditorState,
     merge_view::{AlignRow, ChunkState, MergeDoc},
     render::review::{
@@ -108,6 +108,7 @@ pub(crate) fn render_conflict_view(
     // Held aside for the paint, since the view state below borrows the editor
     // and a sibling field cannot be borrowed alongside it.
     let mut endpoint_cache = editor.highlight_endpoint_cache.take();
+    let mut row_cache = editor.diff_row_cache.take();
     if let Some(state) = editor.conflict_view.as_mut() {
         render_conflict_rows(
             &snapshot,
@@ -118,9 +119,11 @@ pub(crate) fn render_conflict_view(
             theme,
             buf,
             Some(&mut endpoint_cache),
+            Some(&mut row_cache),
         );
     }
     editor.highlight_endpoint_cache = endpoint_cache;
+    editor.diff_row_cache = row_cache;
 
     render_review_cursor(
         editor,
@@ -156,6 +159,7 @@ pub(crate) fn render_conflict_rows(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     endpoint_cache: Option<&mut Option<CachedHighlightEndpoints>>,
+    row_cache: Option<&mut Option<crate::render::review::DiffRowCache>>,
 ) {
     let cols = ConflictColumns::compute(inner);
     let (doc, derived) = state.derived(snapshot);
@@ -171,6 +175,7 @@ pub(crate) fn render_conflict_rows(
         theme,
         buf,
         endpoint_cache,
+        row_cache,
     );
 }
 
@@ -200,6 +205,7 @@ fn paint_conflict_rows(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     endpoint_cache: Option<&mut Option<CachedHighlightEndpoints>>,
+    row_cache: Option<&mut Option<crate::render::review::DiffRowCache>>,
 ) {
     use crate::theme::scope as s;
     let dim = theme.get(s::UI_TEXT_MUTED);
@@ -229,6 +235,12 @@ fn paint_conflict_rows(
     // One replay for the loop, since the rows ascend and each opens its own
     // stream around the separators and numbers painted between them.
     let mut row_cursor = snapshot.row_highlight_cursor(endpoints);
+    let mut local_row_cache = None;
+    let row_states = crate::render::review::diff_row_states(
+        snapshot,
+        scroll_row..end_row,
+        row_cache.unwrap_or(&mut local_row_cache),
+    );
 
     // One buffer for every number this loop paints, rather than one per row.
     let mut num_text = String::new();
@@ -253,8 +265,8 @@ fn paint_conflict_rows(
             }
         }
 
-        match snapshot.classify_row(display_row) {
-            BlockRowKind::BufferRow { buffer_row } => {
+        match row_states[(display_row - scroll_row) as usize].kind {
+            crate::render::review::DiffRowKind::BufferRow { buffer_row } => {
                 render_side_num(
                     buf,
                     &mut num_text,
@@ -278,7 +290,7 @@ fn paint_conflict_rows(
                     &mut row_cursor,
                 );
             },
-            BlockRowKind::Block { .. } => {
+            crate::render::review::DiffRowKind::Block => {
                 render_empty_num(buf, cols.center_num_x, y, dim);
             },
         }

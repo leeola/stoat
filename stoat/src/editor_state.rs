@@ -139,6 +139,11 @@ pub(crate) struct EditorState {
     /// resolved endpoints across repaints that change none of those. Transient
     /// render state, not persisted.
     pub(crate) highlight_endpoint_cache: Option<CachedHighlightEndpoints>,
+    /// Cached per-row state for the diff and conflict bodies, keyed by the
+    /// buffer, display-map and diff versions and the painted window. Spares
+    /// those loops a block-tree descent and a hunk-tree seek per row per frame.
+    /// Transient render state, not persisted.
+    pub(crate) diff_row_cache: Option<crate::render::review::DiffRowCache>,
     /// Ids of the LSP inlay-hint inlays currently spliced into this editor's
     /// display map. Kept so a refresh can remove the prior hints before adding
     /// the new set. Transient render state, not persisted.
@@ -227,6 +232,7 @@ impl EditorState {
             expansion_tip: None,
             search_match_cache: None,
             highlight_endpoint_cache: None,
+            diff_row_cache: None,
             hint_inlay_ids: Vec::new(),
             gutter_severity_cache: None,
             gutter_geometry_cache: None,
@@ -266,6 +272,7 @@ impl EditorState {
             expansion_tip: None,
             search_match_cache: None,
             highlight_endpoint_cache: None,
+            diff_row_cache: None,
             hint_inlay_ids: Vec::new(),
             gutter_severity_cache: None,
             gutter_geometry_cache: None,

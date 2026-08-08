@@ -16,7 +16,10 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::StatefulWidget,
 };
-use std::fmt::Write;
+use std::{
+    fmt::Write,
+    hash::{DefaultHasher, Hash, Hasher},
+};
 use stoat_text::{cursor_offset, Point};
 use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
 
@@ -111,6 +114,7 @@ pub(crate) fn render_diff_view(
         scene,
         0.0,
         Some(&mut editor.highlight_endpoint_cache),
+        Some(&mut editor.diff_row_cache),
     );
     render_review_cursor(
         editor,
@@ -127,6 +131,119 @@ pub(crate) fn render_diff_view(
 /// half falls under about 43 columns after its gutters, too cramped to read
 /// code, so the view collapses to a single unified column.
 const DIFF_TWO_COLUMN_MIN: u16 = 100;
+
+/// What one display row is, without borrowing the snapshot it came from.
+///
+/// [`BlockRowKind`] holds a reference to the block a row belongs to, which is
+/// why it cannot be kept across frames. Neither the diff body nor the conflict
+/// body reads that block, so only the discriminant and the buffer row survive
+/// here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DiffRowKind {
+    Block,
+    BufferRow { buffer_row: u32 },
+}
+
+/// One display row's derived state, as the diff and conflict bodies read it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct DiffRowState {
+    pub(crate) kind: DiffRowKind,
+    pub(crate) status: DiffStatus,
+    pub(crate) staged: Option<bool>,
+    /// Display-column ranges to wash, empty for a row no hunk refines.
+    pub(crate) change_spans: Vec<(std::ops::Range<usize>, ChangeKind)>,
+}
+
+/// The visible rows' derived state, held across repaints.
+///
+/// Every entry costs a block-tree descent to classify the row and a hunk-tree
+/// seek for its status, its staged flag and its change spans, and the diff and
+/// conflict bodies asked for all of that per row per frame. None of it moves
+/// while the buffer, the display map, the diff and the painted window stand
+/// still, which is the ordinary case between two frames.
+pub(crate) struct DiffRowCache {
+    key: u64,
+    rows: Vec<DiffRowState>,
+}
+
+/// Hash what the cached rows are derived from.
+///
+/// A change to any of these misses and rebuilds. The theme, the tints and the
+/// column geometry are deliberately absent, none of them reaching the state
+/// being cached.
+fn diff_row_key(
+    scroll_row: u32,
+    visible: u32,
+    buffer_version: u64,
+    map_version: usize,
+    diff_version: usize,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    scroll_row.hash(&mut hasher);
+    visible.hash(&mut hasher);
+    buffer_version.hash(&mut hasher);
+    map_version.hash(&mut hasher);
+    diff_version.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The derived state of `rows`, rebuilding into `cache` only when its key moved.
+///
+/// The rows are borrowed from the cache rather than handed back by value, a
+/// copy per frame being the cost this exists to avoid. A caller with no cache of
+/// its own passes a local one, which builds once and drops with the paint.
+pub(crate) fn diff_row_states<'c>(
+    snapshot: &DisplaySnapshot,
+    rows: std::ops::Range<u32>,
+    cache: &'c mut Option<DiffRowCache>,
+) -> &'c [DiffRowState] {
+    let key = diff_row_key(
+        rows.start,
+        rows.end - rows.start,
+        snapshot.buffer_snapshot().version(),
+        snapshot.version(),
+        snapshot.diff_map().map_or(0, |dm| dm.version()),
+    );
+    if cache.as_ref().is_none_or(|c| c.key != key) {
+        *cache = Some(DiffRowCache {
+            key,
+            rows: build_diff_row_states(snapshot, rows),
+        });
+    }
+    &cache.as_ref().expect("filled just above").rows
+}
+
+fn build_diff_row_states(
+    snapshot: &DisplaySnapshot,
+    rows: std::ops::Range<u32>,
+) -> Vec<DiffRowState> {
+    let mut hunk_scratch: Vec<&DiffHunk> = Vec::new();
+    rows.map(|display_row| {
+        let kind = match snapshot.classify_row(display_row) {
+            BlockRowKind::Block { .. } => DiffRowKind::Block,
+            BlockRowKind::BufferRow { buffer_row } => DiffRowKind::BufferRow { buffer_row },
+        };
+        let DiffRowKind::BufferRow { buffer_row } = kind else {
+            return DiffRowState {
+                kind,
+                status: DiffStatus::Unchanged,
+                staged: None,
+                change_spans: Vec::new(),
+            };
+        };
+        let mut change_spans = Vec::new();
+        write_buffer_row_change_spans(snapshot, buffer_row, &mut hunk_scratch, &mut change_spans);
+        DiffRowState {
+            kind,
+            status: snapshot.line_diff_status(buffer_row),
+            staged: snapshot
+                .diff_map()
+                .and_then(|dm| dm.staged_for_line(buffer_row)),
+            change_spans,
+        }
+    })
+    .collect()
+}
 
 /// Column geometry for one diff body, resolved once from the inner rect.
 ///
@@ -209,8 +326,9 @@ impl DiffColumns {
 /// so both paint an identical grid. It takes owned parts and paints no cursor,
 /// letting a pooled page render it on a blocking worker.
 ///
-/// `endpoint_cache` is the editor's, when this paint has one behind it. A pooled
-/// page has no editor at all and passes `None`, resolving its endpoints fresh.
+/// `endpoint_cache` and `row_cache` are the editor's, when this paint has one
+/// behind it. A pooled page has no editor at all and passes `None` for both,
+/// resolving its endpoints and row state fresh.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_diff_rows(
     snapshot: &DisplaySnapshot,
@@ -222,6 +340,7 @@ pub(crate) fn paint_diff_rows(
     scene: Option<&mut ApcScene>,
     dim: f32,
     endpoint_cache: Option<&mut Option<CachedHighlightEndpoints>>,
+    row_cache: Option<&mut Option<DiffRowCache>>,
 ) {
     let total_rows = snapshot.line_count();
     let visible = inner.height as u32;
@@ -277,12 +396,16 @@ pub(crate) fn paint_diff_rows(
     // stream because the paint puts a gutter, a number and a status glyph
     // between them, so without this each row re-walks the endpoints above it.
     let mut row_cursor = snapshot.row_highlight_cursor(row_endpoints);
+    let mut local_row_cache = None;
+    let row_states = diff_row_states(
+        snapshot,
+        scroll_row..end_row,
+        row_cache.unwrap_or(&mut local_row_cache),
+    );
     let mut line_buf = String::new();
-    // Reused across rows. Each row seeks the same one-line range and keeps
-    // neither its hunks nor its spans past itself, so the buffers only ever
-    // grow to the widest row rather than being rebuilt for every one.
+    // Reused across rows. No row keeps its hunks past itself, so the buffer
+    // only ever grows to the widest row rather than being rebuilt for each one.
     let mut hunk_scratch: Vec<&DiffHunk> = Vec::new();
-    let mut span_scratch: Vec<(std::ops::Range<usize>, ChangeKind)> = Vec::new();
 
     for display_row in scroll_row..end_row {
         let y = inner.y + (display_row - scroll_row) as u16;
@@ -301,8 +424,9 @@ pub(crate) fn paint_diff_rows(
             }
         }
 
-        match snapshot.classify_row(display_row) {
-            BlockRowKind::Block { .. } => {
+        let row_state = &row_states[(display_row - scroll_row) as usize];
+        match row_state.kind {
+            DiffRowKind::Block => {
                 line_buf.clear();
                 snapshot.write_display_line(&mut line_buf, display_row);
                 draw_diff_num(
@@ -367,7 +491,7 @@ pub(crate) fn paint_diff_rows(
                 }
                 base_line += 1;
             },
-            BlockRowKind::BufferRow { buffer_row } => {
+            DiffRowKind::BufferRow { buffer_row } => {
                 draw_diff_num(
                     &mut rich,
                     buf,
@@ -378,20 +502,9 @@ pub(crate) fn paint_diff_rows(
                     buffer_row + 1,
                     dim_style,
                 );
-                write_buffer_row_change_spans(
-                    snapshot,
-                    buffer_row,
-                    &mut hunk_scratch,
-                    &mut span_scratch,
-                );
-                let changes = &span_scratch;
-                let staged = snapshot
-                    .diff_map()
-                    .and_then(|dm| dm.staged_for_line(buffer_row));
-                // Reading this seeks the hunk tree, and the tint, the move chip,
-                // the status glyph, and the unchanged branch below all want the
-                // same answer for the same row.
-                let status = snapshot.line_diff_status(buffer_row);
+                let changes = &row_state.change_spans;
+                let staged = row_state.staged;
+                let status = row_state.status;
                 let side = tints.as_ref().map(|t| t.side(staged.unwrap_or(false)));
                 if let Some(side) = side {
                     let line_tint = match status {
@@ -1700,6 +1813,59 @@ mod tests {
         (buf.area.x..buf.area.x + buf.area.width)
             .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
             .collect()
+    }
+
+    /// A repaint that changed nothing reuses the derived rows, and a change to
+    /// anything they were derived from rebuilds them.
+    ///
+    /// Reuse is what the cache is for, and every input in the key is there
+    /// because the rows would otherwise be stale against it. A key missing one
+    /// of them shows as a diff view that keeps painting the state before the
+    /// edit, so each is moved on its own and checked to rebuild.
+    #[test]
+    fn row_states_are_reused_until_something_they_read_moves() {
+        let mut editor = diff_editor("a\nb\nc\nd\n", "a\nB\nc\nD\n");
+        let snapshot = editor.display_map.snapshot();
+        let rows = 0..snapshot.line_count();
+
+        let mut cache = None;
+        diff_row_states(&snapshot, rows.clone(), &mut cache);
+        let key = cache.as_ref().expect("built").key;
+
+        // Marking the held entry with a status this text cannot produce for row
+        // zero is what distinguishes reuse from a rebuild that lands on the same
+        // answer. Comparing the rows alone would pass either way.
+        cache.as_mut().expect("built").rows[0].status = DiffStatus::Moved;
+        assert_eq!(
+            diff_row_states(&snapshot, rows.clone(), &mut cache)[0].status,
+            DiffStatus::Moved,
+            "a repeat paint rebuilt the entry instead of reusing it",
+        );
+        assert_eq!(cache.as_ref().expect("held").key, key, "under the same key");
+
+        // A narrower window is a different set of rows, so it must not be served
+        // from the entry built for the wider one.
+        diff_row_states(&snapshot, rows.start..rows.end - 1, &mut cache);
+        assert_ne!(
+            cache.as_ref().expect("held").key,
+            key,
+            "a shorter viewport rebuilds",
+        );
+
+        // The versions cannot be moved through the snapshot without rebuilding
+        // one, so they are checked where the key is formed. Each is in it
+        // because the rows go stale against it, and a key that dropped one would
+        // keep painting the state from before that change.
+        let base = diff_row_key(3, 20, 7, 11, 13);
+        for moved in [
+            diff_row_key(4, 20, 7, 11, 13),
+            diff_row_key(3, 21, 7, 11, 13),
+            diff_row_key(3, 20, 8, 11, 13),
+            diff_row_key(3, 20, 7, 12, 13),
+            diff_row_key(3, 20, 7, 11, 14),
+        ] {
+            assert_ne!(moved, base, "an input moved without changing the key");
+        }
     }
 
     #[test]
