@@ -16532,7 +16532,7 @@ mod tests {
             let text = "keep\nnew\ntail\n";
             let dm = crate::diff_map::DiffMap::from_structural_changes(
                 stoat_language::structural_diff::diff(base, text),
-                base,
+                Arc::new(base.to_string()),
                 text,
             );
             h.stoat
@@ -16597,7 +16597,7 @@ mod tests {
             let text = "keep\nnew\ntail\n";
             let dm = crate::diff_map::DiffMap::from_structural_changes(
                 stoat_language::structural_diff::diff(base, text),
-                base,
+                Arc::new(base.to_string()),
                 text,
             );
             h.stoat
@@ -21778,7 +21778,7 @@ mod tests {
             let text = "keep\nnew\ntail\n";
             let dm = crate::diff_map::DiffMap::from_structural_changes(
                 stoat_language::structural_diff::diff(base, text),
-                base,
+                Arc::new(base.to_string()),
                 text,
             );
             h.stoat
@@ -21870,7 +21870,7 @@ mod tests {
             let text = "keep\nnew\ntail\n";
             let dm = crate::diff_map::DiffMap::from_structural_changes(
                 stoat_language::structural_diff::diff(base, text),
-                base,
+                Arc::new(base.to_string()),
                 text,
             );
             h.stoat
@@ -21939,7 +21939,7 @@ mod tests {
             let text = "keep\nnew\ntail\n";
             let dm = crate::diff_map::DiffMap::from_structural_changes(
                 stoat_language::structural_diff::diff(base, text),
-                base,
+                Arc::new(base.to_string()),
                 text,
             );
             h.stoat
@@ -21987,7 +21987,7 @@ mod tests {
         let text = "keep\nnew\ntail\n";
         let dm = crate::diff_map::DiffMap::from_structural_changes(
             stoat_language::structural_diff::diff(base, text),
-            base,
+            Arc::new(base.to_string()),
             text,
         );
         h.stoat
@@ -22139,7 +22139,7 @@ mod tests {
         {
             let dm = crate::diff_map::DiffMap::from_structural_changes(
                 stoat_language::structural_diff::diff(&base, &text),
-                &base,
+                Arc::new(base.to_string()),
                 &text,
             );
             h.stoat

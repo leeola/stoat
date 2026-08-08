@@ -327,6 +327,15 @@ struct DiffJobOutput {
 struct DiffBaseText {
     head: Arc<String>,
     index: Arc<String>,
+    /// Fingerprints of the two blobs, taken once here.
+    ///
+    /// The index is usually a blob of its own that happens to hold HEAD's
+    /// bytes, and every recompute asks whether the two agree so it can reuse
+    /// one diff for both. Reading them to answer that costs a pass over the
+    /// file per settle, where a blob only changes when something writes under
+    /// `.git`.
+    head_hash: [u8; 32],
+    index_hash: [u8; 32],
 }
 
 /// A one-pane tree showing a fresh scratch buffer, the shape a workspace and
@@ -1404,11 +1413,23 @@ fn compute_diff_map(
         None => {
             let repo = git.discover(git_root)?;
             let head = Arc::new(repo.head_content(path)?);
-            let index = Arc::new(
-                repo.index_content(path)
-                    .unwrap_or_else(|| String::clone(&head)),
-            );
-            DiffBaseText { head, index }
+            // A file with no index entry shares HEAD's handle rather than a
+            // copy of its bytes, which the fingerprint below then reads off.
+            let index = match repo.index_content(path) {
+                Some(index) => Arc::new(index),
+                None => head.clone(),
+            };
+            let head_hash = buffer_registry::fingerprint_bytes(&head);
+            let index_hash = match Arc::ptr_eq(&head, &index) {
+                true => head_hash,
+                false => buffer_registry::fingerprint_bytes(&index),
+            };
+            DiffBaseText {
+                head,
+                index,
+                head_hash,
+                index_hash,
+            }
         },
     };
     let base_text = &*base.head;
@@ -1421,7 +1442,7 @@ fn compute_diff_map(
     // that question has the same answer as the diff just run, and converting
     // one result twice beats diffing the file twice.
     let index_changed: Vec<Range<u32>> = {
-        let hunks = if index_text == base_text {
+        let hunks = if base.index_hash == base.head_hash {
             changes_to_hunks(&result.changes, base_text, buffer_text)
         } else {
             let index_result = structural_diff::diff(index_text, buffer_text);
@@ -1433,8 +1454,12 @@ fn compute_diff_map(
             .collect()
     };
 
-    let mut diff_map =
-        DiffMap::from_structural_changes_staged(result, base_text, buffer_text, &index_changed);
+    let mut diff_map = DiffMap::from_structural_changes_staged(
+        result,
+        base.head.clone(),
+        buffer_text,
+        &index_changed,
+    );
     if let Some(language) = language {
         diff_map.set_base_highlights(compute_base_highlights(
             base_text,
@@ -1557,7 +1582,8 @@ fn bucket_base_highlights(
 /// fraction of the cost.
 fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
     let result = structural_diff::diff(&input.base_text, &input.buffer_text);
-    let diff_map = DiffMap::from_structural_changes(result, &input.base_text, &input.buffer_text);
+    let diff_map =
+        DiffMap::from_structural_changes(result, input.base_text.clone(), &input.buffer_text);
     let rope = Rope::from(input.buffer_text.as_str());
     diff_map
         .hunks_in_range(0..u32::MAX)

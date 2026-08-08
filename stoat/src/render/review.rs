@@ -1755,7 +1755,7 @@ mod tests {
         let mut tb = TextBuffer::with_text(BufferId::new(0), text);
         tb.diff_map = Some(DiffMap::from_structural_changes(
             structural_diff::diff(base, text),
-            base,
+            Arc::new(base.to_string()),
             text,
         ));
         let shared = Arc::new(RwLock::new(tb));
@@ -1797,15 +1797,18 @@ mod tests {
     fn diff_editor_staged(base: &str, index: &str, text: &str) -> EditorState {
         let executor = Executor::new(Arc::new(TestScheduler::new()));
         let mut tb = TextBuffer::with_text(BufferId::new(0), text);
-        let index_changed: Vec<std::ops::Range<u32>> =
-            DiffMap::from_structural_changes(structural_diff::diff(index, text), index, text)
-                .hunks_in_range(0..u32::MAX)
-                .iter()
-                .map(|h| h.buffer_line_range.clone())
-                .collect();
+        let index_changed: Vec<std::ops::Range<u32>> = DiffMap::from_structural_changes(
+            structural_diff::diff(index, text),
+            Arc::new(index.to_string()),
+            text,
+        )
+        .hunks_in_range(0..u32::MAX)
+        .iter()
+        .map(|h| h.buffer_line_range.clone())
+        .collect();
         tb.diff_map = Some(DiffMap::from_structural_changes_staged(
             structural_diff::diff(base, text),
-            base,
+            Arc::new(base.to_string()),
             text,
             &index_changed,
         ));

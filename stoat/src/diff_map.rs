@@ -371,20 +371,26 @@ impl DiffMap {
 
     /// Build a [`DiffMap`] from a structural-diff result.
     ///
-    /// `lhs_text` is the base content the diff was computed against;
-    /// `rhs_text` is the buffer content. Adjacent Lhs+Rhs runs from the
-    /// diff become [`DiffHunkStatus::Modified`] hunks; isolated runs
-    /// become [`DiffHunkStatus::Added`] (Rhs only) or
-    /// [`DiffHunkStatus::Deleted`] (Lhs only). The conversion preserves
-    /// the original byte ranges so the structural-diff sub-line spans
-    /// remain available via [`DiffHunk::token_detail`] in a follow-up.
+    /// `lhs` is the base content the diff was computed against and `rhs_text`
+    /// is the buffer content.
+    ///
+    /// The base arrives by handle rather than by slice, so the map shares the
+    /// caller's copy instead of taking one of its own. That is also what lets a
+    /// later recompute recognise an unchanged base without reading it.
+    ///
+    /// Adjacent Lhs+Rhs runs from the diff become
+    /// [`DiffHunkStatus::Modified`] hunks. An isolated run becomes
+    /// [`DiffHunkStatus::Added`] (Rhs only) or [`DiffHunkStatus::Deleted`]
+    /// (Lhs only). The conversion preserves the original byte ranges so the
+    /// structural-diff sub-line spans remain available via
+    /// [`DiffHunk::token_detail`] in a follow-up.
     pub fn from_structural_changes(
         result: stoat_language::structural_diff::DiffResult,
-        lhs_text: &str,
+        lhs: Arc<String>,
         rhs_text: &str,
     ) -> Self {
-        let hunks = changes_to_hunks(&result.changes, lhs_text, rhs_text);
-        Self::from_hunks(hunks, Some(Arc::new(lhs_text.to_string())))
+        let hunks = changes_to_hunks(&result.changes, &lhs, rhs_text);
+        Self::from_hunks(hunks, Some(lhs))
     }
 
     /// Build a [`DiffMap`] like [`Self::from_structural_changes`], additionally
@@ -396,11 +402,11 @@ impl DiffMap {
     /// because the index and buffer already agree over the hunk's extent.
     pub fn from_structural_changes_staged(
         result: stoat_language::structural_diff::DiffResult,
-        lhs_text: &str,
+        lhs: Arc<String>,
         rhs_text: &str,
         index_changed: &[Range<u32>],
     ) -> Self {
-        let mut hunks = changes_to_hunks(&result.changes, lhs_text, rhs_text);
+        let mut hunks = changes_to_hunks(&result.changes, &lhs, rhs_text);
         for hunk in &mut hunks {
             let range = hunk.buffer_line_range.clone();
             if range.start == range.end {
@@ -416,7 +422,7 @@ impl DiffMap {
                     .collect();
             }
         }
-        Self::from_hunks(hunks, Some(Arc::new(lhs_text.to_string())))
+        Self::from_hunks(hunks, Some(lhs))
     }
 
     /// The hunks as they sit in `buffer`, for a caller reading many rows.
@@ -472,7 +478,16 @@ impl DiffMap {
     /// preserving it across a recompute that changed nothing is the whole point
     /// of asking.
     pub(crate) fn renders_same_as(&self, other: &Self) -> bool {
-        self.base_text == other.base_text && self.hunks.iter().eq(other.hunks.iter())
+        let same_base = match (&self.base_text, &other.base_text) {
+            // The ordinary path. A recompute takes its base from the same
+            // handle the last one did, so the bases are the same allocation
+            // and reading them would be a memcmp of the file for an answer
+            // the pointers already give.
+            (Some(mine), Some(theirs)) => Arc::ptr_eq(mine, theirs) || mine == theirs,
+            (None, None) => true,
+            _ => false,
+        };
+        same_base && self.hunks.iter().eq(other.hunks.iter())
     }
 
     pub fn base_text(&self) -> Option<&Arc<String>> {
@@ -1246,6 +1261,37 @@ mod tests {
         }
     }
 
+    /// Two recomputes of an unchanged file share a base handle, so the question
+    /// is answered by the pointers. The fallback still has to answer it for two
+    /// bases that hold the same bytes in different allocations, which is what a
+    /// pointer test alone would get wrong.
+    #[test]
+    fn a_shared_base_compares_equal_and_a_copied_one_still_does() {
+        let base = Arc::new("alpha\nbeta\n".to_string());
+        let with = |base: Arc<String>, range: std::ops::Range<u32>| {
+            DiffMap::from_hunks([added_hunk(range)], Some(base))
+        };
+
+        let first = with(base.clone(), 3..4);
+        assert!(
+            first.renders_same_as(&with(base.clone(), 3..4)),
+            "the same base and the same hunks render alike",
+        );
+        assert!(
+            first.renders_same_as(&with(Arc::new(String::clone(&base)), 3..4)),
+            "and so does a base holding the same bytes somewhere else",
+        );
+
+        assert!(
+            !first.renders_same_as(&with(Arc::new("gamma\n".to_string()), 3..4)),
+            "a different base renders differently however the hunks line up",
+        );
+        assert!(
+            !first.renders_same_as(&with(base, 5..6)),
+            "and so do different hunks over the same base",
+        );
+    }
+
     /// The rows a hunk was built with go stale the moment the reader types.
     /// Its anchors are what still name the same text afterwards.
     #[test]
@@ -1501,7 +1547,7 @@ mod tests {
                 changes,
                 fell_back_to_line_diff: false,
             },
-            lhs_text,
+            Arc::new(lhs_text.to_string()),
             rhs_text,
         );
         let hunks: Vec<&DiffHunk> = dm.hunks_in_range(0..10);
@@ -1564,7 +1610,7 @@ mod tests {
                 changes,
                 fell_back_to_line_diff: false,
             },
-            lhs_text,
+            Arc::new(lhs_text.to_string()),
             rhs_text,
         );
 
@@ -1626,7 +1672,7 @@ mod tests {
                 changes,
                 fell_back_to_line_diff: false,
             },
-            lhs_text,
+            Arc::new(lhs_text.to_string()),
             rhs_text,
         );
 
@@ -1670,7 +1716,7 @@ mod tests {
                 changes,
                 fell_back_to_line_diff: false,
             },
-            lhs_text,
+            Arc::new(lhs_text.to_string()),
             rhs_text,
         );
         let hunks: Vec<&DiffHunk> = dm.hunks_in_range(0..5);
@@ -1705,7 +1751,7 @@ mod tests {
                 changes,
                 fell_back_to_line_diff: false,
             },
-            lhs_text,
+            Arc::new(lhs_text.to_string()),
             rhs_text,
         );
         let hunks: Vec<&DiffHunk> = dm.hunks_in_range(0..5);
@@ -1893,7 +1939,7 @@ mod tests {
         let lhs = "alpha\nbeta\n";
         let rhs = "alpha\nbeta\ngamma\n";
         let result = stoat_language::structural_diff::diff(lhs, rhs);
-        let dm = DiffMap::from_structural_changes(result, lhs, rhs);
+        let dm = DiffMap::from_structural_changes(result, Arc::new(lhs.to_string()), rhs);
         // The added line is on buffer line 2 (zero-indexed).
         assert_eq!(dm.status_for_line(0), DiffStatus::Unchanged);
         assert_eq!(dm.status_for_line(1), DiffStatus::Unchanged);
@@ -1906,7 +1952,7 @@ mod tests {
         let lhs = "alpha\nbeta\ngamma\n";
         let rhs = "alpha\nBETA\ngamma\n";
         let result = stoat_language::structural_diff::diff(lhs, rhs);
-        let dm = DiffMap::from_structural_changes(result, lhs, rhs);
+        let dm = DiffMap::from_structural_changes(result, Arc::new(lhs.to_string()), rhs);
         assert_eq!(dm.status_for_line(0), DiffStatus::Unchanged);
         assert_eq!(dm.status_for_line(1), DiffStatus::Modified);
         assert_eq!(dm.status_for_line(2), DiffStatus::Unchanged);
@@ -1916,7 +1962,7 @@ mod tests {
     fn from_structural_changes_identical_inputs() {
         let txt = "one\ntwo\nthree\n";
         let result = stoat_language::structural_diff::diff(txt, txt);
-        let dm = DiffMap::from_structural_changes(result, txt, txt);
+        let dm = DiffMap::from_structural_changes(result, Arc::new(txt.to_string()), txt);
         assert!(dm.is_empty());
     }
 
@@ -1925,7 +1971,7 @@ mod tests {
         let lhs = "a\nb\nc\n";
         let rhs = "a\nB\nc\n";
         let result = stoat_language::structural_diff::diff(lhs, rhs);
-        let dm = DiffMap::from_structural_changes(result, lhs, rhs);
+        let dm = DiffMap::from_structural_changes(result, Arc::new(lhs.to_string()), rhs);
         assert!(
             dm.hunks_in_range(0..u32::MAX).iter().all(|h| !h.staged()),
             "index-unaware construction reads as entirely unstaged"
@@ -1941,7 +1987,7 @@ mod tests {
         let buffer = "a\nB\nc\nD\n";
         let index_changed: Vec<std::ops::Range<u32>> = DiffMap::from_structural_changes(
             stoat_language::structural_diff::diff(index, buffer),
-            index,
+            Arc::new(index.to_string()),
             buffer,
         )
         .hunks_in_range(0..u32::MAX)
@@ -1949,7 +1995,12 @@ mod tests {
         .map(|h| h.buffer_line_range.clone())
         .collect();
         let result = stoat_language::structural_diff::diff(base, buffer);
-        let dm = DiffMap::from_structural_changes_staged(result, base, buffer, &index_changed);
+        let dm = DiffMap::from_structural_changes_staged(
+            result,
+            Arc::new(base.to_string()),
+            buffer,
+            &index_changed,
+        );
         let flags: Vec<(u32, bool)> = dm
             .hunks_in_range(0..u32::MAX)
             .iter()
@@ -1973,7 +2024,7 @@ mod tests {
 
         let second_diff: Vec<std::ops::Range<u32>> = DiffMap::from_structural_changes(
             stoat_language::structural_diff::diff(base, buffer),
-            base,
+            Arc::new(base.to_string()),
             buffer,
         )
         .hunks_in_range(0..u32::MAX)
@@ -1992,7 +2043,12 @@ mod tests {
             "the hunks already in hand name the same lines the index diff would",
         );
 
-        let dm = DiffMap::from_structural_changes_staged(result, base, buffer, &own_hunks);
+        let dm = DiffMap::from_structural_changes_staged(
+            result,
+            Arc::new(base.to_string()),
+            buffer,
+            &own_hunks,
+        );
         assert!(
             dm.hunks_in_range(0..u32::MAX).iter().all(|h| !h.staged()),
             "an index sitting at HEAD leaves every hunk unstaged",
@@ -2007,7 +2063,12 @@ mod tests {
         let buffer = "a\nB\nC\n";
         let index_changed = std::iter::once(2..3).collect::<Vec<_>>();
         let result = stoat_language::structural_diff::diff(base, buffer);
-        let dm = DiffMap::from_structural_changes_staged(result, base, buffer, &index_changed);
+        let dm = DiffMap::from_structural_changes_staged(
+            result,
+            Arc::new(base.to_string()),
+            buffer,
+            &index_changed,
+        );
         assert_eq!(
             dm.staged_for_line(1),
             Some(true),
@@ -2122,7 +2183,7 @@ mod tests {
             changes,
             fell_back_to_line_diff: false,
         };
-        let dm = DiffMap::from_structural_changes(result, lhs_text, rhs_text);
+        let dm = DiffMap::from_structural_changes(result, Arc::new(lhs_text.to_string()), rhs_text);
 
         let hunks: Vec<&DiffHunk> = dm.hunks_in_range(0..10);
         assert!(
@@ -2199,7 +2260,7 @@ mod tests {
                 changes,
                 fell_back_to_line_diff: false,
             },
-            lhs_text,
+            Arc::new(lhs_text.to_string()),
             rhs_text,
         );
         let statuses: Vec<DiffHunkStatus> =

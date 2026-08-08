@@ -1473,7 +1473,7 @@ mod tests {
         let mut tb = TextBuffer::with_text(BufferId::new(0), text);
         tb.diff_map = Some(DiffMap::from_structural_changes(
             structural_diff::diff(base, text),
-            base,
+            Arc::new(base.to_string()),
             text,
         ));
         let shared = Arc::new(RwLock::new(tb));
