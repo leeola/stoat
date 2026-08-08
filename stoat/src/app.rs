@@ -3156,13 +3156,7 @@ impl Stoat {
             );
             return;
         }
-        let warm = self.warm_index_load(&git_root);
-        tracing::info!(
-            target: "stoat::app",
-            root = %git_root.display(),
-            mode = if warm.is_some() { "warm" } else { "cold" },
-            "index build starting",
-        );
+        let index_dir = self.index_dir_for_build(&git_root);
         if !self.persistence_disabled {
             // notify's inotify backend registers a recursive watch by walking
             // every directory under the root synchronously, which blocks the
@@ -3194,22 +3188,20 @@ impl Stoat {
             handles,
             git_root,
             workspace,
-            warm,
+            index_dir,
         ));
     }
 
-    /// Read the persisted manifest for a warm index load.
+    /// Where the index for `git_root` persists, or `None` when it does not.
     ///
-    /// Returns `None` to fall through to a full cold build when persistence
-    /// is disabled, no manifest is present, or its [`codegraph::SCHEMA_VERSION`]
-    /// no longer matches.
-    fn warm_index_load(&self, git_root: &Path) -> Option<(PathBuf, codegraph::Manifest)> {
+    /// Only resolves the directory. Whether a usable manifest sits in it, and so
+    /// whether the build runs warm or cold, is the build job's to discover, the
+    /// read being the part worth keeping off this thread.
+    fn index_dir_for_build(&self, git_root: &Path) -> Option<PathBuf> {
         if self.persistence_disabled {
             return None;
         }
-        let dir = crate::code_index::store::index_dir_for(git_root, self.fs_host.as_ref()).ok()?;
-        let manifest = crate::code_index::store::read_manifest(&dir, self.fs_host.as_ref()).ok()?;
-        (manifest.schema_version == codegraph::SCHEMA_VERSION).then_some((dir, manifest))
+        crate::code_index::store::index_dir_for(git_root, self.fs_host.as_ref()).ok()
     }
 
     /// Merge pending index updates into their workspace graphs.
@@ -3236,10 +3228,7 @@ impl Stoat {
                     workspace,
                     rel_path,
                     shard,
-                    persist,
                 } => {
-                    let bytes = (persist && !self.persistence_disabled)
-                        .then(|| codegraph::encode_shard(&shard));
                     let Some(ws) = self.workspaces.get_mut(workspace) else {
                         continue;
                     };
@@ -3249,20 +3238,6 @@ impl Stoat {
                         PathBuf::from(&rel_path),
                     );
                     ws.index_generation += 1;
-                    if let Some(bytes) = bytes {
-                        let git_root = ws.git_root.clone();
-                        if let Ok(dir) = crate::code_index::store::index_dir_for(
-                            &git_root,
-                            self.fs_host.as_ref(),
-                        ) {
-                            let _ = crate::code_index::store::write_shard(
-                                &dir,
-                                &rel_path,
-                                &bytes,
-                                self.fs_host.as_ref(),
-                            );
-                        }
-                    }
                 },
                 IndexUpdate::Complete {
                     workspace,
@@ -12799,7 +12774,6 @@ mod tests {
                 workspace,
                 rel_path: "a.rs".to_string(),
                 shard,
-                persist: true,
             })
             .unwrap();
 
@@ -13021,7 +12995,6 @@ mod tests {
                         symbols: vec![],
                         edges: vec![],
                     },
-                    persist: false,
                 })
                 .unwrap();
         }
@@ -13074,7 +13047,6 @@ mod tests {
                     symbols: vec![symbol(1, "foo")],
                     edges: vec![],
                 },
-                persist: false,
             })
             .unwrap();
         stoat.drain_index_updates();

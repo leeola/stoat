@@ -31,14 +31,14 @@ use tokio::sync::{mpsc::UnboundedSender, Notify};
 
 /// A unit of index progress delivered from the build job to the event loop.
 pub(crate) enum IndexUpdate {
-    /// One file's shard, ready to merge into the graph. `persist` is true
-    /// when the shard was freshly extracted and should be written to disk,
-    /// false when it was loaded from an existing on-disk shard.
+    /// One file's shard, ready to merge into the graph.
+    ///
+    /// The build job has already written it to disk when it was freshly
+    /// extracted, so nothing here needs persisting.
     Shard {
         workspace: WorkspaceId,
         rel_path: String,
         shard: FileShard,
-        persist: bool,
     },
     /// The scan finished. Resolve cross-file references and persist the
     /// manifest listing every covered file.
@@ -81,10 +81,13 @@ pub(crate) struct IndexBuild {
 
 /// Spawn the index build job for `workspace` rooted at `git_root`.
 ///
-/// With `warm` set, each file whose manifest fingerprint still matches is
-/// loaded from its on-disk shard rather than re-extracted, and shards for
-/// files that have since vanished are deleted. Without it, every file is
-/// extracted from scratch.
+/// `index_dir` is where the index persists, or `None` when persistence is off,
+/// in which case nothing is read or written and every file is extracted fresh.
+/// Given a directory, the job reads its manifest and loads each file whose
+/// fingerprint still matches from its shard rather than re-extracting it,
+/// deleting the shards of files that have since vanished. Reading the manifest
+/// here rather than at the call site keeps a decode of one entry per indexed
+/// file off the thread that paints the first frame.
 ///
 /// The returned [`Task`] must be kept alive for the build to run to
 /// completion. Dropping it can cancel the in-flight scan. Progress is
@@ -94,7 +97,7 @@ pub(crate) fn build_index(
     handles: IndexBuild,
     git_root: PathBuf,
     workspace: WorkspaceId,
-    warm: Option<(PathBuf, Manifest)>,
+    index_dir: Option<PathBuf>,
 ) -> Task<()> {
     let IndexBuild {
         fs,
@@ -104,17 +107,24 @@ pub(crate) fn build_index(
     } = handles;
     executor.spawn_blocking(move || {
         let started = Instant::now();
-        let (index_dir, known) = match warm {
-            Some((dir, manifest)) => {
-                let known: HashMap<String, [u8; 32]> = manifest
+        let known: HashMap<String, [u8; 32]> = index_dir
+            .as_deref()
+            .and_then(|dir| store::read_manifest(dir, fs.as_ref()).ok())
+            .filter(|manifest| manifest.schema_version == SCHEMA_VERSION)
+            .map(|manifest| {
+                manifest
                     .files
                     .into_iter()
                     .map(|entry| (entry.rel_path, entry.content_hash))
-                    .collect();
-                (Some(dir), known)
-            },
-            None => (None, HashMap::new()),
-        };
+                    .collect()
+            })
+            .unwrap_or_default();
+        tracing::info!(
+            target: "stoat::code_index",
+            root = %git_root.display(),
+            mode = if known.is_empty() { "cold" } else { "warm" },
+            "index build starting",
+        );
 
         let mut entries = Vec::new();
         let mut seen = HashSet::new();
@@ -142,12 +152,24 @@ pub(crate) fn build_index(
                     rel_path: rel_path.clone(),
                     content_hash: shard.content_hash,
                 });
+                // Written here rather than by the drain, so a build streaming
+                // hundreds of files does not hand the loop hundreds of
+                // temp-file-and-rename pairs to perform between frames.
+                if let Some(dir) = &index_dir
+                    && matches!(source, ShardSource::Extracted)
+                {
+                    let _ = store::write_shard(
+                        dir,
+                        &rel_path,
+                        &codegraph::encode_shard(&shard),
+                        fs.as_ref(),
+                    );
+                }
                 if tx
                     .send(IndexUpdate::Shard {
                         workspace,
                         rel_path,
                         shard,
-                        persist: matches!(source, ShardSource::Extracted),
                     })
                     .is_err()
                 {
@@ -411,15 +433,140 @@ pub(crate) fn extract_shard(
 
 #[cfg(test)]
 mod tests {
-    use super::{index_file, load_or_extract, ShardSource};
+    use super::{build_index, index_file, load_or_extract, IndexBuild, IndexUpdate, ShardSource};
     use crate::{
         buffer_registry::fingerprint_bytes,
         code_index::store,
         host::{FakeFs, FsHost},
+        workspace::WorkspaceId,
     };
-    use std::{collections::HashMap, path::Path};
+    use codegraph::{FileEntry, Manifest, SCHEMA_VERSION};
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
     use stoat_language::LanguageRegistry;
+    use stoat_scheduler::TestScheduler;
     use stoat_text::Rope;
+    use tokio::sync::Notify;
+
+    /// Run a build to completion over `fs`, returning the updates it streamed.
+    fn run_build(fs: Arc<FakeFs>, index_dir: Option<PathBuf>) -> Vec<IndexUpdate> {
+        let scheduler = Arc::new(TestScheduler::new());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = build_index(
+            &scheduler.executor(),
+            IndexBuild {
+                fs,
+                languages: Arc::new(LanguageRegistry::standard()),
+                tx,
+                redraw: Arc::new(Notify::new()),
+            },
+            PathBuf::from("/repo"),
+            WorkspaceId::default(),
+            index_dir,
+        );
+        scheduler.run_until_parked();
+        drop(task);
+
+        let mut updates = Vec::new();
+        while let Ok(update) = rx.try_recv() {
+            updates.push(update);
+        }
+        updates
+    }
+
+    /// The build writes each shard it extracted, rather than handing the bytes
+    /// to the event loop to write between frames.
+    #[test]
+    fn a_build_writes_the_shards_it_extracted() {
+        let fs = Arc::new(FakeFs::new());
+        fs.write(Path::new("/repo/a.rs"), b"fn helper() {}\n")
+            .unwrap();
+
+        let updates = run_build(fs.clone(), Some(PathBuf::from("/idx")));
+
+        assert!(
+            updates
+                .iter()
+                .any(|u| matches!(u, IndexUpdate::Shard { rel_path, .. } if rel_path == "a.rs")),
+            "the shard still reaches the graph",
+        );
+        let stored = store::read_shard(Path::new("/idx"), "a.rs", fs.as_ref())
+            .expect("the build wrote the shard itself");
+        assert_eq!(
+            codegraph::decode_shard(&stored).unwrap().content_hash,
+            fingerprint_bytes("fn helper() {}\n"),
+            "and wrote the bytes for the text it indexed",
+        );
+    }
+
+    /// Without a directory the build persists nothing at all, which is what a
+    /// persistence-disabled session asks for.
+    #[test]
+    fn a_build_with_no_index_dir_writes_nothing() {
+        let fs = Arc::new(FakeFs::new());
+        fs.write(Path::new("/repo/a.rs"), b"fn helper() {}\n")
+            .unwrap();
+
+        let updates = run_build(fs.clone(), None);
+
+        assert!(!updates.is_empty(), "the graph is still populated");
+        assert!(
+            store::read_shard(Path::new("/idx"), "a.rs", fs.as_ref()).is_err(),
+            "but nothing was written",
+        );
+    }
+
+    /// The build reads the manifest itself, so a matching fingerprint loads the
+    /// stored shard instead of re-extracting the file.
+    ///
+    /// The stored shard carries a symbol the source does not, which is what
+    /// makes the two paths tell apart at all.
+    #[test]
+    fn a_build_reads_its_own_manifest_to_go_warm() {
+        let fs = Arc::new(FakeFs::new());
+        let source = "fn helper() {}\n";
+        fs.write(Path::new("/repo/a.rs"), source.as_bytes())
+            .unwrap();
+
+        let dir = Path::new("/idx");
+        let stored = codegraph::FileShard {
+            content_hash: fingerprint_bytes(source),
+            symbols: Vec::new(),
+            edges: Vec::new(),
+        };
+        store::write_shard(dir, "a.rs", &codegraph::encode_shard(&stored), fs.as_ref()).unwrap();
+        store::write_manifest(
+            dir,
+            &Manifest {
+                schema_version: SCHEMA_VERSION,
+                files: vec![FileEntry {
+                    rel_path: "a.rs".to_string(),
+                    content_hash: fingerprint_bytes(source),
+                }],
+            },
+            fs.as_ref(),
+        )
+        .unwrap();
+
+        let updates = run_build(fs, Some(dir.to_path_buf()));
+
+        let shard = updates
+            .iter()
+            .find_map(|u| match u {
+                IndexUpdate::Shard {
+                    rel_path, shard, ..
+                } if rel_path == "a.rs" => Some(shard),
+                _ => None,
+            })
+            .expect("a.rs was indexed");
+        assert!(
+            shard.symbols.is_empty(),
+            "the empty stored shard was loaded, not the source re-extracted",
+        );
+    }
 
     #[test]
     fn index_file_extracts_a_rust_shard() {
