@@ -252,7 +252,7 @@ impl InlayMap {
         let spliced = mem::take(&mut self.spliced_offsets);
         let text_still_matches = buffer_snapshot.version() == self.last_buffer_version;
         let splice_edits = (!spliced.is_empty() && text_still_matches)
-            .then(|| splice_patch(spliced, buffer_snapshot.rope().len()));
+            .then(|| splice_patch(spliced, buffer_snapshot.rope()));
         let edits_in = splice_edits.as_ref().unwrap_or(buffer_edits);
 
         let can_incremental = !edits_in.is_empty()
@@ -540,17 +540,22 @@ impl InlayMap {
 /// The offsets a splice touched, as a patch marking each for rebuild.
 ///
 /// An inlay stands for no buffer text, so nothing here replaces anything and
-/// every range maps to itself. They span a byte rather than nothing only
-/// because [`Patch::push`] drops an empty edit, which would leave the sync
-/// nothing to act on.
-fn splice_patch(mut offsets: Vec<usize>, text_len: usize) -> Patch<usize> {
+/// every range maps to itself. Ranges span the character after the offset
+/// rather than nothing, because [`Patch::push`] drops an empty edit and the
+/// sync would then have nothing to act on.
+///
+/// Stepping a whole character rather than one byte is what keeps the bound
+/// usable. The sync slices the rope by these ranges, and a bound landing inside
+/// a character is not a slice the rope can take.
+fn splice_patch(mut offsets: Vec<usize>, rope: &Rope) -> Patch<usize> {
     offsets.sort_unstable();
     offsets.dedup();
 
+    let text_len = rope.len();
     let mut patch = Patch::empty();
     for offset in offsets {
         let start = offset.min(text_len);
-        let end = (offset + 1).min(text_len);
+        let end = rope.clip_offset((offset + 1).min(text_len), Bias::Right);
         if start < end {
             patch.push(stoat_text::patch::Edit {
                 old: start..end,
@@ -1297,6 +1302,27 @@ mod tests {
             snap.to_buffer_point(InlayPoint::new(0, 7)),
             Point::new(0, 5)
         );
+    }
+
+    /// A splice marks the character after each hint for rebuild, and the sync
+    /// slices the rope by that mark. Stepping one byte rather than a whole
+    /// character lands the mark inside the character a hint sits in front of,
+    /// where the rope cannot be sliced.
+    #[test]
+    fn a_hint_splices_in_front_of_a_multi_byte_character() {
+        for (content, at, want) in [
+            ("\u{e9}a", 0, "x\u{e9}a"),
+            ("a\u{e9}", 1, "ax\u{e9}"),
+            ("\u{4e16}\u{754c}", 3, "\u{4e16}x\u{754c}"),
+        ] {
+            let snap =
+                make_snapshot_with_inlays(content, vec![(Point::new(0, at), "x".to_string())]);
+            assert_eq!(
+                painted_text(&snap),
+                want,
+                "hint at byte {at} of {content:?}"
+            );
+        }
     }
 
     #[test]
