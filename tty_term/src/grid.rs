@@ -44,10 +44,16 @@ pub struct Grid {
     /// blocks a strip renders. A strip finds its store via its
     /// [`MinimapCommand::content_id`].
     minimap_contents: HashMap<u32, Vec<LineSummary>>,
-    /// Height in rows of each logical line, indexed from the top. A line absent
-    /// from the vec is one row tall. The prefix sum gives a line's physical
-    /// start row, so an inline expansion pushes later lines down.
-    line_heights: Vec<u16>,
+    /// Physical start row of each logical line, indexed from the top, so an
+    /// inline expansion pushes later lines down.
+    ///
+    /// The running sum of the declared heights rather than the heights
+    /// themselves, since summing them per lookup makes a re-stamp quadratic in
+    /// the lines on screen. It runs one longer than the heights it was built
+    /// from, the last entry being the total, which is what a line past the end
+    /// extrapolates from. Empty while no layout is declared, where every line
+    /// is one row and starts on its own index.
+    line_start_rows: Vec<usize>,
     /// Change counters bumped by [`crate::Terminal::project`] when it re-applies
     /// the overlay/popover, off-grid text-run, or minimap decorations. A render
     /// pass compares each against its last-seen value to skip rebuilding and
@@ -75,7 +81,7 @@ impl Grid {
             polylines: Vec::new(),
             minimaps: Vec::new(),
             minimap_contents: HashMap::new(),
-            line_heights: Vec::new(),
+            line_start_rows: Vec::new(),
             popovers_epoch: 0,
             text_runs_epoch: 0,
             minimap_epoch: 0,
@@ -206,7 +212,7 @@ impl Grid {
         self.polylines.clear();
         self.minimaps.clear();
         self.minimap_contents.clear();
-        self.line_heights.clear();
+        self.line_start_rows.clear();
     }
 
     /// Reset every cell to [`Cell::default`] and drop all decorations, keeping
@@ -225,7 +231,7 @@ impl Grid {
         self.polylines.clear();
         self.minimaps.clear();
         self.minimap_contents.clear();
-        self.line_heights.clear();
+        self.line_start_rows.clear();
     }
 
     /// The border set `id` names, or the borderless set for an id this grid
@@ -624,19 +630,36 @@ impl Grid {
     /// A line past the end of the list is one row tall. The cell projection is
     /// unaffected; the layout exists for off-grid components to align to.
     pub fn set_line_heights(&mut self, line_heights: Vec<u16>) {
-        self.line_heights = line_heights;
+        self.line_start_rows.clear();
+        if line_heights.is_empty() {
+            return;
+        }
+
+        // One entry per line plus the total, which is where a line past the
+        // declared ones starts counting from.
+        self.line_start_rows.reserve(line_heights.len() + 1);
+        let mut above = 0usize;
+        self.line_start_rows.push(above);
+        for height in line_heights {
+            above += height as usize;
+            self.line_start_rows.push(above);
+        }
     }
 
-    /// The physical row a logical line starts on: the sum of the heights of the
-    /// lines above it, with any line past the declared heights counting as one
+    /// The physical row a logical line starts on, being the heights of the lines
+    /// above it summed, with any line past the declared heights counting as one
     /// row. With no expansions this is `line` itself.
     pub fn line_start_row(&self, line: usize) -> usize {
-        if self.line_heights.is_empty() {
-            return line;
+        match self.line_start_rows.get(line) {
+            Some(&start) => start,
+            // Past the declared lines, or none declared at all. Each of those
+            // is one row, so the answer is the total plus however many lines
+            // beyond the last declared one this is.
+            None => match self.line_start_rows.last() {
+                Some(&total) => total + line - (self.line_start_rows.len() - 1),
+                None => line,
+            },
         }
-        (0..line)
-            .map(|above| self.line_heights.get(above).copied().unwrap_or(1) as usize)
-            .sum()
     }
 
     /// Claim a `scale` by `scale` block of cells for a glyph drawn at (`row`,
@@ -1834,7 +1857,32 @@ mod tests {
         grid.set_line_heights(vec![1, 3, 1]);
         assert_eq!(grid.line_start_row(1), 1, "the expanded line itself");
         assert_eq!(grid.line_start_row(2), 4, "shifted past the expansion");
+        // The sums run one past the heights, so line 3 reads the total where
+        // line 4 is the first that has to extrapolate. Both sit where the
+        // declared part ends, which is where an off-by-one would show.
+        assert_eq!(
+            grid.line_start_row(3),
+            5,
+            "the row the declared lines end on"
+        );
         assert_eq!(grid.line_start_row(4), 6, "undeclared lines count as one");
+        assert_eq!(grid.line_start_row(9), 11, "and go on counting as one");
+
+        // Replacing a layout must not leave the previous sums behind it.
+        grid.set_line_heights(vec![2]);
+        assert_eq!(grid.line_start_row(1), 2, "the shorter layout replaced it");
+        assert_eq!(
+            grid.line_start_row(3),
+            4,
+            "and extrapolates from its own end"
+        );
+
+        grid.set_line_heights(Vec::new());
+        assert_eq!(
+            grid.line_start_row(3),
+            3,
+            "an empty layout is one row a line"
+        );
 
         grid.resize(2, 2);
         assert_eq!(grid.line_start_row(3), 3, "resize clears the layout");
