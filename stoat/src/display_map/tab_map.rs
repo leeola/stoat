@@ -71,10 +71,15 @@ impl TabMap {
         } else {
             let mut expanded = Vec::new();
             for edit in fold_edits.into_iter() {
-                // Fold edits arrive as whole rows, so every row whose tab stops
-                // the edit moved is already inside it. The row just past the end
-                // is the one exception. An edit that left the line count alone
-                // can still shift its stops, and nothing else would report it.
+                // Widening by the row past the end is conservative rather than
+                // required. Expansion restarts at every newline, so a row's tab
+                // stops depend on nothing before its own start, and fold edits
+                // arrive as whole rows, which leaves no way for an edit to move
+                // the stops of a row outside it.
+                //
+                // Kept because it costs one row per same-size edit, where
+                // dropping it would stake correctness on edits staying
+                // row-granular for good.
                 let mut new_end = edit.new.end;
                 let old_rows = edit.old.end - edit.old.start;
                 let new_rows = edit.new.end - edit.new.start;

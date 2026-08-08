@@ -245,7 +245,8 @@ impl TextBuffer {
         self.indent_style = stoat_text::detect_indent_style(self.rope()).unwrap_or_default();
     }
 
-    /// Apply several disjoint replacements in one pass over the fragment tree.
+    /// Apply several disjoint replacements in two passes over the fragment
+    /// tree, however many there are, rather than one rebuild each.
     ///
     /// `edits` are pre-edit coordinates sorted descending by start, which is what
     /// applying them right to left needs and what every caller already builds.

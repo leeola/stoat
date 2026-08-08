@@ -781,12 +781,21 @@ impl BufferRegistry {
         }
     }
 
-    /// Rehydrate a registry from a [`BufferRegistrySnapshot`]. For each entry
-    /// the saved [`BufferHistory`] is replayed on a fresh buffer, which
-    /// reconstructs the fragment tree, undo stack, and dirty state exactly as
-    /// they were at save time. The on-disk file is not read: if it has drifted
-    /// we'd have to choose between it and the saved edits, and the saved edits
-    /// win unconditionally since persistence represents the user's explicit
+    /// Rehydrate a registry from a [`BufferRegistrySnapshot`].
+    ///
+    /// Each entry's saved [`BufferHistory`] is replayed on a fresh buffer,
+    /// rebuilding the fragment tree, the text, and the dirty state as they stood
+    /// at save time.
+    ///
+    /// Undo history comes back edit by edit rather than intact. Grouping is an
+    /// in-session overlay that is never persisted, so every edit returns as its
+    /// own singleton group and the selections each group captured are gone. A
+    /// restored buffer therefore undoes in smaller steps than the one that was
+    /// saved.
+    ///
+    /// The on-disk file is not read. Were it to have drifted, something would
+    /// have to choose between it and the saved edits, and the saved edits win
+    /// unconditionally because persistence stands for the user's explicit
     /// last-known state.
     pub(crate) fn restore_from(&mut self, snap: BufferRegistrySnapshot) {
         self.buffers.clear();

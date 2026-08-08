@@ -8,9 +8,13 @@ use std::{cmp::Ordering, ops::Range};
 pub enum SelectionGoal {
     #[default]
     None,
-    /// A buffer column (character offset from the start of the buffer line), not
-    /// a display column, so a vertical motion lands at the same buffer-line
-    /// offset regardless of soft wrap or folds.
+    /// A display-cell column, counting each character as the cells it is drawn
+    /// in, one for most, two for a wide glyph, and as many as the next tab stop
+    /// for a tab.
+    ///
+    /// Measured along the whole buffer line rather than along a display row, so
+    /// a vertical motion lands at the same place whatever soft wrap or folds do
+    /// to the rows in between.
     Column(u32),
 }
 
