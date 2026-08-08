@@ -8,7 +8,7 @@ use ast_grep_core::Pattern;
 use regex::Regex;
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 use stoat_language::Language;
 use stoat_scheduler::Executor;
@@ -68,6 +68,10 @@ pub struct CodeSearchFinder {
     /// Rows the match list rendered last, driving the page step. `None` until
     /// the first render lays the pane out.
     pub(crate) viewport_rows: Option<usize>,
+    /// Parses the AST scan reuses while this modal is open, shared with the
+    /// scan task. Held here so closing the finder drops a workspace's worth of
+    /// syntax trees rather than leaving them for the process's lifetime.
+    pub(crate) parse_cache: Arc<Mutex<ast::AstParseCache>>,
 }
 
 impl CodeSearchFinder {
@@ -95,6 +99,7 @@ impl CodeSearchFinder {
             target_lang,
             invalid_pattern: false,
             viewport_rows: None,
+            parse_cache: Arc::new(Mutex::new(ast::AstParseCache::new(ast::PARSE_CACHE_CAP))),
         }
     }
 

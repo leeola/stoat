@@ -234,6 +234,7 @@ pub(crate) fn spawn_code_search(
             let pattern = Pattern::try_new(query, ast_lang.clone()).ok()?;
             let language_registry = stoat.language_registry.clone();
             let target_name = lang.name;
+            let parse_cache = finder.parse_cache.clone();
             stoat.executor.spawn_blocking(move || {
                 fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
                     let mut matches = Vec::new();
@@ -245,7 +246,15 @@ pub(crate) fn spawn_code_search(
                         if fs_host.read(&path, &mut buf).is_ok()
                             && let Ok(text) = std::str::from_utf8(&buf)
                         {
-                            ast_scan_file(text, &ast_lang, &pattern, &path, &mut matches);
+                            let mut cache = parse_cache.lock().expect("parse cache poisoned");
+                            ast_scan_file(
+                                text,
+                                &ast_lang,
+                                &pattern,
+                                &path,
+                                &mut cache,
+                                &mut matches,
+                            );
                         }
                     }
                     if !matches.is_empty() {
