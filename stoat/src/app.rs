@@ -776,6 +776,9 @@ pub struct Stoat {
     /// off this task and installs it on the main loop, so opening a review
     /// never stalls input on the scan.
     pub(crate) pending_review_scan: Option<action_handlers::PendingReviewScan>,
+    /// A cross-file changed-file hop scanning off the UI thread, applied by
+    /// [`action_handlers::movement::pump_changed_file_jump`] when it lands.
+    pub(crate) pending_changed_file_jump: Option<action_handlers::movement::PendingChangedFileJump>,
     /// In-flight code-search scan streaming match batches from the blocking pool.
     pub(crate) pending_code_search: Option<action_handlers::code_search::PendingCodeSearch>,
     /// Timer that forwards the latest code-search query on
@@ -1836,6 +1839,7 @@ impl Stoat {
             #[cfg(feature = "perf")]
             perf: crate::perf::PerfStats::default(),
             pending_review_scan: None,
+            pending_changed_file_jump: None,
             pending_code_search: None,
             code_search_debounce: None,
             code_search_query_tx,
@@ -9994,6 +9998,7 @@ impl Stoat {
         action_handlers::code_search::pump_code_search(self);
         action_handlers::code_search::sync_code_search(self);
         action_handlers::pump_lsp_jumps(self);
+        action_handlers::movement::pump_changed_file_jump(self);
         action_handlers::lsp::pump_lsp_hover(self);
         action_handlers::lsp::pump_lsp_signature_help(self);
         action_handlers::lsp::pump_lsp_inlay_hints(self);
@@ -22180,6 +22185,7 @@ mod tests {
         // Mirrors the `stoat review` startup, where the diff view opens on the
         // pathless scratch and then crosses into the sole changed file.
         h.stoat.open_working_tree_diff();
+        h.settle();
 
         let (_, buffer_id) = h.stoat.focused_editor_ids().expect("focused editor");
         let path = {
@@ -22232,6 +22238,7 @@ mod tests {
         h.settle();
 
         h.stoat.toggle_diff_view();
+        h.settle();
 
         let (_, buffer_id) = h.stoat.focused_editor_ids().expect("focused editor");
         let path = {
@@ -22273,6 +22280,7 @@ mod tests {
         let scratch = h.stoat.focused_editor_ids().expect("editor").1;
 
         h.stoat.open_working_tree_diff();
+        h.settle();
 
         assert_eq!(
             h.stoat.focused_editor_ids().expect("editor").1,

@@ -1,9 +1,11 @@
 use crate::{
     action_handlers::focused_editor_mut,
     app::{Stoat, UpdateEffect},
-    diff_map::{DiffHunkStatus, TokenDetail},
+    diff_map::{self, DiffHunkStatus, TokenDetail},
     display_map::{DisplayPoint, DisplaySnapshot},
     editor_state::{EditorState, ScrollGlide},
+    host::{FsHost, GitHost, GitRepo},
+    jumplist::JumpEntry,
     multi_buffer::MultiBufferSnapshot,
     pane::View,
     selection::merge_overlapping_spans,
@@ -11,8 +13,10 @@ use crate::{
 use std::{
     ops::Range,
     path::{Path, PathBuf},
+    sync::{mpsc, Arc},
 };
-use stoat_language::structural_diff::BufferRef;
+use stoat_language::structural_diff::{self, BufferRef};
+use stoat_scheduler::Task;
 use stoat_text::{
     cursor_offset, find_number_seeking, next_char_boundary, next_long_word_end_range,
     next_long_word_start_range, next_word_end_range, next_word_start_range,
@@ -3612,13 +3616,42 @@ pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// A cross-file changed hop whose scan has not landed yet.
+///
+/// Held on [`Stoat`] between the keypress that armed it and the
+/// [`pump_changed_file_jump`] that applies it. The two halves the keypress
+/// knows and the scan does not travel here.
+pub(crate) struct PendingChangedFileJump {
+    rx: mpsc::Receiver<ChangedFileJump>,
+    _task: Task<()>,
+    /// Whether the buffer the hop left was in diff view, which the target
+    /// inherits so the mode survives crossing a file boundary.
+    source_diff_view: bool,
+    /// The jumplist entry for where the hop started, pushed once it lands so a
+    /// scan that finds nowhere to go records no jump.
+    origin: Option<JumpEntry>,
+}
+
+/// What a changed-file scan decided.
+enum ChangedFileJump {
+    /// Open `path` and land on `line`, which is `None` when the file turned out
+    /// to hold no hunk after all.
+    To {
+        path: PathBuf,
+        line: Option<u32>,
+        wrapped: bool,
+    },
+    /// Nowhere else to go.
+    NoMoreChanges,
+}
+
 /// Jump to the adjacent changed file when the focused buffer has no further
 /// hunk in `dir`.
 ///
-/// Opens the neighbor in the focused pane, preserving `source_diff_view`, and
-/// lands the cursor on its first (Next) or last (Prev) hunk after computing its
-/// diff synchronously. Wraps past the repo ends with a "wrapped" status, and
-/// reports "no more changes" when no other file has changes.
+/// Returns as soon as the scan is armed. Listing the repo's changed files and
+/// diffing the target against HEAD are what the hop costs, and both would run
+/// on the thread that handled the key, so they run on a blocking one and
+/// [`pump_changed_file_jump`] opens the target when they land.
 ///
 /// Only tracked changed files (modifications, deletions, staged additions) are
 /// visited. Untracked working-tree files are excluded because they have no HEAD
@@ -3628,11 +3661,45 @@ fn goto_change_across_files(
     dir: ChangeDir,
     current_path: Option<PathBuf>,
     source_diff_view: bool,
-    origin: Option<crate::jumplist::JumpEntry>,
+    origin: Option<JumpEntry>,
 ) -> UpdateEffect {
     let git_root = stoat.active_workspace().git_root.clone();
-    let Some(repo) = stoat.git_host.discover(&git_root) else {
-        return UpdateEffect::None;
+    let git_host = stoat.git_host.clone();
+    let fs_host = stoat.fs_host.clone();
+    let redraw = stoat.redraw_notify.clone();
+    let (tx, rx) = mpsc::channel();
+
+    let task = stoat.executor.spawn_blocking(move || {
+        let found = scan_changed_file_jump(&git_host, &fs_host, &git_root, current_path, dir);
+        let _ = tx.send(found);
+        redraw.notify_one();
+    });
+
+    stoat.pending_changed_file_jump = Some(PendingChangedFileJump {
+        rx,
+        _task: task,
+        source_diff_view,
+        origin,
+    });
+    UpdateEffect::Redraw
+}
+
+/// Pick the changed file `dir` leads to from `current_path`, and the row in it
+/// to land on.
+///
+/// Runs off the UI thread, so it reads the target's working-tree side through
+/// `fs_host` rather than through any open buffer. For the file a hop is
+/// crossing into those hold the same text, that file being by definition one
+/// the reader does not have in front of them.
+fn scan_changed_file_jump(
+    git_host: &Arc<dyn GitHost>,
+    fs_host: &Arc<dyn FsHost>,
+    git_root: &Path,
+    current_path: Option<PathBuf>,
+    dir: ChangeDir,
+) -> ChangedFileJump {
+    let Some(repo) = git_host.discover(git_root) else {
+        return ChangedFileJump::NoMoreChanges;
     };
     let changed: Vec<PathBuf> = repo
         .changed_files()
@@ -3647,8 +3714,7 @@ fn goto_change_across_files(
     // the list. Only bail when nothing changed, or the current buffer is the
     // sole changed file and there is nowhere else to go.
     if changed.is_empty() || (current_index.is_some() && changed.len() < 2) {
-        stoat.set_status("no more changes");
-        return UpdateEffect::Redraw;
+        return ChangedFileJump::NoMoreChanges;
     }
 
     let (target_index, wrapped) = match (current_index, dir) {
@@ -3659,67 +3725,106 @@ fn goto_change_across_files(
         (None, ChangeDir::Next) => (0, false),
         (None, ChangeDir::Prev) => (changed.len() - 1, false),
     };
-    let target_path = changed[target_index].clone();
+    let path = changed[target_index].clone();
+    let line = first_hunk_row(&*repo, fs_host, &path, dir);
 
-    let focused_pane = stoat.active_workspace().panes.focus();
-    let Some(target_buffer) = super::file::open_file_in_pane(stoat, focused_pane, &target_path)
-    else {
-        return UpdateEffect::None;
+    ChangedFileJump::To {
+        path,
+        line,
+        wrapped,
+    }
+}
+
+/// The row of `path`'s first (Next) or last (Prev) hunk against HEAD.
+///
+/// `None` when the file has no HEAD blob, cannot be read, or diffs clean, in
+/// which case the hop opens it and leaves the cursor where the open put it.
+fn first_hunk_row(
+    repo: &dyn GitRepo,
+    fs_host: &Arc<dyn FsHost>,
+    path: &Path,
+    dir: ChangeDir,
+) -> Option<u32> {
+    let base = repo.head_content(path)?;
+    let mut bytes = Vec::new();
+    fs_host.read(path, &mut bytes).ok()?;
+    let working = String::from_utf8(bytes).ok()?;
+
+    let result = structural_diff::diff(&base, &working);
+    let hunks = diff_map::changes_to_hunks(&result.changes, &base, &working);
+    match dir {
+        ChangeDir::Next => hunks.first().map(|h| h.buffer_start_line),
+        ChangeDir::Prev => hunks.last().map(|h| h.buffer_start_line),
+    }
+}
+
+/// Apply a landed changed-file hop, opening the target and landing on its hunk.
+pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
+    let Some(pending) = stoat.pending_changed_file_jump.take() else {
+        return false;
+    };
+    let found = match pending.rx.try_recv() {
+        Ok(found) => found,
+        Err(mpsc::TryRecvError::Empty) => {
+            stoat.pending_changed_file_jump = Some(pending);
+            return false;
+        },
+        Err(mpsc::TryRecvError::Disconnected) => return false,
     };
 
-    if source_diff_view && let Some(editor) = focused_editor_mut(stoat) {
+    let (path, line, wrapped) = match found {
+        ChangedFileJump::To {
+            path,
+            line,
+            wrapped,
+        } => (path, line, wrapped),
+        ChangedFileJump::NoMoreChanges => {
+            stoat.set_status("no more changes");
+            return true;
+        },
+    };
+
+    let focused_pane = stoat.active_workspace().panes.focus();
+    if super::file::open_file_in_pane(stoat, focused_pane, &path).is_none() {
+        return true;
+    }
+
+    if pending.source_diff_view
+        && let Some(editor) = focused_editor_mut(stoat)
+    {
         editor.set_diff_view(true);
     }
 
-    let git_host = stoat.git_host.clone();
-    let language_registry = stoat.language_registry.clone();
-    let syntax_styles = stoat.syntax_styles.clone();
-    let base_cache = stoat.base_highlights_cache.clone();
-    stoat.active_workspace_mut().install_diff_map_now(
-        &git_host,
-        &language_registry,
-        &syntax_styles,
-        &base_cache,
-        target_buffer,
-    );
-
     let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
-    if let Some(editor) = focused_editor_mut(stoat) {
+    if let Some(target_row) = line
+        && let Some(editor) = focused_editor_mut(stoat)
+    {
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let target_row = display_snapshot.diff_map().and_then(|diff_map| {
-            let hunks = diff_map.hunks_in_range(0..u32::MAX);
-            match dir {
-                ChangeDir::Next => hunks.first().map(|h| h.buffer_start_line),
-                ChangeDir::Prev => hunks.last().map(|h| h.buffer_start_line),
-            }
+        let target_offset = buffer_snapshot
+            .rope()
+            .point_to_offset(Point::new(target_row, 0));
+        editor.selections.transform(buffer_snapshot, |sel| {
+            land_block_cursor(
+                sel.id,
+                target_offset,
+                SelectionGoal::None,
+                buffer_snapshot.rope(),
+                buffer_snapshot,
+            )
         });
-        if let Some(target_row) = target_row {
-            let target_offset = buffer_snapshot
-                .rope()
-                .point_to_offset(Point::new(target_row, 0));
-            editor.selections.transform(buffer_snapshot, |sel| {
-                land_block_cursor(
-                    sel.id,
-                    target_offset,
-                    SelectionGoal::None,
-                    buffer_snapshot.rope(),
-                    buffer_snapshot,
-                )
-            });
-            // Pull the view onto the landed hunk here, so a startup or mouse
-            // dispatch that skips the Key-event epilogue still lands scrolled.
-            ensure_cursor_in_view(editor, scrolloff);
-        }
+        // Pull the view onto the landed hunk here, so a startup or mouse
+        // dispatch that skips the Key-event epilogue still lands scrolled.
+        ensure_cursor_in_view(editor, scrolloff);
     }
 
-    if let Some(entry) = origin {
+    if let Some(entry) = pending.origin {
         super::jump::push_entry(stoat, entry);
     }
     if wrapped {
         stoat.set_status("wrapped");
     }
-    UpdateEffect::Redraw
+    true
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -4870,6 +4975,7 @@ mod tests {
         }
 
         goto_change(&mut h.stoat, ChangeDir::Next);
+        h.settle();
 
         assert_eq!(
             focused_buffer_path(&h),
@@ -4880,6 +4986,49 @@ mod tests {
         assert!(
             focused_editor_mut(&mut h.stoat).expect("editor").diff_view,
             "diff_view carried across the file boundary"
+        );
+    }
+
+    /// The hop leaves the keypress with nothing but a scan armed, and lands
+    /// when the pump picks the answer up.
+    ///
+    /// What this pins is the deferral rather than the thread. The test
+    /// scheduler runs a blocking closure inline on purpose, so the scan's own
+    /// work happens on this stack whatever the handler does, and no count of
+    /// what it touched could tell the two apart. Where the open and the jump
+    /// happen can be told apart, and that is what moved.
+    #[test]
+    fn crossing_files_waits_for_the_scan_before_it_opens_anything() {
+        let mut h = TestHarness::with_size(40, 20);
+        let workdir = stage_two_changed_files(&mut h);
+        h.open_file(&workdir.join("a.rs"));
+        h.settle_diff_jobs();
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+            editor.set_diff_view(true);
+            set_cursor_row(editor, 1);
+        }
+
+        goto_change(&mut h.stoat, ChangeDir::Next);
+        assert_eq!(
+            focused_buffer_path(&h),
+            workdir.join("a.rs"),
+            "the keypress opens nothing itself",
+        );
+        assert!(
+            h.stoat.pending_changed_file_jump.is_some(),
+            "it leaves a scan for the pump to apply",
+        );
+
+        h.settle();
+        assert_eq!(
+            focused_buffer_path(&h),
+            workdir.join("b.rs"),
+            "which is where the hop lands",
+        );
+        assert!(
+            h.stoat.pending_changed_file_jump.is_none(),
+            "and the scan is spent once applied",
         );
     }
 
@@ -4897,6 +5046,7 @@ mod tests {
             .set_diff_view(true);
 
         goto_change(&mut h.stoat, ChangeDir::Next);
+        h.settle();
 
         assert_eq!(
             focused_buffer_path(&h),
@@ -4919,6 +5069,7 @@ mod tests {
         set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
         goto_change(&mut h.stoat, ChangeDir::Prev);
+        h.settle();
 
         assert_eq!(
             focused_buffer_path(&h),
@@ -4937,6 +5088,7 @@ mod tests {
         set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
         goto_change(&mut h.stoat, ChangeDir::Next);
+        h.settle();
 
         assert_eq!(
             focused_buffer_path(&h),
@@ -4957,6 +5109,7 @@ mod tests {
         set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
         goto_change(&mut h.stoat, ChangeDir::Next);
+        h.settle();
 
         assert_eq!(
             focused_buffer_path(&h),
@@ -4978,6 +5131,7 @@ mod tests {
         set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
         goto_change(&mut h.stoat, ChangeDir::Next);
+        h.settle();
 
         assert_eq!(
             focused_buffer_path(&h),

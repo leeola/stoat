@@ -607,6 +607,8 @@ impl TestHarness {
             crate::action_handlers::review_walk::sync_commit_picker(&mut self.stoat);
             let review = crate::action_handlers::pump_review_scan(&mut self.stoat);
             let lsp_jumps = crate::action_handlers::pump_lsp_jumps(&mut self.stoat);
+            let changed_file_jump =
+                crate::action_handlers::movement::pump_changed_file_jump(&mut self.stoat);
             let lsp_hover = crate::action_handlers::lsp::pump_lsp_hover(&mut self.stoat);
             let lsp_sig_help =
                 crate::action_handlers::lsp::pump_lsp_signature_help(&mut self.stoat);
@@ -650,6 +652,7 @@ impl TestHarness {
                 && !commit_picker
                 && !review
                 && !lsp_jumps
+                && !changed_file_jump
                 && !lsp_hover
                 && !lsp_sig_help
                 && !lsp_inlay_hints
