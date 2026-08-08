@@ -39,6 +39,19 @@ pub struct TextBuffer {
     /// the edit frontier has moved past [`Self::saved_marker`] -- the
     /// type-a-char-then-delete-it case the frontier comparison alone misses.
     saved_text: Option<Rope>,
+    /// Snapshot version [`Self::saved_text`] was captured at, so the comparison
+    /// against it can ask which spans have changed since.
+    ///
+    /// Distinct from [`Self::saved_marker`], which names the last edit rather
+    /// than the snapshot. An undo carries the snapshot onto a timestamp of its
+    /// own while leaving the marker on the last surviving edit, and it is the
+    /// snapshot's text that was saved, so a diff taken from the marker would
+    /// describe a text that was never captured.
+    ///
+    /// Set and cleared with [`Self::saved_text`], and like it never persisted,
+    /// so a restored buffer answers from bytes it holds rather than a version
+    /// whose fragments are gone.
+    saved_version: Option<u64>,
     pub diff_map: Option<DiffMap>,
     next_timestamp: u64,
     buffer_id: BufferId,
@@ -203,6 +216,7 @@ impl TextBuffer {
             dirty: false,
             saved_marker: None,
             saved_text: None,
+            saved_version: None,
             diff_map: None,
             next_timestamp: 1,
             buffer_id,
@@ -847,6 +861,11 @@ impl TextBuffer {
     pub(crate) fn mark_clean(&mut self) {
         self.saved_marker = self.frontier();
         self.saved_text = Some(self.snapshot.visible_text.clone());
+        // The version the saved bytes belong to, which is not the marker above.
+        // That names the last edit, while an undo carries the snapshot past it
+        // onto a timestamp of its own, and it is the snapshot's text being
+        // captured here.
+        self.saved_version = Some(self.snapshot.version);
         self.dirty = false;
     }
 
@@ -876,19 +895,43 @@ impl TextBuffer {
     /// almost everything.
     ///
     /// Equal counts do not mean equal text, so a byte comparison still decides
-    /// those. It is what a length-preserving edit costs, a case toggle or a
-    /// replacement of like for like.
+    /// those. The counts agree on exactly the edits that preserve them, a case
+    /// toggle or a replacement of like for like, which is why that comparison
+    /// reads only the spans that changed rather than both ropes end to end.
+    ///
+    /// Which spans those are comes from the edits recorded since the version the
+    /// saved text was captured at. Everything outside them is unchanged since
+    /// then, so it already matches, and with the lengths equal from the counts
+    /// above the changed spans settle the rest.
     fn matches_saved_text(&self) -> bool {
         let Some(saved) = &self.saved_text else {
             return false;
         };
         let current = &self.snapshot.visible_text;
         let (saved_summary, current_summary) = (saved.summary(), current.summary());
-        saved_summary.len == current_summary.len
-            && saved_summary.len_utf16 == current_summary.len_utf16
-            && saved_summary.lines == current_summary.lines
-            && saved_summary.chars == current_summary.chars
-            && chunk_streams_match(saved.chunks(), current.chunks())
+        if saved_summary.len != current_summary.len
+            || saved_summary.len_utf16 != current_summary.len_utf16
+            || saved_summary.lines != current_summary.lines
+            || saved_summary.chars != current_summary.chars
+        {
+            return false;
+        }
+
+        let Some(saved_version) = self.saved_version else {
+            return chunk_streams_match(saved.chunks(), current.chunks());
+        };
+
+        self.snapshot
+            .edits_since(saved_version)
+            .edits()
+            .iter()
+            .all(|edit| {
+                edit.old.len() == edit.new.len()
+                    && chunk_streams_match(
+                        saved.chunks_in_range(edit.old.clone()),
+                        current.chunks_in_range(edit.new.clone()),
+                    )
+            })
     }
 
     /// Undo the top edit group, reverting all of its edits as one step. Returns
@@ -3541,6 +3584,67 @@ mod tests {
 
         b.undo();
         assert_eq!(b.snapshot.visible_text.to_string(), "ab\u{65e5}\u{672c}cd");
+    }
+
+    /// The dirty verdict agrees with comparing every byte, across random edits,
+    /// undos and redos after a save.
+    ///
+    /// The comparison reads only the spans recorded as changed since the saved
+    /// version, so a span it fails to name reads clean over a buffer that
+    /// differs, and the reader closes it without saving. Reasoning about which
+    /// spans those are is what this replaces, over sequences that put the save
+    /// point before, between and after the edits that follow it.
+    #[test]
+    fn the_dirty_verdict_agrees_with_comparing_every_byte() {
+        let mut rng = Lcg(0x1234_5678_9abc_def0);
+
+        for round in 0..64 {
+            let mut b = buf("alpha beta\ngamma delta\nepsilon zeta\n");
+
+            // Somewhere in the run, so the save lands on a buffer that already
+            // has history behind it as often as not.
+            let save_at = rng.below(8);
+
+            for step in 0..12 {
+                if step == save_at {
+                    b.mark_clean();
+                }
+                random_step(&mut rng, &mut b);
+
+                let saved = b.saved_text.clone();
+                let by_bytes = saved
+                    .is_some_and(|saved| saved.to_string() == b.snapshot.visible_text.to_string());
+                assert_eq!(
+                    b.matches_saved_text(),
+                    by_bytes,
+                    "round {round} step {step}: saved {:?} against {:?}",
+                    b.saved_text.as_ref().map(|s| s.to_string()),
+                    b.snapshot.visible_text.to_string(),
+                );
+            }
+        }
+    }
+
+    /// A move that swaps two lines keeps every count the summary carries, so it
+    /// is the shape the cheap guard cannot answer and the span comparison has to.
+    #[test]
+    fn swapping_two_lines_reads_dirty() {
+        let mut b = buf("alpha\nbravo\n");
+        b.mark_clean();
+        assert!(!b.dirty, "the save is the baseline");
+
+        b.edit(0..12, "bravo\nalpha\n");
+
+        let before = b.snapshot.visible_text.summary().clone();
+        assert_eq!(
+            (before.len, before.lines, before.chars),
+            (12, Point::new(2, 0), 12),
+            "the swap has to leave the counts alone or it proves nothing",
+        );
+        assert!(b.dirty, "the same bytes in another order is a change");
+
+        b.edit(0..12, "alpha\nbravo\n");
+        assert!(!b.dirty, "and swapping them back is not");
     }
 
     /// One random edit, undo, or redo, weighted so a buffer accumulates
