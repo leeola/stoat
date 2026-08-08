@@ -157,6 +157,23 @@ struct TextCompositeSlot {
     /// eviction since means their UVs moved, so the pool must be reshaped even
     /// though its grid content held steady.
     epoch: u64,
+    /// What each row shaped to, kept so a scrolled frame can slide them and
+    /// re-shape only the rows the scroll exposed.
+    ///
+    /// Shaping a row rasterizes each of its glyphs and inserts them into the
+    /// shared atlas, which is the cost worth carrying. An eased scroll moves the
+    /// top a row or three per frame, so nearly every row it composes was shaped
+    /// for the frame before.
+    ///
+    /// Empty until the first full build, and emptied again whenever the row
+    /// count changes, which is what makes a stale length mean "rebuild".
+    ///
+    /// The built instances are not kept beside these. Every one of them takes its
+    /// position from the glyph's own row and column, so repairing the row a
+    /// rotation moved is enough, and rebuilding the instances from the glyphs
+    /// costs a walk rather than a reshape.
+    glyph_rows: Vec<Vec<PendingGlyph>>,
+    underline_rows: Vec<Vec<UnderlineInstance>>,
 }
 
 /// The instanced glyph pipeline together with the font system, glyph atlas, and
@@ -1201,6 +1218,7 @@ impl TextPass {
         resolution: [f32; 2],
         shift_rows: f32,
         content_changed: bool,
+        scrolled_rows: Option<isize>,
         pool: u32,
         slot: usize,
     ) {
@@ -1235,9 +1253,54 @@ impl TextPass {
         }
 
         let metrics = self.metrics;
+        let rows = grid.rows();
+
+        // A glide moves the rows without changing them, so the shaping done for
+        // them last frame still describes them. Carrying it needs a cache of
+        // this shape and an atlas that has not moved since, because the kept
+        // glyphs hold the placements it gave them.
+        let epoch_before = self.atlas.content_epoch();
+        let rotate_by = scrolled_rows.filter(|&by| by != 0).filter(|_| {
+            self.composite_slots.get(pool).is_some_and(|slot| {
+                slot.epoch == epoch_before
+                    && slot.glyph_rows.len() == rows
+                    && slot.underline_rows.len() == rows
+            })
+        });
+
+        let slot = self.composite_slots.entry(pool, || new_slot(device));
+        let mut glyph_rows = mem::take(&mut slot.glyph_rows);
+        let mut underline_rows = mem::take(&mut slot.underline_rows);
+
+        // Rows the frame has to shape for itself. A rotation leaves only the ones
+        // it scrolled into view. Anything else starts from nothing.
+        match rotate_by {
+            Some(by) => {
+                let dy = by as f32 * metrics.height;
+                crate::render::rotate_row_cache(&mut glyph_rows, by, |glyph| {
+                    glyph.row = glyph.row.saturating_add_signed(-by);
+                });
+                crate::render::rotate_row_cache(&mut underline_rows, by, |underline| {
+                    underline.cell_pos[1] -= dy;
+                });
+            },
+            None => {
+                glyph_rows.clear();
+                glyph_rows.resize_with(rows, Vec::new);
+                underline_rows.clear();
+                underline_rows.resize_with(rows, Vec::new);
+            },
+        }
+        let exposed = exposed_rows(rotate_by, rows);
+
+        for row in exposed.clone() {
+            underline_rows[row].clear();
+            build_underline_row_into(grid, row, metrics, &mut underline_rows[row]);
+        }
+
         self.underline_upload_scratch.clear();
-        for row in 0..grid.rows() {
-            build_underline_row_into(grid, row, metrics, &mut self.underline_upload_scratch);
+        for row in &underline_rows {
+            self.underline_upload_scratch.extend_from_slice(row);
         }
         let target = self.composite_slots.entry(pool, || new_slot(device));
         target.underlines.count = self.underline_upload_scratch.len() as u32;
@@ -1306,9 +1369,13 @@ impl TextPass {
                 cursor_cell: None,
             };
 
-            for row in 0..grid.rows() {
-                self.rasterize_row(device, queue, grid, row, &shaping, &mut pending);
+            for row in exposed.clone() {
+                glyph_rows[row].clear();
+                self.rasterize_row(device, queue, grid, row, &shaping, &mut glyph_rows[row]);
             }
+        }
+        for row in &glyph_rows {
+            pending.extend_from_slice(row);
         }
 
         // The runs packed before the rows above, so either pass may have grown
@@ -1358,7 +1425,10 @@ impl TextPass {
         // Record the atlas state these instances resolved against, so a later
         // shift-only frame can tell whether their UVs still hold.
         let epoch = self.atlas.content_epoch();
-        self.composite_slots.entry(pool, || new_slot(device)).epoch = epoch;
+        let target = self.composite_slots.entry(pool, || new_slot(device));
+        target.epoch = epoch;
+        target.glyph_rows = glyph_rows;
+        target.underline_rows = underline_rows;
     }
 
     /// Build the glyph instances for `pending` into `out`, clearing it first so a
@@ -2711,6 +2781,24 @@ fn instance_bytes<T>(capacity: usize) -> u64 {
     (capacity * size_of::<T>()) as u64
 }
 
+/// Rows a composite has to shape for itself after sliding its caches by `by`.
+///
+/// A slide keeps the rows it moved and empties the ones it carried past the end,
+/// and those emptied rows are what is left to shape. `None` keeps nothing, and a
+/// slide of at least the row count carries everything past the end, so both
+/// leave every row to shape.
+fn exposed_rows(by: Option<isize>, rows: usize) -> Range<usize> {
+    let Some(by) = by else {
+        return 0..rows;
+    };
+    let vacated = by.unsigned_abs().min(rows);
+    if by > 0 {
+        rows - vacated..rows
+    } else {
+        0..vacated
+    }
+}
+
 /// Empty buffers for a pool being composited for the first time.
 fn new_slot(device: &Device) -> TextCompositeSlot {
     TextCompositeSlot {
@@ -2719,6 +2807,8 @@ fn new_slot(device: &Device) -> TextCompositeSlot {
         text_runs: alloc_slot::<TextInstance>(device, "composite text run instances"),
         rects: alloc_slot::<RectInstance>(device, "composite text run rect instances"),
         epoch: 0,
+        glyph_rows: Vec::new(),
+        underline_rows: Vec::new(),
     }
 }
 
@@ -3269,11 +3359,11 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_underline_row, cell_glyph_scale, cell_rect_scissor, cursor_cell, fill_cell_box, font,
-        glyph_origin, grid_build, is_cell_fill, overlay_content_cells, region_split, row_len,
-        text_run_origin, underline_rows_to_build, visible_lines, GlyphSource, GridBuild,
-        OverlayContent, PendingGlyph, RectInstance, RowShaping, TextInstance, TextPass,
-        UnderlineInstance, STYLE_DOTTED,
+        build_underline_row, cell_glyph_scale, cell_rect_scissor, cursor_cell, exposed_rows,
+        fill_cell_box, font, glyph_origin, grid_build, is_cell_fill, overlay_content_cells,
+        region_split, row_len, text_run_origin, underline_rows_to_build, visible_lines,
+        GlyphSource, GridBuild, OverlayContent, PendingGlyph, RectInstance, RowShaping,
+        TextInstance, TextPass, UnderlineInstance, STYLE_DOTTED,
     };
     use crate::{
         atlas::{AtlasKind, GlyphInfo},
@@ -3856,7 +3946,18 @@ mod tests {
         grid.set_text_runs(vec![ascii_burst_run()]);
 
         let (initial, _) = pass.atlas.texture_dims();
-        pass.prepare_composite(&device, &queue, &grid, &[], [640.0, 480.0], 0.0, true, 0, 0);
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &grid,
+            &[],
+            [640.0, 480.0],
+            0.0,
+            true,
+            None,
+            0,
+            0,
+        );
         let (grown, _) = pass.atlas.texture_dims();
         assert!(
             grown > initial,
@@ -3875,6 +3976,7 @@ mod tests {
             [640.0, 480.0],
             0.0,
             false,
+            None,
             0,
             0,
         );
@@ -3912,7 +4014,18 @@ mod tests {
         }]);
 
         let (initial, _) = pass.atlas.texture_dims();
-        pass.prepare_composite(&device, &queue, &grid, &[], [640.0, 480.0], 0.0, true, 0, 0);
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &grid,
+            &[],
+            [640.0, 480.0],
+            0.0,
+            true,
+            None,
+            0,
+            0,
+        );
         let (grown, _) = pass.atlas.texture_dims();
         assert!(
             grown > initial,
@@ -4534,6 +4647,132 @@ mod tests {
                 (got.row, got.col),
                 (want.row, want.col),
                 "every glyph lands on the cell a rebuild would put it on",
+            );
+        }
+    }
+
+    /// Which rows a slide leaves for the composite to shape.
+    ///
+    /// The sibling comparison against a from-scratch build needs a device, so on
+    /// a machine without one it returns before asserting anything. This is the
+    /// same arithmetic with the device taken out of it, and it is where the
+    /// off-by-one lives. Naming one row too few leaves a stale row on screen,
+    /// and one too many gives back the saving.
+    #[test]
+    fn a_slide_leaves_the_rows_it_carried_past_the_end() {
+        assert_eq!(
+            exposed_rows(Some(1), 5),
+            4..5,
+            "one row down exposes the last"
+        );
+        assert_eq!(exposed_rows(Some(3), 5), 2..5, "three down exposes three");
+        assert_eq!(
+            exposed_rows(Some(-1), 5),
+            0..1,
+            "one row up exposes the first"
+        );
+        assert_eq!(exposed_rows(Some(-3), 5), 0..3, "three up exposes three");
+
+        assert_eq!(
+            exposed_rows(Some(5), 5),
+            0..5,
+            "a slide of the whole height keeps nothing",
+        );
+        assert_eq!(
+            exposed_rows(Some(9), 5),
+            0..5,
+            "and neither does a longer one",
+        );
+        assert_eq!(exposed_rows(Some(-9), 5), 0..5, "in either direction",);
+
+        assert_eq!(exposed_rows(None, 5), 0..5, "no slide shapes every row");
+        assert_eq!(exposed_rows(None, 0), 0..0, "an empty grid shapes nothing");
+        assert_eq!(exposed_rows(Some(1), 0), 0..0, "nor does sliding one");
+    }
+
+    /// A pool composited after a scroll holds what one built from scratch holds.
+    ///
+    /// The scrolled frame slides its per-row caches and shapes only the rows the
+    /// scroll exposed, so every other row keeps glyphs shaped against the frame
+    /// before and the row each was shaped for is repaired rather than recomputed.
+    /// A repair that is off by any amount lands those glyphs on the wrong cells,
+    /// which the comparison against a rebuild catches.
+    #[test]
+    fn a_scrolled_composite_matches_one_built_from_scratch() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+        let resolution = [640.0, 480.0];
+        let rows = 5;
+        let lines = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+
+        fn fill(grid: &mut Grid, rows: usize, lines: &[&str], from: usize) {
+            for row in 0..rows {
+                fill_row(grid, row, lines[from + row]);
+            }
+        }
+
+        let mut grid = Grid::new(rows, 20);
+        fill(&mut grid, rows, &lines, 0);
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &grid,
+            &[],
+            resolution,
+            0.0,
+            true,
+            None,
+            0,
+            0,
+        );
+
+        // The content slid up by one, so only the last row is new.
+        let mut scrolled = Grid::new(rows, 20);
+        fill(&mut scrolled, rows, &lines, 1);
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &scrolled,
+            &[],
+            resolution,
+            0.0,
+            true,
+            Some(1),
+            0,
+            0,
+        );
+        let carried = pass.composite_pending_scratch.clone();
+
+        // The same rows reached without a scroll, every one of them shaped here.
+        let Some((device, queue, mut fresh_pass)) = headless_text_pass() else {
+            return;
+        };
+        fresh_pass.prepare_composite(
+            &device,
+            &queue,
+            &scrolled,
+            &[],
+            resolution,
+            0.0,
+            true,
+            None,
+            0,
+            0,
+        );
+        let fresh = fresh_pass.composite_pending_scratch.clone();
+
+        assert!(!fresh.is_empty(), "the fixture has to shape something");
+        assert_eq!(
+            carried.len(),
+            fresh.len(),
+            "a scrolled composite holds as many glyphs as a rebuilt one",
+        );
+        for (got, want) in carried.iter().zip(&fresh) {
+            assert_eq!(
+                (got.row, got.col),
+                (want.row, want.col),
+                "every carried glyph lands on the cell a rebuild would put it on",
             );
         }
     }

@@ -659,6 +659,9 @@ impl Renderer {
             panels,
             shift_rows,
             content_changed,
+            // A single draw with no frame before it to carry rows from, so the
+            // composite shapes every row.
+            None,
             occludable,
             pool,
             slot,
@@ -703,6 +706,7 @@ impl Renderer {
         panels: &[Panel],
         shift_rows: f32,
         content_changed: bool,
+        scrolled_rows: Option<isize>,
         occludable: bool,
         pool: u32,
         slot: usize,
@@ -734,6 +738,7 @@ impl Renderer {
             resolution,
             shift_rows,
             content_changed,
+            scrolled_rows,
             pool,
             slot,
         );
@@ -974,6 +979,14 @@ pub struct PoolComposite<'a> {
     /// it built last frame and only re-apply the shift, rather than reshape and
     /// re-upload identical rows.
     pub content_changed: bool,
+    /// Rows the composed content moved by since the previous frame, when moving
+    /// is all it did.
+    ///
+    /// Lets the text composite slide its per-row shaping caches and re-shape
+    /// only the rows the move exposed, which during an eased scroll is one to
+    /// three of them. `None` when nothing carries over, so the composite rebuilds
+    /// every row as it always has.
+    pub scrolled_rows: Option<isize>,
     /// Whether this pool sits under the modal boxes, so its composite is
     /// occluded by them. True for an editor-pane pool, which glides beneath any
     /// box. False for a pool that is itself a box's content, such as a finder or
@@ -1519,6 +1532,7 @@ impl GpuContext {
                 panels,
                 pool.shift_rows,
                 pool.content_changed,
+                pool.scrolled_rows,
                 pool.occludable,
                 pool.id,
                 slot,
@@ -1727,6 +1741,7 @@ mod tests {
                 scissor: [0, band, width, band],
                 shift_rows: 0.0,
                 content_changed: true,
+                scrolled_rows: None,
                 occludable: true,
             },
             PoolComposite {
@@ -1735,6 +1750,7 @@ mod tests {
                 scissor: [0, band * 2, width, band],
                 shift_rows: 0.0,
                 content_changed: true,
+                scrolled_rows: None,
                 occludable: true,
             },
         ];
@@ -1748,6 +1764,7 @@ mod tests {
                 &[],
                 pool.shift_rows,
                 pool.content_changed,
+                pool.scrolled_rows,
                 pool.occludable,
                 pool.id,
                 slot,

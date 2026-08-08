@@ -690,6 +690,17 @@ struct ActivePool {
     /// the pool grid and the composite's instance rebuild are both skipped and
     /// only the shift is re-applied.
     content_changed: bool,
+    /// Rows the composed content moved by, when moving is all it did.
+    ///
+    /// An eased scroll walks the top a row or three at a time for many frames,
+    /// and every row it keeps was already shaped for the frame before, so the
+    /// composite can slide its per-row caches by this and re-shape only what the
+    /// move exposed.
+    ///
+    /// `None` when nothing can be carried. The first frame of a glide, a content
+    /// version bump, and a resize each leave the previous rows describing
+    /// something else.
+    scrolled_rows: Option<isize>,
 }
 
 /// The outcome of stepping one pool's glide for a frame.
@@ -768,6 +779,18 @@ fn advance_pool_glide(
         || anim.last_version != version
         || anim.last_region_dims != Some(region_dims);
 
+    // Read before the fields below are advanced, since this is the distance
+    // between where the rows were and where they are going. A version bump or a
+    // resize means the rows describe something else, so nothing carries.
+    let scrolled_rows = match anim.last_top {
+        Some(last)
+            if anim.last_version == version && anim.last_region_dims == Some(region_dims) =>
+        {
+            isize::try_from(top - last).ok()
+        },
+        _ => None,
+    };
+
     // A resize reshapes document_grid, so a held composite from the old
     // dimensions no longer fits the region.
     if anim.last_region_dims != Some(region_dims) {
@@ -794,6 +817,7 @@ fn advance_pool_glide(
             region: pool.region,
             frac,
             content_changed,
+            scrolled_rows,
         })
     } else if let Some(held) = anim.held_frac {
         // The window is not buffered this frame. Re-push the last good composite
@@ -804,6 +828,7 @@ fn advance_pool_glide(
             region: pool.region,
             frac: held,
             content_changed: false,
+            scrolled_rows: None,
         })
     } else {
         PoolStep::Degraded
@@ -1747,6 +1772,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                 scissor: [x0, y0, x1 - x0, y1 - y0],
                                 shift_rows: -pool.frac,
                                 content_changed: pool.content_changed,
+                                scrolled_rows: pool.scrolled_rows,
                                 occludable: pool.id < NON_PANE_POOL_BASE,
                             }
                         })
@@ -2899,6 +2925,7 @@ fn redraw_aux(
             scissor: region_scissor(pool.region, cw, ch),
             shift_rows: -pool.frac,
             content_changed: pool.content_changed,
+            scrolled_rows: pool.scrolled_rows,
             occludable: pool.id < NON_PANE_POOL_BASE,
         })
         .collect::<Vec<_>>();
