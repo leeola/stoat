@@ -4259,6 +4259,74 @@ mod chunk_density_tests {
     }
 }
 
+/// Whether a rope still holds the text its edits describe.
+///
+/// The chunk-density tests above drive random edits but read only the shape of
+/// the tree afterwards, so a rope could return the wrong text under some edit
+/// sequence and every one of them would still pass. These compare against a
+/// reference the edits are applied to in parallel.
+///
+/// The summary is checked beside the content because callers treat an unequal
+/// summary as proof of unequal text without reading either, so a summary that
+/// drifts from the text it describes is as wrong as the text being wrong.
+#[cfg(test)]
+mod edit_oracle_tests {
+    use super::*;
+
+    /// Multi-byte throughout, since the summary counts UTF-16 lengths,
+    /// characters and per-row characters that ASCII alone would never separate.
+    /// The last entry is empty, which makes a replace a pure deletion.
+    const ALPHABET: [&str; 8] = [
+        "a",
+        "z\n",
+        "\n",
+        "e\u{301}",
+        "\u{4e16}\u{754c}",
+        "\u{1d11e}",
+        "\u{1f389}",
+        "",
+    ];
+
+    #[test]
+    fn random_replaces_keep_the_text_and_summary_the_edits_describe() {
+        let mut seed = 0x5dee_ce66_d123_4567_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        let base = "abc\n\u{4e16}\u{754c}\u{e9}\n\u{1d11e}xy\nhello\n".repeat(12);
+        let mut rope = Rope::from(base.as_str());
+        let mut reference = base;
+
+        for step in 0..300 {
+            let len = rope.len();
+
+            // Clipping in the rope is enough for both, since the reference
+            // holds the same bytes, and `replace` needs character boundaries.
+            let at = rope.clip_offset((next() as usize) % (len + 1), Bias::Left);
+            let end = rope.clip_offset((at + (next() as usize) % 12).min(len), Bias::Right);
+            let insert = ALPHABET[(next() as usize) % ALPHABET.len()];
+
+            rope.replace(at..end, insert);
+            reference.replace_range(at..end, insert);
+
+            assert_eq!(
+                rope.to_string(),
+                reference,
+                "step {step}: replacing {at}..{end} with {insert:?}",
+            );
+            assert_eq!(
+                rope.summary(),
+                &TextSummary::from_str(&reference),
+                "step {step}: summary after replacing {at}..{end} with {insert:?}",
+            );
+        }
+    }
+}
+
 /// Whether a rope's summary depends on how its text got chunked.
 ///
 /// A caller that treats unequal summaries as proof of unequal text is only
