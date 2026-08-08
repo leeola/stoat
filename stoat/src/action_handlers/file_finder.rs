@@ -1,9 +1,9 @@
 use crate::{
     app::{Stoat, UpdateEffect},
-    file_finder::{Browse, FileFinder, FinderScope, OpenIntent},
+    file_finder::{Browse, FileFinder, FinderPathCache, FinderScope, OpenIntent},
     picker::{PathPicker, Scan},
 };
-use std::{collections::HashSet, ops::ControlFlow, path::PathBuf};
+use std::{collections::HashSet, mem, ops::ControlFlow, path::PathBuf};
 use stoat_action::{OpenFile, SplitNewDown, SplitNewRight};
 use stoat_scheduler::Task;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -176,9 +176,23 @@ pub(super) fn open_file_finder(
     // over the collected roots and installs those roots as the display resolver.
     let all_workspaces_roots =
         (initial_scope == FinderScope::AllWorkspaces).then(|| collect_workspace_roots(stoat));
-    let (walk_rx, walk_task) = match &all_workspaces_roots {
-        Some(roots) => spawn_multi_workspace_walk(stoat, roots.clone()),
-        None => spawn_workspace_walk(stoat, git_root.clone()),
+
+    // A cache built under this root and still current stands in for the walk
+    // entirely. Taking it hands the paths over without a copy, and close puts
+    // them back. Anything else walks the tree as before.
+    let seed_paths = match &all_workspaces_roots {
+        Some(_) => Vec::new(),
+        None => stoat
+            .finder_path_cache
+            .take_if(|cache| cache.root == git_root && cache.epoch == stoat.finder_path_epoch)
+            .map(|cache| cache.paths)
+            .unwrap_or_default(),
+    };
+    let walk_epoch = stoat.finder_path_epoch;
+    let walk = match &all_workspaces_roots {
+        Some(roots) => Some(spawn_multi_workspace_walk(stoat, roots.clone())),
+        None if seed_paths.is_empty() => Some(spawn_workspace_walk(stoat, git_root.clone())),
+        None => None,
     };
 
     let modified = spawn_modified_query(stoat, git_root.clone());
@@ -192,8 +206,9 @@ pub(super) fn open_file_finder(
         open_intent,
         initial_scope,
         git_root,
-        walk_rx,
-        walk_task,
+        walk,
+        seed_paths,
+        walk_epoch,
         modified,
         buffer_paths,
         &finder_scopes,
@@ -543,7 +558,7 @@ fn dispatch_open_file(stoat: &mut Stoat, path: PathBuf) -> UpdateEffect {
 /// reopens there. [`FinderScope::Buffers`] has no persisted name, so closing
 /// in it leaves the prior remembered scope intact.
 pub(crate) fn close_file_finder(stoat: &mut Stoat) {
-    let Some(finder) = stoat.file_finder.take() else {
+    let Some(mut finder) = stoat.file_finder.take() else {
         return;
     };
 
@@ -552,4 +567,15 @@ pub(crate) fn close_file_finder(stoat: &mut Stoat) {
         stoat.workspaces[active_idx].last_finder_scope = Some(name);
     }
     finder.dispose(&mut stoat.workspaces[active_idx]);
+
+    // A cross-workspace list spans several roots, so it cannot be filed under
+    // the one this finder was rooted at. `display_roots` is set exactly while
+    // that walk is the source.
+    if finder.core.picklist.display_roots.is_none() {
+        stoat.finder_path_cache = Some(FinderPathCache {
+            root: mem::take(&mut finder.core.git_root),
+            paths: mem::take(&mut finder.core.all_paths),
+            epoch: finder.walk_epoch,
+        });
+    }
 }

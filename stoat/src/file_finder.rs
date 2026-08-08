@@ -120,6 +120,21 @@ pub(crate) struct Browse {
     pub(crate) picker: PathPicker,
 }
 
+/// A closed finder's collected workspace file list, held for the next open.
+///
+/// Lives on `Stoat` rather than in the finder, since its whole point is to
+/// outlive one. See [`crate::app::Stoat::finder_path_cache`] for why it is
+/// moved rather than shared.
+pub(crate) struct FinderPathCache {
+    /// The single root the paths were walked under. A finder opening on a
+    /// different workspace walks its own tree rather than reading these.
+    pub(crate) root: PathBuf,
+    pub(crate) paths: Vec<PathBuf>,
+    /// The [`crate::app::Stoat::finder_path_epoch`] the walk that produced
+    /// `paths` began under, which is what the next open compares against.
+    pub(crate) epoch: u64,
+}
+
 pub struct FileFinder {
     pub(crate) input: InputView,
     /// What submit should do with the selected file.
@@ -149,6 +164,15 @@ pub struct FileFinder {
     /// Absolute paths of currently-open buffers. Captured once at open time;
     /// not re-queried on scope toggle.
     pub(crate) buffer_paths: Vec<PathBuf>,
+    /// The [`crate::app::Stoat::finder_path_epoch`] this finder's walk started
+    /// under, carried into [`FinderPathCache`] on close.
+    ///
+    /// Stamped at walk start rather than at close because a removal arriving
+    /// mid-session bumps that counter after the walk had already collected the
+    /// path it removed. Comparing the start stamp is what keeps that list out of
+    /// the cache. A re-root keeps the older stamp, which can only under-report
+    /// freshness and so is safe to leave alone.
+    pub(crate) walk_epoch: u64,
     /// The shared walk / fuzzy-list / preview core. Its `all_paths` is the
     /// [`FinderScope::All`] base; Modified/Buffers feed their own vecs through
     /// [`PathPicker::refilter_with_base`]. A scope toggle
@@ -228,8 +252,9 @@ impl FileFinder {
         open_intent: OpenIntent,
         initial_scope: FinderScope,
         git_root: PathBuf,
-        walk_rx: UnboundedReceiver<Vec<PathBuf>>,
-        walk_task: Task<()>,
+        walk: Option<(UnboundedReceiver<Vec<PathBuf>>, Task<()>)>,
+        seed_paths: Vec<PathBuf>,
+        walk_epoch: u64,
         modified: (UnboundedReceiver<Vec<PathBuf>>, Task<()>),
         buffer_paths: Vec<PathBuf>,
         finder_scopes: &BTreeMap<String, Vec<String>>,
@@ -242,7 +267,8 @@ impl FileFinder {
             "insert",
             1,
         );
-        let core = PathPicker::new(ws, executor, git_root, Some((walk_rx, walk_task)));
+        let mut core = PathPicker::new(ws, executor, git_root, walk);
+        core.all_paths = seed_paths;
 
         let mut finder = Self {
             input,
@@ -251,6 +277,7 @@ impl FileFinder {
             modified_paths: Vec::new(),
             modified: Some(modified),
             buffer_paths,
+            walk_epoch,
             base_generation: crate::picker::next_generation(),
             core,
             browse: None,
@@ -1260,6 +1287,85 @@ mod tests {
     }
 
     /// Repo-relative paths in the finder's candidate base, sorted.
+    /// Directory listings the fake filesystem has served, which is what a
+    /// workspace walk spends itself on. An open that reuses the cached paths
+    /// adds none.
+    fn walked_dirs(h: &TestHarness) -> usize {
+        h.fake_fs()
+            .ops()
+            .iter()
+            .filter(|op| matches!(op, crate::host::FakeFsOp::ListDir { .. }))
+            .count()
+    }
+
+    /// Reopening over an unchanged tree must not re-walk it. On a large repo
+    /// that walk is seconds of visibly repopulating rows, matched against a
+    /// base that is still filling in.
+    #[test]
+    fn reopening_the_finder_reuses_the_paths_the_first_walk_found() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("a.rs", ""), ("b.rs", ""), ("src/c.rs", "")]);
+
+        h.type_keys("space p");
+        h.type_keys("escape");
+        let walked = walked_dirs(&h);
+
+        h.type_keys("space p");
+
+        assert_eq!(walked_dirs(&h), walked, "the reopen listed no directories");
+        assert_eq!(
+            base_paths(&h),
+            ["a.rs", "b.rs", "src/c.rs"],
+            "and still lists every file",
+        );
+    }
+
+    /// A removal changes which files a walk would find, so the list captured
+    /// before it is no longer an answer.
+    #[test]
+    fn a_removed_file_makes_the_next_open_walk_again() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("a.rs", ""), ("b.rs", "")]);
+
+        h.type_keys("space p");
+        h.type_keys("escape");
+        let walked = walked_dirs(&h);
+
+        h.fake_fs_watcher()
+            .inject(root.join("b.rs"), crate::host::FsEventKind::Removed);
+        h.stoat.drain_fs_watch_events();
+        h.type_keys("space p");
+
+        assert!(
+            walked_dirs(&h) > walked,
+            "the removal forced a fresh walk instead of reusing the stale list",
+        );
+    }
+
+    /// The cross-workspace walk collects paths from every known root, so filing
+    /// them under the one workspace this finder was rooted at would hand the
+    /// next open another workspace's files.
+    #[test]
+    fn a_cross_workspace_close_caches_nothing() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("a.rs", ""), ("b.rs", "")]);
+
+        h.type_keys("space p");
+        h.type_keys("backtab");
+        h.type_keys("backtab");
+        assert_eq!(
+            h.stoat.file_finder.as_ref().expect("finder open").scope(),
+            &FinderScope::AllWorkspaces,
+            "with no named scopes, two backtabs land on AllWorkspaces",
+        );
+        h.type_keys("escape");
+
+        assert!(
+            h.stoat.finder_path_cache.is_none(),
+            "a multi-root list is not this root's list",
+        );
+    }
+
     fn base_paths(h: &TestHarness) -> Vec<String> {
         let finder = h.stoat.file_finder.as_ref().expect("finder open");
         let mut base: Vec<String> = finder

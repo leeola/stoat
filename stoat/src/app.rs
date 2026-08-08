@@ -15,11 +15,11 @@ use crate::{
         DisplayPoint, DisplaySnapshot,
     },
     editor_state::{EditorId, ScrollGlide},
-    file_finder::FileFinder,
+    file_finder::{FileFinder, FinderPathCache},
     help::Help,
     host::{
-        EnvHost, FsHost, FsWatchHost, GitHost, GitRepo, LanguageServerFeature, LocalEnv, LocalFs,
-        LocalGit, LspHost, NoopFsWatcher,
+        EnvHost, FsEventKind, FsHost, FsWatchHost, GitHost, GitRepo, LanguageServerFeature,
+        LocalEnv, LocalFs, LocalGit, LspHost, NoopFsWatcher,
     },
     input_view::InputView,
     keymap::{Keymap, ResolvedAction, StateValue},
@@ -603,6 +603,22 @@ pub struct Stoat {
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) help: Option<Help>,
     pub(crate) file_finder: Option<FileFinder>,
+    /// The workspace file list the last finder close left behind, so reopening
+    /// does not re-walk a tree that has not changed.
+    ///
+    /// A full ignore-aware walk is seconds of visibly repopulating rows on a
+    /// large repo, and the overwhelmingly common case is a finder reopened over
+    /// an unchanged tree. Open moves the list out and close moves it back, so
+    /// the seed costs nothing to hand over. `None` whenever no finder has closed
+    /// yet, or the list was seeded into one that is open right now.
+    pub(crate) finder_path_cache: Option<FinderPathCache>,
+    /// Counts the changes that would make a cached workspace file list wrong.
+    ///
+    /// Bumped by [`Self::drain_fs_watch_events`] for anything that moves the set
+    /// of paths a walk would yield, meaning a create, a delete, a rename, or a
+    /// `.gitignore` write under the root. Plain content edits leave it alone,
+    /// since they change what a file holds and not whether it is listed.
+    pub(crate) finder_path_epoch: u64,
     /// Open document-symbol finder modal, or `None`. Fed by
     /// [`action_handlers::lsp::pump_lsp_symbol_picker`] and refiltered on the
     /// render path.
@@ -1756,6 +1772,8 @@ impl Stoat {
             command_palette: None,
             help: None,
             file_finder: None,
+            finder_path_cache: None,
+            finder_path_epoch: 0,
             symbol_finder: None,
             workspace_picker: None,
             quit_all_confirm: None,
@@ -3613,7 +3631,7 @@ impl Stoat {
     /// pathological burst can't starve the event loop.
     pub(crate) fn drain_fs_watch_events(&mut self) {
         let host = self.fs_watch_host.clone();
-        let mut paths: Vec<PathBuf> = Vec::new();
+        let mut events: Vec<(PathBuf, FsEventKind)> = Vec::new();
         for _ in 0..256 {
             let Some(event) = host.try_recv() else {
                 break;
@@ -3624,10 +3642,10 @@ impl Stoat {
                 kind = ?event.kind,
                 "fs watch event observed",
             );
-            paths.push(event.path);
+            events.push((event.path, event.kind));
         }
 
-        if paths.is_empty() {
+        if events.is_empty() {
             return;
         }
         // `review.follow` gates every automatic refresh below. A manual `r`
@@ -3642,14 +3660,21 @@ impl Stoat {
         let git_root = self.active_workspace().git_root.clone();
         let git_dir = git_root.join(".git");
         let mut repo: Option<Option<Arc<dyn GitRepo>>> = None;
-        for path in paths {
+        for (path, kind) in events {
             let in_git_dir = path.starts_with(&git_dir);
+            let is_gitignore = path.file_name() == Some(OsStr::new(".gitignore"));
 
             // Invalidate before reading any verdict, so a .gitignore edit drained
             // alongside later paths in the same batch cannot leave them resolving
             // against the rules it just replaced.
-            if in_git_dir || path.file_name() == Some(OsStr::new(".gitignore")) {
+            if in_git_dir || is_gitignore {
                 self.ignored_dir_cache.clear();
+            }
+
+            // The rules deciding which files a walk yields just moved, so the
+            // cached list was built under different ones.
+            if is_gitignore {
+                self.finder_path_epoch += 1;
             }
 
             // A whole ignored directory is build churn, so none of the three arms
@@ -3658,6 +3683,20 @@ impl Stoat {
             // that a rebuild drops.
             if !in_git_dir && self.parent_dir_ignored(&path, &git_root, &mut repo) {
                 continue;
+            }
+
+            // Past the ignored-directory filter, so what is left is a real
+            // source-tree change rather than build churn. Anything that adds or
+            // removes a path makes a cached walk list wrong, and a plain content
+            // edit does not.
+            if !in_git_dir
+                && path.starts_with(&git_root)
+                && matches!(
+                    kind,
+                    FsEventKind::Created | FsEventKind::Removed | FsEventKind::Renamed
+                )
+            {
+                self.finder_path_epoch += 1;
             }
 
             if in_git_dir {
@@ -21970,10 +22009,8 @@ mod tests {
         h.stoat.set_diff_warm_auto(false);
         assert!(h.stoat.active_workspace().review.is_none());
 
-        h.fake_fs_watcher().inject(
-            Path::new("/repo/.git/HEAD"),
-            crate::host::FsEventKind::Modified,
-        );
+        h.fake_fs_watcher()
+            .inject(Path::new("/repo/.git/HEAD"), FsEventKind::Modified);
         h.stoat.drain_fs_watch_events();
         h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
 
@@ -22003,7 +22040,7 @@ mod tests {
         for name in ["one.rs", "two.rs", "three.rs"] {
             h.fake_fs_watcher().inject(
                 PathBuf::from("/repo/target/debug").join(name),
-                crate::host::FsEventKind::Modified,
+                FsEventKind::Modified,
             );
         }
         h.stoat.drain_fs_watch_events();
@@ -22017,10 +22054,8 @@ mod tests {
             "and none of it reaches the code graph"
         );
 
-        h.fake_fs_watcher().inject(
-            Path::new("/repo/src/b.rs"),
-            crate::host::FsEventKind::Modified,
-        );
+        h.fake_fs_watcher()
+            .inject(Path::new("/repo/src/b.rs"), FsEventKind::Modified);
         h.stoat.drain_fs_watch_events();
 
         assert_eq!(
@@ -22037,8 +22072,7 @@ mod tests {
         let mut h = ignored_dir_harness();
         let built = PathBuf::from("/repo/generated/one.rs");
 
-        h.fake_fs_watcher()
-            .inject(&built, crate::host::FsEventKind::Modified);
+        h.fake_fs_watcher().inject(&built, FsEventKind::Modified);
         h.stoat.drain_fs_watch_events();
         assert_eq!(
             h.stoat.index_pending_external_edits.len(),
@@ -22048,12 +22082,9 @@ mod tests {
         h.stoat.index_pending_external_edits.clear();
 
         h.fake_git().add_repo("/repo").ignored("generated");
-        h.fake_fs_watcher().inject(
-            Path::new("/repo/.gitignore"),
-            crate::host::FsEventKind::Modified,
-        );
         h.fake_fs_watcher()
-            .inject(&built, crate::host::FsEventKind::Modified);
+            .inject(Path::new("/repo/.gitignore"), FsEventKind::Modified);
+        h.fake_fs_watcher().inject(&built, FsEventKind::Modified);
         h.stoat.drain_fs_watch_events();
 
         assert!(
