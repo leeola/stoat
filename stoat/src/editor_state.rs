@@ -146,10 +146,11 @@ pub(crate) struct EditorState {
     /// Cached diagnostic gutter severity map, keyed by the diagnostic-set
     /// version. Transient render state, not persisted.
     pub(crate) gutter_severity_cache: Option<crate::render::editor::GutterSeverityCache>,
-    /// Cached gutter geometry (folded lines, digit width, diff marks, and rich
-    /// component lines), keyed by the inputs that change the drawn gutter. Lets
-    /// an unchanged repaint reuse the collections instead of rebuilding them
-    /// every frame. Transient render state, not persisted.
+    /// Cached gutter geometry (folded lines, digit width, and diff marks) and
+    /// the rich component lines built from it, each keyed by the inputs it
+    /// reads. Lets an unchanged repaint reuse the collections instead of
+    /// rebuilding them every frame, and a cursor move rebuild only the lines.
+    /// Transient render state, not persisted.
     pub(crate) gutter_geometry_cache: Option<crate::render::editor::GutterGeometryCache>,
     /// Diagnostic spans resolved to byte offsets, keyed by the diagnostic-set
     /// and buffer versions, so the per-frame render paths reuse one resolution.

@@ -766,19 +766,30 @@ pub(crate) struct GutterSeverityCache {
     pub(crate) map: Arc<BTreeMap<u32, DiagnosticSeverity>>,
 }
 
-/// Cached gutter geometry for one set of drawn-gutter inputs.
+/// Cached gutter geometry for one set of drawn-gutter inputs, in two layers.
 ///
-/// Holds the folded gutter lines, digit width, per-row diff marks, and the rich
-/// component lines, rebuilt only when [`Self::key`] changes. The key hashes
-/// every input that changes the drawn gutter -- the viewport window, the buffer,
-/// fold, diff, and diagnostic-severity versions, the relative-numbering line,
-/// and the resolved colors baked into the lines -- so a repaint that changes
-/// none of them reuses the collections instead of rebuilding them each frame.
+/// The geometry layer holds the folded gutter lines, digit width, and per-row
+/// diff marks. Rebuilding it is the expensive half, costing a block-tree query
+/// per visible row and an anchor resolve over every diff hunk in the file.
+/// [`Self::geometry_key`] guards it and hashes only what those collections
+/// read, namely the viewport window and the buffer, fold, diff, and severity
+/// versions.
+///
+/// The lines layer is the rich component lines, guarded by [`Self::lines_key`]
+/// over the geometry key plus the two inputs only the lines read, the
+/// relative-numbering cursor line and the resolved colors baked into them.
+/// Keeping it separate matters because relative numbering is the default, so
+/// every vertical cursor move changes the line inputs while leaving the
+/// geometry identical, and the cheap layer rebuilds alone.
+///
+/// `lines_key` is `None` while the lines are unbuilt, which is both a fresh
+/// geometry and the whole of fallback mode, where nothing paints from them.
 pub(crate) struct GutterGeometryCache {
-    key: u64,
+    geometry_key: u64,
     folded: Vec<(u32, u16)>,
     width_digits: u16,
     marks: BTreeMap<u32, (DiffHunkStatus, bool)>,
+    lines_key: Option<u64>,
     lines: Vec<GutterLine>,
 }
 
@@ -1475,13 +1486,13 @@ pub(crate) fn rich_gutter(
     }
 }
 
-/// Hash the inputs that change the drawn line-number gutter into a cache key.
+/// Hash the inputs the cached gutter geometry is built from into a cache key.
 ///
-/// Any change here misses [`GutterGeometryCache`] and rebuilds the geometry;
-/// otherwise a repaint reuses it. `colors` is `Some` only in rich mode, where
-/// the component lines bake the diff and severity colors in, so a theme change
-/// shows up as a different key.
-#[allow(clippy::too_many_arguments)]
+/// Any change here misses [`GutterGeometryCache`]'s geometry layer and rebuilds
+/// the folded lines, digit width, and diff marks. A repaint that changes none
+/// of them reuses all three. The relative-numbering line and the resolved
+/// colors are deliberately absent, since none of the three collections reads
+/// either.
 fn gutter_geometry_key(
     scroll_row: u32,
     width: u16,
@@ -1490,8 +1501,6 @@ fn gutter_geometry_key(
     fold_version: usize,
     diff_version: usize,
     severity_version: u64,
-    current_line: Option<u32>,
-    colors: Option<([u8; 3], DiffMarkColors, &SeverityColors)>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     scroll_row.hash(&mut hasher);
@@ -1501,6 +1510,22 @@ fn gutter_geometry_key(
     fold_version.hash(&mut hasher);
     diff_version.hash(&mut hasher);
     severity_version.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Hash the inputs the rich component lines are built from into a cache key.
+///
+/// `geometry_key` is folded in because the lines are built from the geometry it
+/// guards, so a geometry rebuild has to rebuild them too. The two inputs of
+/// their own are the relative-numbering line and the colors they bake in, which
+/// is what makes a theme change and a cursor move both show up here.
+fn gutter_lines_key(
+    geometry_key: u64,
+    current_line: Option<u32>,
+    colors: ([u8; 3], DiffMarkColors, &SeverityColors),
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    geometry_key.hash(&mut hasher);
     current_line.hash(&mut hasher);
     colors.hash(&mut hasher);
     hasher.finish()
@@ -1532,7 +1557,7 @@ fn draw_line_number_gutter(
     let visible = end_row.saturating_sub(scroll_row).min(inner.height as u32);
 
     // Dimmed owned gutter colors, borrowed by the Copy `gutter_rgb` tuple and the
-    // geometry key below. The key hashes them, so a dim change refills the cache.
+    // lines key below. That key hashes them, so a dim change refills the lines.
     // The undimmed colors come from the chrome, which resolved them once for
     // the theme. Only the per-pane shading happens here.
     let diff_colors = match chrome.gutter_bg {
@@ -1548,7 +1573,7 @@ fn draw_line_number_gutter(
         .map(|rich| (&rich.colors, rich.number_fg, rich.separator, rich.bg));
     let rich = scene.zip(gutter_rgb);
 
-    let key = gutter_geometry_key(
+    let geometry_key = gutter_geometry_key(
         scroll_row,
         inner.width,
         visible,
@@ -1556,34 +1581,41 @@ fn draw_line_number_gutter(
         snapshot.version(),
         snapshot.diff_map().map_or(0, |dm| dm.version()),
         severity_version,
-        current_line,
-        gutter_rgb.map(|(colors, _, _, bg)| (bg, diff_colors, colors)),
     );
 
-    let stale = cache.as_ref().is_none_or(|c| c.key != key);
-    if stale {
+    if cache
+        .as_ref()
+        .is_none_or(|c| c.geometry_key != geometry_key)
+    {
         let (folded, width_digits) = gutter_geometry(snapshot, scroll_row, visible);
         let marks = gutter_diff_marks(snapshot, &folded);
-        let lines = match gutter_rgb {
-            Some((colors, _, _, _)) => gutter_component_lines(
-                &folded,
-                row_severity,
-                &marks,
-                &diff_colors,
-                colors,
-                current_line,
-            ),
-            None => Vec::new(),
-        };
         *cache = Some(GutterGeometryCache {
-            key,
+            geometry_key,
             folded,
             width_digits,
             marks,
-            lines,
+            lines_key: None,
+            lines: Vec::new(),
         });
     }
-    let geometry = cache.as_ref().expect("set above");
+    let geometry = cache.as_mut().expect("set above");
+
+    // Only the rich path paints from the lines, so the fallback never builds
+    // them and its cache keeps the empty vec the geometry rebuild left.
+    if let Some((colors, _, _, bg)) = gutter_rgb {
+        let lines_key = gutter_lines_key(geometry_key, current_line, (bg, diff_colors, colors));
+        if geometry.lines_key != Some(lines_key) {
+            geometry.lines = gutter_component_lines(
+                &geometry.folded,
+                row_severity,
+                &geometry.marks,
+                &diff_colors,
+                colors,
+                current_line,
+            );
+            geometry.lines_key = Some(lines_key);
+        }
+    }
 
     match rich {
         Some((scene, (_colors, number_fg, separator, bg))) => {
@@ -3646,14 +3678,15 @@ mod tests {
             .gutter_geometry_cache
             .as_ref()
             .expect("gutter cache set")
-            .key
+            .geometry_key
     }
 
     /// The focused editor's cached folded gutter lines.
     ///
     /// Clearing them is a rebuild sentinel. The next paint either reuses the
     /// cache and leaves them empty, or rebuilds the geometry and repopulates
-    /// them.
+    /// them. Their address is the same sentinel without the mutation, since a
+    /// rebuild allocates its replacement while the old vec is still cached.
     fn cached_folded(stoat: &mut Stoat) -> &mut Vec<(u32, u16)> {
         &mut action_handlers::focused_editor_mut(stoat)
             .unwrap()
@@ -3699,6 +3732,85 @@ mod tests {
         assert!(
             !cached_folded(&mut h.stoat).is_empty(),
             "an invalidated cache rebuilds the geometry"
+        );
+    }
+
+    /// Paint the focused editor's rich sub-cell gutter with relative numbering
+    /// and return the number each cached component line carries.
+    ///
+    /// A scene plus the shipped theme is what engages the rich path, where the
+    /// component lines are the artifact the relative numbers land in.
+    fn rich_gutter_numbers(stoat: &mut Stoat, rows: u16) -> Vec<u32> {
+        let theme = stoat.theme.clone();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
+        let mut scene = super::ApcScene::new();
+        let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
+        let area = Rect::new(0, 0, 12, rows);
+        let mut buf = Buffer::empty(area);
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &chrome,
+            &mut buf,
+            true,
+            false,
+            LineNumbers::Relative,
+            false,
+            None,
+            None,
+            None,
+            None,
+            Some(&mut scene),
+            None,
+            0.0,
+            WrapMode::None,
+            80,
+        );
+        editor
+            .gutter_geometry_cache
+            .as_ref()
+            .expect("gutter cache set")
+            .lines
+            .iter()
+            .map(|line| line.number)
+            .collect()
+    }
+
+    /// Relative numbering is the default, so a cursor move changes the painted
+    /// numbers on a gutter whose geometry is untouched. Rebuilding the geometry
+    /// for it would re-resolve every diff hunk in the file per keypress.
+    #[test]
+    fn a_cursor_move_renumbers_the_gutter_lines_and_reuses_its_geometry() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/gutter-relnum-cache");
+        let path = root.join("a.txt");
+        h.fake_fs()
+            .insert_file(&path, b"one\ntwo\nthree\nfour\nfive");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        assert_eq!(
+            rich_gutter_numbers(&mut h.stoat, 5),
+            [1, 1, 2, 3, 4],
+            "the cursor's line keeps its absolute number, the rest their distance",
+        );
+        let geometry = cached_folded(&mut h.stoat).as_ptr();
+
+        dispatch(&mut h.stoat, &MoveDown);
+
+        assert_eq!(
+            rich_gutter_numbers(&mut h.stoat, 5),
+            [1, 2, 1, 2, 3],
+            "the moved cursor renumbers every line",
+        );
+        assert_eq!(
+            cached_folded(&mut h.stoat).as_ptr(),
+            geometry,
+            "renumbering reuses the cached geometry instead of resolving the hunks again",
         );
     }
 
