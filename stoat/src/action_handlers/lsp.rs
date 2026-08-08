@@ -103,22 +103,24 @@ pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection)
         None => return UpdateEffect::None,
     };
 
-    // Where each diagnostic was published, carried through the edits since. The
-    // position the server named is in the coordinates of text that has moved.
+    // Where each diagnostic sits now. The position the server named is in the
+    // coordinates of text that has moved, so the anchor taken at publish is what
+    // still points at it.
     let snapshot = {
         let editor = crate::action_handlers::focused_editor_mut(stoat).expect("editor");
         editor.display_map.snapshot()
     };
     let buffer_snapshot = snapshot.buffer_snapshot();
-    let mut offsets: Vec<usize> = stoat
+    let buffer_id = buffer_snapshot.buffer_id();
+    let starts: Vec<Anchor> = stoat
         .diagnostics
         .spans(&path)
         .iter()
-        .map(|span| {
-            let patch = buffer_snapshot.edits_since(span.base_version);
-            crate::diagnostics::shift_offset(span.range.start, &patch)
-        })
+        .filter_map(|span| span.anchors)
+        .filter(|(start, _)| start.buffer_id == Some(buffer_id))
+        .map(|(start, _)| start)
         .collect();
+    let mut offsets = buffer_snapshot.resolve_anchors_batch(&starts);
     offsets.sort_unstable();
 
     let target = match direction {

@@ -10683,14 +10683,17 @@ fn drain_notifications_from(
     }
 }
 
-/// Resolve each of `published`'s ranges to a byte span in the buffer for `path`,
-/// in `encoding`, tagged with the buffer version they are measured in.
+/// Anchor each of `published`'s ranges into the buffer for `path`, converting
+/// through `encoding`.
 ///
-/// Resolved here, where the publish has just landed and the ranges still name
+/// Anchored here, where the publish has just landed and the ranges still name
 /// the text the server measured, rather than every frame against text that has
-/// moved since. A path with no open buffer resolves to empty spans at version
-/// zero, which no reader can shift but none has a buffer to shift against
-/// either.
+/// moved since. From here the fragment tree carries each mark along with the
+/// text it sits on, so a reader resolves instead of replaying edits. A path with
+/// no open buffer has nothing to anchor into and yields unresolved spans.
+///
+/// Starts take [`Bias::Right`] and ends [`Bias::Left`], so text inserted at
+/// either edge falls outside the mark rather than widening it.
 pub(crate) fn publish_spans(
     path: &Path,
     published: &[lsp_types::Diagnostic],
@@ -10702,12 +10705,21 @@ pub(crate) fn publish_spans(
     };
     let guard = buffer.read().expect("buffer lock");
     let rope = guard.rope();
-    let base_version = guard.version();
-    published
+
+    let ranges: Vec<Range<usize>> = published
         .iter()
-        .map(|diag| crate::diagnostics::PublishedSpan {
-            range: crate::lsp::util::lsp_range_to_byte_range(rope, diag.range, encoding),
-            base_version,
+        .map(|diag| crate::lsp::util::lsp_range_to_byte_range(rope, diag.range, encoding))
+        .collect();
+    let starts: Vec<usize> = ranges.iter().map(|r| r.start).collect();
+    let ends: Vec<usize> = ranges.iter().map(|r| r.end).collect();
+
+    let snapshot = &guard.snapshot;
+    snapshot
+        .anchors_at_batch(&starts, Bias::Right)
+        .into_iter()
+        .zip(snapshot.anchors_at_batch(&ends, Bias::Left))
+        .map(|pair| crate::diagnostics::PublishedSpan {
+            anchors: Some(pair),
         })
         .collect()
 }
@@ -16891,8 +16903,61 @@ mod tests {
         );
         let utf16 = publish_spans(&path, &[diag], OffsetEncoding::Utf16, buffers);
 
-        assert_eq!(utf8[0].range, 2..3, "utf-8 character 2 is the x");
-        assert_eq!(utf16[0].range, 3..4, "utf-16 character 2 is the y");
+        // A span is anchored rather than stored as offsets, so reading one back
+        // resolves it against the buffer it was taken in.
+        let buffer = buffers
+            .id_for_path(&path)
+            .and_then(|id| buffers.get(id))
+            .expect("open buffer");
+        let snapshot = buffer.read().expect("poisoned").snapshot.clone();
+        let offsets = |span: &crate::diagnostics::PublishedSpan| {
+            let (start, end) = span.anchors.expect("the buffer is open, so it anchored");
+            snapshot.resolve_anchor(&start)..snapshot.resolve_anchor(&end)
+        };
+
+        assert_eq!(offsets(&utf8[0]), 2..3, "utf-8 character 2 is the x");
+        assert_eq!(offsets(&utf16[0]), 3..4, "utf-16 character 2 is the y");
+    }
+
+    /// Typing against either edge of a marked span has to leave the mark on the
+    /// text the server named rather than stretch it over what was just typed.
+    /// The biases the publish anchors with are what decide that.
+    #[test]
+    fn publish_spans_anchor_typing_at_an_edge_outside_the_mark() {
+        use crate::host::OffsetEncoding;
+        use lsp_types::{Diagnostic, Position, Range as LspRange};
+
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.txt", b"alpha bravo\n");
+        let path = std::path::PathBuf::from("/indent/a.txt");
+
+        // `bravo` is [6, 11).
+        let diag = Diagnostic::new_simple(
+            LspRange::new(Position::new(0, 6), Position::new(0, 11)),
+            "boom".to_string(),
+        );
+        let buffers = &h.stoat.active_workspace().buffers;
+        let spans = publish_spans(&path, &[diag], OffsetEncoding::Utf16, buffers);
+        let (start, end) = spans[0]
+            .anchors
+            .expect("the buffer is open, so it anchored");
+
+        let buffer = buffers
+            .id_for_path(&path)
+            .and_then(|id| buffers.get(id))
+            .expect("open buffer");
+        {
+            let mut guard = buffer.write().expect("poisoned");
+            guard.edit(11..11, "Z");
+            guard.edit(6..6, "Y");
+        }
+        let after = buffer.read().expect("poisoned").snapshot.clone();
+
+        assert_eq!(
+            after.resolve_anchor(&start)..after.resolve_anchor(&end),
+            7..12,
+            "the mark covers `bravo` alone, the Y before it and the Z after",
+        );
     }
 
     #[test]

@@ -181,7 +181,10 @@ pub struct TextBufferSnapshot {
     insertions: SumTree<InsertionFragment>,
     undo_map: UndoMap,
     pub version: u64,
-    buffer_id: BufferId,
+    /// Which buffer's fragment tree this snapshot is, so a caller holding an
+    /// [`Anchor`] can tell whether it names a position here at all. Resolving a
+    /// foreign anchor yields an offset rather than an error.
+    pub buffer_id: BufferId,
 }
 
 impl TextBuffer {

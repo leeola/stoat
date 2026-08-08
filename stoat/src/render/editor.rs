@@ -27,7 +27,7 @@ use std::{
     sync::Arc,
 };
 use stoat_config::{LineNumbers, WrapMode};
-use stoat_text::{cursor_offset, patch::Patch, Anchor, Bias, Point, Rope};
+use stoat_text::{cursor_offset, Anchor, Bias, Point, Rope};
 use stoatty_protocol::command::IconKind;
 use stoatty_widgets::{
     bar::Bar,
@@ -873,19 +873,40 @@ pub(crate) fn resolve_diagnostic_spans(
     path: &Path,
     snapshot: &crate::multi_buffer::MultiBufferSnapshot,
 ) -> Vec<ResolvedDiag> {
-    let rope = snapshot.rope();
     let diagnostics = set.get(path);
-    let carried = shift_published_spans(set.spans(path), diagnostics.len(), |version| {
-        snapshot.edits_since(version)
-    });
+    let published = set.spans(path);
 
+    // Every endpoint in one walk of the fragment tree rather than a root descent
+    // apiece, then their lines in one walk of the rope. A diagnostic with no
+    // anchor pair contributes none, so the running slot below is what pairs the
+    // results back up with the diagnostics that asked for them.
+    let anchored: Vec<bool> = (0..diagnostics.len())
+        .map(|index| anchors_in(published.get(index), snapshot).is_some())
+        .collect();
+    let endpoints: Vec<Anchor> = (0..diagnostics.len())
+        .filter_map(|index| anchors_in(published.get(index), snapshot))
+        .flat_map(|(start, end)| [start, end])
+        .collect();
+    let offsets = snapshot.resolve_anchors_batch(&endpoints);
+    let points = snapshot.rope().offsets_to_points_batch(&offsets);
+
+    let mut slot = 0usize;
     let mut spans: Vec<ResolvedDiag> = diagnostics
         .iter()
-        .zip(carried)
         .enumerate()
-        .map(|(index, (diag, (start, end)))| {
-            let start_line = rope.offset_to_point(start.min(rope.len())).row;
-            let end_line = rope.offset_to_point(end.min(rope.len())).row;
+        .map(|(index, diag)| {
+            let (start, end, start_line, end_line) = if anchored[index] {
+                let resolved = (
+                    offsets[slot],
+                    offsets[slot + 1],
+                    points[slot].row,
+                    points[slot + 1].row,
+                );
+                slot += 2;
+                resolved
+            } else {
+                (0, 0, 0, 0)
+            };
             ResolvedDiag {
                 start,
                 end,
@@ -901,38 +922,17 @@ pub(crate) fn resolve_diagnostic_spans(
     spans
 }
 
-/// Carry each of `published`'s endpoint pairs forward to the current text,
-/// padding to `count` entries with `(0, 0)` for a diagnostic with no span.
+/// `span`'s endpoints when they anchor into the buffer `snapshot` is for.
 ///
-/// `patch_for` builds the edit patch since a base version. It runs once per run
-/// of spans sharing one, not once per span: a publish stamps all of its
-/// diagnostics with the same base version, and a path's spans arrive grouped by
-/// the server that published them, so equal versions are adjacent. Building one
-/// patch per diagnostic instead means a filtered walk of the fragment tree per
-/// diagnostic, on every keystroke, since the resolution is redone whenever the
-/// buffer moves.
-fn shift_published_spans(
-    published: &[crate::diagnostics::PublishedSpan],
-    count: usize,
-    mut patch_for: impl FnMut(u64) -> Patch<usize>,
-) -> Vec<(usize, usize)> {
-    let mut carried: Option<(u64, Patch<usize>)> = None;
-    (0..count)
-        .map(|index| {
-            let Some(span) = published.get(index) else {
-                return (0, 0);
-            };
-            let reusable = matches!(&carried, Some((version, _)) if *version == span.base_version);
-            if !reusable {
-                carried = Some((span.base_version, patch_for(span.base_version)));
-            }
-            let patch = &carried.as_ref().expect("set above").1;
-            (
-                crate::diagnostics::shift_offset(span.range.start, patch),
-                crate::diagnostics::shift_offset(span.range.end, patch),
-            )
-        })
-        .collect()
+/// A span published against a different buffer resolves to a meaningless offset
+/// rather than an error, since the fragment tree it names is not the one being
+/// asked, so the buffer has to be checked before the anchors are used.
+fn anchors_in(
+    span: Option<&crate::diagnostics::PublishedSpan>,
+    snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+) -> Option<(Anchor, Anchor)> {
+    let (start, end) = span?.anchors?;
+    (start.buffer_id == Some(snapshot.buffer_id())).then_some((start, end))
 }
 
 /// Rebuild `editor.diagnostic_span_cache` when the diagnostic set or buffer
@@ -2428,93 +2428,71 @@ mod tests {
         }
     }
 
-    /// The resolution reruns whenever the buffer moves, so a patch per
-    /// diagnostic is a filtered walk of the fragment tree per diagnostic per
-    /// keystroke. One publish stamps one base version, so one patch serves all
-    /// of its diagnostics.
+    /// Each resolved diagnostic as `(index, start, end, start_line)`.
+    fn resolved(
+        set: &crate::diagnostics::DiagnosticSet,
+        path: &std::path::Path,
+        snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+    ) -> Vec<(usize, usize, usize, u32)> {
+        super::resolve_diagnostic_spans(set, path, snapshot)
+            .iter()
+            .map(|s| (s.index, s.start, s.end, s.start_line))
+            .collect()
+    }
+
+    /// A diagnostic nothing could anchor has no position of its own, and must
+    /// not take the offsets belonging to the ones beside it.
     #[test]
-    fn spans_from_one_publish_share_a_single_edit_patch() {
-        use crate::diagnostics::PublishedSpan;
-        use stoat_text::patch::{Edit, Patch};
+    fn a_diagnostic_without_an_anchored_span_resolves_to_zero() {
+        let path = PathBuf::from("/a");
+        let snapshot = snapshot_over("alpha\nbravo\n");
+        let mut set = crate::diagnostics::DiagnosticSet::new();
+        set.replace_from_server(
+            path.clone(),
+            "lsp".into(),
+            vec![
+                span_diag(0, 5, DiagnosticSeverity::ERROR),
+                span_diag(0, 5, DiagnosticSeverity::WARNING),
+            ],
+            vec![
+                crate::diagnostics::PublishedSpan::unresolved(),
+                anchored_span(&snapshot, 6..11),
+            ],
+        );
 
-        let published: Vec<PublishedSpan> = (0..5)
-            .map(|i| PublishedSpan {
-                range: (i * 10 + 5)..(i * 10 + 9),
-                base_version: 7,
-            })
-            .collect();
-
-        let mut built = Vec::new();
-        let carried = super::shift_published_spans(&published, published.len(), |version| {
-            built.push(version);
-            Patch::new(vec![Edit {
-                old: 0..0,
-                new: 0..3,
-            }])
-        });
-
-        assert_eq!(built, vec![7], "five spans from one publish, one patch");
         assert_eq!(
-            carried,
-            vec![(8, 12), (18, 22), (28, 32), (38, 42), (48, 52)],
-            "and every span still carries forward by the inserted bytes",
+            resolved(&set, &path, &snapshot),
+            [(0, 0, 0, 0), (1, 6, 11, 1)],
+            "the unanchored one sits at zero and the anchored one keeps its span",
         );
     }
 
-    /// Spans arrive grouped by the server that published them, so a second
-    /// server's base version starts a new run rather than reusing the first's.
+    /// An anchor names a position in one buffer's fragment tree. Resolving it
+    /// against another answers with an offset rather than an error, so a span
+    /// published elsewhere has to read as unanchored instead.
     #[test]
-    fn a_second_publish_version_builds_its_own_patch() {
-        use crate::diagnostics::PublishedSpan;
-        use stoat_text::patch::{Edit, Patch};
+    fn a_span_anchored_in_another_buffer_resolves_to_zero() {
+        use crate::{buffer::TextBuffer, multi_buffer::MultiBuffer};
+        use std::sync::{Arc, RwLock};
 
-        let published = vec![
-            PublishedSpan {
-                range: 5..6,
-                base_version: 7,
-            },
-            PublishedSpan {
-                range: 15..16,
-                base_version: 7,
-            },
-            PublishedSpan {
-                range: 25..26,
-                base_version: 9,
-            },
-            PublishedSpan {
-                range: 35..36,
-                base_version: 9,
-            },
-        ];
+        let path = PathBuf::from("/a");
+        let other_id = stoat_text::BufferId::new(7);
+        let other = MultiBuffer::singleton(
+            other_id,
+            Arc::new(RwLock::new(TextBuffer::with_text(other_id, "elsewhere\n"))),
+        )
+        .snapshot();
 
-        let mut built = Vec::new();
-        let carried = super::shift_published_spans(&published, published.len(), |version| {
-            built.push(version);
-            Patch::new(vec![Edit {
-                old: 0..0,
-                new: 0..1,
-            }])
-        });
+        let snapshot = snapshot_over("alpha\nbravo\n");
+        let mut set = crate::diagnostics::DiagnosticSet::new();
+        set.replace_from_server(
+            path.clone(),
+            "lsp".into(),
+            vec![span_diag(0, 5, DiagnosticSeverity::ERROR)],
+            vec![anchored_span(&other, 2..6)],
+        );
 
-        assert_eq!(built, vec![7, 9], "one patch per version, not per span");
-        assert_eq!(carried, vec![(6, 7), (16, 17), (26, 27), (36, 37)]);
-    }
-
-    /// A diagnostic with no published span carries no position, and pads rather
-    /// than shifting the ones after it out of step.
-    #[test]
-    fn a_diagnostic_without_a_span_resolves_to_zero() {
-        use crate::diagnostics::PublishedSpan;
-        use stoat_text::patch::Patch;
-
-        let published = vec![PublishedSpan {
-            range: 4..8,
-            base_version: 1,
-        }];
-
-        let carried = super::shift_published_spans(&published, 3, |_| Patch::new(Vec::<_>::new()));
-
-        assert_eq!(carried, vec![(4, 8), (0, 0), (0, 0)]);
+        assert_eq!(resolved(&set, &path, &snapshot), [(0, 0, 0, 0)]);
     }
 
     /// The severity map is keyed by buffer row and derived from spans shifted
@@ -4210,12 +4188,17 @@ mod tests {
         MultiBuffer::singleton(id, Arc::new(RwLock::new(buffer))).snapshot()
     }
 
-    /// A span at `range` that no edit history moves, for tests stating where a
-    /// diagnostic sits rather than how it got there.
-    fn fixed_span(range: std::ops::Range<usize>) -> crate::diagnostics::PublishedSpan {
+    /// A span anchored over `range` in `snapshot`, the way a publish against
+    /// that text would have anchored it.
+    fn anchored_span(
+        snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+        range: std::ops::Range<usize>,
+    ) -> crate::diagnostics::PublishedSpan {
         crate::diagnostics::PublishedSpan {
-            range,
-            base_version: u64::MAX,
+            anchors: Some((
+                snapshot.anchors_at_batch(&[range.start], Bias::Right)[0],
+                snapshot.anchors_at_batch(&[range.end], Bias::Left)[0],
+            )),
         }
     }
 
@@ -4232,7 +4215,10 @@ mod tests {
                 span_diag(4, 5, DiagnosticSeverity::WARNING),
                 span_diag(4, 9, DiagnosticSeverity::ERROR),
             ],
-            vec![fixed_span(4..5), fixed_span(4..9)],
+            vec![
+                anchored_span(&snapshot, 4..5),
+                anchored_span(&snapshot, 4..9),
+            ],
         );
 
         let spans = super::resolve_diagnostic_spans(&set, &path, &snapshot);
@@ -4306,37 +4292,42 @@ mod tests {
         assert!(cache.spans[cache.overlapping(5..5)].is_empty());
     }
 
+    /// Anchoring at publish is what makes a mark follow its text. The offsets a
+    /// server named are in the coordinates of text every later edit moves, so a
+    /// resolution reading them back would drift off what it marked.
     #[test]
     fn an_edit_above_a_diagnostic_carries_it_down() {
+        use crate::{buffer::TextBuffer, multi_buffer::MultiBuffer};
+        use std::sync::{Arc, RwLock};
+
         let path = PathBuf::from("/a");
-        let snapshot = snapshot_over("let x = 1;\n");
-        let base_version = snapshot.version();
+        let id = stoat_text::BufferId::new(0);
+        let buffer = Arc::new(RwLock::new(TextBuffer::with_text(id, "alpha\nbravo\n")));
+        let multi = MultiBuffer::singleton(id, buffer.clone());
+
+        // `bravo` is [6, 11), on the second line.
+        let published = multi.snapshot();
         let mut set = crate::diagnostics::DiagnosticSet::new();
         set.replace_from_server(
             path.clone(),
             "lsp".into(),
-            vec![span_diag(4, 5, DiagnosticSeverity::ERROR)],
-            vec![crate::diagnostics::PublishedSpan {
-                range: 4..5,
-                base_version,
-            }],
+            vec![span_diag(0, 5, DiagnosticSeverity::ERROR)],
+            vec![anchored_span(&published, 6..11)],
         );
 
-        // Two characters inserted ahead of it, with no republish behind them.
-        let edited = {
-            use crate::{buffer::TextBuffer, multi_buffer::MultiBuffer};
-            use std::sync::{Arc, RwLock};
-            let id = stoat_text::BufferId::new(0);
-            let mut buffer = TextBuffer::with_text(id, "let x = 1;\n");
-            buffer.edit(0..0, "xy");
-            MultiBuffer::singleton(id, Arc::new(RwLock::new(buffer))).snapshot()
-        };
-
-        let spans = super::resolve_diagnostic_spans(&set, &path, &edited);
         assert_eq!(
-            (spans[0].start, spans[0].end),
-            (6, 7),
-            "the mark stayed where the old coordinates pointed",
+            resolved(&set, &path, &published),
+            [(0, 6, 11, 1)],
+            "over the word it was published on",
+        );
+
+        // Nine bytes and a line inserted ahead of it, with no republish behind.
+        buffer.write().expect("poisoned").edit(0..0, "inserted\n");
+
+        assert_eq!(
+            resolved(&set, &path, &multi.snapshot()),
+            [(0, 15, 20, 2)],
+            "and still over that word, a line further down",
         );
     }
 

@@ -9,26 +9,26 @@
 use lsp_types::{Diagnostic, DiagnosticSeverity};
 use std::{
     collections::{BTreeMap, HashMap},
-    ops::Range,
     path::{Path, PathBuf},
 };
+use stoat_text::Anchor;
 
 /// Where a diagnostic sat in the buffer when its publish landed.
 ///
 /// A server measures a diagnostic against a document version and names it by
 /// line and column. Converting that against the current text puts the mark
 /// wherever those coordinates now point, which after an edit above it is the
-/// wrong place. Resolving once, when the publish arrives and the coordinates
-/// still mean what the server meant, gives a span that later edits can be
-/// carried through instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// wrong place. Anchoring once, when the publish arrives and the coordinates
+/// still mean what the server meant, hands the job of following the text to the
+/// fragment tree, so a reader resolves rather than replaying every edit since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PublishedSpan {
-    pub range: Range<usize>,
-    /// The buffer version [`Self::range`] is in the coordinates of.
+    /// The diagnostic's start and end in the buffer it was published against.
     ///
-    /// [`u64::MAX`] means the span was never resolved against a buffer, so
-    /// there is no history to carry it through and a reader leaves it alone.
-    pub base_version: u64,
+    /// `None` when nothing could anchor it, which is a path with no open buffer
+    /// to measure against. A reader has no position for it and leaves it at the
+    /// buffer start.
+    pub anchors: Option<(Anchor, Anchor)>,
 }
 
 /// One server's published diagnostics for a path, with each one's span.
@@ -118,13 +118,10 @@ impl DiagnosticSummary {
 }
 
 impl PublishedSpan {
-    /// A span for a diagnostic nothing could resolve, because the path has no
-    /// open buffer to measure against. Carried through no edits.
+    /// A span for a diagnostic nothing could anchor, because the path has no
+    /// open buffer to measure against.
     pub fn unresolved() -> Self {
-        Self {
-            range: 0..0,
-            base_version: u64::MAX,
-        }
+        Self { anchors: None }
     }
 }
 
@@ -196,36 +193,12 @@ impl DiagnosticSet {
         self.replace_from_server(path, "lsp".to_string(), diagnostics, spans);
     }
 
-    /// [`Self::replace_for_path`] with each span resolved against `rope` in
-    /// UTF-16, for tests that assert where a diagnostic lands rather than what
-    /// the store holds.
-    #[cfg(test)]
-    pub fn replace_for_path_in(
-        &mut self,
-        path: PathBuf,
-        diagnostics: Vec<Diagnostic>,
-        rope: &stoat_text::Rope,
-    ) {
-        let spans = diagnostics
-            .iter()
-            .map(|diag| PublishedSpan {
-                range: crate::lsp::util::lsp_range_to_byte_range(
-                    rope,
-                    diag.range,
-                    crate::host::OffsetEncoding::Utf16,
-                ),
-                base_version: u64::MAX,
-            })
-            .collect();
-        self.replace_from_server(path, "lsp".to_string(), diagnostics, spans);
-    }
-
     /// Each diagnostic for `path` with the span it was published at, in the same
     /// order [`Self::get`] yields. Empty when the path is unknown.
     ///
-    /// The span is where the diagnostic sat when its publish landed. A caller
-    /// painting it against text that has moved since carries it through the
-    /// edits, which is what [`PublishedSpan::base_version`] names the start of.
+    /// The span anchors where the diagnostic sat when its publish landed, so a
+    /// caller painting it against text that has moved since resolves the anchors
+    /// rather than replaying the edits between.
     pub fn spans(&self, path: &Path) -> &[PublishedSpan] {
         self.by_path
             .get(path)
@@ -300,27 +273,6 @@ impl DiagnosticSet {
     }
 }
 
-/// Move `offset` from the coordinates `patch` starts in into the ones it ends
-/// in.
-///
-/// An offset inside a range an edit replaced has no position of its own in the
-/// new text, so it lands at the start of what replaced it. Edits are disjoint
-/// and ascending, so one pass accumulating the length each one added or removed
-/// answers the rest.
-pub fn shift_offset(offset: usize, patch: &stoat_text::patch::Patch<usize>) -> usize {
-    let mut shifted = offset as i64;
-    for edit in patch.edits() {
-        if edit.old.start >= offset {
-            break;
-        }
-        if edit.old.end > offset {
-            return edit.new.start;
-        }
-        shifted += edit.new.len() as i64 - edit.old.len() as i64;
-    }
-    shifted.max(0) as usize
-}
-
 /// Bucket `diagnostics` by severity and name the worst one present.
 ///
 /// A diagnostic with no severity is counted as an error, since a server that
@@ -353,16 +305,10 @@ fn summarize_diagnostics(diagnostics: &[Diagnostic]) -> DiagnosticSummary {
 
 #[cfg(test)]
 mod tests {
-    /// One empty span per diagnostic, for tests whose subject is the store
+    /// One unanchored span per diagnostic, for tests whose subject is the store
     /// rather than where anything sits.
     fn no_spans(count: usize) -> Vec<PublishedSpan> {
-        vec![
-            PublishedSpan {
-                range: 0..0,
-                base_version: 0,
-            };
-            count
-        ]
+        vec![PublishedSpan::unresolved(); count]
     }
 
     use super::*;

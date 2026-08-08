@@ -652,6 +652,12 @@ impl MultiBufferSnapshot {
         self.buffer_snapshot.version
     }
 
+    /// The buffer an [`Anchor`] must name to resolve here, since resolving a
+    /// foreign one answers with an offset rather than an error.
+    pub fn buffer_id(&self) -> BufferId {
+        self.buffer_snapshot.buffer_id
+    }
+
     pub fn is_singleton(&self) -> bool {
         self.singleton
     }
