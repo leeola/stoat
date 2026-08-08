@@ -12,7 +12,7 @@
 use crate::{
     agent_ipc::AgentQuery,
     app::{PendingSpawn, Stoat, UpdateEffect},
-    buffer::BufferId,
+    buffer::{BufferId, TextBufferSnapshot},
     buffer_registry::{BufferRegistry, LspSymbolKindIndex},
     display_map::{
         syntax_theme, DisplayPoint, DisplaySnapshot, HighlightKey, HighlightLayer, HighlightStyle,
@@ -50,12 +50,12 @@ use lsp_types::{
 use ratatui::{layout::Rect, style::Style};
 use serde_json::{json, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     task::{Context, Poll},
     time::Duration,
 };
@@ -587,14 +587,7 @@ fn dispatch_did_change(
         }
     }
 
-    // Each group reads the same last-seen and last-delivered baseline, which
-    // advance only after the plans are built.
-    let plans: Vec<(DispatchPlan, Vec<Arc<dyn LspHost>>)> = groups
-        .into_iter()
-        .filter_map(|((sync_kind, encoding), hosts)| {
-            build_dispatch_plan(stoat, id, sync_kind, encoding).map(|plan| (plan, hosts))
-        })
-        .collect();
+    let target = capture_dispatch_target(stoat, id);
 
     // The change is consumed for this buffer once seen, whether or not any
     // group took it, mirroring the sync-NONE path.
@@ -603,12 +596,17 @@ fn dispatch_did_change(
         stoat.lsp_buffer_versions.insert(id, v);
     }
 
-    if plans.is_empty() {
+    let (uri, snapshot) = target?;
+    if groups.is_empty() {
         return None;
     }
 
     // One monotonic LSP document version per buffer, shared across groups --
     // a per-server counter buys nothing since each server still sees it rise.
+    //
+    // Stamped here though the changes are shaped later, so a window whose
+    // changes come out empty spends a number. The counter only has to rise, and
+    // a cancelled task already leaves gaps in it.
     let lsp_version = {
         let version = stoat.lsp_doc_versions.entry(id).or_insert(0);
         *version += 1;
@@ -617,24 +615,8 @@ fn dispatch_did_change(
 
     // The delivered baseline is per-buffer, so every group targets the same
     // text and version.
-    let target_text = plans[0].0.target_text.clone();
-    let target_version = plans[0].0.target_buffer_version;
-
-    let dispatches: Vec<(DidChangeTextDocumentParams, Vec<Arc<dyn LspHost>>)> = plans
-        .into_iter()
-        .map(|(plan, hosts)| {
-            (
-                DidChangeTextDocumentParams {
-                    text_document: VersionedTextDocumentIdentifier {
-                        uri: plan.uri,
-                        version: lsp_version,
-                    },
-                    content_changes: plan.content_changes,
-                },
-                hosts,
-            )
-        })
-        .collect();
+    let target_text = snapshot.visible_text.clone();
+    let target_version = snapshot.version;
 
     let executor = stoat.executor.clone();
     let last_text = stoat.lsp_last_delivered_text.clone();
@@ -644,19 +626,47 @@ fn dispatch_did_change(
         if let Some(debounce) = debounce {
             executor.timer(debounce).await;
         }
+
         let mut delivered = true;
-        for (params, hosts) in dispatches {
+        let mut sent = false;
+        for ((sync_kind, encoding), hosts) in groups {
+            // Shaped here rather than where the timer was armed. Every
+            // keystroke inside the window replaces the task holding the last
+            // payload, so building one per keystroke serializes a document to
+            // throw it away.
+            let content_changes = build_content_changes(
+                &snapshot,
+                id,
+                sync_kind,
+                encoding,
+                &last_text,
+                &last_version,
+            );
+            if content_changes.is_empty() {
+                continue;
+            }
+
+            let params = DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: uri.clone(),
+                    version: lsp_version,
+                },
+                content_changes,
+            };
             for lsp in hosts {
                 if let Err(err) = lsp.did_change(params.clone()).await {
                     tracing::warn!(target: "stoat::lsp", ?err, "did_change notification failed");
                     delivered = false;
                 }
             }
+            sent = true;
         }
+
         // Only advance the delivered baseline when every server in every
         // group received the change, so a failed server's next delta still
-        // replays it.
-        if delivered {
+        // replays it. A window that shaped no change for anyone delivered
+        // nothing, and moving the baseline would drop the edits it holds.
+        if delivered && sent {
             last_text
                 .lock()
                 .expect("lsp text mutex")
@@ -670,29 +680,23 @@ fn dispatch_did_change(
 }
 
 /// A buffer's fanned-out hosts grouped by the sync kind and encoding each
-/// negotiated, so one shaped [`DispatchPlan`] serves every host in a group.
+/// negotiated, so one shaped payload serves every host in a group.
 type HostSyncGroups = Vec<(
     (TextDocumentSyncKind, OffsetEncoding),
     Vec<Arc<dyn LspHost>>,
 )>;
 
-struct DispatchPlan {
-    uri: Uri,
-    content_changes: Vec<TextDocumentContentChangeEvent>,
-    target_text: Rope,
-    target_buffer_version: u64,
-}
-
-fn build_dispatch_plan(
-    stoat: &Stoat,
-    id: BufferId,
-    sync_kind: TextDocumentSyncKind,
-    encoding: OffsetEncoding,
-) -> Option<DispatchPlan> {
+/// The document and text every group's change will be built against, or `None`
+/// when the buffer holds nothing the servers have not been given.
+///
+/// This is the part cheap enough to run at the keystroke that arms the debounce.
+/// A snapshot clone is a refcount bump on persistent structures and the version
+/// compare is a map read, where the payload those feed costs a whole-document
+/// string or a fresh patch walk.
+fn capture_dispatch_target(stoat: &Stoat, id: BufferId) -> Option<(Uri, TextBufferSnapshot)> {
     let workspace = stoat.active_workspace();
     let buffer = workspace.buffers.get(id)?;
-    let buffer_b = buffer.read().expect("buffer lock");
-    let current_version = buffer_b.version();
+    let guard = buffer.read().expect("buffer lock");
 
     // Against what the servers were last *given*, not what the sync pump has
     // last looked at. The pump marks a buffer seen before it spawns the
@@ -705,46 +709,54 @@ fn build_dispatch_plan(
         .get(&id)
         .copied()
         .unwrap_or(0);
-    if current_version == last_delivered_version {
+    if guard.version() == last_delivered_version {
         return None;
     }
 
     let path = workspace.buffers.path_for(id)?.to_path_buf();
     let uri = path_to_uri(&path)?;
-    let new_rope = buffer_b.rope();
+    Some((uri, guard.snapshot.clone()))
+}
 
-    let content_changes = match sync_kind {
-        TextDocumentSyncKind::FULL => {
-            vec![TextDocumentContentChangeEvent {
-                range: None,
-                range_length: None,
-                text: new_rope.to_string(),
-            }]
-        },
+/// The content changes one group's servers want, in the shape its negotiated
+/// sync kind takes.
+///
+/// The baseline an INCREMENTAL delta is measured from is read here rather than
+/// captured earlier, so the delta describes what those servers hold as the
+/// notification goes out. Empty means the buffer says nothing new to this
+/// group, which the caller answers by sending it nothing.
+fn build_content_changes(
+    snapshot: &TextBufferSnapshot,
+    id: BufferId,
+    sync_kind: TextDocumentSyncKind,
+    encoding: OffsetEncoding,
+    last_text: &Mutex<HashMap<BufferId, Rope>>,
+    last_version: &Mutex<HashMap<BufferId, u64>>,
+) -> Vec<TextDocumentContentChangeEvent> {
+    match sync_kind {
+        TextDocumentSyncKind::FULL => vec![TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: snapshot.visible_text.to_string(),
+        }],
         TextDocumentSyncKind::INCREMENTAL => {
-            let last_delivered_text = stoat
-                .lsp_last_delivered_text
+            let delivered_version = last_version
+                .lock()
+                .expect("lsp version mutex")
+                .get(&id)
+                .copied()
+                .unwrap_or(0);
+            let delivered_text = last_text
                 .lock()
                 .expect("lsp text mutex")
                 .get(&id)
                 .cloned()
                 .unwrap_or_default();
-            let patch = buffer_b.snapshot.edits_since(last_delivered_version);
-            patch_to_content_changes(&last_delivered_text, new_rope, &patch, encoding)
+            let patch = snapshot.edits_since(delivered_version);
+            patch_to_content_changes(&delivered_text, &snapshot.visible_text, &patch, encoding)
         },
-        _ => return None,
-    };
-
-    if content_changes.is_empty() {
-        return None;
+        _ => Vec::new(),
     }
-
-    Some(DispatchPlan {
-        uri,
-        content_changes,
-        target_text: new_rope.clone(),
-        target_buffer_version: current_version,
-    })
 }
 
 /// Translate a [`Patch`] of byte-range edits between `old_rope` and
@@ -4872,8 +4884,7 @@ pub(crate) fn pump_lsp_format(stoat: &mut Stoat) -> bool {
         },
         Poll::Ready(Some(FormatResponse { uri, edits })) => {
             #[allow(clippy::mutable_key_type)]
-            let mut changes: std::collections::HashMap<Uri, Vec<TextEdit>> =
-                std::collections::HashMap::new();
+            let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
             changes.insert(uri, edits);
             let edit = WorkspaceEdit {
                 changes: Some(changes),
@@ -6073,6 +6084,46 @@ mod tests {
                 lsp_types::Position::new(0, 4),
                 lsp_types::Position::new(0, 4),
             )),
+        );
+    }
+
+    /// The payload is shaped when the timer fires rather than when a keystroke
+    /// armed it, so a window holding several edits produces one set of changes
+    /// covering all of them against what the server was last given.
+    #[test]
+    fn did_change_incremental_coalesces_rapid_edits() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.fake_lsp()
+            .set_text_document_sync(TextDocumentSyncKind::INCREMENTAL);
+        let root = seed(&mut h, &[("a.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+
+        // A delivered baseline first, so the window below measures against text
+        // the server actually holds rather than against an empty document.
+        edit_buffer(&mut h, 0..0, "X");
+        arm_change(&mut h);
+        h.advance_clock(Duration::from_millis(60));
+        assert_eq!(h.fake_lsp().observed_changes().len(), 1);
+
+        // Two edits inside one debounce window. The first arms the timer, the
+        // second replaces the task holding it.
+        edit_buffer(&mut h, 4..4, "Y");
+        arm_change(&mut h);
+        h.advance_clock(Duration::from_millis(20));
+        edit_buffer(&mut h, 5..5, "Z");
+        arm_change(&mut h);
+        h.advance_clock(Duration::from_millis(60));
+
+        let all = h.fake_lsp().observed_changes();
+        assert_eq!(all.len(), 2, "the window delivered one payload, not two");
+        assert_eq!(
+            all[1]
+                .content_changes
+                .iter()
+                .map(|c| c.text.clone())
+                .collect::<Vec<_>>(),
+            ["YZ"],
+            "covering both edits, and neither redelivering the baseline's X",
         );
     }
 
