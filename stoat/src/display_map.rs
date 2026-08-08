@@ -1936,6 +1936,58 @@ mod tests {
         assert_eq!(rows(&mut map), fresh(&shared), "and after a later edit");
     }
 
+    /// A fold follows its text across an edit that removes a row above it
+    /// without changing the buffer's length.
+    ///
+    /// Replacing a newline with an ordinary character costs the same bytes it
+    /// frees, so every offset after it stays exactly where it was while the row
+    /// it ended disappears and each later row shifts up by one. A fold is stored
+    /// by offset and resolved into rows, so this is the one edit shape that
+    /// leaves the stored form untouched and the resolved form moved.
+    #[test]
+    fn a_fold_below_a_byte_neutral_row_merge_moves_up_a_row() {
+        let text: String = (0..30).map(|i| format!("line{i} words\n")).collect();
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut map = DisplayMap::new(multi, test_executor(), crate::test_notify());
+
+        map.fold(vec![Point::new(15, 0)..Point::new(16, 0)]);
+        let before = map.snapshot();
+        assert_eq!(
+            before.line_count(),
+            30,
+            "one of thirty-one rows folded away"
+        );
+
+        // The newline ending row 2, overwritten in place.
+        let at = {
+            let snap = shared.read().expect("poisoned");
+            snap.rope().point_to_offset(Point::new(3, 0)) - 1
+        };
+        let len_before = shared.read().expect("poisoned").rope().len();
+        shared.write().expect("poisoned").edit(at..at + 1, "X");
+        assert_eq!(
+            shared.read().expect("poisoned").rope().len(),
+            len_before,
+            "the edit has to be byte-neutral or it proves nothing",
+        );
+
+        let rows = |map: &mut DisplayMap| {
+            let snapshot = map.snapshot();
+            (0..snapshot.line_count())
+                .map(|row| snapshot.display_line(row))
+                .collect::<Vec<_>>()
+        };
+
+        let fresh_rows = {
+            let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+            let mut fresh = DisplayMap::new(multi, test_executor(), crate::test_notify());
+            fresh.fold(vec![Point::new(14, 0)..Point::new(15, 0)]);
+            rows(&mut fresh)
+        };
+        assert_eq!(rows(&mut map), fresh_rows, "against a fresh build");
+    }
+
     /// An edit strictly inside a replacement's hidden rows leaves the block
     /// standing.
     ///

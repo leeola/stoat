@@ -358,14 +358,36 @@ impl FoldMap {
             // others, so none of them are reliably as of `last_buffer_version`.
             (self.version == self.last_self_version).then_some(self.last_buffer_version),
         );
+        // A fold toggle moves no inlay row, so the rows it changed have to be
+        // derived from the fold set itself. Without this every toggle falls to
+        // the full rebuild below and invalidates the whole file downstream.
+        //
+        // Only when the inlay text is unchanged, though. Fold rows are placed
+        // against the cached transform tree, which describes the text as it was,
+        // so a fold arriving with a buffer edit keeps the full rebuild.
+        //
+        // Both versions have to agree. The inlay set can change without a
+        // buffer edit, and the buffer can change without touching the inlay
+        // set, so either one moving alone still means different text.
+        let inlay_unchanged = inlay_snapshot.inlay_version == self.last_inlay_version
+            && inlay_snapshot.buffer_snapshot().version() == self.last_buffer_version;
+
         // Nothing about where the folds sit has moved. Their buffer offsets came
-        // back the same, and with the inlay set unchanged the same offsets map to
-        // the same inlay points. So the resolved tree the cache holds is the tree
-        // this would rebuild, and `self.folds` already carries these offsets.
-        let placement_held = all_offsets
-            .chunks_exact(2)
-            .zip(all_folds.iter())
-            .all(|(pair, af)| pair[0] == af.resolved_start && pair[1] == af.resolved_end)
+        // back the same over text that itself is unchanged, so they resolve to
+        // the same inlay points. The resolved tree the cache holds is therefore
+        // the tree this would rebuild, and `self.folds` already carries these
+        // offsets.
+        //
+        // Equal offsets alone would not be enough. Replacing a newline with an
+        // ordinary character costs the bytes it frees, so every later offset
+        // stays put while the row it ended disappears and each row after it
+        // shifts up by one. The cached tree names rows, so reusing it across
+        // that edit hands the sync fold positions one row stale.
+        let placement_held = inlay_unchanged
+            && all_offsets
+                .chunks_exact(2)
+                .zip(all_folds.iter())
+                .all(|(pair, af)| pair[0] == af.resolved_start && pair[1] == af.resolved_end)
             && inlay_snapshot.inlay_set_version == self.last_inlay_set_version
             && self.version == self.last_self_version;
 
@@ -409,19 +431,6 @@ impl FoldMap {
             },
         };
 
-        // A fold toggle moves no inlay row, so the rows it changed have to be
-        // derived from the fold set itself. Without this every toggle falls to
-        // the full rebuild below and invalidates the whole file downstream.
-        //
-        // Only when the inlay text is unchanged, though. Fold rows are placed
-        // against the cached transform tree, which describes the text as it was,
-        // so a fold arriving with a buffer edit keeps the full rebuild.
-        //
-        // Both versions have to agree. The inlay set can change without a
-        // buffer edit, and the buffer can change without touching the inlay
-        // set, so either one moving alone still means different text.
-        let inlay_unchanged = inlay_snapshot.inlay_version == self.last_inlay_version
-            && inlay_snapshot.buffer_snapshot().version() == self.last_buffer_version;
         let fold_edits = self
             .cached_snapshot
             .as_ref()
