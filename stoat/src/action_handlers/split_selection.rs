@@ -75,11 +75,15 @@ fn split_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
         let mut pieces: Vec<Selection<Anchor>> = Vec::new();
         let mut piece_start = start;
         for m in regex.find_iter(rope.regex_slice_input(start..end)) {
-            pieces.push(make_anchor_selection(
-                buffer_snapshot,
-                piece_start,
-                start + m.start(),
-            ));
+            // Two matches touching leave nothing between them, and a selection
+            // of no width is not one, so the gap contributes no piece.
+            if start + m.start() > piece_start {
+                pieces.push(make_anchor_selection(
+                    buffer_snapshot,
+                    piece_start,
+                    start + m.start(),
+                ));
+            }
             piece_start = start + m.end();
         }
         if piece_start < end {
@@ -116,9 +120,11 @@ fn select_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
 
                 regex
                     .find_iter(rope.regex_slice_input(start..end))
-                    // An empty match sitting at the selection end, which a
-                    // `$`-style anchor produces, is not a selection.
-                    .filter(|m| start + m.start() != end)
+                    // An empty match names a position rather than a span, and
+                    // there is no width to give it. A pattern that only ever
+                    // matches empty therefore selects nothing, which the
+                    // all-empty branch below reports.
+                    .filter(|m| m.start() != m.end())
                     .map(|m| {
                         make_anchor_selection(buffer_snapshot, start + m.start(), start + m.end())
                     })
@@ -137,10 +143,14 @@ fn select_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
     };
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
-    let mut per_selection = found.into_iter();
-    editor.selections.split_each(buffer_snapshot, |_| {
-        per_selection.next().unwrap_or_default()
-    });
+    // The whole set is replaced rather than each selection being split in
+    // place, so a selection that matched nothing is gone rather than left
+    // sitting where the user searched and found nothing. The guard above
+    // returned already if that were every selection, so this is never empty.
+    let matches: Vec<Selection<Anchor>> = found.into_iter().flatten().collect();
+    editor
+        .selections
+        .replace_with_fresh_ids(matches, buffer_snapshot);
 }
 
 /// Cancel the input modal without splitting. Returns `true` when
@@ -222,6 +232,82 @@ mod tests {
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         let spans = editor::selection_spans(&mut h.stoat);
         assert_eq!(spans, vec![(0, 4, false), (7, 11, false)]);
+    }
+
+    /// Splitting on adjacent separators leaves no empty piece behind.
+    ///
+    /// The gap between two touching matches has no width, and a selection with
+    /// no width is not something the rest of the editor knows how to carry. It
+    /// paints nothing and every motion widens it back.
+    #[test]
+    fn splitting_on_adjacent_matches_emits_no_empty_piece() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("a,,b");
+        select_range(&mut h, 0, 4);
+        dispatch(&mut h.stoat, &action::SplitSelection);
+        h.type_text(",");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(0, 1, false), (3, 4, false)],
+            "the two letters, and nothing for the gap between the commas",
+        );
+    }
+
+    /// A pattern that matches empty selects nothing rather than minting
+    /// zero-width selections at every position it matches.
+    #[test]
+    fn selecting_an_empty_matching_pattern_selects_nothing() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("abc");
+        select_range(&mut h, 0, 3);
+        dispatch(&mut h.stoat, &action::SelectRegex);
+        h.type_text("o*");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(0, 3, false)],
+            "the selection is kept whole rather than cut into empty pieces",
+        );
+    }
+
+    /// Selecting drops the selections that matched nothing, so what is left is
+    /// the matches and only the matches.
+    ///
+    /// Keeping them would leave a cursor sitting where the user searched and
+    /// found nothing, which reads as a match that is not one.
+    #[test]
+    fn selecting_drops_the_selections_that_matched_nothing() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("abc xyz");
+        select_range(&mut h, 0, 3);
+        add_range(&mut h, 4, 7);
+
+        dispatch(&mut h.stoat, &action::SelectRegex);
+        h.type_text("b");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(1, 2, false)],
+            "only the selection that matched survives",
+        );
+    }
+
+    /// Add a further selection, which mints its own id.
+    fn add_range(h: &mut TestHarness, start: usize, end: usize) {
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        editor.selections.insert_range(
+            stoat_text::Selection {
+                id: 0,
+                start: buf_snap.anchor_at(start, stoat_text::Bias::Right),
+                end: buf_snap.anchor_at(end, stoat_text::Bias::Right),
+                reversed: false,
+                goal: stoat_text::SelectionGoal::None,
+            },
+            buf_snap,
+        );
     }
 
     #[test]
