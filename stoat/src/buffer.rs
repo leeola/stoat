@@ -1064,8 +1064,13 @@ impl TextBuffer {
         let mut new_visible = Rope::new();
         let mut new_deleted = Rope::new();
 
-        let mut copied_visible = 0usize;
-        let mut copied_deleted = 0usize;
+        // Both ropes are read strictly forward. The walk crosses the old
+        // fragments in order, and each fragment claims the next stretch of
+        // whichever rope it currently lives in, so each rope gets one reader
+        // rather than a descent from the root per fragment and per run between
+        // them.
+        let mut old_visible = RopeCursor::new(&self.snapshot.visible_text, 0);
+        let mut old_deleted = RopeCursor::new(&self.snapshot.deleted_text, 0);
 
         let mut untouched = old_fragments.cursor::<Option<Locator>>(cx);
         let mut reachable =
@@ -1077,18 +1082,10 @@ impl TextBuffer {
             let run_visible = run.summary().text.visible;
             let run_deleted = run.summary().text.deleted;
 
-            new_visible.append(
-                self.snapshot
-                    .visible_text
-                    .slice(copied_visible..copied_visible + run_visible),
-            );
-            new_deleted.append(
-                self.snapshot
-                    .deleted_text
-                    .slice(copied_deleted..copied_deleted + run_deleted),
-            );
-            copied_visible += run_visible;
-            copied_deleted += run_deleted;
+            let carried_visible = old_visible.offset() + run_visible;
+            new_visible.append(old_visible.slice(carried_visible));
+            let carried_deleted = old_deleted.offset() + run_deleted;
+            new_deleted.append(old_deleted.slice(carried_deleted));
             new_fragments.append(run, cx);
 
             let len = fragment.len as usize;
@@ -1096,19 +1093,11 @@ impl TextBuffer {
             let is_visible = fragment.is_visible_with_undos(&self.snapshot.undo_map);
 
             let text = if was_visible {
-                let slice = self
-                    .snapshot
-                    .visible_text
-                    .slice(copied_visible..copied_visible + len);
-                copied_visible += len;
-                slice
+                let end = old_visible.offset() + len;
+                old_visible.slice(end)
             } else {
-                let slice = self
-                    .snapshot
-                    .deleted_text
-                    .slice(copied_deleted..copied_deleted + len);
-                copied_deleted += len;
-                slice
+                let end = old_deleted.offset() + len;
+                old_deleted.slice(end)
             };
 
             if is_visible {
@@ -1128,16 +1117,10 @@ impl TextBuffer {
             reachable.next();
         }
 
-        new_visible.append(
-            self.snapshot
-                .visible_text
-                .slice(copied_visible..self.snapshot.visible_text.len()),
-        );
-        new_deleted.append(
-            self.snapshot
-                .deleted_text
-                .slice(copied_deleted..self.snapshot.deleted_text.len()),
-        );
+        // Consuming both readers here is also what ends their borrows, which
+        // the writes below could not happen under.
+        new_visible.append(old_visible.suffix());
+        new_deleted.append(old_deleted.suffix());
         new_fragments.append(untouched.suffix(), cx);
 
         self.snapshot.fragments = new_fragments;
