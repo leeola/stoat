@@ -229,13 +229,16 @@ impl LocalLsp {
             .expect("lsp pending map poisoned")
             .insert(id, tx);
 
-        let message = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
+        let body = serde_json::to_vec(&Envelope {
+            jsonrpc: "2.0",
+            id: Some(id),
+            method,
+            params,
         });
-        if let Err(err) = self.write_message(&message) {
+        let sent = body
+            .map_err(io::Error::from)
+            .and_then(|body| self.write_message(&body));
+        if let Err(err) = sent {
             self.pending
                 .lock()
                 .expect("lsp pending map poisoned")
@@ -259,26 +262,44 @@ impl LocalLsp {
 
     /// Send a fire-and-forget JSON-RPC notification (no id, no response).
     fn notify<P: Serialize>(&self, method: &str, params: P) -> io::Result<()> {
-        let message = json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        });
-        self.write_message(&message)
+        let body = serde_json::to_vec(&Envelope {
+            jsonrpc: "2.0",
+            id: None,
+            method,
+            params,
+        })?;
+        self.write_message(&body)
     }
 
-    /// Frame `message` with a `Content-Length` header and write it to the
-    /// child's stdin.
-    fn write_message(&self, message: &Value) -> io::Result<()> {
-        let body = serde_json::to_vec(message)?;
+    /// Frame `body` with a `Content-Length` header and write it to the child's
+    /// stdin.
+    fn write_message(&self, body: &[u8]) -> io::Result<()> {
         if let Some(transcript) = &self.tx_transcript {
-            transcript.record(&String::from_utf8_lossy(&body));
+            transcript.record(&String::from_utf8_lossy(body));
         }
-        let framed = encode_message(&body);
         let mut stdin = self.stdin.lock().expect("lsp stdin poisoned");
-        stdin.write_all(&framed)?;
+        write_framed(&mut *stdin, body)?;
         stdin.flush()
     }
+}
+
+/// A JSON-RPC message on its way out, serialized straight from the typed params.
+///
+/// Building a [`Value`] tree first materializes the whole payload as a map of
+/// boxed nodes and then serializes that, so params large enough to matter --
+/// a full document sync, a semantic-token request -- are built twice over
+/// before a byte reaches the pipe.
+///
+/// Declaration order is wire order, and this order is the one the map these
+/// replaced serialized its keys in, so the bytes a server reads are unchanged.
+#[derive(Serialize)]
+struct Envelope<'a, P> {
+    /// Absent on a notification, which is what distinguishes one from a request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<i64>,
+    jsonrpc: &'static str,
+    method: &'a str,
+    params: P,
 }
 
 #[async_trait]
@@ -573,6 +594,9 @@ impl LspHost for LocalLsp {
         id: NumberOrString,
         result: Result<Value, LspResponseError>,
     ) -> io::Result<()> {
+        // A reply carries no method and so does not fit the request envelope,
+        // and the payloads a client answers with are small enough that going
+        // through a `Value` costs nothing measurable.
         let message = match result {
             Ok(value) => json!({ "jsonrpc": "2.0", "id": id, "result": value }),
             Err(err) => json!({
@@ -581,7 +605,7 @@ impl LspHost for LocalLsp {
                 "error": { "code": err.code, "message": err.message, "data": err.data },
             }),
         };
-        self.write_message(&message)
+        self.write_message(&serde_json::to_vec(&message)?)
     }
 }
 
@@ -695,12 +719,15 @@ async fn reap_child(child: &Mutex<Child>, timeout: Duration, poll: Duration) -> 
     false
 }
 
-/// Frame a JSON-RPC body with the `Content-Length` header the LSP base protocol
+/// Write `body` framed with the `Content-Length` header the LSP base protocol
 /// requires.
-fn encode_message(body: &[u8]) -> Vec<u8> {
-    let mut out = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
-    out.extend_from_slice(body);
-    out
+///
+/// The header and body go as separate writes rather than through one joined
+/// buffer, so a payload of any size is not copied again just to carry a
+/// twenty-odd byte prefix.
+fn write_framed(out: &mut impl Write, body: &[u8]) -> io::Result<()> {
+    write!(out, "Content-Length: {}\r\n\r\n", body.len())?;
+    out.write_all(body)
 }
 
 /// Reassembles JSON-RPC message bodies from a byte stream that may split a
@@ -1102,12 +1129,19 @@ fn client_capabilities() -> ClientCapabilities {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify, client_capabilities, encode_message, reap_child, transcript_slug,
-        transcript_stem, wakes_for, Command, DiagnosticTag, Duration, FrameDecoder, HashSet,
-        Instant, Mutex, Routed,
+        classify, client_capabilities, reap_child, transcript_slug, transcript_stem, wakes_for,
+        write_framed, Command, DiagnosticTag, Duration, Envelope, FrameDecoder, HashSet, Instant,
+        Mutex, Routed,
     };
     use crate::host::lsp::{IncomingRequest, LspNotification};
     use serde_json::{json, Value};
+
+    /// `body` framed the way the transport frames it on its way to the child.
+    fn encode_message(body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_framed(&mut out, body).expect("writing to a vec cannot fail");
+        out
+    }
 
     fn decode_one(bytes: &[u8]) -> Vec<u8> {
         let mut decoder = FrameDecoder::new();
@@ -1178,6 +1212,52 @@ mod tests {
     fn framing_round_trips_a_body() {
         let body = br#"{"jsonrpc":"2.0","id":1}"#;
         assert_eq!(decode_one(&encode_message(body)), body);
+    }
+
+    /// Serializing the typed envelope replaces a `json!` tree, and a server
+    /// reads the bytes rather than the type, so the document those bytes spell
+    /// has to be the one this transport has always sent, field order included.
+    /// The map it replaced serialized its keys sorted, so the envelope declares
+    /// them in that order rather than the order they read naturally in.
+    #[test]
+    fn the_envelope_serializes_the_document_the_value_tree_did() {
+        let params = json!({ "textDocument": { "uri": "file:///a.rs" }, "n": 1 });
+
+        let request = serde_json::to_vec(&Envelope {
+            jsonrpc: "2.0",
+            id: Some(7),
+            method: "textDocument/hover",
+            params: &params,
+        })
+        .expect("serializes");
+        assert_eq!(
+            request,
+            serde_json::to_vec(&json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "textDocument/hover",
+                "params": params,
+            }))
+            .expect("serializes"),
+        );
+
+        let notification = serde_json::to_vec(&Envelope {
+            jsonrpc: "2.0",
+            id: None,
+            method: "textDocument/didOpen",
+            params: &params,
+        })
+        .expect("serializes");
+        assert_eq!(
+            notification,
+            serde_json::to_vec(&json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": params,
+            }))
+            .expect("serializes"),
+            "a notification carries no id at all rather than a null one",
+        );
     }
 
     #[test]
