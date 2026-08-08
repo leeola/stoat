@@ -63,7 +63,7 @@ use std::{
     io,
     ops::Range,
     path::{Path, PathBuf},
-    sync::{atomic::AtomicBool, Arc},
+    sync::Arc,
 };
 use stoat_action::{Conflict, Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
 use stoat_config::{LineNumbers, MinimapMode, Settings, Spanned, TabBarMode, ThemeBlock, WrapMode};
@@ -1059,11 +1059,15 @@ pub struct Stoat {
     /// [`crate::action_handlers::file::pump_auto_reload`] clears this field to
     /// disarm the poll once no buffer wants following.
     pub(crate) auto_reload_poll: Option<stoat_scheduler::Task<()>>,
-    /// Set true by the auto-reload poll timer on each tick and cleared by
-    /// [`crate::action_handlers::file::pump_auto_reload`] when it consumes one,
-    /// so the pump's per-buffer fs stats run at the poll cadence rather than
-    /// every frame [`Self::drive_background`] runs.
-    pub(crate) auto_reload_tick: Arc<AtomicBool>,
+    /// Poll ticks from [`Self::auto_reload_poll`]'s timer, one per interval.
+    ///
+    /// The run loop receives them on its own select arm so a tick wakes it
+    /// without implying a frame. Only [`crate::action_handlers::file::pump_auto_reload`]
+    /// reporting a change turns one into a repaint, which is what keeps a
+    /// buffer tailing an idle file from painting twice a second. The single
+    /// slot coalesces ticks that arrive while the loop is busy.
+    pub(crate) auto_reload_tx: Sender<()>,
+    auto_reload_rx: Receiver<()>,
     /// LSP-protocol document version per buffer. Starts at 0 from
     /// `did_open` and increments at `did_change` spawn time. Gaps
     /// (e.g. the prior task was cancelled before fire) are allowed
@@ -1727,6 +1731,7 @@ impl Stoat {
         let (code_search_query_tx, code_search_query_rx) = tokio::sync::mpsc::channel(256);
         let (diff_warm_file_tx, diff_warm_file_rx) = tokio::sync::mpsc::channel(256);
         let (index_external_edit_tx, index_external_edit_rx) = tokio::sync::mpsc::channel(256);
+        let (auto_reload_tx, auto_reload_rx) = tokio::sync::mpsc::channel(1);
         // Dropped at once, leaving the channel closed until `set_stoatty_rx`
         // installs the UI thread's end. Closed is the truthful state for a
         // process that has no UI thread to hear from.
@@ -1862,7 +1867,8 @@ impl Stoat {
             lsp_buffer_versions: std::collections::HashMap::new(),
             lsp_pending_changes: std::collections::HashMap::new(),
             auto_reload_poll: None,
-            auto_reload_tick: Arc::new(AtomicBool::new(false)),
+            auto_reload_tx,
+            auto_reload_rx,
             lsp_doc_versions: std::collections::HashMap::new(),
             lsp_last_delivered_text: Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
@@ -2731,6 +2737,16 @@ impl Stoat {
                 // neighbours use would wake the loop on every poll.
                 Some(present) = self.stoatty_rx.recv() => {
                     self.handle_stoatty_present(present)
+                }
+                // A poll tick is a reason to re-stat the followed files, not a
+                // reason to paint. Only the pump finding one of them advanced
+                // asks for a frame.
+                Some(()) = self.auto_reload_rx.recv() => {
+                    if action_handlers::file::pump_auto_reload(self) {
+                        UpdateEffect::Redraw
+                    } else {
+                        UpdateEffect::None
+                    }
                 }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
                 _ = self.shutdown_notify.notified() => UpdateEffect::Quit,
@@ -9796,7 +9812,6 @@ impl Stoat {
         action_handlers::file::install_pending_opens(self);
         action_handlers::sync_palette_picker(self);
         action_handlers::sync_file_finder_preview(self);
-        action_handlers::file::pump_auto_reload(self);
         self.drive_parse_jobs();
         self.drive_diff_jobs();
         action_handlers::pump_commits(self);

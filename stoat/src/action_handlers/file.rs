@@ -20,7 +20,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     str::FromStr,
-    sync::{atomic::Ordering, Arc, Mutex},
+    sync::{Arc, Mutex},
     task::{Context, Poll},
     time::{Duration, SystemTime},
 };
@@ -447,24 +447,29 @@ fn disk_changed_since_open(stoat: &Stoat, buffer_id: BufferId, path: &Path) -> b
 
 /// Arm the auto-reload poll if it is not already running.
 ///
-/// Spawns a timer loop that wakes [`Stoat::drive_background`] every
-/// [`crate::app::AUTO_RELOAD_POLL`] so [`pump_auto_reload`] can re-read flagged
-/// buffers. The task cancels when dropped, and [`pump_auto_reload`] drops it
-/// once no buffer is flagged. Called when a buffer opts into file-following,
-/// such as the session log buffer and the `:auto-reload` command.
+/// Spawns a timer loop sending a tick every [`crate::app::AUTO_RELOAD_POLL`],
+/// which the run loop receives and answers by driving [`pump_auto_reload`]. The
+/// tick deliberately does not wake a repaint on its own, so following an idle
+/// file costs no frames. The task cancels when dropped, and
+/// [`pump_auto_reload`] drops it once no buffer is flagged. Called when a buffer
+/// opts into file-following, such as the session log buffer and the
+/// `:auto-reload` command.
 #[allow(dead_code)]
 pub(crate) fn ensure_auto_reload_poll(stoat: &mut Stoat) {
     if stoat.auto_reload_poll.is_some() {
         return;
     }
     let executor = stoat.executor.clone();
-    let redraw = stoat.redraw_notify.clone();
-    let tick = stoat.auto_reload_tick.clone();
+    let tick = stoat.auto_reload_tx.clone();
     let task = stoat.executor.spawn(async move {
         loop {
             executor.timer(crate::app::AUTO_RELOAD_POLL).await;
-            tick.store(true, Ordering::Relaxed);
-            redraw.notify_one();
+            // The single-slot channel makes this wait out a busy loop rather
+            // than queue ticks behind it, so a stall costs one late pass and
+            // not a burst of them.
+            if tick.send(()).await.is_err() {
+                break;
+            }
         }
     });
     stoat.auto_reload_poll = Some(task);
@@ -478,22 +483,26 @@ pub(crate) fn ensure_auto_reload_poll(stoat: &mut Stoat) {
 /// the log-tail case. Otherwise the buffer is fully replaced. A cursor sitting
 /// on the old last line follows to the new end, while any other cursor stays
 /// put.
-pub(crate) fn pump_auto_reload(stoat: &mut Stoat) {
+///
+/// Returns whether anything the reader can see moved, either a buffer reloaded
+/// or a status reporting a file that could not be read. A poll finding every
+/// followed file unchanged returns `false`, which is what lets the run loop
+/// skip the frame rather than repaint at the poll cadence.
+pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
     if stoat.auto_reload_poll.is_none() {
-        return;
-    }
-    // Only re-stat when the poll timer has ticked since the last pump, so the
-    // per-frame drive_background calls in between do no fs work.
-    if !stoat.auto_reload_tick.swap(false, Ordering::Relaxed) {
-        return;
+        return false;
     }
     let paths = stoat.active_workspace().buffers.auto_reload_paths();
     if paths.is_empty() {
         stoat.auto_reload_poll = None;
-        return;
+        return false;
     }
 
     let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+    // Separate from `changed` because a failed read repaints the status without
+    // editing the buffer, and the LSP notify below must not hear about a buffer
+    // that never changed.
+    let mut status_set = false;
     let mut changed = false;
 
     for (id, path, mode) in paths {
@@ -529,6 +538,7 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) {
                     .buffers
                     .set_disk_mtime(id, mtime);
                 stoat.set_status(format!("cannot reload {}: {e}", display_name(&path)));
+                status_set = true;
                 continue;
             },
         };
@@ -626,6 +636,7 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) {
     if changed {
         super::lsp::notify_buffer_changes_pending(stoat);
     }
+    changed || status_set
 }
 
 /// Re-read the focused buffer's backing file from disk, backing `:reload` and
@@ -1476,10 +1487,7 @@ mod tests {
         test_harness::TestHarness,
         Stoat,
     };
-    use std::{
-        path::{Path, PathBuf},
-        sync::atomic::Ordering,
-    };
+    use std::path::{Path, PathBuf};
     use stoat_action::{
         CloseBuffer, ForceSaveBuffer, MoveDown, OpenBuffer, OpenFile, SaveBuffer, WriteQuit,
     };
@@ -1784,7 +1792,7 @@ mod tests {
         let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"line1\n");
 
         h.fake_fs().insert_file(&path, NOT_UTF8);
-        arm_and_pump(&mut h);
+        pump_poll(&mut h);
 
         assert_eq!(
             buffer_text(&h, id),
@@ -1800,7 +1808,7 @@ mod tests {
         // Polling twice a second, a version that cannot be decoded must not be
         // re-read and re-reported until the file changes again.
         h.stoat.pending_message = None;
-        arm_and_pump(&mut h);
+        pump_poll(&mut h);
         assert_eq!(
             h.stoat.pending_message, None,
             "the same undecodable version must not report again"
@@ -1974,26 +1982,29 @@ mod tests {
         )
     }
 
-    /// Arm the poll tick and drive the pump, standing in for the timer that sets
-    /// the tick in production.
-    fn arm_and_pump(h: &mut TestHarness) {
-        h.stoat.auto_reload_tick.store(true, Ordering::Relaxed);
-        super::pump_auto_reload(&mut h.stoat);
+    /// Drive one poll pass, standing in for the tick the timer sends in
+    /// production, and report whether the pump asked for a repaint.
+    fn pump_poll(h: &mut TestHarness) -> bool {
+        super::pump_auto_reload(&mut h.stoat)
     }
 
+    /// The run loop paints a poll tick only when the pump reports one, so a
+    /// buffer following an idle file has to cost no frames.
     #[test]
-    fn pump_auto_reload_skips_until_the_poll_ticks() {
+    fn only_the_poll_that_reloads_asks_for_a_repaint() {
         let mut h = Stoat::test();
-        let root = PathBuf::from("/auto-reload-untick");
+        let root = PathBuf::from("/auto-reload-quiet");
         let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"line1\n");
 
-        h.fake_fs().insert_file(&path, b"line1\nline2\n");
-        super::pump_auto_reload(&mut h.stoat);
+        assert!(!pump_poll(&mut h), "an unchanged file asks for no repaint");
 
-        assert_eq!(
-            buffer_text(&h, id),
-            "line1\n",
-            "the pump does no fs work until the poll timer ticks"
+        h.fake_fs().insert_file(&path, b"line1\nline2\n");
+
+        assert!(pump_poll(&mut h), "the reload asks for a repaint");
+        assert_eq!(buffer_text(&h, id), "line1\nline2\n");
+        assert!(
+            !pump_poll(&mut h),
+            "the poll after the reload lands asks for no repaint",
         );
     }
 
@@ -2004,7 +2015,7 @@ mod tests {
         let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"line1\n");
 
         h.fake_fs().insert_file(&path, b"line1\nline2\n");
-        arm_and_pump(&mut h);
+        pump_poll(&mut h);
 
         assert_eq!(buffer_text(&h, id), "line1\nline2\n");
         assert!(!focused_dirty(&h.stoat), "a reloaded buffer stays clean");
@@ -2021,7 +2032,7 @@ mod tests {
         let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"line1\r\n");
 
         h.fake_fs().insert_file(&path, b"line1\r\nline2\r\n");
-        arm_and_pump(&mut h);
+        pump_poll(&mut h);
 
         assert_eq!(buffer_text(&h, id), "line1\nline2\n");
     }
@@ -2037,7 +2048,7 @@ mod tests {
 
         let appended = format!("{seed}tail line\n");
         h.fake_fs().insert_file(&path, appended.as_bytes());
-        arm_and_pump(&mut h);
+        pump_poll(&mut h);
 
         assert_eq!(buffer_text(&h, id), appended);
         assert!(
@@ -2058,7 +2069,7 @@ mod tests {
         let mut changed = seed.into_bytes();
         changed[1500] = b'Z';
         h.fake_fs().insert_file(&path, &changed);
-        arm_and_pump(&mut h);
+        pump_poll(&mut h);
 
         assert_eq!(
             buffer_text(&h, id).into_bytes(),
@@ -2082,7 +2093,7 @@ mod tests {
             .edit(0..0, "x");
 
         h.fake_fs().insert_file(&path, b"line1\nline2\n");
-        arm_and_pump(&mut h);
+        pump_poll(&mut h);
 
         assert_eq!(
             buffer_text(&h, id),
@@ -2109,7 +2120,7 @@ mod tests {
         );
 
         h.fake_fs().insert_file(&path, b"aaa\nbbb\nccc\nddd\n");
-        arm_and_pump(&mut h);
+        pump_poll(&mut h);
 
         assert_eq!(buffer_text(&h, id), "aaa\nbbb\nccc\nddd\n");
         assert_eq!(
@@ -2180,7 +2191,7 @@ mod tests {
         );
 
         h.fake_fs().insert_file(&path, b"l0\nCHANGED\nl2\nl3\nl4\n");
-        arm_and_pump(&mut h);
+        pump_poll(&mut h);
 
         assert_eq!(buffer_text(&h, id), "l0\nCHANGED\nl2\nl3\nl4\n");
         assert_eq!(anchored_rows(&mut h, id), (3, 3, 3));
@@ -2209,7 +2220,7 @@ mod tests {
         assert_eq!(focused_cursor_row(&mut h), 0, "cursor starts mid-file");
 
         h.fake_fs().insert_file(&path, b"a\nb\nc\nd\ne\n");
-        arm_and_pump(&mut h);
+        pump_poll(&mut h);
 
         assert_eq!(
             focused_cursor_row(&mut h),
@@ -2230,7 +2241,7 @@ mod tests {
         assert_eq!(focused_cursor_row(&mut h), 0, "cursor starts at the top");
 
         h.fake_fs().insert_file(&path, b"a\nb\nCHANGED\nd\n");
-        arm_and_pump(&mut h);
+        pump_poll(&mut h);
 
         assert_eq!(buffer_text(&h, id), "a\nb\nCHANGED\nd\n");
         assert_eq!(
@@ -2253,7 +2264,7 @@ mod tests {
         assert_eq!(focused_cursor_row(&mut h), 0, "cursor starts at the top");
 
         h.fake_fs().insert_file(&path, b"a\nb\nc\nd\n");
-        arm_and_pump(&mut h);
+        pump_poll(&mut h);
 
         assert_eq!(buffer_text(&h, id), "a\nb\nc\nd\n");
         assert_eq!(
@@ -2278,7 +2289,7 @@ mod tests {
         super::ensure_auto_reload_poll(&mut h.stoat);
 
         h.fake_fs().insert_file(&path, b"line1\nline2\n");
-        arm_and_pump(&mut h);
+        pump_poll(&mut h);
 
         assert_eq!(
             buffer_text(&h, id),
@@ -2293,7 +2304,7 @@ mod tests {
         super::ensure_auto_reload_poll(&mut h.stoat);
         assert!(h.stoat.auto_reload_poll.is_some(), "poll armed");
 
-        arm_and_pump(&mut h);
+        pump_poll(&mut h);
 
         assert!(
             h.stoat.auto_reload_poll.is_none(),
@@ -2413,7 +2424,7 @@ mod tests {
         assert!(!is_flagged(&h, id), "the flag is cleared");
         assert_eq!(h.stoat.pending_message.as_deref(), Some("auto-reload off"));
 
-        arm_and_pump(&mut h);
+        pump_poll(&mut h);
         assert!(
             h.stoat.auto_reload_poll.is_none(),
             "the pump drops the poll after the last flag clears"
