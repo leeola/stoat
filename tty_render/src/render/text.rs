@@ -65,7 +65,11 @@ const STYLE_DASHED: u32 = 4;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct TextInstance {
-    /// Top-left of the glyph bitmap in physical pixels.
+    /// Top-left of the glyph bitmap in physical pixels, with the vertical
+    /// measured from the top of [`Self::row`] rather than from the surface.
+    ///
+    /// Split that way so a row that moves up or down the screen leaves every
+    /// glyph it holds untouched, only the row index moving with it.
     pos: [f32; 2],
     /// Glyph bitmap size in physical pixels.
     dim: [f32; 2],
@@ -79,6 +83,13 @@ struct TextInstance {
     /// Declaration-order seq the fragment shader occludes by. Text-run glyphs
     /// carry their run's seq, and every other glyph carries [`UNOCCLUDED_SEQ`].
     seq: u32,
+    /// Grid row [`Self::pos`] is measured from, which the vertex stage scales by
+    /// the cell height to recover the surface position.
+    ///
+    /// Zero for the draws that are not built per row, being the overlays, text
+    /// runs and readouts, whose positions are already absolute and which the
+    /// same arithmetic then leaves alone.
+    row: u32,
 }
 
 /// Per-underlined-cell decoration instance.
@@ -88,12 +99,15 @@ struct TextInstance {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct UnderlineInstance {
-    /// Top-left of the cell in physical pixels.
+    /// Top-left of the cell in physical pixels, with the vertical measured from
+    /// the top of [`Self::row`] rather than from the surface.
     cell_pos: [f32; 2],
     /// Underline color, normalized sRGB.
     color: [f32; 3],
     /// Underline shape: one of the `STYLE_*` constants.
     style: u32,
+    /// Grid row [`Self::cell_pos`] is measured from, as on [`TextInstance`].
+    row: u32,
 }
 
 /// One opaque background rect behind a scaled text run's glyphs. It masks
@@ -541,6 +555,7 @@ impl TextPass {
                         3 => Float32x3,
                         4 => Uint32,
                         5 => Uint32,
+                        6 => Uint32,
                     ],
                 }],
             },
@@ -1276,12 +1291,11 @@ impl TextPass {
         // it scrolled into view. Anything else starts from nothing.
         match rotate_by {
             Some(by) => {
-                let dy = by as f32 * metrics.height;
                 crate::render::rotate_row_cache(&mut glyph_rows, by, |glyph| {
                     glyph.row = glyph.row.saturating_add_signed(-by);
                 });
                 crate::render::rotate_row_cache(&mut underline_rows, by, |underline| {
-                    underline.cell_pos[1] -= dy;
+                    underline.row = underline.row.saturating_add_signed(-by as i32);
                 });
             },
             None => {
@@ -1488,12 +1502,13 @@ impl TextPass {
             };
 
             out.push(TextInstance {
-                pos,
+                pos: [pos[0], pos[1] - glyph.row as f32 * self.metrics.height],
                 dim,
                 uv: info.uv,
                 fg: rgb_f32(glyph.fg),
                 kind: kind_flag(info.kind),
                 seq: UNOCCLUDED_SEQ,
+                row: glyph.row as u32,
             });
         }
     }
@@ -1595,6 +1610,8 @@ impl TextPass {
                     fg: rgb_f32(run.color),
                     kind: kind_flag(info.kind),
                     seq: run.seq,
+                    // A text run is placed absolutely rather than per grid row.
+                    row: 0,
                 });
             }
         }
@@ -1914,6 +1931,8 @@ impl TextPass {
                     fg: READOUT_FG,
                     kind: kind_flag(info.kind),
                     seq: UNOCCLUDED_SEQ,
+                    // A readout is placed absolutely rather than per grid row.
+                    row: 0,
                 });
             }
         }
@@ -2100,24 +2119,24 @@ impl TextPass {
     /// Slide every per-row cache up by `rows` so a scrolled grid keeps the
     /// shaping and rasterizing it already did for rows that only moved.
     ///
-    /// The glyphs carry the row they were shaped for and the built instances
-    /// carry a baked pixel position, so each survivor is corrected for where it
-    /// now sits. Only the rows the scroll exposed are left to rebuild.
+    /// Every cached glyph and built instance names the row it belongs to, so
+    /// each survivor is renumbered for the row it now sits on. Only the rows the
+    /// scroll exposed are left to rebuild.
     fn rotate_row_caches(&mut self, rows: isize) {
         self.rows_shifted = rows != 0;
-        let dy = rows as f32 * self.metrics.height;
+        let renumber = |row: &mut u32| *row = row.saturating_add_signed(-rows as i32);
 
         crate::render::rotate_row_cache(&mut self.glyph_row_cache, rows, |glyph| {
             glyph.row = glyph.row.saturating_add_signed(-rows);
         });
         crate::render::rotate_row_cache(&mut self.plain_row_instances, rows, |instance| {
-            instance.pos[1] -= dy;
+            renumber(&mut instance.row);
         });
         crate::render::rotate_row_cache(&mut self.region_row_instances, rows, |instance| {
-            instance.pos[1] -= dy;
+            renumber(&mut instance.row);
         });
         crate::render::rotate_row_cache(&mut self.underline_row_instances, rows, |instance| {
-            instance.cell_pos[1] -= dy;
+            renumber(&mut instance.row);
         });
     }
 
@@ -2871,6 +2890,7 @@ fn build_underline_pipeline(
                     0 => Float32x2,
                     1 => Float32x3,
                     2 => Uint32,
+                    3 => Uint32,
                 ],
             }],
         },
@@ -3337,9 +3357,10 @@ fn build_underline_row_into(
         };
 
         out.push(UnderlineInstance {
-            cell_pos: [col as f32 * metrics.width, row as f32 * metrics.height],
+            cell_pos: [col as f32 * metrics.width, 0.0],
             color: rgb_f32(cell.underline_color),
             style,
+            row: row as u32,
         });
     }
 }
@@ -3392,6 +3413,38 @@ mod tests {
             "an eviction moves UVs, so undamaged rows must still rebuild"
         );
         assert_eq!(grid_build(false, 8, 7), GridBuild::RebuildAll);
+    }
+
+    /// The vertex stage's half of the split position, mirrored so the round trip
+    /// can be checked without a device.
+    fn shader_pixel_y(pos_y: f32, row: u32, cell_height: f32) -> f32 {
+        pos_y + row as f32 * cell_height
+    }
+
+    /// An instance stores its position measured from the top of its row, and the
+    /// shader puts the row back. What the two halves must add up to is the
+    /// absolute position the builder started from.
+    #[test]
+    fn a_row_relative_position_recombines_to_the_absolute_one() {
+        // The height is fractional on purpose. The builder snaps the cell origin
+        // to whole pixels, so a height that does not divide evenly is where a
+        // mismatched scale between the two halves would show.
+        let metrics = CellMetrics {
+            font_size: 10.0,
+            width: 6.0,
+            height: 12.5,
+        };
+
+        for row in 0..5usize {
+            let absolute = glyph_origin(3, row, [1, 9], 10.0, metrics);
+            let stored = absolute[1] - row as f32 * metrics.height;
+
+            assert_eq!(
+                shader_pixel_y(stored, row as u32, metrics.height),
+                absolute[1],
+                "row {row} must come back where the builder put it",
+            );
+        }
     }
 
     #[test]
@@ -4279,6 +4332,7 @@ mod tests {
             cell_pos: [0.0, 0.0],
             color: [0.0; 3],
             style: STYLE_DOTTED,
+            row: 0,
         };
         // Rows of differing length, so a write placed by summing the rows before it
         // lands somewhere a fixed stride would not.

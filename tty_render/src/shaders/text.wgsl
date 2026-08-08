@@ -84,6 +84,9 @@ fn vs_main(
     @location(3) fg: vec3<f32>,
     @location(4) kind: u32,
     @location(5) seq: u32,
+    // Grid row `pos` is measured from. Zero for the draws whose positions are
+    // already absolute, which leaves the term below at zero for them.
+    @location(6) row: u32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -95,7 +98,8 @@ fn vs_main(
     );
     let corner = corners[vertex_index];
 
-    let pixel = pos + corner * dim + vec2<f32>(0.0, globals.scroll_y);
+    let row_y = f32(row) * globals.cell_size.y;
+    let pixel = pos + corner * dim + vec2<f32>(0.0, row_y + globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0
@@ -157,6 +161,8 @@ fn vs_underline(
     @location(0) cell_pos: vec2<f32>,
     @location(1) color: vec3<f32>,
     @location(2) style: u32,
+    // Grid row `cell_pos` is measured from, as in `vs_main`.
+    @location(3) row: u32,
 ) -> UnderlineVsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -168,7 +174,9 @@ fn vs_underline(
     );
     let corner = corners[vertex_index];
 
-    let pixel = cell_pos + corner * globals.cell_size + vec2<f32>(0.0, globals.scroll_y);
+    let row_y = f32(row) * globals.cell_size.y;
+    let pixel = cell_pos + corner * globals.cell_size
+        + vec2<f32>(0.0, row_y + globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0
