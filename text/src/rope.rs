@@ -248,7 +248,23 @@ impl Chunk {
     /// which is what makes the answer a column the rope can actually address.
     fn clip_point_utf16(&self, point: PointUtf16, bias: Bias) -> PointUtf16 {
         let row = self.offset_range_for_row(point.row);
-        let bytes = self.advance_utf16(row.start, point.column as usize, row.end);
+        let mut bytes = self.advance_utf16(row.start, point.column as usize, row.end);
+
+        // A column landing inside a character comes back rounded up to its end,
+        // so what reaches `clip_point` below is already a boundary and the bias
+        // has nothing left to decide. Consuming more code units than the column
+        // asked for is how that shows. Left has to answer with the character's
+        // start instead, since a Left clip that moves rightward would put an
+        // LSP position a whole character past the one it named.
+        if matches!(bias, Bias::Left)
+            && bits_in(self.chars_utf16, row.start..bytes).count_ones() > point.column
+        {
+            let starts = bits_in(self.chars, row.start..bytes);
+            if starts != 0 {
+                bytes = row.start + (Bitmap::BITS - 1 - starts.leading_zeros()) as usize;
+            }
+        }
+
         let clipped = self.clip_point(Point::new(point.row, (bytes - row.start) as u32), bias);
 
         let end = row.start + clipped.column as usize;
@@ -2912,6 +2928,53 @@ mod tests {
         assert_eq!(clipped, PointUtf16::new(0, 1));
     }
 
+    /// A column naming the second half of a surrogate pair resolves to whichever
+    /// end of that character the bias asks for.
+    ///
+    /// A UTF-16 column can land inside a character the rope cannot address
+    /// there, and the bias is the caller saying which way to leave it. Left has
+    /// to go left. An LSP position on a surrogate half is clipped Left, so
+    /// answering with the character's end puts the caller a whole character
+    /// past what they named.
+    #[test]
+    fn a_left_clip_of_a_surrogate_half_lands_on_the_character_start() {
+        let rope = Rope::from("\u{1d11e}");
+        assert_eq!(
+            rope.clip_point_utf16(PointUtf16::new(0, 1), Bias::Left),
+            PointUtf16::new(0, 0),
+            "left of the pair's second unit is the character's start",
+        );
+        assert_eq!(
+            rope.clip_point_utf16(PointUtf16::new(0, 1), Bias::Right),
+            PointUtf16::new(0, 2),
+            "right of it is the character's end",
+        );
+        assert_eq!(
+            rope.clip_point_utf16(PointUtf16::new(0, 3), Bias::Right),
+            PointUtf16::new(0, 2),
+            "a column past the row clamps to its end either way",
+        );
+    }
+
+    /// The same rule on a row the chunk does not start at, so the clip is
+    /// measured from the row's own start rather than the chunk's.
+    #[test]
+    fn a_left_clip_of_a_surrogate_half_holds_on_a_later_row() {
+        let rope = Rope::from("x\n\u{1d11e}\u{1d11e}\ny");
+        for (column, left, right) in [(1u32, 0u32, 2u32), (3, 2, 4)] {
+            assert_eq!(
+                rope.clip_point_utf16(PointUtf16::new(1, column), Bias::Left),
+                PointUtf16::new(1, left),
+                "left clip of column {column}",
+            );
+            assert_eq!(
+                rope.clip_point_utf16(PointUtf16::new(1, column), Bias::Right),
+                PointUtf16::new(1, right),
+                "right clip of column {column}",
+            );
+        }
+    }
+
     #[test]
     fn cursor_summary_single_chunk() {
         let rope = Rope::from("hello");
@@ -3878,6 +3941,11 @@ mod clip_reference {
     /// Columns are counted in UTF-16 code units, so the clip converts into
     /// bytes, clips there, and converts back the way the rope's composition of
     /// the three conversions does.
+    ///
+    /// A column can name the second unit of a surrogate pair, which is not a
+    /// position the rope can address. The bias decides which end of that
+    /// character to answer with, so this walk has to honour it rather than
+    /// always running the character to completion.
     fn clip_point_utf16(text: &str, point: PointUtf16, bias: Bias) -> PointUtf16 {
         let rows = text.matches('\n').count() as u32;
         let row = point.row.min(rows);
@@ -3890,8 +3958,15 @@ mod clip_reference {
             if utf16 >= point.column {
                 break;
             }
+            let char_start = bytes;
             utf16 += ch.len_utf16() as u32;
             bytes += ch.len_utf8();
+            if utf16 > point.column {
+                if matches!(bias, Bias::Left) {
+                    bytes = char_start;
+                }
+                break;
+            }
         }
         let byte_column = if point.row > rows { line.len() } else { bytes };
 
