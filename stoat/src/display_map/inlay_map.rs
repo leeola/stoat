@@ -1019,8 +1019,15 @@ impl InlaySnapshot {
         }
     }
 
+    /// Output offset where inlay row `row` begins.
+    ///
+    /// A hint carrying a newline starts a row inside its own text, so this
+    /// reaches into the hint rather than answering the position it occupies as
+    /// a whole. [`Self::inlay_point_to_offset`] treats a hint as one
+    /// indivisible position and would collapse such a row onto the hint's
+    /// start, which is a lower offset than the row it was asked about.
     pub fn inlay_offset_at_row(&self, row: u32) -> InlayOffset {
-        self.inlay_point_to_offset(InlayPoint::new(row, 0))
+        InlayOffset(self.row_start_offset(row))
     }
 
     pub fn inlay_point_cursor(&self) -> InlayPointCursor<'_> {
@@ -1161,11 +1168,15 @@ impl<'a> InlayChunksInner<'a> {
                 Transform::Inlay(inlay) => {
                     let inlay_text: &'a str = inlay.text.as_ref();
                     let kind = inlay.kind;
-                    let trans_end = trans_end_inlay;
+                    // A hint carrying a newline holds more than one row, so a
+                    // request for part of it has to be cut down to the part
+                    // asked for, exactly as the isomorphic arm cuts the buffer.
+                    let local_start = self.offset.0.max(trans_start_inlay.0) - trans_start_inlay.0;
+                    let local_end = self.end.0.min(trans_end_inlay.0) - trans_start_inlay.0;
                     self.cursor.next();
-                    self.offset = trans_end;
+                    self.offset = InlayOffset(trans_start_inlay.0 + local_end);
                     return Some(Chunk {
-                        text: Cow::Borrowed(inlay_text),
+                        text: Cow::Borrowed(&inlay_text[local_start..local_end]),
                         is_inlay: true,
                         inlay_kind: Some(kind),
                         highlight_style: None,

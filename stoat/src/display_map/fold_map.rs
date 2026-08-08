@@ -1536,8 +1536,12 @@ impl FoldSnapshot {
                 transform.placeholder_text.is_none(),
                 "a column-0 fold point with row overshoot cannot fall inside a placeholder",
             );
-            let inlay_point = InlayPoint(start.1.input.lines + overshoot);
-            offset += self.inlay_snapshot.inlay_point_to_offset(inlay_point).0 - start.1.input.len;
+            // A row overshoot lands on column 0, so the inlay position wanted is
+            // a row start. Asking for it by row is what reaches inside a hint
+            // carrying a newline, where converting the point would collapse onto
+            // the hint's own start instead.
+            let inlay_row = (start.1.input.lines + overshoot).row;
+            offset += self.inlay_snapshot.inlay_offset_at_row(inlay_row).0 - start.1.input.len;
         }
         FoldOffset(offset)
     }
@@ -2167,6 +2171,60 @@ mod tests {
             new_len,
             "the transform tree covers the full new text",
         );
+    }
+
+    /// A hint carrying newlines starts rows inside its own text, and a row
+    /// beginning there is a real place in the painted output. Reading it as the
+    /// position the hint occupies as a whole puts the row start at the hint's
+    /// own offset, which is lower, and every row from there on measures and
+    /// paints a span running through the newlines that should have ended it.
+    ///
+    /// The oracle is the painted text itself rather than a walk over
+    /// `fold_line_chars`, which reads the same row starts and would agree with
+    /// them however wrong they are.
+    #[test]
+    fn a_row_starting_inside_a_multi_line_hint_spans_only_itself() {
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "abcdefgh\n",
+        )));
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi.snapshot();
+
+        let (mut inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot);
+        inlay_map.splice(
+            &buffer_snapshot,
+            Vec::new(),
+            vec![(
+                buffer_snapshot.anchor_at(2, Bias::Right),
+                "\nhint\n".to_string(),
+                InlayKind::Hint,
+            )],
+        );
+        fold_map.fold(
+            vec![
+                buffer_snapshot.anchor_at(4, Bias::Right)..buffer_snapshot.anchor_at(6, Bias::Left),
+            ],
+            FoldPlaceholder::default(),
+            &buffer_snapshot,
+        );
+        let (inlay_snap, inlay_edits) = inlay_map.sync(buffer_snapshot, &Patch::empty());
+        let (snap, _) = fold_map.sync(inlay_snap, &inlay_edits, None);
+
+        let painted: String = snap
+            .chunks(FoldOffset(0)..snap.len(), Arc::from(Vec::new()))
+            .map(|chunk| chunk.text.to_string())
+            .collect();
+        let rows: Vec<&str> = painted.split('\n').collect();
+
+        assert_eq!(rows, ["ab", "hint", "cd...gh", ""], "the painted rows");
+        assert_eq!(snap.line_count() as usize, rows.len(), "row count");
+        for (row, want) in rows.iter().enumerate() {
+            let row = row as u32;
+            assert_eq!(&snap.fold_line(row), want, "row {row} characters");
+            assert_eq!(snap.line_len(row), want.len() as u32, "row {row} length");
+        }
     }
 
     #[test]
