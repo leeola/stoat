@@ -750,7 +750,12 @@ fn compute_wrap_columns(
 
         if ch == ' ' || ch == '\t' || ch == '-' {
             last_break_candidate = Some(expanded_col + char_width);
-        } else if char_width >= 2 {
+        }
+        // Separate from the test above rather than chained onto it. A tab is at
+        // once a place a reader would break and a span too wide to split, so it
+        // needs the escape as well as the candidate. The column after a tab can
+        // lie past the pane, and then only the escape is reachable.
+        if char_width >= 2 {
             // CJK and other wide characters can break at any boundary, so one
             // that would overrun the row can start the next instead of being
             // split down the middle. Recorded before the character rather than
@@ -772,12 +777,14 @@ fn compute_wrap_columns(
         let segment_start = *breaks.last().expect("breaks starts with [0]");
         if expanded_col - segment_start >= budget {
             // A word boundary is where a reader would break, so it wins
-            // whenever there is one. Failing that, a character ending exactly
-            // on the budget fills the row rather than overrunning it and keeps
-            // its place, and only one that would overrun falls back to starting
-            // the next row.
+            // whenever there is one that fits. A candidate past the budget is
+            // not one, since breaking there would leave cells on a row too
+            // narrow to show them. Failing that, a character ending exactly on
+            // the budget fills the row rather than overrunning it and keeps its
+            // place, and only one that would overrun falls back to starting the
+            // next row.
             let break_at = match last_break_candidate {
-                Some(b) if b > segment_start => b,
+                Some(b) if b > segment_start && b <= segment_start + budget => b,
                 _ if expanded_col - segment_start == budget => expanded_col,
                 _ => match wide_escape {
                     Some(b) if b > segment_start => b,
@@ -1689,6 +1696,37 @@ mod tests {
         assert_eq!(snap.line_count(), 2);
         assert_eq!(snap.line_len(0), 4);
         assert_eq!(snap.line_len(1), 1);
+    }
+
+    /// A tab that would run past the pane starts the next row rather than
+    /// hanging off the end of this one.
+    ///
+    /// A tab expands to the next stop, so it is one indivisible run of cells
+    /// whose end has nothing to do with the pane width. Breaking after it puts
+    /// cells on a row too narrow to show them, where a caret is never painted.
+    #[test]
+    fn a_tab_that_would_overrun_the_width_starts_the_next_row() {
+        // The tab starts at column 5 and runs to 8 on a six-column pane.
+        let snap = make_snapshot("abcde\tZ", Some(6));
+        let widths: Vec<u32> = (0..snap.line_count()).map(|r| snap.line_len(r)).collect();
+        assert_eq!(
+            widths,
+            [5, 4],
+            "the tab moves down whole, and no row is wider than the pane",
+        );
+    }
+
+    /// A tab ending exactly on the width fills its row rather than moving down.
+    ///
+    /// The escape only applies to a tab that does not fit, so the boundary
+    /// between the two is worth stating. One cell narrower and this same tab
+    /// overruns and moves down instead.
+    #[test]
+    fn a_tab_filling_the_width_exactly_stays_on_the_row() {
+        // The tab starts at column 5 and runs to 8, which is the whole pane.
+        let snap = make_snapshot("abcde\tZ", Some(8));
+        let widths: Vec<u32> = (0..snap.line_count()).map(|r| snap.line_len(r)).collect();
+        assert_eq!(widths, [8, 1], "the tab fills the row it started on");
     }
 
     /// A combining mark landing on the wrap break rides with its base
