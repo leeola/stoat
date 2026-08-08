@@ -115,10 +115,125 @@ pub(crate) fn update_manifest_entry(
     write_manifest(index_dir, &manifest, fs)
 }
 
+/// One file's change to the manifest, as collected before being applied.
+///
+/// Exists so a drain's worth of changes can be applied together. Ordering is
+/// significant, a path being set and then removed within one batch having to
+/// end removed.
+pub(crate) enum ManifestEdit {
+    Set {
+        rel_path: String,
+        content_hash: [u8; 32],
+    },
+    Remove {
+        rel_path: String,
+    },
+}
+
+/// Apply `edits` to the manifest under `index_dir` in order, in one pass.
+///
+/// Equivalent to calling [`update_manifest_entry`] and [`remove_manifest_entry`]
+/// for each edit in turn, but reading and writing the manifest once rather than
+/// once per edit. A checkout touching N files costs one manifest cycle here and
+/// N through the single-entry calls.
+///
+/// Starts from an empty manifest when none exists yet, and re-stamps the current
+/// schema version. An empty `edits` writes nothing.
+pub(crate) fn update_manifest_entries(
+    index_dir: &Path,
+    edits: &[ManifestEdit],
+    fs: &dyn FsHost,
+) -> io::Result<()> {
+    if edits.is_empty() {
+        return Ok(());
+    }
+
+    let manifest = read_manifest(index_dir, fs).unwrap_or_else(|_| Manifest {
+        schema_version: SCHEMA_VERSION,
+        files: Vec::new(),
+    });
+    write_manifest(index_dir, &apply_edits(manifest, edits), fs)
+}
+
+/// Fold `edits` into `manifest` in order, re-stamping the current schema
+/// version.
+fn apply_edits(mut manifest: Manifest, edits: &[ManifestEdit]) -> Manifest {
+    manifest.schema_version = SCHEMA_VERSION;
+    for edit in edits {
+        match edit {
+            ManifestEdit::Set {
+                rel_path,
+                content_hash,
+            } => {
+                manifest.files.retain(|entry| &entry.rel_path != rel_path);
+                manifest.files.push(FileEntry {
+                    rel_path: rel_path.clone(),
+                    content_hash: *content_hash,
+                });
+            },
+            ManifestEdit::Remove { rel_path } => {
+                manifest.files.retain(|entry| &entry.rel_path != rel_path);
+            },
+        }
+    }
+    manifest
+}
+
+/// One index directory's worth of disk work, as gathered over a drain.
+///
+/// The event loop collects these while merging updates into the graph and hands
+/// the lot to a blocking thread, so a drain covering hundreds of files performs
+/// no writes itself.
+#[derive(Default)]
+pub(crate) struct IndexWrites {
+    pub(crate) shards: Vec<(String, Vec<u8>)>,
+    pub(crate) deleted_shards: Vec<String>,
+    /// A finished build's manifest, which supersedes what is on disk rather than
+    /// editing it, and licenses a prune of the shards it does not name.
+    pub(crate) completed: Option<Manifest>,
+    pub(crate) manifest_edits: Vec<ManifestEdit>,
+}
+
+/// Perform `writes` against the index under `index_dir`.
+///
+/// Shards land first, then the manifest is brought up to date in a single read
+/// and write. A completed build's manifest is the base the edits apply over, so
+/// a reindex that arrived in the same drain is not lost to the build's older
+/// view of the tree.
+///
+/// Individual shard failures are skipped rather than aborting the rest, a
+/// missing shard costing a re-extract on the next build. Returns the number of
+/// stale shards pruned.
+pub(crate) fn apply_index_writes(
+    index_dir: &Path,
+    writes: IndexWrites,
+    fs: &dyn FsHost,
+) -> io::Result<usize> {
+    for (rel_path, bytes) in &writes.shards {
+        let _ = write_shard(index_dir, rel_path, bytes, fs);
+    }
+    for rel_path in &writes.deleted_shards {
+        let _ = delete_shard(index_dir, rel_path, fs);
+    }
+
+    let Some(built) = writes.completed else {
+        update_manifest_entries(index_dir, &writes.manifest_edits, fs)?;
+        return Ok(0);
+    };
+
+    let manifest = apply_edits(built, &writes.manifest_edits);
+    write_manifest(index_dir, &manifest, fs)?;
+    prune_shards(index_dir, &manifest, fs)
+}
+
 /// Drop the manifest entry for `rel_path`, preserving the rest.
 ///
-/// A no-op when no manifest exists. Used when a file is removed so its
-/// stale entry does not survive into the next load.
+/// A no-op when no manifest exists.
+///
+/// Kept only as the reference a batched [`ManifestEdit::Remove`] is measured
+/// against. The drain that once removed entries one at a time now batches them,
+/// and the comparison is only worth making against the straightforward version.
+#[cfg(test)]
 pub(crate) fn remove_manifest_entry(
     index_dir: &Path,
     rel_path: &str,
@@ -180,7 +295,8 @@ fn read_bytes(path: &Path, fs: &dyn FsHost) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        prune_shards, read_manifest, read_shard, update_manifest_entry, write_manifest, write_shard,
+        prune_shards, read_manifest, read_shard, remove_manifest_entry, update_manifest_entries,
+        update_manifest_entry, write_manifest, write_shard, ManifestEdit,
     };
     use crate::{buffer_registry::fingerprint_bytes, host::FakeFs};
     use codegraph::{FileEntry, Manifest, SCHEMA_VERSION};
@@ -249,6 +365,98 @@ mod tests {
                     content_hash: [2u8; 32],
                 },
             ]
+        );
+    }
+
+    /// The batch exists only to spare N read-write cycles, so what it leaves on
+    /// disk has to be what the single-entry calls would have left.
+    ///
+    /// The sequence sets a path twice, sets one it later removes, and removes
+    /// one that was never there, because those are the orderings a drain
+    /// covering a checkout actually produces and the ones a batch that merged
+    /// its edits into a set would get wrong.
+    #[test]
+    fn a_batch_of_edits_lands_where_the_same_edits_one_at_a_time_would() {
+        let edits = vec![
+            ManifestEdit::Set {
+                rel_path: "a.rs".to_string(),
+                content_hash: [1u8; 32],
+            },
+            ManifestEdit::Set {
+                rel_path: "b.rs".to_string(),
+                content_hash: [2u8; 32],
+            },
+            ManifestEdit::Set {
+                rel_path: "a.rs".to_string(),
+                content_hash: [9u8; 32],
+            },
+            ManifestEdit::Remove {
+                rel_path: "b.rs".to_string(),
+            },
+            ManifestEdit::Remove {
+                rel_path: "never.rs".to_string(),
+            },
+            ManifestEdit::Set {
+                rel_path: "c.rs".to_string(),
+                content_hash: [3u8; 32],
+            },
+        ];
+
+        let batched = FakeFs::new();
+        update_manifest_entries(Path::new("/idx"), &edits, &batched).unwrap();
+
+        let one_at_a_time = FakeFs::new();
+        for edit in &edits {
+            match edit {
+                ManifestEdit::Set {
+                    rel_path,
+                    content_hash,
+                } => update_manifest_entry(
+                    Path::new("/idx"),
+                    rel_path,
+                    *content_hash,
+                    &one_at_a_time,
+                )
+                .unwrap(),
+                ManifestEdit::Remove { rel_path } => {
+                    remove_manifest_entry(Path::new("/idx"), rel_path, &one_at_a_time).unwrap()
+                },
+            }
+        }
+
+        let sorted = |fs: &FakeFs| {
+            let mut files = read_manifest(Path::new("/idx"), fs).unwrap().files;
+            files.sort_by(|x, y| x.rel_path.cmp(&y.rel_path));
+            files
+        };
+        assert_eq!(
+            sorted(&batched),
+            vec![
+                FileEntry {
+                    rel_path: "a.rs".to_string(),
+                    content_hash: [9u8; 32],
+                },
+                FileEntry {
+                    rel_path: "c.rs".to_string(),
+                    content_hash: [3u8; 32],
+                },
+            ],
+            "the later set wins and the removed path is gone",
+        );
+        assert_eq!(
+            sorted(&batched),
+            sorted(&one_at_a_time),
+            "which is exactly where the single-entry calls land",
+        );
+    }
+
+    #[test]
+    fn an_empty_batch_leaves_no_manifest_behind() {
+        let fs = FakeFs::new();
+        update_manifest_entries(Path::new("/idx"), &[], &fs).unwrap();
+        assert!(
+            read_manifest(Path::new("/idx"), &fs).is_err(),
+            "a drain that changed nothing writes nothing",
         );
     }
 

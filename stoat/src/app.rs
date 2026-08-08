@@ -4,7 +4,10 @@ use crate::{
     agent_status::AgentStatus,
     badge::BadgeTray,
     buffer::{BufferId, TextBufferSnapshot},
-    code_index::build::IndexUpdate,
+    code_index::{
+        build::IndexUpdate,
+        store::{IndexWrites, ManifestEdit},
+    },
     command_palette::CommandPalette,
     display_map::{
         highlights::{
@@ -3204,12 +3207,38 @@ impl Stoat {
         crate::code_index::store::index_dir_for(git_root, self.fs_host.as_ref()).ok()
     }
 
+    /// A workspace's index directory, resolved once per drain.
+    ///
+    /// Resolution canonicalizes the git root, so a drain touching hundreds of
+    /// files would otherwise repeat that syscall per update. `memo` carries the
+    /// answers, `None` meaning this workspace persists nothing.
+    fn index_dir_for_workspace(
+        &self,
+        workspace: WorkspaceId,
+        memo: &mut std::collections::HashMap<WorkspaceId, Option<PathBuf>>,
+    ) -> Option<PathBuf> {
+        if let Some(dir) = memo.get(&workspace) {
+            return dir.clone();
+        }
+        let dir = self
+            .workspaces
+            .get(workspace)
+            .map(|ws| ws.git_root.clone())
+            .and_then(|git_root| self.index_dir_for_build(&git_root));
+        memo.insert(workspace, dir.clone());
+        dir
+    }
+
     /// Merge pending index updates into their workspace graphs.
     ///
-    /// Each shard is inserted and, in non-test runs, written to disk. Reindex
-    /// and remove updates apply without re-resolving inline. Every touched
-    /// workspace has its cross-file references re-resolved once after the
-    /// drain, so N queued updates cost one graph sweep rather than N.
+    /// Reindex and remove updates apply without re-resolving inline. Every
+    /// touched workspace has its cross-file references re-resolved once after
+    /// the drain, so N queued updates cost one graph sweep rather than N.
+    ///
+    /// Nothing here touches the disk. Shards to write, shards to delete and
+    /// manifest edits are gathered as the updates are merged, then handed to a
+    /// blocking thread once, which is what keeps a drain covering a whole
+    /// checkout from performing a write per file between two frames.
     ///
     /// At most [`INDEX_DRAIN_CAP`] updates are processed per call. On hitting
     /// the cap the drain schedules a redraw and returns, leaving the remainder
@@ -3221,6 +3250,10 @@ impl Stoat {
         let mut completed: std::collections::HashSet<WorkspaceId> =
             std::collections::HashSet::new();
         let mut drained: usize = 0;
+        let mut dirs: std::collections::HashMap<WorkspaceId, Option<PathBuf>> =
+            std::collections::HashMap::new();
+        let mut writes: std::collections::HashMap<PathBuf, IndexWrites> =
+            std::collections::HashMap::new();
         while let Ok(update) = self.index_update_rx.try_recv() {
             drained += 1;
             match update {
@@ -3245,32 +3278,8 @@ impl Stoat {
                 } => {
                     resolve_pending.insert(workspace);
                     completed.insert(workspace);
-                    if !self.persistence_disabled {
-                        let git_root = self.workspaces.get(workspace).map(|ws| ws.git_root.clone());
-                        if let Some(git_root) = git_root
-                            && let Ok(dir) = crate::code_index::store::index_dir_for(
-                                &git_root,
-                                self.fs_host.as_ref(),
-                            )
-                        {
-                            let _ = crate::code_index::store::write_manifest(
-                                &dir,
-                                &manifest,
-                                self.fs_host.as_ref(),
-                            );
-                            if let Ok(pruned) = crate::code_index::store::prune_shards(
-                                &dir,
-                                &manifest,
-                                self.fs_host.as_ref(),
-                            ) && pruned > 0
-                            {
-                                tracing::info!(
-                                    target: "stoat::app",
-                                    pruned,
-                                    "pruned stale index shards",
-                                );
-                            }
-                        }
+                    if let Some(dir) = self.index_dir_for_workspace(workspace, &mut dirs) {
+                        writes.entry(dir).or_default().completed = Some(manifest);
                     }
                 },
                 IndexUpdate::Reindex {
@@ -3289,26 +3298,15 @@ impl Stoat {
                     ws.file_paths.insert(file, PathBuf::from(&rel_path));
                     ws.index_generation += 1;
                     resolve_pending.insert(workspace);
-                    let git_root = ws.git_root.clone();
                     if let Some((bytes, content_hash)) = to_persist
-                        && !self.persistence_disabled
-                        && let Ok(dir) = crate::code_index::store::index_dir_for(
-                            &git_root,
-                            self.fs_host.as_ref(),
-                        )
+                        && let Some(dir) = self.index_dir_for_workspace(workspace, &mut dirs)
                     {
-                        let _ = crate::code_index::store::write_shard(
-                            &dir,
-                            &rel_path,
-                            &bytes,
-                            self.fs_host.as_ref(),
-                        );
-                        let _ = crate::code_index::store::update_manifest_entry(
-                            &dir,
-                            &rel_path,
+                        let entry = writes.entry(dir).or_default();
+                        entry.shards.push((rel_path.clone(), bytes));
+                        entry.manifest_edits.push(ManifestEdit::Set {
+                            rel_path,
                             content_hash,
-                            self.fs_host.as_ref(),
-                        );
+                        });
                     }
                 },
                 IndexUpdate::Remove {
@@ -3323,23 +3321,10 @@ impl Stoat {
                     ws.file_paths.remove(&file);
                     ws.index_generation += 1;
                     resolve_pending.insert(workspace);
-                    let git_root = ws.git_root.clone();
-                    if !self.persistence_disabled
-                        && let Ok(dir) = crate::code_index::store::index_dir_for(
-                            &git_root,
-                            self.fs_host.as_ref(),
-                        )
-                    {
-                        let _ = crate::code_index::store::delete_shard(
-                            &dir,
-                            &rel_path,
-                            self.fs_host.as_ref(),
-                        );
-                        let _ = crate::code_index::store::remove_manifest_entry(
-                            &dir,
-                            &rel_path,
-                            self.fs_host.as_ref(),
-                        );
+                    if let Some(dir) = self.index_dir_for_workspace(workspace, &mut dirs) {
+                        let entry = writes.entry(dir).or_default();
+                        entry.deleted_shards.push(rel_path.clone());
+                        entry.manifest_edits.push(ManifestEdit::Remove { rel_path });
                     }
                 },
             }
@@ -3348,6 +3333,31 @@ impl Stoat {
                 self.redraw_notify.notify_one();
                 break;
             }
+        }
+
+        if !writes.is_empty() {
+            let fs = self.fs_host.clone();
+            self.executor
+                .spawn_blocking(move || {
+                    for (dir, batch) in writes {
+                        match crate::code_index::store::apply_index_writes(&dir, batch, fs.as_ref())
+                        {
+                            Ok(pruned) if pruned > 0 => tracing::info!(
+                                target: "stoat::app",
+                                pruned,
+                                "pruned stale index shards",
+                            ),
+                            Ok(_) => {},
+                            Err(err) => tracing::warn!(
+                                target: "stoat::app",
+                                %err,
+                                dir = %dir.display(),
+                                "index writes failed",
+                            ),
+                        }
+                    }
+                })
+                .detach();
         }
 
         for workspace in resolve_pending {
