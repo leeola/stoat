@@ -49,7 +49,7 @@ use stoat_language::{
     extract_highlights, parse, structural_diff, HighlightSpan, Language, LanguageRegistry, Tree,
 };
 use stoat_scheduler::{Executor, Task};
-use stoat_text::{Point, Rope};
+use stoat_text::Rope;
 use tokio::sync::{
     mpsc::{self, UnboundedReceiver, UnboundedSender},
     oneshot, Notify,
@@ -1576,29 +1576,31 @@ fn bucket_base_highlights(
 /// Hunk line ranges are converted to byte ranges in the working-tree text
 /// so a symbol's byte def-range can be tested for overlap directly.
 ///
+/// A deletion has no working-tree lines of its own, so it yields an empty range
+/// at the seam it was removed from. That range is kept rather than dropped. The
+/// overlap test the caller applies treats it as a point, which is how a
+/// deletion marks the symbol it was cut out of.
+///
 /// Uses the line diff rather than the language-aware structural diff. The only
 /// consumer tests whole-line overlap, and treating moved code as a delete plus
 /// an add yields the same or a strictly larger changed set for that test, at a
 /// fraction of the cost.
 fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
     let result = structural_diff::diff(&input.base_text, &input.buffer_text);
-    let diff_map =
-        DiffMap::from_structural_changes(result, input.base_text.clone(), &input.buffer_text);
-    let rope = Rope::from(input.buffer_text.as_str());
-    diff_map
-        .hunks_in_range(0..u32::MAX)
-        .into_iter()
+    let hunks = changes_to_hunks(&result.changes, &input.base_text, &input.buffer_text);
+    let starts = line_starts(&input.buffer_text);
+
+    let offset_of_row = |row: u32| {
+        starts
+            .get(row as usize)
+            .copied()
+            .unwrap_or(input.buffer_text.len())
+    };
+
+    hunks
+        .iter()
         .map(|hunk| {
-            let lines = &hunk.buffer_line_range;
-            let start = rope.point_to_offset(Point {
-                row: lines.start,
-                column: 0,
-            });
-            let end = rope.point_to_offset(Point {
-                row: lines.end,
-                column: 0,
-            });
-            start..end
+            offset_of_row(hunk.buffer_line_range.start)..offset_of_row(hunk.buffer_line_range.end)
         })
         .collect()
 }
@@ -1832,6 +1834,37 @@ mod tests {
     #[test]
     fn changed_byte_ranges_empty_when_identical() {
         assert!(changed_byte_ranges(&input("fn foo() {}\n", "fn foo() {}\n")).is_empty());
+    }
+
+    /// Every hunk becomes one working-tree byte range, deletions included.
+    ///
+    /// A deletion has no working-tree lines of its own, so it lands as an empty
+    /// range at the seam it was cut from, wherever that seam falls. The range
+    /// is kept rather than dropped. The caller's overlap test reads an empty
+    /// range as a point, so a symbol spanning the seam still reports changed,
+    /// which is the whole signal a deletion has to give.
+    ///
+    /// The last case has no closing newline, so its range ends at the text's
+    /// end rather than at a line start the table does not hold.
+    ///
+    /// Compared as pairs because an expected `[2..2]` reads to the compiler as
+    /// a range that might have meant a repeat count.
+    #[test]
+    fn changed_byte_ranges_converts_every_hunk_including_deletion_seams() {
+        let cases = [
+            ("a\nb\nc\n", "a\nc\n", vec![(2, 2)]),
+            ("a\nb\nc\n", "b\nc\n", vec![(0, 0)]),
+            ("a\nb\nc\nd\n", "a\nc\nd\ne\n", vec![(2, 2), (6, 8)]),
+            ("a\nb", "a\nc", vec![(2, 3)]),
+        ];
+
+        for (base, buffer, expected) in cases {
+            let got: Vec<(usize, usize)> = changed_byte_ranges(&input(base, buffer))
+                .into_iter()
+                .map(|r| (r.start, r.end))
+                .collect();
+            assert_eq!(got, expected, "{base:?} -> {buffer:?}");
+        }
     }
 
     #[test]
