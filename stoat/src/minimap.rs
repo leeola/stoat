@@ -1074,6 +1074,20 @@ mod tests {
         }
     }
 
+    /// An edge source that fails on any use, so a pass that must consult none
+    /// is pinned by whether it runs at all rather than by a count.
+    struct UnusedEdges;
+
+    impl EdgeSource for UnusedEdges {
+        fn edge_of(&self, row: u32) -> Option<u8> {
+            panic!("row {row} was asked about");
+        }
+
+        fn marked_rows(&self, rows: Range<u32>) -> Vec<u32> {
+            panic!("rows {rows:?} were asked about");
+        }
+    }
+
     /// A bump carrying no row information, so the sweep covers every built row.
     /// Moving `syntax_other` in step with `syntax` is what makes it one.
     fn versions(decoration: u64, syntax: u64) -> SyncVersions {
@@ -2348,6 +2362,39 @@ mod tests {
 
         assert_eq!(fetches.get(), 0, "no mark moved, so no tokens are resolved");
         assert!(content.take_queued().is_empty());
+    }
+
+    /// Every branch that reads the marks is gated, and the caller resolves its
+    /// diff hunks on the first row asked about. A branch that reached for a
+    /// mark unconditionally would put that resolve back on every frame while
+    /// changing nothing it emits, so the silence is what has to be pinned.
+    #[test]
+    fn a_sync_with_nothing_to_do_consults_no_edge_source() {
+        let text = rope("alpha\nbravo\ncharlie");
+        let mut content = MinimapContent::new(1);
+        content.sync(
+            &text,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
+        let _ = content.take_queued();
+
+        content.sync(
+            &text,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            UnusedEdges,
+        );
+
+        assert!(
+            content.take_queued().is_empty(),
+            "nothing moved, so nothing splices"
+        );
     }
 
     #[test]

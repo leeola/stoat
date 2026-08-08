@@ -56,6 +56,7 @@ use ratatui::{
 use slotmap::SlotMap;
 use std::{
     borrow::Cow,
+    cell::OnceCell,
     collections::hash_map::DefaultHasher,
     ffi::OsStr,
     hash::{Hash, Hasher},
@@ -8568,9 +8569,8 @@ impl Stoat {
             minimap_line_tokens(&snapshot, buffer_id, syntax_on, class_table, rows)
         };
         let marks = MinimapEdges {
-            diff: snapshot
-                .diff_map()
-                .map(|diff| diff.live_hunks(snapshot.buffer_snapshot())),
+            snapshot: &snapshot,
+            diff: OnceCell::new(),
             severity_map: &severity_map,
             class_table,
         };
@@ -10239,16 +10239,36 @@ fn minimap_line_tokens(
 /// by row, so which rows are markable at all comes out of one ordered walk
 /// rather than a seek per line of the file.
 struct MinimapEdges<'a> {
-    /// Where the hunks sit now. Resolved once for the pass, since `edge_of`
-    /// runs per row and the diff job's own rows are already behind.
-    diff: Option<crate::diff_map::LiveHunks<'a>>,
+    snapshot: &'a DisplaySnapshot,
+    /// Where the hunks sit now, resolved on the first row asked for rather than
+    /// at construction.
+    ///
+    /// Every branch of a strip sync is gated, and a strip whose buffer, marks
+    /// and colors all held still since the last frame takes none of them, so
+    /// most frames ask nothing. The resolve is an ordered walk of the buffer's
+    /// fragments, which is far too much to spend on a question that is usually
+    /// not put. Held once for the pass, since `edge_of` runs per row and the
+    /// diff job's own rows are already behind.
+    diff: OnceCell<Option<crate::diff_map::LiveHunks<'a>>>,
     severity_map: &'a std::collections::BTreeMap<u32, lsp_types::DiagnosticSeverity>,
     class_table: &'a crate::minimap::ClassTable,
 }
 
+impl<'a> MinimapEdges<'a> {
+    fn live_hunks(&self) -> Option<&crate::diff_map::LiveHunks<'a>> {
+        self.diff
+            .get_or_init(|| {
+                self.snapshot
+                    .diff_map()
+                    .map(|diff| diff.live_hunks(self.snapshot.buffer_snapshot()))
+            })
+            .as_ref()
+    }
+}
+
 impl EdgeSource for MinimapEdges<'_> {
     fn edge_of(&self, row: u32) -> Option<u8> {
-        minimap_edge_class(self.diff.as_ref(), self.severity_map, self.class_table, row)
+        minimap_edge_class(self.live_hunks(), self.severity_map, self.class_table, row)
     }
 
     fn marked_rows(&self, rows: Range<u32>) -> Vec<u32> {
@@ -10258,7 +10278,7 @@ impl EdgeSource for MinimapEdges<'_> {
             .map(|(&row, _)| row)
             .collect();
 
-        if let Some(diff) = self.diff.as_ref() {
+        if let Some(diff) = self.live_hunks() {
             for (_, hunk_rows) in diff.in_range(rows.clone()) {
                 marked.extend(hunk_rows.start.max(rows.start)..hunk_rows.end.min(rows.end));
             }
