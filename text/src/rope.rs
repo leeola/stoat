@@ -1045,6 +1045,104 @@ impl Rope {
         }
     }
 
+    /// [`Self::prev_grapheme_boundary`] for every offset, in one forward walk
+    /// of the tree.
+    ///
+    /// Answers exactly what the scalar call answers, offset for offset. A
+    /// caller stepping a few hundred cursors back by a cluster would otherwise
+    /// descend from the root for each of them.
+    ///
+    /// The walk only goes forward, so the offsets are visited in ascending
+    /// order and only input that is actually out of order pays for a
+    /// permutation. An offset the walk cannot settle from the chunk in hand --
+    /// a cluster reaching back past the chunk start, or an offset that is not
+    /// on a char boundary -- falls back to the scalar call.
+    pub fn prev_grapheme_boundaries_batch(&self, offsets: &[usize]) -> Vec<usize> {
+        let ascending_order: Option<Vec<usize>> = (!offsets.is_sorted()).then(|| {
+            let mut order: Vec<usize> = (0..offsets.len()).collect();
+            order.sort_unstable_by_key(|&i| offsets[i]);
+            order
+        });
+
+        let mut results = vec![0usize; offsets.len()];
+        let mut cursor = self.chunks.cursor::<usize>(());
+        let len = self.len();
+
+        for step in 0..offsets.len() {
+            let original_idx = match &ascending_order {
+                Some(order) => order[step],
+                None => step,
+            };
+            let offset = offsets[original_idx];
+            if offset == 0 {
+                continue;
+            }
+
+            // The cluster ends at `offset`, so the chunk that decides it is the
+            // one holding the byte before it.
+            cursor.seek_forward(&(offset - 1), Bias::Right);
+            let chunk_start = *cursor.start();
+            let settled = cursor.item().and_then(|chunk| {
+                let text = chunk.text.as_str();
+                let local = offset.checked_sub(chunk_start)?;
+                if local > text.len() || !text.is_char_boundary(local) {
+                    return None;
+                }
+                match GraphemeCursor::new(offset, len, true).prev_boundary(text, chunk_start) {
+                    Ok(Some(boundary)) => Some(boundary),
+                    _ => None,
+                }
+            });
+
+            results[original_idx] = match settled {
+                Some(boundary) => boundary,
+                None => self.prev_grapheme_boundary(offset),
+            };
+        }
+        results
+    }
+
+    /// The character at every offset, in one forward walk of the tree.
+    ///
+    /// Each answer is what `chars_at(offset).next()` would give, so an offset
+    /// at or past the rope end reads as `None`. For a caller reading one
+    /// character at each of many places -- the cell under every block cursor,
+    /// say -- this replaces a root descent per offset with a single walk.
+    ///
+    /// Offsets are expected to sit on char boundaries. One that splits a scalar
+    /// reads as `None` rather than being clipped onto the character it lands
+    /// inside, since a caller asking about a position that is not a character
+    /// has no character to be told about.
+    ///
+    /// The walk only goes forward, so the offsets are visited in ascending
+    /// order and only input that is actually out of order pays for a
+    /// permutation.
+    pub fn chars_at_batch(&self, offsets: &[usize]) -> Vec<Option<char>> {
+        let ascending_order: Option<Vec<usize>> = (!offsets.is_sorted()).then(|| {
+            let mut order: Vec<usize> = (0..offsets.len()).collect();
+            order.sort_unstable_by_key(|&i| offsets[i]);
+            order
+        });
+
+        let mut results = vec![None; offsets.len()];
+        let mut cursor = self.chunks.cursor::<usize>(());
+
+        for step in 0..offsets.len() {
+            let original_idx = match &ascending_order {
+                Some(order) => order[step],
+                None => step,
+            };
+            let offset = offsets[original_idx];
+            cursor.seek_forward(&offset, Bias::Right);
+            let chunk_start = *cursor.start();
+            results[original_idx] = cursor.item().and_then(|chunk| {
+                let local = offset.checked_sub(chunk_start)?;
+                chunk.text.as_str().get(local..)?.chars().next()
+            });
+        }
+        results
+    }
+
     /// Offset of the first grapheme-cluster boundary before `offset`, or
     /// `offset` itself at the rope start.
     ///
@@ -3522,6 +3620,61 @@ mod tests {
                 "stepping back over the flag pair takes both halves at pad {pad}",
             );
         }
+    }
+
+    /// The batch walks the tree forward once where the scalar calls each
+    /// descend from the root, so the only thing that makes it worth having is
+    /// that every offset comes back with the answer the scalar gives.
+    #[test]
+    fn batched_rope_reads_match_the_scalar_ones() {
+        let text = format!(
+            "{}\u{1F1F7}\u{1F1F8}e\u{301}{}",
+            "a".repeat(9),
+            "b".repeat(24),
+        );
+        let mut rope = Rope::new();
+        for ch in text.chars() {
+            rope.push(&ch.to_string());
+        }
+        assert!(rope.chunks().count() > 1, "the rope must straddle chunks");
+
+        // Every offset, including the ones splitting a scalar, which the batch
+        // cannot settle from the chunk in hand and hands to the scalar path.
+        let steps: Vec<usize> = (0..=rope.len()).collect();
+        let expected_steps: Vec<usize> = steps
+            .iter()
+            .map(|&o| rope.prev_grapheme_boundary(o))
+            .collect();
+        let reads: Vec<usize> = steps
+            .iter()
+            .copied()
+            .filter(|&o| rope.is_char_boundary(o))
+            .collect();
+        let expected_reads: Vec<Option<char>> =
+            reads.iter().map(|&o| rope.chars_at(o).next()).collect();
+
+        assert_eq!(
+            rope.prev_grapheme_boundaries_batch(&steps),
+            expected_steps,
+            "every batched cluster step matches the scalar one",
+        );
+        assert_eq!(
+            rope.chars_at_batch(&reads),
+            expected_reads,
+            "every batched character read matches the scalar one",
+        );
+
+        let reverse = |xs: &[usize]| -> Vec<usize> { xs.iter().rev().copied().collect() };
+        assert_eq!(
+            rope.prev_grapheme_boundaries_batch(&reverse(&steps)),
+            reverse(&expected_steps),
+            "descending input is permuted rather than mis-answered",
+        );
+        assert_eq!(
+            rope.chars_at_batch(&reverse(&reads)),
+            expected_reads.iter().rev().copied().collect::<Vec<_>>(),
+            "descending input is permuted rather than mis-answered",
+        );
     }
 
     #[test]

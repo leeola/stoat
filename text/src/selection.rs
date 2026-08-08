@@ -212,6 +212,35 @@ pub fn cursor_offset(rope: &Rope, anchor: usize, head: usize) -> usize {
     }
 }
 
+/// [`cursor_offset`] for a whole set of `(anchor, head)` pairs.
+///
+/// Answers pair for pair, in the order given. Only the forward selections need
+/// a cluster stepped back, and those steps are taken in one walk of the rope
+/// rather than a descent from the root apiece, which is what makes painting a
+/// few hundred cursors cost one traversal instead of hundreds.
+pub fn cursor_offsets(rope: &Rope, selections: &[(usize, usize)]) -> Vec<usize> {
+    let mut cursors: Vec<usize> = selections.iter().map(|&(_, head)| head).collect();
+
+    let stepping: Vec<usize> = selections
+        .iter()
+        .enumerate()
+        .filter(|&(_, &(anchor, head))| head > anchor)
+        .map(|(i, _)| i)
+        .collect();
+    if stepping.is_empty() {
+        return cursors;
+    }
+
+    let heads: Vec<usize> = stepping.iter().map(|&i| cursors[i]).collect();
+    for (&i, boundary) in stepping
+        .iter()
+        .zip(rope.prev_grapheme_boundaries_batch(&heads))
+    {
+        cursors[i] = boundary;
+    }
+    cursors
+}
+
 /// Offset one grapheme cluster past `offset`, or `offset` itself at the rope
 /// end.
 ///
@@ -380,6 +409,29 @@ mod tests {
             cursor_offset(&rope, 0, 20),
             19,
             "the cell after the family is the plain b",
+        );
+    }
+
+    #[test]
+    fn cursor_offsets_answers_pair_for_pair_like_the_scalar() {
+        // Mixed on purpose. Only the forward pairs step back, so the batch has
+        // to put its answers on those and leave the collapsed and reversed ones
+        // holding their heads, all while the two sets interleave.
+        let rope = Rope::from(format!("a{FAMILY}b cafe\u{301} xyz").as_str());
+        let pairs = [(0, 19), (19, 19), (25, 20), (0, 20), (28, 25), (21, 27)];
+
+        assert_eq!(
+            cursor_offsets(&rope, &pairs),
+            pairs
+                .iter()
+                .map(|&(anchor, head)| cursor_offset(&rope, anchor, head))
+                .collect::<Vec<_>>(),
+            "the batch matches the scalar on every pair",
+        );
+        assert_eq!(
+            cursor_offsets(&rope, &[]),
+            Vec::<usize>::new(),
+            "no selections is no work",
         );
     }
 

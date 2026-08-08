@@ -577,16 +577,37 @@ pub(crate) fn render_editor_with_overlay(
             .collect();
         buffer_snapshot.resolve_anchors_batch(&anchors)
     };
-    for (selection, ends) in editor
+    // The block-cursor cell of every selection, and its buffer point, each in
+    // one walk for the same reason the anchors above are resolved in one.
+    let cursors = {
+        let pairs: Vec<(usize, usize)> = endpoints
+            .chunks_exact(4)
+            .map(|ends| (ends[2], ends[3]))
+            .collect();
+        stoat_text::cursor_offsets(rope, &pairs)
+    };
+    let cursor_points = rope.offsets_to_points_batch(&cursors);
+
+    // Where the cursor cells this frame draws land, filled by the pass below.
+    // The character each one covers is read afterwards, since only these few
+    // are wanted and reading them all would cost more than it saves.
+    //
+    // Deferring them also puts every cursor on top of every selection range
+    // rather than only its own. Selections are disjoint, so the two orders
+    // differ solely where a fold collapses two of them onto the same cells, and
+    // there a visible cursor is the better of the two answers.
+    let mut cursor_cells: Vec<(usize, u16, u16)> = Vec::new();
+
+    for ((selection, ends), (&cursor, &cursor_point)) in editor
         .selections
         .all_anchors()
         .iter()
         .zip(endpoints.chunks_exact(4))
+        .zip(cursors.iter().zip(cursor_points.iter()))
     {
-        let &[start_offset, end_offset, tail_offset, head_offset] = ends else {
+        let &[start_offset, end_offset, _, _] = ends else {
             continue;
         };
-        let cursor = cursor_offset(rope, tail_offset, head_offset);
 
         let lo = start_offset.max(visible.start);
         let hi = end_offset.min(visible.end);
@@ -609,7 +630,6 @@ pub(crate) fn render_editor_with_overlay(
             );
         }
 
-        let cursor_point = rope.offset_to_point(cursor);
         let display = snapshot.buffer_to_display(cursor_point);
         if display.row >= editor.scroll_row && display.row < end_row {
             let y = inner.y + (display.row - editor.scroll_row) as u16;
@@ -618,26 +638,30 @@ pub(crate) fn render_editor_with_overlay(
                 if delegates_cursor && selection.id == primary_id {
                     primary_cell = Some((x, y));
                 } else {
-                    let cell = &mut buf[(x, y)];
-                    let existing_char = cell.symbol().chars().next().unwrap_or(' ');
-                    let char_to_paint = if existing_char == '\0' {
-                        ' '
-                    } else {
-                        existing_char
-                    };
-                    cell.set_char(char_to_paint);
-                    cell.set_style(cursor_style);
-                    // A block cursor covers the character it sits on, so a wide
-                    // one takes both of its columns rather than reading as half
-                    // covered. The trailing column carries no character of its
-                    // own, so only its style changes.
-                    let width = rope.chars_at(cursor).next().map_or(1, display_width);
-                    for extra in 1..width as u16 {
-                        if x + extra < right {
-                            buf[(x + extra, y)].set_style(cursor_style);
-                        }
-                    }
+                    cursor_cells.push((cursor, x, y));
                 }
+            }
+        }
+    }
+
+    let covered = rope.chars_at_batch(&cursor_cells.iter().map(|&(o, _, _)| o).collect::<Vec<_>>());
+    for (&(_, x, y), covered) in cursor_cells.iter().zip(covered) {
+        let cell = &mut buf[(x, y)];
+        let existing_char = cell.symbol().chars().next().unwrap_or(' ');
+        let char_to_paint = if existing_char == '\0' {
+            ' '
+        } else {
+            existing_char
+        };
+        cell.set_char(char_to_paint);
+        cell.set_style(cursor_style);
+        // A block cursor covers the character it sits on, so a wide one takes
+        // both of its columns rather than reading as half covered. The trailing
+        // column carries no character of its own, so only its style changes.
+        let width = covered.map_or(1, display_width);
+        for extra in 1..width as u16 {
+            if x + extra < right {
+                buf[(x + extra, y)].set_style(cursor_style);
             }
         }
     }
