@@ -197,6 +197,23 @@ pub struct Terminal {
     /// when it reports a redraw, and taken by [`Terminal::take_damage_flag`] for a
     /// frame that renders something other than the projected grid.
     output_since_project: bool,
+    /// Something has damaged the terminal since the last projection, so
+    /// [`Terminal::project`] has damage worth collecting.
+    ///
+    /// Separate from [`Self::output_since_project`], which
+    /// [`Terminal::take_damage_flag`] consumes. The damage it stands for outlives
+    /// that read, accumulating until a projection collects it, so one flag cannot
+    /// serve both.
+    ///
+    /// A projection with this clear skips reading the terminal's damage at all.
+    /// That is the point of the flag. The terminal damages the cursor's line on
+    /// every read, so an animation frame over unchanged content would otherwise
+    /// reproject and re-upload that row.
+    ///
+    /// Set wherever the terminal's own damage is marked. That is output arriving,
+    /// a resize, and a scrollback move, which fully damages the screen on any
+    /// change of display offset.
+    damage_pending: bool,
     /// The grid rows the cell-stamped decorations (borders, scales) occupied when one
     /// of them last changed, so a moved or cleared decoration can damage the rows it
     /// used to cover and erase its stale footprint.
@@ -733,6 +750,9 @@ impl Terminal {
             decoration_seq: 1,
             decorations_dirty: DecorationDirty::default(),
             output_since_project: false,
+            // A new terminal is fully damaged and the grid it projects into holds
+            // nothing, so the first projection has to collect and paint all of it.
+            damage_pending: true,
             last_decoration_footprint: Vec::new(),
             footprint_scratch: Vec::new(),
             projected_decorations: ProjectedDecorations::default(),
@@ -781,6 +801,7 @@ impl Terminal {
     pub fn advance(&mut self, bytes: &[u8]) -> bool {
         let redraw = self.advance_inner(bytes);
         self.output_since_project |= redraw;
+        self.damage_pending |= redraw;
         self.drain_listener_events();
         self.drain_staged();
         redraw
@@ -1924,6 +1945,7 @@ impl Terminal {
         }
 
         self.term.resize(GridSize { rows, cols });
+        self.damage_pending = true;
         // Pages are sized to each pool's region, not the viewport, so a viewport
         // resize only empties them: the app re-declares regions and refills as
         // its layout recomputes. Any half-painted page is abandoned.
@@ -1949,6 +1971,7 @@ impl Terminal {
     /// repaints the scrolled-back view through the usual path.
     pub fn scroll_display(&mut self, delta: i32) {
         self.term.scroll_display(Scroll::Delta(delta));
+        self.damage_pending = true;
     }
 
     /// The viewport's offset back into scrollback history, in rows: zero at the
@@ -1992,6 +2015,7 @@ impl Terminal {
     /// keyboard input.
     pub fn scroll_to_bottom(&mut self) {
         self.term.scroll_display(Scroll::Bottom);
+        self.damage_pending = true;
     }
 
     /// Begin a simple text selection anchored at viewport cell `(row, col)`.
@@ -2107,7 +2131,20 @@ impl Terminal {
         }
 
         self.output_since_project = false;
-        let mut dirty = self.collect_damage(rows, resized);
+        // Nothing has damaged the terminal since the last projection, so there is
+        // nothing to read out of it. Reading anyway would report the cursor's row
+        // as dirty, which it always does, and buy a reprojection and a re-upload
+        // of that row on a frame whose content stood still.
+        //
+        // Skipping the reset below with it is what keeps a missed damage source
+        // from losing a repaint outright. Whatever accumulated stays there for the
+        // next projection that does collect, so the cost of a miss is one frame of
+        // delay.
+        let collected = mem::take(&mut self.damage_pending) || resized;
+        let mut dirty = match collected {
+            true => self.collect_damage(rows, resized),
+            false => Damage::Partial(Vec::new()),
+        };
 
         let content = self.term.renderable_content();
         let offset = content.display_offset as i32;
@@ -2339,7 +2376,9 @@ impl Terminal {
 
         self.decorations_dirty = DecorationDirty::default();
 
-        self.term.reset_damage();
+        if collected {
+            self.term.reset_damage();
+        }
         (cursor, scrolled, dirty)
     }
 
@@ -2511,6 +2550,47 @@ mod tests {
         assert!(
             !terminal.take_damage_flag(),
             "taking it reports the output once"
+        );
+    }
+
+    /// The whole point of the pending-damage flag. An animation frame projects
+    /// over content that has not moved, and the terminal damages the cursor's
+    /// row on every read, so asking it would name that row and buy a
+    /// reprojection and a re-upload of it at the frame rate.
+    #[test]
+    fn a_projection_over_unchanged_content_reports_nothing_dirty() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+
+        terminal.advance(b"ab");
+        terminal.project(&mut grid);
+
+        let (_cursor, _scroll, damage) = terminal.project(&mut grid);
+        assert!(
+            matches!(&damage, Damage::Partial(rows) if rows.is_empty()),
+            "a second projection with nothing between them names no row",
+        );
+    }
+
+    /// A scrollback move damages the whole screen without any output arriving,
+    /// so the flag cannot be set from the parse alone.
+    #[test]
+    fn a_scrollback_move_still_collects_damage() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+
+        terminal.advance(b"one\r\ntwo\r\nthree\r\nfour\r\n");
+        terminal.project(&mut grid);
+
+        terminal.scroll_display(2);
+        let (_cursor, _scroll, damage) = terminal.project(&mut grid);
+        assert!(matches!(damage, Damage::Full), "the scrolled view repaints");
+
+        terminal.scroll_to_bottom();
+        let (_cursor, _scroll, damage) = terminal.project(&mut grid);
+        assert!(
+            matches!(damage, Damage::Full),
+            "and so does the return to the live bottom",
         );
     }
 
