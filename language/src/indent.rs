@@ -77,22 +77,52 @@ fn newline_indent_from(ranges: &[IndentRange], rope: &Rope, cursor_offset: usize
 /// previous row indents one level. A closing-token row aligns to its opener's
 /// row. Otherwise the previous row's indentation is copied.
 pub fn suggested_indent(query: &Query, root: Node<'_>, rope: &Rope, row: u32) -> Option<String> {
-    let ranges = collect_indent_ranges(query, root, rope, suggested_window(rope, row));
+    suggested_indent_scanning(query, root, rope, row, true)
+}
+
+/// [`suggested_indent`], with the query restriction made optional so a test can
+/// compare the restricted answer against the whole-prefix one.
+fn suggested_indent_scanning(
+    query: &Query,
+    root: Node<'_>,
+    rope: &Rope,
+    row: u32,
+    restrict: bool,
+) -> Option<String> {
+    let window = if restrict {
+        suggested_window(query, rope, row)
+    } else {
+        0..row_indent_end(rope, row) + 1
+    };
+    let ranges = collect_indent_ranges(query, root, rope, window);
     suggested_indent_from(&ranges, rope, row)
 }
 
 /// Bytes the query has to visit for [`suggested_indent`] to answer.
 ///
-/// Every region it reads opens on a row above this one, so no start lies past
-/// the row's first non-whitespace byte. The ends it compares are read off the
-/// returned nodes and can sit anywhere below.
+/// Both comparisons the decision makes put a byte of their region between the
+/// previous row's start and just past this row's indentation. The indent test
+/// wants a region starting on the previous row, and the outdent test wants an
+/// end between the two rows' indentation ends. A query cursor returns any match
+/// meeting its range whole, so a region reaching in from far above still arrives
+/// carrying the start row the decision reads off it.
 ///
-/// The outdents that can change one of those comparisons are here too. Either
-/// one moves a region's end down to at or before the row's start, or it moves it
-/// into the band just above, and the truncation puts the new end at the
-/// outdent's own position in both cases.
-fn suggested_window(rope: &Rope, row: u32) -> std::ops::Range<usize> {
-    0..row_indent_end(rope, row) + 1
+/// An `@outdent` capture is what that argument does not survive, so a query
+/// holding one gets the whole prefix instead. Truncation pulls a region's end
+/// back to an outdent's own position, and an outdent above this band is one the
+/// narrow window never sees, leaving an end long enough to answer a test the
+/// whole-prefix scan would have shortened it out of.
+///
+/// No `indents.scm` in the tree captures one, so the narrow window is what every
+/// current language runs at. The wide branch is there so adding a query that
+/// does captures it stays correct rather than silently mis-indenting.
+fn suggested_window(query: &Query, rope: &Rope, row: u32) -> std::ops::Range<usize> {
+    let end = row_indent_end(rope, row) + 1;
+    if query.capture_index_for_name("outdent").is_some() {
+        return 0..end;
+    }
+    let prev_row = row.saturating_sub(1);
+    rope.point_to_offset(Point::new(prev_row, 0))..end
 }
 
 /// The whitespace `row` should carry, given the regions around it.
@@ -232,7 +262,7 @@ fn collect_indent_ranges(
 mod tests {
     use super::{
         collect_indent_ranges, newline_indent, newline_indent_from, newline_window,
-        suggested_indent, suggested_indent_from, suggested_window,
+        suggested_indent, suggested_indent_from, suggested_indent_scanning, suggested_window,
     };
     use crate::{Language, LanguageRegistry};
     use std::sync::Arc;
@@ -353,13 +383,65 @@ mod tests {
         }
 
         for row in 0..=rope.max_point().row {
-            let windowed = collect_indent_ranges(query, root, &rope, suggested_window(&rope, row));
+            let windowed =
+                collect_indent_ranges(query, root, &rope, suggested_window(query, &rope, row));
             let full = collect_indent_ranges(query, root, &rope, whole.clone());
             assert_eq!(
                 suggested_indent_from(&windowed, &rope, row),
                 suggested_indent_from(&full, &rope, row),
                 "suggested_indent disagrees at row {row}"
             );
+        }
+    }
+
+    /// The narrowed window answers what the whole prefix answers, across every
+    /// shape the other tests here rely on, and through the entry point rather
+    /// than the range collection alone.
+    ///
+    /// Like the comparison above, this cannot pin where the window's start
+    /// belongs. Under the captures these queries use, every region a decision
+    /// reads runs from its opener down to at least the row being asked about, so
+    /// it meets the range and comes back whole however tight the window is.
+    /// Starting at the previous row is a margin, not a measured boundary, and
+    /// moving the start to the row itself passes this too.
+    ///
+    /// What the start does carry is the `@outdent` branch in
+    /// [`suggested_window`], where an outdent above the window is one the narrow
+    /// scan never sees. No query here captures one, so that branch is what these
+    /// fixtures cannot reach rather than something they confirm.
+    #[test]
+    fn the_narrow_window_answers_what_the_whole_prefix_answers() {
+        let fixtures: [(&str, &str); 6] = [
+            ("rust", "fn a() {\n\tx;\n}\n"),
+            ("rust", "fn a() {\n\tif b {\n\t\tx;\n\t}\n}\n"),
+            (
+                "rust",
+                "fn a() {\n\tif b {\n\t\twhile c {\n\t\t\tx;\n\t\t}\n\t}\n}\n",
+            ),
+            // Several levels closing on consecutive rows, so a row's decision
+            // reads a region that opened well above it.
+            (
+                "rust",
+                "fn a() {\n\tif b {\n\t\tif c {\n\t\t\tif d {\n\t\t\t\tx;\n\t\t\t}\n\t\t}\n\t}\n\ty;\n}\n",
+            ),
+            ("json", "{\n\t\"a\": {\n\t\t\"b\": 1\n\t}\n}\n"),
+            ("json", "{\n}\n"),
+        ];
+
+        for (name, src) in fixtures {
+            let lang = lang(name);
+            let tree = parse(&lang, src);
+            let rope = Rope::from(src);
+            let query = lang.indent_query.as_ref().expect("indent query");
+            let root = tree.root_node();
+
+            for row in 0..=rope.max_point().row {
+                assert_eq!(
+                    suggested_indent_scanning(query, root, &rope, row, true),
+                    suggested_indent_scanning(query, root, &rope, row, false),
+                    "{name} row {row} of {src:?}",
+                );
+            }
         }
     }
 }
