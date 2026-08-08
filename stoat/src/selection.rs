@@ -1472,6 +1472,38 @@ mod tests {
         assert_eq!(h.selection_spans(), vec![(0, 3, false), (9, 12, false)]);
     }
 
+    /// A copied cursor lands in the column a vertical motion would reach.
+    ///
+    /// Both answer "the same place, one line down", so they have to agree about
+    /// what a column is. A tab is one byte and several cells, so a copy working
+    /// in bytes lands near the start of the line below where the motion lands
+    /// past the indent, and the two only diverge on lines that hold one.
+    #[test]
+    fn add_selection_below_lands_where_moving_down_lands() {
+        let text = "\tfoo\nabcdefgh\n";
+
+        let moved = {
+            let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+            let path = h.write_file("s.txt", text);
+            h.open_file(&path);
+            h.type_keys("l j");
+            h.selection_spans()
+        };
+
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", text);
+        h.open_file(&path);
+        h.type_keys("l");
+        h.type_keys("shift-C");
+        let copied = h.selection_spans();
+
+        assert_eq!(copied.len(), 2, "the source and its copy, got {copied:?}",);
+        assert_eq!(
+            copied[1], moved[0],
+            "the copy sits where moving down from the same cursor sits",
+        );
+    }
+
     #[test]
     fn count_prefix_add_selection_below_inserts_n_cursors() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 10);

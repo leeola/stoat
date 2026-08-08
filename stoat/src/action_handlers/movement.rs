@@ -272,6 +272,11 @@ fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEff
         let head_off = cursor_offset(rope, anchor_off, buffer.resolve_anchor(&source.head()));
         let anchor_pt = rope.offset_to_point(anchor_off);
         let head_pt = rope.offset_to_point(head_off);
+        // Columns travel as visual cells, which is what a vertical motion
+        // carries. A tab is one byte and several cells, so copying the byte
+        // column would put the copy somewhere j never goes.
+        let anchor_col = display.visual_column(anchor_pt);
+        let head_col = display.visual_column(head_pt);
         let height = anchor_pt.row.max(head_pt.row) - anchor_pt.row.min(head_pt.row) + 1;
 
         let mut made = 0usize;
@@ -298,8 +303,8 @@ fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEff
             }
 
             if let (Some(new_anchor), Some(new_head)) = (
-                offset_at_exact_col(&display, buffer, anchor_row, anchor_pt.column),
-                offset_at_exact_col(&display, buffer, head_row, head_pt.column),
+                offset_at_exact_col(&display, buffer, anchor_row, anchor_col),
+                offset_at_exact_col(&display, buffer, head_row, head_col),
             ) {
                 let point = Selection {
                     id: source.id,
@@ -330,24 +335,31 @@ fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEff
     UpdateEffect::Redraw
 }
 
-/// Byte offset of the buffer position at buffer `(row, col)`, or `None` when the
-/// line is too short to reach `col` exactly or `row` is hidden in a fold (so the
-/// caller skips it rather than clamping onto a different line).
+/// Byte offset of the buffer position `visual` cells along `row`, or `None` when
+/// the line is too short to reach that column exactly or `row` is hidden in a
+/// fold (so the caller skips it rather than clamping onto a different line).
+///
+/// The column is in visual cells because that is what a vertical motion carries,
+/// and a copied selection lands where such a motion would.
 fn offset_at_exact_col(
     display: &DisplaySnapshot,
     buffer: &MultiBufferSnapshot,
     row: u32,
-    col: u32,
+    visual: u32,
 ) -> Option<usize> {
     let rope = buffer.rope();
-    if col > rope.line_len(row) {
-        return None;
-    }
+    let col = display.buffer_column_at_visual(row, visual, Bias::Left);
     // Route the buffer target through display space so a folded row snaps to a
     // different buffer row. A mismatch means the target line is hidden, so skip.
     let clipped = display.clip_point(display.buffer_to_display(Point::new(row, col)), Bias::Left);
     let buffer_pt = display.display_to_buffer(clipped)?;
     if buffer_pt.row != row {
+        return None;
+    }
+    // A line too short to reach the column answers its own end, and one whose
+    // cell boundaries fall elsewhere answers the cell before. Either way the
+    // round trip differs from what was asked for, which is the skip.
+    if display.visual_column(buffer_pt) != visual {
         return None;
     }
     Some(rope.point_to_offset(buffer_pt))
