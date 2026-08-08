@@ -50,6 +50,7 @@ use std::{
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         atomic::{AtomicI64, Ordering},
+        mpsc::{self, Receiver, SyncSender},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -70,6 +71,13 @@ const REAP_TIMEOUT: Duration = Duration::from_millis(250);
 /// How often the reap looks, so a server that goes promptly is noticed rather
 /// than waited out.
 const REAP_POLL: Duration = Duration::from_millis(10);
+
+/// How many outgoing bodies may wait on the writer thread before senders block.
+///
+/// Deep enough that a burst of syncs and requests never waits on a server that
+/// is keeping up, and bounded so one that has stopped reading its stdin cannot
+/// grow the queue without limit.
+const WRITE_QUEUE_DEPTH: usize = 256;
 
 type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, LspResponseError>>>>>;
 
@@ -137,7 +145,14 @@ fn transcript_stem(process_stem: Option<&str>, pid: u32, slug: &str) -> String {
 /// running until [`LspHost::shutdown`] reaps it. Production keeps the host in an
 /// `Arc` for the app's lifetime.
 pub struct LocalLsp {
-    stdin: Mutex<ChildStdin>,
+    /// Bodies queued for the writer thread, which frames and writes each one.
+    ///
+    /// Writing to the child's stdin blocks once it stops draining its pipe, and
+    /// a server busy indexing does exactly that, so the write happens on a
+    /// thread of its own rather than wherever the sending task happened to be
+    /// scheduled. The queue is bounded, so a server that never drains
+    /// backpressures the senders instead of growing without limit.
+    writer_tx: SyncSender<Vec<u8>>,
     child: Mutex<Child>,
     next_id: AtomicI64,
     pending: PendingMap,
@@ -202,8 +217,14 @@ impl LocalLsp {
         });
         std::thread::spawn(move || stderr_loop(stderr));
 
+        let (writer_tx, writer_rx) = mpsc::sync_channel(WRITE_QUEUE_DEPTH);
+        std::thread::spawn({
+            let pending = pending.clone();
+            move || writer_loop(stdin, writer_rx, pending)
+        });
+
         Ok(Self {
-            stdin: Mutex::new(stdin),
+            writer_tx,
             child: Mutex::new(child),
             next_id: AtomicI64::new(1),
             pending,
@@ -237,7 +258,7 @@ impl LocalLsp {
         });
         let sent = body
             .map_err(io::Error::from)
-            .and_then(|body| self.write_message(&body));
+            .and_then(|body| self.write_message(body));
         if let Err(err) = sent {
             self.pending
                 .lock()
@@ -268,18 +289,21 @@ impl LocalLsp {
             method,
             params,
         })?;
-        self.write_message(&body)
+        self.write_message(body)
     }
 
-    /// Frame `body` with a `Content-Length` header and write it to the child's
-    /// stdin.
-    fn write_message(&self, body: &[u8]) -> io::Result<()> {
+    /// Hand `body` to the writer thread, which frames and writes it.
+    ///
+    /// Returns once the body is queued, not once the server has it. A write that
+    /// then fails takes the whole transport down, and every request waiting on
+    /// one fails with the same closed-transport error a dead server gives.
+    fn write_message(&self, body: Vec<u8>) -> io::Result<()> {
         if let Some(transcript) = &self.tx_transcript {
-            transcript.record(&String::from_utf8_lossy(body));
+            transcript.record(&String::from_utf8_lossy(&body));
         }
-        let mut stdin = self.stdin.lock().expect("lsp stdin poisoned");
-        write_framed(&mut *stdin, body)?;
-        stdin.flush()
+        self.writer_tx
+            .send(body)
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "language server closed"))
     }
 }
 
@@ -605,7 +629,7 @@ impl LspHost for LocalLsp {
                 "error": { "code": err.code, "message": err.message, "data": err.data },
             }),
         };
-        self.write_message(&serde_json::to_vec(&message)?)
+        self.write_message(serde_json::to_vec(&message)?)
     }
 }
 
@@ -672,6 +696,28 @@ fn reader_loop(
             }
         }
     }
+}
+
+/// Frame and write each queued body to the child's stdin until the queue closes
+/// or the pipe breaks. Runs on a dedicated OS thread because the write blocks.
+///
+/// A server stops draining its 64KB stdin pipe while it is busy, and the write
+/// that fills it blocks until it resumes. On an executor thread that stalls
+/// whatever else was scheduled there, so the block is confined to this thread.
+///
+/// Every waiting request is failed on the way out. A body that never reached the
+/// server has no response coming, and the caller would otherwise wait on a
+/// oneshot nothing will ever send.
+fn writer_loop(mut stdin: ChildStdin, bodies: Receiver<Vec<u8>>, pending: PendingMap) {
+    while let Ok(body) = bodies.recv() {
+        if write_framed(&mut stdin, &body)
+            .and_then(|()| stdin.flush())
+            .is_err()
+        {
+            break;
+        }
+    }
+    pending.lock().expect("lsp pending map poisoned").clear();
 }
 
 /// Forward the child's stderr lines to the `stoat::lsp` tracing target. Language
