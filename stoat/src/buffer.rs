@@ -1890,7 +1890,10 @@ mod tests {
             }
         };
 
-        let content = "the quick brown fox jumps over the lazy dog\nand back again\n";
+        // Multibyte, so a batch boundary can sit against a character several
+        // bytes wide rather than always between two ASCII ones.
+        let content =
+            "the quick \u{65e5}\u{672c} fox jumps\ne\u{301} over the lazy dog\nand back again\n";
         for _ in 0..200 {
             let count = 2 + next(3);
             let mut cuts: Vec<usize> = (0..count * 2)
@@ -2032,10 +2035,20 @@ mod tests {
         }
 
         // More edits after anchoring, so some anchors now sit in deleted text.
-        for _ in 0..15 {
+        // Some of that deleting is done by a batch, since a batch reaches the
+        // fragment tree by its own path and an anchor it strands has to resolve
+        // the same way.
+        for round in 0..15 {
             let len = b.snapshot.visible_text.len();
             let at = (lcg(&mut seed) as usize) % (len + 1);
-            if at < len {
+
+            if round % 4 == 3 && len > 12 {
+                let second = (lcg(&mut seed) as usize) % (len / 2);
+                let first = len / 2 + (lcg(&mut seed) as usize) % (len - len / 2);
+                let first_end = (first + 1 + (lcg(&mut seed) as usize) % 4).min(len);
+                let second_end = (second + 1 + (lcg(&mut seed) as usize) % 4).min(len / 2);
+                b.edit_batch(&[(first..first_end, "Q"), (second..second_end, "")]);
+            } else if at < len {
                 let end = (at + 1 + (lcg(&mut seed) as usize) % 7).min(len);
                 b.edit(at..end, "z");
             } else {
@@ -3400,6 +3413,40 @@ mod tests {
         bounds[rng.below(bounds.len())]
     }
 
+    /// Two or three ranges legal for [`TextBuffer::edit_batch`], paired with the
+    /// text to put in each.
+    ///
+    /// Cut points are deduped before pairing, so no two ranges share an offset
+    /// and they are strictly disjoint. Reversing gives the descending order the
+    /// batch takes its ranges in.
+    ///
+    /// Some pairs collapse to an empty range, which is the multi-caret shape.
+    /// That stays in contract. What `edit_batch` rejects is an empty range
+    /// sharing an offset with a deleting range's start, and distinct cut points
+    /// rule that out.
+    fn random_batch(
+        rng: &mut Lcg,
+        text: &str,
+        inserts: &[&'static str],
+    ) -> Vec<(Range<usize>, &'static str)> {
+        let mut cuts: Vec<usize> = (0..(2 + rng.below(2)) * 2)
+            .map(|_| random_boundary(rng, text))
+            .collect();
+        cuts.sort_unstable();
+        cuts.dedup();
+
+        let mut edits: Vec<(Range<usize>, &'static str)> = cuts
+            .chunks_exact(2)
+            .map(|pair| {
+                let end = if rng.below(3) == 0 { pair[0] } else { pair[1] };
+                (pair[0]..end, inserts[rng.below(inserts.len())])
+            })
+            .collect();
+
+        edits.reverse();
+        edits
+    }
+
     #[test]
     fn edits_undos_and_redos_show_the_text_they_should() {
         const INSERTS: [&str; 6] = ["", "z", "hello ", "\n", "\u{65e5}\u{672c}", "  \n  "];
@@ -3413,7 +3460,7 @@ mod tests {
 
             for step in 0..30 {
                 match rng.below(10) {
-                    0..=5 => {
+                    0..=4 => {
                         b.begin_group(Vec::new());
                         model.begin_group();
 
@@ -3429,7 +3476,30 @@ mod tests {
 
                         b.seal_group(Vec::new());
                     },
-                    6..=8 => {
+                    5..=6 => {
+                        // The batch arrives on whatever tree the steps before it
+                        // left, which is what puts it over toggled fragments and
+                        // in among undos.
+                        let text = b.snapshot.visible_text.to_string();
+                        let edits = random_batch(&mut rng, &text, &INSERTS);
+
+                        // A short buffer can leave too few distinct cut points to
+                        // pair, and an empty group is not the shape under test.
+                        if !edits.is_empty() {
+                            b.begin_group(Vec::new());
+                            model.begin_group();
+
+                            b.edit_batch(&edits);
+                            // Right to left, the order the batch takes them in
+                            // and the order it is documented to match.
+                            for (range, insert) in &edits {
+                                model.edit(range.clone(), insert);
+                            }
+
+                            b.seal_group(Vec::new());
+                        }
+                    },
+                    7..=8 => {
                         b.undo();
                         model.undo();
                     },
@@ -3478,13 +3548,17 @@ mod tests {
         const INSERTS: [&str; 5] = ["", "z", "hello ", "\u{65e5}\u{672c}", "\n  "];
 
         match rng.below(10) {
-            0..=5 => {
+            0..=4 => {
                 let text = b.snapshot.visible_text.to_string();
                 let a = random_boundary(rng, &text);
                 let z = random_boundary(rng, &text);
                 b.edit(a.min(z)..a.max(z), INSERTS[rng.below(INSERTS.len())]);
             },
-            6..=8 => {
+            5..=6 => {
+                let text = b.snapshot.visible_text.to_string();
+                b.edit_batch(&random_batch(rng, &text, &INSERTS));
+            },
+            7..=8 => {
                 b.undo();
             },
             _ => {
