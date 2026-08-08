@@ -1988,6 +1988,67 @@ mod tests {
         assert_eq!(rows(&mut map), fresh_rows, "against a fresh build");
     }
 
+    /// Two edits in one patch, the first ending where a replacement begins and
+    /// the second landing inside it, leave the block standing.
+    ///
+    /// A region rebuild scans the blocks its rows cover and remembers where the
+    /// scan reached, so the next region in the same patch starts from there
+    /// rather than from the beginning. A block starting exactly at a region's
+    /// end is outside it, since the test is strict, but it is the next region
+    /// that owns it. Counting it as scanned leaves it owned by no region at
+    /// all, and a replacement is not carried over from the old tree either,
+    /// because the edit inside it consumed its transform.
+    #[test]
+    fn a_replacement_survives_an_edit_after_one_ending_at_its_start() {
+        let text: String = (0..32).map(|i| format!("line{i} words\n")).collect();
+
+        let block = || {
+            vec![BlockProperties::from_text(
+                BlockPlacement::Replace { start: 26, end: 28 },
+                vec!["replacement".to_string()],
+                BlockStyle::Fixed,
+            )]
+        };
+
+        let rows = |map: &mut DisplayMap| {
+            let snapshot = map.snapshot();
+            (0..snapshot.line_count())
+                .map(|row| match snapshot.classify_row(row) {
+                    BlockRowKind::BufferRow { buffer_row } => format!("buf{buffer_row}"),
+                    BlockRowKind::Block { block, line_index } => block.get_line(line_index),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut map = DisplayMap::new(multi, test_executor(), crate::test_notify());
+        map.insert_blocks(block());
+        map.snapshot();
+
+        // Both land in one patch, so the second region's block scan starts
+        // where the first region's left off. Same-size so no row moves.
+        for row in [14u32, 27] {
+            let at = {
+                let snap = shared.read().expect("poisoned");
+                snap.rope().point_to_offset(Point::new(row, 2))
+            };
+            shared.write().expect("poisoned").edit(at..at + 2, "QQ");
+        }
+
+        let fresh_rows = {
+            let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+            let mut fresh = DisplayMap::new(multi, test_executor(), crate::test_notify());
+            fresh.insert_blocks(block());
+            rows(&mut fresh)
+        };
+        assert!(
+            fresh_rows.contains(&"replacement".to_string()),
+            "the fresh build has to show the block, or this proves nothing",
+        );
+        assert_eq!(rows(&mut map), fresh_rows, "against a fresh build");
+    }
+
     /// An edit strictly inside a replacement's hidden rows leaves the block
     /// standing.
     ///

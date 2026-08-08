@@ -1895,11 +1895,19 @@ fn sync_incremental(
                 + blocks[start_block_idx..].partition_point(|b| block_buffer_row(b) <= edit_end_buf)
         };
 
+        // The first block this region declines because it begins at or past the
+        // region's end. Such a block has not been dealt with, it simply belongs
+        // to a later region, so the scan for the next one must not start past
+        // it. Blocks are ordered by row and the test is on their start, so
+        // everything from here on is declined for the same reason.
+        let mut deferred_block_idx = end_block_idx;
+
         blocks_in_range.clear();
         blocks_in_range.extend(
             blocks[start_block_idx..end_block_idx]
                 .iter()
-                .filter_map(|b| {
+                .enumerate()
+                .filter_map(|(offset, b)| {
                     let placement = resolve_block_placement(
                         b,
                         &mut inlay_cursor,
@@ -1924,6 +1932,9 @@ fn sync_incremental(
                     if block_start < edit_end && block_end >= first_row {
                         Some((placement, b))
                     } else {
+                        if block_start >= edit_end {
+                            deferred_block_idx = deferred_block_idx.min(start_block_idx + offset);
+                        }
                         None
                     }
                 }),
@@ -1956,7 +1967,7 @@ fn sync_incremental(
             push_isomorphic(&mut new_transforms, edit_end - row);
         }
 
-        last_block_idx = end_block_idx;
+        last_block_idx = deferred_block_idx;
     }
 
     new_transforms.append(cursor.suffix(), ());
