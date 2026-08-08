@@ -1,6 +1,6 @@
 use super::{
     fold_map::FoldOffset,
-    highlights::{Chunk, HighlightEndpoint},
+    highlights::{Chunk, HighlightCursor, HighlightEndpoint},
     tab_map::{self, TabChunks, TabPoint, TabSnapshot},
 };
 use std::{
@@ -1094,6 +1094,7 @@ impl WrapSnapshot {
             current_row: rows.start,
             row_state: None,
             pending_newline: false,
+            cursor: HighlightCursor::default(),
         }))
     }
 
@@ -1127,6 +1128,12 @@ pub struct WrappedChunksInner<'a> {
     current_row: u32,
     row_state: Option<RowChunksState<'a>>,
     pending_newline: bool,
+    /// One endpoint replay for the whole run, seeding each row's stream.
+    ///
+    /// Rows are visited in ascending order, so the replay only ever moves
+    /// forward and each endpoint in the viewport is applied once rather than
+    /// once per row below it.
+    cursor: HighlightCursor,
 }
 
 /// Streaming state for one tab row, carried across every wrap row it produces.
@@ -1280,7 +1287,7 @@ impl<'a> WrappedChunksInner<'a> {
         ))
     }
 
-    fn start_row(&self, wrap_row: u32) -> Option<RowChunksState<'a>> {
+    fn start_row(&mut self, wrap_row: u32) -> Option<RowChunksState<'a>> {
         let (tab_row, window) = self.row_window(wrap_row)?;
 
         let fold = self.snapshot.tab_snapshot.fold_snapshot();
@@ -1290,10 +1297,16 @@ impl<'a> WrappedChunksInner<'a> {
         let row_start = fold.row_start_offset(tab_row);
         let row_end = FoldOffset(row_start.0 + fold.output_line_len(tab_row) as usize);
 
-        let tab_chunks =
-            self.snapshot
-                .tab_snapshot
-                .chunks(row_start..row_end, 0, self.endpoints.clone());
+        // Rows are visited in order, so one replay carried across them costs
+        // what a single row's used to. Opening each row's stream unseeded would
+        // have it re-walk every endpoint the rows above it already walked.
+        self.cursor.advance_to(row_start.0, &self.endpoints);
+        let tab_chunks = self.snapshot.tab_snapshot.chunks_seeded(
+            row_start..row_end,
+            0,
+            self.endpoints.clone(),
+            Some(&self.cursor),
+        );
 
         Some(RowChunksState {
             tab_chunks,

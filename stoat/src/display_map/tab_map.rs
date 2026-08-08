@@ -1,6 +1,6 @@
 use super::{
     fold_map::{FoldChunks, FoldOffset, FoldPoint, FoldSnapshot},
-    highlights::{Chunk, HighlightEndpoint},
+    highlights::{Chunk, HighlightCursor, HighlightEndpoint},
 };
 use std::{
     borrow::Cow,
@@ -337,8 +337,19 @@ impl TabSnapshot {
         start_column: u32,
         endpoints: Arc<[HighlightEndpoint]>,
     ) -> TabChunks<'a> {
+        self.chunks_seeded(range, start_column, endpoints, None)
+    }
+
+    /// Like [`Self::chunks`], passing `seed` down to the buffer stream.
+    pub fn chunks_seeded<'a>(
+        &'a self,
+        range: Range<FoldOffset>,
+        start_column: u32,
+        endpoints: Arc<[HighlightEndpoint]>,
+        seed: Option<&HighlightCursor>,
+    ) -> TabChunks<'a> {
         TabChunks {
-            fold_chunks: self.fold_snapshot.chunks(range, endpoints),
+            fold_chunks: self.fold_snapshot.chunks_seeded(range, endpoints, seed),
             pending: None,
             pending_offset: 0,
             display_column: start_column,

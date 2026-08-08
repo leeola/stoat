@@ -1,5 +1,5 @@
 use super::{
-    highlights::{Chunk, HighlightEndpoint},
+    highlights::{Chunk, HighlightCursor, HighlightEndpoint},
     inlay_map::{InlayChunks, InlayOffset, InlayPoint, InlaySnapshot},
 };
 use crate::multi_buffer::MultiBufferSnapshot;
@@ -1551,11 +1551,25 @@ impl FoldSnapshot {
         range: Range<FoldOffset>,
         endpoints: Arc<[HighlightEndpoint]>,
     ) -> FoldChunks<'a> {
+        self.chunks_seeded(range, endpoints, None)
+    }
+
+    /// Like [`Self::chunks`], passing `seed` down to the buffer stream.
+    ///
+    /// The seed only travels when nothing is folded, a fold being what makes
+    /// fold offsets diverge from the offsets the seed was advanced over.
+    pub fn chunks_seeded<'a>(
+        &'a self,
+        range: Range<FoldOffset>,
+        endpoints: Arc<[HighlightEndpoint]>,
+        seed: Option<&HighlightCursor>,
+    ) -> FoldChunks<'a> {
         if self.fold_count() == 0 {
             // Without folds, fold offsets equal inlay offsets.
-            return FoldChunks::Passthrough(Box::new(self.inlay_snapshot.chunks(
+            return FoldChunks::Passthrough(Box::new(self.inlay_snapshot.chunks_seeded(
                 InlayOffset(range.start.0)..InlayOffset(range.end.0),
                 endpoints,
+                seed,
             )));
         }
 

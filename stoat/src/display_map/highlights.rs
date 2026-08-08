@@ -708,23 +708,95 @@ pub struct BufferChunks<'a> {
     active: BTreeMap<HighlightKey, HighlightStyle>,
 }
 
+/// How far an endpoint replay has got, and what it left active.
+///
+/// A [`BufferChunks`] works out which styles apply at its range start by
+/// replaying every endpoint at or below that offset. A caller opening one stream
+/// per row repeats that replay per row, each time from the beginning of the
+/// endpoint list. Keeping one of these across the rows instead, advanced to each
+/// row's start, replays each endpoint once for the whole run.
+///
+/// The offset it describes travels with it because the active set only means
+/// anything at that offset. A stream that starts elsewhere must not be seeded
+/// with it.
+#[derive(Clone, Default)]
+pub struct HighlightCursor {
+    offset: usize,
+    ep_idx: usize,
+    active: BTreeMap<HighlightKey, HighlightStyle>,
+}
+
+impl HighlightCursor {
+    /// Replay `endpoints` forward until the cursor describes `offset`.
+    ///
+    /// Ascending offsets only. Asking to go backwards leaves the cursor where it
+    /// is, since the active set is built by moving forward and cannot be undone,
+    /// and a stream seeded from an unmoved cursor still renders correctly
+    /// because the seed is checked against the range it opens.
+    pub fn advance_to(&mut self, offset: usize, endpoints: &[HighlightEndpoint]) {
+        if offset < self.offset {
+            debug_assert!(
+                false,
+                "cursor at {} asked to go back to {offset}",
+                self.offset
+            );
+            return;
+        }
+        while self.ep_idx < endpoints.len() && endpoints[self.ep_idx].offset <= offset {
+            let ep = &endpoints[self.ep_idx];
+            match &ep.style {
+                Some(style) => {
+                    self.active.insert(ep.key, style.clone());
+                },
+                None => {
+                    self.active.remove(&ep.key);
+                },
+            }
+            self.ep_idx += 1;
+        }
+        self.offset = offset;
+    }
+}
+
 impl<'a> BufferChunks<'a> {
     /// Construct a new iterator over `rope[range]` applying `endpoints`.
     ///
-    /// `endpoints` must be sorted by offset and must only cover offsets within
-    /// `range`. Use [`create_highlight_endpoints`] (or the cached variant) to
-    /// build them.
+    /// `endpoints` must be sorted by offset. Use [`create_highlight_endpoints`]
+    /// (or the cached variant) to build them.
     pub fn new(rope: &'a Rope, range: Range<usize>, endpoints: Arc<[HighlightEndpoint]>) -> Self {
+        Self::with_seed(rope, range, endpoints, None)
+    }
+
+    /// Like [`Self::new`], starting from a replay `seed` already advanced to the
+    /// range's start.
+    ///
+    /// Saves re-deriving the active styles by walking the endpoints below
+    /// `range.start`, which is worth doing for a caller opening a stream per row
+    /// over one shared endpoint list.
+    ///
+    /// A seed describing any other offset is ignored and the replay runs as
+    /// usual, so a caller that gets the pairing wrong loses the shortcut rather
+    /// than the styling.
+    pub fn with_seed(
+        rope: &'a Rope,
+        range: Range<usize>,
+        endpoints: Arc<[HighlightEndpoint]>,
+        seed: Option<&HighlightCursor>,
+    ) -> Self {
         let start = range.start;
         let end = range.end;
+        let (ep_idx, active) = match seed.filter(|cursor| cursor.offset == start) {
+            Some(cursor) => (cursor.ep_idx, cursor.active.clone()),
+            None => (0, BTreeMap::new()),
+        };
         Self {
             text_chunks: rope.chunks_in_range(range),
             pending: "",
             offset: start,
             end,
             endpoints,
-            ep_idx: 0,
-            active: BTreeMap::new(),
+            ep_idx,
+            active,
         }
     }
 
@@ -796,12 +868,143 @@ impl<'a> Iterator for BufferChunks<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_highlight_endpoints, highlighted_chunks, AnchorResolver, Chunk, HighlightKey,
-        HighlightLayer, HighlightStyle, TextHighlights,
+        create_highlight_endpoints, highlighted_chunks, AnchorResolver, BufferChunks, Chunk,
+        HighlightCursor, HighlightEndpoint, HighlightKey, HighlightLayer, HighlightStyle,
+        TextHighlights,
     };
     use ratatui::style::Color;
     use std::{collections::HashMap, ops::Range, sync::Arc};
-    use stoat_text::{Anchor, Bias};
+    use stoat_text::{Anchor, Bias, Rope};
+
+    /// Endpoints turning three overlapping styles on and off across the text,
+    /// so a replay stopped part-way holds more than one active entry.
+    fn layered_endpoints() -> Arc<[HighlightEndpoint]> {
+        let colored = |color| HighlightStyle {
+            foreground: Some(color),
+            ..Default::default()
+        };
+        let spans = [
+            (HighlightLayer::SearchHighlight, colored(Color::Red), 2..30),
+            (
+                HighlightLayer::SelectionHighlight,
+                colored(Color::Green),
+                8..22,
+            ),
+            (
+                HighlightLayer::MatchingBracket,
+                colored(Color::Blue),
+                14..40,
+            ),
+        ];
+
+        let mut endpoints = Vec::new();
+        for (layer, style, range) in spans {
+            endpoints.push(HighlightEndpoint {
+                offset: range.start,
+                is_start: true,
+                key: HighlightKey::layer(layer),
+                style: Some(style),
+            });
+            endpoints.push(HighlightEndpoint {
+                offset: range.end,
+                is_start: false,
+                key: HighlightKey::layer(layer),
+                style: None,
+            });
+        }
+        endpoints.sort();
+        Arc::from(endpoints)
+    }
+
+    fn styled_text(chunks: BufferChunks<'_>) -> Vec<(String, Option<HighlightStyle>)> {
+        chunks
+            .map(|c| (c.text.into_owned(), c.highlight_style))
+            .collect()
+    }
+
+    /// A stream seeded from a carried replay must render exactly what one that
+    /// replayed the endpoints itself renders.
+    ///
+    /// The seed exists only to skip that walk, so any difference between the two
+    /// is a colouring bug, and one that reads as plausible output rather than as
+    /// a crash. Every endpoint offset is checked, plus the positions either side
+    /// of each, because the replay's boundary condition is `<=` and an off-by-one
+    /// there changes which styles a row opens with.
+    #[test]
+    fn a_seeded_stream_renders_what_an_unseeded_one_does() {
+        let rope = Rope::from("a".repeat(48).as_str());
+        let endpoints = layered_endpoints();
+
+        let mut offsets: Vec<usize> = endpoints.iter().map(|e| e.offset).collect();
+        offsets.extend(offsets.clone().iter().filter_map(|o| o.checked_sub(1)));
+        offsets.extend(offsets.clone().iter().map(|o| o + 1));
+        offsets.push(0);
+        offsets.push(48);
+        offsets.sort_unstable();
+        offsets.dedup();
+
+        let mut cursor = HighlightCursor::default();
+        for start in offsets {
+            cursor.advance_to(start, &endpoints);
+            let seeded =
+                BufferChunks::with_seed(&rope, start..rope.len(), endpoints.clone(), Some(&cursor));
+            let plain = BufferChunks::new(&rope, start..rope.len(), endpoints.clone());
+            assert_eq!(
+                styled_text(seeded),
+                styled_text(plain),
+                "seeded at {start} diverged from replaying from the start",
+            );
+        }
+    }
+
+    /// A seed describing some other offset is ignored rather than believed.
+    ///
+    /// It is the guard that keeps a mis-paired seed from silently styling a row
+    /// with whatever was active somewhere else.
+    #[test]
+    fn a_seed_for_a_different_offset_is_ignored() {
+        let rope = Rope::from("a".repeat(48).as_str());
+        let endpoints = layered_endpoints();
+
+        let mut elsewhere = HighlightCursor::default();
+        elsewhere.advance_to(20, &endpoints);
+
+        assert_eq!(
+            styled_text(BufferChunks::with_seed(
+                &rope,
+                4..rope.len(),
+                endpoints.clone(),
+                Some(&elsewhere),
+            )),
+            styled_text(BufferChunks::new(&rope, 4..rope.len(), endpoints)),
+            "the mismatched seed was used instead of being replayed past",
+        );
+    }
+
+    /// Advancing in steps has to land where advancing in one go lands, since
+    /// the caller advances row by row and never in one jump.
+    #[test]
+    fn advancing_in_steps_matches_advancing_at_once() {
+        let rope = Rope::from("a".repeat(48).as_str());
+        let endpoints = layered_endpoints();
+
+        let mut stepped = HighlightCursor::default();
+        for offset in [3, 9, 15, 21, 33] {
+            stepped.advance_to(offset, &endpoints);
+        }
+        let mut at_once = HighlightCursor::default();
+        at_once.advance_to(33, &endpoints);
+
+        let render = |cursor: &HighlightCursor| {
+            styled_text(BufferChunks::with_seed(
+                &rope,
+                33..rope.len(),
+                endpoints.clone(),
+                Some(cursor),
+            ))
+        };
+        assert_eq!(render(&stepped), render(&at_once), "the walk lost state");
+    }
 
     fn anchor(offset: usize) -> Anchor {
         Anchor {

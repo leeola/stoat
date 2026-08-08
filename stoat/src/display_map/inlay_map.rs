@@ -1,5 +1,5 @@
 use crate::{
-    display_map::highlights::{BufferChunks, Chunk, HighlightEndpoint},
+    display_map::highlights::{BufferChunks, Chunk, HighlightCursor, HighlightEndpoint},
     multi_buffer::MultiBufferSnapshot,
 };
 use std::{
@@ -1042,11 +1042,26 @@ impl InlaySnapshot {
         range: Range<InlayOffset>,
         endpoints: Arc<[HighlightEndpoint]>,
     ) -> InlayChunks<'a> {
+        self.chunks_seeded(range, endpoints, None)
+    }
+
+    /// Like [`Self::chunks`], offering `seed` to the underlying buffer stream.
+    ///
+    /// The seed reaches that stream only when there are no inlays, since an
+    /// inlay makes inlay offsets diverge from the buffer offsets the seed was
+    /// advanced over.
+    pub fn chunks_seeded<'a>(
+        &'a self,
+        range: Range<InlayOffset>,
+        endpoints: Arc<[HighlightEndpoint]>,
+        seed: Option<&HighlightCursor>,
+    ) -> InlayChunks<'a> {
         if !self.has_inlays() {
-            return InlayChunks::Passthrough(Box::new(BufferChunks::new(
+            return InlayChunks::Passthrough(Box::new(BufferChunks::with_seed(
                 self.buffer.rope(),
                 range.start.0..range.end.0,
                 endpoints,
+                seed,
             )));
         }
 
