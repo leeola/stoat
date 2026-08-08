@@ -1740,6 +1740,39 @@ mod tests {
         )
     }
 
+    /// An anchor at every character boundary, in both biases, for a buffer that
+    /// has not been edited yet.
+    ///
+    /// [`observable`] builds its anchors on the buffer it then reads, which
+    /// makes that an identity round trip. An anchor made at an offset resolves
+    /// back to it by construction. These are the readers `split_at_boundaries`
+    /// promises to keep valid, made against the tree as it stood before the
+    /// re-keying.
+    fn anchors_before_edits(b: &TextBuffer) -> Vec<Anchor> {
+        let snap = &b.snapshot;
+        let len = snap.visible_text.len();
+        (0..=len)
+            .filter(|o| snap.visible_text.is_char_boundary(*o))
+            .flat_map(|o| [(o, Bias::Left), (o, Bias::Right)])
+            .map(|(o, bias)| snap.anchor_at(o, bias))
+            .collect()
+    }
+
+    /// Where carried anchors land, and how they order against each other.
+    ///
+    /// Resolution alone would miss a re-keying that moved a run of anchors
+    /// together, since they would go on agreeing with each other while all
+    /// being wrong, so the pairwise ordering is read too.
+    fn carried(b: &TextBuffer, anchors: &[Anchor]) -> String {
+        let snap = &b.snapshot;
+        let resolved: Vec<usize> = anchors.iter().map(|a| snap.resolve_anchor(a)).collect();
+        let order: Vec<Ordering> = anchors
+            .windows(2)
+            .map(|pair| snap.cmp_anchors(&pair[0], &pair[1]))
+            .collect();
+        format!("resolved={resolved:?}\norder={order:?}")
+    }
+
     /// `edit_batch` is indistinguishable from the sequential calls it replaces.
     ///
     /// The fixtures are the shapes that break a shared cursor walk. Several carets
@@ -1751,6 +1784,12 @@ mod tests {
         let mut sequential = buf(content);
         let pre_version = batched.snapshot.version;
 
+        // Each buffer supplies its own, so the comparison never rests on
+        // anchors from one resolving in the other. What is being asked is that
+        // an anchor made the same way in each survives the edits the same way.
+        let batched_anchors = anchors_before_edits(&batched);
+        let sequential_anchors = anchors_before_edits(&sequential);
+
         batched.edit_batch(edits);
         for (range, text) in edits {
             sequential.edit(range.clone(), text);
@@ -1761,9 +1800,16 @@ mod tests {
             observable(&sequential, pre_version),
             "batch diverged from sequential on {content:?} with {edits:?}",
         );
+        assert_eq!(
+            carried(&batched, &batched_anchors),
+            carried(&sequential, &sequential_anchors),
+            "anchors predating the batch diverged on {content:?} with {edits:?}",
+        );
 
         // Undo and redo read the op log and the fragment tree together, so a
-        // tree that merely looks right at the end still fails here.
+        // tree that merely looks right at the end still fails here. Undo also
+        // restores fragments the batch removed, which is where an anchor into
+        // deleted text is most likely to come back somewhere else.
         for step in 0..3 {
             batched.undo();
             sequential.undo();
@@ -1771,6 +1817,11 @@ mod tests {
                 observable(&batched, pre_version),
                 observable(&sequential, pre_version),
                 "undo {step} diverged on {content:?}",
+            );
+            assert_eq!(
+                carried(&batched, &batched_anchors),
+                carried(&sequential, &sequential_anchors),
+                "undo {step} moved a carried anchor on {content:?}",
             );
         }
         for step in 0..3 {
@@ -1780,6 +1831,11 @@ mod tests {
                 observable(&batched, pre_version),
                 observable(&sequential, pre_version),
                 "redo {step} diverged on {content:?}",
+            );
+            assert_eq!(
+                carried(&batched, &batched_anchors),
+                carried(&sequential, &sequential_anchors),
+                "redo {step} moved a carried anchor on {content:?}",
             );
         }
     }
@@ -1863,6 +1919,11 @@ mod tests {
         let pre_version = b.snapshot.version;
         let before = observable(&b, pre_version);
 
+        // Made against the tree the split is about to re-key, which is what its
+        // doc promises to keep valid.
+        let anchors = anchors_before_edits(&b);
+        let carried_before = carried(&b, &anchors);
+
         let len = b.snapshot.visible_text.len();
         let boundaries: Vec<usize> = (0..=len).step_by(3).collect();
         let mut new_insertions = Vec::new();
@@ -1880,6 +1941,11 @@ mod tests {
             before,
             observable(&b, pre_version),
             "the split is invisible"
+        );
+        assert_eq!(
+            carried_before,
+            carried(&b, &anchors),
+            "the split moved an anchor that predates it",
         );
     }
 
