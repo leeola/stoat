@@ -1287,6 +1287,12 @@ impl BlockSnapshot {
     /// soft-wrap indent margin, tab expansions, fold placeholders, and inlays
     /// in turn.
     ///
+    /// Wrap-space clipping can answer on a different row than it was asked
+    /// about, because a fold placeholder straddling a wrap break clips to the
+    /// whole placeholder. The result is read back through the wrap-to-block
+    /// mapping rather than pinned to the row the point started on, so it names
+    /// the position the wrap layer chose.
+    ///
     /// A block at a document edge has buffer text on one side only, so the
     /// direction `bias` names can run out. The search then turns around, since
     /// the far side of the block is the only text left to land on.
@@ -1297,24 +1303,35 @@ impl BlockSnapshot {
                 let wrap_point = self
                     .wrap_snapshot
                     .clip_point(WrapPoint::new(self.wrap_row_at(row), point.column), bias);
-                BlockPoint::new(row, wrap_point.column())
-            },
-            BlockRowKind::Block { .. } => {
-                let found = if bias == Bias::Left {
-                    self.buffer_position_before(row)
-                        .or_else(|| self.buffer_position_after(row))
-                } else {
-                    self.buffer_position_after(row)
-                        .or_else(|| self.buffer_position_before(row))
-                };
+                let clipped = self.wrap_to_block(wrap_point);
 
-                // A `Replace` block spanning every wrap row leaves the tree
-                // holding no buffer text at all, so neither search can answer.
-                // The block's own row keeps clipping total and idempotent, which
-                // is the most a document with nowhere to put a caret allows.
-                found.unwrap_or_else(|| BlockPoint::new(row, 0))
+                // The row the wrap layer moved to can itself be one a `Replace`
+                // block covers, which holds no buffer text either.
+                match self.classify_row(clipped.row) {
+                    BlockRowKind::BufferRow { .. } => clipped,
+                    BlockRowKind::Block { .. } => self.off_block_row(clipped.row, bias),
+                }
             },
+            BlockRowKind::Block { .. } => self.off_block_row(row, bias),
         }
+    }
+
+    /// Nearest position holding buffer text to block row `row`, preferring the
+    /// side `bias` names.
+    fn off_block_row(&self, row: u32, bias: Bias) -> BlockPoint {
+        let found = if bias == Bias::Left {
+            self.buffer_position_before(row)
+                .or_else(|| self.buffer_position_after(row))
+        } else {
+            self.buffer_position_after(row)
+                .or_else(|| self.buffer_position_before(row))
+        };
+
+        // A `Replace` block spanning every wrap row leaves the tree holding no
+        // buffer text at all, so neither search can answer. The block's own row
+        // keeps clipping total and idempotent, which is the most a document
+        // with nowhere to put a caret allows.
+        found.unwrap_or_else(|| BlockPoint::new(row, 0))
     }
 
     /// End of the last row holding buffer text above block row `row`.
@@ -2286,11 +2303,19 @@ mod tests {
 
     use crate::{
         buffer::{BufferId, TextBuffer},
-        display_map::{fold_map::FoldMap, inlay_map::InlayMap, tab_map::TabMap, wrap_map::WrapMap},
+        display_map::{
+            fold_map::{FoldMap, FoldPlaceholder},
+            inlay_map::InlayMap,
+            tab_map::TabMap,
+            wrap_map::WrapMap,
+        },
         multi_buffer::MultiBuffer,
     };
     use ratatui::text::Line;
-    use std::sync::{Arc, OnceLock, RwLock};
+    use std::{
+        ops::Range,
+        sync::{Arc, OnceLock, RwLock},
+    };
     use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::{patch::Patch, Bias, Point};
 
@@ -2312,6 +2337,80 @@ mod tests {
         let mut block_map = BlockMap::new();
         block_map.insert(props.to_vec());
         block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None)
+    }
+
+    /// [`create_block_snapshot`] with soft wrap on and `fold` (given as buffer
+    /// `(row, column)` ends) folded behind the default ellipsis.
+    fn wrapped_block_snapshot(
+        content: &str,
+        wrap_width: u32,
+        fold: Range<(u32, u32)>,
+    ) -> super::BlockSnapshot {
+        let buffer = TextBuffer::with_text(BufferId::new(0), content);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+
+        let offset = |(row, column): (u32, u32)| {
+            buffer_snapshot
+                .rope()
+                .point_to_offset(Point::new(row, column))
+        };
+        fold_map.fold(
+            vec![
+                buffer_snapshot.anchor_at(offset(fold.start), Bias::Right)
+                    ..buffer_snapshot.anchor_at(offset(fold.end), Bias::Left),
+            ],
+            FoldPlaceholder::default(),
+            &buffer_snapshot,
+        );
+        let (fold_snapshot, _) = fold_map.sync(inlay_snapshot, &Patch::empty(), None);
+
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
+        let (_, wrap_snapshot) = WrapMap::new(
+            tab_snapshot,
+            Some(wrap_width),
+            test_executor(),
+            crate::test_notify(),
+        );
+        BlockMap::new().sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None)
+    }
+
+    /// Wrap-space clipping answers on whichever row the position it chose lives
+    /// on, and a fold placeholder straddling a wrap break makes that a
+    /// different row than the one asked about. Keeping the row asked about and
+    /// taking only the column reads that column against the wrong row, which
+    /// shows up as the rightward bias landing before the leftward one.
+    #[test]
+    fn clip_point_follows_a_fold_across_a_wrap_break() {
+        let snapshot = wrapped_block_snapshot("abcdefghij\nklm\n", 5, (0, 3)..(0, 7));
+
+        for row in 0..snapshot.total_lines() {
+            for column in 0..=snapshot.line_len(row) + 1 {
+                let point = BlockPoint::new(row, column);
+                let left = snapshot.clip_point(point, Bias::Left);
+                let right = snapshot.clip_point(point, Bias::Right);
+
+                assert!(
+                    left <= right,
+                    "{point:?} clips to {left:?} left of {right:?} right",
+                );
+                for (clipped, bias) in [(left, Bias::Left), (right, Bias::Right)] {
+                    assert_eq!(
+                        snapshot.clip_point(clipped, bias),
+                        clipped,
+                        "{clipped:?} moves when clipped {bias:?} again",
+                    );
+                    assert!(
+                        snapshot.block_to_buffer(clipped).is_some(),
+                        "{point:?} clips to {clipped:?}, which names no buffer position",
+                    );
+                }
+            }
+        }
     }
 
     /// A touch is what turns a block into a rebuilt region, so an edit that only
