@@ -194,9 +194,23 @@ impl KeyedItem for InsertionFragment {
 
 #[cfg(test)]
 mod tests {
-    use super::{Fragment, FragmentTextSummary, InsertionFragment, InsertionFragmentKey};
-    use crate::Locator;
+    use super::{
+        Fragment, FragmentSummary, FragmentTextSummary, InsertionFragment, InsertionFragmentKey,
+    };
+    use crate::{Item, Locator, Summary};
     use smallvec::SmallVec;
+
+    fn frag(id: Locator) -> Fragment {
+        Fragment {
+            id,
+            timestamp: 1,
+            insertion_offset: 0,
+            len: 1,
+            visible: true,
+            deletions: SmallVec::new(),
+            max_undos: 0,
+        }
+    }
 
     #[test]
     fn fragment_visible_len() {
@@ -241,6 +255,29 @@ mod tests {
         a.add(&b);
         assert_eq!(a.visible, 15);
         assert_eq!(a.deleted, 5);
+    }
+
+    #[test]
+    fn max_id_carries_the_last_summary_folded_in_not_the_greatest() {
+        // The name says maximum, and over a fragment tree the two read alike,
+        // since the tree is ordered by id and the last id is the greatest. The
+        // buffer takes the root summary as its last fragment's id, which only
+        // the assignment gives it. A maximum would answer an interior id for a
+        // tree whose ids ever ran the other way.
+        let folded = |ids: [Locator; 2]| -> Locator {
+            let mut summary = FragmentSummary::zero(&None);
+            for id in ids {
+                summary.add_summary(&frag(id).summary(&None), &None);
+            }
+            summary.max_id
+        };
+
+        assert_eq!(folded([Locator::min(), Locator::max()]), Locator::max());
+        assert_eq!(
+            folded([Locator::max(), Locator::min()]),
+            Locator::min(),
+            "folding a smaller id last leaves it holding, rather than the larger",
+        );
     }
 
     #[test]

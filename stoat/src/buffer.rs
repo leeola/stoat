@@ -1241,8 +1241,15 @@ impl Default for TextBuffer {
     }
 }
 
+/// The id of the tree's last fragment, or [`Locator::min`] when it holds none.
+///
+/// Read off the root summary rather than walked down to. `FragmentSummary`
+/// assigns `max_id` as summaries fold in rather than taking a maximum of them,
+/// so it holds the last fragment's id, and an empty tree carries the `zero`
+/// summary's `Locator::min`. Every emitted fragment asks for this to place the
+/// next one, so a descent here would double the descents a splice makes.
 fn last_id<'a>(tree: &'a SumTree<Fragment>, _cx: &Option<u64>) -> &'a Locator {
-    tree.last().map(|f| &f.id).unwrap_or(Locator::min_ref())
+    &tree.summary().max_id
 }
 
 /// Builds the deleted rope for one edit, in document order.
