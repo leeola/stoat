@@ -1805,6 +1805,8 @@ mod tests {
             carried(&sequential, &sequential_anchors),
             "anchors predating the batch diverged on {content:?} with {edits:?}",
         );
+        check_invariants(&batched, "after the batch");
+        check_invariants(&sequential, "after the sequential edits");
 
         // Undo and redo read the op log and the fragment tree together, so a
         // tree that merely looks right at the end still fails here. Undo also
@@ -1823,6 +1825,8 @@ mod tests {
                 carried(&sequential, &sequential_anchors),
                 "undo {step} moved a carried anchor on {content:?}",
             );
+            check_invariants(&batched, &format!("batched, after undo {step}"));
+            check_invariants(&sequential, &format!("sequential, after undo {step}"));
         }
         for step in 0..3 {
             batched.redo();
@@ -1837,6 +1841,8 @@ mod tests {
                 carried(&sequential, &sequential_anchors),
                 "redo {step} moved a carried anchor on {content:?}",
             );
+            check_invariants(&batched, &format!("batched, after redo {step}"));
+            check_invariants(&sequential, &format!("sequential, after redo {step}"));
         }
     }
 
@@ -3168,6 +3174,89 @@ mod tests {
         spans
     }
 
+    /// The structural invariants of the fragment and insertion trees.
+    ///
+    /// [`fragment_spans`] reads each fragment's bytes out of the two ropes, so
+    /// it proves the ropes and the fragment lengths agree and nothing more.
+    /// Nothing reads the insertions tree at all. A split that re-records an
+    /// entry against the wrong fragment leaves the text correct and surfaces
+    /// only later, through whichever anchor path consults the broken entry.
+    ///
+    /// Both directions of the fragment-to-insertion correspondence are read.
+    /// Either alone passes for a tree whose entries were duplicated rather than
+    /// moved, because the surviving copy still answers the lookup.
+    fn check_invariants(b: &TextBuffer, context: &str) {
+        use std::collections::HashMap;
+        use stoat_text::{InsertionFragmentKey, KeyedItem, Locator};
+
+        let cx = &None;
+        let snap = &b.snapshot;
+
+        let fragments: Vec<&super::Fragment> = snap.fragments.cursor::<()>(cx).collect();
+
+        // The tree is ordered by locator, so a duplicate or out-of-order id
+        // breaks every seek without necessarily changing the text.
+        for pair in fragments.windows(2) {
+            assert!(
+                pair[0].id < pair[1].id,
+                "{context}: fragment ids are not ascending, {:?} then {:?}",
+                pair[0].id,
+                pair[1].id,
+            );
+        }
+
+        let by_id: HashMap<&Locator, &super::Fragment> =
+            fragments.iter().map(|f| (&f.id, *f)).collect();
+
+        for fragment in &fragments {
+            // The tree opens with an empty sentinel that stands for the
+            // position before all text. It comes from no insertion, so the
+            // insertions tree deliberately holds no entry for it.
+            if fragment.id == Locator::min() {
+                continue;
+            }
+
+            let key = InsertionFragmentKey {
+                timestamp: fragment.timestamp,
+                split_offset: fragment.insertion_offset,
+            };
+            let mut cursor = snap.insertions.cursor::<InsertionFragmentKey>(());
+            cursor.seek(&key, Bias::Left);
+            let entry = cursor
+                .item()
+                .filter(|entry| entry.key() == key)
+                .unwrap_or_else(|| panic!("{context}: no insertion entry for {key:?}"));
+            assert_eq!(
+                entry.fragment_id, fragment.id,
+                "{context}: insertion entry for {key:?} names another fragment",
+            );
+        }
+
+        for entry in snap.insertions.cursor::<()>(()) {
+            let fragment = by_id
+                .get(&entry.fragment_id)
+                .unwrap_or_else(|| panic!("{context}: insertion entry names a missing fragment"));
+            assert_eq!(
+                fragment.insertion_offset, entry.split_offset,
+                "{context}: insertion entry and fragment disagree on the offset",
+            );
+        }
+
+        // Maintained incrementally as the tree is rebuilt, so it can drift from
+        // the text it describes.
+        let summary = snap.fragments.summary();
+        assert_eq!(
+            summary.text.visible,
+            snap.visible_text.len(),
+            "{context}: summary disagrees with the visible rope",
+        );
+        assert_eq!(
+            summary.text.deleted,
+            snap.deleted_text.len(),
+            "{context}: summary disagrees with the deleted rope",
+        );
+    }
+
     /// Assert the full contract of an undo or redo rebuild.
     ///
     /// Every fragment survives in order carrying the same bytes, each one's
@@ -3249,6 +3338,8 @@ mod tests {
                         assert_toggle_preserved(&before, &b);
                     },
                 }
+
+                check_invariants(&b, "after a random operation");
             }
         }
     }
@@ -3353,6 +3444,7 @@ mod tests {
                     model.current,
                     "step {step} left the buffer showing text no edit history explains"
                 );
+                check_invariants(&b, &format!("step {step}"));
             }
         }
     }
