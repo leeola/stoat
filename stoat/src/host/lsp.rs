@@ -16,10 +16,11 @@ use lsp_types::{
     ImplementationProviderCapability, InitializeResult, InlayHint, InlayHintParams,
     InlayHintServerCapabilities, Location, MessageType, NumberOrString, OneOf,
     PrepareRenameResponse, ProgressToken, ReferenceParams, RegistrationParams, RenameFilesParams,
-    RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensParams,
-    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities,
-    ShowMessageRequestParams, SignatureHelp, SignatureHelpParams, TextDocumentPositionParams,
-    TextEdit, TypeDefinitionProviderCapability, TypeHierarchyItem, TypeHierarchyPrepareParams,
+    RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensDeltaParams,
+    SemanticTokensFullDeltaResult, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities, ShowMessageRequestParams,
+    SignatureHelp, SignatureHelpParams, TextDocumentPositionParams, TextEdit,
+    TypeDefinitionProviderCapability, TypeHierarchyItem, TypeHierarchyPrepareParams,
     TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, UnregistrationParams, Uri,
     WorkDoneProgress, WorkDoneProgressCreateParams, WorkspaceEdit, WorkspaceSymbolParams,
     WorkspaceSymbolResponse,
@@ -426,6 +427,17 @@ pub trait LspHost: Send + Sync {
         &self,
         params: SemanticTokensParams,
     ) -> io::Result<Option<SemanticTokensResult>>;
+    /// The tokens that changed since the result named by
+    /// `params.previous_result_id`, for a server advertising `full.delta`.
+    ///
+    /// A server may answer with the whole set instead, which the reply's variant
+    /// says, so a caller has to handle both. Only worth asking when a previous
+    /// result id is in hand, since a delta against nothing is a full pull with
+    /// extra steps.
+    async fn semantic_tokens_full_delta(
+        &self,
+        params: SemanticTokensDeltaParams,
+    ) -> io::Result<Option<SemanticTokensFullDeltaResult>>;
     async fn semantic_tokens_range(
         &self,
         params: SemanticTokensRangeParams,
@@ -722,6 +734,13 @@ impl LspHost for NoopLsp {
         &self,
         _params: SemanticTokensParams,
     ) -> io::Result<Option<SemanticTokensResult>> {
+        Ok(None)
+    }
+
+    async fn semantic_tokens_full_delta(
+        &self,
+        _params: SemanticTokensDeltaParams,
+    ) -> io::Result<Option<SemanticTokensFullDeltaResult>> {
         Ok(None)
     }
 

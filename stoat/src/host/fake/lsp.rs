@@ -20,15 +20,16 @@ use lsp_types::{
     InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
     MessageType, NumberOrString, PartialResultParams, Position, PositionEncodingKind,
     PrepareRenameResponse, Range, ReferenceContext, ReferenceParams, RenameFilesParams,
-    RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensParams,
-    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities,
-    SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
-    TypeHierarchySupertypesParams, Uri, VersionedTextDocumentIdentifier, WorkDoneProgress,
-    WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit, WorkspaceFolder,
-    WorkspaceFoldersChangeEvent, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensDeltaParams,
+    SemanticTokensFullDeltaResult, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities, SignatureHelp,
+    SignatureHelpParams, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, TypeHierarchyItem,
+    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
+    VersionedTextDocumentIdentifier, WorkDoneProgress, WorkDoneProgressBegin,
+    WorkDoneProgressParams, WorkspaceEdit, WorkspaceFolder, WorkspaceFoldersChangeEvent,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use serde_json::Value;
 use std::{
@@ -568,6 +569,10 @@ struct FakeLspState {
     document_colors: BTreeMap<Uri, Vec<ColorInformation>>,
     color_presentations: BTreeMap<Uri, Vec<ColorPresentation>>,
     semantic_tokens_full: BTreeMap<Uri, SemanticTokensResult>,
+    semantic_tokens_full_delta: BTreeMap<Uri, SemanticTokensFullDeltaResult>,
+    /// Every delta request served, so a test can tell a delta pull from a full
+    /// one and check which result id it named.
+    semantic_tokens_delta_requests: Vec<SemanticTokensDeltaParams>,
     semantic_tokens_range: BTreeMap<Uri, SemanticTokensRangeResult>,
     document_symbols: BTreeMap<Uri, DocumentSymbolResponse>,
     signature_helps: BTreeMap<LspKey, SignatureHelp>,
@@ -651,6 +656,8 @@ impl FakeLsp {
                 document_colors: BTreeMap::new(),
                 color_presentations: BTreeMap::new(),
                 semantic_tokens_full: BTreeMap::new(),
+                semantic_tokens_full_delta: BTreeMap::new(),
+                semantic_tokens_delta_requests: Vec::new(),
                 semantic_tokens_range: BTreeMap::new(),
                 document_symbols: BTreeMap::new(),
                 signature_helps: BTreeMap::new(),
@@ -861,6 +868,34 @@ impl FakeLsp {
             .unwrap()
             .semantic_tokens_full
             .insert(file_uri(path), result);
+    }
+
+    /// Programs the [`SemanticTokensFullDeltaResult`] returned for a
+    /// `textDocument/semanticTokens/full/delta` call against `path`.
+    /// The fake ignores the request's `previous_result_id` and returns whatever
+    /// was programmed for the document. Replaces any previously seeded result
+    /// for the same document.
+    pub fn set_semantic_tokens_full_delta(
+        &self,
+        path: &str,
+        result: SemanticTokensFullDeltaResult,
+    ) {
+        self.state
+            .lock()
+            .unwrap()
+            .semantic_tokens_full_delta
+            .insert(file_uri(path), result);
+    }
+
+    /// Every `textDocument/semanticTokens/full/delta` call served, in order, so
+    /// a test can tell a delta pull from a full one and read the result id it
+    /// asked against.
+    pub fn observed_semantic_token_deltas(&self) -> Vec<SemanticTokensDeltaParams> {
+        self.state
+            .lock()
+            .unwrap()
+            .semantic_tokens_delta_requests
+            .clone()
     }
 
     /// Programs the [`SemanticTokensRangeResult`] returned for a
@@ -2195,6 +2230,29 @@ impl LspHost for FakeLsp {
             .semantic_tokens_full
             .get(&params.text_document.uri)
             .cloned())
+    }
+
+    async fn semantic_tokens_full_delta(
+        &self,
+        params: SemanticTokensDeltaParams,
+    ) -> io::Result<Option<SemanticTokensFullDeltaResult>> {
+        self.apply_delay("textDocument/semanticTokens/full/delta")
+            .await;
+        if let Some(err) = self.take_request_failure("textDocument/semanticTokens/full/delta") {
+            return Err(err);
+        }
+        pending_check!(
+            self,
+            lsp_types::request::SemanticTokensFullDeltaRequest,
+            params
+        );
+        let mut state = self.state.lock().unwrap();
+        let result = state
+            .semantic_tokens_full_delta
+            .get(&params.text_document.uri)
+            .cloned();
+        state.semantic_tokens_delta_requests.push(params);
+        Ok(result)
     }
 
     async fn semantic_tokens_range(

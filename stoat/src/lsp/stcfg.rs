@@ -31,13 +31,13 @@ use lsp_types::{
     PositionEncodingKind, PrepareRenameResponse, Range, ReferenceParams,
     RelatedFullDocumentDiagnosticReport, RenameFilesParams, RenameParams, SelectionRange,
     SelectionRangeParams, SemanticToken, SemanticTokenType, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpParams,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
-    TypeHierarchySupertypesParams, Uri, WorkspaceEdit, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    SemanticTokensDeltaParams, SemanticTokensFullDeltaResult, SemanticTokensFullOptions,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensRangeResult, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, SignatureHelp, SignatureHelpParams, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, TypeHierarchyItem,
+    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
+    WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use serde_json::Value as JsonValue;
 use std::{
@@ -308,6 +308,28 @@ impl LspHost for StcfgLsp {
         };
         Ok(data.map(|data| {
             SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data,
+            })
+        }))
+    }
+
+    /// Answers with the whole set, which the delta reply permits. The tokens
+    /// come from re-highlighting the document either way, so there is no
+    /// previous result to diff against.
+    async fn semantic_tokens_full_delta(
+        &self,
+        params: SemanticTokensDeltaParams,
+    ) -> io::Result<Option<SemanticTokensFullDeltaResult>> {
+        let data = {
+            let docs = self.docs.lock().expect("stcfg docs poisoned");
+            let Some(text) = docs.get(&params.text_document.uri) else {
+                return Ok(None);
+            };
+            semantic_tokens(text)
+        };
+        Ok(data.map(|data| {
+            SemanticTokensFullDeltaResult::Tokens(SemanticTokens {
                 result_id: None,
                 data,
             })

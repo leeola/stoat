@@ -33,8 +33,9 @@ use lsp_types::{
     ProgressParamsValue, ProgressToken, PublishDiagnosticsClientCapabilities,
     PublishDiagnosticsParams, ReferenceClientCapabilities, ReferenceParams,
     RenameClientCapabilities, RenameFilesParams, RenameParams, SelectionRange,
-    SelectionRangeParams, SemanticTokensParams, SemanticTokensRangeParams,
-    SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities, ShowMessageParams,
+    SelectionRangeParams, SemanticTokensDeltaParams, SemanticTokensFullDeltaResult,
+    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
+    SemanticTokensResult, ServerCapabilities, ShowMessageParams,
     ShowMessageRequestClientCapabilities, SignatureHelp, SignatureHelpParams, TagSupport,
     TextDocumentClientCapabilities, TextDocumentPositionParams, TextEdit, TypeHierarchyItem,
     TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
@@ -480,6 +481,13 @@ impl LspHost for LocalLsp {
         params: SemanticTokensParams,
     ) -> io::Result<Option<SemanticTokensResult>> {
         self.request("textDocument/semanticTokens/full", params)
+            .await
+    }
+    async fn semantic_tokens_full_delta(
+        &self,
+        params: SemanticTokensDeltaParams,
+    ) -> io::Result<Option<SemanticTokensFullDeltaResult>> {
+        self.request("textDocument/semanticTokens/full/delta", params)
             .await
     }
     async fn semantic_tokens_range(
