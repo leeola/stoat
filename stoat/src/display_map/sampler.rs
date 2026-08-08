@@ -6,6 +6,23 @@
 //! ending mid-character, a hint on a row of wide glyphs, a tab landing off the
 //! expansion grid.
 
+use super::{
+    fold_map::{FoldMap, FoldPlaceholder},
+    inlay_map::{InlayKind, InlayMap},
+    tab_map::TabMap,
+    wrap_map::{WrapMap, WrapSnapshot},
+};
+use crate::{
+    buffer::{BufferId, TextBuffer},
+    multi_buffer::MultiBuffer,
+};
+use std::{
+    num::NonZeroU32,
+    sync::{Arc, RwLock},
+};
+use stoat_scheduler::{Executor, TestScheduler};
+use stoat_text::{patch::Patch, Bias};
+
 /// Characters spanning every UTF-8 width, plus the newlines that make rows and
 /// the tabs that make expansions.
 ///
@@ -61,4 +78,68 @@ impl Sampler {
             .map(|_| ALPHABET[(self.next() as usize) % ALPHABET.len()])
             .collect()
     }
+}
+
+/// A generated buffer stacked through the inlay, fold, tab and wrap layers.
+///
+/// The sampler comes back so a caller can keep drawing from the same seed for
+/// whatever it layers on top, which is what lets the block suite generate its
+/// blocks without starting a second sequence that would repeat these draws.
+///
+/// Wrap widths are drawn from a range that mostly misses the tab grid. Tab
+/// expansion is modular in the tab size, so a width that is a multiple of it
+/// never puts a break inside an expansion, which is where the wrap layer's
+/// column arithmetic is hardest.
+pub(super) fn random_wrap_stack(seed: u64) -> (Sampler, Arc<WrapSnapshot>) {
+    let mut sampler = Sampler::new(seed);
+    let len = 1 + sampler.below(60) as usize;
+    let text = sampler.text(len);
+    let tab_size = NonZeroU32::new(1 + sampler.below(4)).expect("nonzero");
+    let wrap_width = match sampler.below(4) {
+        0 => None,
+        _ => Some(3 + sampler.below(14)),
+    };
+
+    let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
+    let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+    let buffer_snapshot = multi_buffer.snapshot();
+    let rope = buffer_snapshot.rope();
+    let offset = |sampler: &mut Sampler| {
+        rope.clip_offset(sampler.below(rope.len() as u32 + 1) as usize, Bias::Left)
+    };
+
+    let (mut inlay_map, _) = InlayMap::new(buffer_snapshot.clone());
+    let hint_count = sampler.below(3);
+    let hints = (0..hint_count)
+        .map(|_| {
+            let anchor = buffer_snapshot.anchor_at(offset(&mut sampler), Bias::Right);
+            let hint_len = 1 + sampler.below(4) as usize;
+            (anchor, sampler.text(hint_len), InlayKind::Hint)
+        })
+        .collect();
+    inlay_map.splice(&buffer_snapshot, Vec::new(), hints);
+    let (inlay_snapshot, _) = inlay_map.sync(buffer_snapshot.clone(), &Patch::empty());
+
+    let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+    let fold_count = sampler.below(3);
+    let folds = (0..fold_count)
+        .map(|_| {
+            let (a, b) = (offset(&mut sampler), offset(&mut sampler));
+            let (start, end) = if a <= b { (a, b) } else { (b, a) };
+            buffer_snapshot.anchor_at(start, Bias::Right)
+                ..buffer_snapshot.anchor_at(end, Bias::Left)
+        })
+        .collect();
+    fold_map.fold(folds, FoldPlaceholder::default(), &buffer_snapshot);
+    let (fold_snapshot, _) = fold_map.sync(inlay_snapshot, &Patch::empty(), None);
+
+    let (tab_snapshot, _) = TabMap::new(tab_size).sync(fold_snapshot, Patch::empty());
+    let (_, wrap_snapshot) = WrapMap::new(
+        tab_snapshot,
+        wrap_width,
+        Executor::new(Arc::new(TestScheduler::new())),
+        crate::test_notify(),
+    );
+
+    (sampler, wrap_snapshot)
 }

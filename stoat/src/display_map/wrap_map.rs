@@ -1486,6 +1486,7 @@ mod tests {
         display_map::{
             fold_map::{FoldMap, FoldPlaceholder},
             inlay_map::InlayMap,
+            sampler,
             tab_map::{TabMap, TabPoint},
         },
         multi_buffer::MultiBuffer,
@@ -2365,6 +2366,56 @@ mod tests {
                 got, expected,
                 "char {idx}: got {got:?}, expected {expected:?}"
             );
+        }
+    }
+
+    /// Clipping has to settle on a position it leaves alone, keep the two
+    /// biases in the order they name, and land inside the row it answers with,
+    /// past the synthetic indent a continuation row carries and no further than
+    /// the row's own length. A settled point is a wrap-space image of a tab
+    /// position, so converting it down and back has to return it.
+    ///
+    /// The row is deliberately not asserted to be preserved. A fold placeholder
+    /// straddling a wrap break clips to the whole placeholder, which can move
+    /// the result onto the row the placeholder ends on.
+    #[test]
+    fn clipping_a_wrap_point_settles_and_converts_back() {
+        for seed in 0..256 {
+            let (_, snap) = sampler::random_wrap_stack(seed);
+
+            for row in 0..snap.line_count() {
+                for column in 0..=snap.line_len(row) + 1 {
+                    let point = WrapPoint::new(row, column);
+                    let left = snap.clip_point(point, Bias::Left);
+                    let right = snap.clip_point(point, Bias::Right);
+
+                    assert!(
+                        left <= right,
+                        "seed {seed}: {point:?} clips to {left:?} left of {right:?} right",
+                    );
+                    for (clipped, bias) in [(left, Bias::Left), (right, Bias::Right)] {
+                        assert_eq!(
+                            snap.clip_point(clipped, bias),
+                            clipped,
+                            "seed {seed}: {point:?} clipped {bias:?} to {clipped:?}, which moves \
+                             again",
+                        );
+
+                        let len = snap.line_len(clipped.row());
+                        let indent = snap.soft_wrap_indent(clipped.row()).min(len);
+                        assert!(
+                            (indent..=len).contains(&clipped.column()),
+                            "seed {seed}: {clipped:?} sits outside {indent}..={len}",
+                        );
+
+                        assert_eq!(
+                            snap.to_wrap_point(snap.to_tab_point(clipped)),
+                            clipped,
+                            "seed {seed}: {clipped:?} does not survive the tab round trip",
+                        );
+                    }
+                }
+            }
         }
     }
 }

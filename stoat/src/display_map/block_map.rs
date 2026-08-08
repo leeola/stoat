@@ -2347,6 +2347,7 @@ mod tests {
         display_map::{
             fold_map::{FoldMap, FoldPlaceholder},
             inlay_map::InlayMap,
+            sampler,
             tab_map::TabMap,
             wrap_map::WrapMap,
         },
@@ -3261,5 +3262,109 @@ mod tests {
         block_map.remove(&[ids[0]].into_iter().collect());
         let snap = block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None);
         assert_eq!(snap.total_lines(), 4);
+    }
+
+    /// A generated stack under a generated block set.
+    ///
+    /// The placements draw from all four kinds. `Replace` is what makes rows
+    /// disappear rather than only shift, and it is the one that can leave a
+    /// document holding no buffer text at all.
+    fn random_block_snapshot(seed: u64) -> super::BlockSnapshot {
+        let (mut sampler, wrap_snapshot) = sampler::random_wrap_stack(seed);
+        let buffer_rows = wrap_snapshot
+            .tab_snapshot()
+            .fold_snapshot()
+            .inlay_snapshot()
+            .buffer_snapshot()
+            .line_count();
+
+        // One block per row, ascending, with every `Replace` range stopping
+        // short of the next block's row. `build_transforms` resolves placements
+        // through forward-only cursors, so the rows it maps have to ascend, and
+        // a `Replace` reaching the row after it would send the next block's
+        // lookup backwards. Nothing in the editor builds a `Replace` spanning
+        // more than the row it names, so this is the shape the layer is asked
+        // for rather than a restriction on the sweep.
+        let mut rows: Vec<u32> = (0..sampler.below(4))
+            .map(|_| sampler.below(buffer_rows))
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+
+        let blocks = rows
+            .iter()
+            .enumerate()
+            .map(|(index, &row)| {
+                let next = rows.get(index + 1).copied().unwrap_or(buffer_rows);
+                let placement = match sampler.below(4) {
+                    0 => BlockPlacement::Above(row),
+                    1 => BlockPlacement::Below(row),
+                    2 => BlockPlacement::Near(row),
+                    _ => BlockPlacement::Replace {
+                        start: row,
+                        end: row + sampler.below(2).min(next - row - 1),
+                    },
+                };
+                let lines = (0..1 + sampler.below(2))
+                    .map(|line| format!("block{row}-{line}"))
+                    .collect();
+                BlockProperties::from_text(placement, lines, BlockStyle::Fixed)
+            })
+            .collect();
+
+        let mut block_map = BlockMap::new();
+        block_map.insert(blocks);
+        block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None)
+    }
+
+    /// A block's rows hold no buffer text, so clipping has to move off them and
+    /// onto a row the buffer can name. Clipping also has to settle, keep the
+    /// two biases in the order they name, and land inside the row it answers
+    /// with.
+    ///
+    /// The addressability check is skipped for a document whose every row a
+    /// `Replace` block swallowed. There is no position to answer with there, so
+    /// requiring one would assert something false rather than find a bug.
+    #[test]
+    fn clipping_a_block_point_settles_on_buffer_text() {
+        for seed in 0..256 {
+            let snap = random_block_snapshot(seed);
+            let addressable = (0..snap.total_lines())
+                .any(|row| matches!(snap.classify_row(row), BlockRowKind::BufferRow { .. }));
+
+            for row in 0..snap.total_lines() {
+                for column in 0..=snap.line_len(row) + 1 {
+                    let point = BlockPoint::new(row, column);
+                    let left = snap.clip_point(point, Bias::Left);
+                    let right = snap.clip_point(point, Bias::Right);
+
+                    assert!(
+                        left <= right,
+                        "seed {seed}: {point:?} clips to {left:?} left of {right:?} right",
+                    );
+                    for (clipped, bias) in [(left, Bias::Left), (right, Bias::Right)] {
+                        assert_eq!(
+                            snap.clip_point(clipped, bias),
+                            clipped,
+                            "seed {seed}: {point:?} clipped {bias:?} to {clipped:?}, which moves \
+                             again",
+                        );
+                        assert!(
+                            clipped.column <= snap.line_len(clipped.row),
+                            "seed {seed}: {clipped:?} runs past its row",
+                        );
+
+                        if addressable {
+                            let buffer = snap.block_to_buffer(clipped);
+                            assert!(
+                                buffer.is_some(),
+                                "seed {seed}: {point:?} clipped {bias:?} to {clipped:?}, which \
+                                 names no buffer position",
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
