@@ -978,31 +978,15 @@ impl Rope {
         }
     }
 
-    /// Whether the scalars on either side of `offset` are both ASCII and break
-    /// between, which decides a grapheme boundary without a cursor.
+    /// [`ascii_pair_breaks`] for a rope offset, fetching the chunk it needs.
     ///
-    /// Two adjacent scalars below 0x80 always break, save CR before LF. GB3
-    /// joins that one pair, GB4 and GB5 break around the other controls, and
-    /// every remaining rule needs Hangul, Extend, ZWJ, SpacingMark, Prepend,
-    /// Extended_Pictographic, or a regional indicator, none of which any ASCII
-    /// scalar is. A byte below 0x80 is also never a UTF-8 continuation byte, so
-    /// the two reads below identify whole scalars rather than the middle of one.
-    ///
-    /// False when either side lies in a neighbouring chunk. Reaching for it
-    /// would cost the descent this exists to skip, and the caller's slower path
-    /// answers a seam correctly anyway.
+    /// For a caller holding no chunk yet. One already inside a walk applies
+    /// [`ascii_pair_breaks`] to the chunk in hand instead.
     fn ascii_pair_brackets(&self, offset: usize) -> bool {
         let Some((chunk, chunk_start)) = self.chunk_at(offset) else {
             return false;
         };
-        let local = offset - chunk_start;
-        let bytes = chunk.as_bytes();
-        if local == 0 || local >= bytes.len() {
-            return false;
-        }
-
-        let (before, after) = (bytes[local - 1], bytes[local]);
-        before < 0x80 && after < 0x80 && !(before == b'\r' && after == b'\n')
+        ascii_pair_breaks(chunk.as_bytes(), offset - chunk_start)
     }
 
     /// Offset of the first grapheme-cluster boundary after `offset`, or
@@ -1018,6 +1002,20 @@ impl Rope {
     /// - [`Self::prev_grapheme_boundary`] for the backward step.
     /// - [`Self::clip_to_grapheme_boundary`] to snap onto one instead of past it.
     pub fn next_grapheme_boundary(&self, offset: usize) -> usize {
+        // One descent settles the ordinary case. A cluster holding the ASCII
+        // scalar at `offset` can only reach past it through Extend, ZWJ,
+        // SpacingMark or a regional indicator, none of which is ASCII, or
+        // through CR before LF, which the check excludes.
+        //
+        // Ahead of the clip below, since a byte under 0x80 is never a
+        // continuation byte. An offset this accepts is on a char boundary
+        // already, and one that is not always fails it.
+        if let Some((chunk, chunk_start)) = self.chunk_at(offset)
+            && ascii_pair_breaks(chunk.as_bytes(), offset + 1 - chunk_start)
+        {
+            return offset + 1;
+        }
+
         let offset = self.clip_offset(offset, Bias::Left);
         if offset >= self.len() {
             return offset;
@@ -1150,6 +1148,16 @@ impl Rope {
     /// cluster definition and the same left-clipping of an `offset` that is not
     /// on a char boundary.
     pub fn prev_grapheme_boundary(&self, offset: usize) -> usize {
+        // The mirror of the forward step's fast path, one position back. The
+        // chunk is taken at `offset - 1` rather than at `offset` so a step back
+        // from the rope end, where nothing holds `offset`, still lands here.
+        if offset > 0
+            && let Some((chunk, chunk_start)) = self.chunk_at(offset - 1)
+            && ascii_pair_breaks(chunk.as_bytes(), offset - 1 - chunk_start)
+        {
+            return offset - 1;
+        }
+
         let offset = self.clip_offset(offset, Bias::Left);
         if offset == 0 {
             return 0;
@@ -2085,6 +2093,29 @@ impl<'a> Dimension<'a, TextSummary> for usize {
     fn add_summary(&mut self, summary: &'a TextSummary, _cx: ()) {
         *self += summary.len;
     }
+}
+
+/// Whether the two scalars around `local` in `bytes` are both ASCII and break
+/// between, which decides a grapheme boundary without a cursor.
+///
+/// Two adjacent scalars below 0x80 always break, save CR before LF. GB3 joins
+/// that one pair, GB4 and GB5 break around the other controls, and every
+/// remaining rule needs Hangul, Extend, ZWJ, SpacingMark, Prepend,
+/// Extended_Pictographic, or a regional indicator, none of which any ASCII
+/// scalar is. A byte below 0x80 is also never a UTF-8 continuation byte, so the
+/// two reads identify whole scalars rather than the middle of one.
+///
+/// False at either end of `bytes`, which is how a caller holding one chunk
+/// finds out that the answer lies across a seam. Reaching over it would cost
+/// the descent this exists to skip, and every caller has a slower path that
+/// answers a seam correctly.
+fn ascii_pair_breaks(bytes: &[u8], local: usize) -> bool {
+    if local == 0 || local >= bytes.len() {
+        return false;
+    }
+
+    let (before, after) = (bytes[local - 1], bytes[local]);
+    before < 0x80 && after < 0x80 && !(before == b'\r' && after == b'\n')
 }
 
 /// Mask of every bit below `offset`, saturating at the full width.
@@ -3675,6 +3706,53 @@ mod tests {
             expected_reads.iter().rev().copied().collect::<Vec<_>>(),
             "descending input is permuted rather than mis-answered",
         );
+    }
+
+    /// The stepping pair answers most offsets from two bytes of the chunk in
+    /// hand, so what it must agree with is not its own slower path but the
+    /// segmentation rules themselves, read off the whole text at once.
+    #[test]
+    fn stepping_matches_the_segmentation_rules_at_every_offset() {
+        use unicode_segmentation::UnicodeSegmentation;
+
+        for pad in 0..24usize {
+            // ASCII either side of a flag pair, a ZWJ family, a CRLF, a
+            // combining mark and an Arabic number sign, so the fast path meets
+            // each of the things that defeat it. The number sign is the one
+            // that reaches forward. GB9b joins a Prepend to whatever follows,
+            // so the ASCII digit after it starts no cluster of its own, and
+            // that is why the scalar before an ASCII one has to be checked as
+            // well as the ASCII one. The pad walks all of them across the
+            // chunk seams.
+            let text = format!(
+                "{}ab\r\ncd\u{1F1F7}\u{1F1F8}e\u{301}f\u{1F468}\u{200D}\u{1F469}g\u{0600}7h\r\nij",
+                "z".repeat(pad),
+            );
+            let mut rope = Rope::new();
+            for ch in text.chars() {
+                rope.push(&ch.to_string());
+            }
+
+            let mut boundaries: Vec<usize> =
+                text.grapheme_indices(true).map(|(at, _)| at).collect();
+            boundaries.push(text.len());
+
+            for offset in (0..=text.len()).filter(|&o| text.is_char_boundary(o)) {
+                let next = boundaries.iter().copied().find(|&b| b > offset);
+                assert_eq!(
+                    rope.next_grapheme_boundary(offset),
+                    next.unwrap_or(offset),
+                    "next from {offset} at pad {pad} in {text:?}",
+                );
+
+                let prev = boundaries.iter().copied().rev().find(|&b| b < offset);
+                assert_eq!(
+                    rope.prev_grapheme_boundary(offset),
+                    prev.unwrap_or(0),
+                    "prev from {offset} at pad {pad} in {text:?}",
+                );
+            }
+        }
     }
 
     #[test]
