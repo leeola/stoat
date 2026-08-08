@@ -126,7 +126,19 @@ pub struct FileFinder {
     pub(crate) open_intent: OpenIntent,
     pub(crate) scope: FinderScope,
     /// Absolute paths of currently-modified files. Re-queried on scope toggle.
+    ///
+    /// Empty until the first background query lands, and thereafter the
+    /// previous answer while a re-query is in flight, so a refresh never blinks
+    /// the rows empty.
     pub(crate) modified_paths: Vec<PathBuf>,
+    /// The in-flight git-status query feeding [`Self::modified_paths`], and the
+    /// task running it.
+    ///
+    /// The query is a full status pass with untracked recursion, far too slow
+    /// to run where a keystroke waits on it, so it runs on the blocking pool and
+    /// reports back here. `None` once its answer has been taken. The task is
+    /// held so dropping the finder drops the query with it.
+    modified: Option<(UnboundedReceiver<Vec<PathBuf>>, Task<()>)>,
     /// Which generation of [`Self::modified_paths`] and [`Self::buffer_paths`]
     /// the pick list is looking at.
     ///
@@ -218,7 +230,7 @@ impl FileFinder {
         git_root: PathBuf,
         walk_rx: UnboundedReceiver<Vec<PathBuf>>,
         walk_task: Task<()>,
-        modified_paths: Vec<PathBuf>,
+        modified: (UnboundedReceiver<Vec<PathBuf>>, Task<()>),
         buffer_paths: Vec<PathBuf>,
         finder_scopes: &BTreeMap<String, Vec<String>>,
     ) -> Self {
@@ -236,7 +248,8 @@ impl FileFinder {
             input,
             open_intent,
             scope: initial_scope,
-            modified_paths,
+            modified_paths: Vec::new(),
+            modified: Some(modified),
             buffer_paths,
             base_generation: crate::picker::next_generation(),
             core,
@@ -282,25 +295,57 @@ impl FileFinder {
         self.active_core().move_selection(delta);
     }
 
-    /// Flip the scope, optionally refreshing the Modified list before
-    /// rerunning the filter against the new base. `git_host` is borrowed
-    /// only when switching *to* Modified so the caller can skip the
-    /// discover call when switching away. From [`FinderScope::Buffers`]
-    /// the toggle returns to [`FinderScope::All`]; the Buffers scope is
-    /// reachable only through the dedicated `OpenBufferPicker` action,
-    /// not through this toggle.
-    pub(crate) fn toggle_scope(&mut self, git_host: &dyn GitHost) {
-        let next = self.next_scope();
-        // Refresh the Modified list only when landing on it, so switching away
-        // skips the git discover call.
-        if next == FinderScope::Modified {
-            self.modified_paths = query_modified(git_host, &self.core.git_root);
-            self.base_generation = crate::picker::next_generation();
-        }
-        self.scope = next;
+    /// Flip the scope and rerun the filter against the new base.
+    ///
+    /// Landing on [`FinderScope::Modified`] wants a fresh git status, but that
+    /// query is the caller's to spawn via [`Self::set_modified_source`], since
+    /// it belongs off this thread. From [`FinderScope::Buffers`] the toggle
+    /// returns to [`FinderScope::All`]. The Buffers scope is reachable only
+    /// through the dedicated `OpenBufferPicker` action, not through this toggle.
+    pub(crate) fn toggle_scope(&mut self) {
+        self.scope = self.next_scope();
         self.core.picklist.selected = 0;
         // Force refilter + preview resync on next render against the new base.
         self.core.invalidate();
+    }
+
+    /// Point the Modified list at a freshly spawned git-status query, replacing
+    /// any query still in flight.
+    ///
+    /// The paths already shown stay until the new answer lands, so a refresh
+    /// never blinks the rows empty.
+    pub(crate) fn set_modified_source(
+        &mut self,
+        rx: UnboundedReceiver<Vec<PathBuf>>,
+        task: Task<()>,
+    ) {
+        self.modified = Some((rx, task));
+    }
+
+    /// Take the background git-status answer if it has arrived, replacing the
+    /// modified list.
+    ///
+    /// Restamping the generation alone would not show the new list. The
+    /// Modified base id keys on that generation, but
+    /// [`PathPicker::refilter_with_base`] returns early while the query is
+    /// unchanged and the filter still valid, which is exactly the state a
+    /// finder sits in after opening. Invalidating is what that method exists
+    /// for. Only the scope actually reading the list needs it, since every
+    /// other scope re-runs from [`Self::toggle_scope`]'s own invalidate on the
+    /// way in.
+    fn pump_modified(&mut self) {
+        let Some((rx, _)) = self.modified.as_mut() else {
+            return;
+        };
+        let Ok(paths) = rx.try_recv() else {
+            return;
+        };
+        self.modified = None;
+        self.modified_paths = paths;
+        self.base_generation = crate::picker::next_generation();
+        if self.scope == FinderScope::Modified {
+            self.core.invalidate();
+        }
     }
 
     /// The scope Shift-Tab lands on next: All -> Modified -> each named scope
@@ -331,6 +376,9 @@ impl FileFinder {
     /// sync hook. Drains any pending walk result first so freshly arrived
     /// paths participate in the same render tick.
     pub(crate) fn refilter_from_input(&mut self, ws: &Workspace) -> Option<(u64, Scan)> {
+        // Ahead of the browse branch so a git-status answer landing while a
+        // directory query is typed is taken rather than left in the channel.
+        self.pump_modified();
         if let Some(browse) = &mut self.browse {
             browse.picker.pump_walk();
             if browse.picker.all_paths.len() >= BROWSE_PATH_CAP {
@@ -1057,6 +1105,88 @@ mod tests {
             assert_eq!(base.len(), 1);
             assert!(base[0].ends_with("b.rs"));
         }
+    }
+
+    /// The toggle onto Modified re-asks git rather than reusing whatever the
+    /// open-time query answered, so a file changed while the finder sat open
+    /// still shows up.
+    #[test]
+    fn backtab_onto_modified_sees_a_change_made_since_the_finder_opened() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("a.rs", "v1\n"), ("b.rs", "v1\n")]);
+        {
+            let mut builder = h.fake_git().add_repo(&root).with_fs(h.fake_fs());
+            builder.head_file("a.rs", "v1\n");
+            builder.head_file("b.rs", "v1\n");
+        }
+
+        h.type_keys("space p");
+
+        {
+            let mut builder = h.fake_git().add_repo(&root).with_fs(h.fake_fs());
+            builder.modified("b.rs", "v1\n", "v2\n");
+        }
+        h.type_keys("backtab");
+
+        let finder = h.stoat.file_finder.as_ref().unwrap();
+        assert_eq!(finder.scope(), &FinderScope::Modified);
+        let base: Vec<PathBuf> = finder.core.picklist.base.to_vec();
+        assert_eq!(base.len(), 1, "the toggle re-queried: {base:?}");
+        assert!(base[0].ends_with("b.rs"));
+    }
+
+    /// In production the git status pass lands after the finder has already
+    /// painted its empty list, which is the case the test scheduler's inline
+    /// blocking work never reaches on its own. Restamping the base generation
+    /// alone would leave those rows empty, since the refilter short-circuits on
+    /// the unchanged query.
+    #[test]
+    fn a_modified_answer_arriving_after_the_first_paint_fills_the_rows() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("a.rs", "v1\n"), ("b.rs", "v1\n")]);
+        {
+            let mut builder = h.fake_git().add_repo(&root).with_fs(h.fake_fs());
+            builder.head_file("a.rs", "v1\n");
+            builder.head_file("b.rs", "v1\n");
+        }
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenChangedFilePicker);
+        let _ = h.snapshot();
+        assert!(
+            h.stoat
+                .file_finder
+                .as_ref()
+                .expect("finder open")
+                .core
+                .picklist
+                .base
+                .is_empty(),
+            "nothing is modified yet",
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = h.stoat.executor.spawn_blocking(|| {});
+        tx.send(vec![root.join("b.rs")])
+            .expect("receiver held below");
+        h.stoat
+            .file_finder
+            .as_mut()
+            .expect("finder open")
+            .set_modified_source(rx, task);
+
+        let _ = h.snapshot();
+
+        let base: Vec<PathBuf> = h
+            .stoat
+            .file_finder
+            .as_ref()
+            .expect("finder open")
+            .core
+            .picklist
+            .base
+            .to_vec();
+        assert_eq!(base.len(), 1, "the late answer replaced the empty list");
+        assert!(base[0].ends_with("b.rs"));
     }
 
     #[test]

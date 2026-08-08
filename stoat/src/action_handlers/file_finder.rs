@@ -181,7 +181,7 @@ pub(super) fn open_file_finder(
         None => spawn_workspace_walk(stoat, git_root.clone()),
     };
 
-    let modified_paths = crate::file_finder::query_modified(&*stoat.git_host, &git_root);
+    let modified = spawn_modified_query(stoat, git_root.clone());
     let buffer_paths = stoat.active_workspace().buffers.open_paths();
     let finder_scopes = stoat.settings.finder_scopes.clone();
 
@@ -194,7 +194,7 @@ pub(super) fn open_file_finder(
         git_root,
         walk_rx,
         walk_task,
-        modified_paths,
+        modified,
         buffer_paths,
         &finder_scopes,
     );
@@ -255,6 +255,29 @@ pub(super) fn spawn_workspace_walk(
         });
     });
     (walk_rx, task)
+}
+
+/// Spawn the git status pass backing [`FinderScope::Modified`].
+///
+/// Returns the receiver the single result arrives on and the task running it.
+/// The status pass recurses into untracked directories and costs tens to
+/// hundreds of milliseconds on a large or cold-cache repo, which is why it never
+/// runs where the finder's first paint waits on it. The result pings the redraw
+/// notifier so the rows fill in without needing another keystroke.
+fn spawn_modified_query(
+    stoat: &Stoat,
+    git_root: PathBuf,
+) -> (UnboundedReceiver<Vec<PathBuf>>, Task<()>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let git_host = stoat.git_host.clone();
+    let redraw_notify = stoat.redraw_notify.clone();
+    let task = stoat.executor.spawn_blocking(move || {
+        let paths = crate::file_finder::query_modified(&*git_host, &git_root);
+        if tx.send(paths).is_ok() {
+            redraw_notify.notify_one();
+        }
+    });
+    (rx, task)
 }
 
 /// The distinct roots a cross-workspace walk covers.
@@ -460,13 +483,22 @@ pub(super) fn file_finder_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
 }
 
 pub(super) fn file_finder_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
-    let git_host = stoat.git_host.clone();
     let Some(finder) = stoat.file_finder.as_mut() else {
         return UpdateEffect::None;
     };
     let was_all_workspaces = *finder.scope() == FinderScope::AllWorkspaces;
-    finder.toggle_scope(&*git_host);
+    finder.toggle_scope();
     let is_all_workspaces = *finder.scope() == FinderScope::AllWorkspaces;
+    let landed_on_modified = *finder.scope() == FinderScope::Modified;
+    let git_root = finder.core.git_root.clone();
+
+    // Re-ask git for the changed set only when landing on Modified, so toggling
+    // away from it costs no query at all.
+    if landed_on_modified {
+        let (rx, task) = spawn_modified_query(stoat, git_root);
+        let finder = stoat.file_finder.as_mut().expect("checked above");
+        finder.set_modified_source(rx, task);
+    }
 
     // AllWorkspaces sources a different (multi-root) walk than the scopes that
     // filter one walk, so crossing its boundary re-roots the core walk and
