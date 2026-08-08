@@ -1441,14 +1441,26 @@ impl TextBufferSnapshot {
     /// [`Bias::Left`]).
     pub fn anchors_at_batch(&self, offsets: &[usize], bias: Bias) -> Vec<Anchor> {
         let len = self.visible_text.len();
-        let mut indexed: Vec<(usize, usize)> =
-            offsets.iter().map(|&o| o.min(len)).enumerate().collect();
-        indexed.sort_unstable_by_key(|&(_, o)| o);
+        // Input already in that order is walked where it stands, which is what
+        // every caller anchoring a sorted set hands over and what a batch of one
+        // is for free. Only input that is actually out of order pays for a
+        // permutation. Reading `is_sorted` off the offsets rather than the
+        // clamped ones is enough, since clamping to the length is monotonic.
+        let ascending_order: Option<Vec<usize>> = (!offsets.is_sorted()).then(|| {
+            let mut order: Vec<usize> = (0..offsets.len()).collect();
+            order.sort_unstable_by_key(|&i| offsets[i]);
+            order
+        });
 
         let mut results = vec![Anchor::min_for_buffer(self.buffer_id); offsets.len()];
         let cx = &None;
         let mut cursor = self.fragments.cursor::<usize>(cx);
-        for (original_idx, offset) in indexed {
+        for step in 0..offsets.len() {
+            let original_idx = match &ascending_order {
+                Some(order) => order[step],
+                None => step,
+            };
+            let offset = offsets[original_idx].min(len);
             results[original_idx] = if bias == Bias::Left && offset == 0 {
                 Anchor::min_for_buffer(self.buffer_id)
             } else if bias == Bias::Right && offset == len {
@@ -2083,15 +2095,25 @@ mod tests {
         let snap = b.snapshot.clone();
 
         let len = snap.visible_text.len();
-        let offsets: Vec<usize> = (0..=len).collect();
-        for bias in [Bias::Left, Bias::Right] {
-            let batch = snap.anchors_at_batch(&offsets, bias);
-            for (i, &off) in offsets.iter().enumerate() {
-                assert_eq!(
-                    batch[i],
-                    snap.anchor_at(off, bias),
-                    "anchors_at_batch disagrees at offset {off} bias {bias:?}"
-                );
+        let ascending: Vec<usize> = (0..=len).collect();
+        // The walk takes ascending offsets where they stand and permutes any
+        // other order, so both orders have to answer what `anchor_at` does.
+        // Odds before evens leaves no run of the input in order.
+        let shuffled: Vec<usize> = (0..=len)
+            .filter(|o| o % 2 == 1)
+            .chain((0..=len).filter(|o| o % 2 == 0))
+            .collect();
+
+        for offsets in [&ascending, &shuffled] {
+            for bias in [Bias::Left, Bias::Right] {
+                let batch = snap.anchors_at_batch(offsets, bias);
+                for (i, &off) in offsets.iter().enumerate() {
+                    assert_eq!(
+                        batch[i],
+                        snap.anchor_at(off, bias),
+                        "anchors_at_batch disagrees at offset {off} bias {bias:?}"
+                    );
+                }
             }
         }
     }
