@@ -402,7 +402,7 @@ fn overlay_status_segments(is_focused: bool, area: Rect, frame: FrameCtx<'_>) ->
     let mut left: Vec<StatusSeg> = Vec::new();
     let mut cursor = area.x;
     if is_focused {
-        let (mode_label, mode_bg) = mode_segment(frame.mode, theme, frame.mode_badges);
+        let (mode_label, mode_bg) = frame.mode_label;
         let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
         push_left(
             &mut left,
@@ -692,7 +692,7 @@ fn status_segments(
     let mut left: Vec<(String, Style)> = Vec::new();
     let mut cursor = area.x;
     if is_focused {
-        let (label, mode_bg) = mode_segment(frame.mode, theme, frame.mode_badges);
+        let (label, mode_bg) = frame.mode_label;
         let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
         push_left(
             &mut left,
@@ -719,11 +719,11 @@ fn status_segments(
         }
     }
 
-    let (filename, dirty, cursor_pos) =
-        pane_status_info(view, frame.workspace_root, frame.home, editors, buffers);
-    if let Some(name) = filename {
+    let status = pane_status_info(view, frame.workspace_root, frame.home, editors, buffers);
+    let cursor_pos = status.cursor_pos;
+    if let Some(name) = &status.filename {
         let left_pad = if cursor == area.x { " " } else { "" };
-        let text = if dirty {
+        let text = if status.dirty {
             format!("{left_pad}{name} [+] ")
         } else {
             format!("{left_pad}{name} ")
@@ -799,7 +799,7 @@ fn status_segments(
                 right_anchor = start;
             }
         }
-        if let Some(text) = focused_staged_label(view, editors, buffers) {
+        if let Some(text) = focused_staged_label(status.staged_counts) {
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
             if start >= cursor {
@@ -944,18 +944,8 @@ fn focused_diagnostic_label(
 
 /// Statusline label counting the focused buffer's staged and unstaged diff
 /// hunks, or `None` when the buffer has no diff map or no hunks.
-fn focused_staged_label(
-    view: &View,
-    editors: &SlotMap<EditorId, EditorState>,
-    buffers: &BufferRegistry,
-) -> Option<String> {
-    let View::Editor(editor_id) = view else {
-        return None;
-    };
-    let editor = editors.get(*editor_id)?;
-    let shared = buffers.get(editor.buffer_id)?;
-    let guard = shared.read().ok()?;
-    let (staged, unstaged) = guard.diff_map.as_ref().map(|dm| dm.staged_counts())?;
+fn focused_staged_label(counts: Option<(usize, usize)>) -> Option<String> {
+    let (staged, unstaged) = counts?;
     if staged == 0 && unstaged == 0 {
         return None;
     }
@@ -1038,11 +1028,11 @@ fn paint_segment(
     x
 }
 
-pub(crate) fn mode_segment(
+pub(crate) fn mode_segment<'a>(
     mode: &str,
     theme: &crate::theme::Theme,
-    mode_badges: &std::collections::BTreeMap<String, String>,
-) -> (std::borrow::Cow<'static, str>, Color) {
+    mode_badges: &'a std::collections::BTreeMap<String, String>,
+) -> (&'a str, Color) {
     use crate::theme::scope;
     let (default_label, default, legacy_scope) = match mode {
         "normal" => ("NOR", Color::Blue, scope::UI_STATUSLINE_NORMAL),
@@ -1068,10 +1058,7 @@ pub(crate) fn mode_segment(
         .and_then(|s| s.fg)
         .or_else(|| theme.try_get(legacy_scope).and_then(|s| s.fg))
         .unwrap_or(default);
-    let label = match mode_badges.get(mode) {
-        Some(badge) => std::borrow::Cow::Owned(badge.clone()),
-        None => std::borrow::Cow::Borrowed(default_label),
-    };
+    let label = mode_badges.get(mode).map_or(default_label, String::as_str);
     (label, color)
 }
 
@@ -1108,37 +1095,172 @@ fn pane_status_info(
     home: Option<&Path>,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
-) -> (Option<String>, bool, Option<(u32, u32)>) {
+) -> PaneStatusInfo {
+    let owned = |name: &str| PaneStatusInfo {
+        filename: Some(name.to_string()),
+        ..Default::default()
+    };
     match view {
         View::Editor(editor_id) => {
             let Some(editor) = editors.get_mut(*editor_id) else {
-                return (None, false, None);
+                return PaneStatusInfo::default();
             };
             let buffer_id = editor.buffer_id;
-            let path = buffers.path_for(buffer_id);
-            let filename = path
-                .map(|p| crate::paths::display_relative_with_home(p, workspace_root, home))
-                .or_else(|| Some("[scratch]".to_string()));
-            let dirty = buffers
-                .get(buffer_id)
-                .and_then(|b| b.read().ok().map(|g| g.dirty))
-                .unwrap_or(false);
-            let cursor_pos = editor_cursor_position(editor);
-            (filename, dirty, cursor_pos)
+            let filename =
+                status_filename(editor, buffers.path_for(buffer_id), workspace_root, home)
+                    .to_string();
+            // Both fields come off the same buffer at the same moment, and the
+            // bar wants them together, so one acquisition answers for both
+            // rather than the staged label taking a lock of its own.
+            let shared = buffers.get(buffer_id);
+            let (dirty, staged_counts) = shared
+                .as_ref()
+                .and_then(|b| b.read().ok())
+                .map(|g| (g.dirty, g.diff_map.as_ref().map(|dm| dm.staged_counts())))
+                .unwrap_or_default();
+            PaneStatusInfo {
+                filename: Some(filename),
+                dirty,
+                cursor_pos: editor_cursor_position(editor),
+                staged_counts,
+            }
         },
-        View::Run(_) => (Some("[run]".to_string()), false, None),
-        View::Agent(_) => (Some("[agent]".to_string()), false, None),
-        View::Terminal(_) => (Some("[term]".to_string()), false, None),
-        View::Label(label) => (Some(label.clone()), false, None),
+        View::Run(_) => owned("[run]"),
+        View::Agent(_) => owned("[agent]"),
+        View::Terminal(_) => owned("[term]"),
+        View::Label(label) => owned(label),
     }
+}
+
+/// What one pane's status bar reads off its view.
+#[derive(Default)]
+struct PaneStatusInfo {
+    filename: Option<String>,
+    dirty: bool,
+    cursor_pos: Option<(u32, u32)>,
+    /// `(staged, unstaged)` hunk counts, `None` when the buffer has no diff.
+    /// Read alongside `dirty` so the bar takes one lock, not two.
+    staged_counts: Option<(usize, usize)>,
+}
+
+/// The rendered filename for `editor`, reusing the last one when nothing it was
+/// rendered from has changed.
+///
+/// Rendering walks the path and allocates, and the bar re-derives its segments
+/// for every pane on every repaint, so a pane sitting still would otherwise
+/// rebuild the same string every frame.
+fn status_filename<'a>(
+    editor: &'a mut EditorState,
+    path: Option<&Path>,
+    workspace_root: &Path,
+    home: Option<&Path>,
+) -> &'a str {
+    let fresh = editor.status_filename.as_ref().is_some_and(|held| {
+        held.path.as_deref() == path
+            && held.workspace_root == workspace_root
+            && held.home.as_deref() == home
+    });
+    if !fresh {
+        let rendered = match path {
+            Some(path) => crate::paths::display_relative_with_home(path, workspace_root, home),
+            None => "[scratch]".to_string(),
+        };
+        editor.status_filename = Some(crate::editor_state::StatusFilename {
+            path: path.map(Path::to_path_buf),
+            workspace_root: workspace_root.to_path_buf(),
+            home: home.map(Path::to_path_buf),
+            rendered,
+        });
+    }
+    &editor
+        .status_filename
+        .as_ref()
+        .expect("filled just above")
+        .rendered
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{action_handlers::dispatch, Stoat};
+    use super::status_filename;
+    use crate::{
+        action_handlers::dispatch,
+        buffer::{BufferId, TextBuffer},
+        editor_state::EditorState,
+        Stoat,
+    };
     use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
-    use std::path::PathBuf;
+    use std::{
+        path::{Path, PathBuf},
+        sync::{Arc, RwLock},
+    };
     use stoat_action::OpenFile;
+
+    /// The rendered name is reused only while everything it was rendered from
+    /// holds still.
+    ///
+    /// The bar re-derives every pane's segments on every repaint, so a name
+    /// rebuilt each time is an allocation per pane per frame. Each input is
+    /// moved on its own because one missing from the key would leave a pane
+    /// showing the name it had before a rename, a workspace switch, or a change
+    /// of home.
+    #[test]
+    fn the_status_filename_is_reused_until_an_input_moves() {
+        let executor =
+            stoat_scheduler::Executor::new(Arc::new(stoat_scheduler::TestScheduler::new()));
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), "x\n")));
+        let mut editor = EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
+
+        let root = Path::new("/repo");
+        let home = Path::new("/home/u");
+        let a = PathBuf::from("/repo/src/a.rs");
+
+        let first = status_filename(&mut editor, Some(&a), root, Some(home)).to_string();
+        assert_eq!(first, "src/a.rs", "the name renders relative to the root");
+
+        let held = editor
+            .status_filename
+            .as_ref()
+            .expect("rendering fills the cache")
+            .rendered
+            .as_ptr();
+        assert_eq!(
+            status_filename(&mut editor, Some(&a), root, Some(home)).as_ptr(),
+            held,
+            "an unchanged pane hands back the string it already had",
+        );
+
+        let b = PathBuf::from("/repo/src/b.rs");
+        assert_eq!(
+            status_filename(&mut editor, Some(&b), root, Some(home)),
+            "src/b.rs",
+            "a renamed buffer re-renders",
+        );
+        assert_eq!(
+            status_filename(&mut editor, Some(&b), Path::new("/repo/src"), Some(home)),
+            "b.rs",
+            "and so does a workspace that moved under it",
+        );
+        assert_eq!(
+            status_filename(
+                &mut editor,
+                Some(Path::new("/home/u/n.md")),
+                root,
+                Some(home)
+            ),
+            "~/n.md",
+            "and a home that now contains it",
+        );
+        assert_eq!(
+            status_filename(&mut editor, Some(Path::new("/home/u/n.md")), root, None),
+            "/home/u/n.md",
+            "and a home that is no longer known",
+        );
+        assert_eq!(
+            status_filename(&mut editor, None, root, Some(home)),
+            "[scratch]",
+            "a pathless buffer names itself",
+        );
+    }
 
     fn diag(severity: DiagnosticSeverity) -> Diagnostic {
         Diagnostic {
@@ -1541,7 +1663,7 @@ mod tests {
             &[("f.txt", "a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n")],
         );
         h.stoat.set_diff_warm_auto(true);
-        h.open_file(std::path::Path::new("/repo/f.txt"));
+        h.open_file(Path::new("/repo/f.txt"));
         h.settle_diff_jobs();
         h.snapshot();
 

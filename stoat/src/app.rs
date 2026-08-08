@@ -8440,7 +8440,11 @@ impl Stoat {
                 .map(|(typ, message)| (*typ, message.as_str())),
             status_message: self.pending_message.as_deref(),
             goto_word_labels: None,
-            mode_badges: &self.settings.mode_badges,
+            mode_label: crate::render::pane::mode_segment(
+                &mode,
+                &self.theme,
+                &self.settings.mode_badges,
+            ),
             diagnostics: &self.diagnostics,
             search_query: None,
             line_numbers: LineNumbers::Relative,

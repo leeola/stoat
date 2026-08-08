@@ -242,11 +242,15 @@ pub(crate) struct FrameCtx<'a> {
     /// string with byte-offset values. Painted by the focused editor's
     /// render path; non-focused panes ignore this field.
     pub(crate) goto_word_labels: Option<&'a std::collections::BTreeMap<String, usize>>,
-    /// Per-mode status-line badge overrides resolved from `Settings`.
-    /// `mode_segment` consults this before falling back to its hardcoded
-    /// badge table; user-defined modes can supply an entry here so the
-    /// status line shows something more meaningful than `---`.
-    pub(crate) mode_badges: &'a std::collections::BTreeMap<String, String>,
+    /// [`Self::mode`]'s status-line label and colour, resolved once for the
+    /// frame by [`pane::mode_segment`].
+    ///
+    /// Resolving it builds a `ui.statusline.{mode}` scope string to probe the
+    /// theme with, which the panes would otherwise repeat for a mode that is
+    /// the same for all of them. The label is a per-mode override from
+    /// `Settings` when one exists, so a user-defined mode shows something more
+    /// meaningful than `---`.
+    pub(crate) mode_label: (&'a str, Color),
     /// Workspace-wide LSP diagnostic store. The status bar reads the
     /// focused buffer's path and paints a compact severity badge when
     /// any diagnostics are present.
@@ -590,7 +594,7 @@ pub(crate) fn frame(
             .map(|(typ, message)| (*typ, message.as_str())),
         status_message: stoat.pending_message.as_deref(),
         goto_word_labels: stoat.pending_goto_word.as_ref(),
-        mode_badges: &stoat.settings.mode_badges,
+        mode_label: pane::mode_segment(mode, &stoat.theme, &stoat.settings.mode_badges),
         diagnostics: &stoat.diagnostics,
         search_query: stoat.last_search.as_ref().map(|s| s.query.as_str()),
         line_numbers: stoat

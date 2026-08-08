@@ -10,7 +10,7 @@ use ratatui::layout::Rect;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use slotmap::new_key_type;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 use stoat_config::WrapMode;
 use stoat_scheduler::Executor;
 use tokio::sync::Notify;
@@ -59,6 +59,17 @@ pub(crate) enum ScrollGlide {
     None,
     Page,
     Wheel,
+}
+
+/// A status-bar filename and the inputs it was rendered from.
+///
+/// All three form the key. The buffer can be renamed under the editor, and the
+/// workspace root or home can move without the buffer changing at all.
+pub(crate) struct StatusFilename {
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) workspace_root: PathBuf,
+    pub(crate) home: Option<PathBuf>,
+    pub(crate) rendered: String,
 }
 
 pub(crate) struct EditorState {
@@ -144,6 +155,14 @@ pub(crate) struct EditorState {
     /// those loops a block-tree descent and a hunk-tree seek per row per frame.
     /// Transient render state, not persisted.
     pub(crate) diff_row_cache: Option<crate::render::review::DiffRowCache>,
+    /// The status bar's rendered filename, with the path, workspace root and
+    /// home it was rendered from.
+    ///
+    /// Rendering it walks the path and allocates, and the bar re-derives its
+    /// segments for every pane on every repaint, so the same string would
+    /// otherwise be rebuilt per pane per frame for a name that changes only when
+    /// the buffer or the workspace does. Transient render state, not persisted.
+    pub(crate) status_filename: Option<StatusFilename>,
     /// Ids of the LSP inlay-hint inlays currently spliced into this editor's
     /// display map. Kept so a refresh can remove the prior hints before adding
     /// the new set. Transient render state, not persisted.
@@ -233,6 +252,7 @@ impl EditorState {
             search_match_cache: None,
             highlight_endpoint_cache: None,
             diff_row_cache: None,
+            status_filename: None,
             hint_inlay_ids: Vec::new(),
             gutter_severity_cache: None,
             gutter_geometry_cache: None,
@@ -273,6 +293,7 @@ impl EditorState {
             search_match_cache: None,
             highlight_endpoint_cache: None,
             diff_row_cache: None,
+            status_filename: None,
             hint_inlay_ids: Vec::new(),
             gutter_severity_cache: None,
             gutter_geometry_cache: None,
