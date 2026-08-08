@@ -3,6 +3,7 @@ use crate::{
     display_map::{HighlightStyleInterner, SemanticTokenHighlight, SemanticTokenSpans},
     lsp::LspSymbolKind,
 };
+use lsp_types::SemanticToken;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -94,6 +95,14 @@ struct BufferEntry {
     /// separate from [`Self::lsp_tokens`] so cursor-aware features can query the
     /// kind under an offset without the highlight styling. Start-anchor sorted.
     lsp_symbol_kinds: Option<LspSymbolKindIndex>,
+    /// The server's own token stream as it last sent it, with the result id it
+    /// named it by.
+    ///
+    /// Kept undecoded beside [`Self::lsp_tokens`] because that is the form a
+    /// delta reply patches. A delta says which slice of this stream to replace,
+    /// so without the stream there is nothing to apply it to and the next pull
+    /// has to ask for the whole file again.
+    lsp_token_source: Option<(Option<String>, Vec<SemanticToken>)>,
     diff: Option<CachedDiff>,
     /// Marks this buffer as a transient preview surface (e.g. the
     /// file finder's preview pane). The parse pipeline pulls these
@@ -229,6 +238,7 @@ impl BufferRegistry {
                 token_spans: None,
                 tokens: None,
                 lsp_tokens: None,
+                lsp_token_source: None,
                 lsp_symbol_kinds: None,
                 diff: None,
                 preview,
@@ -264,6 +274,7 @@ impl BufferRegistry {
                 token_spans: None,
                 tokens: None,
                 lsp_tokens: None,
+                lsp_token_source: None,
                 lsp_symbol_kinds: None,
                 diff: None,
                 preview: false,
@@ -419,6 +430,7 @@ impl BufferRegistry {
             entry.syntax_map = None;
             entry.tokens = None;
             entry.lsp_tokens = None;
+            entry.lsp_token_source = None;
             entry.lsp_symbol_kinds = None;
         }
     }
@@ -462,6 +474,7 @@ impl BufferRegistry {
             entry.syntax_map = None;
             entry.tokens = None;
             entry.lsp_tokens = None;
+            entry.lsp_token_source = None;
             entry.lsp_symbol_kinds = None;
         }
     }
@@ -538,6 +551,28 @@ impl BufferRegistry {
         if let Some(entry) = self.buffers.get_mut(&id) {
             entry.lsp_tokens = Some((version, tokens, interner));
         }
+    }
+
+    /// Retain the server's own token stream and the result id naming it, so the
+    /// next pull can ask for a delta against it.
+    pub(crate) fn store_lsp_token_source(
+        &mut self,
+        id: BufferId,
+        result_id: Option<String>,
+        data: Vec<SemanticToken>,
+    ) {
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.lsp_token_source = Some((result_id, data));
+        }
+    }
+
+    /// The retained `(result_id, data)` pair for `id`, if a semantic-tokens
+    /// response has landed and nothing has invalidated it since.
+    pub(crate) fn lsp_token_source_for(
+        &self,
+        id: BufferId,
+    ) -> Option<(Option<String>, Vec<SemanticToken>)> {
+        self.buffers.get(&id)?.lsp_token_source.clone()
     }
 
     /// The retained `(version, tokens, interner)` triple for `id`, if an LSP
@@ -821,6 +856,7 @@ impl BufferRegistry {
                     token_spans: None,
                     tokens: None,
                     lsp_tokens: None,
+                    lsp_token_source: None,
                     lsp_symbol_kinds: None,
                     diff: None,
                     preview: false,

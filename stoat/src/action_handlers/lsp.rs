@@ -39,9 +39,10 @@ use lsp_types::{
     Documentation, FoldingRange, FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse,
     HoverContents, HoverParams, InlayHint, InlayHintLabel, InlayHintParams, MarkedString,
     MarkupKind, OneOf, ParameterLabel, Position, PrepareRenameResponse, Range, ReferenceContext,
-    ReferenceParams, RenameParams, SemanticToken, SemanticTokenType, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerInfo, SignatureHelp,
-    SignatureHelpParams, SignatureInformation, SymbolInformation, SymbolKind,
+    ReferenceParams, RenameParams, SemanticToken, SemanticTokenType, SemanticTokensDeltaParams,
+    SemanticTokensEdit, SemanticTokensFullDeltaResult, SemanticTokensFullOptions,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities, ServerInfo,
+    SignatureHelp, SignatureHelpParams, SignatureInformation, SymbolInformation, SymbolKind,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
     VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol,
@@ -2725,13 +2726,22 @@ struct DecodedToken {
     kind: Option<LspSymbolKind>,
 }
 
-/// A completed semantic-tokens request's payload. It carries the buffer, the
-/// buffer version the request was built against, and the resolved `(byte range,
-/// scope stem, symbol kind)` spans in request-time coordinates. The scope drives
-/// the highlight channel and the kind the symbol-kind index. Each is optional.
+/// A completed semantic-tokens request's payload.
+///
+/// It carries the buffer, the buffer version the request was built against, the
+/// server's own token stream with the result id naming it, and the resolved
+/// `(byte range, scope stem, symbol kind)` spans in request-time coordinates.
+/// The scope drives the highlight channel and the kind the symbol-kind index.
+/// Each is optional.
+///
+/// The stream is carried alongside the resolved spans because the next pull
+/// patches it rather than re-asking for it, and the result id is what names it
+/// to the server.
 pub(crate) type SemanticTokensOutcome = (
     BufferId,
     u64,
+    Option<String>,
+    Vec<SemanticToken>,
     Vec<(
         std::ops::Range<usize>,
         Option<&'static str>,
@@ -2800,23 +2810,99 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
         return;
     }
 
+    // A delta is only worth asking for against a result the server named, and
+    // only if it advertises answering them at all. Everything else pulls the
+    // whole set, which is also the recovery path when a delta cannot be applied.
+    let previous = advertises_token_delta(&capabilities)
+        .then(|| {
+            stoat
+                .active_workspace()
+                .buffers
+                .lsp_token_source_for(buffer_id)
+        })
+        .flatten()
+        .and_then(|(result_id, data)| result_id.map(|result_id| (result_id, data)));
+
     let executor = stoat.executor.clone();
     let task = stoat.spawn_woken(async move {
         executor.timer(SEMANTIC_TOKENS_DEBOUNCE).await;
-        match lsp.semantic_tokens_full(params).await {
-            Ok(Some(result)) => Some((
-                buffer_id,
-                version,
-                convert_semantic_tokens(result, &legend, &rope, encoding),
-            )),
-            Ok(None) => None,
-            Err(err) => {
-                tracing::warn!(target: "stoat::lsp", ?err, "semantic_tokens_full request failed");
-                None
+        let (result_id, data) = match previous {
+            Some((previous_result_id, previous_data)) => {
+                pull_token_delta(lsp.as_ref(), &params, previous_result_id, &previous_data).await?
             },
-        }
+            None => pull_tokens_full(lsp.as_ref(), params).await?,
+        };
+        let items = convert_semantic_tokens(&data, &legend, &rope, encoding);
+        Some((buffer_id, version, result_id, data, items))
     });
     stoat.pending_semantic_tokens = Some(task);
+}
+
+/// The whole token stream and the result id the server named it by.
+async fn pull_tokens_full(
+    lsp: &dyn LspHost,
+    params: SemanticTokensParams,
+) -> Option<(Option<String>, Vec<SemanticToken>)> {
+    match lsp.semantic_tokens_full(params).await {
+        Ok(Some(SemanticTokensResult::Tokens(tokens))) => Some((tokens.result_id, tokens.data)),
+        // A partial result streams its tokens over separate progress
+        // notifications, which this path does not collect.
+        Ok(Some(SemanticTokensResult::Partial(_))) | Ok(None) => None,
+        Err(err) => {
+            tracing::warn!(target: "stoat::lsp", ?err, "semantic_tokens_full request failed");
+            None
+        },
+    }
+}
+
+/// The token stream after the changes since `previous_result_id`, or the whole
+/// one when the server answers with that instead.
+///
+/// Falls back to a full pull whenever the reply cannot be applied to
+/// `previous_data`, so a delta that does not line up costs one extra round trip
+/// rather than a silently wrong highlight.
+async fn pull_token_delta(
+    lsp: &dyn LspHost,
+    params: &SemanticTokensParams,
+    previous_result_id: String,
+    previous_data: &[SemanticToken],
+) -> Option<(Option<String>, Vec<SemanticToken>)> {
+    let delta_params = SemanticTokensDeltaParams {
+        work_done_progress_params: params.work_done_progress_params.clone(),
+        partial_result_params: params.partial_result_params.clone(),
+        text_document: params.text_document.clone(),
+        previous_result_id,
+    };
+    let reply = match lsp.semantic_tokens_full_delta(delta_params).await {
+        Ok(reply) => reply,
+        Err(err) => {
+            tracing::warn!(target: "stoat::lsp", ?err, "semantic_tokens delta request failed");
+            None
+        },
+    };
+
+    match reply {
+        Some(SemanticTokensFullDeltaResult::Tokens(tokens)) => {
+            Some((tokens.result_id, tokens.data))
+        },
+        Some(SemanticTokensFullDeltaResult::TokensDelta(delta)) => {
+            match apply_token_delta(previous_data, &delta.edits) {
+                Some(data) => Some((delta.result_id, data)),
+                None => {
+                    tracing::warn!(
+                        target: "stoat::lsp",
+                        "semantic tokens delta did not fit the retained stream, pulling in full",
+                    );
+                    pull_tokens_full(lsp, params.clone()).await
+                },
+            }
+        },
+        // A partial delta streams its edits elsewhere, and no reply at all means
+        // the server declined. Neither leaves anything to patch with.
+        Some(SemanticTokensFullDeltaResult::PartialTokensDelta { .. }) | None => {
+            pull_tokens_full(lsp, params.clone()).await
+        },
+    }
 }
 
 fn build_semantic_tokens_request(
@@ -2853,21 +2939,66 @@ fn build_semantic_tokens_request(
 /// The token-type legend from the server's semantic-tokens capability, or `None`
 /// when it advertises no full-document semantic tokens.
 fn semantic_tokens_legend(caps: &lsp_types::ServerCapabilities) -> Option<&[SemanticTokenType]> {
-    let opts = match caps.semantic_tokens_provider.as_ref()? {
-        SemanticTokensServerCapabilities::SemanticTokensOptions(o) => o,
-        SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(o) => {
-            &o.semantic_tokens_options
-        },
-    };
+    let opts = semantic_tokens_options(caps)?;
     opts.full.as_ref()?;
     Some(&opts.legend.token_types)
 }
 
-/// Decode a semantic-tokens response into `(byte range, scope stem)` spans using
-/// the request-time rope. Partial (streaming) results carry no full token set and
-/// yield nothing.
+fn semantic_tokens_options(
+    caps: &lsp_types::ServerCapabilities,
+) -> Option<&lsp_types::SemanticTokensOptions> {
+    match caps.semantic_tokens_provider.as_ref()? {
+        SemanticTokensServerCapabilities::SemanticTokensOptions(o) => Some(o),
+        SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(o) => {
+            Some(&o.semantic_tokens_options)
+        },
+    }
+}
+
+/// Whether the server will answer `semanticTokens/full/delta`, which it says by
+/// advertising full support in its delta-bearing form.
+fn advertises_token_delta(caps: &lsp_types::ServerCapabilities) -> bool {
+    matches!(
+        semantic_tokens_options(caps).and_then(|o| o.full.as_ref()),
+        Some(SemanticTokensFullOptions::Delta { delta: Some(true) })
+    )
+}
+
+/// Apply a delta's edits to the token stream it was measured against.
+///
+/// `None` when an edit does not fit `previous`, which leaves the caller to pull
+/// the whole set instead. A misapplied edit shifts every token after it without
+/// failing, so a delta that does not line up is refused rather than guessed at.
+///
+/// The edits index the flat array of five-u32 tokens the protocol sends, not the
+/// tokens themselves, so both bounds are in units of five. They are applied back
+/// to front so each one still names a position the ones before it have not
+/// moved.
+fn apply_token_delta(
+    previous: &[SemanticToken],
+    edits: &[SemanticTokensEdit],
+) -> Option<Vec<SemanticToken>> {
+    let mut ordered: Vec<&SemanticTokensEdit> = edits.iter().collect();
+    ordered.sort_by_key(|edit| std::cmp::Reverse(edit.start));
+
+    let mut data = previous.to_vec();
+    for edit in ordered {
+        let start = usize::try_from(edit.start).ok()? / 5;
+        let removed = usize::try_from(edit.delete_count).ok()? / 5;
+        let end = start.checked_add(removed)?;
+        if end > data.len() {
+            return None;
+        }
+        let inserted = edit.data.clone().unwrap_or_default();
+        data.splice(start..end, inserted);
+    }
+    Some(data)
+}
+
+/// Decode a server's token stream into `(byte range, scope stem)` spans using
+/// the request-time rope.
 fn convert_semantic_tokens(
-    result: SemanticTokensResult,
+    data: &[SemanticToken],
     legend: &[SemanticTokenType],
     rope: &Rope,
     encoding: OffsetEncoding,
@@ -2876,10 +3007,7 @@ fn convert_semantic_tokens(
     Option<&'static str>,
     Option<LspSymbolKind>,
 )> {
-    let SemanticTokensResult::Tokens(tokens) = result else {
-        return Vec::new();
-    };
-    let decoded = decode_semantic_tokens(&tokens.data, legend);
+    let decoded = decode_semantic_tokens(data, legend);
     let positions: Vec<Position> = decoded
         .iter()
         .flat_map(|t| {
@@ -2990,7 +3118,14 @@ pub(crate) fn pump_lsp_semantic_tokens(stoat: &mut Stoat) -> bool {
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some((buffer_id, version, items))) => {
+        Poll::Ready(Some((buffer_id, version, result_id, data, items))) => {
+            // Retained before the anchoring below, which drops the reply when the
+            // buffer has moved on. The stream is still what the server holds
+            // whatever this buffer now reads as, so the next delta can name it.
+            stoat
+                .active_workspace_mut()
+                .buffers
+                .store_lsp_token_source(buffer_id, result_id, data);
             apply_semantic_tokens(stoat, buffer_id, version, items);
             true
         },
@@ -10210,6 +10345,171 @@ mod tests {
             ),
             ..Default::default()
         });
+    }
+
+    /// [`enable_semantic_tokens`] with the server also advertising that it
+    /// answers `full/delta`.
+    fn enable_semantic_token_deltas(h: &TestHarness) {
+        use lsp_types::{
+            SemanticTokenType, SemanticTokensFullOptions, SemanticTokensLegend,
+            SemanticTokensOptions, SemanticTokensServerCapabilities, ServerCapabilities,
+        };
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            semantic_tokens_provider: Some(
+                SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                    legend: SemanticTokensLegend {
+                        token_types: vec![SemanticTokenType::new("function")],
+                        token_modifiers: vec![],
+                    },
+                    full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
+                    range: None,
+                    work_done_progress_options: Default::default(),
+                }),
+            ),
+            ..Default::default()
+        });
+    }
+
+    /// A one-character token identified by `n`, which it carries as its column
+    /// step so a splice's output says which of the originals survived where.
+    /// Every token stays on the first line, so a converted stream lands inside a
+    /// single-line fixture buffer.
+    fn tok(n: u32) -> lsp_types::SemanticToken {
+        lsp_types::SemanticToken {
+            delta_line: 0,
+            delta_start: n,
+            length: 1,
+            token_type: 0,
+            token_modifiers_bitset: 0,
+        }
+    }
+
+    fn edit(
+        start: u32,
+        delete_count: u32,
+        data: Option<Vec<u32>>,
+    ) -> lsp_types::SemanticTokensEdit {
+        lsp_types::SemanticTokensEdit {
+            start,
+            delete_count,
+            data: data.map(|ns| ns.into_iter().map(tok).collect()),
+        }
+    }
+
+    /// The protocol numbers an edit over the flat array of five-u32 tokens it
+    /// sends, not over the tokens, so every bound is five times the token index.
+    /// Reading them as token indices would shift every token after the edit
+    /// without failing anywhere.
+    #[test]
+    fn a_token_delta_replaces_the_span_its_edit_names() {
+        let previous = vec![tok(1), tok(2), tok(3), tok(4)];
+
+        assert_eq!(
+            super::apply_token_delta(&previous, &[edit(5, 10, Some(vec![9]))]),
+            Some(vec![tok(1), tok(9), tok(4)]),
+            "tokens one and two go, replaced by the one the edit carries",
+        );
+    }
+
+    /// A delete carries no data at all rather than an empty list, and an insert
+    /// deletes nothing. Both are ordinary shapes a server sends.
+    #[test]
+    fn a_token_delta_handles_a_bare_delete_and_a_bare_insert() {
+        let previous = vec![tok(1), tok(2), tok(3)];
+
+        assert_eq!(
+            super::apply_token_delta(&previous, &[edit(5, 5, None)]),
+            Some(vec![tok(1), tok(3)]),
+            "a delete with no data drops its span",
+        );
+        assert_eq!(
+            super::apply_token_delta(&previous, &[edit(10, 0, Some(vec![8, 9]))]),
+            Some(vec![tok(1), tok(2), tok(8), tok(9), tok(3)]),
+            "an insert-only edit adds without removing",
+        );
+    }
+
+    /// Edits name positions in the stream as it was before any of them applied,
+    /// so applying them front to back would move the ones still to come.
+    #[test]
+    fn a_token_delta_applies_several_edits_back_to_front() {
+        let previous = vec![tok(1), tok(2), tok(3), tok(4)];
+
+        assert_eq!(
+            super::apply_token_delta(
+                &previous,
+                &[edit(0, 5, Some(vec![7])), edit(15, 5, Some(vec![8]))],
+            ),
+            Some(vec![tok(7), tok(2), tok(3), tok(8)]),
+        );
+    }
+
+    /// A delta measured against a stream this one is not costs a full pull
+    /// rather than a splice past the end, which would silently drop tokens.
+    #[test]
+    fn a_token_delta_reaching_past_the_stream_is_refused() {
+        assert_eq!(
+            super::apply_token_delta(&[tok(1)], &[edit(5, 10, None)]),
+            None,
+        );
+    }
+
+    /// The first pull has nothing to diff against, so it asks for the whole
+    /// set. Once the server has named a result, the next pull asks only for what
+    /// changed, and the spans it installs are the ones the equivalent full reply
+    /// would have.
+    #[test]
+    fn a_second_token_pull_asks_for_a_delta_and_installs_the_same_spans() {
+        use lsp_types::{SemanticTokens, SemanticTokensDelta, SemanticTokensResult};
+        let mut h = TestHarness::with_size(24, 4);
+        enable_semantic_token_deltas(&h);
+        let root = seed(&mut h, &[("main.rs", "let x = y\n")]);
+        let path = root.join("main.rs");
+        let uri = path.to_str().unwrap().to_string();
+        open_buffer(&mut h, path.clone());
+
+        h.fake_lsp().set_semantic_tokens_full(
+            &uri,
+            SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: Some("r1".into()),
+                data: vec![tok(1), tok(2)],
+            }),
+        );
+        // Arms the trigger now that a reply is programmed for it to receive.
+        h.type_keys("escape");
+        h.advance_clock(Duration::from_millis(550));
+        assert_eq!(lsp_token_count(&mut h), 2, "the first pull is a full one");
+        assert!(
+            h.fake_lsp().observed_semantic_token_deltas().is_empty(),
+            "with nothing to name, it could not have asked for a delta",
+        );
+
+        // The delta drops the second token and adds two in its place.
+        h.fake_lsp().set_semantic_tokens_full_delta(
+            &uri,
+            lsp_types::SemanticTokensFullDeltaResult::TokensDelta(SemanticTokensDelta {
+                result_id: Some("r2".into()),
+                edits: vec![edit(5, 5, Some(vec![3, 4]))],
+            }),
+        );
+        h.type_keys("i");
+        h.type_text("z");
+        h.advance_clock(Duration::from_millis(550));
+
+        let asked = h.fake_lsp().observed_semantic_token_deltas();
+        assert_eq!(
+            asked
+                .iter()
+                .map(|p| p.previous_result_id.clone())
+                .collect::<Vec<_>>(),
+            ["r1"],
+            "the second pull named the result the first one came back with",
+        );
+        assert_eq!(
+            lsp_token_count(&mut h),
+            3,
+            "and the spliced stream is what got installed",
+        );
     }
 
     fn lsp_token_count(h: &mut TestHarness) -> usize {
