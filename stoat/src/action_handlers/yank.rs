@@ -911,6 +911,48 @@ mod tests {
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
+    /// A block cursor at the rope end covers the last character rather than
+    /// resting past it, so insert types before that character and append is
+    /// what reaches the end of the buffer.
+    ///
+    /// There is no next cluster to cover at the end, so the cursor widens
+    /// backward over the previous one. That is a workable model only because
+    /// both intents stay reachable, which is why the two keys are pinned
+    /// together. A change here would show up as text landing on the wrong side
+    /// of the cursor at the end of a file and nowhere else.
+    #[test]
+    fn delete_at_buffer_end_then_insert_types_before_the_widened_cursor() {
+        let typed_after = |keys: &str| {
+            let mut h = TestHarness::with_size(40, 10);
+            let path = seed(&mut h, "abc");
+            h.type_keys("l v l d");
+            assert_eq!(
+                buffer_text(&h, &path),
+                "a",
+                "the delete empties the line's tail"
+            );
+            assert_eq!(
+                cursor_offset(&mut h),
+                0,
+                "the cursor widens back onto \"a\""
+            );
+
+            h.type_keys(keys);
+            buffer_text(&h, &path)
+        };
+
+        assert_eq!(
+            typed_after("i x escape"),
+            "xa",
+            "insert goes before the cell the cursor widened onto",
+        );
+        assert_eq!(
+            typed_after("a x escape"),
+            "ax",
+            "append reaches the insert point past the buffer's last character",
+        );
+    }
+
     #[test]
     fn linewise_paste_after_inserts_the_line_below() {
         let mut h = TestHarness::with_size(40, 10);
