@@ -409,11 +409,16 @@ impl SelectionsCollection {
                     (prev.end, prev.selection.end)
                 };
 
+                // Which way the merged span faces is a property of what went
+                // into it, not of which input was minted later. `prev` already
+                // carries the answer for everything merged into it so far.
+                let reversed = prev.selection.reversed && entry.selection.reversed;
                 if entry.selection.id > prev.selection.id {
                     prev.selection = entry.selection;
                 }
 
                 prev.end = end;
+                prev.selection.reversed = reversed;
                 prev.selection.start = start_anchor;
                 prev.selection.end = end_anchor;
                 continue;
@@ -517,11 +522,15 @@ impl SelectionsCollection {
                     false => (prev.end, prev.keep),
                 };
 
+                // As in `replace_with`'s merge, the direction follows the inputs
+                // rather than whichever is newest, so the same overlap lands the
+                // cursor on the same end however the ids fall.
+                let reversed = prev.reversed && entry.reversed;
                 if entry.id > prev.id {
                     prev.id = entry.id;
-                    prev.reversed = entry.reversed;
                     prev.goal = entry.goal;
                 }
+                prev.reversed = reversed;
 
                 prev.start = start;
                 prev.start_clipped = start_clipped;
@@ -670,6 +679,108 @@ mod tests {
         assert!(sel.is_empty());
         assert_eq!(sel.goal, SelectionGoal::None);
         assert!(sel.start.is_min());
+    }
+
+    /// A merged selection faces forward unless every input it merged faced
+    /// backward.
+    ///
+    /// The direction decides which end the block cursor sits on, and taking it
+    /// from whichever input happened to be minted later makes the merge depend
+    /// on something that says nothing about direction. Swapping the ids must
+    /// therefore leave the result alone, which the same assertion run both ways
+    /// is what checks.
+    #[test]
+    fn merging_mixed_directions_faces_forward_whichever_is_newer() {
+        let multi = singleton("abcdefgh\n");
+        let snapshot = multi.snapshot();
+        let span = |id: usize, start: usize, end: usize, reversed: bool| Selection {
+            id,
+            start: snapshot.anchor_at(start, Bias::Right),
+            end: snapshot.anchor_at(end, Bias::Right),
+            reversed,
+            goal: SelectionGoal::None,
+        };
+
+        for (reversed_id, forward_id) in [(2, 1), (1, 2)] {
+            let mut collection = SelectionsCollection::new();
+            collection.replace_with(
+                vec![span(reversed_id, 0, 6, true), span(forward_id, 3, 4, false)],
+                &snapshot,
+            );
+
+            let merged = collection.all_anchors();
+            assert_eq!(merged.len(), 1, "the two overlap, so they merge");
+            assert_eq!(
+                (
+                    snapshot.resolve_anchor(&merged[0].start),
+                    snapshot.resolve_anchor(&merged[0].end),
+                    merged[0].reversed,
+                ),
+                (0, 6, false),
+                "the union, facing forward, with the reversed id being {reversed_id}",
+            );
+        }
+    }
+
+    /// Landing cursors merges by the same direction rule.
+    ///
+    /// This path has its own merge loop, and a landing is always forward while
+    /// a selection it does not name keeps the direction it had. So a landing
+    /// inside a backward selection is the mixed case here, and the backward one
+    /// carries the higher id, which is the arrangement the old rule got wrong.
+    #[test]
+    fn landing_a_cursor_inside_a_reversed_selection_faces_forward() {
+        let multi = singleton("abcdefgh\n");
+        let snapshot = multi.snapshot();
+
+        let mut collection = SelectionsCollection::new();
+        collection.restore(vec![
+            Selection {
+                id: 1,
+                start: snapshot.anchor_at(3, Bias::Right),
+                end: snapshot.anchor_at(4, Bias::Right),
+                reversed: false,
+                goal: SelectionGoal::None,
+            },
+            Selection {
+                id: 2,
+                start: snapshot.anchor_at(0, Bias::Right),
+                end: snapshot.anchor_at(6, Bias::Right),
+                reversed: true,
+                goal: SelectionGoal::None,
+            },
+        ]);
+
+        collection.land_block_cursors(&[(1, 3)], &snapshot);
+
+        let merged = collection.all_anchors();
+        assert_eq!(merged.len(), 1, "the landing sits inside the other span");
+        assert!(
+            !merged[0].reversed,
+            "one input faced forward, so the merge does",
+        );
+    }
+
+    /// Two backward selections merge into a backward one, so the rule is a
+    /// property of the inputs rather than a blanket forward.
+    #[test]
+    fn merging_two_reversed_selections_stays_reversed() {
+        let multi = singleton("abcdefgh\n");
+        let snapshot = multi.snapshot();
+        let span = |id: usize, start: usize, end: usize| Selection {
+            id,
+            start: snapshot.anchor_at(start, Bias::Right),
+            end: snapshot.anchor_at(end, Bias::Right),
+            reversed: true,
+            goal: SelectionGoal::None,
+        };
+
+        let mut collection = SelectionsCollection::new();
+        collection.replace_with(vec![span(1, 0, 6), span(2, 3, 8)], &snapshot);
+
+        let merged = collection.all_anchors();
+        assert_eq!(merged.len(), 1, "the two overlap, so they merge");
+        assert!(merged[0].reversed, "both faced backward, so the merge does");
     }
 
     #[test]
