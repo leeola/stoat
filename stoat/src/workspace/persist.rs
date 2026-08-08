@@ -265,24 +265,17 @@ impl Workspace {
     /// Serialize the current workspace state to RON and write it atomically
     /// to `path`. Parent directory is created if missing.
     pub(crate) fn save_state(&self, path: &Path, fs: &dyn FsHost) -> io::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs.create_dir_all(parent)?;
-        }
-        let state = self.to_state();
-        let body = ron::ser::to_string_pretty(&state, ron::ser::PrettyConfig::default())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        let tmp = path.with_extension("ron.tmp");
-        fs.write(&tmp, body.as_bytes())?;
-        fs.rename(&tmp, path)?;
+        write_state(&self.to_state(), &self.meta(), path, fs)
+    }
 
-        let meta = super::registry::WorkspaceMeta {
+    /// The registry entry describing this workspace, as it stands.
+    pub(crate) fn meta(&self) -> super::registry::WorkspaceMeta {
+        super::registry::WorkspaceMeta {
             uid: self.uid,
             name: self.name.clone(),
             git_root: self.git_root.clone(),
             buffer_count: self.buffers.len(),
-        };
-        super::registry::write_meta(&meta, path, fs)?;
-        Ok(())
+        }
     }
 
     /// Replace `self` with the persisted state at `path`. Returns an error if
@@ -425,6 +418,35 @@ impl Workspace {
         // Which tab to toggle back to is session state, not layout.
         self.last_tab = None;
     }
+}
+
+/// Write an already-taken workspace snapshot and its registry entry to `path`,
+/// creating the parent directory if missing.
+///
+/// Split from [`Workspace::save_state`] so a caller can take the snapshot on
+/// the thread that owns the workspace and pay the serialization somewhere else.
+/// Nothing here reads the live workspace, so what lands on disk is the
+/// workspace as it stood when `state` was taken, however long ago that was.
+///
+/// The state file is written through a temp file and a rename, so a reader
+/// never sees a partial one.
+pub(crate) fn write_state(
+    state: &WorkspaceStateV1,
+    meta: &super::registry::WorkspaceMeta,
+    path: &Path,
+    fs: &dyn FsHost,
+) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs.create_dir_all(parent)?;
+    }
+
+    let body = ron::ser::to_string_pretty(state, ron::ser::PrettyConfig::default())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let tmp = path.with_extension("ron.tmp");
+    fs.write(&tmp, body.as_bytes())?;
+    fs.rename(&tmp, path)?;
+
+    super::registry::write_meta(meta, path, fs)
 }
 
 /// Re-express selections into buffers whose history is persisting compacted.
@@ -622,6 +644,63 @@ mod tests {
         let mut ws = Workspace::new(git_root, exec, crate::test_notify());
         ws.layout(ratatui::layout::Rect::new(0, 0, 120, 40));
         ws
+    }
+
+    /// A save that serializes later must still record the workspace as it was
+    /// when the snapshot was taken.
+    ///
+    /// That is the whole basis for taking the snapshot on the thread that owns
+    /// the workspace and writing it somewhere else. A workspace switch snapshots
+    /// the workspace being left, and by the time the bytes reach disk the user
+    /// has moved on and is editing again. Were the write to consult the live
+    /// workspace, it would save whatever happened to be true by then.
+    #[test]
+    fn a_deferred_write_records_the_workspace_as_it_was_snapshotted() {
+        let fake = FakeFs::new();
+        let exec = executor();
+        let ws_dir = PathBuf::from("/deferred");
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        ws.buffers.open(&ws_dir.join("before.txt"), "before\n");
+
+        let (state, meta) = (ws.to_state(), ws.meta());
+
+        // Everything after this point is what the user did while the write was
+        // still queued, and none of it belongs in the file.
+        ws.buffers.open(&ws_dir.join("after.txt"), "after\n");
+        ws.name = "renamed".to_string();
+
+        let deferred = ws_dir.join("deferred.ron");
+        write_state(&state, &meta, &deferred, &fake).unwrap();
+
+        let reference = FakeFs::new();
+        let taken_then = ws_dir.join("taken_then.ron");
+        write_state(&state, &meta, &taken_then, &reference).unwrap();
+
+        let written = |fs: &FakeFs, path: &Path| {
+            let mut buf = Vec::new();
+            fs.read(path, &mut buf).unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+        let body = written(&fake, &deferred);
+        assert!(
+            body.contains("before.txt"),
+            "the snapshotted buffer is in the file, got {body}",
+        );
+        assert!(
+            !body.contains("after.txt"),
+            "and the one opened after the snapshot is not, got {body}",
+        );
+        assert_eq!(
+            body,
+            written(&reference, &taken_then),
+            "which is byte for byte what saving at snapshot time produced",
+        );
+
+        let meta_body = written(&fake, &super::super::registry::meta_path_for(&deferred));
+        assert!(
+            !meta_body.contains("renamed"),
+            "the registry entry is the snapshot's too, got {meta_body}",
+        );
     }
 
     /// The editor a parked tab shows, or `None` when that tab's focused pane

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 pub(super) fn new_workspace(stoat: &mut Stoat) -> UpdateEffect {
     let git_root = stoat.active_workspace().git_root.clone();
-    stoat.save_workspace(stoat.active_workspace());
+    stoat.save_workspace(stoat.active_workspace);
 
     let mut ws = Workspace::new(git_root, &stoat.executor, stoat.redraw_notify.clone());
     ws.layout(stoat.size());
@@ -26,7 +26,7 @@ pub(super) fn copy_workspace(stoat: &mut Stoat) -> UpdateEffect {
     state.rebase_active = None;
     state.uid = WorkspaceUid::now(&stoat.executor);
 
-    stoat.save_workspace(stoat.active_workspace());
+    stoat.save_workspace(stoat.active_workspace);
 
     let mut ws = Workspace::new(git_root, &stoat.executor, stoat.redraw_notify.clone());
     ws.apply_state(state, &stoat.executor);
@@ -53,7 +53,7 @@ pub(super) fn close_workspace(stoat: &mut Stoat) -> UpdateEffect {
     let active_id = stoat.active_workspace;
     if !stoat.persistence_disabled {
         let ws = &stoat.workspaces[active_id];
-        stoat.save_workspace(ws);
+        stoat.save_workspace_now(ws);
         if let Ok(path) = crate::workspace::state_path_for(&ws.git_root, ws.uid, &*stoat.fs_host) {
             let meta_path = crate::workspace::registry::meta_path_for(&path);
             for target in [path, meta_path] {
@@ -170,7 +170,7 @@ pub(super) fn workspace_picker_select(stoat: &mut Stoat) -> UpdateEffect {
             if id == stoat.active_workspace {
                 return UpdateEffect::Redraw;
             }
-            stoat.save_workspace(stoat.active_workspace());
+            stoat.save_workspace(stoat.active_workspace);
             switch_active_workspace(stoat, id);
         },
         (None, Some(state_path)) => {
@@ -200,7 +200,7 @@ fn activate_inactive_workspace(
     name: String,
     state_path: PathBuf,
 ) -> WorkspaceId {
-    stoat.save_workspace(stoat.active_workspace());
+    stoat.save_workspace(stoat.active_workspace);
 
     let mut ws = Workspace::new(git_root, &stoat.executor, stoat.redraw_notify.clone());
     ws.uid = uid;

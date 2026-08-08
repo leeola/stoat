@@ -1254,6 +1254,13 @@ pub struct Stoat {
     /// Shared rather than returned because the restore runs detached on
     /// [`Self::executor`] and cannot borrow `self`, like [`Self::pending_env`].
     pub(crate) pending_workspace_restore: Arc<std::sync::Mutex<Option<PendingWorkspaceRestore>>>,
+    /// In-flight session-state writes, one slot per workspace.
+    ///
+    /// Holding the task is what keeps the write scheduled. Keying by workspace
+    /// makes a second save of the same workspace replace the first, so a run of
+    /// switches leaves one write per workspace rather than a queue of them.
+    pub(crate) pending_workspace_saves:
+        std::collections::HashMap<WorkspaceId, stoat_scheduler::Task<()>>,
     /// System-clipboard writes route through this trait. Defaults to
     /// [`NoopClipboard`] so headless or display-less environments do
     /// not error on the first clipboard event; tests install
@@ -1951,6 +1958,7 @@ impl Stoat {
             diff_warm_auto: false,
             pending_env: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_restore: Arc::new(std::sync::Mutex::new(None)),
+            pending_workspace_saves: std::collections::HashMap::new(),
             clipboard_host: Arc::new(crate::host::NoopClipboard),
             diff_cache: Arc::new(std::sync::Mutex::new(crate::diff_cache::DiffCache::new(
                 256,
@@ -3555,29 +3563,67 @@ impl Stoat {
         }
     }
 
-    /// Persist a workspace's state to disk. Failures are logged and swallowed
-    /// so a write error never prevents a clean shutdown or workspace switch.
+    /// Persist a workspace's state, serializing it off this thread.
+    ///
+    /// Runs on every workspace switch, open and close, so the snapshot is taken
+    /// here and the RON encoding and writes happen on the blocking pool. What
+    /// lands on disk is the workspace as it stood at this call, whatever it does
+    /// afterwards.
+    ///
+    /// A second save of the same workspace replaces the first's task. Snapshots
+    /// are ordered by this thread and every write is atomic, so the most a
+    /// late-landing earlier write costs is a stale file the next save replaces.
+    ///
     /// No-op when [`Self::persistence_disabled`] is set (used by the test
     /// harness to keep the real `$XDG_STATE_HOME` pristine) or when the
     /// workspace is still in its freshly-created state per
     /// [`Workspace::is_fresh`], so launches without `--continue` do not
-    /// write a throwaway session file on quit.
-    pub(crate) fn save_workspace(&self, ws: &Workspace) {
-        if self.persistence_disabled {
+    /// write a throwaway session file.
+    pub(crate) fn save_workspace(&mut self, workspace: WorkspaceId) {
+        let Some(ws) = self.workspaces.get(workspace) else {
             return;
-        }
-        if ws.is_fresh() {
+        };
+        let Some(path) = self.workspace_save_path(ws) else {
             return;
-        }
-        let path = match crate::workspace::state_path_for(&ws.git_root, ws.uid, &*self.fs_host) {
-            Ok(p) => p,
-            Err(err) => {
-                tracing::warn!(?err, "could not resolve workspace state path");
-                return;
-            },
+        };
+        let (state, meta) = (ws.to_state(), ws.meta());
+
+        let fs = self.fs_host.clone();
+        let task = self.executor.spawn_blocking(move || {
+            if let Err(err) = crate::workspace::write_state(&state, &meta, &path, fs.as_ref()) {
+                tracing::warn!(?path, ?err, "failed to save workspace state");
+            }
+        });
+        self.pending_workspace_saves.insert(workspace, task);
+    }
+
+    /// Persist a workspace's state before returning.
+    ///
+    /// For callers whose next statement depends on the write having happened.
+    /// Quit breaks out of the run loop immediately after, and closing a
+    /// workspace deletes the files this writes. A deferred write would lose the
+    /// race in the first case and win it in the second, resurrecting the state
+    /// of a workspace that was just closed.
+    pub(crate) fn save_workspace_now(&self, ws: &Workspace) {
+        let Some(path) = self.workspace_save_path(ws) else {
+            return;
         };
         if let Err(err) = ws.save_state(&path, &*self.fs_host) {
             tracing::warn!(?path, ?err, "failed to save workspace state");
+        }
+    }
+
+    /// Where `ws` persists, or `None` when it should not be persisted at all.
+    fn workspace_save_path(&self, ws: &Workspace) -> Option<PathBuf> {
+        if self.persistence_disabled || ws.is_fresh() {
+            return None;
+        }
+        match crate::workspace::state_path_for(&ws.git_root, ws.uid, &*self.fs_host) {
+            Ok(path) => Some(path),
+            Err(err) => {
+                tracing::warn!(?err, "could not resolve workspace state path");
+                None
+            },
         }
     }
 
@@ -3585,7 +3631,7 @@ impl Stoat {
     /// left in the background get their latest state written out.
     fn save_all_workspaces(&self) {
         for ws in self.workspaces.values() {
-            self.save_workspace(ws);
+            self.save_workspace_now(ws);
         }
     }
 
