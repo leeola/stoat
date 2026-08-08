@@ -889,6 +889,7 @@ mod tests {
                 .sync(
                     inlay_map.sync(before.clone(), &Patch::empty()).0,
                     &Patch::empty(),
+                    None,
                 )
                 .0,
             Patch::empty(),
@@ -901,7 +902,7 @@ mod tests {
         let after = multi_buffer.snapshot();
         let buffer_edits = after.edits_since(before.version());
         let (inlay_snapshot, inlay_edits) = inlay_map.sync(after, &buffer_edits);
-        let (fold_snapshot, fold_edits) = fold_map.sync(inlay_snapshot, &inlay_edits);
+        let (fold_snapshot, fold_edits) = fold_map.sync(inlay_snapshot, &inlay_edits, None);
         let (_, tab_edits) = tab_map.sync(fold_snapshot, fold_edits);
 
         let covered: Vec<(u32, u32)> = tab_edits
@@ -935,6 +936,7 @@ mod tests {
                 .sync(
                     inlay_map.sync(before.clone(), &Patch::empty()).0,
                     &Patch::empty(),
+                    None,
                 )
                 .0,
             Patch::empty(),
@@ -945,7 +947,7 @@ mod tests {
         let after = multi_buffer.snapshot();
         let buffer_edits = after.edits_since(before.version());
         let (inlay_snapshot, inlay_edits) = inlay_map.sync(after, &buffer_edits);
-        let (fold_snapshot, fold_edits) = fold_map.sync(inlay_snapshot, &inlay_edits);
+        let (fold_snapshot, fold_edits) = fold_map.sync(inlay_snapshot, &inlay_edits, None);
         let fold_delta: i64 = fold_edits
             .edits()
             .iter()

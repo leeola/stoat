@@ -790,7 +790,8 @@ impl DisplayMap {
         MultiBufferSnapshot,
     ) {
         let buffer_snapshot = self.multi_buffer.snapshot();
-        let buffer_edits = buffer_snapshot.edits_since(self.last_buffer_version);
+        let since_version = self.last_buffer_version;
+        let buffer_edits = buffer_snapshot.edits_since(since_version);
         let buffer_row_edits = match self.last_buffer_snapshot.take() {
             Some(previous) => buffer_row_patch(&buffer_edits, &previous, &buffer_snapshot),
             None => Patch::empty(),
@@ -801,7 +802,11 @@ impl DisplayMap {
 
         let (inlay_snapshot, inlay_edits) =
             self.inlay_map.sync(buffer_snapshot.clone(), &buffer_edits);
-        let (fold_snapshot, fold_edits) = self.fold_map.sync(inlay_snapshot, &inlay_edits);
+        let (fold_snapshot, fold_edits) = self.fold_map.sync(
+            inlay_snapshot,
+            &inlay_edits,
+            Some((&buffer_edits, since_version)),
+        );
         let (tab_snapshot, tab_edits) = self.tab_map.sync(fold_snapshot, fold_edits);
         let (wrap_snapshot, wrap_edits) = self.wrap_map.sync(tab_snapshot, &tab_edits);
         (wrap_snapshot, wrap_edits, buffer_row_edits, buffer_snapshot)
