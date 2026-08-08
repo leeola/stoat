@@ -165,7 +165,9 @@ fn apply_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &
         return;
     }
     new_pieces.reverse();
-    editor.selections.replace_with(new_pieces, new_buf);
+    editor
+        .selections
+        .replace_with_fresh_ids(new_pieces, new_buf);
 }
 
 fn apply_pipe_to(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
@@ -320,6 +322,71 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let snapshot = editor.display_map.snapshot();
         snapshot.buffer_snapshot().rope().to_string()
+    }
+
+    /// Piping several selections leaves pieces that are distinct, so removing
+    /// the primary one removes one of them.
+    ///
+    /// The collection deletes the primary by id, so pieces sharing an id are
+    /// one piece as far as that goes, and removing the primary of a set that
+    /// shares one empties a collection that must never be empty.
+    #[test]
+    fn piped_pieces_survive_removing_the_primary_selection() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        fake.set_response(
+            "tr a-z A-Z",
+            ShellOutput {
+                stdout: b"X".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.seed_focused_buffer("aa bb cc");
+        select_range(&mut h, 0, 2);
+        add_range(&mut h, 3, 5);
+        add_range(&mut h, 6, 8);
+
+        dispatch(&mut h.stoat, &action::ShellPipe);
+        h.type_text("tr a-z A-Z");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert_eq!(
+            selection_count(&mut h),
+            3,
+            "each piped piece is its own selection",
+        );
+
+        dispatch(&mut h.stoat, &action::RemovePrimarySelection);
+        assert_eq!(
+            selection_count(&mut h),
+            2,
+            "removing the primary removes one of them, not all of them",
+        );
+    }
+
+    /// Add a second and further selection, which mints its own id.
+    fn add_range(h: &mut TestHarness, start: usize, end: usize) {
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        editor.selections.insert_range(
+            stoat_text::Selection {
+                id: 0,
+                start: buf_snap.anchor_at(start, stoat_text::Bias::Right),
+                end: buf_snap.anchor_at(end, stoat_text::Bias::Right),
+                reversed: false,
+                goal: stoat_text::SelectionGoal::None,
+            },
+            buf_snap,
+        );
+    }
+
+    fn selection_count(h: &mut TestHarness) -> usize {
+        crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .selections
+            .all_anchors()
+            .len()
     }
 
     #[test]

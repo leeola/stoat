@@ -287,6 +287,31 @@ impl SelectionsCollection {
         self.replace_with(new_disjoint, snapshot);
     }
 
+    /// Replace selections with `new_disjoint`, giving each one a fresh id.
+    ///
+    /// For a producer building a set of selections that carry no identity yet,
+    /// which is every producer that would otherwise leave them all at the
+    /// default id. The collection tells selections apart by id and by nothing
+    /// else. The primary is the highest-id one, removing it retains everything
+    /// whose id differs, and switch-case, increment and paste all build maps
+    /// keyed on it. Selections sharing an id are therefore one selection to all
+    /// of them, and removing the primary of a set that shares one removes the
+    /// whole set.
+    ///
+    /// [`Self::replace_with`] is for callers whose ids already mean something,
+    /// such as a motion carrying each selection's identity forward.
+    pub(crate) fn replace_with_fresh_ids(
+        &mut self,
+        mut new_disjoint: Vec<Selection<Anchor>>,
+        snapshot: &MultiBufferSnapshot,
+    ) {
+        for selection in &mut new_disjoint {
+            selection.id = self.next_selection_id;
+            self.next_selection_id += 1;
+        }
+        self.replace_with(new_disjoint, snapshot);
+    }
+
     /// Replace selections with `new_disjoint`, sorting by offset and deduping
     /// empty collisions at the same offset (keeping the highest-id survivor).
     /// Asserts non-empty: callers must ensure at least one selection.

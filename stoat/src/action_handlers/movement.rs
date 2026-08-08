@@ -1387,7 +1387,7 @@ fn join_selections_impl(stoat: &mut Stoat, select_space: bool) -> UpdateEffect {
     if spaces.is_empty() {
         editor.selections.transform(new_buf, |sel| sel.clone());
     } else {
-        editor.selections.replace_with(spaces, new_buf);
+        editor.selections.replace_with_fresh_ids(spaces, new_buf);
     }
     UpdateEffect::Redraw
 }
@@ -6421,6 +6421,36 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
         assert_eq!(buffer_string(&mut h), "ab cd\n");
         assert_eq!(h.selection_spans(), vec![(2, 3, false)]);
+    }
+
+    /// Joining several lines leaves selections that are distinct, so removing
+    /// the primary one removes one of them.
+    ///
+    /// The collection deletes the primary by id, so selections sharing an id
+    /// are one selection as far as that goes. Three joined spaces built from
+    /// the same id would all match the primary's and be removed together,
+    /// emptying a collection that must never be empty, and the next read of the
+    /// newest selection panics rather than misbehaving quietly.
+    #[test]
+    fn joined_spaces_survive_removing_the_primary_selection() {
+        let mut h = TestHarness::with_size(20, 6);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\n");
+        h.open_file(&path);
+        set_range(&mut h, 0, 7);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
+        assert_eq!(buffer_string(&mut h), "a b c d\n");
+        assert_eq!(
+            h.selection_spans().len(),
+            3,
+            "each joined space is its own selection",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RemovePrimarySelection);
+        assert_eq!(
+            h.selection_spans().len(),
+            2,
+            "removing the primary removes one of them, not all of them",
+        );
     }
 
     #[test]
