@@ -624,6 +624,17 @@ impl PaneTree {
         }
     }
 
+    /// Whether any pane is detached into its own window.
+    ///
+    /// [`Self::windowed_panes`] answers this too, but it sorts the matches into
+    /// two vectors on the way, which a caller only asking whether the set is
+    /// empty pays on every frame for an answer that is almost always no.
+    pub fn has_windowed_panes(&self) -> bool {
+        self.panes
+            .iter()
+            .any(|(_, pane)| matches!(pane.placement, Placement::Window(_)))
+    }
+
     /// Collect the ids of every leaf pane. Convenience for iteration that needs
     /// mutable access to panes (via [`Self::pane_mut`]) without holding a
     /// borrow of `self` across the loop.

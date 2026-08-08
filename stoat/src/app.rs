@@ -57,7 +57,7 @@ use slotmap::SlotMap;
 use std::{
     borrow::Cow,
     cell::OnceCell,
-    collections::hash_map::DefaultHasher,
+    collections::hash_map::{DefaultHasher, Entry},
     ffi::OsStr,
     hash::{Hash, Hasher},
     io,
@@ -559,6 +559,13 @@ pub struct Stoat {
     /// open input modal. The live mode for those targets lives on the target
     /// itself; [`Self::focused_mode`] resolves which store applies.
     fallback_mode: String,
+    /// What [`Self::focused_mode`] answered when [`Self::refresh_frame_mode`]
+    /// last ran, held so a frame can read the mode as a field.
+    ///
+    /// [`Self::focused_mode`] borrows the whole app, which a paint holding the
+    /// active workspace mutably cannot do. Rewritten only when the mode string
+    /// actually differs, so the steady frame reads it without copying it.
+    pub(crate) frame_mode: String,
     /// Config-defined session variables set by `SetVar`. Session-local and never
     /// persisted. The keymap reads them after its built-in predicate fields.
     pub(crate) user_vars: std::collections::HashMap<String, StateValue>,
@@ -1526,6 +1533,17 @@ pub struct Stoat {
         Arc<crate::theme::Theme>,
         crate::render::editor::ResolvedChrome,
     )>,
+    /// [`Self::minimap_class_table`]'s palette pre-blended toward the editor
+    /// background at the inactive dim, for the strips of unfocused panes.
+    ///
+    /// Every unfocused strip blends this identically, so the blend is kept
+    /// rather than redone per frame. `None` means no dim applies or the
+    /// background did not resolve, and those strips paint undimmed.
+    ///
+    /// Keyed on the theme's identity and the dim, the way [`Self::chrome`] is
+    /// keyed. That covers the class table too, since a config install replaces
+    /// [`Self::theme`] and [`Self::minimap_class_table`] together.
+    pub(crate) dimmed_minimap_palette: Option<(Arc<crate::theme::Theme>, f32, Vec<[u8; 3]>)>,
     /// Smooth-scroll pool emit state for the focused editor. Tracks the
     /// last-declared pool region, filled page window, and emitted scroll row
     /// so each frame emits only the deltas.
@@ -1759,6 +1777,7 @@ impl Stoat {
         let mut stoat = Self {
             size: Rect::default(),
             fallback_mode: "normal".into(),
+            frame_mode: String::new(),
             user_vars: std::collections::HashMap::new(),
             executor,
             keymap,
@@ -1970,6 +1989,7 @@ impl Stoat {
             pending_undercurls: UndercurlBatch::default(),
             theme_epoch: 0,
             chrome: None,
+            dimmed_minimap_palette: None,
             smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
             minimap_content: std::collections::HashMap::new(),
             minimap_next_content_id: 0,
@@ -2586,6 +2606,43 @@ impl Stoat {
             let chrome = crate::render::editor::ResolvedChrome::resolve(&self.theme);
             self.chrome = Some((self.theme.clone(), chrome));
         }
+    }
+
+    /// Settle [`Self::dimmed_minimap_palette`] for the dim now in force.
+    ///
+    /// Separate from reading it for the same reason [`Self::refresh_chrome`]
+    /// is. A caller passes `wanted` as `false` to keep the blend from being
+    /// built at all, which is what the minimap being off means.
+    pub(crate) fn refresh_dimmed_minimap_palette(&mut self, wanted: bool, dim: f32) {
+        if !wanted || dim <= 0.0 {
+            self.dimmed_minimap_palette = None;
+            return;
+        }
+        let fresh = self
+            .dimmed_minimap_palette
+            .as_ref()
+            .is_some_and(|(theme, blended_at, _)| {
+                Arc::ptr_eq(theme, &self.theme) && *blended_at == dim
+            });
+        if fresh {
+            return;
+        }
+
+        let Some(bg) = crate::render::review::style_rgb(
+            self.theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|s| s.bg),
+        ) else {
+            self.dimmed_minimap_palette = None;
+            return;
+        };
+        let blended = self
+            .minimap_class_table
+            .palette()
+            .iter()
+            .map(|&c| crate::render::review::dim_rgb(c, bg, dim))
+            .collect();
+        self.dimmed_minimap_palette = Some((self.theme.clone(), dim, blended));
     }
 
     pub(crate) fn size(&self) -> Rect {
@@ -6768,6 +6825,19 @@ impl Stoat {
         &self.fallback_mode
     }
 
+    /// Settle [`Self::frame_mode`] onto what [`Self::focused_mode`] answers now.
+    ///
+    /// Separate from reading it, the way [`Self::refresh_chrome`] is, so a
+    /// caller that goes on to borrow the workspace mutably can settle the copy
+    /// first and then read it as an ordinary field.
+    pub(crate) fn refresh_frame_mode(&mut self) {
+        let mode = self.focused_mode();
+        if self.frame_mode != mode {
+            let mode = mode.to_string();
+            self.frame_mode = mode;
+        }
+    }
+
     /// Set the mode of the focused input target.
     ///
     /// Writes to the same target [`Self::focused_mode`] reads, so a value
@@ -8225,6 +8295,13 @@ impl Stoat {
             return;
         };
 
+        // No pane is detached and none was last frame either, so there is
+        // nothing to open and nothing to close. That is the overwhelmingly
+        // common shape, and the reason this checks before it builds anything.
+        if !self.active_workspace().panes.has_windowed_panes() && self.aux_windows.is_empty() {
+            return;
+        }
+
         let (out, current) = {
             let ws = self.active_workspace();
             let mut out = Vec::new();
@@ -8517,26 +8594,30 @@ impl Stoat {
             return;
         }
         let ws_id = self.active_workspace;
-        let ws = &self.workspaces[ws_id];
-        let buffer_ids: Vec<BufferId> = ws
-            .panes
-            .split_panes()
-            .filter_map(|(_, pane)| {
-                let View::Editor(editor_id) = pane.view else {
-                    return None;
-                };
-                Some(ws.editors.get(editor_id)?.buffer_id)
-            })
-            .collect();
+        // The walk reads the workspace while the declaration writes to the
+        // content store, so the two fields are borrowed apart rather than the
+        // buffer ids being collected to get one loop out of the way of the
+        // other.
+        let Self {
+            workspaces,
+            minimap_content,
+            minimap_next_content_id,
+            ..
+        } = self;
+        let ws = &workspaces[ws_id];
 
-        for buffer_id in buffer_ids {
-            if let std::collections::hash_map::Entry::Vacant(slot) =
-                self.minimap_content.entry((ws_id, buffer_id))
-            {
+        for (_, pane) in ws.panes.split_panes() {
+            let View::Editor(editor_id) = pane.view else {
+                continue;
+            };
+            let Some(editor) = ws.editors.get(editor_id) else {
+                continue;
+            };
+            if let Entry::Vacant(slot) = minimap_content.entry((ws_id, editor.buffer_id)) {
                 slot.insert(crate::minimap::MinimapContent::new(
-                    self.minimap_next_content_id,
+                    *minimap_next_content_id,
                 ));
-                self.minimap_next_content_id += 1;
+                *minimap_next_content_id += 1;
             }
         }
     }
@@ -15723,6 +15804,21 @@ mod tests {
             unfocused.thumb_border,
             [dr, dg, db],
             "the unfocused thumb border dims"
+        );
+
+        // The blend is held across frames rather than redone on each one, so a
+        // change to the dim has to reach the next frame instead of the first
+        // blend standing for the rest of the session.
+        let widened = 0.6_f32;
+        h.stoat.settings.ui_inactive_dim = Some(widened.into());
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        let rewidened: Vec<[u8; 3]> = raw.iter().map(|&c| dim_rgb(c, bg, widened)).collect();
+        assert!(
+            drain_apc(&mut rx)
+                .into_iter()
+                .any(|c| matches!(c, Command::Minimap(m) if m.palette == rewidened)),
+            "a changed dim re-blends the held palette",
         );
     }
 

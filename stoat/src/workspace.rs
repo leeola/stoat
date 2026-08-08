@@ -1340,24 +1340,20 @@ impl Workspace {
     /// content area excludes the status row via [`split_pane_status`], matching
     /// the rectangle the renderer composites the emulator into.
     fn fit_terms_to_panes(&mut self) {
-        let targets: Vec<(TermId, u16, u16)> = self
-            .panes
-            .split_panes()
-            .filter_map(|(_, pane)| match pane.view {
-                View::Agent(id) | View::Terminal(id) => {
-                    if pane.area.width == 0 || pane.area.height == 0 {
-                        return None;
-                    }
-                    let (content, _) = split_pane_status(pane.area);
-                    Some((id, content.height, content.width))
-                },
-                _ => None,
-            })
-            .collect();
-
-        for (id, rows, cols) in targets {
-            if let Some(agent) = self.terms.get_mut(id) {
-                agent.fit(rows, cols);
+        // The walk reads the pane tree while the fit writes to the terms, so
+        // both fields are borrowed apart rather than the ids being collected to
+        // get one loop out of the way of the other.
+        let Self { panes, terms, .. } = self;
+        for (_, pane) in panes.split_panes() {
+            let (View::Agent(id) | View::Terminal(id)) = pane.view else {
+                continue;
+            };
+            if pane.area.width == 0 || pane.area.height == 0 {
+                continue;
+            }
+            let (content, _) = split_pane_status(pane.area);
+            if let Some(agent) = terms.get_mut(id) {
+                agent.fit(content.height, content.width);
             }
         }
     }

@@ -441,6 +441,7 @@ pub(crate) fn frame(
     // Settled before the frame borrows the rest of the state it paints from,
     // since every pane reads these and only a theme change moves them.
     stoat.refresh_chrome();
+    stoat.refresh_frame_mode();
 
     if let Some(deadline) = stoat.pending_message_deadline
         && stoat.executor.now() >= deadline
@@ -450,7 +451,6 @@ pub(crate) fn frame(
         stoat.pending_message_expiry = None;
     }
 
-    let mode = stoat.focused_mode().to_string();
     let minimap_mode = stoat.minimap_mode();
     let minimap_enabled = minimap_mode != MinimapMode::Off;
     stoat.ensure_minimap_content_ids();
@@ -481,26 +481,15 @@ pub(crate) fn frame(
         .unwrap_or(0.25)
         .clamp(0.0, 1.0) as f32;
 
-    // Every unfocused pane's strip blends this identically, so the frame blends
-    // it once. `None` leaves those strips on the undimmed palette, which is what
-    // no dim or no resolvable background means.
-    let dimmed_palette: Option<Vec<[u8; 3]>> = (minimap_enabled && inactive_dim > 0.0)
-        .then(|| {
-            let bg = review::style_rgb(
-                stoat
-                    .theme
-                    .try_get(crate::theme::scope::UI_BACKGROUND)
-                    .and_then(|s| s.bg),
-            )?;
-            let palette = stoat.minimap_class_table.palette();
-            Some(
-                palette
-                    .iter()
-                    .map(|&c| review::dim_rgb(c, bg, inactive_dim))
-                    .collect(),
-            )
-        })
-        .flatten();
+    stoat.refresh_dimmed_minimap_palette(minimap_enabled, inactive_dim);
+
+    // The last whole-app borrows are behind us, so what the frame reads from
+    // here on is field by field and can live alongside the workspace below.
+    let mode = stoat.frame_mode.as_str();
+    let dimmed_palette: Option<&[[u8; 3]]> = stoat
+        .dimmed_minimap_palette
+        .as_ref()
+        .map(|(_, _, blended)| blended.as_slice());
 
     let minimap_chrome = minimap_enabled.then(|| {
         let thumb = {
@@ -513,7 +502,7 @@ pub(crate) fn frame(
             workspace: stoat.active_workspace,
             content: &stoat.minimap_content,
             palette,
-            dimmed_palette: dimmed_palette.as_deref().unwrap_or(palette),
+            dimmed_palette: dimmed_palette.unwrap_or(palette),
             thumb,
         }
     });
@@ -543,13 +532,12 @@ pub(crate) fn frame(
     };
 
     let workspace_name = if !ws.name.is_empty() {
-        ws.name.clone()
+        ws.name.as_str()
     } else {
         ws.git_root
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("(unnamed)")
-            .to_string()
     };
 
     // Reading which buffer is focused costs nothing, so the server list settles
@@ -579,9 +567,9 @@ pub(crate) fn frame(
     };
 
     let frame = FrameCtx {
-        workspace_name: &workspace_name,
+        workspace_name,
         workspace_root: &ws.git_root,
-        mode: &mode,
+        mode,
         screen,
         theme: &stoat.theme,
         chrome: &stoat
@@ -780,6 +768,7 @@ pub(crate) fn frame(
         .as_ref()
         .expect("refresh_chrome ran at the top of the frame")
         .1;
+    let mode = stoat.frame_mode.as_str();
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     badges::sync_agent_badge(&mut ws.badges, ws.agent.as_ref());
     badges::render_badges(
@@ -811,7 +800,7 @@ pub(crate) fn frame(
                 cached_modal_hints(
                     &mut stoat.hints_cache,
                     &stoat.keymap,
-                    &mode,
+                    mode,
                     "quit_confirm",
                     Some("quit"),
                     &stoat.theme,
@@ -835,7 +824,7 @@ pub(crate) fn frame(
                 cached_modal_hints(
                     &mut stoat.hints_cache,
                     &stoat.keymap,
-                    &mode,
+                    mode,
                     "workspace_picker",
                     Some("picker"),
                     &stoat.theme,
@@ -857,7 +846,7 @@ pub(crate) fn frame(
                 cached_modal_hints(
                     &mut stoat.hints_cache,
                     &stoat.keymap,
-                    &mode,
+                    mode,
                     "jumplist",
                     None,
                     &stoat.theme,
@@ -880,7 +869,7 @@ pub(crate) fn frame(
                 cached_modal_hints(
                     &mut stoat.hints_cache,
                     &stoat.keymap,
-                    &mode,
+                    mode,
                     "diagnostics",
                     None,
                     &stoat.theme,
@@ -908,7 +897,7 @@ pub(crate) fn frame(
                 cached_modal_hints(
                     &mut stoat.hints_cache,
                     &stoat.keymap,
-                    &mode,
+                    mode,
                     "commit_picker",
                     None,
                     &stoat.theme,
@@ -931,7 +920,7 @@ pub(crate) fn frame(
                 cached_modal_hints(
                     &mut stoat.hints_cache,
                     &stoat.keymap,
-                    &mode,
+                    mode,
                     "location",
                     Some("locations"),
                     &stoat.theme,
@@ -960,7 +949,7 @@ pub(crate) fn frame(
                 cached_modal_hints(
                     &mut stoat.hints_cache,
                     &stoat.keymap,
-                    &mode,
+                    mode,
                     "finder",
                     None,
                     &stoat.theme,
@@ -988,7 +977,7 @@ pub(crate) fn frame(
                 cached_modal_hints(
                     &mut stoat.hints_cache,
                     &stoat.keymap,
-                    &mode,
+                    mode,
                     "symbols",
                     None,
                     &stoat.theme,
@@ -1016,7 +1005,7 @@ pub(crate) fn frame(
                 cached_modal_hints(
                     &mut stoat.hints_cache,
                     &stoat.keymap,
-                    &mode,
+                    mode,
                     "code_search",
                     None,
                     &stoat.theme,
@@ -1043,7 +1032,7 @@ pub(crate) fn frame(
                 cached_modal_hints(
                     &mut stoat.hints_cache,
                     &stoat.keymap,
-                    &mode,
+                    mode,
                     "palette",
                     None,
                     &stoat.theme,
@@ -1057,7 +1046,7 @@ pub(crate) fn frame(
             if let Some(help) = &stoat.help {
                 help::render_help(
                     help,
-                    &mode,
+                    mode,
                     ws,
                     &stoat.theme,
                     chrome,
@@ -1070,7 +1059,7 @@ pub(crate) fn frame(
                 cached_modal_hints(
                     &mut stoat.hints_cache,
                     &stoat.keymap,
-                    &mode,
+                    mode,
                     "help",
                     None,
                     &stoat.theme,
@@ -1095,7 +1084,7 @@ pub(crate) fn frame(
 
     if !painted_modal.is_some_and(ActiveModal::paints_own_box)
         && mode != "space_pane_display"
-        && (!PRIMARY_MODES.contains(&mode.as_str())
+        && (!PRIMARY_MODES.contains(&mode)
             || screen == Some("review")
             || screen == Some("conflict")
             || stoat.key_hints_visible)
@@ -1112,13 +1101,13 @@ pub(crate) fn frame(
         };
         let token = cursor_token(ws);
         let focus = focus_flags(ws, &stoat.diagnostics, &stoat.lsp_registry);
-        let key = hints_cache_key(&mode, screen, &flags, token, &focus, None);
+        let key = hints_cache_key(mode, screen, &flags, token, &focus, None);
 
         if stoat.hints_cache.as_ref().map(|c| c.key) != Some(key) {
             // The review screen rides on normal mode, so scope to its own `view
             // == review` bindings. A chord sub-mode owns its whole mode, so take
             // them all.
-            let state = StoatKeymapState::with_flags(&mode, flags)
+            let state = StoatKeymapState::with_flags(mode, flags)
                 .with_view(screen)
                 .with_token(token)
                 .with_focus_flags(focus);
@@ -1190,7 +1179,7 @@ pub(crate) fn frame(
         let hint_label = match screen {
             Some("review") => "review",
             Some("conflict") => "conflict",
-            _ => mode.as_str(),
+            _ => mode,
         };
         let cache = stoat.hints_cache.as_mut().expect("cache populated above");
         hints::render_hints_grouped(
