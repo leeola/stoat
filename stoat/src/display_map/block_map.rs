@@ -1299,74 +1299,115 @@ impl BlockSnapshot {
     pub fn clip_point(&self, point: BlockPoint, bias: Bias) -> BlockPoint {
         let row = point.row.min(self.total_rows.saturating_sub(1));
         match self.classify_row(row) {
-            BlockRowKind::BufferRow { .. } => {
-                let wrap_point = self
-                    .wrap_snapshot
-                    .clip_point(WrapPoint::new(self.wrap_row_at(row), point.column), bias);
-                let clipped = self.wrap_to_block(wrap_point);
-
-                // The row the wrap layer moved to can itself be one a `Replace`
-                // block covers, which holds no buffer text either.
-                match self.classify_row(clipped.row) {
-                    BlockRowKind::BufferRow { .. } => clipped,
-                    BlockRowKind::Block { .. } => self.off_block_row(clipped.row, bias),
-                }
-            },
+            BlockRowKind::BufferRow { .. } => self.clip_on_buffer_row(row, point.column, bias),
             BlockRowKind::Block { .. } => self.off_block_row(row, bias),
         }
+    }
+
+    /// Clip `column` on `row`, which must hold buffer text.
+    ///
+    /// The whole clip happens in wrap space, which clears the soft-wrap indent
+    /// margin, tab expansions, fold placeholders and inlays in turn. The result
+    /// is read back through the wrap-to-block mapping rather than pinned to
+    /// `row`, since wrap-space clipping does not preserve the row.
+    fn clip_on_buffer_row(&self, row: u32, column: u32, bias: Bias) -> BlockPoint {
+        let clipped = self.wrap_clip(row, column, bias);
+        match self.classify_row(clipped.row) {
+            BlockRowKind::BufferRow { .. } => clipped,
+            // The wrap layer carried the position onto a row a `Replace` block
+            // hides. The search resumes in whichever direction it was carried
+            // rather than the one `bias` names, so the walk only ever moves
+            // away from the row it started on and cannot come back to it.
+            BlockRowKind::Block { .. } => {
+                let onward = if clipped.row > row {
+                    Bias::Right
+                } else {
+                    Bias::Left
+                };
+                self.off_block_row(clipped.row, onward)
+            },
+        }
+    }
+
+    /// Clip `column` on `row` through the wrap layer, without checking whether
+    /// the row it lands on holds buffer text.
+    ///
+    /// Separate from [`Self::clip_on_buffer_row`] so the searches that feed it
+    /// candidate positions cannot re-enter that check and cycle between two
+    /// rows that each carry onto the other.
+    fn wrap_clip(&self, row: u32, column: u32, bias: Bias) -> BlockPoint {
+        let wrap_point = self
+            .wrap_snapshot
+            .clip_point(WrapPoint::new(self.wrap_row_at(row), column), bias);
+        self.wrap_to_block(wrap_point)
     }
 
     /// Nearest position holding buffer text to block row `row`, preferring the
     /// side `bias` names.
     fn off_block_row(&self, row: u32, bias: Bias) -> BlockPoint {
         let found = if bias == Bias::Left {
-            self.buffer_position_before(row)
-                .or_else(|| self.buffer_position_after(row))
+            self.scan_up(row).or_else(|| self.scan_down(row))
         } else {
-            self.buffer_position_after(row)
-                .or_else(|| self.buffer_position_before(row))
+            self.scan_down(row).or_else(|| self.scan_up(row))
         };
 
         // A `Replace` block spanning every wrap row leaves the tree holding no
-        // buffer text at all, so neither search can answer. The block's own row
+        // buffer text at all, so neither scan can answer. The block's own row
         // keeps clipping total and idempotent, which is the most a document
         // with nowhere to put a caret allows.
         found.unwrap_or_else(|| BlockPoint::new(row, 0))
     }
 
-    /// End of the last row holding buffer text above block row `row`.
-    fn buffer_position_before(&self, row: u32) -> Option<BlockPoint> {
-        let mut cursor = self
-            .transforms
-            .cursor::<Dimensions<InputRow, OutputRow>>(());
-        cursor.seek(&OutputRow(row + 1), Bias::Left);
-
-        cursor.prev();
-        while let Some(transform) = cursor.item() {
-            if transform.block.is_none() {
-                let last_buf_row = cursor.end().1 .0.saturating_sub(1);
-                return Some(BlockPoint::new(last_buf_row, self.line_len(last_buf_row)));
+    /// Last position holding buffer text above block row `row`.
+    ///
+    /// A candidate row's own end is not always a position a caret can occupy,
+    /// because a fold placeholder straddling a soft-wrap break carries it onto
+    /// the row after. When that row is one a `Replace` block hides, the
+    /// candidate is no position at all and the scan carries on upward. Only
+    /// moving further from `row` each step is what ends the walk, since a
+    /// candidate that turned around could carry back onto the one before it.
+    fn scan_up(&self, row: u32) -> Option<BlockPoint> {
+        let mut candidate = row;
+        loop {
+            candidate = candidate.checked_sub(1)?;
+            if !matches!(self.classify_row(candidate), BlockRowKind::BufferRow { .. }) {
+                continue;
             }
-            cursor.prev();
+
+            let clipped = self.wrap_clip(candidate, self.line_len(candidate), Bias::Left);
+            if matches!(
+                self.classify_row(clipped.row),
+                BlockRowKind::BufferRow { .. }
+            ) {
+                return Some(clipped);
+            }
         }
-        None
     }
 
-    /// Start of the first row holding buffer text below block row `row`.
-    fn buffer_position_after(&self, row: u32) -> Option<BlockPoint> {
-        let mut cursor = self
-            .transforms
-            .cursor::<Dimensions<InputRow, OutputRow>>(());
-        cursor.seek(&OutputRow(row + 1), Bias::Left);
-
-        cursor.next();
-        while let Some(transform) = cursor.item() {
-            if transform.block.is_none() {
-                return Some(BlockPoint::new(cursor.start().1 .0, 0));
+    /// First position holding buffer text below block row `row`.
+    ///
+    /// Column zero is clipped for the same reason [`Self::scan_up`] clips a row
+    /// end. A continuation row carries a soft-wrap indent margin holding no
+    /// text, so its first cell sits past column zero.
+    fn scan_down(&self, row: u32) -> Option<BlockPoint> {
+        let mut candidate = row;
+        loop {
+            candidate += 1;
+            if candidate >= self.total_rows {
+                return None;
             }
-            cursor.next();
+            if !matches!(self.classify_row(candidate), BlockRowKind::BufferRow { .. }) {
+                continue;
+            }
+
+            let clipped = self.wrap_clip(candidate, 0, Bias::Right);
+            if matches!(
+                self.classify_row(clipped.row),
+                BlockRowKind::BufferRow { .. }
+            ) {
+                return Some(clipped);
+            }
         }
-        None
     }
 
     pub fn line_len(&self, block_row: u32) -> u32 {
