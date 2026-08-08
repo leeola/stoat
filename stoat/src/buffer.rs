@@ -4,8 +4,8 @@ use std::{cmp::Ordering, collections::HashMap, ops::Range, sync::Arc};
 pub use stoat_text::BufferId;
 use stoat_text::{
     patch::{Edit, Patch},
-    Anchor, Bias, Cursor, Dimensions, Fragment, IndentStyle, InsertionFragment,
-    InsertionFragmentKey, Locator, Point, Rope, RopeCursor, Selection, SumTree, UndoMap,
+    Anchor, Bias, Cursor, Dimensions, Edit as TreeEdit, Fragment, IndentStyle, InsertionFragment,
+    InsertionFragmentKey, KeyedItem, Locator, Point, Rope, RopeCursor, Selection, SumTree, UndoMap,
     UndoOperation,
 };
 
@@ -377,9 +377,7 @@ impl TextBuffer {
         new_fragments.append(suffix, cx);
 
         let mut all_insertions = self.snapshot.insertions.clone();
-        for ins in new_insertions {
-            all_insertions.insert_or_replace(ins, ());
-        }
+        all_insertions.edit(insertion_edits(new_insertions), ());
 
         let visible_text = {
             let mut out = Rope::new();
@@ -440,9 +438,7 @@ impl TextBuffer {
 
         // Update insertions tree
         let mut all_insertions = self.snapshot.insertions.clone();
-        for ins in new_insertions {
-            all_insertions.insert_or_replace(ins, ());
-        }
+        all_insertions.edit(insertion_edits(new_insertions), ());
 
         // Update the rope
         self.snapshot.visible_text.replace(range, text);
@@ -1307,6 +1303,35 @@ impl DeletedRebuild {
     }
 }
 
+/// One edit's insertion records, reduced to the last under each key and wrapped
+/// for [`SumTree::edit`].
+///
+/// Applying the records one at a time replaced an earlier record with a later
+/// one under the same key, and the batch has to land on the same tree.
+/// [`SumTree::edit`] replaces a same-key entry already in the tree but buffers
+/// and pushes every record inside one batch, so a duplicate left in would put
+/// two entries under one key. Nothing downstream would report that. The lookups
+/// answer from whichever entry the walk meets first, and which one that is
+/// depends on where the tree happened to split.
+fn insertion_edits(mut records: Vec<InsertionFragment>) -> Vec<TreeEdit<InsertionFragment>> {
+    // Stable, so records under one key stay in the order they were emitted and
+    // the last of a run is the one that was applied last.
+    records.sort_by_key(|record| record.key());
+
+    let mut edits = Vec::with_capacity(records.len());
+    let mut records = records.into_iter().peekable();
+    while let Some(record) = records.next() {
+        if records
+            .peek()
+            .is_some_and(|next| next.key() == record.key())
+        {
+            continue;
+        }
+        edits.push(TreeEdit::Insert(record));
+    }
+    edits
+}
+
 fn push_insertion(insertions: &mut Vec<InsertionFragment>, fragment: &Fragment) {
     insertions.push(InsertionFragment {
         timestamp: fragment.timestamp,
@@ -1748,9 +1773,12 @@ pub type SharedBuffer = Arc<std::sync::RwLock<TextBuffer>>;
 
 #[cfg(test)]
 mod tests {
-    use super::{TextBuffer, OPS_COMPACT_THRESHOLD};
+    use super::{insertion_edits, TextBuffer, TreeEdit, OPS_COMPACT_THRESHOLD};
     use std::{cmp::Ordering, mem, ops::Range};
-    use stoat_text::{Anchor, Bias, BufferId, IndentStyle, Point, Selection, SelectionGoal};
+    use stoat_text::{
+        Anchor, Bias, BufferId, IndentStyle, InsertionFragment, Locator, Point, Selection,
+        SelectionGoal,
+    };
 
     fn buf(content: &str) -> TextBuffer {
         TextBuffer::with_text(BufferId::new(0), content)
@@ -1907,6 +1935,39 @@ mod tests {
     fn batch_matches_sequential_for_repeated_offsets_and_touching_ranges() {
         assert_batch_matches_sequential("abcdefghij", &[(4..4, "Y"), (4..4, "X")]);
         assert_batch_matches_sequential("abcdefghij", &[(5..7, "Z"), (3..5, "Y")]);
+    }
+
+    #[test]
+    fn insertion_records_collapse_to_the_last_under_one_key() {
+        // What applying the records one at a time did, and what the batch has to
+        // reproduce. `SumTree::edit` would keep both same-key records instead,
+        // and no buffer path emits a pair today, so the contract is pinned here
+        // rather than through an edit.
+        let record = |split_offset: u32, fragment_id: Locator| InsertionFragment {
+            timestamp: 7,
+            split_offset,
+            fragment_id,
+        };
+        let (first, last) = (Locator::min(), Locator::max());
+
+        let edits = insertion_edits(vec![
+            record(4, first.clone()),
+            record(0, first.clone()),
+            record(4, last.clone()),
+        ]);
+
+        let kept: Vec<(u32, &Locator)> = edits
+            .iter()
+            .map(|edit| match edit {
+                TreeEdit::Insert(record) => (record.split_offset, &record.fragment_id),
+                TreeEdit::Remove(_) => unreachable!("insertion_edits only inserts"),
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            vec![(0, &first), (4, &last)],
+            "the repeated key keeps the record emitted last",
+        );
     }
 
     #[test]
