@@ -627,4 +627,136 @@ mod tests {
         apply_patch(&mut actual, &composed, &expected);
         assert_eq!(actual, expected);
     }
+
+    /// A random transformation of `text`, returned with the patch describing
+    /// it.
+    ///
+    /// The text and the patch are built together in one walk, so the patch is
+    /// true of the transformation rather than something invented alongside it.
+    /// Inserted characters all come from `filler`, which distinguishes what each
+    /// step contributed when a case fails.
+    ///
+    /// At least one character is kept between consecutive edits, since
+    /// [`Patch::new`] asserts strictly ascending, non-touching ranges in both
+    /// the old and the new space.
+    fn random_step(seed: &mut u64, text: &[char], filler: char) -> (Vec<char>, Patch<u32>) {
+        let mut next = || {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            *seed
+        };
+
+        let mut out: Vec<char> = Vec::new();
+        let mut edits: Vec<Edit<u32>> = Vec::new();
+        let mut old = 0usize;
+
+        while old < text.len() {
+            let keep = (1 + (next() % 4) as usize).min(text.len() - old);
+            out.extend_from_slice(&text[old..old + keep]);
+            old += keep;
+            if old >= text.len() {
+                break;
+            }
+
+            // Either length may be zero, which is what makes pure insertions
+            // and pure deletions appear.
+            let deleted = ((next() % 4) as usize).min(text.len() - old);
+            let inserted = (next() % 4) as usize;
+            if deleted == 0 && inserted == 0 {
+                continue;
+            }
+
+            let new_start = out.len();
+            out.extend(std::iter::repeat_n(filler, inserted));
+            edits.push(Edit {
+                old: old as u32..(old + deleted) as u32,
+                new: new_start as u32..(new_start + inserted) as u32,
+            });
+            old += deleted;
+        }
+
+        (out, Patch::new(edits))
+    }
+
+    /// Composing two patches describes the same change as applying them in
+    /// turn.
+    ///
+    /// Every display-map layer hands the next a composed patch, so a compose
+    /// that loses or misplaces an edit moves rows rather than failing outright.
+    /// The three deterministic compose tests cover shapes chosen in advance;
+    /// this covers the ones nobody thought to write down.
+    #[test]
+    fn composing_matches_applying_both_over_random_patches() {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+
+        for case in 0..200 {
+            let base: Vec<char> = ('a'..='z').cycle().take(30).collect();
+            let (mid, first) = random_step(&mut seed, &base, 'A');
+            let (final_text, second) = random_step(&mut seed, &mid, '0');
+
+            let composed = first.compose(&second);
+
+            let mut rebuilt = base.clone();
+            apply_patch(&mut rebuilt, &composed, &final_text);
+            assert_eq!(
+                rebuilt.iter().collect::<String>(),
+                final_text.iter().collect::<String>(),
+                "case {case}: composed {:?} over {:?} then {:?}",
+                composed.edits(),
+                first.edits(),
+                second.edits(),
+            );
+        }
+    }
+
+    /// A patch composed with its own inverse moves no boundary.
+    ///
+    /// Inverting swaps each edit's two ranges, so the pair describes a round
+    /// trip to the text it started from. The result therefore maps a text onto
+    /// one of the same shape, and every edit it holds has to name the same range
+    /// on both sides. An edit whose two lengths differ would be claiming the
+    /// round trip changed the text's length.
+    ///
+    /// Offsets between the touched regions follow from that and are checked too.
+    /// Offsets strictly inside one do not. A region the patch names as touched
+    /// collapses to its start, which `old_to_new_mapping` pins for exactly this
+    /// shape, since a patch records which ranges moved and not what they hold.
+    #[test]
+    fn composing_a_patch_with_its_inverse_moves_no_boundary() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+
+        for case in 0..200 {
+            let base: Vec<char> = ('a'..='z').cycle().take(30).collect();
+            let (_, patch) = random_step(&mut seed, &base, 'A');
+
+            let mut inverse = patch.clone();
+            inverse.invert();
+            let round_trip = patch.compose(&inverse);
+
+            for edit in round_trip.edits() {
+                assert_eq!(
+                    edit.old,
+                    edit.new,
+                    "case {case}: {:?} names a different range on each side",
+                    round_trip.edits(),
+                );
+            }
+
+            let touched = |offset: u32| {
+                round_trip
+                    .edits()
+                    .iter()
+                    .any(|edit| offset > edit.old.start && offset < edit.old.end)
+            };
+            for offset in (0..=base.len() as u32).filter(|o| !touched(*o)) {
+                assert_eq!(
+                    round_trip.old_to_new(offset),
+                    offset,
+                    "case {case}: offset {offset} under {:?}",
+                    round_trip.edits(),
+                );
+            }
+        }
+    }
 }
