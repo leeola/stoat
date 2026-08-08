@@ -6,7 +6,10 @@
 //! guarantees that terminal IO latency is independent of main-thread workload.
 
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, EventStream,
+    },
     execute, queue,
     terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
 };
@@ -68,6 +71,7 @@ pub fn install_panic_hook() {
         let prior = panic::take_hook();
         panic::set_hook(Box::new(move |info| {
             let _ = execute!(io::stdout(), DisableMouseCapture);
+            let _ = execute!(io::stdout(), DisableBracketedPaste);
             ratatui::restore();
 
             let panic_message = match info.payload().downcast_ref::<&'static str>() {
@@ -106,6 +110,9 @@ pub fn spawn(
 
         rt.block_on(async move {
             let mut terminal = ratatui::init();
+            // Without this a paste arrives as its characters, which normal mode
+            // would run as commands. Bracketed, it arrives whole as one event.
+            execute!(io::stdout(), EnableBracketedPaste)?;
             if mouse_captured {
                 execute!(io::stdout(), EnableMouseCapture)?;
             }
@@ -120,6 +127,7 @@ pub fn spawn(
             if mouse_captured {
                 let _ = execute!(io::stdout(), DisableMouseCapture);
             }
+            let _ = execute!(io::stdout(), DisableBracketedPaste);
             ratatui::restore();
             result
         })

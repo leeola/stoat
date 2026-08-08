@@ -3608,6 +3608,7 @@ impl Stoat {
                 self.auto_insert_focused_terminal(term_before, origin);
                 effect
             },
+            Event::Paste(text) => self.handle_paste(&text),
             _ => UpdateEffect::None,
         };
         action_handlers::lsp::notify_buffer_changes_pending(self);
@@ -6497,6 +6498,40 @@ impl Stoat {
         Some((input.editor_id, input.buffer_id))
     }
 
+    /// Insert a bracketed paste's text wherever typing would land, as one edit.
+    ///
+    /// The characters arrive as text and never as keys, so a paste in normal
+    /// mode inserts rather than running what it spells. It also leaves the mode
+    /// alone, which is what bracketed paste means: the reader asked for these
+    /// characters in the buffer, not for a mode change.
+    ///
+    /// One [`Self::editor_insert`] covers the pane's buffer and every modal's
+    /// input alike, since [`Self::focused_editor_ids`] already resolves to
+    /// whichever of them typing would reach.
+    ///
+    /// Line endings are normalized because a terminal forwards whatever the
+    /// clipboard held, and a buffer holds LF.
+    fn handle_paste(&mut self, text: &str) -> UpdateEffect {
+        let Some((editor_id, buffer_id)) = self.focused_editor_ids() else {
+            return UpdateEffect::None;
+        };
+        if text.is_empty() {
+            return UpdateEffect::None;
+        }
+
+        let normalized = match text.contains('\r') {
+            true => text.replace("\r\n", "\n").replace('\r', "\n"),
+            false => text.to_owned(),
+        };
+
+        let opened = self.begin_paste_undo_group();
+        self.editor_insert(editor_id, buffer_id, &normalized);
+        if opened {
+            self.seal_focused_undo_group();
+        }
+        UpdateEffect::Redraw
+    }
+
     pub(crate) fn focused_editor_ids(&self) -> Option<(EditorId, BufferId)> {
         let ws = self.active_workspace();
 
@@ -6936,7 +6971,7 @@ impl Stoat {
             self.restore_cursor_after_append();
         }
         if leaving_insert {
-            self.seal_insert_undo_group();
+            self.seal_focused_undo_group();
         }
         if !was_insert && now_insert {
             self.current_insert_run = Some(String::new());
@@ -6956,9 +6991,27 @@ impl Stoat {
         }
     }
 
-    /// Seal the insert-session group, capturing the post-session selections to
-    /// restore on redo. A session that typed nothing discards its group.
-    fn seal_insert_undo_group(&mut self) {
+    /// Open an undo group for a paste unless one is already open, reporting
+    /// whether it did so the caller knows to seal it.
+    ///
+    /// A paste is one thing to undo, and a multi-cursor one lands an edit record
+    /// per cursor, so outside an insert session those records would undo one at
+    /// a time. Inside one, the session's own group already covers them and
+    /// opening another would split the session in two.
+    fn begin_paste_undo_group(&mut self) -> bool {
+        let Some((buffer_id, before)) = self.focused_undo_snapshot() else {
+            return false;
+        };
+        let Some(buffer) = self.active_workspace().buffers.get(buffer_id) else {
+            return false;
+        };
+        buffer.write().expect("poisoned").try_begin_group(|| before)
+    }
+
+    /// Seal the focused buffer's open undo group, capturing the selections to
+    /// restore on redo. A group that took no edits was never materialized, so
+    /// sealing one leaves no step behind.
+    fn seal_focused_undo_group(&mut self) {
         let Some((buffer_id, after)) = self.focused_undo_snapshot() else {
             return;
         };
@@ -16841,6 +16894,88 @@ mod tests {
             .expect("poisoned")
             .rope()
             .to_string()
+    }
+
+    fn focused_buffer_version(h: &crate::test_harness::TestHarness) -> u64 {
+        let ws = h.stoat.active_workspace();
+        let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
+            panic!("focused pane is not an editor");
+        };
+        let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
+        ws.buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .version()
+    }
+
+    /// A paste arrives whole, so it costs one edit across every cursor rather
+    /// than the whole keystroke pipeline per character. Landing as one edit is
+    /// also what makes it one thing to undo.
+    #[test]
+    fn a_paste_lands_as_one_edit_every_cursor_shares() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "note.txt", b"a\nb\n");
+        h.type_keys("C");
+        let before = focused_buffer_version(&h);
+
+        // Carries a CRLF, which a terminal forwards as the clipboard held it.
+        h.stoat.update(Event::Paste("X\r\nY".to_string()));
+
+        // The version counts edit records, and a multi-cursor insert is one per
+        // cursor however it arrived. What the batch buys is that the count does
+        // not also multiply by the pasted length, which is what a character at a
+        // time would have cost.
+        assert_eq!(
+            focused_buffer_version(&h),
+            before + 2,
+            "one record per cursor, not one per cursor per pasted character",
+        );
+        assert_eq!(focused_buffer_string(&h), "X\nYa\nX\nYb\n");
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Undo);
+        assert_eq!(focused_buffer_string(&h), "a\nb\n", "and one thing to undo",);
+    }
+
+    /// The characters of a paste are text, never keys. Pasting in normal mode
+    /// used to run what it spelled, so text carrying `d` or `x` edited the
+    /// buffer on its way in.
+    #[test]
+    fn a_normal_mode_paste_inserts_rather_than_running_its_characters() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "note.txt", b"keep\n");
+        assert_eq!(h.snapshot().mode, "normal");
+
+        h.stoat.update(Event::Paste("dd".to_string()));
+
+        assert_eq!(focused_buffer_string(&h), "ddkeep\n");
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "and the paste leaves the mode where it found it",
+        );
+    }
+
+    /// A modal's input is where typing goes while it is open, so a paste goes
+    /// there too rather than into the buffer behind it.
+    #[test]
+    fn a_paste_with_a_modal_open_lands_in_its_input() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "note.txt", b"keep\n");
+        h.type_keys("space p");
+        assert!(h.stoat.file_finder.is_some(), "the finder is open");
+
+        h.stoat.update(Event::Paste("note".to_string()));
+
+        let ws = h.stoat.active_workspace();
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        assert_eq!(finder.input.text(ws), "note");
+        assert_eq!(
+            focused_buffer_string(&h),
+            "keep\n",
+            "and the buffer behind it is untouched",
+        );
     }
 
     fn open_indent_buffer(h: &mut crate::test_harness::TestHarness, name: &str, contents: &[u8]) {

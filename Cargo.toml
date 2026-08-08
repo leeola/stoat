@@ -50,7 +50,7 @@ serde_json = { version = "1.0", features = ["raw_value"] }
 toml = "0.8"
 etcetera = "0.11"
 ratatui = "0.30.0"
-crossterm = { version = "0.29", features = ["event-stream"] }
+crossterm = { version = "0.29", features = ["bracketed-paste", "event-stream"] }
 tokio = { version = "1", features = ["rt", "macros", "sync"] }
 futures = { version = "0.3", default-features = false }
 compact_str = "0.9"
