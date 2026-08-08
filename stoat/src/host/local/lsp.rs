@@ -30,21 +30,21 @@ use lsp_types::{
     HoverClientCapabilities, HoverParams, InitializeParams, InitializeResult, InitializedParams,
     InlayHint, InlayHintClientCapabilities, InlayHintParams, Location, LogMessageParams,
     MarkupKind, NumberOrString, PositionEncodingKind, PrepareRenameResponse, ProgressParams,
-    ProgressParamsValue, PublishDiagnosticsClientCapabilities, PublishDiagnosticsParams,
-    ReferenceClientCapabilities, ReferenceParams, RenameClientCapabilities, RenameFilesParams,
-    RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensParams,
-    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities,
-    ShowMessageParams, ShowMessageRequestClientCapabilities, SignatureHelp, SignatureHelpParams,
-    TagSupport, TextDocumentClientCapabilities, TextDocumentPositionParams, TextEdit,
-    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
-    TypeHierarchySupertypesParams, Uri, WindowClientCapabilities, WorkspaceClientCapabilities,
-    WorkspaceEdit, WorkspaceSymbolClientCapabilities, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    ProgressParamsValue, ProgressToken, PublishDiagnosticsClientCapabilities,
+    PublishDiagnosticsParams, ReferenceClientCapabilities, ReferenceParams,
+    RenameClientCapabilities, RenameFilesParams, RenameParams, SelectionRange,
+    SelectionRangeParams, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities, ShowMessageParams,
+    ShowMessageRequestClientCapabilities, SignatureHelp, SignatureHelpParams, TagSupport,
+    TextDocumentClientCapabilities, TextDocumentPositionParams, TextEdit, TypeHierarchyItem,
+    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
+    WindowClientCapabilities, WorkDoneProgress, WorkspaceClientCapabilities, WorkspaceEdit,
+    WorkspaceSymbolClientCapabilities, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, BufRead, BufReader, Read, Write},
     path::Path,
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
@@ -604,6 +604,7 @@ fn reader_loop(
     let mut reader = BufReader::new(stdout);
     let mut decoder = FrameDecoder::new();
     let mut buf = [0u8; 4096];
+    let mut active_progress = HashSet::new();
     loop {
         let n = match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
@@ -619,7 +620,7 @@ fn reader_loop(
                 continue;
             };
             let routed = classify(message);
-            let wakes = routed.warrants_wake();
+            let wakes = wakes_for(&routed, &mut active_progress);
             match routed {
                 Routed::Response { id, result } => {
                     if let Some(tx) = pending
@@ -786,6 +787,43 @@ impl Routed {
             ),
             Routed::Incoming(_) => true,
         }
+    }
+}
+
+/// [`Routed::warrants_wake`], with the progress tokens already on screen taken
+/// into account.
+///
+/// A report on a token that is showing is the one message a wake buys nothing
+/// for. Showing any progress arms the frame timer, and each spinner phase flip
+/// merges a redraw, so the report's own text reaches the screen on a frame that
+/// was already coming. A cold index sends several per phase, and each one was
+/// costing a whole-screen paint.
+///
+/// Begin and end change whether anything is shown at all, so they wake. So does
+/// a report on a token no begin arrived for, because the progress handling
+/// synthesizes an entry from it and that entry is what starts the spinner. Left
+/// quiet, nothing would arm the timer for it to be drawn on.
+///
+/// `active` records the tokens showing on this connection, which is the right
+/// scope. Progress entries are keyed by server as well as token.
+fn wakes_for(routed: &Routed, active: &mut HashSet<ProgressToken>) -> bool {
+    let Routed::Notification(LspNotification::Progress { token, value }) = routed else {
+        return routed.warrants_wake();
+    };
+
+    match value {
+        WorkDoneProgress::Begin(_) => {
+            active.insert(token.clone());
+            true
+        },
+        WorkDoneProgress::End(_) => {
+            active.remove(token);
+            true
+        },
+        // Inserting answers the question it asks. It reports whether the token
+        // was new, which is exactly when the report has to wake, and records it
+        // either way so the ones after it stay quiet.
+        WorkDoneProgress::Report(_) => active.insert(token.clone()),
     }
 }
 
@@ -1065,7 +1103,8 @@ fn client_capabilities() -> ClientCapabilities {
 mod tests {
     use super::{
         classify, client_capabilities, encode_message, reap_child, transcript_slug,
-        transcript_stem, Command, DiagnosticTag, Duration, FrameDecoder, Instant, Mutex, Routed,
+        transcript_stem, wakes_for, Command, DiagnosticTag, Duration, FrameDecoder, HashSet,
+        Instant, Mutex, Routed,
     };
     use crate::host::lsp::{IncomingRequest, LspNotification};
     use serde_json::{json, Value};
@@ -1250,6 +1289,41 @@ mod tests {
             wakes,
             [false, false, true, true, true, true],
             "only the log and trace notifications the drain traces skip the wake",
+        );
+    }
+
+    #[test]
+    fn a_progress_report_wakes_only_while_its_token_is_new() {
+        let progress = |token: i32, value: Value| {
+            json!({
+                "jsonrpc": "2.0",
+                "method": "$/progress",
+                "params": {"token": token, "value": value},
+            })
+        };
+        let report = json!({"kind": "report", "message": "crate 3/9"});
+        let frames = [
+            progress(1, json!({"kind": "begin", "title": "indexing"})),
+            progress(1, report.clone()),
+            progress(1, report.clone()),
+            // No begin arrived for token 2, so the report is what synthesizes
+            // its entry and starts the spinner the later ones ride on.
+            progress(2, report.clone()),
+            progress(2, report.clone()),
+            progress(1, json!({"kind": "end"})),
+            progress(1, report),
+        ];
+
+        let mut active = HashSet::new();
+        let wakes: Vec<bool> = frames
+            .into_iter()
+            .map(|frame| wakes_for(&classify(frame), &mut active))
+            .collect();
+
+        assert_eq!(
+            wakes,
+            [true, false, false, true, false, true, true],
+            "a report wakes only when it is the first sight of its token",
         );
     }
 
