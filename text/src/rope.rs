@@ -870,10 +870,8 @@ impl Rope {
         if offset > self.len() {
             return false;
         }
-        let (start, _end, chunk_opt) =
-            self.chunks
-                .find::<Dimensions<usize, Point>, _>((), &offset, Bias::Right);
-        let Dimensions(chunk_start_offset, _, ()) = start;
+        let (chunk_start_offset, _end, chunk_opt) =
+            self.chunks.find::<usize, _>((), &offset, Bias::Right);
         let chunk = match chunk_opt {
             Some(c) => c,
             None => return true,
@@ -887,10 +885,8 @@ impl Rope {
         if self.is_char_boundary(offset) {
             return offset;
         }
-        let (start, _end, chunk_opt) =
-            self.chunks
-                .find::<Dimensions<usize, Point>, _>((), &offset, Bias::Right);
-        let Dimensions(chunk_start_offset, _, ()) = start;
+        let (chunk_start_offset, _end, chunk_opt) =
+            self.chunks.find::<usize, _>((), &offset, Bias::Right);
         let chunk = match chunk_opt {
             Some(c) => c,
             None => return self.len(),
@@ -1191,10 +1187,7 @@ impl Rope {
     /// The chunk holding `offset` paired with the offset it starts at, or
     /// `None` past the last chunk.
     fn chunk_at(&self, offset: usize) -> Option<(&str, usize)> {
-        let (start, _end, chunk) =
-            self.chunks
-                .find::<Dimensions<usize, Point>, _>((), &offset, Bias::Right);
-        let Dimensions(chunk_start, _, ()) = start;
+        let (chunk_start, _end, chunk) = self.chunks.find::<usize, _>((), &offset, Bias::Right);
         chunk.map(|chunk| (chunk.text.as_str(), chunk_start))
     }
 
