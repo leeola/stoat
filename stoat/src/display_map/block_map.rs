@@ -588,7 +588,17 @@ impl BlockChunks<'_> {
 pub struct BlockMap {
     next_block_id: AtomicUsize,
     next_spacer_id: AtomicUsize,
-    custom_blocks: Vec<Arc<CustomBlock>>,
+    /// Every custom block, ordered by start row, at the placement the edits
+    /// have carried it to.
+    ///
+    /// This is the authoritative position. A block reached through the
+    /// transform tree is the [`Arc`] that was cloned in when the block was
+    /// inserted, and carrying replaces the entry here without rewriting the
+    /// tree's copies, so a placement read back off a snapshot names the row
+    /// the block went in at rather than the row it now occupies. The sync
+    /// resolves against [`Self::custom_blocks_by_id`] wherever it needs the
+    /// current one.
+    pub(super) custom_blocks: Vec<Arc<CustomBlock>>,
     custom_blocks_by_id: TreeMap<CustomBlockId, Arc<CustomBlock>>,
     transforms: Option<SumTree<Transform>>,
     total_rows: u32,

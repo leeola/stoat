@@ -3562,4 +3562,266 @@ mod tests {
             }
         }
     }
+
+    /// Every row an incrementally-synced map renders matches a map built from
+    /// scratch over the same text, folds, blocks, inlays and wrap width.
+    ///
+    /// Each layer hands the next a row patch saying which rows changed and how
+    /// many replaced them. A patch that misreports either sends every layer
+    /// above it building a tree over rows that moved, and the result is a
+    /// rendered row in the wrong place rather than a crash or a bad count. The
+    /// other randomized display-map tests read carried fold offsets and fold
+    /// records, never a transform tree or a rendered row, so nothing else here
+    /// compares what the reader actually sees against what it should be.
+    ///
+    /// Folds and blocks are read back off the incremental map to re-apply them,
+    /// which is the only way to name where they ended up. That makes this a
+    /// check that the rows rendered for a given fold and block set are right,
+    /// not that the positions were carried right. Carrying is covered by
+    /// `carried_fold_offsets_match_a_full_resolve` and
+    /// `blocks_follow_the_row_they_mark_across_an_edit`.
+    ///
+    /// Blocks come from the map's carried list rather than from a rendered row,
+    /// because the tree holds each block as it was inserted. Reading a
+    /// placement off a snapshot names the row the block went in at, which
+    /// re-applies it to the wrong row once an edit has moved it.
+    #[test]
+    fn incremental_sync_matches_a_fresh_build_over_random_edits() {
+        use super::{Block, CustomBlock};
+        use stoat_text::{Anchor, Bias};
+
+        // The same generator and seed derivation the fold-carrying test uses,
+        // so a seed names the same thing in both.
+        fn lcg(state: &mut u64) -> u64 {
+            *state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *state >> 33
+        }
+
+        // Tabs make the tab layer expand, the wide characters make it and the
+        // wrap layer disagree about columns, and the combining mark rides on a
+        // base character rather than standing alone. Plain rows in between keep
+        // the ordinary path represented.
+        let text: String = (0..30)
+            .map(|i| match i % 4 {
+                0 => format!("line{i}\twith a tab\n"),
+                1 => format!("line{i} \u{5e7f}\u{4e1c}\u{8bdd} wide\n"),
+                2 => format!("line{i} e\u{301}accented\n"),
+                _ => format!("line{i} plain words here\n"),
+            })
+            .collect();
+
+        for seed in 0..40u64 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+
+            let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
+            let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+            let mut map = DisplayMap::new(multi, test_executor(), crate::test_notify());
+
+            let wrap_width = match lcg(&mut state) % 3 {
+                0 => None,
+                _ => Some(5 + (lcg(&mut state) % 25) as u32),
+            };
+            map.set_wrap_width(wrap_width);
+
+            // Disjoint and ordered, so the fold merge pass does not rewrite them
+            // out from under the read-back below.
+            let mut fold_ranges = Vec::new();
+            let mut row = 0u32;
+            while row < 26 && fold_ranges.len() < 3 {
+                if lcg(&mut state).is_multiple_of(2) {
+                    let span = 1 + (lcg(&mut state) % 3) as u32;
+                    fold_ranges.push(Point::new(row, 0)..Point::new(row + span, 0));
+                    row += span;
+                }
+                row += 1 + (lcg(&mut state) % 3) as u32;
+            }
+            if !fold_ranges.is_empty() {
+                map.fold(fold_ranges);
+            }
+
+            let blocks: Vec<BlockProperties> = (0..lcg(&mut state) % 4)
+                .map(|i| {
+                    let row = (lcg(&mut state) % 28) as u32;
+                    let placement = match lcg(&mut state) % 3 {
+                        0 => BlockPlacement::Above(row),
+                        1 => BlockPlacement::Below(row),
+                        _ => BlockPlacement::Replace {
+                            start: row,
+                            end: row + 1 + (lcg(&mut state) % 2) as u32,
+                        },
+                    };
+                    BlockProperties::from_text(
+                        placement,
+                        vec![format!("block{i}")],
+                        BlockStyle::Fixed,
+                    )
+                })
+                .collect();
+            if !blocks.is_empty() {
+                map.insert_blocks(blocks);
+            }
+
+            // Anchored at row starts, so an inlay never lands inside a wide
+            // character. The anchors themselves are handed to both maps, since
+            // they survive the edits below and resolve to the same final spots.
+            let inlays: Vec<(Anchor, String, InlayKind)> = {
+                let snap = map.multi_buffer.snapshot();
+                (0..lcg(&mut state) % 3)
+                    .map(|i| {
+                        let row = (lcg(&mut state) % 29) as u32;
+                        let offset = snap.rope().point_to_offset(Point::new(row, 0));
+                        (
+                            snap.anchor_at(offset, Bias::Left),
+                            format!(": hint{i}"),
+                            InlayKind::Hint,
+                        )
+                    })
+                    .collect()
+            };
+            if !inlays.is_empty() {
+                map.splice_inlays(Vec::new(), inlays.clone());
+            }
+
+            for round in 0..4 {
+                for _ in 0..1 + lcg(&mut state) % 3 {
+                    let len = shared.read().expect("poisoned").rope().len();
+                    let at = (lcg(&mut state) as usize) % (len + 1);
+
+                    // Both endpoints snap to grapheme boundaries. An edit
+                    // splitting one of the wide characters panics in the rope.
+                    let clip = |off: usize| {
+                        shared
+                            .read()
+                            .expect("poisoned")
+                            .rope()
+                            .clip_to_grapheme_boundary(off.min(len), Bias::Left)
+                    };
+                    match lcg(&mut state) % 3 {
+                        0 => {
+                            let (start, end) = (clip(at), clip(at + 4));
+                            shared.write().expect("poisoned").edit(start..end, "");
+                        },
+                        // A same-size replace moves no offset and changes no
+                        // row count, which is the shape that defeats the
+                        // version and touch mechanisms the layers carry state
+                        // with.
+                        1 => {
+                            let (start, end) = (clip(at), clip(at + 2));
+                            let width = end - start;
+                            if width > 0 {
+                                let filler = "q".repeat(width);
+                                shared.write().expect("poisoned").edit(start..end, &filler);
+                            }
+                        },
+                        _ => {
+                            let start = clip(at);
+                            shared.write().expect("poisoned").edit(start..start, "zz\n");
+                        },
+                    }
+                }
+
+                let rows = {
+                    let snapshot = map.snapshot();
+                    (0..snapshot.line_count())
+                        .map(|row| {
+                            let kind = match snapshot.classify_row(row) {
+                                BlockRowKind::BufferRow { buffer_row } => {
+                                    format!("buf{buffer_row}")
+                                },
+                                BlockRowKind::Block { block, line_index } => {
+                                    block.get_line(line_index)
+                                },
+                            };
+                            (kind, snapshot.display_line(row))
+                        })
+                        .collect::<Vec<_>>()
+                };
+
+                // The folds and blocks as they now stand, which is the only
+                // way to name where the edits left them.
+                let carried_folds: Vec<Range<Point>> = {
+                    let snapshot = map.snapshot();
+                    let fold_snapshot = snapshot.fold_snapshot();
+                    let inlay_snapshot = snapshot.inlay_snapshot();
+                    fold_snapshot
+                        .folds_in_range(InlayPoint::new(0, 0)..InlayPoint::new(u32::MAX, 0))
+                        .into_iter()
+                        .map(|fold| {
+                            inlay_snapshot.to_buffer_point(fold.range.start)
+                                ..inlay_snapshot.to_buffer_point(fold.range.end)
+                        })
+                        .collect()
+                };
+                // Read off the map's own carried list, not off a snapshot. The
+                // transform tree holds each block as it was inserted, so a
+                // placement taken from a rendered row names the row the block
+                // went in at rather than the row it now occupies.
+                //
+                // Re-applied in id order, which is insertion order, rather than
+                // the row order the list is kept in. Two blocks a fold collapses
+                // onto one row are separated by priority and then by id, so a
+                // fresh map only renders them the same way round if it mints
+                // its ids in the same order.
+                let carried_blocks: Vec<BlockProperties> = {
+                    let mut blocks: Vec<&Arc<CustomBlock>> =
+                        map.block_map.custom_blocks.iter().collect();
+                    blocks.sort_by_key(|block| block.id);
+                    blocks
+                        .into_iter()
+                        .map(|block| {
+                            let label = Block::Custom(Arc::clone(block)).get_line(0);
+                            let mut props = BlockProperties::from_text(
+                                block.placement,
+                                vec![label],
+                                BlockStyle::Fixed,
+                            );
+                            props.priority = block.priority;
+                            props
+                        })
+                        .collect()
+                };
+
+                let fresh_rows = {
+                    let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+                    let mut fresh = DisplayMap::new(multi, test_executor(), crate::test_notify());
+                    fresh.set_wrap_width(wrap_width);
+                    if !carried_folds.is_empty() {
+                        fresh.fold(carried_folds);
+                    }
+                    if !carried_blocks.is_empty() {
+                        fresh.insert_blocks(carried_blocks);
+                    }
+                    if !inlays.is_empty() {
+                        fresh.splice_inlays(Vec::new(), inlays.clone());
+                    }
+
+                    let snapshot = fresh.snapshot();
+                    (0..snapshot.line_count())
+                        .map(|row| {
+                            let kind = match snapshot.classify_row(row) {
+                                BlockRowKind::BufferRow { buffer_row } => {
+                                    format!("buf{buffer_row}")
+                                },
+                                BlockRowKind::Block { block, line_index } => {
+                                    block.get_line(line_index)
+                                },
+                            };
+                            (kind, snapshot.display_line(row))
+                        })
+                        .collect::<Vec<_>>()
+                };
+
+                assert_eq!(
+                    rows.len(),
+                    fresh_rows.len(),
+                    "seed {seed} round {round}: row count",
+                );
+                for (row, (incremental, fresh)) in rows.iter().zip(&fresh_rows).enumerate() {
+                    assert_eq!(incremental, fresh, "seed {seed} round {round} row {row}",);
+                }
+            }
+        }
+    }
 }
