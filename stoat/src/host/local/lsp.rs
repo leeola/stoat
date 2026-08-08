@@ -41,8 +41,8 @@ use lsp_types::{
     WindowClientCapabilities, WorkDoneProgress, WorkspaceClientCapabilities, WorkspaceEdit,
     WorkspaceSymbolClientCapabilities, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
-use serde::{de::DeserializeOwned, Serialize};
-use serde_json::{json, Value};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::{json, value::RawValue, Value};
 use std::{
     collections::{HashMap, HashSet},
     io::{self, BufRead, BufReader, Read, Write},
@@ -79,7 +79,10 @@ const REAP_POLL: Duration = Duration::from_millis(10);
 /// grow the queue without limit.
 const WRITE_QUEUE_DEPTH: usize = 256;
 
-type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, LspResponseError>>>>>;
+/// Waiting requests by id, each holding the raw `result` text its response
+/// carried so the awaiting caller runs the one typed parse itself.
+type PendingMap =
+    Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Box<RawValue>, LspResponseError>>>>>;
 
 /// Byte-faithful JSONL transcripts of the two protocol directions, enabled
 /// by the `text_proto_log` setting.
@@ -268,7 +271,7 @@ impl LocalLsp {
         }
 
         match rx.await {
-            Ok(Ok(value)) => serde_json::from_value(value)
+            Ok(Ok(raw)) => serde_json::from_str(raw.get())
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err)),
             Ok(Err(err)) => Err(io::Error::other(format!(
                 "lsp error {}: {}",
@@ -663,11 +666,7 @@ fn reader_loop(
             if let Some(transcript) = &rx_transcript {
                 transcript.record(&String::from_utf8_lossy(&body));
             }
-            let Ok(message) = serde_json::from_slice::<Value>(&body) else {
-                tracing::warn!(target: "stoat::lsp", "dropping unparseable lsp frame");
-                continue;
-            };
-            let routed = classify(message);
+            let routed = classify(&body);
             let wakes = wakes_for(&routed, &mut active_progress);
             match routed {
                 Routed::Response { id, result } => {
@@ -832,7 +831,7 @@ fn parse_content_length(header: &[u8]) -> Option<usize> {
 enum Routed {
     Response {
         id: i64,
-        result: Result<Value, LspResponseError>,
+        result: Result<Box<RawValue>, LspResponseError>,
     },
     Notification(LspNotification),
     Incoming(IncomingRequest),
@@ -900,44 +899,79 @@ fn wakes_for(routed: &Routed, active: &mut HashSet<ProgressToken>) -> bool {
     }
 }
 
+/// An inbound JSON-RPC message, parsed only as far as routing it needs.
+///
+/// The payload fields stay as raw JSON text rather than a [`Value`] tree. A
+/// `semanticTokens/full` result is hundreds of thousands of numbers, and
+/// building that as boxed nodes only to walk it again into the typed struct
+/// costs more than the parse itself. Holding the text defers the one parse that
+/// has to happen to whoever knows the type it should be.
+#[derive(Deserialize)]
+struct Incoming {
+    #[serde(default)]
+    id: Option<Box<RawValue>>,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    params: Option<Box<RawValue>>,
+    #[serde(default)]
+    result: Option<Box<RawValue>>,
+    #[serde(default)]
+    error: Option<Box<RawValue>>,
+}
+
+/// The error payload of a failed response, taken without materializing its
+/// `data`, which nothing reads structurally.
+#[derive(Deserialize)]
+struct IncomingError {
+    #[serde(default)]
+    code: i64,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    data: Option<Value>,
+}
+
 /// Classify one JSON-RPC message by its shape. An `id` without a `method` is a
 /// response to us. A `method` with an `id` is a server request. A `method`
 /// without an `id` is a notification.
-fn classify(message: Value) -> Routed {
-    // Taken apart rather than read through, so a result tree or a diagnostics
-    // payload moves into the routed message instead of being copied out of one
-    // this function is about to drop.
-    let Value::Object(mut map) = message else {
+///
+/// `body` is the frame's bytes, which JSON-RPC requires to be UTF-8. Anything
+/// else, or anything that does not parse, is ignored.
+fn classify(body: &[u8]) -> Routed {
+    let Ok(text) = std::str::from_utf8(body) else {
+        tracing::warn!(target: "stoat::lsp", "dropping non-utf8 lsp frame");
         return Routed::Ignore;
     };
-    let method = map.remove("method");
-    let method = method.as_ref().and_then(Value::as_str);
-    let id = map.remove("id");
+    let Ok(message) = serde_json::from_str::<Incoming>(text) else {
+        tracing::warn!(target: "stoat::lsp", "dropping unparseable lsp frame");
+        return Routed::Ignore;
+    };
 
-    match (method, id) {
+    match (message.method, message.id) {
         (None, Some(id)) => {
-            let Some(id) = id.as_i64() else {
+            let Ok(id) = serde_json::from_str::<i64>(id.get()) else {
                 return Routed::Ignore;
             };
-            match map.remove("error") {
+            match message.error {
                 Some(error) => Routed::Response {
                     id,
                     result: Err(parse_response_error(&error)),
                 },
                 None => Routed::Response {
                     id,
-                    result: Ok(map.remove("result").unwrap_or(Value::Null)),
+                    result: Ok(message.result.unwrap_or_else(null_raw)),
                 },
             }
         },
         (Some(method), Some(id)) => {
-            let Ok(id) = serde_json::from_value::<NumberOrString>(id) else {
+            let Ok(id) = serde_json::from_str::<NumberOrString>(id.get()) else {
                 return Routed::Ignore;
             };
-            let params = map.remove("params").unwrap_or(Value::Null);
-            Routed::Incoming(classify_incoming(id, method, params))
+            let params = message.params.unwrap_or_else(null_raw);
+            Routed::Incoming(classify_incoming(id, &method, &params))
         },
-        (Some(method), None) => match classify_notification(method, map.remove("params")) {
+        (Some(method), None) => match classify_notification(&method, message.params.as_deref()) {
             Some(notification) => Routed::Notification(notification),
             None => Routed::Ignore,
         },
@@ -945,19 +979,26 @@ fn classify(message: Value) -> Routed {
     }
 }
 
-fn parse_response_error(error: &Value) -> LspResponseError {
+/// The raw JSON `null`, for a message that named no payload where one is
+/// expected.
+fn null_raw() -> Box<RawValue> {
+    RawValue::from_string("null".to_owned()).expect("null is valid json")
+}
+
+fn parse_response_error(error: &RawValue) -> LspResponseError {
+    let parsed: IncomingError = serde_json::from_str(error.get()).unwrap_or(IncomingError {
+        code: 0,
+        message: String::new(),
+        data: None,
+    });
     LspResponseError {
-        code: error.get("code").and_then(Value::as_i64).unwrap_or(0),
-        message: error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        data: error.get("data").cloned(),
+        code: parsed.code,
+        message: parsed.message,
+        data: parsed.data,
     }
 }
 
-fn classify_incoming(id: NumberOrString, method: &str, params: Value) -> IncomingRequest {
+fn classify_incoming(id: NumberOrString, method: &str, params: &RawValue) -> IncomingRequest {
     match method {
         "window/showMessageRequest" => decode(id, method, params, |id, params| {
             IncomingRequest::ShowMessageRequest { id, params }
@@ -980,7 +1021,7 @@ fn classify_incoming(id: NumberOrString, method: &str, params: Value) -> Incomin
         _ => IncomingRequest::Unknown {
             id,
             method: method.to_owned(),
-            params,
+            params: serde_json::from_str(params.get()).unwrap_or(Value::Null),
         },
     }
 }
@@ -988,17 +1029,15 @@ fn classify_incoming(id: NumberOrString, method: &str, params: Value) -> Incomin
 /// Deserialize `params` into the typed request `build` wants, falling back to
 /// [`IncomingRequest::Unknown`] when they do not fit.
 ///
-/// The fallback carries no params. Deserializing consumes them, and keeping
-/// them for this path would mean cloning the payload of every request that does
-/// parse. Nothing reads them: an `Unknown` is answered "method not found"
-/// whatever it holds.
+/// The fallback carries no params. Nothing reads them: an `Unknown` is answered
+/// "method not found" whatever it holds.
 fn decode<T: DeserializeOwned>(
     id: NumberOrString,
     method: &str,
-    params: Value,
+    params: &RawValue,
     build: impl FnOnce(NumberOrString, T) -> IncomingRequest,
 ) -> IncomingRequest {
-    match serde_json::from_value(params) {
+    match serde_json::from_str(params.get()) {
         Ok(params) => build(id, params),
         Err(_) => IncomingRequest::Unknown {
             id,
@@ -1008,11 +1047,11 @@ fn decode<T: DeserializeOwned>(
     }
 }
 
-fn classify_notification(method: &str, params: Option<Value>) -> Option<LspNotification> {
+fn classify_notification(method: &str, params: Option<&RawValue>) -> Option<LspNotification> {
     let params = params?;
     match method {
         "textDocument/publishDiagnostics" => {
-            let params: PublishDiagnosticsParams = serde_json::from_value(params).ok()?;
+            let params: PublishDiagnosticsParams = serde_json::from_str(params.get()).ok()?;
             Some(LspNotification::Diagnostics {
                 uri: params.uri,
                 diagnostics: params.diagnostics,
@@ -1020,7 +1059,7 @@ fn classify_notification(method: &str, params: Option<Value>) -> Option<LspNotif
             })
         },
         "$/progress" => {
-            let params: ProgressParams = serde_json::from_value(params).ok()?;
+            let params: ProgressParams = serde_json::from_str(params.get()).ok()?;
             let ProgressParamsValue::WorkDone(value) = params.value;
             Some(LspNotification::Progress {
                 token: params.token,
@@ -1028,20 +1067,21 @@ fn classify_notification(method: &str, params: Option<Value>) -> Option<LspNotif
             })
         },
         "window/logMessage" => {
-            let params: LogMessageParams = serde_json::from_value(params).ok()?;
+            let params: LogMessageParams = serde_json::from_str(params.get()).ok()?;
             Some(LspNotification::LogMessage {
                 typ: params.typ,
                 message: params.message,
             })
         },
         "window/showMessage" => {
-            let params: ShowMessageParams = serde_json::from_value(params).ok()?;
+            let params: ShowMessageParams = serde_json::from_str(params.get()).ok()?;
             Some(LspNotification::ShowMessage {
                 typ: params.typ,
                 message: params.message,
             })
         },
         "$/logTrace" => {
+            let params: Value = serde_json::from_str(params.get()).ok()?;
             let message = params.get("message")?.as_str()?.to_owned();
             let verbose = params
                 .get("verbose")
@@ -1175,9 +1215,8 @@ fn client_capabilities() -> ClientCapabilities {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify, client_capabilities, reap_child, transcript_slug, transcript_stem, wakes_for,
-        write_framed, Command, DiagnosticTag, Duration, Envelope, FrameDecoder, HashSet, Instant,
-        Mutex, Routed,
+        client_capabilities, reap_child, transcript_slug, transcript_stem, wakes_for, write_framed,
+        Command, DiagnosticTag, Duration, Envelope, FrameDecoder, HashSet, Instant, Mutex, Routed,
     };
     use crate::host::lsp::{IncomingRequest, LspNotification};
     use serde_json::{json, Value};
@@ -1187,6 +1226,12 @@ mod tests {
         let mut out = Vec::new();
         write_framed(&mut out, body).expect("writing to a vec cannot fail");
         out
+    }
+
+    /// [`classify`] over a message written as a `json!` literal, which is how
+    /// these fixtures read most clearly. The transport hands it frame bytes.
+    fn classify(message: Value) -> Routed {
+        super::classify(serde_json::to_vec(&message).expect("serializes").as_slice())
     }
 
     fn decode_one(bytes: &[u8]) -> Vec<u8> {
@@ -1336,7 +1381,7 @@ mod tests {
         match classify(message) {
             Routed::Response { id, result } => {
                 assert_eq!(id, 5);
-                assert_eq!(result.unwrap(), json!({"ok": true}));
+                assert_eq!(result.unwrap().get(), r#"{"ok":true}"#);
             },
             _ => panic!("expected a response"),
         }
