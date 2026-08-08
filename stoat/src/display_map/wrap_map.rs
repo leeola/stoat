@@ -963,11 +963,15 @@ impl WrapSnapshot {
         let min_col = self.soft_wrap_indent(row).min(max_col);
         let col = point.column().clamp(min_col, max_col);
 
-        // The row's wrap and tab columns differ by a constant, so the wrap
-        // column takes whatever step the tab column took.
-        let tab_point = self.to_tab_point(WrapPoint::new(row, col));
-        let snapped = self.tab_snapshot.clip_point(tab_point, bias);
-        WrapPoint::new(row, col + snapped.column() - tab_point.column())
+        // A fold placeholder can straddle a wrap break, and a clip lands on the
+        // whole placeholder, so the snap can leave the row it started on.
+        // Converting back finds the row the tab column now belongs to, and
+        // re-applies that row's indent, rather than forcing the result onto the
+        // row asked about at a fixed distance from where it started.
+        let snapped = self
+            .tab_snapshot
+            .clip_point(self.to_tab_point(WrapPoint::new(row, col)), bias);
+        self.to_wrap_point(snapped)
     }
 
     pub fn line_len(&self, wrap_row: u32) -> u32 {
@@ -1473,15 +1477,18 @@ mod tests {
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::{
-            fold_map::FoldMap,
+            fold_map::{FoldMap, FoldPlaceholder},
             inlay_map::InlayMap,
             tab_map::{TabMap, TabPoint},
         },
         multi_buffer::MultiBuffer,
     };
-    use std::sync::{Arc, RwLock};
+    use std::{
+        ops::Range,
+        sync::{Arc, RwLock},
+    };
     use stoat_scheduler::{Executor, TestScheduler};
-    use stoat_text::patch::Patch;
+    use stoat_text::{patch::Patch, Bias, Point};
 
     fn test_executor() -> Executor {
         Executor::new(Arc::new(TestScheduler::new()))
@@ -1494,6 +1501,43 @@ mod tests {
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
+        let (_, wrap_snapshot) = WrapMap::new(
+            tab_snapshot,
+            wrap_width,
+            test_executor(),
+            crate::test_notify(),
+        );
+        wrap_snapshot
+    }
+
+    /// [`make_snapshot`] with `range` folded behind the default ellipsis, each
+    /// end given as a buffer `(row, column)`.
+    fn folded_snapshot(
+        content: &str,
+        range: Range<(u32, u32)>,
+        wrap_width: Option<u32>,
+    ) -> Arc<super::WrapSnapshot> {
+        let buffer = TextBuffer::with_text(BufferId::new(0), content);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+
+        let fold_snapshot = {
+            let offset = |(row, column): (u32, u32)| {
+                buffer_snapshot
+                    .rope()
+                    .point_to_offset(Point::new(row, column))
+            };
+            let anchors = buffer_snapshot.anchor_at(offset(range.start), Bias::Right)
+                ..buffer_snapshot.anchor_at(offset(range.end), Bias::Left);
+            fold_map.fold(vec![anchors], FoldPlaceholder::default(), &buffer_snapshot);
+            fold_map.sync(inlay_snapshot, &Patch::empty(), None).0
+        };
+
         let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         let (_, wrap_snapshot) = WrapMap::new(
@@ -1820,7 +1864,6 @@ mod tests {
 
     #[test]
     fn clip_point_pushes_out_of_the_indent_margin() {
-        use stoat_text::Bias;
         let snap = make_snapshot("    hello world example text", Some(12));
         let indent = snap.soft_wrap_indent(1);
         assert!(indent > 0);
@@ -1828,6 +1871,33 @@ mod tests {
             snap.clip_point(WrapPoint::new(1, 0), Bias::Left),
             WrapPoint::new(1, indent),
             "a column in the synthetic margin clamps to the first real cell",
+        );
+    }
+
+    /// A caret cannot rest inside a fold placeholder, so clipping the start of a
+    /// continuation row that begins mid-placeholder has to leave the row.
+    ///
+    /// The ellipsis for a fold is one indivisible cell run, and a wrap break can
+    /// fall inside it. Clipping left then snaps to the placeholder's start,
+    /// which lies on the row before the one asked about. Nothing constrains that
+    /// column to be at or after where the continuation row begins, so treating
+    /// the wrap and tab columns as a fixed distance apart is what fails here.
+    #[test]
+    fn clip_point_leaves_a_row_that_starts_inside_a_fold() {
+        // The ellipsis covers cells 8 through 10 and the width-10 break falls
+        // inside it, so the continuation row starts mid-placeholder.
+        let snap = folded_snapshot("aaaaaaaaXXXXbbbb", (0, 8)..(0, 12), Some(10));
+        assert!(snap.line_count() > 1, "the folded line wraps");
+
+        assert_eq!(
+            snap.clip_point(WrapPoint::new(1, 0), Bias::Left),
+            WrapPoint::new(0, 8),
+            "clipping left reaches back to where the placeholder starts",
+        );
+        assert_eq!(
+            snap.clip_point(WrapPoint::new(1, 0), Bias::Right),
+            WrapPoint::new(1, 1),
+            "clipping right steps forward onto the cell past the placeholder",
         );
     }
 
@@ -2195,7 +2265,7 @@ mod tests {
         let mk_anchor = |offset: usize| Anchor {
             timestamp: 0,
             offset: offset as u32,
-            bias: stoat_text::Bias::Left,
+            bias: Bias::Left,
             buffer_id: None,
         };
         highlights_map.insert(
