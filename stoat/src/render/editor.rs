@@ -2183,6 +2183,14 @@ fn render_diagnostic_popover(
 /// Re-resolving walks the whole row prefix, so the per-character path is
 /// quadratic in the row length. It is kept only for rows carrying folds,
 /// inlays, or soft wrap, where the display column is not a simple accumulation.
+///
+/// `runs` collects the painted cells as `(x, y, len)` runs of horizontally
+/// adjacent same-row cells, appended as they are painted. Cells arrive left to
+/// right within each display row and cover every column a character occupies,
+/// so adjacency breaks only where the paint itself does. That is a row change
+/// or `skip_offset`, and both are where an undercurl drawn from these runs
+/// should break too. A wide character or a tab contributes all of its columns
+/// to one run rather than starting a new one after each.
 #[allow(clippy::too_many_arguments)]
 fn paint_offset_range(
     rope: &Rope,
@@ -2196,7 +2204,7 @@ fn paint_offset_range(
     right: u16,
     bottom: u16,
     buf: &mut Buffer,
-    runs: Option<&mut Vec<(u16, u16, u16)>>,
+    mut runs: Option<&mut Vec<(u16, u16, u16)>>,
 ) {
     // A fold moves everything after it, so rows from the first one on go the
     // general way whether or not they hold a fold themselves. Rows above it are
@@ -2209,8 +2217,6 @@ fn paint_offset_range(
     let max_expansion_column = snapshot.tab_snapshot().max_expansion_column();
     let line_count = snapshot.line_count();
 
-    let collect = runs.is_some();
-    let mut painted: Vec<(u16, u16)> = Vec::new();
     // `cells` is how far the character moves the column, so a wide glyph
     // washes both of its columns rather than leaving the right one bare, and a
     // tab covers every column up to its stop. A combining mark moves it none
@@ -2225,8 +2231,11 @@ fn paint_offset_range(
             let x = inner.x + (display_col + step) as u16;
             if x < right && y < bottom {
                 apply(x, y, &mut buf[(x, y)]);
-                if collect {
-                    painted.push((x, y));
+                if let Some(runs) = runs.as_deref_mut() {
+                    match runs.last_mut() {
+                        Some(last) if last.1 == y && last.0 + last.2 == x => last.2 += 1,
+                        _ => runs.push((x, y, 1)),
+                    }
                 }
             }
         }
@@ -2343,39 +2352,6 @@ fn paint_offset_range(
                 char_point.column += ch.len_utf8() as u32;
             }
         }
-    }
-
-    if let Some(runs) = runs {
-        coalesce_runs(&painted, runs);
-    }
-}
-
-/// Coalesce painted cells, in paint order, into `(x, y, len)` runs of
-/// horizontally adjacent same-row cells, appending them to `out`.
-///
-/// A diagnostic span paints its cells left to right within each display row,
-/// and every column a character occupies, so adjacency breaks only where the
-/// span itself does. That is a row change or the character the cursor sits on,
-/// which the span steps over, and both are where the underline should break
-/// too. A wide character or a tab contributes all of its columns to one run
-/// rather than starting a new one after each.
-fn coalesce_runs(painted: &[(u16, u16)], out: &mut Vec<(u16, u16, u16)>) {
-    let mut cur: Option<(u16, u16, u16)> = None;
-    for &(x, y) in painted {
-        match cur {
-            Some((rx, ry, rlen)) if ry == y && rx + rlen == x => {
-                cur = Some((rx, ry, rlen + 1));
-            },
-            _ => {
-                if let Some(run) = cur.take() {
-                    out.push(run);
-                }
-                cur = Some((x, y, 1));
-            },
-        }
-    }
-    if let Some(run) = cur {
-        out.push(run);
     }
 }
 
