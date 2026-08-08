@@ -4720,25 +4720,39 @@ pub(crate) fn clamp_cursor_to_view(editor: &mut EditorState, scrolloff: u32) -> 
         .selections
         .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
             let sel_cursor = cursor_offset(rope, tail_offset, head_offset);
-            let cursor_display = snapshot.buffer_to_display(rope.offset_to_point(sel_cursor));
+            let cursor_pt = rope.offset_to_point(sel_cursor);
+            let cursor_display = snapshot.buffer_to_display(cursor_pt);
+            // Cells along the whole buffer line, which is what a vertical
+            // motion carries. Measuring along a display row would land the
+            // cursor elsewhere under wrap and leave the wrong kind of goal for
+            // the next motion to read.
             let goal_col = match sel.goal {
                 SelectionGoal::Column(c) => c,
-                SelectionGoal::None => cursor_display.column,
+                SelectionGoal::None => snapshot.visual_column(cursor_pt),
             };
+            // The rows stay in display space, the band being one of display
+            // rows, so the target row converts back to the buffer line whose
+            // cells the goal is counted in.
             let new_row_i = (cursor_display.row as i64).saturating_add(row_delta);
             let new_row = new_row_i.clamp(0, max_row as i64) as u32;
             if new_row == cursor_display.row {
                 return sel.clone();
             }
-            let clamped_col = goal_col.min(snapshot.line_len(new_row));
-            let clipped = snapshot.clip_point(DisplayPoint::new(new_row, clamped_col), clip_bias);
+            let Some(target_line) = snapshot.display_to_buffer(DisplayPoint::new(new_row, 0))
+            else {
+                return sel.clone();
+            };
+            let col = snapshot.buffer_column_at_visual(target_line.row, goal_col, Bias::Left);
+            let clipped = snapshot.clip_point(
+                snapshot.buffer_to_display(Point::new(target_line.row, col)),
+                clip_bias,
+            );
             let Some(buffer_pt) = snapshot.display_to_buffer(clipped) else {
                 return sel.clone();
             };
             let offset = rope.point_to_offset(buffer_pt);
             if extend {
-                let cursor_target = if clamped_col > 0 && rope.chars_at(offset).next() == Some('\n')
-                {
+                let cursor_target = if col > 0 && rope.chars_at(offset).next() == Some('\n') {
                     rope.reversed_chars_at(offset)
                         .next()
                         .map_or(offset, |c| offset - c.len_utf8())
@@ -5653,6 +5667,61 @@ mod tests {
             .row;
         assert_eq!(tail_row, 0, "select mode keeps the anchor at its origin");
         assert_eq!(head_row, 43, "the head extends down to the band top");
+    }
+
+    /// A scroll clamp leaves behind a goal column a later vertical motion can
+    /// use, in the space that motion reads it in.
+    ///
+    /// The goal is cells counted along the whole buffer line, so a motion lands
+    /// in the same place whatever wrap does to the rows in between. A clamp
+    /// measuring it along one display row instead both moves the cursor to the
+    /// wrong column itself and leaves that column behind as the goal, which the
+    /// next motion then reads as a whole-line one.
+    #[test]
+    fn a_scroll_clamp_keeps_the_cursor_column_under_wrap() {
+        // Lines long enough to wrap at this width, so a display row covers only
+        // part of a buffer line and the two column spaces come apart. Every line
+        // is the same length, so a vertical move has no short line to clamp to
+        // and the column is preserved exactly.
+        let body: String = (0..60)
+            .map(|i| format!("{i:02} {}\n", "x".repeat(60)))
+            .collect();
+
+        let mut h = TestHarness::with_size(40, 12);
+        let path = h.write_file("wrapped.rs", &body);
+        h.open_file(&path);
+
+        let visual_column = |h: &mut TestHarness| {
+            let point = focused_cursor_point(h);
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.display_map.snapshot().visual_column(point)
+        };
+
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            place_cursor(editor, 0, 40);
+        }
+        assert_eq!(visual_column(&mut h), 40, "the cursor starts mid-line");
+
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.scroll_row = 30;
+            assert!(clamp_cursor_to_view(editor, 3), "the clamp fires");
+            editor.scroll_row = 0;
+        }
+        assert_eq!(
+            visual_column(&mut h),
+            40,
+            "the clamp moves the cursor down its rows, not across its columns",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::MoveDown);
+        assert_eq!(
+            visual_column(&mut h),
+            40,
+            "and the goal it left behind is the one a motion reads",
+        );
     }
 
     #[test]
