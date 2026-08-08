@@ -55,16 +55,43 @@ pub(crate) fn ast_scan_file(
     out: &mut Vec<SearchMatch>,
 ) {
     let root = lang.ast_grep(text);
+
+    // Tree traversal is document order, so each match's position is the last
+    // one's plus what lies between them. Deriving each from the start of the
+    // file would walk the file once per match.
+    let mut counted_to = 0usize;
+    let mut line = 1u32;
+    let mut line_start = 0usize;
+
     for m in root.root().find_all(pattern) {
         let start = m.range().start;
-        let (line, column) = offset_to_line_column(text, start);
-        let snippet = line_snippet(text, line_start_at(text, start), start);
+
+        if start < counted_to {
+            debug_assert!(false, "find_all yielded {start} after {counted_to}");
+            let (line, column) = offset_to_line_column(text, start);
+            out.push(SearchMatch {
+                path: path.to_path_buf(),
+                offset: start,
+                line,
+                column,
+                snippet: line_snippet(text, line_start_at(text, start), start),
+            });
+            continue;
+        }
+
+        let since = &text[counted_to..start];
+        line += since.bytes().filter(|&b| b == b'\n').count() as u32;
+        if let Some(last) = since.rfind('\n') {
+            line_start = counted_to + last + 1;
+        }
+        counted_to = start;
+
         out.push(SearchMatch {
             path: path.to_path_buf(),
             offset: start,
             line,
-            column,
-            snippet,
+            column: text[line_start..start].chars().count() as u32 + 1,
+            snippet: line_snippet(text, line_start, start),
         });
     }
 }
@@ -95,6 +122,40 @@ mod tests {
             "both fns match on their own lines"
         );
         assert_eq!(out[0].snippet, "fn alpha() {}");
+    }
+
+    /// The scan derives each position from the previous match rather than from
+    /// the start of the file, so what it reports has to equal what a
+    /// from-scratch walk would say at every single match.
+    ///
+    /// The text puts a match inside another match, so the carried offset has to
+    /// survive two hits that begin at the same place, and puts multi-byte
+    /// characters ahead of a later line, so a column counted in bytes rather
+    /// than characters would diverge.
+    #[test]
+    fn carried_positions_agree_with_walking_from_the_start() {
+        let lang = AstLang::new(rust_lang());
+        let pattern = Pattern::try_new("$A + $B", lang.clone()).expect("pattern compiles");
+        let text = "let a = 1 + 2 + 3;\nlet \u{e9}\u{e9}\u{e9} = 4 + 5;\n\nlet c = 6 + 7;\n";
+
+        let mut out = Vec::new();
+        ast_scan_file(text, &lang, &pattern, Path::new("/x.rs"), &mut out);
+
+        assert!(out.len() >= 4, "the nested sum matches too, got {out:?}");
+        for m in &out {
+            assert_eq!(
+                (m.line, m.column),
+                offset_to_line_column(text, m.offset),
+                "offset {} disagrees with a walk from byte 0",
+                m.offset,
+            );
+            assert_eq!(
+                m.snippet,
+                line_snippet(text, line_start_at(text, m.offset), m.offset),
+                "offset {} took its snippet from the wrong line start",
+                m.offset,
+            );
+        }
     }
 
     #[test]
