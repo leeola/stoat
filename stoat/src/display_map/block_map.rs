@@ -1286,6 +1286,10 @@ impl BlockSnapshot {
     /// block entirely. Every other point clips in wrap space, which clears the
     /// soft-wrap indent margin, tab expansions, fold placeholders, and inlays
     /// in turn.
+    ///
+    /// A block at a document edge has buffer text on one side only, so the
+    /// direction `bias` names can run out. The search then turns around, since
+    /// the far side of the block is the only text left to land on.
     pub fn clip_point(&self, point: BlockPoint, bias: Bias) -> BlockPoint {
         let row = point.row.min(self.total_rows.saturating_sub(1));
         match self.classify_row(row) {
@@ -1296,36 +1300,56 @@ impl BlockSnapshot {
                 BlockPoint::new(row, wrap_point.column())
             },
             BlockRowKind::Block { .. } => {
-                let target = OutputRow(row + 1);
-                let mut cursor = self
-                    .transforms
-                    .cursor::<Dimensions<InputRow, OutputRow>>(());
-                cursor.seek(&target, Bias::Left);
-
-                if bias == Bias::Left {
-                    cursor.prev();
-                    while let Some(t) = cursor.item() {
-                        if t.block.is_none() {
-                            let end = cursor.end();
-                            let last_buf_row = end.1 .0.saturating_sub(1);
-                            return BlockPoint::new(last_buf_row, self.line_len(last_buf_row));
-                        }
-                        cursor.prev();
-                    }
-                    BlockPoint::new(0, 0)
+                let found = if bias == Bias::Left {
+                    self.buffer_position_before(row)
+                        .or_else(|| self.buffer_position_after(row))
                 } else {
-                    cursor.next();
-                    while let Some(t) = cursor.item() {
-                        if t.block.is_none() {
-                            let start_row = cursor.start().1 .0;
-                            return BlockPoint::new(start_row, 0);
-                        }
-                        cursor.next();
-                    }
-                    self.max_point()
-                }
+                    self.buffer_position_after(row)
+                        .or_else(|| self.buffer_position_before(row))
+                };
+
+                // A `Replace` block spanning every wrap row leaves the tree
+                // holding no buffer text at all, so neither search can answer.
+                // The block's own row keeps clipping total and idempotent, which
+                // is the most a document with nowhere to put a caret allows.
+                found.unwrap_or_else(|| BlockPoint::new(row, 0))
             },
         }
+    }
+
+    /// End of the last row holding buffer text above block row `row`.
+    fn buffer_position_before(&self, row: u32) -> Option<BlockPoint> {
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<InputRow, OutputRow>>(());
+        cursor.seek(&OutputRow(row + 1), Bias::Left);
+
+        cursor.prev();
+        while let Some(transform) = cursor.item() {
+            if transform.block.is_none() {
+                let last_buf_row = cursor.end().1 .0.saturating_sub(1);
+                return Some(BlockPoint::new(last_buf_row, self.line_len(last_buf_row)));
+            }
+            cursor.prev();
+        }
+        None
+    }
+
+    /// Start of the first row holding buffer text below block row `row`.
+    fn buffer_position_after(&self, row: u32) -> Option<BlockPoint> {
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<InputRow, OutputRow>>(());
+        cursor.seek(&OutputRow(row + 1), Bias::Left);
+
+        cursor.next();
+        while let Some(transform) = cursor.item() {
+            if transform.block.is_none() {
+                return Some(BlockPoint::new(cursor.start().1 .0, 0));
+            }
+            cursor.next();
+        }
+        None
     }
 
     pub fn line_len(&self, block_row: u32) -> u32 {
@@ -2596,6 +2620,39 @@ mod tests {
 
         let clipped_right = snapshot.clip_point(BlockPoint::new(1, 0), Bias::Right);
         assert_eq!(clipped_right, BlockPoint::new(2, 0));
+    }
+
+    /// A block at a document edge has buffer text on one side only, so the scan
+    /// the bias asks for runs out. Clipping still has to name a row the buffer
+    /// holds, which means falling back to the other direction rather than to the
+    /// edge of the document, since that edge is the block itself.
+    #[test]
+    fn clip_point_leaves_a_block_at_either_edge() {
+        let blocks = vec![
+            text_block(BlockPlacement::Above(0), "deleted above"),
+            text_block(BlockPlacement::Below(1), "deleted below"),
+        ];
+        let snapshot = create_block_snapshot("hello\nworld", &blocks);
+
+        let block_rows: Vec<u32> = (0..snapshot.total_lines())
+            .filter(|&row| matches!(snapshot.classify_row(row), BlockRowKind::Block { .. }))
+            .collect();
+        assert_eq!(block_rows, [0, 3], "a block sits at each edge");
+
+        for (row, bias, clipped, buffer) in [
+            (0, Bias::Left, BlockPoint::new(1, 0), Point::new(0, 0)),
+            (0, Bias::Right, BlockPoint::new(1, 0), Point::new(0, 0)),
+            (3, Bias::Left, BlockPoint::new(2, 5), Point::new(1, 5)),
+            (3, Bias::Right, BlockPoint::new(2, 5), Point::new(1, 5)),
+        ] {
+            let actual = snapshot.clip_point(BlockPoint::new(row, 0), bias);
+            assert_eq!(actual, clipped, "clipping block row {row} {bias:?}");
+            assert_eq!(
+                snapshot.block_to_buffer(actual),
+                Some(buffer),
+                "block row {row} {bias:?} clips where the buffer cannot be addressed",
+            );
+        }
     }
 
     #[test]
