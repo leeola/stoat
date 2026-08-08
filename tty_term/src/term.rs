@@ -213,6 +213,9 @@ pub struct Terminal {
     /// between changes, which no reader sees because a rebuild overwrites the whole
     /// buffer.
     footprint_scratch: Vec<bool>,
+    /// The decoration lists the last projection stamped, so a redeclare of the
+    /// same scene can be recognised and skipped.
+    projected_decorations: ProjectedDecorations,
     /// One projected row, reused across the rows of a projection.
     ///
     /// A scrolled frame projects each row here first so it can be compared
@@ -346,6 +349,80 @@ impl DecorationDirty {
             polylines: true,
             minimaps: true,
         }
+    }
+}
+
+/// The decoration lists as the last projection stamped them.
+///
+/// A scene redeclare empties every list and raises every dirty flag, because the
+/// wire protocol dedups whole scenes and so re-sends all of them when any byte
+/// differs. Without something to compare against, a bar moving one row re-stamps
+/// every border cell, bumps every epoch, and damages every row a decoration
+/// covers, which is what defeats the renderer's row caches.
+///
+/// Sequence numbers are held beside their lists because a list can come back
+/// identical while its numbers move. Comparing them is sound only because
+/// `clear_decorations` resets the counter, so a redeclare of the same scene
+/// reproduces the same numbers.
+#[derive(Default)]
+struct ProjectedDecorations {
+    borders: Vec<BorderCommand>,
+    panels: Vec<PanelCommand>,
+    panel_seq: Vec<u32>,
+    scales: Vec<ScaleCommand>,
+    popovers: Vec<PopoverCommand>,
+    icons: Vec<IconCommand>,
+    icon_seq: Vec<u32>,
+    text_runs: Vec<StoredTextRun>,
+    text_run_seq: Vec<u32>,
+    bars: Vec<BarCommand>,
+    bar_seq: Vec<u32>,
+    polylines: Vec<PolylineCommand>,
+    polyline_seq: Vec<u32>,
+    minimaps: Vec<MinimapCommand>,
+    minimap_seq: Vec<u32>,
+    /// Held because the minimap stamp reads the views as well as the strips, so
+    /// a view-only advance moves the thumb while leaving the strip list equal.
+    minimap_views: HashMap<u32, MinimapView>,
+    scroll_region: Option<ScrollRegionCommand>,
+    line_layout: Option<LineLayoutCommand>,
+}
+
+/// Clear `dirty` when `current` already matches `retained`, and take a copy
+/// otherwise.
+///
+/// `clone_from` rather than `clone` so a category that genuinely changed reuses
+/// the allocation it had last frame instead of freeing and taking a new one
+/// every time.
+fn reconcile<T: Clone + PartialEq>(dirty: &mut bool, current: &T, retained: &mut T) {
+    if !*dirty {
+        return;
+    }
+    if current == retained {
+        *dirty = false;
+    } else {
+        retained.clone_from(current);
+    }
+}
+
+/// [`reconcile`] for a list whose sequence numbers are held separately.
+///
+/// Both have to match for the category to count as unchanged, since the same
+/// commands can arrive carrying different numbers, and both are refreshed
+/// together so a later comparison reads one consistent pair.
+fn reconcile_seq<T: Clone + PartialEq>(
+    dirty: &mut bool,
+    current: (&Vec<T>, &Vec<u32>),
+    retained: (&mut Vec<T>, &mut Vec<u32>),
+) {
+    if !*dirty {
+        return;
+    }
+    if current.0 == retained.0 && current.1 == retained.1 {
+        *dirty = false;
+    } else {
+        retained.0.clone_from(current.0);
+        retained.1.clone_from(current.1);
     }
 }
 
@@ -581,6 +658,7 @@ struct ContentCapture {
 /// owning a `String`. Every dirty projection hands the whole run list to the
 /// grid, so an owned string would be rebuilt into the grid's shared text once
 /// per frame per run, and a gutter declares one run per visible line.
+#[derive(Clone, PartialEq, Eq)]
 struct StoredTextRun {
     col: i16,
     row: i16,
@@ -657,6 +735,7 @@ impl Terminal {
             output_since_project: false,
             last_decoration_footprint: Vec::new(),
             footprint_scratch: Vec::new(),
+            projected_decorations: ProjectedDecorations::default(),
             row_scratch: Vec::new(),
             row_flags_spare: Vec::new(),
             capture_scratch: Vec::new(),
@@ -1733,6 +1812,75 @@ impl Terminal {
     /// lists only grow, since the VT projection re-stamps them every frame, so a
     /// program that redraws a frame at a new position would leave the old one
     /// behind. Resetting lets a program redraw its decoration scene from scratch.
+    /// Drop the dirty flags of categories a redeclare left unchanged.
+    ///
+    /// Every flag is raised together by a scene reset, so without this a scene
+    /// differing in one bar re-stamps the borders, re-bumps the epochs, and
+    /// damages every row a decoration covers. Each category is compared against
+    /// what the last projection stamped and only survives if it really moved.
+    ///
+    /// Lists carrying sequence numbers are compared with them, since the same
+    /// commands can arrive under different numbers.
+    fn reconcile_decorations(&mut self) {
+        let dirty = &mut self.decorations_dirty;
+        let last = &mut self.projected_decorations;
+
+        reconcile(&mut dirty.borders, &self.borders, &mut last.borders);
+        reconcile(&mut dirty.scales, &self.scales, &mut last.scales);
+        reconcile(&mut dirty.popovers, &self.popovers, &mut last.popovers);
+        reconcile(
+            &mut dirty.scroll_region,
+            &self.scroll_region,
+            &mut last.scroll_region,
+        );
+        reconcile(
+            &mut dirty.line_layout,
+            &self.line_layout,
+            &mut last.line_layout,
+        );
+
+        reconcile_seq(
+            &mut dirty.panels,
+            (&self.panels, &self.panel_seq),
+            (&mut last.panels, &mut last.panel_seq),
+        );
+        reconcile_seq(
+            &mut dirty.icons,
+            (&self.icons, &self.icon_seq),
+            (&mut last.icons, &mut last.icon_seq),
+        );
+        reconcile_seq(
+            &mut dirty.text_runs,
+            (&self.text_runs, &self.text_run_seq),
+            (&mut last.text_runs, &mut last.text_run_seq),
+        );
+        reconcile_seq(
+            &mut dirty.bars,
+            (&self.bars, &self.bar_seq),
+            (&mut last.bars, &mut last.bar_seq),
+        );
+        reconcile_seq(
+            &mut dirty.polylines,
+            (&self.polylines, &self.polyline_seq),
+            (&mut last.polylines, &mut last.polyline_seq),
+        );
+        // The strips alone are not the whole stamp. A view-only advance moves
+        // the thumb over an unchanged strip list, so the views are part of what
+        // decides whether this category still matches.
+        if dirty.minimaps {
+            if self.minimaps == last.minimaps
+                && self.minimap_seq == last.minimap_seq
+                && self.minimap_views == last.minimap_views
+            {
+                dirty.minimaps = false;
+            } else {
+                last.minimaps.clone_from(&self.minimaps);
+                last.minimap_seq.clone_from(&self.minimap_seq);
+                last.minimap_views.clone_from(&self.minimap_views);
+            }
+        }
+    }
+
     fn clear_decorations(&mut self) {
         self.borders.clear();
         self.panels.clear();
@@ -2056,6 +2204,10 @@ impl Terminal {
         self.row_scratch = projected;
 
         let cursor = project_cursor(content.cursor, offset);
+
+        // A scene redeclare raised every flag without regard to whether the
+        // lists changed, so settle that here, before anything reads them.
+        self.reconcile_decorations();
 
         // Re-stamp a decoration only when it changed, when a resize cleared the
         // grid's lists and cells, or -- for the per-cell borders and scales --
@@ -2515,6 +2667,95 @@ mod tests {
         assert_eq!(grid.minimap_epoch(), minimap, "minimap epoch stable");
     }
 
+    /// A scene sent again unchanged costs nothing, even though the reset that
+    /// precedes it emptied every list.
+    ///
+    /// The wire protocol dedups whole scenes, so a scene differing anywhere
+    /// arrives in full behind a reset, and the reset raises every dirty flag.
+    /// Left alone that re-stamps decorations that never moved and damages every
+    /// row they cover, which is what the renderer's row caches then have to
+    /// rebuild.
+    #[test]
+    fn a_reset_and_identical_redeclare_changes_nothing() {
+        let border = BorderCommand {
+            top: 0,
+            left: 0,
+            width: 3,
+            height: 2,
+            color: [1, 2, 3],
+            style: ProtoBorderStyle::Light,
+        };
+
+        let mut terminal = Terminal::new(4, 6, Theme::default());
+        let mut grid = Grid::new(4, 6);
+        terminal.advance(&encode_border(&border));
+        terminal.project(&mut grid);
+        let _ = terminal.take_decoration_damage();
+
+        let popovers = grid.popovers_epoch();
+        let text_runs = grid.text_runs_epoch();
+        let minimap = grid.minimap_epoch();
+
+        terminal.advance(&encode_reset());
+        terminal.advance(&encode_border(&border));
+        terminal.project(&mut grid);
+
+        assert_eq!(grid.popovers_epoch(), popovers, "popovers epoch stable");
+        assert_eq!(grid.text_runs_epoch(), text_runs, "text-runs epoch stable");
+        assert_eq!(grid.minimap_epoch(), minimap, "minimap epoch stable");
+
+        let Damage::Partial(rows) = terminal.take_decoration_damage() else {
+            panic!("decoration damage is always partial");
+        };
+        assert!(
+            !rows.iter().any(|&row| row),
+            "an unchanged scene damages no row: {rows:?}",
+        );
+    }
+
+    /// A redeclare that moves one decoration re-stamps that one and leaves the
+    /// rest alone.
+    ///
+    /// The reset raises every flag, so this is what distinguishes clearing them
+    /// on equality from clearing them wholesale.
+    #[test]
+    fn a_reset_and_changed_redeclare_restamps_only_what_moved() {
+        let border = |top: u16| BorderCommand {
+            top,
+            left: 0,
+            width: 3,
+            height: 2,
+            color: [1, 2, 3],
+            style: ProtoBorderStyle::Light,
+        };
+
+        let mut terminal = Terminal::new(6, 6, Theme::default());
+        let mut grid = Grid::new(6, 6);
+        terminal.advance(&encode_border(&border(0)));
+        terminal.project(&mut grid);
+        let _ = terminal.take_decoration_damage();
+
+        let popovers = grid.popovers_epoch();
+        let minimap = grid.minimap_epoch();
+
+        terminal.advance(&encode_reset());
+        terminal.advance(&encode_border(&border(3)));
+        terminal.project(&mut grid);
+
+        // Borders carry no epoch of their own, so the categories that do are
+        // what shows the other flags were dropped.
+        assert_eq!(grid.popovers_epoch(), popovers, "popovers epoch stable");
+        assert_eq!(grid.minimap_epoch(), minimap, "minimap epoch stable");
+
+        let Damage::Partial(rows) = terminal.take_decoration_damage() else {
+            panic!("decoration damage is always partial");
+        };
+        assert!(
+            rows.iter().any(|&row| row),
+            "the moved border damages the rows it left and arrived on",
+        );
+    }
+
     #[test]
     fn a_decoration_change_bumps_only_its_epoch() {
         let mut terminal = Terminal::new(3, 4, Theme::default());
@@ -2524,7 +2765,21 @@ mod tests {
         let text_runs = grid.text_runs_epoch();
         let minimap = grid.minimap_epoch();
 
-        terminal.decorations_dirty.popovers = true;
+        // A real declaration, not just the flag. Raising the flag over an
+        // unchanged list is what a scene redeclare does, and that is a no-op.
+        terminal.advance(&encode_popover(&PopoverCommand {
+            top: 1,
+            left: 1,
+            width: 2,
+            height: 2,
+            fill: [10, 20, 30],
+            border: [40, 50, 60],
+            content_fg: [70, 80, 90],
+            scale: 1,
+            offset: [0, 0],
+            bold: false,
+            content: "x".to_owned(),
+        }));
         terminal.project(&mut grid);
 
         assert_eq!(
