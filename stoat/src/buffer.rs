@@ -351,7 +351,11 @@ impl TextBuffer {
 
         let mut new_fragments = SumTree::new(cx);
         let mut cursor = old_fragments.cursor::<usize>(cx);
-        let mut deleted_rope = DeletedRebuild::new(ascending[0].1 .0.start);
+        let mut deleted_rope = DeletedRebuild::new(
+            &self.snapshot.visible_text,
+            &self.snapshot.deleted_text,
+            ascending[0].1 .0.start,
+        );
 
         for (k, (range, text)) in &ascending {
             deleted_rope.skip_to(range.start);
@@ -367,13 +371,11 @@ impl TextBuffer {
                     new_insertions: &mut new_insertions,
                     deleted_rope: &mut deleted_rope,
                 },
-                &self.snapshot.visible_text,
-                &self.snapshot.deleted_text,
             );
         }
 
         let suffix = cursor.suffix();
-        deleted_rope.carry(&self.snapshot.deleted_text, suffix.summary().text.deleted);
+        deleted_rope.carry(suffix.summary().text.deleted);
         new_fragments.append(suffix, cx);
 
         let mut all_insertions = self.snapshot.insertions.clone();
@@ -391,8 +393,10 @@ impl TextBuffer {
             out
         };
 
+        let deleted_text = deleted_rope.into_text();
+
         self.snapshot.visible_text = visible_text;
-        self.snapshot.deleted_text = deleted_rope.text;
+        self.snapshot.deleted_text = deleted_text;
         self.snapshot.fragments = new_fragments;
         self.snapshot.insertions = all_insertions;
         self.snapshot.version = self.next_timestamp - 1;
@@ -413,7 +417,11 @@ impl TextBuffer {
         let mut new_insertions = Vec::new();
         let old_fragments = std::mem::replace(&mut self.snapshot.fragments, SumTree::new(cx));
         let mut cursor = old_fragments.cursor::<usize>(cx);
-        let mut deleted_rope = DeletedRebuild::new(range.start);
+        let mut deleted_rope = DeletedRebuild::new(
+            &self.snapshot.visible_text,
+            &self.snapshot.deleted_text,
+            range.start,
+        );
 
         splice_one_range(
             SpliceRange {
@@ -427,24 +435,24 @@ impl TextBuffer {
                 new_insertions: &mut new_insertions,
                 deleted_rope: &mut deleted_rope,
             },
-            &self.snapshot.visible_text,
-            &self.snapshot.deleted_text,
         );
 
         // Copy remaining fragments
         let suffix = cursor.suffix();
-        deleted_rope.carry(&self.snapshot.deleted_text, suffix.summary().text.deleted);
+        deleted_rope.carry(suffix.summary().text.deleted);
         new_fragments.append(suffix, cx);
 
         // Update insertions tree
         let mut all_insertions = self.snapshot.insertions.clone();
         all_insertions.edit(insertion_edits(new_insertions), ());
 
+        let deleted_text = deleted_rope.into_text();
+
         // Update the rope
         self.snapshot.visible_text.replace(range, text);
 
         // Store new state
-        self.snapshot.deleted_text = deleted_rope.text;
+        self.snapshot.deleted_text = deleted_text;
         self.snapshot.fragments = new_fragments;
         self.snapshot.insertions = all_insertions;
         self.snapshot.version = timestamp;
@@ -464,11 +472,11 @@ struct SpliceRange<'a> {
 ///
 /// The cursor walks the old tree once, so a batch hands the same state to each
 /// range in turn rather than starting over.
-struct SpliceState<'a, 'b, 'c> {
+struct SpliceState<'a, 'b, 'c, 'd> {
     cursor: &'a mut Cursor<'b, 'c, Fragment, usize>,
     new_fragments: &'a mut SumTree<Fragment>,
     new_insertions: &'a mut Vec<InsertionFragment>,
-    deleted_rope: &'a mut DeletedRebuild,
+    deleted_rope: &'a mut DeletedRebuild<'d>,
 }
 
 /// Splice one range's replacement into the fragment tree being built, advancing
@@ -477,12 +485,10 @@ struct SpliceState<'a, 'b, 'c> {
 /// The cursor must sit at or before `range.start` in the old tree, and the
 /// coordinates are the old tree's, which is what lets a caller apply several
 /// disjoint ranges against one walk without adjusting any of them.
-fn splice_one_range(
-    edit: SpliceRange<'_>,
-    state: &mut SpliceState<'_, '_, '_>,
-    visible_text: &Rope,
-    deleted_text: &Rope,
-) {
+///
+/// The old visible and deleted ropes are reached through the rebuild in
+/// `state`, which reads both forward across the whole pass.
+fn splice_one_range(edit: SpliceRange<'_>, state: &mut SpliceState<'_, '_, '_, '_>) {
     let SpliceRange {
         range,
         text,
@@ -498,7 +504,7 @@ fn splice_one_range(
 
     // Copy all fragments before the edit start
     let prefix = cursor.slice(&range.start, Bias::Right);
-    deleted_rope.carry(deleted_text, prefix.summary().text.deleted);
+    deleted_rope.carry(prefix.summary().text.deleted);
     new_fragments.append(prefix, cx);
 
     let mut delete_remaining = range.end - range.start;
@@ -568,7 +574,7 @@ fn splice_one_range(
                 deleted.deletions.push(timestamp);
                 push_insertion(new_insertions, &deleted);
                 new_fragments.push(deleted, cx);
-                deleted_rope.take(visible_text, to_delete_here);
+                deleted_rope.take(to_delete_here);
                 delete_remaining -= to_delete_here;
             }
 
@@ -600,7 +606,7 @@ fn splice_one_range(
 
             cursor.next();
         } else {
-            deleted_rope.carry(deleted_text, fragment.len as usize);
+            deleted_rope.carry(fragment.len as usize);
             new_fragments.push(fragment.clone(), cx);
             cursor.next();
         }
@@ -616,7 +622,7 @@ fn splice_one_range(
                     deleted.visible = false;
                     deleted.deletions.push(timestamp);
                     new_fragments.push(deleted, cx);
-                    deleted_rope.take(visible_text, frag_len);
+                    deleted_rope.take(frag_len);
                     delete_remaining -= frag_len;
                     cursor.next();
                 } else {
@@ -627,7 +633,7 @@ fn splice_one_range(
                     deleted_part.deletions.push(timestamp);
                     push_insertion(new_insertions, &deleted_part);
                     new_fragments.push(deleted_part, cx);
-                    deleted_rope.take(visible_text, delete_remaining);
+                    deleted_rope.take(delete_remaining);
 
                     let next_id = cursor
                         .next_item()
@@ -655,7 +661,7 @@ fn splice_one_range(
                 }
             },
             Some(fragment) => {
-                deleted_rope.carry(deleted_text, fragment.len as usize);
+                deleted_rope.carry(fragment.len as usize);
                 new_fragments.push(fragment.clone(), cx);
                 cursor.next();
             },
@@ -1262,37 +1268,44 @@ fn last_id<'a>(tree: &'a SumTree<Fragment>, _cx: &Option<u64>) -> &'a Locator {
 /// hand undo some other deletion's bytes.
 ///
 /// Bytes reach the new rope from two places, each read in ascending order, so
-/// each side needs only a running offset. Text already deleted comes from the
-/// old deleted rope, and text this edit deletes is still in the visible one.
-struct DeletedRebuild {
+/// each side needs only a reader that moves forward. Text already deleted comes
+/// from the old deleted rope, and text this edit deletes is still in the
+/// visible one.
+struct DeletedRebuild<'a> {
     text: Rope,
-    already_deleted: usize,
-    being_deleted: usize,
+    /// Reader over the text that was deleted before this edit and stays so.
+    already_deleted: RopeCursor<'a>,
+    /// Reader over the visible text this edit is taking out.
+    ///
+    /// Both readers only ever move forward, which is what lets them be cursors
+    /// rather than a pair of offsets sliced from the root. The walk crosses the
+    /// old fragments in order, and each piece of either rope is claimed by the
+    /// one fragment covering it.
+    being_deleted: RopeCursor<'a>,
 }
 
-impl DeletedRebuild {
+impl<'a> DeletedRebuild<'a> {
     /// `range_start` is where in the visible rope this edit starts deleting.
-    fn new(range_start: usize) -> Self {
+    fn new(old_visible: &'a Rope, old_deleted: &'a Rope, range_start: usize) -> Self {
         Self {
             text: Rope::new(),
-            already_deleted: 0,
-            being_deleted: range_start,
+            already_deleted: RopeCursor::new(old_deleted, 0),
+            being_deleted: RopeCursor::new(old_visible, range_start),
         }
     }
 
     /// Carry over `len` bytes of text that was already deleted and stays so.
-    fn carry(&mut self, old_deleted: &Rope, len: usize) {
-        let end = self.already_deleted + len;
-        self.text
-            .append(old_deleted.slice(self.already_deleted..end));
-        self.already_deleted = end;
+    fn carry(&mut self, len: usize) {
+        let end = self.already_deleted.offset() + len;
+        let carried = self.already_deleted.slice(end);
+        self.text.append(carried);
     }
 
     /// Take `len` bytes that this edit is deleting out of the visible rope.
-    fn take(&mut self, old_visible: &Rope, len: usize) {
-        let end = self.being_deleted + len;
-        self.text.append(old_visible.slice(self.being_deleted..end));
-        self.being_deleted = end;
+    fn take(&mut self, len: usize) {
+        let end = self.being_deleted.offset() + len;
+        let taken = self.being_deleted.slice(end);
+        self.text.append(taken);
     }
 
     /// Move the read position to where the next range starts deleting.
@@ -1303,10 +1316,18 @@ impl DeletedRebuild {
     /// one would mean they overlap.
     fn skip_to(&mut self, offset: usize) {
         debug_assert!(
-            offset >= self.being_deleted,
+            offset >= self.being_deleted.offset(),
             "ranges are applied ascending, so the delete position only moves forward",
         );
-        self.being_deleted = offset;
+        self.being_deleted.seek_forward(offset);
+    }
+
+    /// The rebuilt deleted rope, releasing the borrows on the old ones.
+    ///
+    /// A caller writes the result back over the ropes this read from, which the
+    /// readers cannot be alive for.
+    fn into_text(self) -> Rope {
+        self.text
     }
 }
 
