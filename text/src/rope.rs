@@ -757,6 +757,7 @@ impl Rope {
             offset: self.point_to_offset(Point::new(rows.start, 0)),
             row: rows.start,
             end_row: rows.end,
+            last_row: self.max_point().row,
             len: self.len(),
             started: false,
         }
@@ -1510,6 +1511,12 @@ pub struct LineWalk<'a> {
     row: u32,
     /// One past the last row to report.
     end_row: u32,
+    /// Index of the rope's last row.
+    ///
+    /// A start row past this one still resolves to a byte offset, because the
+    /// conversion clamps, so the offset alone cannot tell the walk it has been
+    /// asked for a row that does not exist.
+    last_row: u32,
     len: usize,
     started: bool,
 }
@@ -1535,7 +1542,7 @@ impl<'a> LineWalk<'a> {
     /// The text is taken as the scan passes over it, so wanting a row's text
     /// costs nothing beyond the copy itself.
     fn step(&mut self, mut out: Option<&mut String>) -> Option<u32> {
-        if self.row >= self.end_row || self.offset > self.len {
+        if self.row >= self.end_row || self.row > self.last_row || self.offset > self.len {
             return None;
         }
         if !self.started {
@@ -4129,6 +4136,46 @@ mod line_walk_tests {
             "row three's index and length"
         );
         assert_eq!(walk.next_len(), None, "the walk stops at the end row");
+    }
+
+    /// A walk whose first row is already past the rope's last one yields
+    /// nothing.
+    ///
+    /// Rows past the end are absent, not empty. The walk is documented to
+    /// return fewer items than asked for rather than empty ones, and a caller
+    /// rendering what it yields would otherwise paint a row the rope does not
+    /// have.
+    #[test]
+    fn a_walk_starting_past_the_last_row_yields_nothing() {
+        let rope = Rope::from("abc\ndef");
+        assert_eq!(rope.max_point().row, 1, "two rows, indices zero and one");
+
+        let mut walk = rope.line_walk(5..8);
+        assert_eq!(walk.next_len(), None, "row five is past the last row");
+
+        let mut walk = rope.line_walk(2..4);
+        assert_eq!(walk.next_len(), None, "so is the row just past the end");
+
+        // The last real row still reports, including its length, so the guard
+        // stops one row too late rather than one too early.
+        let mut walk = rope.line_walk(1..4);
+        assert_eq!(walk.next_len(), Some((1, 3)), "row one is the last one");
+        assert_eq!(walk.next_len(), None, "and nothing follows it");
+    }
+
+    /// A trailing newline makes the empty row after it real, so a walk reaches
+    /// it.
+    ///
+    /// The row past the end and the empty final row are one apart and easy to
+    /// conflate, and `max_point` is what separates them.
+    #[test]
+    fn a_walk_reaches_the_empty_row_after_a_trailing_newline() {
+        let rope = Rope::from("abc\ndef\n");
+        assert_eq!(rope.max_point().row, 2, "the empty row after the newline");
+
+        let mut walk = rope.line_walk(2..5);
+        assert_eq!(walk.next_len(), Some((2, 0)), "the empty row is real");
+        assert_eq!(walk.next_len(), None, "and it is the last one");
     }
 }
 
