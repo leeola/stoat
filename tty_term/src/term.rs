@@ -1609,7 +1609,7 @@ impl Terminal {
         let diffing = moved_rows.unsigned_abs() < out_rows;
         if diffing {
             out.scroll_by(moved_rows);
-            *damage = Damage::Partial(vec![false; out_rows]);
+            *damage = Damage::Partial(row_flags(&mut self.row_flags_spare, out_rows));
         }
 
         // Row 0 is the straddle row one line older than the offset's top, so a
@@ -5457,6 +5457,44 @@ mod tests {
             (rows, window(&out)),
             (&vec![false, false, false], ['c', 'd', 'e']),
             "the window holds the same rows, so none is dirty",
+        );
+    }
+
+    /// A scrollback projection takes its row flags from the pool a recycled
+    /// frame filled.
+    ///
+    /// Drawing from the pool only saves an allocation while something puts one
+    /// back, since the pool falls back to a fresh buffer when it is empty. So
+    /// the round trip is what this checks, not the draw alone.
+    #[test]
+    fn a_recycled_scrollback_frame_supplies_the_next_one() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        terminal.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
+
+        let mut out = Grid::new(0, 0);
+        let mut damage = Damage::Partial(Vec::new());
+        terminal.project_scrollback(&mut out, 1.0, 0, &mut damage);
+        assert!(
+            matches!(damage, Damage::Partial(_)),
+            "the fixture has to reach the diffing path to produce a buffer",
+        );
+
+        assert!(
+            terminal.row_flags_spare.is_empty(),
+            "nothing has been handed back yet",
+        );
+        terminal.recycle_damage(std::mem::replace(&mut damage, Damage::Partial(Vec::new())));
+        assert_eq!(
+            terminal.row_flags_spare.len(),
+            1,
+            "the read frame's buffer went back to the pool",
+        );
+
+        terminal.advance(b"\r\ng");
+        terminal.project_scrollback(&mut out, 2.0, 0, &mut damage);
+        assert!(
+            terminal.row_flags_spare.is_empty(),
+            "the next projection filled its flags into the pooled buffer",
         );
     }
 

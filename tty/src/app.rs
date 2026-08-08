@@ -1675,6 +1675,10 @@ impl ApplicationHandler<PtyEvent> for App {
                                 scrolled_rows: moved_rows,
                             },
                         );
+                        // Read now, so the row flags go back for the next
+                        // projection to fill rather than being dropped and
+                        // allocated again a frame later.
+                        state.damage_spares.push(sb_damage);
                         false
                     } else {
                         // At the live bottom, render the projected live grid (cursor
