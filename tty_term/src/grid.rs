@@ -184,13 +184,16 @@ impl Grid {
             return;
         }
 
+        // Copied rather than rotated. A rotation would carry the vacated rows
+        // to the far end for the fill below to overwrite, which at a full
+        // terminal is a screen's worth of cells moved for nothing.
         let moved = magnitude * self.cols;
+        let kept = self.cells.len() - moved;
         if rows > 0 {
-            self.cells.rotate_left(moved);
-            let kept = self.cells.len() - moved;
+            self.cells.copy_within(moved.., 0);
             self.cells[kept..].fill(Cell::default());
         } else {
-            self.cells.rotate_right(moved);
+            self.cells.copy_within(..kept, moved);
             self.cells[..moved].fill(Cell::default());
         }
     }
@@ -1533,6 +1536,42 @@ mod tests {
             grid.row(3),
             &[Cell::default(), Cell::default()],
             "the row the slide vacated is blank",
+        );
+    }
+
+    /// Every row read after a multi-row slide, since a one-row slide read at
+    /// two of its rows is satisfied by a source or destination off by a row.
+    #[test]
+    fn a_multi_row_slide_lands_every_row_where_it_belongs() {
+        let rows_of = |grid: &Grid| -> Vec<String> {
+            (0..grid.rows())
+                .map(|row| grid.row(row).iter().map(|cell| cell.ch).collect())
+                .collect()
+        };
+        let filled = || {
+            let mut grid = Grid::new(5, 3);
+            for row in 0..5 {
+                for col in 0..3 {
+                    grid.get_mut(row, col).ch = char::from(b'a' + (row * 3 + col) as u8);
+                }
+            }
+            grid
+        };
+
+        let mut up = filled();
+        up.scroll_by(2);
+        assert_eq!(
+            rows_of(&up),
+            ["ghi", "jkl", "mno", "   ", "   "],
+            "two rows up leaves the last two blank and the rest shifted",
+        );
+
+        let mut down = filled();
+        down.scroll_by(-2);
+        assert_eq!(
+            rows_of(&down),
+            ["   ", "   ", "abc", "def", "ghi"],
+            "two rows down leaves the first two blank and the rest shifted",
         );
     }
 
