@@ -114,12 +114,47 @@ pub(crate) mod non_pane_pool {
 #[derive(Default)]
 pub(crate) struct SmoothScrollState {
     pools: BTreeMap<u32, PoolEmitState>,
-    /// `(pool, top_256, visible_lines)` the most recent [`MinimapViewCommand`]
-    /// carried per strip id, so an unmoved viewport re-emits no thumb update.
-    /// The pool is part of the value because single-minimap mode feeds one strip
-    /// from different pools as focus moves, so a same-offset view from a new pool
-    /// must still re-emit.
-    minimap_views: HashMap<u32, (u32, u32, u16)>,
+    /// What the most recent [`MinimapViewCommand`] carried per strip id, so an
+    /// unmoved viewport neither re-emits a thumb update nor re-derives one.
+    minimap_views: HashMap<u32, MinimapView>,
+}
+
+/// What a strip's thumb was last placed at, and what placed it there.
+///
+/// The pool belongs here because single-minimap mode feeds one strip from
+/// different pools as focus moves, so a same-offset view from a new pool must
+/// still re-emit.
+#[derive(PartialEq, Eq)]
+struct MinimapView {
+    pool: u32,
+    top_256: u32,
+    visible: u16,
+    from: MinimapWindowInputs,
+}
+
+/// The inputs a strip's window was derived from.
+///
+/// Deriving that window converts display rows to buffer lines three times over,
+/// each a clip and a tree descent, so a frame that would derive the same window
+/// again is worth recognizing before doing the work rather than after.
+///
+/// The scroll offset compares by bits because this asks whether the inputs are
+/// identical, not whether two numbers are numerically close.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MinimapWindowInputs {
+    scroll_offset_bits: u32,
+    map_version: usize,
+    viewport_rows: u32,
+}
+
+impl MinimapWindowInputs {
+    pub(crate) fn new(scroll_offset: f32, map_version: usize, viewport_rows: u32) -> Self {
+        Self {
+            scroll_offset_bits: scroll_offset.to_bits(),
+            map_version,
+            viewport_rows,
+        }
+    }
 }
 
 /// What has been declared to the terminal for one pool, so a frame re-emits only
@@ -191,22 +226,43 @@ impl SmoothScrollState {
     /// Append a `minimap_view` frame positioning `strip_id`'s thumb to `out`, but
     /// only when the viewport moved since the last emit for that strip.
     ///
-    /// `pool` is the scroll pool feeding the strip this frame. `top_256` is the
-    /// fractional top document row in 1/256ths of a line, and `visible` the
-    /// viewport height in lines. The dedup keys on `strip_id` and includes `pool`
-    /// in the stored value, so a strip fed by a new pool re-emits even at an
-    /// unchanged offset.
+    /// `pool` is the scroll pool feeding the strip this frame, and `inputs` is
+    /// what the window would be derived from. `window` produces the fractional
+    /// top document row and the viewport height in lines, and runs only when
+    /// `inputs` differ from the last emit's, since deriving a window costs
+    /// several display-to-buffer conversions and identical inputs give an
+    /// identical answer.
+    ///
+    /// Inputs that moved need not mean the window did, so a fresh window is
+    /// still compared before anything is sent. Either way the new inputs are
+    /// recorded, or the next frame would derive it again for the same reason.
     pub(crate) fn emit_minimap_view(
         &mut self,
         out: &mut Vec<u8>,
         strip_id: u32,
         pool: u32,
-        top_256: u32,
-        visible: u16,
+        inputs: MinimapWindowInputs,
+        window: impl FnOnce() -> (f32, u16),
     ) {
-        if self.minimap_views.get(&strip_id) == Some(&(pool, top_256, visible)) {
+        let held = self.minimap_views.get_mut(&strip_id);
+        if held
+            .as_ref()
+            .is_some_and(|view| view.pool == pool && view.from == inputs)
+        {
             return;
         }
+
+        let (top, visible) = window();
+        let top_256 = (top * 256.0) as u32;
+        if let Some(view) = held
+            && view.pool == pool
+            && view.top_256 == top_256
+            && view.visible == visible
+        {
+            view.from = inputs;
+            return;
+        }
+
         encode_minimap_view_into(
             out,
             &MinimapViewCommand {
@@ -215,8 +271,15 @@ impl SmoothScrollState {
                 visible_lines: visible,
             },
         );
-        self.minimap_views
-            .insert(strip_id, (pool, top_256, visible));
+        self.minimap_views.insert(
+            strip_id,
+            MinimapView {
+                pool,
+                top_256,
+                visible,
+                from: inputs,
+            },
+        );
     }
 }
 
@@ -1124,6 +1187,85 @@ mod tests {
     use super::{emit_into, scroll_target, window_range, SmoothScrollState, WINDOW_PAGES};
     use crate::display_map::{highlights::HighlightEndpoint, DisplaySnapshot};
     use std::sync::Arc;
+
+    /// Deriving a strip's window converts display rows to buffer lines three
+    /// times over, and an idle frame would derive the same window it derived
+    /// last frame.
+    ///
+    /// Counting the derivations is the only way to see the saving, since a
+    /// frame that derives needlessly still sends nothing and looks identical
+    /// from the outside. Each input is moved on its own, because one left out of
+    /// the record would leave the thumb reporting a window that no longer
+    /// matches the viewport.
+    #[test]
+    fn an_unmoved_thumb_neither_derives_nor_emits() {
+        use super::MinimapWindowInputs;
+
+        /// Emit for strip 1 from pool 2, returning the bytes written.
+        fn emit(
+            state: &mut SmoothScrollState,
+            derives: &mut u32,
+            inputs: MinimapWindowInputs,
+            window: (f32, u16),
+        ) -> usize {
+            let mut out = Vec::new();
+            state.emit_minimap_view(&mut out, 1, 2, inputs, || {
+                *derives += 1;
+                window
+            });
+            out.len()
+        }
+
+        let mut state = SmoothScrollState::default();
+        let mut derives = 0;
+        let settled = MinimapWindowInputs::new(3.5, 7, 40);
+
+        assert!(
+            emit(&mut state, &mut derives, settled, (3.5, 40)) > 0,
+            "the first frame places the thumb",
+        );
+        assert_eq!(derives, 1, "and derives the window to do it");
+
+        assert_eq!(
+            emit(&mut state, &mut derives, settled, (3.5, 40)),
+            0,
+            "an unmoved frame sends nothing",
+        );
+        assert_eq!(derives, 1, "and derives nothing either");
+
+        // A scroll too small to move the thumb. The inputs moved, so the window
+        // is derived, but nothing is sent.
+        let nudged = MinimapWindowInputs::new(3.502, 7, 40);
+        assert_eq!(
+            emit(&mut state, &mut derives, nudged, (3.5, 40)),
+            0,
+            "a window that came out the same sends nothing",
+        );
+        assert_eq!(derives, 2, "though it had to be derived to know that");
+        assert_eq!(
+            emit(&mut state, &mut derives, nudged, (3.5, 40)),
+            0,
+            "and the frame after it is idle again",
+        );
+        assert_eq!(
+            derives, 2,
+            "the inputs that produced it were recorded, not just the ones that emitted",
+        );
+
+        for (moved, label) in [
+            (MinimapWindowInputs::new(9.0, 7, 40), "a scroll"),
+            (MinimapWindowInputs::new(3.502, 8, 40), "an edit"),
+            (MinimapWindowInputs::new(3.502, 7, 41), "a resize"),
+        ] {
+            let before = derives;
+            emit(&mut state, &mut derives, moved, (9.0, 41));
+            assert_eq!(derives, before + 1, "{label} must derive the window again");
+            // Back to a shared baseline so each input is judged on its own.
+            state = SmoothScrollState::default();
+            emit(&mut state, &mut derives, nudged, (3.5, 40));
+            derives = 0;
+        }
+    }
 
     /// The endpoints a page resolved for itself before a refill began sharing
     /// one set across its pages, which is the behavior these tests pin.

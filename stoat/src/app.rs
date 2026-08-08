@@ -9226,18 +9226,22 @@ impl Stoat {
             };
             if let Some(strip_id) = view_strip {
                 // The strip is one row per buffer line while the editor scrolls in
-                // display rows, so the window converts before it ships.
-                let (top, visible) = minimap_view_window(
-                    &editor.display_map.snapshot(),
+                // display rows, so the window converts before it ships. The
+                // conversion is deferred into the closure because an idle frame
+                // has nothing to convert that the last one did not.
+                let snapshot = editor.display_map.snapshot();
+                let rows = region.height as u32;
+                let inputs = crate::smooth_scroll::MinimapWindowInputs::new(
                     scroll_offset,
-                    region.height as u32,
+                    snapshot.version(),
+                    rows,
                 );
                 self.smooth_scroll.emit_minimap_view(
                     &mut out,
                     strip_id,
                     region.pool,
-                    (top * 256.0) as u32,
-                    visible,
+                    inputs,
+                    || minimap_view_window(&snapshot, scroll_offset, rows),
                 );
             }
 
