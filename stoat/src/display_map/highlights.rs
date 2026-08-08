@@ -393,6 +393,48 @@ impl PartialOrd for HighlightEndpoint {
     }
 }
 
+/// A viewport's endpoints plus one replay over them, for a painter working row
+/// by row.
+///
+/// The review, diff and conflict views paint other things between rows, so they
+/// cannot hold one chunk stream open across the viewport the way the plain
+/// editor body does. Opening a stream per row instead makes each row re-derive
+/// its opening styles from the first endpoint, so the frame costs rows times
+/// endpoints. Holding this across the loop makes it cost the endpoints once.
+///
+/// `plain` records whether display offsets below the block layer are buffer
+/// offsets. They are not once anything is folded or an inlay is shown, and a
+/// replay measured in one coordinate says nothing about the other, so no seed is
+/// offered at all in that case and the rows simply cost what they used to.
+pub struct RowHighlightCursor {
+    pub(crate) endpoints: Arc<[HighlightEndpoint]>,
+    cursor: HighlightCursor,
+    plain: bool,
+}
+
+impl RowHighlightCursor {
+    pub fn new(endpoints: Arc<[HighlightEndpoint]>, plain: bool) -> Self {
+        Self {
+            endpoints,
+            cursor: HighlightCursor::default(),
+            plain,
+        }
+    }
+
+    /// Advance the replay to `offset` and hand it over as a seed.
+    ///
+    /// `None` when there is no offset to advance to, which is a block row, or
+    /// when the coordinates do not line up.
+    pub(crate) fn seed_at(&mut self, offset: Option<usize>) -> Option<&HighlightCursor> {
+        if !self.plain {
+            return None;
+        }
+        let offset = offset?;
+        self.cursor.advance_to(offset, &self.endpoints);
+        Some(&self.cursor)
+    }
+}
+
 /// Visible-range highlight endpoints memoized across repaints.
 ///
 /// The key carries the buffer content `version` because an in-place edit shifts
@@ -729,17 +771,17 @@ pub struct HighlightCursor {
 impl HighlightCursor {
     /// Replay `endpoints` forward until the cursor describes `offset`.
     ///
-    /// Ascending offsets only. Asking to go backwards leaves the cursor where it
-    /// is, since the active set is built by moving forward and cannot be undone,
-    /// and a stream seeded from an unmoved cursor still renders correctly
-    /// because the seed is checked against the range it opens.
+    /// Only moves forward. An offset behind the cursor leaves it where it is,
+    /// because the active set is accumulated and cannot be unwound, and a stream
+    /// seeded from an unmoved cursor renders correctly anyway. The seed no
+    /// longer describes the range being opened, so it is ignored and that range
+    /// replays for itself.
+    ///
+    /// Going backwards is ordinary rather than a misuse. A caller stepping down
+    /// display rows steps back whenever a row's chunks come from a run that
+    /// started above it, as a wrapped line's continuation rows do.
     pub fn advance_to(&mut self, offset: usize, endpoints: &[HighlightEndpoint]) {
         if offset < self.offset {
-            debug_assert!(
-                false,
-                "cursor at {} asked to go back to {offset}",
-                self.offset
-            );
             return;
         }
         while self.ep_idx < endpoints.len() && endpoints[self.ep_idx].offset <= offset {

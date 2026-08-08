@@ -28,7 +28,8 @@ pub use highlights::{
     BufferSemanticTokens, CachedHighlightEndpoints, Chunk, ChunkRenderer, ChunkRendererId,
     ChunkReplacement, HighlightKey, HighlightLayer, HighlightStyle, HighlightStyleId,
     HighlightStyleInterner, HighlightedChunk, Highlights, InlayHighlight, InlayHighlights,
-    SemanticTokenHighlight, SemanticTokenSpans, SemanticTokensHighlights, TextHighlights,
+    RowHighlightCursor, SemanticTokenHighlight, SemanticTokenSpans, SemanticTokensHighlights,
+    TextHighlights,
 };
 pub use inlay_map::{InlayId, InlayKind, InlayMap, InlayOffset, InlayPoint, InlaySnapshot};
 use std::{
@@ -1118,6 +1119,57 @@ impl DisplaySnapshot {
         endpoints: Arc<[highlights::HighlightEndpoint]>,
     ) -> block_map::BlockChunks<'_> {
         self.block_snapshot.chunks(display_rows, endpoints)
+    }
+
+    /// The buffer byte offset display row `row` starts at, when it has one.
+    ///
+    /// `None` for a row belonging to a block, which shows text the buffer does
+    /// not contain and so has no offset of its own.
+    fn row_start_offset(&self, row: u32) -> Option<usize> {
+        let point = self
+            .block_snapshot
+            .block_to_buffer(BlockPoint::new(row, 0))?;
+        Some(self.buffer_snapshot().rope().point_to_offset(point))
+    }
+
+    /// Whether display offsets below the block layer are buffer offsets.
+    ///
+    /// A fold or an inlay makes the layers between renumber, and an endpoint
+    /// replay measured in buffer offsets means nothing against those. Asked once
+    /// by [`RowHighlightCursor`] rather than re-derived per layer per row.
+    fn offsets_are_buffer_offsets(&self) -> bool {
+        let fold = self
+            .block_snapshot
+            .wrap_snapshot()
+            .tab_snapshot()
+            .fold_snapshot();
+        fold.fold_count() == 0 && !fold.inlay_snapshot().has_inlays()
+    }
+
+    /// Chunks for one row, resuming `cursor` rather than replaying the
+    /// endpoints below the row.
+    ///
+    /// For a painter that walks the viewport a row at a time and cannot hold one
+    /// stream open across them, because it paints other things between rows.
+    /// Rows must be asked for in ascending order, which is the order such a
+    /// painter visits them.
+    pub fn row_chunks(
+        &self,
+        row: u32,
+        cursor: &mut RowHighlightCursor,
+    ) -> block_map::BlockChunks<'_> {
+        let endpoints = cursor.endpoints.clone();
+        let seed = cursor.seed_at(self.row_start_offset(row));
+        self.block_snapshot
+            .chunks_seeded(row..row + 1, endpoints, seed)
+    }
+
+    /// A replay over `endpoints` for painting this snapshot row by row.
+    pub fn row_highlight_cursor(
+        &self,
+        endpoints: Arc<[highlights::HighlightEndpoint]>,
+    ) -> RowHighlightCursor {
+        RowHighlightCursor::new(endpoints, self.offsets_are_buffer_offsets())
     }
 
     /// Like [`Self::highlighted_chunks`] but memoizes the resolved endpoints in
@@ -3494,6 +3546,79 @@ mod tests {
             vec![10, 14, 18, 22],
             "ranges are stored ascending by resolved start, whatever order they arrived in",
         );
+    }
+
+    /// Painting row by row through a carried replay renders each row exactly as
+    /// opening that row's stream on its own does.
+    ///
+    /// The replay is only a shortcut past work the per-row stream would repeat,
+    /// so any divergence is a colouring bug, and one that paints plausible text
+    /// rather than failing. Tokens overlap across rows so a row's opening styles
+    /// genuinely depend on what the rows above it left active, and the check
+    /// runs wrapped as well as unwrapped because the two take different paths
+    /// through the wrap layer.
+    #[test]
+    fn row_by_row_painting_matches_opening_each_row_alone() {
+        use super::highlights::{HighlightStyle, HighlightStyleInterner, SemanticTokenHighlight};
+        use ratatui::style::Color;
+        use stoat_text::Bias;
+
+        let text = "fn alpha() {}\nfn beta() {}\nfn gamma() {}\nfn delta() {}\nfn epsilon() {}\n";
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), text)));
+        let mut display_map = DisplayMap::new(
+            MultiBuffer::singleton(BufferId::new(0), shared.clone()),
+            test_executor(),
+            crate::test_notify(),
+        );
+
+        let (tokens, interner) = {
+            let snap = display_map.multi_buffer.snapshot();
+            let mut interner = HighlightStyleInterner::default();
+            let colors = [Color::Red, Color::Green, Color::Blue].map(|color| {
+                interner.push(HighlightStyle {
+                    foreground: Some(color),
+                    ..Default::default()
+                })
+            });
+            // Spans deliberately straddle row boundaries, and start and end at
+            // offsets that are not multiples of any wrap width tried below, so
+            // some boundaries fall part-way through a continuation row. A row
+            // opened cold and one opened from the replay agree there only if the
+            // replay is right.
+            let tokens: Arc<[SemanticTokenHighlight]> = [(3usize, 57usize), (11, 37), (23, 62)]
+                .iter()
+                .zip(colors)
+                .map(|(&(start, end), style)| SemanticTokenHighlight {
+                    range: snap.anchor_at(start, Bias::Right)..snap.anchor_at(end, Bias::Left),
+                    style,
+                })
+                .collect();
+            (tokens, Arc::new(interner))
+        };
+        display_map.set_semantic_token_highlights(BufferId::new(0), tokens, interner);
+
+        for wrap_width in [None, Some(5u32), Some(8u32), Some(11u32)] {
+            display_map.set_wrap_width(wrap_width);
+            let snapshot = display_map.snapshot();
+            let rows = 0..snapshot.line_count();
+            let endpoints = snapshot.highlighted_endpoints(rows.clone());
+
+            let styled = |chunks: super::block_map::BlockChunks<'_>| {
+                chunks
+                    .map(|c| (c.text.into_owned(), c.highlight_style))
+                    .collect::<Vec<_>>()
+            };
+            let mut cursor = snapshot.row_highlight_cursor(endpoints.clone());
+            for row in rows {
+                assert_eq!(
+                    styled(snapshot.row_chunks(row, &mut cursor)),
+                    styled(
+                        snapshot.highlighted_chunks_with_endpoints(row..row + 1, endpoints.clone())
+                    ),
+                    "row {row} diverged at wrap width {wrap_width:?}",
+                );
+            }
+        }
     }
 
     #[test]

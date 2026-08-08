@@ -2,8 +2,8 @@ use super::TEXT_SCALE_COMPACT;
 use crate::{
     diff_map::{ChangeKind, DiffHunk},
     display_map::{
-        highlights::{HighlightEndpoint, HighlightStyle},
-        BlockRowKind, CachedHighlightEndpoints, DisplaySnapshot,
+        highlights::HighlightStyle, BlockRowKind, CachedHighlightEndpoints, DisplaySnapshot,
+        RowHighlightCursor,
     },
     editor_state::EditorState,
     host::DiffStatus,
@@ -16,7 +16,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::StatefulWidget,
 };
-use std::{fmt::Write, sync::Arc};
+use std::fmt::Write;
 use stoat_text::{cursor_offset, Point};
 use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
 
@@ -273,6 +273,10 @@ pub(crate) fn paint_diff_rows(
         Some(cache) => snapshot.highlighted_endpoints_cached(scroll_row..end_row, cache),
         None => snapshot.highlighted_endpoints(scroll_row..end_row),
     };
+    // One replay for the loop. The rows below ascend, and each opens its own
+    // stream because the paint puts a gutter, a number and a status glyph
+    // between them, so without this each row re-walks the endpoints above it.
+    let mut row_cursor = snapshot.row_highlight_cursor(row_endpoints);
     let mut line_buf = String::new();
     // Reused across rows. Each row seeks the same one-line range and keeps
     // neither its hunks nor its spans past itself, so the buffers only ever
@@ -411,7 +415,7 @@ pub(crate) fn paint_diff_rows(
                     changes,
                     side.map(|c| c.added_span),
                     side.map(|c| c.moved_span),
-                    &row_endpoints,
+                    &mut row_cursor,
                 );
                 if status == DiffStatus::Moved
                     && let Some((path, line)) =
@@ -744,7 +748,7 @@ pub(crate) fn paint_highlighted_row(
     change_spans: &[(std::ops::Range<usize>, ChangeKind)],
     side_span_tint: Option<[u8; 3]>,
     moved_span_tint: Option<[u8; 3]>,
-    endpoints: &Arc<[HighlightEndpoint]>,
+    row_cursor: &mut RowHighlightCursor,
 ) {
     debug_assert!(
         change_spans.is_sorted_by_key(|(range, _)| range.start),
@@ -753,9 +757,7 @@ pub(crate) fn paint_highlighted_row(
 
     let mut col = 0usize;
     let mut span_cursor = 0;
-    for chunk in
-        snapshot.highlighted_chunks_with_endpoints(display_row..display_row + 1, endpoints.clone())
-    {
+    for chunk in snapshot.row_chunks(display_row, row_cursor) {
         let style = if chunk.is_inlay {
             inlay_style
         } else {

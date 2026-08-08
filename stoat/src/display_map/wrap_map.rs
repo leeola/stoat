@@ -1061,6 +1061,21 @@ impl WrapSnapshot {
         rows: Range<u32>,
         endpoints: Arc<[HighlightEndpoint]>,
     ) -> WrapChunks<'a> {
+        self.chunks_seeded(rows, endpoints, None)
+    }
+
+    /// Like [`Self::chunks`], resuming an endpoint replay from `seed`.
+    ///
+    /// For a caller streaming one row at a time down the same buffer, where each
+    /// range would otherwise re-derive its opening styles from the first
+    /// endpoint. The wrapped path adopts the seed as its own running replay, so
+    /// the saving reaches a wrapped buffer as well as a plain one.
+    pub fn chunks_seeded<'a>(
+        &'a self,
+        rows: Range<u32>,
+        endpoints: Arc<[HighlightEndpoint]>,
+        seed: Option<&HighlightCursor>,
+    ) -> WrapChunks<'a> {
         if self.wrap_width.is_none() {
             // wrap row = tab row = fold row in this mode. Compute the matching
             // fold-offset range. The range spans from the start of the first
@@ -1083,7 +1098,12 @@ impl WrapSnapshot {
                 (start, end)
             };
             return WrapChunks::Passthrough {
-                tab_chunks: Box::new(self.tab_snapshot.chunks(start..end, 0, endpoints)),
+                tab_chunks: Box::new(self.tab_snapshot.chunks_seeded(
+                    start..end,
+                    0,
+                    endpoints,
+                    seed,
+                )),
             };
         }
 
@@ -1094,7 +1114,7 @@ impl WrapSnapshot {
             current_row: rows.start,
             row_state: None,
             pending_newline: false,
-            cursor: HighlightCursor::default(),
+            cursor: seed.cloned().unwrap_or_default(),
         }))
     }
 

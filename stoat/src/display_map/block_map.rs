@@ -463,7 +463,10 @@ pub enum BlockRowKind<'a> {
     Block { block: &'a Block, line_index: u32 },
 }
 
-use super::{highlights::HighlightEndpoint, wrap_map::WrapChunks};
+use super::{
+    highlights::{HighlightCursor, HighlightEndpoint},
+    wrap_map::WrapChunks,
+};
 
 /// Iterator over a range of block rows, emitting [`Chunk`]s that propagate
 /// highlight styles from the wrap layer below.
@@ -485,6 +488,9 @@ pub struct BlockChunks<'a> {
     end_row: u32,
     pending_wrap_chunks: Option<WrapChunks<'a>>,
     pending_newline: bool,
+    /// Taken by the first wrap range opened, which is the only one starting
+    /// where the caller's replay left off.
+    seed: Option<HighlightCursor>,
 }
 
 impl<'a> Iterator for BlockChunks<'a> {
@@ -549,11 +555,11 @@ impl<'a> Iterator for BlockChunks<'a> {
             let wrap_end = wrap_start + (run_end - self.current_row);
 
             self.current_row = run_end;
-            self.pending_wrap_chunks = Some(
-                self.snapshot
-                    .wrap_snapshot
-                    .chunks(wrap_start..wrap_end, self.endpoints.clone()),
-            );
+            self.pending_wrap_chunks = Some(self.snapshot.wrap_snapshot.chunks_seeded(
+                wrap_start..wrap_end,
+                self.endpoints.clone(),
+                self.seed.take().as_ref(),
+            ));
         }
     }
 }
@@ -1414,6 +1420,22 @@ impl BlockSnapshot {
     }
 
     pub fn chunks(&self, rows: Range<u32>, endpoints: Arc<[HighlightEndpoint]>) -> BlockChunks<'_> {
+        self.chunks_seeded(rows, endpoints, None)
+    }
+
+    /// Like [`Self::chunks`], resuming an endpoint replay from `seed`.
+    ///
+    /// The seed is offered to the first wrap range this opens and to no other,
+    /// since only the first begins where the caller's replay stopped. A stream
+    /// covering several rows therefore gains nothing from it, and one covering a
+    /// single row gains everything, which is the shape of a caller painting row
+    /// by row.
+    pub fn chunks_seeded(
+        &self,
+        rows: Range<u32>,
+        endpoints: Arc<[HighlightEndpoint]>,
+        seed: Option<&HighlightCursor>,
+    ) -> BlockChunks<'_> {
         BlockChunks {
             snapshot: self,
             endpoints,
@@ -1424,6 +1446,7 @@ impl BlockSnapshot {
             end_row: rows.end,
             pending_wrap_chunks: None,
             pending_newline: false,
+            seed: seed.cloned(),
         }
     }
 

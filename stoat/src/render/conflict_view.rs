@@ -226,6 +226,9 @@ fn paint_conflict_rows(
         Some(cache) => snapshot.highlighted_endpoints_cached(scroll_row..end_row, cache),
         None => snapshot.highlighted_endpoints(scroll_row..end_row),
     };
+    // One replay for the loop, since the rows ascend and each opens its own
+    // stream around the separators and numbers painted between them.
+    let mut row_cursor = snapshot.row_highlight_cursor(endpoints);
 
     // One buffer for every number this loop paints, rather than one per row.
     let mut num_text = String::new();
@@ -272,7 +275,7 @@ fn paint_conflict_rows(
                     &[],
                     None,
                     None,
-                    &endpoints,
+                    &mut row_cursor,
                 );
             },
             BlockRowKind::Block { .. } => {
