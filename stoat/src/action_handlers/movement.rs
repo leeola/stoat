@@ -213,14 +213,12 @@ pub(super) fn move_nav(stoat: &mut Stoat, nav: MoveNavigation) -> UpdateEffect {
 pub(crate) fn set_cursor_row(editor: &mut EditorState, row: u32) {
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope();
     let point = Point::new(row, 0);
-    let offset = rope.point_to_offset(point);
-    let anchor = buffer_snapshot.anchor_at(offset, Bias::Left);
-    editor.selections = crate::selection::SelectionsCollection::new();
-    editor
-        .selections
-        .insert_cursor(anchor, SelectionGoal::None, buffer_snapshot);
+    let offset = buffer_snapshot.rope().point_to_offset(point);
+    // Replaces the set rather than adding to it. A fresh collection carries a
+    // seeded selection at offset 0, so appending would land the cursor here and
+    // leave a second one at the top of the file.
+    editor.selections.set_block_cursor(offset, buffer_snapshot);
     editor.scroll_row = snapshot.buffer_to_display(point).row.saturating_sub(2);
 }
 
@@ -5057,6 +5055,28 @@ mod tests {
             focused_head_row(&mut h),
             1,
             "landed on the changed file's first hunk",
+        );
+    }
+
+    /// Landing the cursor on a row leaves that cursor and nothing else.
+    ///
+    /// A fresh collection is seeded with a zero-width selection at offset 0, so
+    /// a landing that appends to one rather than replacing it leaves a second
+    /// cursor at the top of the file. It paints there, and every later insert
+    /// applies at it too, since an edit applies at every cursor.
+    #[test]
+    fn landing_on_a_row_leaves_no_cursor_behind_at_the_top() {
+        let mut h = TestHarness::with_size(20, 8);
+        let path = h.write_file("s.txt", "alpha\nbeta\ngamma\n");
+        h.open_file(&path);
+
+        set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 2);
+
+        let spans = h.selection_spans();
+        assert_eq!(spans.len(), 1, "the landing is the only selection");
+        assert_eq!(
+            spans[0].0, 11,
+            "and it sits on the row asked for, not at the file top",
         );
     }
 
