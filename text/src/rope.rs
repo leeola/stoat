@@ -483,16 +483,25 @@ impl Rope {
             (),
         );
         text = &text[consumed..];
+        if text.is_empty() {
+            return;
+        }
 
+        // Split the whole remainder first, then hand it over in one go. Pushing
+        // a chunk at a time walks the rightmost spine for each one, which over a
+        // file-sized append is a walk per 128 bytes, where extending builds the
+        // leaves bottom-up and joins them with a single append.
+        let mut chunks = Vec::with_capacity(text.len().div_ceil(MAX_BASE));
         while !text.is_empty() {
             let mut split_ix = cmp::min(MAX_BASE, text.len());
             while !text.is_char_boundary(split_ix) {
                 split_ix -= 1;
             }
             let (chunk, remainder) = text.split_at(split_ix);
-            self.chunks.push(Chunk::new(chunk), ());
+            chunks.push(chunk);
             text = remainder;
         }
+        self.chunks.extend(chunks.into_iter().map(Chunk::new), ());
     }
 
     /// Concatenate `other` onto this rope, merging the seam when it would leave
