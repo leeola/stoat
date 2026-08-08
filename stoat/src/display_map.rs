@@ -1539,9 +1539,9 @@ impl Iterator for ReversedBufferCharsAt<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockPlacement, BlockProperties, BlockRowKind, BlockStyle, DisplayMap, DisplayPoint,
-        DisplayRow, DisplaySnapshot, HighlightStyle, HighlightStyleInterner, InlayKind, InlayPoint,
-        SemanticTokenHighlight,
+        display_width, BlockPlacement, BlockProperties, BlockRowKind, BlockStyle, DisplayMap,
+        DisplayPoint, DisplayRow, DisplaySnapshot, HighlightStyle, HighlightStyleInterner,
+        InlayKind, InlayPoint, SemanticTokenHighlight,
     };
     use crate::{
         buffer::{BufferId, TextBuffer},
@@ -2533,12 +2533,16 @@ mod tests {
             stream.join("\n"),
             [
                 // Row 0 wraps mid-hint, so the hint arrives as two chunks
-                // either side of the break.
+                // either side of the break. The hint's cells count toward the
+                // width, filling the first sub-row exactly and pushing the rest
+                // of the line onto a third.
                 r#""fn alpha() {""#,
-                r#"":" inlay"#,
+                r#"": " inlay"#,
                 r#""\n""#,
-                r#"" u32" inlay"#,
-                r#"" let x = 1; }""#,
+                r#""u32" inlay"#,
+                r#"" let x = ""#,
+                r#""\n""#,
+                r#""1; }""#,
                 r#""\n""#,
                 // Row 1's first sub-row, then the block splitting it.
                 r#""    indented ""#,
@@ -2570,6 +2574,66 @@ mod tests {
                 r#""\n""#,
             ]
             .join("\n"),
+        );
+    }
+
+    /// A row's measured width is the width of the row that gets painted.
+    ///
+    /// Every caret position, wrap break and horizontal scroll bound is derived
+    /// from the measurement, while what the user sees comes from the chunks. If
+    /// the two disagree the caret sits some number of cells away from its own
+    /// character, and the disagreement is invisible until something is wide:
+    /// each layer between them can widen a row, so the fixture carries one of
+    /// each.
+    #[test]
+    fn every_row_measures_the_width_it_paints() {
+        // A tab, a hint, a fold, glyphs two cells wide, and a line long enough
+        // to wrap. Row 2 puts the hint and the fold on one row so their offsets
+        // compound.
+        let text = "\tfn alpha() {}\n\
+                    \u{4e00}\u{4e01} wide glyphs here\n\
+                    fn beta() { let y = 2; } trailing words to force a wrap\n";
+        let buffer = TextBuffer::with_text(BufferId::new(0), text);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
+
+        let hint_at = {
+            let snap = display_map.multi_buffer.snapshot();
+            snap.anchor_at(
+                snap.rope().point_to_offset(Point::new(2, 9)),
+                stoat_text::Bias::Right,
+            )
+        };
+        display_map.splice_inlays(
+            Vec::new(),
+            vec![(hint_at, ": u32".to_string(), InlayKind::Hint)],
+        );
+        display_map.fold(vec![Point::new(2, 11)..Point::new(2, 24)]);
+        display_map.set_wrap_width(Some(16));
+
+        let snapshot = display_map.snapshot();
+        let painted = |row: u32| -> u32 {
+            snapshot
+                .highlighted_chunks(row..row + 1)
+                .map(|chunk| {
+                    chunk
+                        .text
+                        .chars()
+                        .filter(|&ch| ch != '\n')
+                        .map(display_width)
+                        .sum::<u32>()
+                })
+                .sum()
+        };
+
+        let measured: Vec<u32> = (0..snapshot.line_count())
+            .map(|row| snapshot.line_len(row))
+            .collect();
+        assert_eq!(
+            measured,
+            (0..snapshot.line_count()).map(painted).collect::<Vec<_>>(),
+            "each row's measured width is the width of the cells drawn on it",
         );
     }
 

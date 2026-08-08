@@ -9,13 +9,18 @@ use std::{
     cmp::Ordering,
     collections::HashMap,
     ops::{Add, AddAssign, Deref, Range, Sub},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 use stoat_text::{
     patch::Patch, tree_map::TreeMap, Anchor, AnchorRangeExt, Bias, CharsAt, ContextLessSummary,
     Cursor, Dimension, Dimensions, Edit, Item, KeyedItem, Point, ReversedCharsAt, Rope, SeekTarget,
     SumTree, TextSummary,
 };
+
+/// Shared empty highlight endpoints, for the row walkers that read the chunk
+/// stream only to count characters. Cloning this is a refcount bump where a
+/// fresh `Arc` would allocate on every call.
+static NO_ENDPOINTS: LazyLock<Arc<[HighlightEndpoint]>> = LazyLock::new(|| Arc::from(Vec::new()));
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FoldId(pub(crate) usize);
@@ -1617,9 +1622,30 @@ impl FoldSnapshot {
         extent.row() + 1
     }
 
+    /// The characters painted on `fold_row`, excluding its newline.
+    ///
+    /// Spans exactly what [`Self::line_len`] measures, so a caller that walks
+    /// these characters toward a column taken from that length cannot run out
+    /// early. Inlay text is why the two could disagree: it is absent from the
+    /// buffer rope but counted by the transform summaries.
     pub fn fold_line_chars(&self, fold_row: u32) -> FoldLineChars<'_> {
-        FoldLineChars {
-            inner: self.chars_at(FoldPoint::new(fold_row, 0)),
+        // With no inlays the rope carries the whole row, and reading it is far
+        // cheaper than driving the chunk machinery for callers this hot.
+        if !self.inlay_snapshot.has_inlays() {
+            return FoldLineChars::Rope(self.chars_at(FoldPoint::new(fold_row, 0)));
+        }
+
+        let start = self.row_start_offset(fold_row);
+        let end = match fold_row + 1 < self.line_count() {
+            // The next row starts one past the newline that ends this one.
+            true => FoldOffset(self.row_start_offset(fold_row + 1).0.saturating_sub(1)),
+            false => self.len(),
+        };
+
+        FoldLineChars::Painted {
+            chunks: self.chunks(start..end, NO_ENDPOINTS.clone()),
+            chunk: Chunk::default(),
+            offset: 0,
         }
     }
 
@@ -1644,9 +1670,9 @@ impl FoldSnapshot {
     /// and however many folds it crosses.
     ///
     /// Fold transforms are summarized over the inlay-expanded text, so this
-    /// counts hint text the way the chunk stream paints it. Walking the
-    /// characters could not. They come from the buffer rope, which no inlay
-    /// appears in.
+    /// counts hint text the way the chunk stream paints it.
+    /// [`Self::fold_line_chars`] spans the same bytes, so walking that row's
+    /// characters toward this length always reaches it.
     pub fn line_len(&self, fold_row: u32) -> u32 {
         let start = self.row_start_offset(fold_row).0;
         let end = if fold_row + 1 < self.line_count() {
@@ -1951,17 +1977,47 @@ impl Iterator for ReversedFoldChars<'_> {
     }
 }
 
-pub struct FoldLineChars<'a> {
-    inner: FoldChars<'a>,
+/// Iterator returned by [`FoldSnapshot::fold_line_chars`].
+///
+/// The rope variant is much the larger of the two, and boxing it would put an
+/// allocation on the path taken whenever a buffer has no inlays, which is the
+/// path this type exists to keep cheap. Holding it inline costs no more than
+/// the plain wrapper around [`FoldChars`] that came before.
+#[allow(clippy::large_enum_variant)]
+pub enum FoldLineChars<'a> {
+    /// No inlays, so the buffer rope and the placeholders are the whole row.
+    Rope(FoldChars<'a>),
+    /// Decodes the chunk stream the paint path reads, which is the only place
+    /// inlay text appears. The chunk is held rather than borrowed from because
+    /// its text may be owned.
+    Painted {
+        chunks: FoldChunks<'a>,
+        chunk: Chunk<'a>,
+        offset: usize,
+    },
 }
 
 impl Iterator for FoldLineChars<'_> {
     type Item = char;
 
     fn next(&mut self) -> Option<char> {
-        match self.inner.next()? {
-            '\n' => None,
-            ch => Some(ch),
+        match self {
+            FoldLineChars::Rope(inner) => match inner.next()? {
+                '\n' => None,
+                ch => Some(ch),
+            },
+            FoldLineChars::Painted {
+                chunks,
+                chunk,
+                offset,
+            } => loop {
+                if let Some(ch) = chunk.text[*offset..].chars().next() {
+                    *offset += ch.len_utf8();
+                    return Some(ch);
+                }
+                *chunk = chunks.next()?;
+                *offset = 0;
+            },
         }
     }
 }
