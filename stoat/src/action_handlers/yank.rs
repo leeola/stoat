@@ -443,7 +443,14 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
         let rope = buf_snap.rope();
         let max_row = rope.max_point().row;
         let rope_len = rope.len();
-        let entries: Vec<(usize, usize)> = editor
+        // A buffer with no final line ending has no row after its last one, so
+        // the offset that opens a fresh line in a terminated buffer is the end
+        // of this one's last line instead. The entry landing there carries the
+        // separator its line needs.
+        let unterminated =
+            rope_len > 0 && rope.chars_at(rope_len - 1).next().is_none_or(|c| c != '\n');
+        let mut open_line = false;
+        let entries: Vec<(usize, usize, bool)> = editor
             .selections
             .all_anchors()
             .iter()
@@ -455,6 +462,7 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
                 } else {
                     (end, start)
                 };
+                open_line = false;
                 let insert_at = match (side, linewise) {
                     (PasteSide::Before, true) => {
                         let row = rope.offset_to_point(lo).row;
@@ -472,6 +480,7 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
                         };
                         let next = last_line + 1;
                         if next > max_row {
+                            open_line = unterminated;
                             rope_len
                         } else {
                             rope.point_to_offset(Point::new(next, 0))
@@ -486,7 +495,7 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
                         }
                     },
                 };
-                (sel.id, insert_at)
+                (sel.id, insert_at, open_line)
             })
             .collect();
         (buffer_id, entries)
@@ -496,19 +505,29 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
         return UpdateEffect::None;
     }
 
-    entries.sort_by_key(|(_, off)| *off);
+    entries.sort_by_key(|(_, off, _)| *off);
 
     // Each selection receives its fragment in start-offset order, repeated by
     // the pending count. Selections beyond the fragment count reuse the last
-    // fragment.
-    let payloads: Vec<String> = (0..entries.len())
-        .map(|idx| fragments[idx.min(fragments.len() - 1)].repeat(count))
+    // fragment. An entry opening a line at an unterminated end carries the
+    // separator on its payload rather than as an edit of its own, which would
+    // shift the offsets the entries before it were computed against.
+    let payloads: Vec<String> = entries
+        .iter()
+        .enumerate()
+        .map(|(idx, (_, _, open_line))| {
+            let text = fragments[idx.min(fragments.len() - 1)].repeat(count);
+            match open_line {
+                true => format!("\n{text}"),
+                false => text,
+            }
+        })
         .collect();
 
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for (idx, (_, off)) in entries.iter().enumerate().rev() {
+        for (idx, (_, off, _)) in entries.iter().enumerate().rev() {
             guard.edit(*off..*off, &payloads[idx]);
         }
     }
@@ -516,10 +535,13 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
     let mut id_to_range: std::collections::HashMap<usize, (usize, usize)> =
         std::collections::HashMap::with_capacity(entries.len());
     let mut shift: i64 = 0;
-    for (idx, (id, off)) in entries.iter().enumerate() {
+    for (idx, (id, off, open_line)) in entries.iter().enumerate() {
         let payload_len = payloads[idx].len();
-        let start = (*off as i64 + shift) as usize;
-        id_to_range.insert(*id, (start, start + payload_len));
+        // The separator belongs to the previous line's ending rather than to
+        // what was pasted, so the selection starts past it.
+        let opened = usize::from(*open_line);
+        let start = (*off as i64 + shift) as usize + opened;
+        id_to_range.insert(*id, (start, start + payload_len - opened));
         shift += payload_len as i64;
     }
 
@@ -900,6 +922,43 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
         assert_eq!(buffer_text(&h, &path), "X\nY\nZ\nX\n");
+    }
+
+    /// Pasting a line below the last line of a buffer that has no final newline
+    /// opens a line rather than splicing onto the one that is there.
+    ///
+    /// The rope reports a row after a trailing line ending and none without
+    /// one, so the offset that means "the start of a fresh line" for a
+    /// newline-terminated buffer means "the end of the last line's text" for
+    /// this one. Files opened without a final newline are ordinary.
+    #[test]
+    fn linewise_paste_after_opens_a_line_at_an_unterminated_end() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\ndef");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["X\n".to_string()]);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(buffer_text(&h, &path), "abc\ndef\nX\n");
+    }
+
+    /// A buffer that does end in a newline already has the row to paste into,
+    /// so pasting past its last line adds no separator of its own.
+    ///
+    /// Reaching that branch needs the cursor on the row after the final line
+    /// ending, which only a terminated buffer has. Without this the opening
+    /// newline could be added unconditionally and nothing would notice.
+    #[test]
+    fn linewise_paste_past_the_last_line_adds_no_blank_line() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["X\n".to_string()]);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(buffer_text(&h, &path), "abc\nX\n");
     }
 
     #[test]
