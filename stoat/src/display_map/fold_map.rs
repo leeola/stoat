@@ -1917,14 +1917,34 @@ impl Iterator for FoldChars<'_> {
 
         if self.buffer_offset >= self.next_fold_start_offset {
             let fold = self.folds.item().expect("fold present at its start offset");
-            let end = self.inlay_snapshot.to_buffer_point(fold.range.end);
-            let end_off = self.rope.point_to_offset(end);
             let placeholder_chars: Vec<char> = fold.placeholder.display_text().chars().collect();
+            let merge_adjacent = fold.placeholder.merge_adjacent;
+            let mut region_end = fold.range.end;
+
+            // Folds covering the same text paint one placeholder, which is what
+            // the transform tree is built from. Taking them one at a time would
+            // put a placeholder in this walk that the row never draws, and
+            // everything measuring the row from it would read wide.
             self.folds.next();
+            while let Some(next) = self.folds.item() {
+                let merges = next.range.start < region_end
+                    || (next.range.start == region_end
+                        && merge_adjacent
+                        && next.placeholder.merge_adjacent);
+                if !merges {
+                    break;
+                }
+                region_end = region_end.max(next.range.end);
+                self.folds.next();
+            }
+
             self.next_fold_start_offset = self.folds.item().map_or(usize::MAX, |f| {
                 self.rope
                     .point_to_offset(self.inlay_snapshot.to_buffer_point(f.range.start))
             });
+            let end_off = self
+                .rope
+                .point_to_offset(self.inlay_snapshot.to_buffer_point(region_end));
             self.placeholder_iter = Some(placeholder_chars.into_iter());
             self.chars = self.rope.chars_at(end_off);
             self.buffer_offset = end_off;
@@ -1960,15 +1980,34 @@ impl Iterator for ReversedFoldChars<'_> {
 
         if self.folds.item().is_some() && self.buffer_offset <= self.next_fold_end_offset {
             let fold = self.folds.item().expect("fold present at its end offset");
-            let start = self.inlay_snapshot.to_buffer_point(fold.range.start);
-            let start_off = self.rope.point_to_offset(start);
             let placeholder_chars: Vec<char> =
                 fold.placeholder.display_text().chars().rev().collect();
+            let merge_adjacent = fold.placeholder.merge_adjacent;
+            let mut region_start = fold.range.start;
+
+            // The forward walk's merging rule, read backwards. Folds covering
+            // the same text paint one placeholder, so taking them one at a time
+            // would put one in this walk that the row never draws.
             self.folds.prev();
+            while let Some(previous) = self.folds.item() {
+                let merges = previous.range.end > region_start
+                    || (previous.range.end == region_start
+                        && merge_adjacent
+                        && previous.placeholder.merge_adjacent);
+                if !merges {
+                    break;
+                }
+                region_start = region_start.min(previous.range.start);
+                self.folds.prev();
+            }
+
             self.next_fold_end_offset = self.folds.item().map_or(0, |f| {
                 self.rope
                     .point_to_offset(self.inlay_snapshot.to_buffer_point(f.range.end))
             });
+            let start_off = self
+                .rope
+                .point_to_offset(self.inlay_snapshot.to_buffer_point(region_start));
             self.placeholder_iter = Some(placeholder_chars.into_iter());
             self.chars = self.rope.reversed_chars_at(start_off);
             self.buffer_offset = start_off;
@@ -2879,6 +2918,52 @@ mod tests {
         let (snap, _) = fold_map.sync(inlay_snapshot, &Patch::empty(), None);
         // 4 rows - 2 rows folded = 2 rows
         assert_eq!(snap.line_count(), 2);
+    }
+
+    /// Folds covering the same text paint one placeholder, so the character
+    /// walk a row is measured from has to collapse them the same way the
+    /// transform tree does. Walking them one at a time puts a placeholder in the
+    /// measurement that the row never draws, and every column right of it lands
+    /// wide.
+    #[test]
+    fn overlapping_folds_measure_the_one_placeholder_they_paint() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\nline3");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+
+        let to_anchor = |row: u32, col: u32, bias: Bias| {
+            let off = buffer_snapshot
+                .rope()
+                .point_to_offset(stoat_text::Point::new(row, col));
+            buffer_snapshot.anchor_at(off, bias)
+        };
+
+        for range in [
+            to_anchor(0, 2, Bias::Right)..to_anchor(2, 0, Bias::Left),
+            to_anchor(0, 4, Bias::Right)..to_anchor(3, 2, Bias::Left),
+        ] {
+            fold_map.fold(vec![range], FoldPlaceholder::default(), &buffer_snapshot);
+        }
+        let (snap, _) = fold_map.sync(inlay_snapshot, &Patch::empty(), None);
+
+        let painted: String = snap
+            .chunks(FoldOffset(0)..snap.len(), Arc::from(Vec::new()))
+            .map(|chunk| chunk.text.to_string())
+            .collect();
+        assert_eq!(painted, "li...ne3", "one placeholder for the merged region");
+
+        assert_eq!(snap.fold_line(0), painted, "the walk reads what is painted");
+        assert_eq!(snap.line_len(0), painted.len() as u32, "and measures it");
+
+        let reversed: String = snap.reversed_chars_at(snap.max_point()).collect();
+        assert_eq!(
+            reversed,
+            painted.chars().rev().collect::<String>(),
+            "the backward walk collapses the region the same way",
+        );
     }
 
     /// Folding over an existing fold must not consume the one already there.
