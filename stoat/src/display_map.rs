@@ -1330,12 +1330,15 @@ impl DisplaySnapshot {
     }
 
     /// Characters of buffer `row`, stopping at its line break.
+    ///
+    /// The row's extent comes from its byte range rather than a counted budget,
+    /// so a row holding multi-byte characters ends where the row does instead of
+    /// spilling into the rows below it.
     fn line_chars(&self, row: u32) -> impl Iterator<Item = char> {
-        let buffer = self.buffer_snapshot();
-        let rope = buffer.rope();
-        let start = rope.point_to_offset(Point::new(row, 0));
-        let len = rope.line_len(row) as usize;
-        rope.chars_at(start).take(len)
+        self.buffer_snapshot()
+            .rope()
+            .chunks_in_line(row)
+            .flat_map(str::chars)
     }
 
     pub fn classify_row(&self, display_row: u32) -> BlockRowKind<'_> {
@@ -3233,6 +3236,26 @@ mod tests {
         let snapshot = display_map.snapshot();
         // "ab你" = 4 cols, "好cd" = 4 cols -> wraps after 你
         assert_eq!(snapshot.line_count(), 2);
+    }
+
+    #[test]
+    fn a_goal_column_walk_stops_at_a_multi_byte_rows_end() {
+        use stoat_text::Bias;
+        let mut display_map = create_display_map("aaaaaaaaaa\n\u{4f60}\ncccccccc");
+        let snapshot = display_map.snapshot();
+
+        for bias in [Bias::Left, Bias::Right] {
+            assert_eq!(
+                snapshot.buffer_column_at_visual(1, 10, bias),
+                3,
+                "a goal column past the row's end answers the row's own length, {bias:?}"
+            );
+        }
+        assert_eq!(
+            snapshot.visual_column(Point::new(1, 3)),
+            2,
+            "the row's one character spans three bytes and two cells"
+        );
     }
 
     #[test]
