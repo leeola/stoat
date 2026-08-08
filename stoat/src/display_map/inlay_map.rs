@@ -1215,10 +1215,11 @@ mod tests {
     use super::{InlayMap, InlayPoint};
     use crate::{
         buffer::{BufferId, TextBuffer},
+        display_map::sampler::Sampler,
         multi_buffer::MultiBuffer,
     };
     use std::sync::{Arc, RwLock};
-    use stoat_text::{patch::Patch, Bias, Point};
+    use stoat_text::{patch::Patch, Bias, Point, Rope};
 
     fn make_snapshot(content: &str) -> Arc<super::InlaySnapshot> {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
@@ -1240,6 +1241,32 @@ mod tests {
             )
             .map(|chunk| chunk.text.to_string())
             .collect()
+    }
+
+    /// A generated buffer carrying a handful of generated hints.
+    ///
+    /// Hint text comes from the same alphabet as the buffer, so a hint can
+    /// carry a newline or a tab and split the row it sits on. That is the shape
+    /// the hand-written fixtures reach for last and the layer handles least.
+    fn random_snapshot_with_hints(seed: u64) -> Arc<super::InlaySnapshot> {
+        let mut sampler = Sampler::new(seed);
+        let len = 1 + sampler.below(60) as usize;
+        let text = sampler.text(len);
+        let rope = Rope::from(text.as_str());
+
+        let hint_count = sampler.below(4);
+        let hints = (0..hint_count)
+            .map(|_| {
+                let offset = sampler.below(rope.len() as u32 + 1) as usize;
+                let hint_len = 1 + sampler.below(4) as usize;
+                (
+                    rope.offset_to_point(rope.clip_offset(offset, Bias::Left)),
+                    sampler.text(hint_len),
+                )
+            })
+            .collect();
+
+        make_snapshot_with_inlays(&text, hints)
     }
 
     fn make_snapshot_with_inlays(
@@ -2008,6 +2035,82 @@ mod tests {
                 vec![(want_old, want_new)],
                 "{what}",
             );
+        }
+    }
+
+    /// A point converted up from the buffer names a position the caret can
+    /// already occupy, so neither bias may move it, and it has to convert back
+    /// to where it came from. Walking the buffer forward has to walk inlay
+    /// space forward too, since a hint only ever adds text.
+    #[test]
+    fn an_inlay_point_built_from_the_buffer_survives_clipping() {
+        for seed in 0..256 {
+            let snap = random_snapshot_with_hints(seed);
+            let rope = snap.buffer_snapshot().rope();
+            let mut previous: Option<(Point, InlayPoint)> = None;
+
+            for row in 0..=rope.max_point().row {
+                for column in 0..=rope.line_len(row) {
+                    let point = Point::new(row, column);
+                    if rope.clip_point(point, Bias::Left) != point {
+                        continue;
+                    }
+
+                    let inlay = snap.to_inlay_point(point);
+                    for bias in [Bias::Left, Bias::Right] {
+                        assert_eq!(
+                            snap.clip_point(inlay, bias),
+                            inlay,
+                            "seed {seed}: {point:?} became {inlay:?}, which moves when clipped \
+                             {bias:?}",
+                        );
+                    }
+                    assert_eq!(
+                        snap.to_buffer_point(inlay),
+                        point,
+                        "seed {seed}: {point:?} became {inlay:?}, which converts back elsewhere",
+                    );
+
+                    if let Some((last_point, last_inlay)) = previous {
+                        assert!(
+                            inlay > last_inlay,
+                            "seed {seed}: {last_point:?} became {last_inlay:?} but the later \
+                             {point:?} became {inlay:?}",
+                        );
+                    }
+                    previous = Some((point, inlay));
+                }
+            }
+        }
+    }
+
+    /// Clipping has to settle on a position clipping again leaves alone, and
+    /// the two biases have to stay in the order they name.
+    #[test]
+    fn clipping_an_inlay_point_settles_in_bias_order() {
+        for seed in 0..256 {
+            let snap = random_snapshot_with_hints(seed);
+
+            for row in 0..=snap.total_summary().lines.row {
+                for column in 0..=snap.line_len(row) + 1 {
+                    let point = InlayPoint::new(row, column);
+                    let left = snap.clip_point(point, Bias::Left);
+                    let right = snap.clip_point(point, Bias::Right);
+
+                    assert!(
+                        left <= right,
+                        "seed {seed}: {point:?} clips to {left:?} left of {right:?} right",
+                    );
+                    for (clipped, bias) in [(left, Bias::Left), (right, Bias::Right)] {
+                        assert_eq!(
+                            snap.clip_point(clipped, bias),
+                            clipped,
+                            "seed {seed}: {point:?} clipped {bias:?} to {clipped:?}, which moves \
+                             again",
+                        );
+                    }
+                }
+            }
         }
     }
 }

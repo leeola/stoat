@@ -4,6 +4,8 @@ mod fold_map;
 pub mod highlights;
 pub mod inlay_map;
 pub mod invisibles;
+#[cfg(test)]
+mod sampler;
 pub mod syntax_theme;
 pub mod tab_map;
 mod wrap_map;

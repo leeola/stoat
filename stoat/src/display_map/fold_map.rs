@@ -2031,7 +2031,10 @@ mod tests {
     use super::{FoldId, FoldMap, FoldOffset, FoldPlaceholder, FoldPoint};
     use crate::{
         buffer::{BufferId, TextBuffer},
-        display_map::inlay_map::{InlayKind, InlayMap, InlayPoint},
+        display_map::{
+            inlay_map::{InlayKind, InlayMap, InlayPoint},
+            sampler::Sampler,
+        },
         multi_buffer::MultiBuffer,
     };
     use std::{
@@ -2049,6 +2052,51 @@ mod tests {
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
         fold_snapshot
+    }
+
+    /// A generated buffer carrying generated hints and folds.
+    ///
+    /// Both layers are stacked because a fold over hinted text is where the two
+    /// coordinate spaces disagree most, and neither layer's own fixtures put
+    /// them together.
+    fn random_snapshot_with_hints_and_folds(seed: u64) -> Arc<super::FoldSnapshot> {
+        let mut sampler = Sampler::new(seed);
+        let len = 1 + sampler.below(60) as usize;
+        let text = sampler.text(len);
+
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let rope = buffer_snapshot.rope();
+        let offset = |sampler: &mut Sampler| {
+            rope.clip_offset(sampler.below(rope.len() as u32 + 1) as usize, Bias::Left)
+        };
+
+        let (mut inlay_map, _) = InlayMap::new(buffer_snapshot.clone());
+        let hint_count = sampler.below(3);
+        let hints = (0..hint_count)
+            .map(|_| {
+                let anchor = buffer_snapshot.anchor_at(offset(&mut sampler), Bias::Right);
+                let hint_len = 1 + sampler.below(4) as usize;
+                (anchor, sampler.text(hint_len), InlayKind::Hint)
+            })
+            .collect();
+        inlay_map.splice(&buffer_snapshot, Vec::new(), hints);
+        let (inlay_snapshot, _) = inlay_map.sync(buffer_snapshot.clone(), &Patch::empty());
+
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+        let fold_count = sampler.below(3);
+        let folds = (0..fold_count)
+            .map(|_| {
+                let (a, b) = (offset(&mut sampler), offset(&mut sampler));
+                let (start, end) = if a <= b { (a, b) } else { (b, a) };
+                buffer_snapshot.anchor_at(start, Bias::Right)
+                    ..buffer_snapshot.anchor_at(end, Bias::Left)
+            })
+            .collect();
+        fold_map.fold(folds, FoldPlaceholder::default(), &buffer_snapshot);
+
+        fold_map.sync(inlay_snapshot, &Patch::empty(), None).0
     }
 
     fn make_snapshot_with_folds(
@@ -3849,5 +3897,42 @@ mod tests {
         let fold_chunks: Vec<_> = chunks.iter().filter(|c| c.renderer.is_some()).collect();
         assert_eq!(fold_chunks.len(), 1);
         assert_eq!(fold_chunks[0].text.as_ref(), "...");
+    }
+
+    /// A fold is one indivisible position, so clipping has to land on an edge
+    /// and stay there, and the edge it lands on has to survive the trip down to
+    /// inlay space and back. The two biases have to stay in the order they
+    /// name.
+    #[test]
+    fn clipping_a_fold_point_settles_and_converts_back() {
+        for seed in 0..256 {
+            let snap = random_snapshot_with_hints_and_folds(seed);
+
+            for row in 0..snap.line_count() {
+                for column in 0..=snap.line_len(row) + 1 {
+                    let point = FoldPoint::new(row, column);
+                    let left = snap.clip_point(point, Bias::Left);
+                    let right = snap.clip_point(point, Bias::Right);
+
+                    assert!(
+                        left <= right,
+                        "seed {seed}: {point:?} clips to {left:?} left of {right:?} right",
+                    );
+                    for (clipped, bias) in [(left, Bias::Left), (right, Bias::Right)] {
+                        assert_eq!(
+                            snap.clip_point(clipped, bias),
+                            clipped,
+                            "seed {seed}: {point:?} clipped {bias:?} to {clipped:?}, which moves \
+                             again",
+                        );
+                        assert_eq!(
+                            snap.to_fold_point(snap.to_inlay_point(clipped), Bias::Right),
+                            clipped,
+                            "seed {seed}: {clipped:?} does not survive the inlay round trip",
+                        );
+                    }
+                }
+            }
+        }
     }
 }

@@ -715,8 +715,9 @@ mod tests {
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::{
-            fold_map::{FoldMap, FoldPoint},
-            inlay_map::InlayMap,
+            fold_map::{FoldMap, FoldPlaceholder, FoldPoint},
+            inlay_map::{InlayKind, InlayMap},
+            sampler::Sampler,
         },
         multi_buffer::MultiBuffer,
     };
@@ -1113,5 +1114,94 @@ mod tests {
         let tab_chunks: Vec<_> = chunks.iter().filter(|c| c.is_tab).collect();
         assert_eq!(tab_chunks.len(), 1);
         assert_eq!(tab_chunks[0].text.as_ref(), "  ");
+    }
+
+    /// A generated buffer under a generated hint, fold and tab stack.
+    ///
+    /// The tab size varies per seed because the expansion is modular in it, so
+    /// a column that lands on a stop under one size lands inside an expansion
+    /// under another.
+    fn random_tab_snapshot(seed: u64) -> super::TabSnapshot {
+        let mut sampler = Sampler::new(seed);
+        let len = 1 + sampler.below(60) as usize;
+        let text = sampler.text(len);
+        let tab_size = NonZeroU32::new(1 + sampler.below(4)).expect("nonzero");
+
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let rope = buffer_snapshot.rope();
+        let offset = |sampler: &mut Sampler| {
+            rope.clip_offset(sampler.below(rope.len() as u32 + 1) as usize, Bias::Left)
+        };
+
+        let (mut inlay_map, _) = InlayMap::new(buffer_snapshot.clone());
+        let hint_count = sampler.below(3);
+        let hints = (0..hint_count)
+            .map(|_| {
+                let anchor = buffer_snapshot.anchor_at(offset(&mut sampler), Bias::Right);
+                let hint_len = 1 + sampler.below(4) as usize;
+                (anchor, sampler.text(hint_len), InlayKind::Hint)
+            })
+            .collect();
+        inlay_map.splice(&buffer_snapshot, Vec::new(), hints);
+        let (inlay_snapshot, _) = inlay_map.sync(buffer_snapshot.clone(), &Patch::empty());
+
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+        let fold_count = sampler.below(3);
+        let folds = (0..fold_count)
+            .map(|_| {
+                let (a, b) = (offset(&mut sampler), offset(&mut sampler));
+                let (start, end) = if a <= b { (a, b) } else { (b, a) };
+                buffer_snapshot.anchor_at(start, Bias::Right)
+                    ..buffer_snapshot.anchor_at(end, Bias::Left)
+            })
+            .collect();
+        fold_map.fold(folds, FoldPlaceholder::default(), &buffer_snapshot);
+        let (fold_snapshot, _) = fold_map.sync(inlay_snapshot, &Patch::empty(), None);
+
+        TabMap::new(tab_size).sync(fold_snapshot, Patch::empty()).0
+    }
+
+    /// A column inside a tab's expansion names no character, so clipping has to
+    /// settle on one that does and stay there. The settled column is a tab-space
+    /// image of a fold position, so converting it down and back has to return
+    /// it. The two biases have to stay in the order they name.
+    #[test]
+    fn clipping_a_tab_point_settles_and_converts_back() {
+        for seed in 0..256 {
+            let snap = random_tab_snapshot(seed);
+
+            for row in 0..snap.line_count() {
+                for column in 0..=snap.line_len(row) + 1 {
+                    let point = TabPoint::new(row, column);
+                    let left = snap.clip_point(point, Bias::Left);
+                    let right = snap.clip_point(point, Bias::Right);
+
+                    assert!(
+                        left <= right,
+                        "seed {seed}: {point:?} clips to {left:?} left of {right:?} right",
+                    );
+                    for (clipped, bias) in [(left, Bias::Left), (right, Bias::Right)] {
+                        assert_eq!(
+                            snap.clip_point(clipped, bias),
+                            clipped,
+                            "seed {seed}: {point:?} clipped {bias:?} to {clipped:?}, which moves \
+                             again",
+                        );
+                        assert_eq!(
+                            snap.to_tab_point(snap.to_fold_point(clipped, bias)),
+                            clipped,
+                            "seed {seed}: {clipped:?} does not survive the fold round trip \
+                             {bias:?}",
+                        );
+                        assert!(
+                            clipped.column() <= snap.line_len(clipped.row()),
+                            "seed {seed}: {clipped:?} runs past its row",
+                        );
+                    }
+                }
+            }
+        }
     }
 }
