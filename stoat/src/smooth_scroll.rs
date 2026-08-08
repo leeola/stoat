@@ -416,6 +416,7 @@ pub(crate) fn render_page_fill(
     diff_view: bool,
     dim: f32,
     endpoints: Arc<[HighlightEndpoint]>,
+    live: Option<&crate::diff_map::LiveHunks<'_>>,
 ) -> Vec<u8> {
     let top_row = page_top_row(index, region_height);
     let bytes = render_page_from_snapshot(
@@ -428,6 +429,7 @@ pub(crate) fn render_page_fill(
         diff_view,
         dim,
         endpoints,
+        live,
     );
 
     let mut frame = Vec::with_capacity(bytes.len() + 16);
@@ -457,6 +459,10 @@ pub(crate) fn render_page_fill(
 /// Inside stoatty the rich gutter's sub-cell components ride as APC frames
 /// appended after the serialized cells, so the terminal captures them onto the
 /// page slot. Every other terminal gets degraded cell numbers in the buffer.
+///
+/// `live` offers hunks a caller already resolved, for a run of pages over one
+/// snapshot that would otherwise each pay an anchor batch over every hunk in the
+/// file. `None` resolves them here, which is what a lone page wants.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_page_from_snapshot(
     snapshot: &DisplaySnapshot,
@@ -468,6 +474,7 @@ pub(crate) fn render_page_from_snapshot(
     diff_view: bool,
     dim: f32,
     endpoints: Arc<[HighlightEndpoint]>,
+    live: Option<&crate::diff_map::LiveHunks<'_>>,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
     let mut buf = Buffer::empty(area);
@@ -502,7 +509,8 @@ pub(crate) fn render_page_from_snapshot(
         .saturating_add(region_height as u32)
         .min(snapshot.line_count());
 
-    let (gutter_w, apc) = paint_page_gutter(snapshot, top_row, end_row, &mut buf, area, gutter);
+    let (gutter_w, apc) =
+        paint_page_gutter(snapshot, top_row, end_row, &mut buf, area, gutter, live);
 
     if end_row > top_row {
         let right = area.x + area.width;
@@ -647,6 +655,7 @@ fn paint_page_gutter(
     buf: &mut Buffer,
     area: Rect,
     gutter: &PageGutter,
+    live: Option<&crate::diff_map::LiveHunks<'_>>,
 ) -> (u16, Vec<u8>) {
     if !gutter.line_numbers {
         return (0, Vec::new());
@@ -655,7 +664,10 @@ fn paint_page_gutter(
     let visible = end_row.saturating_sub(top_row).min(area.height as u32);
     let (folded, width_digits) = gutter_geometry(snapshot, top_row, visible);
 
-    let diff_marks = gutter_diff_marks(snapshot, &folded);
+    let diff_marks = match live {
+        Some(live) => crate::render::editor::gutter_diff_marks_from(live, &folded),
+        None => gutter_diff_marks(snapshot, &folded),
+    };
 
     match &gutter.rich {
         Some(rich) => {
@@ -1210,6 +1222,7 @@ mod tests {
                 false,
                 0.0,
                 page_endpoints(&snapshot, top_row, 4),
+                None,
             );
 
             assert_eq!(got, expected, "page at top_row {top_row}");
@@ -1286,6 +1299,7 @@ mod tests {
             false,
             0.0,
             page_endpoints(&snapshot, 0, 2),
+            None,
         );
 
         assert_eq!(
@@ -1373,6 +1387,7 @@ mod tests {
             false,
             0.0,
             page_endpoints(&snapshot, 0, 3),
+            None,
         );
 
         assert_eq!(
@@ -1424,6 +1439,7 @@ mod tests {
             false,
             0.0,
             page_endpoints(&snapshot, 0, 4),
+            None,
         );
         let dimmed = render_page_from_snapshot(
             &snapshot,
@@ -1435,6 +1451,7 @@ mod tests {
             false,
             0.5,
             page_endpoints(&snapshot, 0, 4),
+            None,
         );
         assert_ne!(undimmed, dimmed, "threading dim changes the page bytes");
 
@@ -1521,6 +1538,7 @@ mod tests {
             true,
             0.0,
             page_endpoints(&snapshot, 0, 8),
+            None,
         );
         assert_eq!(
             got, expected,
@@ -1624,7 +1642,7 @@ mod tests {
         );
         let area = Rect::new(0, 0, 12, 5);
         let mut buf = Buffer::empty(area);
-        let (width, _) = paint_page_gutter(&snapshot, 0, 5, &mut buf, area, &gutter);
+        let (width, _) = paint_page_gutter(&snapshot, 0, 5, &mut buf, area, &gutter, None);
 
         let digits: Vec<String> = (0..5)
             .map(|y| {
@@ -1987,10 +2005,104 @@ mod tests {
             let own = page_endpoints(&snapshot, page_top_row(index, height), height);
             let fill = |endpoints| {
                 render_page_fill(
-                    &snapshot, 5, index, fallback, 40, height, &gutter, false, 0.0, endpoints,
+                    &snapshot, 5, index, fallback, 40, height, &gutter, false, 0.0, endpoints, None,
                 )
             };
             assert_eq!(fill(shared.clone()), fill(own), "page {index}");
+        }
+    }
+
+    /// A page painted from the refill's shared hunks matches one that resolved
+    /// its own.
+    ///
+    /// Sharing them is what spares a run of pages an anchor batch over every
+    /// hunk in the file per page. It is only sound because the answer does not
+    /// vary by page, and a divergence would show as a diff gutter marking the
+    /// wrong rows on some pages and not others.
+    ///
+    /// The buffer is edited after the diff was taken, so the hunks' stored rows
+    /// and their live rows differ. Without that the two paths would agree for
+    /// the wrong reason, both reading rows that never moved.
+    #[test]
+    fn shared_hunks_paint_the_page_that_resolving_per_page_does() {
+        use super::{page_top_row, render_page_fill, PageGutter};
+        use crate::{
+            buffer::{BufferId, TextBuffer},
+            diff_map::DiffMap,
+            display_map::DisplayMap,
+            multi_buffer::MultiBuffer,
+            theme::{scope, Theme},
+        };
+        use std::{collections::BTreeMap, sync::RwLock};
+        use stoat_language::structural_diff;
+        use stoat_scheduler::{Executor, TestScheduler};
+
+        let base: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        let text: String = (0..40)
+            .map(|i| {
+                if i % 7 == 0 {
+                    format!("edited {i}\n")
+                } else {
+                    format!("line {i}\n")
+                }
+            })
+            .collect();
+
+        let mut tb = TextBuffer::with_text(BufferId::new(0), &text);
+        tb.diff_map = Some(DiffMap::from_structural_changes(
+            structural_diff::diff(&base, &text),
+            Arc::new(base),
+            &text,
+        ));
+        // Inserting above every hunk drags each one's anchors down, so the live
+        // rows are not the rows the diff recorded.
+        tb.edit(0..0, "// header\n// header\n");
+        let shared_buf = Arc::new(RwLock::new(tb));
+
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared_buf);
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let mut display_map = DisplayMap::new(multi, executor, crate::test_notify());
+        let snapshot = display_map.snapshot();
+
+        let theme = Theme::empty();
+        let fallback = theme.get(scope::UI_TEXT);
+        let gutter = PageGutter::new(
+            true,
+            Arc::new(BTreeMap::new()),
+            Arc::new(theme.clone()),
+            None,
+            None,
+        );
+
+        let diff_map = snapshot.diff_map().expect("the fixture carries a diff");
+        let live = diff_map.live_hunks(snapshot.buffer_snapshot());
+        assert!(
+            live.gutter_mark_for_line(7).is_some() || live.gutter_mark_for_line(9).is_some(),
+            "the fixture must place a mark on a shifted row for this to test anything",
+        );
+
+        let height = 6u16;
+        for index in 0..5u64 {
+            let fill = |live| {
+                render_page_fill(
+                    &snapshot,
+                    5,
+                    index,
+                    fallback,
+                    40,
+                    height,
+                    &gutter,
+                    false,
+                    0.0,
+                    page_endpoints(&snapshot, page_top_row(index, height), height),
+                    live,
+                )
+            };
+            assert_eq!(
+                fill(Some(&live)),
+                fill(None),
+                "page {index} painted differently from shared hunks",
+            );
         }
     }
 
@@ -2037,6 +2149,7 @@ mod tests {
             false,
             0.0,
             page_endpoints(&snapshot, 6, 3),
+            None,
         );
 
         let cmds = commands(&frame);
@@ -2059,6 +2172,7 @@ mod tests {
             false,
             0.0,
             page_endpoints(&snapshot, 6, 3),
+            None,
         );
         assert!(
             find(&frame, &page).is_some(),
@@ -2113,6 +2227,7 @@ mod tests {
             false,
             0.0,
             page_endpoints(&snapshot, 0, 4),
+            None,
         );
         let cmds = commands(&frame);
 

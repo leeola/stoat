@@ -1448,6 +1448,19 @@ pub(crate) fn gutter_diff_marks(
     // Where the hunks sit now, not where the last diff job left them. It runs
     // in the background per buffer version, so its rows are already behind.
     let live = diff_map.live_hunks(snapshot.buffer_snapshot());
+    gutter_diff_marks_from(&live, folded)
+}
+
+/// The marks `folded`'s rows take from `live`.
+///
+/// Split from [`gutter_diff_marks`] for a caller painting several windows of one
+/// snapshot. Resolving the hunks costs an anchor batch over every hunk in the
+/// file plus a sort, and every window of that snapshot would otherwise pay it
+/// again for the same answer.
+pub(crate) fn gutter_diff_marks_from(
+    live: &crate::diff_map::LiveHunks<'_>,
+    folded: &[(u32, u16)],
+) -> BTreeMap<u32, (DiffHunkStatus, bool)> {
     folded
         .iter()
         .filter_map(|&(number, _)| {
