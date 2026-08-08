@@ -235,8 +235,8 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
                 install_popup(stoat, popup);
                 return;
             },
-            Refine::Ask { servers, carried } => {
-                ask_again(stoat, &snapshot, owned, servers, carried);
+            Refine::Ask { servers } => {
+                ask_again(stoat, &snapshot, owned, servers);
                 return;
             },
         }
@@ -321,10 +321,27 @@ enum Refine {
     /// The cached items answer this prefix outright.
     Done(CompletionPopup),
     /// These servers stopped early last time and are asked again. Everything
-    /// else carries across rather than being fetched twice.
-    Ask {
-        servers: Vec<String>,
-        carried: Vec<CompletionItem>,
+    /// else stays on the open popup and is merged back when the answer lands.
+    Ask { servers: Vec<String> },
+}
+
+/// What a landed completion request means for the open popup.
+///
+/// A re-ask is not a whole answer, so it cannot simply be installed. Keeping
+/// the two apart is what lets the popup's own items stay where they are for the
+/// whole debounce window instead of being copied out of it per keystroke.
+pub(crate) enum RequestOutcome {
+    /// A full fetch, which stands alone and replaces whatever is open.
+    Replace(CompletionPopup),
+    /// Answers from the servers that stopped early last time.
+    ///
+    /// `fresh` holds only those servers' items, unranked, since ranking has to
+    /// wait until the popup's surviving items have joined them. `asked` names
+    /// the servers whose earlier items this supersedes, which is every server
+    /// re-asked and not merely the ones that answered.
+    Refill {
+        fresh: CompletionPopup,
+        asked: Vec<String>,
     },
 }
 
@@ -354,15 +371,13 @@ fn refine_open_popup(stoat: &mut Stoat, owned: &ContextOwned) -> Refine {
 
     // A server that stopped early is re-asked, and `ask_again` does not replace
     // the popup until its request lands a debounce later, so the popup stays
-    // where it is and its survivors are copied. Taking it would blank the popup
-    // for that window, on most keystrokes, since servers mark their lists
-    // incomplete routinely.
+    // where it is and keeps its items. Taking it would blank the popup for that
+    // window, on most keystrokes, since servers mark their lists incomplete
+    // routinely, and copying them out would pay for a filter the landing
+    // request redoes anyway.
     if !popup.incomplete.is_empty() {
-        let stale = popup.incomplete.clone();
-        let carried = surviving(popup.items.iter().cloned(), &stale, &owned.prefix).0;
         return Refine::Ask {
-            servers: stale,
-            carried,
+            servers: popup.incomplete.clone(),
         };
     }
 
@@ -422,8 +437,8 @@ fn surviving(
     (kept, scores)
 }
 
-/// Ask `servers` again for a prefix they answered incompletely, carrying the
-/// items held from everywhere else into the result.
+/// Ask `servers` again for a prefix they answered incompletely, leaving the
+/// items held from everywhere else on the open popup until the answer lands.
 ///
 /// Re-requesting everything would throw away answers that are still good, and
 /// leaving the server out would leave the popup permanently short of what it
@@ -434,7 +449,6 @@ fn ask_again(
     snapshot: &EditorSnapshot,
     owned: ContextOwned,
     servers: Vec<String>,
-    carried: Vec<CompletionItem>,
 ) {
     let hosts: Vec<(String, Arc<dyn LspHost>)> = stoat
         .feature_hosts(snapshot.buffer_id, LanguageServerFeature::Completion)
@@ -456,8 +470,13 @@ fn ask_again(
     let Some(request) =
         Some(request).filter(|_| !hosts.is_empty() && snapshot.source_path.is_some())
     else {
-        // The server is no longer there to ask, so what is held is all of it.
-        let mut items = carried;
+        // The server is no longer there to ask, so the popup's own items are all
+        // of it. Narrowing them to the grown prefix is what the landing request
+        // would otherwise have done, and taking the popup does it without a copy.
+        let mut items = match stoat.pending_completion.take() {
+            Some(popup) => surviving(popup.items.into_iter(), &servers, &owned.prefix).0,
+            None => Vec::new(),
+        };
         rank_by_prefix(&mut items, &owned.prefix);
         stoat.pending_completion_request = None;
         install_popup(
@@ -479,7 +498,7 @@ fn ask_again(
     let task = stoat.spawn_woken(async move {
         executor.timer(COMPLETION_DEBOUNCE).await;
 
-        let mut items = carried;
+        let mut items: Vec<CompletionItem> = Vec::new();
         let mut incomplete = Vec::new();
         {
             let ctx = owned.as_borrowed();
@@ -511,15 +530,18 @@ fn ask_again(
             }
         }
 
-        rank_by_prefix(&mut items, &owned.prefix);
-
-        CompletionPopup {
-            items,
-            selected_idx: 0,
-            anchor_offset: owned.prefix_range.start,
-            prefix_range: owned.prefix_range,
-            prefix: owned.prefix,
-            incomplete,
+        // These go back unranked. The popup's survivors join them at install,
+        // and ranking a partial list only to re-rank the whole one is wasted.
+        RequestOutcome::Refill {
+            fresh: CompletionPopup {
+                items,
+                selected_idx: 0,
+                anchor_offset: owned.prefix_range.start,
+                prefix_range: owned.prefix_range,
+                prefix: owned.prefix,
+                incomplete,
+            },
+            asked: servers,
         }
     });
     stoat.pending_completion_request = Some(task);
@@ -537,9 +559,39 @@ fn install_popup(stoat: &mut Stoat, popup: CompletionPopup) {
     crate::action_handlers::completion::arm_completion_resolve(stoat);
 }
 
-/// Poll the in-flight completion task. On `Ready` writes the
-/// returned [`CompletionPopup`] onto [`Stoat::pending_completion`]
-/// (or clears it when the result has no items). Returns `true` when
+/// Merge a re-ask's answer with what the popup it was asked for still holds.
+///
+/// The popup was left alone for the whole debounce window, so this is where its
+/// items are narrowed to the prefix the ask captured and the re-asked servers'
+/// earlier answers give way to their new ones. Moving them through rather than
+/// copying is the point of deferring the merge to here.
+///
+/// A popup gone by now was accepted or dismissed mid-flight, and reviving what
+/// it held would undo that, so only the fresh items install.
+fn install_refill(stoat: &mut Stoat, fresh: CompletionPopup, asked: Vec<String>) {
+    let mut items = match stoat.pending_completion.take() {
+        Some(popup) => surviving(popup.items.into_iter(), &asked, &fresh.prefix).0,
+        None => Vec::new(),
+    };
+    items.extend(fresh.items);
+    rank_by_prefix(&mut items, &fresh.prefix);
+
+    install_popup(
+        stoat,
+        CompletionPopup {
+            items,
+            selected_idx: 0,
+            anchor_offset: fresh.anchor_offset,
+            prefix_range: fresh.prefix_range,
+            prefix: fresh.prefix,
+            incomplete: fresh.incomplete,
+        },
+    );
+}
+
+/// Poll the in-flight completion task. On `Ready` resolves its
+/// [`RequestOutcome`] against [`Stoat::pending_completion`], installing a full
+/// answer outright and merging a re-ask into what is open. Returns `true` when
 /// the popup state changed, mirroring the convention used by the
 /// other LSP pumps so the render loop can drive both for free.
 pub(crate) fn pump(stoat: &mut Stoat) -> bool {
@@ -549,8 +601,12 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(popup) => {
+        Poll::Ready(RequestOutcome::Replace(popup)) => {
             install_popup(stoat, popup);
+            true
+        },
+        Poll::Ready(RequestOutcome::Refill { fresh, asked }) => {
+            install_refill(stoat, fresh, asked);
             true
         },
         Poll::Pending => {
@@ -730,7 +786,7 @@ async fn run_request(
     lsp_request: Option<LspRequest>,
     immediate: bool,
     pending_change: Option<Task<()>>,
-) -> CompletionPopup {
+) -> RequestOutcome {
     // The server has to have the edit this position was measured after before
     // the request naming that position goes out.
     if let Some(pending_change) = pending_change {
@@ -803,14 +859,14 @@ async fn run_request(
 
     rank_by_prefix(&mut items, &owned.prefix);
 
-    CompletionPopup {
+    RequestOutcome::Replace(CompletionPopup {
         items,
         selected_idx: 0,
         anchor_offset: owned.prefix_range.start,
         prefix_range: owned.prefix_range,
         prefix: owned.prefix,
         incomplete,
-    }
+    })
 }
 
 /// Order `items` by how well each answers `prefix`.
@@ -1555,6 +1611,76 @@ mod harness_tests {
             server: Some("test".to_string()),
             ..word(label)
         }
+    }
+
+    /// A popup over `prefix`, anchored at the start of the line.
+    fn popup_over(items: Vec<CompletionItem>, prefix: &str) -> CompletionPopup {
+        CompletionPopup {
+            items,
+            selected_idx: 0,
+            anchor_offset: 0,
+            prefix_range: 0..prefix.len(),
+            prefix: prefix.to_string(),
+            incomplete: Vec::new(),
+        }
+    }
+
+    /// A re-ask answers for one server, so everything the popup holds from
+    /// elsewhere has to come through with it rather than being asked for again.
+    /// The re-asked server's own earlier items do not come through however well
+    /// they still match, since its new answer supersedes them.
+    #[test]
+    fn a_landed_re_ask_merges_what_the_popup_still_holds() {
+        let mut h = TestHarness::default();
+        h.stoat.pending_completion = Some(popup_over(
+            vec![
+                word("appleseed"),
+                served("apply_theme", None, None),
+                word("zebra"),
+            ],
+            "app",
+        ));
+
+        install_refill(
+            &mut h.stoat,
+            popup_over(vec![served("append", None, None)], "app"),
+            vec!["test".to_string()],
+        );
+
+        let popup = h
+            .stoat
+            .pending_completion
+            .as_ref()
+            .expect("popup installed");
+        let mut got = labels(&popup.items);
+        got.sort();
+        assert_eq!(
+            got,
+            ["append", "appleseed"],
+            "the fresh answer joins the surviving word, while the re-asked \
+             server's old item and the word the prefix no longer matches both go",
+        );
+    }
+
+    /// Accepting or dismissing while the re-ask is in flight takes the popup
+    /// down, and merging must not put back what it was holding.
+    #[test]
+    fn a_re_ask_landing_on_a_dismissed_popup_installs_the_fresh_items_alone() {
+        let mut h = TestHarness::default();
+        assert!(h.stoat.pending_completion.is_none(), "nothing is open");
+
+        install_refill(
+            &mut h.stoat,
+            popup_over(vec![served("append", None, None)], "app"),
+            vec!["test".to_string()],
+        );
+
+        let popup = h
+            .stoat
+            .pending_completion
+            .as_ref()
+            .expect("popup installed");
+        assert_eq!(labels(&popup.items), ["append"]);
     }
 
     #[test]

@@ -1422,10 +1422,10 @@ pub struct Stoat {
     /// In-flight debounced completion request. Replacing the entry
     /// drops the prior task, cancelling its spawned future before its
     /// debounce timer or downstream LSP request can land. Polled by
-    /// [`crate::completion::request::pump`] each render tick; on
-    /// `Ready` writes the resolved popup to [`Self::pending_completion`].
+    /// [`crate::completion::request::pump`] each render tick, which resolves
+    /// its outcome against [`Self::pending_completion`].
     pub(crate) pending_completion_request:
-        Option<stoat_scheduler::Task<crate::completion::CompletionPopup>>,
+        Option<stoat_scheduler::Task<crate::completion::request::RequestOutcome>>,
 
     /// In-flight debounced `completionItem/resolve` for the popup's
     /// selected row. Replacing the entry drops the prior task, so
