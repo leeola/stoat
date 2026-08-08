@@ -266,6 +266,15 @@ pub(crate) fn render_editor_with_overlay(
     } else if row_severity.is_empty() {
         0
     } else {
+        let rows = diagnostic_rows(
+            &snapshot,
+            row_severity,
+            editor.scroll_row,
+            inner,
+            end_row,
+            severity_version,
+            &mut editor.diagnostic_rows_cache,
+        );
         // Rich mode emits a sub-cell severity bar per row instead of the glyph,
         // engaging only with a scene and every severity color resolved to RGB.
         let rich = scene.as_deref_mut().zip(severity.as_ref());
@@ -282,19 +291,10 @@ pub(crate) fn render_editor_with_overlay(
                         .try_get(crate::theme::scope::UI_BACKGROUND)
                         .and_then(|st| st.bg)
                 }));
-                for display_row in editor.scroll_row..end_row {
-                    let row_offset = (display_row - editor.scroll_row) as u16;
-                    if row_offset >= inner.height {
-                        break;
-                    }
-                    let Some(sev) = buffer_row_of(&snapshot, display_row)
-                        .and_then(|row| row_severity.get(&row))
-                    else {
-                        continue;
-                    };
+                for &(row_offset, sev) in rows {
                     let color = match bar_bg {
-                        Some(bg) if dim > 0.0 => dim_rgb(severity_color(*sev, colors), bg, dim),
-                        _ => severity_color(*sev, colors),
+                        Some(bg) if dim > 0.0 => dim_rgb(severity_color(sev, colors), bg, dim),
+                        _ => severity_color(sev, colors),
                     };
                     Bar {
                         x: 0,
@@ -306,17 +306,7 @@ pub(crate) fn render_editor_with_overlay(
                     .render(area, buf, &mut *scene);
                 }
             },
-            None => paint_diagnostic_gutter(
-                &snapshot,
-                row_severity,
-                inner.x,
-                inner.y,
-                inner.height,
-                editor.scroll_row,
-                end_row,
-                theme,
-                buf,
-            ),
+            None => paint_diagnostic_gutter(rows, inner.x, inner.y, theme, buf),
         }
         1
     };
@@ -1245,6 +1235,61 @@ fn gutter_background(theme: &crate::theme::Theme, fallback_style: Style) -> Opti
     }))
 }
 
+/// The visible rows carrying a diagnostic, for the gutter with line numbers off.
+///
+/// Held rather than re-derived because resolving each visible display row to its
+/// buffer row is a descent down the layer stack, and the gutter asks for every
+/// row on every repaint. The line-numbers-on gutter caches the same question
+/// under [`GutterGeometryCache`], but shares no fields with this one, so mixing
+/// them would leave whichever path ran last holding a half-filled entry.
+pub(crate) struct DiagnosticRowsCache {
+    key: u64,
+    /// `(offset from the top of the viewport, severity)` for the rows that carry
+    /// one. Rows without a diagnostic are absent, both painters skipping them.
+    rows: Vec<(u16, DiagnosticSeverity)>,
+}
+
+/// The visible rows carrying a diagnostic, rebuilding `cache` only when the
+/// viewport's row mapping could have moved.
+///
+/// Keyed by [`gutter_geometry_key`], which already asks that question for the
+/// line-numbers-on gutter. It folds in the width, since that sets the wrap, and
+/// the diff version, which this does not read but which only ever costs a spare
+/// rebuild of a viewport-sized list.
+fn diagnostic_rows<'c>(
+    snapshot: &DisplaySnapshot,
+    row_severity: &BTreeMap<u32, DiagnosticSeverity>,
+    scroll_row: u32,
+    inner: Rect,
+    end_row: u32,
+    severity_version: u64,
+    cache: &'c mut Option<DiagnosticRowsCache>,
+) -> &'c [(u16, DiagnosticSeverity)] {
+    let key = gutter_geometry_key(
+        scroll_row,
+        inner.width,
+        end_row.saturating_sub(scroll_row),
+        snapshot.buffer_snapshot().version(),
+        snapshot.version(),
+        snapshot.diff_map().map_or(0, |dm| dm.version()),
+        severity_version,
+    );
+    if cache.as_ref().is_none_or(|c| c.key != key) {
+        let rows = (scroll_row..end_row)
+            .map_while(|display_row| {
+                let offset = (display_row - scroll_row) as u16;
+                (offset < inner.height).then_some((display_row, offset))
+            })
+            .filter_map(|(display_row, offset)| {
+                let row = buffer_row_of(snapshot, display_row)?;
+                Some((offset, *row_severity.get(&row)?))
+            })
+            .collect();
+        *cache = Some(DiagnosticRowsCache { key, rows });
+    }
+    &cache.as_ref().expect("filled just above").rows
+}
+
 /// The buffer row shown at `display_row`, or `None` when the row is a block's
 /// own and belongs to no buffer line.
 ///
@@ -1257,30 +1302,17 @@ fn buffer_row_of(snapshot: &DisplaySnapshot, display_row: u32) -> Option<u32> {
         .map(|point| point.row)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn paint_diagnostic_gutter(
-    snapshot: &DisplaySnapshot,
-    row_severity: &BTreeMap<u32, DiagnosticSeverity>,
+    rows: &[(u16, DiagnosticSeverity)],
     x: u16,
     y: u16,
-    height: u16,
-    scroll_row: u32,
-    end_row: u32,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
-    for display_row in scroll_row..end_row {
-        let row_offset = display_row.saturating_sub(scroll_row) as u16;
-        if row_offset >= height {
-            break;
-        }
-        let Some(sev) = buffer_row_of(snapshot, display_row).and_then(|row| row_severity.get(&row))
-        else {
-            continue;
-        };
-        let style = theme.get(severity_scope(*sev));
+    for &(row_offset, sev) in rows {
+        let style = theme.get(severity_scope(sev));
         buf[(x, y + row_offset)]
-            .set_char(severity_mark(*sev))
+            .set_char(severity_mark(sev))
             .set_style(style);
     }
 }
@@ -2584,6 +2616,71 @@ mod tests {
         );
     }
 
+    /// The rows are derived once and reused until something that could move
+    /// them does.
+    ///
+    /// Deriving them resolves every visible display row down the layer stack,
+    /// and the gutter asks on every repaint, so reuse is the whole point.
+    /// Each input is moved on its own because one missing from the key leaves
+    /// the gutter marking where a diagnostic used to be.
+    #[test]
+    fn the_diagnostic_rows_are_reused_until_an_input_moves() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/severity-cache");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"one\ntwo\nthree\nfour\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let severity: std::collections::BTreeMap<u32, DiagnosticSeverity> =
+            std::iter::once((2, DiagnosticSeverity::ERROR)).collect();
+        let area = Rect::new(0, 0, 4, 12);
+
+        let mut cache = None;
+        let rows = super::diagnostic_rows(&snapshot, &severity, 0, area, 4, 0, &mut cache).to_vec();
+        assert_eq!(
+            rows,
+            vec![(2u16, DiagnosticSeverity::ERROR)],
+            "the diagnostic's row carries its severity",
+        );
+
+        // A severity this text cannot produce marks the held entry, so reuse is
+        // told apart from a rebuild that lands on the same answer.
+        cache.as_mut().expect("built").rows[0].1 = DiagnosticSeverity::HINT;
+        assert_eq!(
+            super::diagnostic_rows(&snapshot, &severity, 0, area, 4, 0, &mut cache)[0].1,
+            DiagnosticSeverity::HINT,
+            "a repeat frame rebuilt the rows instead of reusing them",
+        );
+
+        for (label, scroll, rect, end, version) in [
+            ("a scroll", 1u32, area, 4u32, 0u64),
+            ("a resize", 0, Rect::new(0, 0, 5, 12), 4, 0),
+            ("a shorter viewport", 0, area, 3, 0),
+            ("a new diagnostic set", 0, area, 4, 1),
+        ] {
+            // From the same baseline each time, or one case's key change would
+            // stand in for the next's and an input missing from the key would
+            // go unnoticed.
+            let mut cache = None;
+            super::diagnostic_rows(&snapshot, &severity, 0, area, 4, 0, &mut cache);
+            cache.as_mut().expect("built").rows[0].1 = DiagnosticSeverity::HINT;
+
+            assert_eq!(
+                super::diagnostic_rows(
+                    &snapshot, &severity, scroll, rect, end, version, &mut cache
+                )
+                .first()
+                .map(|&(_, sev)| sev),
+                Some(DiagnosticSeverity::ERROR),
+                "{label} must derive the rows again",
+            );
+        }
+    }
+
     /// Severity is recorded per buffer row, and a wrapped line puts more display
     /// rows on screen than the buffer has, so the mark has to be painted at the
     /// display row its buffer row occupies.
@@ -2612,17 +2709,17 @@ mod tests {
             std::iter::once((1, DiagnosticSeverity::ERROR)).collect();
         let mut buf = Buffer::empty(Rect::new(0, 0, 4, 12));
         let theme = h.stoat.theme.clone();
-        super::paint_diagnostic_gutter(
+        let mut cache = None;
+        let rows = super::diagnostic_rows(
             &snapshot,
             &severity,
             0,
-            0,
-            12,
-            0,
+            Rect::new(0, 0, 4, 12),
             snapshot.line_count().min(12),
-            &theme,
-            &mut buf,
+            0,
+            &mut cache,
         );
+        super::paint_diagnostic_gutter(rows, 0, 0, &theme, &mut buf);
 
         let marked: Vec<u32> = (0..12)
             .filter(|&y| buf[(0, y)].symbol() != " ")

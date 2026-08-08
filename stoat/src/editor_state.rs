@@ -163,6 +163,13 @@ pub(crate) struct EditorState {
     /// otherwise be rebuilt per pane per frame for a name that changes only when
     /// the buffer or the workspace does. Transient render state, not persisted.
     pub(crate) status_filename: Option<StatusFilename>,
+    /// The visible rows carrying a diagnostic, for the gutter painted with line
+    /// numbers off.
+    ///
+    /// Deriving it resolves every visible display row down the layer stack to a
+    /// buffer row, which the line-numbers-on gutter already caches and this one
+    /// repeated per row per frame. Transient render state, not persisted.
+    pub(crate) diagnostic_rows_cache: Option<crate::render::editor::DiagnosticRowsCache>,
     /// Ids of the LSP inlay-hint inlays currently spliced into this editor's
     /// display map. Kept so a refresh can remove the prior hints before adding
     /// the new set. Transient render state, not persisted.
@@ -253,6 +260,7 @@ impl EditorState {
             highlight_endpoint_cache: None,
             diff_row_cache: None,
             status_filename: None,
+            diagnostic_rows_cache: None,
             hint_inlay_ids: Vec::new(),
             gutter_severity_cache: None,
             gutter_geometry_cache: None,
@@ -294,6 +302,7 @@ impl EditorState {
             highlight_endpoint_cache: None,
             diff_row_cache: None,
             status_filename: None,
+            diagnostic_rows_cache: None,
             hint_inlay_ids: Vec::new(),
             gutter_severity_cache: None,
             gutter_geometry_cache: None,
