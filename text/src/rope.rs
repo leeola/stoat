@@ -1338,6 +1338,15 @@ impl Rope {
         }
     }
 
+    /// The chunks spanning `range`, front to back, each clipped to it.
+    ///
+    /// A range that is empty or inverted covers no text and so yields nothing
+    /// at all, rather than one empty chunk. Callers that compute a range from
+    /// two independently derived offsets get an empty answer instead of a
+    /// panic when the two arrive out of order.
+    ///
+    /// See also:
+    /// - [`Self::reversed_chunks_in_range`] for the same span back to front.
     pub fn chunks_in_range(&self, range: Range<usize>) -> ChunksInRange<'_> {
         ChunksInRange {
             chunks: self.chunks.cursor::<usize>(()),
@@ -1403,6 +1412,14 @@ impl Rope {
         Input::new(self.regex_cursor_over(range))
     }
 
+    /// The chunks spanning `range`, back to front, each clipped to it.
+    ///
+    /// The chunks arrive in reverse order but their text does not, so a caller
+    /// rebuilding the span reverses the sequence rather than the bytes. An
+    /// empty or inverted range yields nothing, as it does going forward.
+    ///
+    /// See also:
+    /// - [`Self::chunks_in_range`] for the same span front to back.
     pub fn reversed_chunks_in_range(&self, range: Range<usize>) -> ReversedChunksInRange<'_> {
         let mut chunks = self.chunks.cursor::<usize>(());
         chunks.seek(&range.end, Bias::Right);
@@ -1590,6 +1607,10 @@ impl Rope {
         self.chunks.summary().lines_utf16
     }
 
+    /// The bytes spanning `range`, front to back.
+    ///
+    /// Walks [`Self::chunks_in_range`] and carries its contract, so an empty or
+    /// inverted range yields no bytes.
     pub fn bytes_in_range(&self, range: Range<usize>) -> BytesInRange<'_> {
         BytesInRange {
             chunks: self.chunks_in_range(range),
@@ -1734,6 +1755,10 @@ impl<'a> Iterator for ChunksInRange<'a> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.range.start >= self.range.end {
+            return None;
+        }
+
         if !self.started {
             self.started = true;
             self.chunks.seek(&self.range.start, Bias::Right);
@@ -2968,6 +2993,23 @@ mod tests {
         let rope = Rope::from("hello");
         let text: String = rope.chunks_in_range(3..3).collect();
         assert_eq!(text, "");
+    }
+
+    /// An inverted range covers no text, so every form of the walk yields
+    /// nothing rather than slicing a chunk backwards.
+    ///
+    /// A range built from two offsets derived apart from each other can arrive
+    /// out of order, and answering it with a panic makes that a crash in the
+    /// caller rather than an empty span it can carry on from.
+    #[test]
+    fn an_inverted_range_covers_nothing() {
+        let rope = Rope::from("hello world");
+        let start = 5;
+        let end = 3;
+
+        assert_eq!(rope.chunks_in_range(start..end).count(), 0);
+        assert_eq!(rope.bytes_in_range(start..end).count(), 0);
+        assert_eq!(rope.reversed_chunks_in_range(start..end).count(), 0);
     }
 
     #[test]
