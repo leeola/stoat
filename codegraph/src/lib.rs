@@ -330,13 +330,11 @@ impl CodeGraph {
     /// definition rather than dangle at a missing key.
     pub fn evict_file(&mut self, file: FileId) {
         self.evict_file_inner(file);
-        self.rebuild_adjacency();
     }
 
-    /// Evict a file's symbols and edges without rebuilding adjacency.
+    /// Evict a file's symbols and edges, keeping the adjacency exact.
     ///
-    /// Shared by [`Self::evict_file`] and [`Self::reindex`], which rebuild the
-    /// adjacency once after the full sequence.
+    /// Shared by [`Self::evict_file`] and [`Self::reindex`].
     ///
     /// Touches only the file's own edges and the edges the reverse adjacency
     /// says point into it, so the work follows the file rather than the
@@ -351,6 +349,7 @@ impl CodeGraph {
         // already gone by the time the degrade pass reaches it. The sweep this
         // replaced skipped those instead.
         for id in self.edges_by_file.remove(&file).unwrap_or_default() {
+            self.unlink_edge(id);
             if self.edges[id as usize].take().is_some() {
                 self.free_edges.push(id);
             }
@@ -361,6 +360,12 @@ impl CodeGraph {
         }
 
         for key in &keys {
+            // Both directions are empty by now. The file's own edges were the
+            // only ones leaving these symbols, and the degrade pass took every
+            // edge arriving at them.
+            self.out.remove(key);
+            self.inn.remove(key);
+
             if let Some(sym) = self.symbols.remove(key) {
                 remove_name_entry(&mut self.by_name, &sym.name, *key);
             }
@@ -369,19 +374,15 @@ impl CodeGraph {
 
     /// Point every edge resolved to `key` back at its name, so it can re-link to
     /// a future definition rather than dangle at a symbol about to be removed.
-    ///
-    /// The candidates come from the reverse adjacency, which holds a superset:
-    /// eviction leaves the ids of edges it dropped or degraded behind, so each
-    /// one is re-checked against the edge it names.
     fn degrade_edges_into(&mut self, key: SymbolKey) {
         let Some(name) = self.symbols.get(&key).map(|sym| sym.name.clone()) else {
             return;
         };
-        let Some(ids) = self.inn.get(&key) else {
+        let Some(ids) = self.inn.get(&key).cloned() else {
             return;
         };
 
-        for id in ids.clone() {
+        for id in ids {
             let Some(edge) = self.edges[id as usize].as_mut() else {
                 continue;
             };
@@ -397,17 +398,46 @@ impl CodeGraph {
                 kind,
             };
             edge.confidence = Confidence::NameMatch;
+
+            // Unresolved edges are not in the adjacency, and the caller drops
+            // the `inn` entry for `key` wholesale once this returns.
+            let from = edge.from;
+            drop_edge_from(&mut self.out, from, id);
+        }
+    }
+
+    /// Take an edge out of both adjacency directions.
+    ///
+    /// A no-op for an unresolved edge, which was never in either.
+    fn unlink_edge(&mut self, id: u32) {
+        let Some(edge) = self.edge(id) else {
+            return;
+        };
+        let from = edge.from;
+        let to = match edge.to {
+            Target::Sym(key) => Some(key),
+            Target::Unresolved { .. } => None,
+        };
+
+        drop_edge_from(&mut self.out, from, id);
+        if let Some(key) = to {
+            drop_edge_from(&mut self.inn, key, id);
         }
     }
 
     /// Re-link every still-unresolved edge against the current name index.
     ///
-    /// Insertion order does not affect the final graph. A call inserted
-    /// before its definition is left unresolved, and this pass resolves it
-    /// once the defining shard is present.
+    /// A call merged before its definition is left unresolved, and this pass
+    /// links it once the defining shard is present.
+    ///
+    /// Insertion order does affect which definition an ambiguous name binds to.
+    /// [`Self::insert_shard`] resolves each edge as it merges, so a name defined
+    /// in several files binds to whichever definition was in the graph first,
+    /// and a graph reached by a sequence of edits can differ from one built in
+    /// another order. What is guaranteed is that the same sequence of edits
+    /// gives the same graph.
     pub fn reresolve_unresolved(&mut self) {
         self.reresolve_unresolved_inner();
-        self.rebuild_adjacency();
     }
 
     /// Aggregate symbol, edge, and unresolved-edge counts for the whole graph.
@@ -422,10 +452,9 @@ impl CodeGraph {
         }
     }
 
-    /// Re-link unresolved edges without rebuilding adjacency.
+    /// Re-link unresolved edges, indexing each one it links.
     ///
-    /// Shared by [`Self::reresolve_unresolved`] and [`Self::reindex`], which
-    /// rebuild the adjacency once after the full sequence.
+    /// Shared by [`Self::reresolve_unresolved`] and [`Self::reindex`].
     fn reresolve_unresolved_inner(&mut self) {
         let updates: Vec<(u32, SymbolKey, Confidence)> = self
             .live_edges()
@@ -443,61 +472,45 @@ impl CodeGraph {
 
             edge.to = Target::Sym(key);
             edge.confidence = confidence;
+            self.link_edge(id, key);
         }
     }
 
-    /// Re-index one file in a single adjacency rebuild.
+    /// Re-index one file.
     ///
     /// Combines [`Self::evict_file`], [`Self::insert_shard`], and
-    /// [`Self::reresolve_unresolved`] but rebuilds `out`/`inn` only once at the
-    /// end, where the per-step variants would each rebuild the whole project.
+    /// [`Self::reresolve_unresolved`]. Only the re-resolution still costs the
+    /// whole graph.
     pub fn reindex(&mut self, file: FileId, shard: FileShard) {
         self.evict_file_inner(file);
         self.insert_shard(shard);
         self.reresolve_unresolved_inner();
-        self.rebuild_adjacency();
     }
 
-    /// Re-index one file without re-resolving edges or rebuilding adjacency.
+    /// Re-index one file without re-resolving edges.
     ///
     /// Evicts the file's prior symbols and edges, then merges the new shard.
-    /// Unlike [`Self::reindex`], cross-file links are left stale and the
-    /// `out`/`inn` adjacency is left inconsistent. A caller applying many
-    /// updates in a batch must call [`Self::reresolve_unresolved`] once
-    /// afterward to restore both. The graph must not be queried until then.
+    /// Unlike [`Self::reindex`], an edge naming a symbol this shard did not
+    /// bring is left unresolved even when another file defines it. A caller
+    /// applying many updates in a batch calls [`Self::reresolve_unresolved`]
+    /// once afterward to link them, and until then the graph answers as though
+    /// those definitions were absent.
+    ///
+    /// The adjacency stays exact throughout, so a query mid-batch is answered
+    /// correctly for the links that are present.
     pub fn apply_reindex(&mut self, file: FileId, shard: FileShard) {
         self.evict_file_inner(file);
         self.insert_shard(shard);
     }
 
-    /// Remove a file without re-resolving edges or rebuilding adjacency.
+    /// Remove a file without re-resolving edges.
     ///
-    /// Like [`Self::evict_file`] but leaves the `out`/`inn` adjacency
-    /// inconsistent, with edges that pointed at the removed symbols degraded to
-    /// unresolved and not yet re-linked. A caller applying many updates in a
-    /// batch must call [`Self::reresolve_unresolved`] once afterward to restore
-    /// both. The graph must not be queried until then.
+    /// Like [`Self::evict_file`], with the same batch caveat as
+    /// [`Self::apply_reindex`]: an edge that pointed at a removed symbol is
+    /// unresolved until [`Self::reresolve_unresolved`] finds it another
+    /// definition.
     pub fn apply_remove(&mut self, file: FileId) {
         self.evict_file_inner(file);
-    }
-
-    /// Rebuild `out`/`inn` from the current edges, indexing only edges
-    /// whose target resolves to a present symbol.
-    fn rebuild_adjacency(&mut self) {
-        self.out.clear();
-        self.inn.clear();
-
-        let linked: Vec<(u32, SymbolKey)> = self
-            .live_edges()
-            .filter_map(|(id, edge)| match edge.to {
-                Target::Sym(key) if self.symbols.contains_key(&key) => Some((id, key)),
-                _ => None,
-            })
-            .collect();
-
-        for (id, key) in linked {
-            self.link_edge(id, key);
-        }
     }
 
     /// Order a file's symbol keys by definition start so [`Self::symbol_at`]
@@ -702,6 +715,20 @@ fn remove_name_entry(
         entries.retain(|(_, k)| *k != key);
         if entries.is_empty() {
             by_name.remove(name);
+        }
+    }
+}
+
+/// Remove edge `id` from `key`'s adjacency bucket, dropping the bucket when it
+/// empties.
+///
+/// A symbol whose last edge goes leaves no entry, so the map holds one key per
+/// symbol that currently has an edge rather than one per symbol that ever did.
+fn drop_edge_from(adjacency: &mut HashMap<SymbolKey, SmallVec<[u32; 4]>>, key: SymbolKey, id: u32) {
+    if let Some(ids) = adjacency.get_mut(&key) {
+        ids.retain(|held| *held != id);
+        if ids.is_empty() {
+            adjacency.remove(&key);
         }
     }
 }
