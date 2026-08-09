@@ -308,6 +308,17 @@ impl Chunk {
         (self.advance_utf16(start, units as usize, line_end) - start.min(line_end)) as u32
     }
 
+    /// Bytes from `start` to where advancing `column` bytes lands, stopping at
+    /// the end of the line `start` falls on.
+    ///
+    /// The byte counterpart of [`Self::line_column_bytes`]. A column past the
+    /// row's end names no position in that row, so it collapses onto the end
+    /// rather than continuing into the row below.
+    fn line_column_capped(&self, start: usize, column: u32) -> u32 {
+        let line_end = self.line_end_from(start);
+        (line_end.min(start + column as usize) - start.min(line_end)) as u32
+    }
+
     fn summarize_from_bitmaps(&self) -> TextSummary {
         let text_len = self.text.len();
         let chars = self.chars.count_ones() as usize;
@@ -604,6 +615,12 @@ impl Rope {
         self.chunks.summary().lines
     }
 
+    /// Byte offset of `target`.
+    ///
+    /// A row past the last one answers the rope's length, and a column past its
+    /// row's end answers that row's end. Clamping rather than running on is
+    /// what keeps this the inverse of [`Self::offset_to_point`] and keeps it
+    /// agreeing with [`Self::clip_point`] and the UTF-16 conversions.
     pub fn point_to_offset(&self, target: Point) -> usize {
         let (start, _end, chunk_opt) =
             self.chunks
@@ -616,12 +633,16 @@ impl Rope {
         };
 
         let remaining_rows = target.row - chunk_start_point.row;
-        if remaining_rows == 0 {
-            return chunk_start_offset + (target.column - chunk_start_point.column) as usize;
-        }
+        let (line_start, column) = if remaining_rows == 0 {
+            (0, target.column - chunk_start_point.column)
+        } else {
+            (
+                nth_newline_offset_bitmap(chunk.newlines, remaining_rows),
+                target.column,
+            )
+        };
 
-        let pos = nth_newline_offset_bitmap(chunk.newlines, remaining_rows);
-        chunk_start_offset + pos + target.column as usize
+        chunk_start_offset + line_start + chunk.line_column_capped(line_start, column) as usize
     }
 
     pub fn offset_to_point(&self, offset: usize) -> Point {
@@ -699,12 +720,18 @@ impl Rope {
             results[original_idx] = match cursor.item() {
                 Some(chunk) => {
                     let remaining_rows = point.row - chunk_start_point.row;
-                    if remaining_rows == 0 {
-                        chunk_start_offset + (point.column - chunk_start_point.column) as usize
+                    let (line_start, column) = if remaining_rows == 0 {
+                        (0, point.column - chunk_start_point.column)
                     } else {
-                        let pos = nth_newline_offset_bitmap(chunk.newlines, remaining_rows);
-                        chunk_start_offset + pos + point.column as usize
-                    }
+                        (
+                            nth_newline_offset_bitmap(chunk.newlines, remaining_rows),
+                            point.column,
+                        )
+                    };
+
+                    chunk_start_offset
+                        + line_start
+                        + chunk.line_column_capped(line_start, column) as usize
                 },
                 None => len,
             };
@@ -1407,7 +1434,6 @@ impl Rope {
             None => return self.chunks.summary().lines_utf16,
         };
 
-        let text = chunk.text.as_str();
         let remaining_rows = target.row - chunk_start_point.row;
         let line_start = if remaining_rows == 0 {
             0
@@ -1416,12 +1442,12 @@ impl Rope {
         };
 
         let col_bytes = if remaining_rows == 0 {
-            (target.column - chunk_start_point.column) as usize
+            target.column - chunk_start_point.column
         } else {
-            target.column as usize
+            target.column
         };
 
-        let scan_end = (line_start + col_bytes).min(text.len());
+        let scan_end = line_start + chunk.line_column_capped(line_start, col_bytes) as usize;
         let utf16_col = bits_in(chunk.chars_utf16, line_start..scan_end).count_ones();
 
         chunk_start_utf16 + PointUtf16::new(remaining_rows, utf16_col)
@@ -2581,6 +2607,35 @@ mod tests {
     fn point_to_offset_past_end() {
         let rope = Rope::from("hello");
         assert_eq!(rope.point_to_offset(Point::new(1, 0)), 5);
+    }
+
+    /// A column past its row's end names the row's end, in every conversion
+    /// that reads one.
+    ///
+    /// Row 0 here holds one byte and row 1 holds four, so a column of 3 on row
+    /// 0 is out of range by two. Left uncapped it would count into row 1 and
+    /// answer a position on a different row, which makes the UTF-8 and UTF-16
+    /// conversions cease to be inverses of one another. Callers that carry a
+    /// point from one rope to another rely on the two agreeing.
+    #[test]
+    fn a_column_past_the_row_end_lands_on_the_row_end() {
+        let rope = Rope::from("a\nbbbb");
+
+        assert_eq!(
+            rope.clip_point(Point::new(0, 3), Bias::Right),
+            Point::new(0, 1)
+        );
+        assert_eq!(rope.points_to_offsets_batch(&[Point::new(0, 3)]), vec![1]);
+        assert_eq!(rope.point_to_offset(Point::new(0, 3)), 1);
+        assert_eq!(
+            rope.point_to_point_utf16(Point::new(0, 3)),
+            PointUtf16::new(0, 1)
+        );
+        assert_eq!(rope.point_utf16_to_offset(PointUtf16::new(0, 3)), 1);
+        assert_eq!(
+            rope.point_utf16_to_point(PointUtf16::new(0, 3)),
+            Point::new(0, 1)
+        );
     }
 
     #[test]
@@ -3994,13 +4049,24 @@ mod utf16_reference {
     }
 
     fn point_to_point_utf16(text: &str, point: Point) -> PointUtf16 {
-        let line_start = row_start(text, point.row);
-        let scan_end = (line_start + point.column as usize).min(text.len());
-        let column = text[line_start..scan_end]
-            .chars()
-            .map(|ch| ch.len_utf16() as u32)
-            .sum();
+        let mut column = 0u32;
+        let mut bytes = 0u32;
+        for ch in text[row_start(text, point.row)..].chars() {
+            if ch == '\n' || bytes >= point.column {
+                break;
+            }
+            bytes += ch.len_utf8() as u32;
+            column += ch.len_utf16() as u32;
+        }
         PointUtf16::new(point.row, column)
+    }
+
+    /// Byte offset of `target.column` bytes into `target.row`, stopping at the
+    /// end of the line.
+    fn point_to_offset(text: &str, target: Point) -> usize {
+        let start = row_start(text, target.row);
+        let line_len = text[start..].split('\n').next().map_or(0, str::len);
+        start + (target.column as usize).min(line_len)
     }
 
     fn point_utf16_to_point(text: &str, target: PointUtf16) -> Point {
@@ -4095,9 +4161,17 @@ mod utf16_reference {
                     .unwrap_or(0);
                 for column in 0..=(line_bytes as u32 + 2) {
                     let point = Point::new(row, column);
-                    if column as usize <= line_bytes
-                        && text.is_char_boundary(row_start(&text, row) + column as usize)
-                    {
+                    assert_eq!(
+                        rope.point_to_offset(point),
+                        point_to_offset(&text, point),
+                        "point_to_offset at {point:?} of {text:?}"
+                    );
+                    // A column landing inside a character has no UTF-16 answer
+                    // the two agree on, since a surrogate pair is one bit in
+                    // the chunk bitmap and two units in a char walk. A column
+                    // past the row's end clamps onto it, which is a boundary.
+                    let clamped = row_start(&text, row) + (column as usize).min(line_bytes);
+                    if text.is_char_boundary(clamped) {
                         assert_eq!(
                             rope.point_to_point_utf16(point),
                             point_to_point_utf16(&text, point),
