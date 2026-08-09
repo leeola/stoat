@@ -1988,7 +1988,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{Bias, ContextLessSummary, Dimension, Edit, Item, KeyedItem, SumTree, TREE_BASE};
-    use std::cmp::{self, Ordering};
+    use std::{
+        cmp::{self, Ordering},
+        ops::Range,
+    };
 
     #[derive(Clone, Debug)]
     struct TestItem;
@@ -2390,5 +2393,219 @@ mod tests {
     fn default_impl() {
         let tree = SumTree::<u8>::default();
         assert!(tree.is_empty());
+    }
+
+    struct Sampler(u64);
+
+    impl Sampler {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, limit: usize) -> usize {
+            (self.next() % limit as u64) as usize
+        }
+    }
+
+    /// Replace `range` with `items`, the way a positional edit reaches the tree.
+    ///
+    /// No keyed edit expresses this, so it goes through the cursor: slice off
+    /// the head, extend with the replacement, then append what the cursor
+    /// still has in front of it.
+    fn splice(tree: &SumTree<u8>, range: Range<usize>, items: Vec<u8>) -> SumTree<u8> {
+        let mut cursor = tree.cursor::<Count>(());
+        let mut spliced = cursor.slice(&Count(range.start), Bias::Right);
+        spliced.extend(items, ());
+        cursor.seek(&Count(range.end), Bias::Right);
+        spliced.append(cursor.suffix(), ());
+        spliced
+    }
+
+    /// The index a seek settles on for `Count(target)` under `bias`.
+    ///
+    /// The walk steps past an item while the target is greater than the count
+    /// so far, and also when the two are equal and the bias is `Right`. So a
+    /// right-biased seek lands on the item starting at `target` and a
+    /// left-biased one lands on the item ending there.
+    fn settled_index(target: usize, len: usize, bias: Bias) -> usize {
+        match bias {
+            Bias::Right => target.min(len),
+            Bias::Left => target.saturating_sub(1).min(len),
+        }
+    }
+
+    fn assert_reads_back(tree: &SumTree<u8>, reference: &[u8]) {
+        assert_eq!(tree.items(()), reference, "items() matches the reference");
+        assert_eq!(
+            tree.iter().copied().collect::<Vec<_>>(),
+            reference,
+            "the iterator matches the reference",
+        );
+
+        let mut cursor = tree.cursor::<Count>(());
+        let mut walked = Vec::new();
+        cursor.next();
+        while let Some(&item) = cursor.item() {
+            assert_eq!(
+                cursor.start().0,
+                walked.len(),
+                "the cursor counts what it has passed",
+            );
+            walked.push(item);
+            cursor.next();
+        }
+        assert_eq!(walked, reference, "a cursor walk matches the reference");
+        assert_eq!(
+            cursor.start().0,
+            reference.len(),
+            "the walk ends having counted every item",
+        );
+    }
+
+    fn assert_seeks_agree(tree: &SumTree<u8>, reference: &[u8], sampler: &mut Sampler) {
+        let len = reference.len();
+        for bias in [Bias::Left, Bias::Right] {
+            for _ in 0..8 {
+                let target = sampler.below(len + 3);
+                let settled = settled_index(target, len, bias);
+                let item = reference.get(settled);
+
+                let mut cursor = tree.cursor::<Count>(());
+                let found = cursor.seek(&Count(target), bias);
+                assert_eq!(
+                    (cursor.start().0, cursor.item()),
+                    (settled, item),
+                    "seek to {target} under {bias:?} over {len} items",
+                );
+                assert_eq!(
+                    found,
+                    settled + usize::from(bias == Bias::Left && settled < len) == target,
+                    "seek to {target} under {bias:?} reports whether it landed exactly",
+                );
+
+                let (start, end, found_item) = tree.find::<Count, _>((), &Count(target), bias);
+                assert_eq!(
+                    (start, end, found_item),
+                    (
+                        Count(settled),
+                        Count(settled + usize::from(item.is_some())),
+                        item,
+                    ),
+                    "find at {target} under {bias:?} answers the same place as seek",
+                );
+
+                let mut cursor = tree.cursor::<Count>(());
+                assert_eq!(
+                    cursor.summary::<_, Sum>(&Count(target), bias),
+                    Sum(reference[..settled].iter().map(|&v| v as usize).sum()),
+                    "the summary up to {target} under {bias:?} covers what the seek passed",
+                );
+            }
+        }
+    }
+
+    fn assert_filter_walks(tree: &SumTree<u8>, reference: &[u8]) {
+        let expected: Vec<(usize, u8)> = reference
+            .iter()
+            .enumerate()
+            .filter(|&(_, &v)| v % 2 == 0)
+            .map(|(i, &v)| (i, v))
+            .collect();
+
+        let mut forward = Vec::new();
+        let mut cursor = tree.filter::<_, Count>((), |summary| summary.contains_even);
+        cursor.next();
+        while let Some(&item) = cursor.item() {
+            forward.push((cursor.start().0, item));
+            cursor.next();
+        }
+        assert_eq!(forward, expected, "the filter walk skips the odd items");
+
+        let mut backward = Vec::new();
+        let mut cursor = tree.filter::<_, Count>((), |summary| summary.contains_even);
+        cursor.prev();
+        while let Some(&item) = cursor.item() {
+            backward.push((cursor.start().0, item));
+            cursor.prev();
+        }
+        backward.reverse();
+        assert_eq!(backward, expected, "and finds the same ones going back");
+    }
+
+    /// Walk off a random seek one item at a time in either direction.
+    ///
+    /// The position runs from -1 to `len`. Stepping back off the front leaves
+    /// the cursor holding no item at index zero, which is a state apart from
+    /// sitting at the end, and stepping forward from there returns to the
+    /// first item.
+    fn assert_steps_agree(tree: &SumTree<u8>, reference: &[u8], sampler: &mut Sampler) {
+        let len = reference.len();
+        let mut cursor = tree.cursor::<Count>(());
+        let seeded = sampler.below(len + 1);
+        cursor.seek(&Count(seeded), Bias::Right);
+        let mut at = seeded as isize;
+
+        for _ in 0..64 {
+            if sampler.next().is_multiple_of(2) {
+                cursor.next();
+                at = (at + 1).min(len as isize);
+            } else {
+                cursor.prev();
+                at = (at - 1).max(-1);
+            }
+
+            let item = usize::try_from(at).ok().and_then(|i| reference.get(i));
+            assert_eq!(
+                (cursor.start().0, cursor.item()),
+                (at.clamp(0, len as isize) as usize, item),
+                "stepping to {at} over {len} items",
+            );
+        }
+    }
+
+    /// A tree spliced at random reads back what a plain vector holds, however
+    /// it is walked and whichever bias the walk is asked for.
+    ///
+    /// The fixed tests above stay under ten items and seek right, so they never
+    /// reach the left-biased arms of the seek, nor a tree deep enough for the
+    /// cursor to ascend and descend more than once. Both are live under every
+    /// anchor the buffer resolves.
+    #[test]
+    fn a_spliced_tree_answers_what_the_reference_holds() {
+        let mut sampler = Sampler(0x243f_6a88_85a3_08d3);
+        let mut reference: Vec<u8> = (0..80).map(|_| (sampler.below(200)) as u8).collect();
+        let mut tree = SumTree::<u8>::default();
+        tree.extend(reference.clone(), ());
+
+        for case in 0..24 {
+            assert!(
+                reference.len() > (2 * TREE_BASE).pow(2),
+                "case {case} must keep the tree past two levels",
+            );
+            assert!(tree.is_internal(), "case {case} must not flatten the tree");
+
+            assert_reads_back(&tree, &reference);
+            assert_seeks_agree(&tree, &reference, &mut sampler);
+            assert_filter_walks(&tree, &reference);
+            assert_steps_agree(&tree, &reference, &mut sampler);
+
+            let start = sampler.below(reference.len());
+            let end = start + sampler.below(reference.len() - start + 1);
+            let inserted: Vec<u8> = (0..sampler.below(12))
+                .map(|_| sampler.below(200) as u8)
+                .collect();
+
+            tree = splice(&tree, start..end, inserted.clone());
+            reference.splice(start..end, inserted);
+
+            while reference.len() <= (2 * TREE_BASE).pow(2) * 2 {
+                let extra: Vec<u8> = (0..20).map(|_| sampler.below(200) as u8).collect();
+                tree.extend(extra.clone(), ());
+                reference.extend(extra);
+            }
+        }
     }
 }
