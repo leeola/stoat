@@ -9,6 +9,20 @@ pub enum CharCategory {
     Unknown,
 }
 
+/// The class a character belongs to, which the short-word (`w`/`b`/`e`)
+/// motions and the word text objects both break on wherever two neighbours
+/// differ.
+///
+/// Punctuation here is the ASCII set only, so a non-ASCII mark like an em dash
+/// or an ideographic full stop falls to `Unknown` and forms a class of its own.
+/// Helix reads Unicode general categories instead, which put those in
+/// `Punctuation` alongside their ASCII counterparts, so a full stop, an em
+/// dash, and a full stop are three spans here and one there.
+///
+/// The ASCII reading is deliberate. Following Helix needs a Unicode
+/// general-category table, a dependency nothing else in this crate wants, and
+/// the divergence only widens a `w` stop across runs of non-ASCII punctuation.
+/// Motions over ordinary text land in the same places either way.
 pub fn categorize_char(ch: char) -> CharCategory {
     if char_is_line_ending(ch) {
         CharCategory::Eol
@@ -646,6 +660,16 @@ mod tests {
         assert_eq!(categorize_char('\n'), CharCategory::Eol);
         assert_eq!(categorize_char('.'), CharCategory::Punctuation);
         assert_eq!(categorize_char(','), CharCategory::Punctuation);
+        assert_eq!(
+            categorize_char('\u{2014}'),
+            CharCategory::Unknown,
+            "an em dash is not ASCII punctuation, so it classes on its own",
+        );
+        assert_eq!(
+            categorize_char('\u{3002}'),
+            CharCategory::Unknown,
+            "and neither is an ideographic full stop",
+        );
     }
 
     /// A combining mark categorizes apart from the letter it sits on, so a
