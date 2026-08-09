@@ -21,6 +21,8 @@ use stoat_language::{RefKind, SymbolKind};
 
 mod build;
 mod codec;
+#[cfg(test)]
+mod reference;
 
 pub use build::build_shard;
 pub use codec::{
