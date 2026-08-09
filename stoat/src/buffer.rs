@@ -926,17 +926,35 @@ impl TextBuffer {
             return chunk_streams_match(saved.chunks(), current.chunks());
         };
 
-        self.snapshot
-            .edits_since(saved_version)
-            .edits()
-            .iter()
-            .all(|edit| {
-                edit.old.len() == edit.new.len()
-                    && chunk_streams_match(
-                        saved.chunks_in_range(edit.old.clone()),
-                        current.chunks_in_range(edit.new.clone()),
-                    )
-            })
+        let patch = self.snapshot.edits_since(saved_version);
+        let edits = patch.edits();
+        let (Some(first), Some(last)) = (edits.first(), edits.last()) else {
+            return true;
+        };
+
+        // Each edit against its own counterpart, while every one of them holds
+        // its length. Then each pair lines up on its own and the walk reads
+        // only what moved.
+        if edits.iter().all(|edit| edit.old.len() == edit.new.len()) {
+            return edits.iter().all(|edit| {
+                chunk_streams_match(
+                    saved.chunks_in_range(edit.old.clone()),
+                    current.chunks_in_range(edit.new.clone()),
+                )
+            });
+        }
+
+        // An edit that shifts lengths moves everything after it, so its
+        // neighbours no longer sit at the same offsets in both texts and cannot
+        // be paired off. One window spanning the whole set restores the
+        // alignment. The patch bounds every change, so the text before the
+        // first edit is untouched and the two windows start together. The text
+        // after the last is untouched too, and the counts above already made
+        // the totals equal, so they end together as well.
+        chunk_streams_match(
+            saved.chunks_in_range(first.old.start..last.old.end),
+            current.chunks_in_range(first.new.start..last.new.end),
+        )
     }
 
     /// Undo the top edit group, reverting all of its edits as one step. Returns
@@ -3722,6 +3740,26 @@ mod tests {
         }
     }
 
+    /// Two edits that cancel each other out land on the saved bytes, and
+    /// nothing joins them into one because they do not touch. Reading them one
+    /// at a time finds a delete and an insert of unequal length and calls the
+    /// buffer dirty, which is the move-a-line-down-and-back case and costs the
+    /// reader a save prompt on a file they did not change.
+    #[test]
+    fn edits_that_cancel_out_read_clean() {
+        let mut b = buf("xyxy");
+        b.mark_clean();
+
+        b.edit(0..2, "");
+        b.edit(2..2, "xy");
+
+        assert_eq!(b.snapshot.visible_text.to_string(), "xyxy");
+        assert!(
+            b.matches_saved_text(),
+            "the text is the saved text, byte for byte",
+        );
+    }
+
     /// A move that swaps two lines keeps every count the summary carries, so it
     /// is the shape the cheap guard cannot answer and the span comparison has to.
     #[test]
@@ -3749,7 +3787,7 @@ mod tests {
     fn random_step(rng: &mut Lcg, b: &mut TextBuffer) {
         const INSERTS: [&str; 5] = ["", "z", "hello ", "\u{65e5}\u{672c}", "\n  "];
 
-        match rng.below(10) {
+        match rng.below(11) {
             0..=4 => {
                 let text = b.snapshot.visible_text.to_string();
                 let a = random_boundary(rng, &text);
@@ -3763,8 +3801,18 @@ mod tests {
             7..=8 => {
                 b.undo();
             },
-            _ => {
+            9 => {
                 b.redo();
+            },
+            // Back onto the saved bytes without undoing to them. Undo is the
+            // only other way a run reaches them, and it rewinds the recorded
+            // edits along with the text, so a walk over those edits is never
+            // asked to answer for a buffer that arrived by editing.
+            _ => {
+                if let Some(saved) = b.saved_text.as_ref().map(|s| s.to_string()) {
+                    let len = b.snapshot.visible_text.len();
+                    b.edit(0..len, &saved);
+                }
             },
         }
     }
