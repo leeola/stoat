@@ -15,6 +15,13 @@ pub(crate) struct SelectionsCollection {
     /// Nothing mutates through the handle. Each mutator builds a new list and
     /// installs it, which is what the set-replacing ones did anyway.
     disjoint: Arc<[Selection<Anchor>]>,
+    /// Where in [`Self::disjoint`] the highest-id selection sits.
+    ///
+    /// The primary is asked for several times per keystroke and the set changes
+    /// about once, so finding it is recorded when the set is installed rather
+    /// than repeated on every read. Only [`Self::install`] writes it, which is
+    /// what keeps it true.
+    newest: usize,
 }
 
 impl SelectionsCollection {
@@ -29,7 +36,19 @@ impl SelectionsCollection {
         Self {
             next_selection_id: 1,
             disjoint: Arc::from([default]),
+            newest: 0,
         }
+    }
+
+    /// Install `disjoint` as the selection set, recording which entry is the
+    /// primary.
+    ///
+    /// The one way the set changes. Every mutator builds its list and hands it
+    /// here, so the recorded primary cannot fall out of step with the list it
+    /// indexes.
+    fn install(&mut self, disjoint: Arc<[Selection<Anchor>]>) {
+        self.newest = newest_index(&disjoint);
+        self.disjoint = disjoint;
     }
 
     pub(crate) fn all_anchors(&self) -> &[Selection<Anchor>] {
@@ -46,9 +65,14 @@ impl SelectionsCollection {
     }
 
     pub(crate) fn newest_anchor(&self) -> &Selection<Anchor> {
+        debug_assert_eq!(
+            self.newest,
+            newest_index(&self.disjoint),
+            "the recorded primary drifted from the set it indexes"
+        );
+
         self.disjoint
-            .iter()
-            .max_by_key(|s| s.id)
+            .get(self.newest)
             .expect("SelectionsCollection invariant: at least one selection")
     }
 
@@ -64,7 +88,7 @@ impl SelectionsCollection {
     /// the result stays ordered or deduplicated. Feeding it a
     /// position-preserving map keeps both.
     pub(crate) fn reanchor(&mut self, mut remap: impl FnMut(&Anchor) -> Anchor) {
-        self.disjoint = self
+        let remapped = self
             .disjoint
             .iter()
             .map(|selection| Selection {
@@ -73,6 +97,7 @@ impl SelectionsCollection {
                 ..selection.clone()
             })
             .collect();
+        self.install(remapped);
     }
 
     pub(crate) fn insert_cursor(
@@ -117,7 +142,7 @@ impl SelectionsCollection {
             reversed: false,
             goal,
         };
-        self.disjoint = insert_at(&self.disjoint, pos, selection);
+        self.install(insert_at(&self.disjoint, pos, selection));
     }
 
     /// Insert `selection`, minting a fresh id and keeping its span and
@@ -156,7 +181,7 @@ impl SelectionsCollection {
 
         selection.id = self.next_selection_id;
         self.next_selection_id += 1;
-        self.disjoint = insert_at(&self.disjoint, pos, selection);
+        self.install(insert_at(&self.disjoint, pos, selection));
     }
 
     /// Replace the collection with a single 1-wide block cursor over the first
@@ -166,20 +191,25 @@ impl SelectionsCollection {
     /// like Helix, rather than the zero-width placeholder [`Self::new`] holds
     /// before a rope is available. An empty buffer leaves a zero-width cursor.
     pub(crate) fn seed_cursor(&mut self, snapshot: &MultiBufferSnapshot) {
-        self.disjoint = Arc::from([block_cursor_at(0, SelectionGoal::None, 0, snapshot)]);
+        self.install(Arc::from([block_cursor_at(
+            0,
+            SelectionGoal::None,
+            0,
+            snapshot,
+        )]));
         self.next_selection_id = 1;
     }
 
     pub(crate) fn set_single_range(&mut self, start: Anchor, end: Anchor, goal: SelectionGoal) {
         let id = self.next_selection_id;
         self.next_selection_id += 1;
-        self.disjoint = Arc::from([Selection {
+        self.install(Arc::from([Selection {
             id,
             start,
             end,
             reversed: false,
             goal,
-        }]);
+        }]));
     }
 
     /// Replace the collection with a single 1-wide block cursor over the
@@ -191,7 +221,12 @@ impl SelectionsCollection {
     pub(crate) fn set_block_cursor(&mut self, offset: usize, snapshot: &MultiBufferSnapshot) {
         let id = self.next_selection_id;
         self.next_selection_id += 1;
-        self.disjoint = Arc::from([block_cursor_at(offset, SelectionGoal::None, id, snapshot)]);
+        self.install(Arc::from([block_cursor_at(
+            offset,
+            SelectionGoal::None,
+            id,
+            snapshot,
+        )]));
     }
 
     /// Replace the selection set with a saved `snapshot`, e.g. the selections an
@@ -205,12 +240,12 @@ impl SelectionsCollection {
         if let Some(max_id) = snapshot.iter().map(|s| s.id).max() {
             self.next_selection_id = self.next_selection_id.max(max_id + 1);
         }
-        self.disjoint = snapshot;
+        self.install(snapshot);
     }
 
     pub(crate) fn keep_primary(&mut self) {
         let primary = self.newest_anchor().clone();
-        self.disjoint = Arc::from([primary]);
+        self.install(Arc::from([primary]));
     }
 
     pub(crate) fn remove_primary(&mut self) {
@@ -218,12 +253,13 @@ impl SelectionsCollection {
             return;
         }
         let primary_id = self.newest_anchor().id;
-        self.disjoint = self
+        let kept = self
             .disjoint
             .iter()
             .filter(|s| s.id != primary_id)
             .cloned()
             .collect();
+        self.install(kept);
     }
 
     pub(crate) fn rotate_primary_by(&mut self, forward: bool, count: u32) {
@@ -248,7 +284,7 @@ impl SelectionsCollection {
         };
         let new_id = self.next_selection_id;
         self.next_selection_id += 1;
-        self.disjoint = self
+        let rotated = self
             .disjoint
             .iter()
             .enumerate()
@@ -260,6 +296,7 @@ impl SelectionsCollection {
                 false => selection.clone(),
             })
             .collect();
+        self.install(rotated);
     }
 
     pub(crate) fn transform<F>(&mut self, snapshot: &MultiBufferSnapshot, mut f: F)
@@ -464,7 +501,7 @@ impl SelectionsCollection {
             }
             deduped.push(entry);
         }
-        self.disjoint = deduped.into_iter().map(|r| r.selection).collect();
+        self.install(deduped.into_iter().map(|r| r.selection).collect());
     }
 
     /// Land a forward block cursor per selection, from offsets already in hand.
@@ -601,7 +638,7 @@ impl SelectionsCollection {
         let mut right = snapshot.anchors_at_batch(&right, Bias::Right).into_iter();
         let mut left = snapshot.anchors_at_batch(&left, Bias::Left).into_iter();
 
-        self.disjoint = deduped
+        let landed = deduped
             .into_iter()
             .map(|entry| {
                 let (start, end) = match entry.keep {
@@ -623,6 +660,7 @@ impl SelectionsCollection {
                 }
             })
             .collect();
+        self.install(landed);
     }
 }
 
@@ -663,6 +701,20 @@ pub(crate) fn merge_overlapping_spans(mut spans: Vec<(usize, usize)>) -> Vec<(us
 
 /// Build a forward 1-wide block cursor covering the character at `offset`,
 /// widening backward at the rope end where there is no next character.
+/// Where the highest-id selection sits in `selections`, or zero when there are
+/// none.
+///
+/// Ties go to the last, which is what `max_by_key` answers and so what the
+/// scan this replaces would have. Ids are minted from a counter that only
+/// climbs, so a tie means one selection listed twice.
+fn newest_index(selections: &[Selection<Anchor>]) -> usize {
+    selections
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, selection)| selection.id)
+        .map_or(0, |(index, _)| index)
+}
+
 /// `selections` with `selection` spliced in at `at`.
 ///
 /// A shared list cannot be inserted into, so the whole list is rebuilt. The
@@ -719,6 +771,92 @@ mod tests {
     };
     use std::sync::{Arc, RwLock};
     use stoat_text::Bias;
+
+    /// The recorded primary is only right while every path that changes the set
+    /// goes through the one place that records it. A mutator that assigned the
+    /// list directly would leave it pointing at whatever used to be there, and
+    /// the collection would go on answering with the wrong selection.
+    ///
+    /// Each case runs a mutator and asks who the primary is, against the scan
+    /// the index replaced.
+    #[test]
+    fn every_mutator_leaves_the_primary_findable() {
+        let multi = singleton("abcdefgh\nijklmnop\n");
+        let snapshot = multi.snapshot();
+        let at = |offset: usize| snapshot.anchor_at(offset, Bias::Right);
+
+        /// A named mutation of a collection, for a table pinning what each
+        /// one leaves behind.
+        type NamedMutation = (
+            &'static str,
+            fn(&mut SelectionsCollection, &MultiBufferSnapshot),
+        );
+
+        let cases: [NamedMutation; 12] = [
+            ("reanchor", |c, _| c.reanchor(|anchor| *anchor)),
+            ("insert_cursor", |c, s| {
+                c.insert_cursor(s.anchor_at(4, Bias::Right), SelectionGoal::None, s)
+            }),
+            ("insert_range", |c, s| {
+                c.insert_range(
+                    Selection {
+                        id: 0,
+                        start: s.anchor_at(2, Bias::Right),
+                        end: s.anchor_at(5, Bias::Right),
+                        reversed: false,
+                        goal: SelectionGoal::None,
+                    },
+                    s,
+                )
+            }),
+            ("seed_cursor", |c, s| c.seed_cursor(s)),
+            ("set_single_range", |c, s| {
+                c.set_single_range(
+                    s.anchor_at(1, Bias::Right),
+                    s.anchor_at(3, Bias::Right),
+                    SelectionGoal::None,
+                )
+            }),
+            ("set_block_cursor", |c, s| c.set_block_cursor(6, s)),
+            ("restore", |c, s| {
+                c.restore(Arc::from([Selection {
+                    id: 41,
+                    start: s.anchor_at(0, Bias::Right),
+                    end: s.anchor_at(1, Bias::Right),
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                }]))
+            }),
+            ("keep_primary", |c, _| c.keep_primary()),
+            ("remove_primary", |c, _| c.remove_primary()),
+            ("rotate_primary_by", |c, _| c.rotate_primary_by(true, 1)),
+            ("transform", |c, s| c.transform(s, |sel| sel.clone())),
+            ("land_block_cursors", |c, s| {
+                c.land_block_cursors(&[(0, 2)], s)
+            }),
+        ];
+
+        for (name, mutate) in cases {
+            // Two selections to start, so a mutator that keeps or drops one has
+            // something to choose between and the index can be wrong.
+            let mut collection = SelectionsCollection::new();
+            collection.insert_cursor(at(3), SelectionGoal::None, &snapshot);
+            collection.insert_cursor(at(6), SelectionGoal::None, &snapshot);
+
+            mutate(&mut collection, &snapshot);
+
+            let scanned = collection
+                .all_anchors()
+                .iter()
+                .max_by_key(|selection| selection.id)
+                .expect("at least one selection");
+            assert_eq!(
+                collection.newest_anchor().id,
+                scanned.id,
+                "after {name} the recorded primary is not the highest id"
+            );
+        }
+    }
 
     /// The undo group a keystroke opens keeps whatever this hands back, so it
     /// has to be the list itself. A copy would put the cursor count back into
