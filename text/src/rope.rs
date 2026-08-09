@@ -148,19 +148,35 @@ struct Chunk {
     /// for.
     chars_utf16: Bitmap,
     newlines: Bitmap,
+    /// One set bit per tab byte.
+    ///
+    /// A tab is the one character whose width depends on where it sits, so a
+    /// caller measuring display columns has to find them before it can do
+    /// anything cheaper than walking.
+    tabs: Bitmap,
+    /// One set bit per byte that occupies exactly one display cell on its own,
+    /// which is the printable ASCII range.
+    ///
+    /// Where these cover a run, its byte length is its column width, so it can
+    /// be measured without being decoded. Everything else -- tabs, control
+    /// bytes, anything multi-byte -- is left clear, since its width is either
+    /// positional or needs the character to answer.
+    single_width: Bitmap,
     text: ArrayString<MAX_BASE>,
 }
 
 impl Chunk {
     fn new(text: &str) -> Self {
-        let (chars, chars_utf16, newlines) = chunk_bitmaps(text);
+        let maps = chunk_bitmaps(text);
         let mut arr = ArrayString::new();
         arr.push_str(text);
 
         Self {
-            chars,
-            chars_utf16,
-            newlines,
+            chars: maps.chars,
+            chars_utf16: maps.chars_utf16,
+            newlines: maps.newlines,
+            tabs: maps.tabs,
+            single_width: maps.single_width,
             text: arr,
         }
     }
@@ -176,10 +192,12 @@ impl Chunk {
         // place. A surrogate pair's second bit sits at `i+1` of a four-byte
         // sequence, so it never reaches past the text it was built from and the
         // shift cannot push a bit out of the chunk.
-        let (chars, chars_utf16, newlines) = chunk_bitmaps(s);
-        self.chars |= chars << offset;
-        self.chars_utf16 |= chars_utf16 << offset;
-        self.newlines |= newlines << offset;
+        let maps = chunk_bitmaps(s);
+        self.chars |= maps.chars << offset;
+        self.chars_utf16 |= maps.chars_utf16 << offset;
+        self.newlines |= maps.newlines << offset;
+        self.tabs |= maps.tabs << offset;
+        self.single_width |= maps.single_width << offset;
     }
 
     fn len_utf16(&self) -> usize {
@@ -1346,6 +1364,24 @@ impl Rope {
     /// - [`Self::reversed_chunks_in_range`] for the same span back to front.
     pub fn chunks_in_range(&self, range: Range<usize>) -> ChunksInRange<'_> {
         ChunksInRange {
+            chunks: self.chunks_with_chunk(range),
+        }
+    }
+
+    /// This rope's chunks over `range`, each paired with whether its column
+    /// width is its byte length.
+    ///
+    /// For a caller measuring display columns, which can then add a run's
+    /// length instead of decoding it. See [`MeasuredChunk`] for what the flag
+    /// promises and what leaves it clear.
+    pub fn measured_chunks_in_range(&self, range: Range<usize>) -> MeasuredChunksInRange<'_> {
+        MeasuredChunksInRange {
+            chunks: self.chunks_with_chunk(range),
+        }
+    }
+
+    fn chunks_with_chunk(&self, range: Range<usize>) -> ChunksWithChunk<'_> {
+        ChunksWithChunk {
             chunks: self.chunks.cursor::<usize>(()),
             range,
             started: false,
@@ -1742,16 +1778,63 @@ impl<'a> LineWalk<'a> {
     }
 }
 
-pub struct ChunksInRange<'a> {
+/// A run of a rope's text, with what measuring it costs.
+///
+/// Yielded by [`Rope::measured_chunks_in_range`] for a caller working in
+/// display columns.
+pub struct MeasuredChunk<'a> {
+    pub text: &'a str,
+    /// Whether every byte here is one display cell on its own, so the run's
+    /// column width is its byte length and no character in it need be decoded.
+    ///
+    /// False for a run holding a tab, whose width depends on where it starts,
+    /// or anything outside printable ASCII, whose width the character has to
+    /// answer for. Such a run is measured the long way.
+    pub cell_per_byte: bool,
+}
+
+/// A rope's chunks over a range, each paired with whether it can be measured
+/// by its length.
+///
+/// The flag comes off the chunk's own bitmap rather than a scan, so a caller
+/// asking repeatedly about the same text pays for it once, when the chunk was
+/// built.
+pub struct MeasuredChunksInRange<'a> {
+    chunks: ChunksWithChunk<'a>,
+}
+
+impl<'a> Iterator for MeasuredChunksInRange<'a> {
+    type Item = MeasuredChunk<'a>;
+
+    fn next(&mut self) -> Option<MeasuredChunk<'a>> {
+        let (chunk, span) = self.chunks.next()?;
+        let width = bits_in(chunk.single_width, span.clone());
+        let covered = match span.len() as u32 >= Bitmap::BITS {
+            true => !0,
+            false => ((1 as Bitmap) << span.len()) - 1,
+        };
+
+        Some(MeasuredChunk {
+            text: &chunk.text.as_str()[span],
+            cell_per_byte: width == covered,
+        })
+    }
+}
+
+/// The chunks of a range, each with the byte span of it the range covers.
+///
+/// The shared walk under [`ChunksInRange`] and [`MeasuredChunksInRange`], which
+/// differ only in what they report about each chunk.
+struct ChunksWithChunk<'a> {
     chunks: sum_tree::Cursor<'a, 'a, Chunk, usize>,
     range: Range<usize>,
     started: bool,
 }
 
-impl<'a> Iterator for ChunksInRange<'a> {
-    type Item = &'a str;
+impl<'a> Iterator for ChunksWithChunk<'a> {
+    type Item = (&'a Chunk, Range<usize>);
 
-    fn next(&mut self) -> Option<Self::Item> {
+    fn next(&mut self) -> Option<(&'a Chunk, Range<usize>)> {
         if self.range.start >= self.range.end {
             return None;
         }
@@ -1773,7 +1856,20 @@ impl<'a> Iterator for ChunksInRange<'a> {
         let chunk_end = chunk_start + chunk.text.len();
         let local_end = self.range.end.min(chunk_end) - chunk_start;
 
-        Some(&chunk.text.as_str()[local_start..local_end])
+        Some((chunk, local_start..local_end))
+    }
+}
+
+pub struct ChunksInRange<'a> {
+    chunks: ChunksWithChunk<'a>,
+}
+
+impl<'a> Iterator for ChunksInRange<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        let (chunk, span) = self.chunks.next()?;
+        Some(&chunk.text.as_str()[span])
     }
 }
 
@@ -2242,32 +2338,53 @@ fn nth_set_bit_u64(v: u64, mut n: u64) -> u64 {
 /// Bytes are taken a lane at a time so the per-byte work is an 8-bit shift
 /// rather than one over the full mask width, and the lanes are assembled at the
 /// end.
-fn chunk_bitmaps(text: &str) -> (Bitmap, Bitmap, Bitmap) {
+fn chunk_bitmaps(text: &str) -> ChunkBitmaps {
     const LANE: usize = 8;
     let mut char_lanes = [0u8; MAX_BASE / LANE];
     let mut wide_lanes = [0u8; MAX_BASE / LANE];
     let mut newline_lanes = [0u8; MAX_BASE / LANE];
+    let mut tab_lanes = [0u8; MAX_BASE / LANE];
+    let mut single_width_lanes = [0u8; MAX_BASE / LANE];
 
     for (lane_ix, lane) in text.as_bytes().chunks(LANE).enumerate() {
         let (mut chars, mut wide, mut newlines) = (0u8, 0u8, 0u8);
+        let (mut tabs, mut single_width) = (0u8, 0u8);
         for (ix, &byte) in lane.iter().enumerate() {
             chars |= u8::from(byte & 0xC0 != 0x80) << ix;
             newlines |= u8::from(byte == b'\n') << ix;
             // A byte this large opens a four-byte sequence, which is the only
             // encoding costing two UTF-16 code units.
             wide |= u8::from(byte >= 240) << ix;
+            tabs |= u8::from(byte == b'\t') << ix;
+            // Printable ASCII, each character one byte and one cell. Control
+            // bytes and anything multi-byte are left out, since their width is
+            // either positional or needs the character to answer.
+            single_width |= u8::from(byte.is_ascii_graphic() || byte == b' ') << ix;
         }
         char_lanes[lane_ix] = chars;
         wide_lanes[lane_ix] = wide;
         newline_lanes[lane_ix] = newlines;
+        tab_lanes[lane_ix] = tabs;
+        single_width_lanes[lane_ix] = single_width;
     }
 
     let chars = Bitmap::from_le_bytes(char_lanes);
-    (
+    ChunkBitmaps {
         chars,
-        (Bitmap::from_le_bytes(wide_lanes) << 1) | chars,
-        Bitmap::from_le_bytes(newline_lanes),
-    )
+        chars_utf16: (Bitmap::from_le_bytes(wide_lanes) << 1) | chars,
+        newlines: Bitmap::from_le_bytes(newline_lanes),
+        tabs: Bitmap::from_le_bytes(tab_lanes),
+        single_width: Bitmap::from_le_bytes(single_width_lanes),
+    }
+}
+
+/// The per-byte maps a chunk keeps over its text.
+struct ChunkBitmaps {
+    chars: Bitmap,
+    chars_utf16: Bitmap,
+    newlines: Bitmap,
+    tabs: Bitmap,
+    single_width: Bitmap,
 }
 
 /// Byte offset just past the `n`th newline, counting from one.
@@ -2990,6 +3107,58 @@ mod tests {
         let rope = Rope::from("hello");
         let text: String = rope.chunks_in_range(3..3).collect();
         assert_eq!(text, "");
+    }
+
+    /// A caller adds a run's byte length in place of measuring it, so the flag
+    /// has to be false for anything whose width is not one cell per byte.
+    /// Getting that wrong misplaces a cursor rather than failing.
+    #[test]
+    fn a_measured_chunk_promises_one_cell_per_byte() {
+        let cases = [
+            ("plain ascii", true),
+            ("!@#$%^&*()", true),
+            ("", true),
+            ("with\ttab", false),
+            ("wide \u{4e00}", false),
+            ("mark e\u{301}", false),
+            ("bell \u{7}", false),
+            ("line\nbreak", false),
+        ];
+
+        for (text, expected) in cases {
+            let rope = Rope::from(text);
+            let measured: Vec<bool> = rope
+                .measured_chunks_in_range(0..rope.len())
+                .map(|chunk| chunk.cell_per_byte)
+                .collect();
+
+            assert_eq!(
+                measured.iter().all(|&flag| flag),
+                expected,
+                "{text:?} was measured as {measured:?}"
+            );
+        }
+    }
+
+    /// The flag describes the slice a caller is handed, not the chunk it came
+    /// out of, so a range landing inside a plain stretch of an otherwise
+    /// awkward chunk still takes the cheap path.
+    #[test]
+    fn a_measured_chunk_describes_the_slice_not_its_chunk() {
+        let rope = Rope::from("ab\tcd");
+
+        let plain: Vec<&str> = rope
+            .measured_chunks_in_range(3..5)
+            .filter(|chunk| chunk.cell_per_byte)
+            .map(|chunk| chunk.text)
+            .collect();
+        assert_eq!(plain, vec!["cd"], "the span past the tab is plain");
+
+        let over_tab: Vec<bool> = rope
+            .measured_chunks_in_range(0..5)
+            .map(|chunk| chunk.cell_per_byte)
+            .collect();
+        assert_eq!(over_tab, vec![false], "the span containing it is not");
     }
 
     /// An inverted range covers no text, so every form of the walk yields
