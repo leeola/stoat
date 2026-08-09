@@ -1593,6 +1593,13 @@ pub struct Stoat {
     /// that an action which edits nothing stops paying for one.
     #[cfg(test)]
     pub(crate) selection_snapshots: std::cell::Cell<u64>,
+    /// How many times the focused mode was resolved.
+    ///
+    /// Resolving walks the modal stack and clones a pane-tree view, and costs
+    /// nothing else, so a test needs the count to say the key guards ask once
+    /// rather than once each.
+    #[cfg(test)]
+    pub(crate) focused_mode_reads: std::cell::Cell<u64>,
     /// The editor chrome resolved from [`Self::theme`], rebuilt by
     /// [`Self::refresh_chrome`] when the theme has been replaced.
     ///
@@ -2067,6 +2074,8 @@ impl Stoat {
             keymap_lookups: std::cell::Cell::new(0),
             #[cfg(test)]
             selection_snapshots: std::cell::Cell::new(0),
+            #[cfg(test)]
+            focused_mode_reads: std::cell::Cell::new(0),
             chrome: None,
             dimmed_minimap_palette: None,
             smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
@@ -6087,7 +6096,27 @@ impl Stoat {
             return self.route_key_to_term(agent_id, key);
         }
 
-        if self.focused_mode() == "insert" {
+        // The guards below all turn on the mode, and resolving it walks the
+        // modal stack and clones a pane-tree view, so it is resolved once here
+        // and read as the three questions they ask of it. The answer is taken
+        // rather than borrowed because the chain mutates as it goes, and taken
+        // apart rather than copied because a String per keystroke is the sort
+        // of cost this avoids.
+        //
+        // One answer serves the whole chain because nothing in it changes the
+        // mode. The insert block returns on every path that mutates, and each
+        // guard below clears only its own pending flag. The assertion at the
+        // end of the chain is what keeps that true.
+        let (insert_mode, normal_mode, takes_pending) = {
+            let mode = self.focused_mode();
+            (
+                mode == "insert",
+                mode == "normal",
+                mode == "normal" || mode == "select",
+            )
+        };
+
+        if insert_mode {
             // A non-printable key the keymap binds falls through to the lookup
             // below, so bindings like `pane == run { Enter -> RunSubmit }`
             // override the built-in insert arms. Printable characters always
@@ -6119,9 +6148,7 @@ impl Stoat {
             }
         }
 
-        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
-            && self.pending_code_action_picker.is_some()
-        {
+        if takes_pending && self.pending_code_action_picker.is_some() {
             if let KeyCode::Char(ch) = key.code {
                 match ch {
                     'j' => {
@@ -6176,9 +6203,7 @@ impl Stoat {
             self.pending_code_action_request = None;
         }
 
-        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
-            && self.pending_symbol_picker.is_some()
-        {
+        if takes_pending && self.pending_symbol_picker.is_some() {
             if let KeyCode::Char(ch) = key.code {
                 match ch {
                     'j' => {
@@ -6237,9 +6262,7 @@ impl Stoat {
         // which also covers the SetMode-only keys that `continue` before the
         // post-dispatch clear below. Ctrl-c is consumed by the close in the
         // Ctrl-c block above, so it never reaches here.
-        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
-            && self.pending_hover.is_some()
-        {
+        if takes_pending && self.pending_hover.is_some() {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             let scroll_down =
                 matches!(key.code, KeyCode::PageDown) || (ctrl && key.code == KeyCode::Char('d'));
@@ -6279,9 +6302,7 @@ impl Stoat {
             }
         }
 
-        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
-            && self.pending_find.is_some()
-        {
+        if takes_pending && self.pending_find.is_some() {
             if let KeyCode::Char(ch) = key.code {
                 let (kind, extend, count) = self.pending_find.take().expect("checked above");
                 return action_handlers::movement::execute_find(self, kind, ch, extend, count);
@@ -6289,7 +6310,7 @@ impl Stoat {
             self.pending_find = None;
         }
 
-        if self.focused_mode() == "normal" && self.pending_mark.is_some() {
+        if normal_mode && self.pending_mark.is_some() {
             if let KeyCode::Char(ch) = key.code {
                 let request = self.pending_mark.take().expect("checked above");
                 return action_handlers::marks::execute_mark(self, request, ch);
@@ -6297,9 +6318,7 @@ impl Stoat {
             self.pending_mark = None;
         }
 
-        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
-            && self.pending_replace
-        {
+        if takes_pending && self.pending_replace {
             if let KeyCode::Char(ch) = key.code {
                 self.pending_replace = false;
                 return action_handlers::movement::execute_replace(self, ch);
@@ -6307,9 +6326,7 @@ impl Stoat {
             self.pending_replace = false;
         }
 
-        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
-            && self.pending_surround_add
-        {
+        if takes_pending && self.pending_surround_add {
             if let KeyCode::Char(ch) = key.code {
                 self.pending_surround_add = false;
                 return action_handlers::surround::execute_surround_add(self, ch);
@@ -6317,9 +6334,7 @@ impl Stoat {
             self.pending_surround_add = false;
         }
 
-        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
-            && self.pending_register_select
-        {
+        if takes_pending && self.pending_register_select {
             if let KeyCode::Char(ch) = key.code {
                 self.pending_register_select = false;
                 action_handlers::yank::execute_select_register(self, ch);
@@ -6328,7 +6343,7 @@ impl Stoat {
             self.pending_register_select = false;
         }
 
-        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
+        if takes_pending
             && self.pending_surround_replace
                 != action_handlers::surround::SurroundReplaceStage::Idle
         {
@@ -6351,9 +6366,7 @@ impl Stoat {
             self.pending_surround_replace = action_handlers::surround::SurroundReplaceStage::Idle;
         }
 
-        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
-            && self.pending_surround_delete
-        {
+        if takes_pending && self.pending_surround_delete {
             if let KeyCode::Char(ch) = key.code {
                 self.pending_surround_delete = false;
                 return action_handlers::surround::execute_surround_delete(self, ch);
@@ -6361,9 +6374,7 @@ impl Stoat {
             self.pending_surround_delete = false;
         }
 
-        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
-            && self.pending_textobject_select.is_some()
-        {
+        if takes_pending && self.pending_textobject_select.is_some() {
             if let KeyCode::Char(ch) = key.code {
                 let mode = self.pending_textobject_select.expect("checked above");
                 self.pending_textobject_select = None;
@@ -6372,9 +6383,7 @@ impl Stoat {
             self.pending_textobject_select = None;
         }
 
-        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
-            && self.pending_goto_word.is_some()
-        {
+        if takes_pending && self.pending_goto_word.is_some() {
             if let KeyCode::Char(ch) = key.code {
                 let labels = self.pending_goto_word.as_ref().expect("checked above");
                 match crate::goto_word::step_jump(labels, &self.pending_goto_word_input, ch) {
@@ -6398,7 +6407,17 @@ impl Stoat {
             self.pending_goto_word_input.clear();
         }
 
-        let count_active_mode = self.focused_mode() == "normal" || self.focused_mode() == "select";
+        // The guards above are read at the mode this press started in, which
+        // holds only while none of them changes it. They clear pending flags
+        // and nothing else today, and this is what says so if that stops being
+        // true.
+        debug_assert_eq!(
+            takes_pending,
+            matches!(self.focused_mode(), "normal" | "select"),
+            "a key guard changed the mode the guards after it were read at"
+        );
+
+        let count_active_mode = takes_pending;
         if count_active_mode
             && self.pending_count.is_some()
             && key.modifiers.is_empty()
@@ -6953,6 +6972,10 @@ impl Stoat {
     /// pane supplies its [`TermSession::mode`]. With no such target the mode
     /// falls back to [`Self::fallback_mode`].
     pub(crate) fn focused_mode(&self) -> &str {
+        #[cfg(test)]
+        self.focused_mode_reads
+            .set(self.focused_mode_reads.get() + 1);
+
         let ws = self.active_workspace();
         if let Some((editor_id, _)) = self.focused_editor_ids()
             && let Some(editor) = ws.editors.get(editor_id)
@@ -16023,7 +16046,39 @@ mod tests {
 
     /// A frame driven by background activity alone paints only the focused
     /// pane.
+    /// The key guards used to resolve the mode once each, and resolving it
+    /// walks the modal stack and clones a pane-tree view. Reading it once for
+    /// the whole chain took a movement key from twenty-two resolutions to nine.
     ///
+    /// A bound rather than a count, because the nine that remain belong to
+    /// callers this does not touch, and one of them arriving or leaving should
+    /// not fail a test about the guards. Anything near twenty means the chain
+    /// went back to asking per guard.
+    #[test]
+    fn the_key_guards_resolve_the_mode_once_between_them() {
+        use crate::test_harness::TestHarness;
+
+        let mut h = TestHarness::with_size(40, 6);
+        let file = h.write_file("a.rs", "hello world\nsecond line\n");
+        h.open_file(&file);
+
+        let before = h.stoat.focused_mode_reads.get();
+        h.type_keys("l");
+        let movement = h.stoat.focused_mode_reads.get() - before;
+        assert!(
+            movement <= 12,
+            "a movement key resolved the mode {movement} times"
+        );
+
+        let before = h.stoat.focused_mode_reads.get();
+        h.type_keys("i");
+        let entering = h.stoat.focused_mode_reads.get() - before;
+        assert!(
+            entering <= 12,
+            "entering insert resolved the mode {entering} times"
+        );
+    }
+
     /// An action brackets itself in an undo group, and a group that takes no
     /// edit is discarded on sealing, so the selections the seal would record are
     /// never read. Gathering them copies the whole selection set, which at
