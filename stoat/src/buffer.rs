@@ -864,6 +864,17 @@ impl TextBuffer {
     /// content) so a later undo/redo back to this frontier -- or any edit that
     /// restores the saved bytes -- clears [`Self::dirty`] again.
     pub(crate) fn mark_clean(&mut self) {
+        // A marker taken mid-group names a frontier undo can never land on,
+        // since undo pops whole groups, so the nearest undo steps past the
+        // saved state to before the group began. Sealing makes the save point a
+        // boundary, which a live buffer only needs for that reason and a
+        // restored one needs to read clean at all, having no saved bytes to
+        // compare against.
+        //
+        // Sealed with no selections, as `undo`, `redo` and `begin_group` all do
+        // at this level. The selections a group restores come from the caller,
+        // and a save has none to offer.
+        self.seal_group(Vec::new());
         self.saved_marker = self.frontier();
         self.saved_text = Some(self.snapshot.visible_text.clone());
         // The version the saved bytes belong to, which is not the marker above.
@@ -1823,6 +1834,41 @@ mod tests {
 
     fn buf(content: &str) -> TextBuffer {
         TextBuffer::with_text(BufferId::new(0), content)
+    }
+
+    /// A save during an insert session lands its marker on the last edit, and
+    /// undo pops whole groups, so without a boundary there the nearest undo
+    /// steps straight past the saved state to before the session began.
+    ///
+    /// A live buffer hides that behind the text comparison. A restored one
+    /// cannot, because the history carries the marker across but not the saved
+    /// bytes, leaving the frontier the only thing left to answer with.
+    #[test]
+    fn a_save_inside_an_insert_session_is_undoable_back_to() {
+        let mut b = buf("start\n");
+        b.begin_group(Vec::new());
+        b.edit(6..6, "one\n");
+        b.mark_clean();
+        let saved = b.snapshot.visible_text.to_string();
+
+        b.edit(10..10, "two\n");
+        b.seal_group(Vec::new());
+        assert!(b.dirty, "the edit after the save leaves it modified");
+
+        b.undo();
+        assert_eq!(
+            b.snapshot.visible_text.to_string(),
+            saved,
+            "the undo lands on the saved state rather than stepping past it",
+        );
+        assert!(!b.dirty, "and reads clean there");
+
+        let restored = TextBuffer::from_history(BufferId::new(0), &b.history());
+        assert_eq!(restored.snapshot.visible_text.to_string(), saved);
+        assert!(
+            !restored.dirty,
+            "the restored buffer agrees, with no saved bytes to fall back on",
+        );
     }
 
     /// Everything an `edit_batch` must reproduce, read off a buffer.
