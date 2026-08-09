@@ -139,17 +139,27 @@ pub enum Dir {
 
 /// The in-RAM graph the navigation hot path reads.
 ///
-/// Forward (`out`) and reverse (`inn`) adjacency map a symbol to the
-/// indices of its outgoing and incoming edges in `edges`. `by_name`
-/// indexes symbols by name for name-match resolution, and
-/// `by_file` groups them per file for incremental eviction.
+/// Forward (`out`) and reverse (`inn`) adjacency map a symbol to the ids of
+/// its outgoing and incoming edges. `by_name` indexes symbols by name for
+/// name-match resolution, and `by_file` groups them per file for incremental
+/// eviction.
 ///
 /// It is not serialized. It is rebuilt in RAM by merging [`FileShard`]s,
 /// which are what persist.
 #[derive(Debug, Default)]
 pub struct CodeGraph {
     symbols: HashMap<SymbolKey, Symbol>,
-    edges: Vec<Edge>,
+    /// Edges by id, with an evicted one left as a tombstone.
+    ///
+    /// An id is a position here and is what the adjacency and the per-file
+    /// index hold, so it has to survive eviction. Compacting the vector would
+    /// renumber every id past the hole, which is what forces a whole-graph
+    /// adjacency rebuild. A tombstone costs the slot until [`Self::free_edges`]
+    /// hands it out again.
+    edges: Vec<Option<Edge>>,
+    /// Tombstoned slots waiting to be reused, so a project that reindexes for
+    /// hours does not grow the edge vector without bound.
+    free_edges: Vec<u32>,
     out: HashMap<SymbolKey, SmallVec<[u32; 4]>>,
     inn: HashMap<SymbolKey, SmallVec<[u32; 4]>>,
     by_name: HashMap<String, SmallVec<[(SymbolKind, SymbolKey); 2]>>,
@@ -247,14 +257,52 @@ impl CodeGraph {
         for mut edge in shard.edges {
             let (confidence, resolved) = self.resolve_target(&edge.to);
             edge.confidence = confidence;
-            if let Some(key) = resolved {
-                edge.to = Target::Sym(key);
-                let idx = self.edges.len() as u32;
-                self.out.entry(edge.from).or_default().push(idx);
-                self.inn.entry(key).or_default().push(idx);
+
+            let linked = resolved.inspect(|&key| edge.to = Target::Sym(key));
+            let id = self.push_edge(edge);
+            if let Some(key) = linked {
+                self.link_edge(id, key);
             }
-            self.edges.push(edge);
         }
+    }
+
+    /// Store `edge` and report the id it can be found under, reusing a
+    /// tombstoned slot when one is free.
+    fn push_edge(&mut self, edge: Edge) -> u32 {
+        match self.free_edges.pop() {
+            Some(id) => {
+                self.edges[id as usize] = Some(edge);
+                id
+            },
+            None => {
+                self.edges.push(Some(edge));
+                (self.edges.len() - 1) as u32
+            },
+        }
+    }
+
+    /// The edge under `id`, or `None` for a tombstone.
+    fn edge(&self, id: u32) -> Option<&Edge> {
+        self.edges.get(id as usize)?.as_ref()
+    }
+
+    /// Every live edge with its id, ascending.
+    fn live_edges(&self) -> impl Iterator<Item = (u32, &Edge)> {
+        self.edges
+            .iter()
+            .enumerate()
+            .filter_map(|(id, edge)| edge.as_ref().map(|edge| (id as u32, edge)))
+    }
+
+    /// Index a resolved edge into both adjacency directions.
+    fn link_edge(&mut self, id: u32, to: SymbolKey) {
+        let from = self.edges[id as usize]
+            .as_ref()
+            .expect("linking a live edge")
+            .from;
+
+        self.out.entry(from).or_default().push(id);
+        self.inn.entry(to).or_default().push(id);
     }
 
     /// Remove a file's symbols and edges from the graph.
@@ -283,7 +331,7 @@ impl CodeGraph {
             .filter_map(|k| self.symbols.get(k).map(|s| (*k, s.name.clone())))
             .collect();
 
-        for edge in &mut self.edges {
+        for edge in self.edges.iter_mut().flatten() {
             if evicted.contains(&edge.from) {
                 continue;
             }
@@ -299,7 +347,16 @@ impl CodeGraph {
             }
         }
 
-        self.edges.retain(|edge| !evicted.contains(&edge.from));
+        for id in 0..self.edges.len() as u32 {
+            if self
+                .edge(id)
+                .is_some_and(|edge| evicted.contains(&edge.from))
+            {
+                self.edges[id as usize] = None;
+                self.free_edges.push(id);
+            }
+        }
+
         for key in &keys {
             if let Some(sym) = self.symbols.remove(key) {
                 remove_name_entry(&mut self.by_name, &sym.name, *key);
@@ -321,11 +378,10 @@ impl CodeGraph {
     pub fn stats(&self) -> GraphStats {
         GraphStats {
             symbols: self.symbols.len(),
-            edges: self.edges.len(),
+            edges: self.live_edges().count(),
             unresolved_edges: self
-                .edges
-                .iter()
-                .filter(|edge| matches!(edge.to, Target::Unresolved { .. }))
+                .live_edges()
+                .filter(|(_, edge)| matches!(edge.to, Target::Unresolved { .. }))
                 .count(),
         }
     }
@@ -335,20 +391,22 @@ impl CodeGraph {
     /// Shared by [`Self::reresolve_unresolved`] and [`Self::reindex`], which
     /// rebuild the adjacency once after the full sequence.
     fn reresolve_unresolved_inner(&mut self) {
-        let updates: Vec<(usize, SymbolKey, Confidence)> = self
-            .edges
-            .iter()
-            .enumerate()
+        let updates: Vec<(u32, SymbolKey, Confidence)> = self
+            .live_edges()
             .filter(|(_, edge)| matches!(edge.to, Target::Unresolved { .. }))
-            .filter_map(|(idx, edge)| {
+            .filter_map(|(id, edge)| {
                 let (confidence, key) = self.resolve_target(&edge.to);
-                key.map(|key| (idx, key, confidence))
+                key.map(|key| (id, key, confidence))
             })
             .collect();
 
-        for (idx, key, confidence) in updates {
-            self.edges[idx].to = Target::Sym(key);
-            self.edges[idx].confidence = confidence;
+        for (id, key, confidence) in updates {
+            let edge = self.edges[id as usize]
+                .as_mut()
+                .expect("resolving a live edge");
+
+            edge.to = Target::Sym(key);
+            edge.confidence = confidence;
         }
     }
 
@@ -392,13 +450,17 @@ impl CodeGraph {
     fn rebuild_adjacency(&mut self) {
         self.out.clear();
         self.inn.clear();
-        for (idx, edge) in self.edges.iter().enumerate() {
-            if let Target::Sym(key) = edge.to
-                && self.symbols.contains_key(&key)
-            {
-                self.out.entry(edge.from).or_default().push(idx as u32);
-                self.inn.entry(key).or_default().push(idx as u32);
-            }
+
+        let linked: Vec<(u32, SymbolKey)> = self
+            .live_edges()
+            .filter_map(|(id, edge)| match edge.to {
+                Target::Sym(key) if self.symbols.contains_key(&key) => Some((id, key)),
+                _ => None,
+            })
+            .collect();
+
+        for (id, key) in linked {
+            self.link_edge(id, key);
         }
     }
 
@@ -466,8 +528,8 @@ impl CodeGraph {
         };
         indices
             .iter()
-            .filter_map(|&idx| {
-                let edge = &self.edges[idx as usize];
+            .filter_map(|&id| {
+                let edge = self.edge(id)?;
                 if edge.kind != kind {
                     return None;
                 }
@@ -707,11 +769,11 @@ mod tests {
 
     fn call_edge(graph: &CodeGraph) -> Edge {
         graph
-            .edges
-            .iter()
-            .find(|e| e.kind == EdgeKind::Calls)
-            .cloned()
-            .unwrap()
+            .live_edges()
+            .find(|(_, edge)| edge.kind == EdgeKind::Calls)
+            .expect("a call edge")
+            .1
+            .clone()
     }
 
     fn key_for(graph: &CodeGraph, name: &str, kind: SymbolKind) -> SymbolKey {
@@ -829,10 +891,9 @@ mod tests {
         let impl_key = key_for(&graph, "Point", SymbolKind::Impl);
 
         let implements: Vec<(SymbolKey, Target)> = graph
-            .edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Implements)
-            .map(|e| (e.from, e.to.clone()))
+            .live_edges()
+            .filter(|(_, edge)| edge.kind == EdgeKind::Implements)
+            .map(|(_, edge)| (edge.from, edge.to.clone()))
             .collect();
         assert_eq!(implements, vec![(impl_key, Target::Sym(greet))]);
     }
