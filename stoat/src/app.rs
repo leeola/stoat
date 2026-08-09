@@ -556,6 +556,23 @@ pub(crate) fn modal_split_percent(
         .unwrap_or(crate::render::picker::DEFAULT_LIST_PERCENT)
 }
 
+/// One key press's keymap lookup, derived on demand.
+///
+/// The outer `Option` is whether the lookup has run, the inner one its answer,
+/// so a press that matched no binding is still only looked up once.
+///
+/// A press mutates the app as it falls through the readers, and every one of
+/// those mutations is outside what a keymap predicate reads, which is what lets
+/// the derivation happen at whichever reader gets there first rather than up
+/// front. See [`Stoat::handle_key`], where that is spelled out against the
+/// readers themselves.
+#[derive(Default)]
+struct KeymapLookup(Option<Option<BoundActions>>);
+
+/// The actions a key press's binding names, with the digit a counted binding
+/// captured out of the key itself.
+type BoundActions = (Arc<[ResolvedAction]>, Option<f64>);
+
 pub struct Stoat {
     size: Rect,
     /// Fallback mode store, read and written only when the focused target has
@@ -1563,6 +1580,13 @@ pub struct Stoat {
     /// leaves no trace in the frame it skipped. Counting is what lets a test
     /// say the skip occurred rather than that the output happened to match.
     pub(crate) pane_paints: u64,
+    /// How many key presses derived a keymap lookup.
+    ///
+    /// Whether a press consults the keymap is otherwise invisible, since the
+    /// derivation only costs time. Counting it is what lets a test say the
+    /// busiest keys still skip it.
+    #[cfg(test)]
+    pub(crate) keymap_lookups: std::cell::Cell<u64>,
     /// The editor chrome resolved from [`Self::theme`], rebuilt by
     /// [`Self::refresh_chrome`] when the theme has been replaced.
     ///
@@ -2033,6 +2057,8 @@ impl Stoat {
             paint_generation: 0,
             pane_cache: std::collections::HashMap::new(),
             pane_paints: 0,
+            #[cfg(test)]
+            keymap_lookups: std::cell::Cell::new(0),
             chrome: None,
             dimmed_minimap_palette: None,
             smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
@@ -5925,6 +5951,26 @@ impl Stoat {
         true
     }
 
+    /// The binding `key` resolves to, deriving it on the first reader and
+    /// answering the rest from `memo`.
+    ///
+    /// Takes the memo by reference rather than holding it on the pass, because
+    /// it is only good for the one key press it was derived for and a field
+    /// would outlive that.
+    fn keymap_lookup<'memo>(
+        &self,
+        key: &KeyEvent,
+        memo: &'memo mut KeymapLookup,
+    ) -> &'memo Option<BoundActions> {
+        memo.0.get_or_insert_with(|| {
+            #[cfg(test)]
+            self.keymap_lookups.set(self.keymap_lookups.get() + 1);
+
+            let state = StoatKeymapState::from_stoat(self);
+            self.keymap.lookup_with_capture(&state, key)
+        })
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> UpdateEffect {
         debug_assert_modal_exclusivity(self);
 
@@ -5933,21 +5979,21 @@ impl Stoat {
             .remove_by_source(crate::badge::BadgeSource::Version);
         self.lsp_message = None;
 
-        // The keymap state and binding lookup are derived once here and reused
-        // at every site below (Ctrl-C bound check, macro-toggle scan, insert
-        // fall-through, dispatch). `from_stoat` is expensive (two buffer read
-        // locks, a snapshot clone, mode/lang allocations) and none of the
-        // fall-through mutations between those sites feed a keymap predicate, so
-        // one derivation is behavior-preserving. Normalization runs first so the
-        // Ctrl-C block matches on the same key the lookup used.
+        // The keymap state and binding lookup are derived at most once per press
+        // and only for a press that reads them. `from_stoat` is expensive (two
+        // buffer read locks, a snapshot clone, mode and language allocations)
+        // and the lookup scans every compiled binding, while the busiest keys
+        // want neither. A printable insert character types without consulting
+        // the keymap, and terminal passthrough returns before any reader.
+        //
+        // Deriving late is sound for the same reason deriving once was. None of
+        // the fall-through mutations between the readers below feed a keymap
+        // predicate, so the state is the same wherever it is read.
+        //
+        // Normalization runs first so the Ctrl-C block matches on the same key
+        // the lookup used.
         let key = normalize_shift_event(key);
-        let (looked_up, captured_digit) = {
-            let state = StoatKeymapState::from_stoat(self);
-            match self.keymap.lookup_with_capture(&state, &key) {
-                Some((actions, captured)) => (Some(actions), captured),
-                None => (None, None),
-            }
-        };
+        let mut lookup = KeymapLookup::default();
 
         // This line diagnoses a key that appears dead in a running build. It
         // names which layer dropped the press. An absent line means the event
@@ -5960,9 +6006,13 @@ impl Stoat {
             mods = ?key.modifiers,
             modal = ?modal_predicate(self),
             mode = %self.focused_mode(),
-            actions = ?looked_up
+            // Evaluated only when the filter enables this line, so a release
+            // run never derives the lookup for it and a debug run keeps
+            // today's diagnostics.
+            actions = ?self
+                .keymap_lookup(&key, &mut lookup)
                 .as_ref()
-                .map(|actions| actions.iter().map(|a| &a.name).collect::<Vec<_>>()),
+                .map(|(actions, _)| actions.iter().map(|a| &a.name).collect::<Vec<_>>()),
             "key dispatch"
         );
 
@@ -5982,7 +6032,7 @@ impl Stoat {
             }
             // Ctrl-C with a keymap binding (`pane == run` -> RunInterrupt) routes
             // through the keymap below. An unbound Ctrl-C quits.
-            if looked_up.is_none() {
+            if self.keymap_lookup(&key, &mut lookup).is_none() {
                 return UpdateEffect::Quit;
             }
         }
@@ -5999,9 +6049,14 @@ impl Stoat {
             return UpdateEffect::Redraw;
         }
 
-        let is_record_macro_toggle = looked_up
-            .as_ref()
-            .is_some_and(|actions| actions.iter().any(|a| a.name == "RecordMacro"));
+        // Only a session that is recording can be toggled out of it, and the
+        // false branch calls `capture`, which is itself a no-op with nothing
+        // recording. So a session that never records never looks this up.
+        let is_record_macro_toggle = self.macro_recording.is_some()
+            && self
+                .keymap_lookup(&key, &mut lookup)
+                .as_ref()
+                .is_some_and(|(actions, _)| actions.iter().any(|a| a.name == "RecordMacro"));
         if !is_record_macro_toggle {
             action_handlers::macro_recording::capture(self, &key);
         }
@@ -6039,7 +6094,9 @@ impl Stoat {
             // None for it, so it falls through to the keymap and leaves insert.
             let insert_first =
                 printable || self.pending_completion.is_some() || self.pending_insert_register;
-            let keymap_binds = !insert_first && looked_up.is_some();
+            // Short-circuits for a printable character, which is what keeps
+            // ordinary typing off the lookup entirely.
+            let keymap_binds = !insert_first && self.keymap_lookup(&key, &mut lookup).is_some();
             if !keymap_binds && let Some(effect) = self.handle_insert_key(key) {
                 // If help is open, keep its filtered list in sync after every
                 // text mutation in the prompt input.
@@ -6350,7 +6407,7 @@ impl Stoat {
             return UpdateEffect::Redraw;
         }
 
-        let Some(actions) = looked_up else {
+        let Some((actions, captured_digit)) = self.keymap_lookup(&key, &mut lookup).clone() else {
             if count_active_mode
                 && let KeyCode::Char(ch) = key.code
                 && ch.is_ascii_digit()
@@ -15959,6 +16016,44 @@ mod tests {
     /// A frame driven by background activity alone paints only the focused
     /// pane.
     ///
+    /// Typing in insert mode is the busiest thing the editor does, and a
+    /// printable character never consults the keymap, so it must not pay to
+    /// derive the lookup. Nothing else would notice if it started to: the
+    /// derivation only costs time.
+    ///
+    /// The keys that do read a binding still derive one, which is what says the
+    /// counter is measuring something.
+    #[test]
+    fn typing_a_printable_character_never_derives_a_keymap_lookup() {
+        use crate::test_harness::TestHarness;
+
+        let mut h = TestHarness::with_size(40, 6);
+        let file = h.write_file("a.rs", "hello\n");
+        h.open_file(&file);
+
+        // `i` is a normal-mode binding and reads its own lookup.
+        h.type_keys("i");
+        let entering_insert = h.stoat.keymap_lookups.get();
+        assert!(
+            entering_insert > 0,
+            "entering insert resolves through the keymap"
+        );
+
+        h.type_text("abcdef");
+        assert_eq!(
+            h.stoat.keymap_lookups.get(),
+            entering_insert,
+            "six printable characters must derive no lookup between them"
+        );
+
+        // Escape is non-printable, so it falls through to the keymap.
+        h.type_keys("esc");
+        assert!(
+            h.stoat.keymap_lookups.get() > entering_insert,
+            "leaving insert resolves through the keymap"
+        );
+    }
+
     /// This is the case the cache exists for. A spinner tick redraws at its own
     /// rate while nothing a pane reads has moved, and every visible pane used to
     /// repaint in full for it. The focused one still paints, since its
