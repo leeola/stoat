@@ -162,6 +162,13 @@ pub struct CodeGraph {
     /// Tombstoned slots waiting to be reused, so a project that reindexes for
     /// hours does not grow the edge vector without bound.
     free_edges: Vec<u32>,
+    /// Edge ids grouped by the file their `from` symbol lives in.
+    ///
+    /// Every edge a shard contributes originates in that shard's file, so this
+    /// is what a file's eviction has to drop. Finding them by walking the whole
+    /// edge list instead would make the cost of one keystroke's reindex follow
+    /// the size of the project.
+    edges_by_file: HashMap<FileId, Vec<u32>>,
     out: HashMap<SymbolKey, SmallVec<[u32; 4]>>,
     inn: HashMap<SymbolKey, SmallVec<[u32; 4]>>,
     by_name: HashMap<String, SmallVec<[(SymbolKind, SymbolKey); 2]>>,
@@ -260,8 +267,16 @@ impl CodeGraph {
             let (confidence, resolved) = self.resolve_target(&edge.to);
             edge.confidence = confidence;
 
+            let origin = self.symbols.get(&edge.from).map(|sym| sym.file);
             let linked = resolved.inspect(|&key| edge.to = Target::Sym(key));
             let id = self.push_edge(edge);
+
+            // An edge whose source symbol is not in the graph belongs to no
+            // file's eviction set, so it would outlive every file. Shards carry
+            // their own symbols, so this only arises from a malformed one.
+            if let Some(origin) = origin {
+                self.edges_by_file.entry(origin).or_default().push(id);
+            }
             if let Some(key) = linked {
                 self.link_edge(id, key);
             }
@@ -322,47 +337,66 @@ impl CodeGraph {
     ///
     /// Shared by [`Self::evict_file`] and [`Self::reindex`], which rebuild the
     /// adjacency once after the full sequence.
+    ///
+    /// Touches only the file's own edges and the edges the reverse adjacency
+    /// says point into it, so the work follows the file rather than the
+    /// project.
     fn evict_file_inner(&mut self, file: FileId) {
         self.content_hashes.remove(&file);
         let Some(keys) = self.by_file.remove(&file) else {
             return;
         };
-        let evicted: HashSet<SymbolKey> = keys.iter().copied().collect();
-        let evicted_names: HashMap<SymbolKey, String> = keys
-            .iter()
-            .filter_map(|k| self.symbols.get(k).map(|s| (*k, s.name.clone())))
-            .collect();
 
-        for edge in self.edges.iter_mut().flatten() {
-            if evicted.contains(&edge.from) {
-                continue;
-            }
-            if let Target::Sym(key) = edge.to
-                && let Some(name) = evicted_names.get(&key)
-                && let Some(kind) = ref_kind_for(edge.kind)
-            {
-                edge.to = Target::Unresolved {
-                    name: name.clone(),
-                    kind,
-                };
-                edge.confidence = Confidence::NameMatch;
+        // The file's own edges go first, so an edge from this file into it is
+        // already gone by the time the degrade pass reaches it. The sweep this
+        // replaced skipped those instead.
+        for id in self.edges_by_file.remove(&file).unwrap_or_default() {
+            if self.edges[id as usize].take().is_some() {
+                self.free_edges.push(id);
             }
         }
 
-        for id in 0..self.edges.len() as u32 {
-            if self
-                .edge(id)
-                .is_some_and(|edge| evicted.contains(&edge.from))
-            {
-                self.edges[id as usize] = None;
-                self.free_edges.push(id);
-            }
+        for key in &keys {
+            self.degrade_edges_into(*key);
         }
 
         for key in &keys {
             if let Some(sym) = self.symbols.remove(key) {
                 remove_name_entry(&mut self.by_name, &sym.name, *key);
             }
+        }
+    }
+
+    /// Point every edge resolved to `key` back at its name, so it can re-link to
+    /// a future definition rather than dangle at a symbol about to be removed.
+    ///
+    /// The candidates come from the reverse adjacency, which holds a superset:
+    /// eviction leaves the ids of edges it dropped or degraded behind, so each
+    /// one is re-checked against the edge it names.
+    fn degrade_edges_into(&mut self, key: SymbolKey) {
+        let Some(name) = self.symbols.get(&key).map(|sym| sym.name.clone()) else {
+            return;
+        };
+        let Some(ids) = self.inn.get(&key) else {
+            return;
+        };
+
+        for id in ids.clone() {
+            let Some(edge) = self.edges[id as usize].as_mut() else {
+                continue;
+            };
+            if edge.to != Target::Sym(key) {
+                continue;
+            }
+            let Some(kind) = ref_kind_for(edge.kind) else {
+                continue;
+            };
+
+            edge.to = Target::Unresolved {
+                name: name.clone(),
+                kind,
+            };
+            edge.confidence = Confidence::NameMatch;
         }
     }
 

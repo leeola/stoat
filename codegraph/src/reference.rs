@@ -35,8 +35,12 @@ impl CodeGraph {
         self.reference_rebuild_adjacency();
     }
 
-    fn reference_evict_inner(&mut self, file: FileId) {
+    pub(crate) fn reference_evict_inner(&mut self, file: FileId) {
         self.content_hashes.remove(&file);
+        // Dropped rather than used. The sweep below finds the same edges by
+        // walking, but leaving the index behind would let it name slots a later
+        // insert has reused.
+        self.edges_by_file.remove(&file);
         let Some(keys) = self.by_file.remove(&file) else {
             return;
         };
@@ -318,6 +322,50 @@ mod tests {
                     canonical(&fast),
                     canonical(&slow),
                     "seed {seed} step {step} diverged on {rel}"
+                );
+            }
+        }
+    }
+
+    /// The application applies a whole drain of index updates before resolving
+    /// once, so the adjacency an eviction consults is whatever the last resolve
+    /// left plus what the applies since have linked. That is the shape the
+    /// incremental eviction has to be right under, and it is the only one the
+    /// editor ever uses.
+    #[test]
+    fn a_batch_of_applies_lands_where_the_sweeps_do() {
+        let shards = Shards::new();
+
+        for seed in 1..=16u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x2545_F491_4F6C_DD1D));
+            let mut fast = CodeGraph::new();
+            let mut slow = CodeGraph::new();
+
+            for round in 0..8 {
+                // Several files change before anything re-resolves, so an
+                // eviction mid-batch sees an adjacency nothing has rebuilt.
+                for _ in 0..=rng.below(3) {
+                    let file = FileId(rng.below(FILES as usize) as u32);
+                    let rel = format!("f{}.rs", file.0);
+
+                    if rng.below(4) == 0 {
+                        fast.apply_remove(file);
+                        slow.reference_evict_inner(file);
+                    } else {
+                        let shard = shards.of(file, &rel, &source(&mut rng));
+                        fast.apply_reindex(file, shard.clone());
+                        slow.reference_evict_inner(file);
+                        slow.insert_shard(shard);
+                    }
+                }
+
+                fast.reresolve_unresolved();
+                slow.reference_reresolve();
+
+                assert_eq!(
+                    canonical(&fast),
+                    canonical(&slow),
+                    "seed {seed} round {round} diverged"
                 );
             }
         }
