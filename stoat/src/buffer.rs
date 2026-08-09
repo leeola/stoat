@@ -89,7 +89,24 @@ pub struct TextBuffer {
     /// Grows without bound in a live session. [`Self::history`] is where the
     /// ceiling is applied, so what persists past [`OPS_COMPACT_THRESHOLD`] is a
     /// seed rather than this log.
+    ///
+    /// The seed edit a loaded file opens with carries no text. [`Self::seed_text`]
+    /// holds it instead, and [`Self::history`] puts it back.
     ops: Vec<BufferOp>,
+    /// Text [`Self::with_text`] loaded the buffer with, standing in for the
+    /// first entry of [`Self::ops`].
+    ///
+    /// Recording that entry the way every other edit is recorded would keep a
+    /// heap copy of the whole file for as long as the buffer is open, next to
+    /// the rope built from the same bytes. A rope costs nothing at load, since
+    /// it shares its chunks with the live one, and diverges only as far as the
+    /// edits since have rewritten them.
+    ///
+    /// `Some` exactly when the first op is that emptied seed edit, which is
+    /// what lets [`Self::history`] restore it by position. A buffer loaded
+    /// empty pushed no op and leaves this `None`, as does one replayed by
+    /// [`Self::from_history`], whose ops are all genuine.
+    seed_text: Option<Rope>,
     next_checkpoint_id: u32,
     /// Named markers on the op log placed by `commit_undo_checkpoint`. Read by
     /// checkpoint-navigation actions; never mutated by `edit` / `undo` / `redo`.
@@ -230,6 +247,7 @@ impl TextBuffer {
             open_group_started: false,
             open_group_before: Arc::from([]),
             ops: Vec::new(),
+            seed_text: None,
             next_checkpoint_id: 0,
             checkpoints: Vec::new(),
             indent_style: IndentStyle::default(),
@@ -240,6 +258,16 @@ impl TextBuffer {
         let mut buf = Self::new(buffer_id);
         if !text.is_empty() {
             buf.edit(0..0, text);
+
+            // Seeded through `edit` so the fragment tree, timestamps and dirty
+            // state are built exactly as any other edit builds them, then the
+            // recorded copy of the file is handed to the rope that already
+            // holds those bytes.
+            buf.seed_text = Some(buf.snapshot.visible_text.clone());
+            let Some(BufferOp::Edit { text, .. }) = buf.ops.first_mut() else {
+                unreachable!("the edit above is the log's first op")
+            };
+            *text = String::new();
         }
         // Empty content is a baseline too. Skipping this leaves `saved_text`
         // unset, and the content comparison that clears a round-trip edit
@@ -1212,8 +1240,19 @@ impl TextBuffer {
         if self.ops.len() > OPS_COMPACT_THRESHOLD {
             return self.compacted_history();
         }
+
+        let mut ops = self.ops.clone();
+        if let Some(seed) = &self.seed_text {
+            // Materialized only here, so what persists is the same log as ever
+            // and a restored buffer replays the load the way it was written.
+            let Some(BufferOp::Edit { text, .. }) = ops.first_mut() else {
+                unreachable!("a seeded log opens with the edit that loaded it")
+            };
+            *text = seed.to_string();
+        }
+
         BufferHistory {
-            ops: self.ops.clone(),
+            ops,
             saved_marker: self.saved_marker,
             undo_floor: self.undo_floor,
             compacted: false,
@@ -1835,7 +1874,7 @@ pub type SharedBuffer = Arc<std::sync::RwLock<TextBuffer>>;
 
 #[cfg(test)]
 mod tests {
-    use super::{insertion_edits, TextBuffer, TreeEdit, OPS_COMPACT_THRESHOLD};
+    use super::{insertion_edits, BufferOp, TextBuffer, TreeEdit, OPS_COMPACT_THRESHOLD};
     use std::{cmp::Ordering, mem, ops::Range, sync::Arc};
     use stoat_text::{
         Anchor, Bias, BufferId, IndentStyle, InsertionFragment, Locator, Point, Selection,
@@ -3212,6 +3251,45 @@ mod tests {
         assert_eq!(b.snapshot.visible_text.to_string(), "hello");
         assert!(b.undo().is_none(), "undo stops at the seeded baseline");
         assert_eq!(b.snapshot.visible_text.to_string(), "hello");
+    }
+
+    /// A loaded file lives in the rope, so the op log holds no second copy of
+    /// it, while what persists still carries the text a restore replays.
+    ///
+    /// Emptiness alone would not say the memory went. A string emptied without
+    /// releasing its buffer reads empty and still holds the file, so capacity
+    /// is what says nothing was kept.
+    #[test]
+    fn the_load_lives_in_the_rope_and_persists_from_it() {
+        let content = "seeded contents\nsecond line\n";
+        let mut b = buf(content);
+        b.edit(0..0, "user edit\n");
+
+        let BufferOp::Edit { old, text } = &b.ops[0] else {
+            panic!("the log opens with the load")
+        };
+        assert_eq!(*old, 0..0, "the load covers the empty buffer");
+        assert_eq!(
+            text.capacity(),
+            0,
+            "the load keeps no allocation of its own"
+        );
+
+        let history = b.history();
+        let BufferOp::Edit { old, text } = &history.ops[0] else {
+            panic!("the persisted log opens with the load")
+        };
+        assert_eq!((old.clone(), text.as_str()), (0..0, content));
+
+        let restored = TextBuffer::from_history(BufferId::new(0), &history);
+        assert_eq!(
+            restored.snapshot.visible_text.to_string(),
+            b.snapshot.visible_text.to_string(),
+        );
+        assert!(
+            restored.seed_text.is_none(),
+            "a replayed log has no load to stand in for",
+        );
     }
 
     #[test]
