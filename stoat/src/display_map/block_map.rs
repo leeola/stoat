@@ -2399,6 +2399,7 @@ mod tests {
         content: &str,
         wrap_width: u32,
         fold: Range<(u32, u32)>,
+        props: &[BlockProperties],
     ) -> super::BlockSnapshot {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
@@ -2430,7 +2431,9 @@ mod tests {
             test_executor(),
             crate::test_notify(),
         );
-        BlockMap::new().sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None)
+        let mut block_map = BlockMap::new();
+        block_map.insert(props.to_vec());
+        block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None)
     }
 
     /// Wrap-space clipping answers on whichever row the position it chose lives
@@ -2440,7 +2443,7 @@ mod tests {
     /// shows up as the rightward bias landing before the leftward one.
     #[test]
     fn clip_point_follows_a_fold_across_a_wrap_break() {
-        let snapshot = wrapped_block_snapshot("abcdefghij\nklm\n", 5, (0, 3)..(0, 7));
+        let snapshot = wrapped_block_snapshot("abcdefghij\nklm\n", 5, (0, 3)..(0, 7), &[]);
 
         for row in 0..snapshot.total_lines() {
             for column in 0..=snapshot.line_len(row) + 1 {
@@ -3141,6 +3144,36 @@ mod tests {
             rendered(&tied),
             vec!["line0", "alpha", "beta", "line1"],
             "an equal priority leaves insertion order deciding",
+        );
+    }
+
+    /// The same shape as [`a_near_block_survives_a_replacement_over_its_row`],
+    /// on a document whose layers hold more than one transform each.
+    ///
+    /// A replacement resolves its start and then its end, so a block anchored
+    /// inside the replaced span is looked up at a row behind the one just
+    /// resolved. The resolver walks all three layers with cursors, and a cursor
+    /// that only seeks forward fails on that lookup once the tree it walks has
+    /// somewhere to have moved from.
+    #[test]
+    fn a_near_block_inside_a_replacement_resolves_through_folds() {
+        let blocks = vec![
+            text_block(BlockPlacement::Replace { start: 1, end: 3 }, "replacement"),
+            text_block(BlockPlacement::Near(1), "near-block"),
+        ];
+        let snapshot = wrapped_block_snapshot(
+            "line0 with a long tail\nline1\nline2\nline3\nline4 also long here\n",
+            6,
+            (0, 3)..(0, 9),
+            &blocks,
+        );
+
+        let rows: Vec<String> = (0..snapshot.total_lines())
+            .map(|row| snapshot.display_line(row))
+            .collect();
+        assert!(
+            rows.iter().any(|row| row == "near-block"),
+            "the near block survives the replacement over its row: {rows:?}",
         );
     }
 

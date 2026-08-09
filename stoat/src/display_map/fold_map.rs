@@ -1870,8 +1870,13 @@ pub struct FoldPointCursor<'a> {
 impl FoldPointCursor<'_> {
     /// The cursor-held equivalent of [`FoldSnapshot::to_fold_point`], for a
     /// caller mapping a run of ascending points. Same semantics.
+    ///
+    /// A point behind the cursor is answered by seeking from the root, which is
+    /// the same work a fresh cursor would do. Callers that mostly ascend still
+    /// have a reason to hand back an occasional earlier point, so refusing one
+    /// would push the cost of a whole second pass onto them.
     pub fn map(&mut self, inlay_point: InlayPoint, bias: Bias) -> FoldPoint {
-        if self.cursor.did_seek() {
+        if self.cursor.did_seek() && inlay_point >= self.cursor.start().0 {
             self.cursor.seek_forward(&inlay_point, Bias::Right);
         } else {
             self.cursor.seek(&inlay_point, Bias::Right);

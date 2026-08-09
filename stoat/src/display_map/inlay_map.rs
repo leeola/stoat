@@ -1193,8 +1193,16 @@ pub struct InlayPointCursor<'a> {
 }
 
 impl InlayPointCursor<'_> {
+    /// Inlay position of `buffer_point`, carrying the cursor between calls.
+    ///
+    /// Ascending points are what this exists for, and they cost one forward
+    /// step. A point behind the cursor is answered by seeking from the root
+    /// instead, which is the same work a fresh cursor would do. Callers that
+    /// mostly ascend still have a reason to hand back an occasional earlier
+    /// point, so refusing one would push the cost of a whole second pass onto
+    /// them.
     pub fn map(&mut self, buffer_point: Point) -> InlayPoint {
-        if self.cursor.did_seek() {
+        if self.cursor.did_seek() && buffer_point >= self.cursor.start().0 {
             self.cursor.seek_forward(&buffer_point, Bias::Right);
         } else {
             self.cursor.seek(&buffer_point, Bias::Right);

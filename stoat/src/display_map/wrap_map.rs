@@ -1437,13 +1437,19 @@ pub struct WrapPointCursor<'a> {
 }
 
 impl WrapPointCursor<'_> {
+    /// Wrap position of `tab_point`, carrying the cursor between calls.
+    ///
+    /// A point behind the cursor is answered by seeking from the root, which is
+    /// the same work a fresh cursor would do. Callers that mostly ascend still
+    /// have a reason to hand back an occasional earlier point, so refusing one
+    /// would push the cost of a whole second pass onto them.
     pub fn map(&mut self, tab_point: TabPoint) -> WrapPoint {
         if self.wrap_width.is_none() {
             return WrapPoint::new(tab_point.row(), tab_point.column());
         }
 
         let target = InputRow(tab_point.row() + 1);
-        if self.cursor.did_seek() {
+        if self.cursor.did_seek() && target >= self.cursor.start().0 {
             self.cursor.seek_forward(&target, Bias::Left);
         } else {
             self.cursor.seek(&target, Bias::Left);
