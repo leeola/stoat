@@ -421,10 +421,12 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
         return UpdateEffect::None;
     }
 
-    // Line-shaped register content (every fragment ends with a line ending)
+    // Line-shaped register content (any fragment ends with a line ending)
     // pastes as a line rather than splicing mid-line. After puts it below the
-    // line, Before at the line start.
-    let linewise = fragments.iter().all(|f| f.ends_with('\n'));
+    // line, Before at the line start. One line-shaped fragment settles it for
+    // the whole paste, so fragments carrying no line ending land at a line
+    // start too.
+    let linewise = fragments.iter().any(|f| f.ends_with('\n'));
 
     let count = stoat.take_pending_count().unwrap_or(1).max(1) as usize;
 
@@ -1194,27 +1196,28 @@ mod tests {
         );
     }
 
-    /// A paste is linewise only when every fragment ends in a newline.
+    /// A single line-shaped fragment makes the whole paste linewise.
     ///
-    /// The reference implementation treats a register as linewise when *any*
-    /// fragment does. Stoat requires all of them, so a mixed register splices
-    /// in place rather than opening lines around content that was not
-    /// line-shaped. The divergence is deliberate and pinned here so it reads as
-    /// a decision rather than a discrepancy to reconcile.
+    /// A mixed register is what an ordinary multi-cursor yank produces when one
+    /// selection covers a line ending and another does not. The classification
+    /// is a property of the register rather than of each fragment, so the
+    /// fragment carrying no line ending opens a line as well instead of
+    /// splicing into the one it was pasted onto. This follows the reference
+    /// implementation, which asks the same question with `any`.
     #[test]
-    fn a_mixed_register_pastes_characterwise() {
+    fn a_mixed_register_pastes_linewise() {
         let mut h = TestHarness::with_size(40, 10);
-        let path = seed(&mut h, "abc\n");
+        let path = seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
         h.stoat.registers.write(
             crate::register::Register::Unnamed,
             vec!["X\n".to_string(), "Y".to_string()],
         );
-        h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
         assert_eq!(
             buffer_text(&h, &path),
-            "aX\nbc\n",
-            "one fragment lacking a newline makes the whole paste characterwise",
+            "abc\nX\ndef\nY",
+            "both fragments land at a line start, including the one with no newline",
         );
     }
 
