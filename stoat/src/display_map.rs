@@ -4147,4 +4147,26 @@ mod tests {
             }
         }
     }
+
+    /// Wrapping only ever splits a row into more rows, so a wrap snapshot can
+    /// never show fewer than the fold layer it holds.
+    ///
+    /// Two halves of one snapshot disagreeing is invisible where it happens and
+    /// surfaces far away, as a coordinate resolving past the end of a document
+    /// that is not actually that short.
+    #[test]
+    fn a_wrap_snapshot_shows_at_least_the_rows_beneath_it() {
+        for seed in 0..256 {
+            let mut display_map = sampler::random_display_map(seed);
+            let (wrap, ..) = display_map.sync_through_wrap();
+            let fold_rows = wrap.tab_snapshot().fold_snapshot().line_count();
+
+            assert!(
+                wrap.line_count() >= fold_rows,
+                "seed {seed}: wrap shows {} rows over a fold layer of {fold_rows}, at width {:?}",
+                wrap.line_count(),
+                wrap.wrap_width(),
+            );
+        }
+    }
 }

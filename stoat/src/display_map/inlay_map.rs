@@ -906,8 +906,17 @@ impl InlaySnapshot {
         self.to_inlay_point(Point::new(row, col))
     }
 
+    /// Rows this snapshot paints.
+    ///
+    /// A hint carrying a newline splits the row it sits on, so this can exceed
+    /// the buffer's own count. Every caller here measures inlay rows against
+    /// inlay rows, and one wanting the buffer's count reads it from
+    /// [`Self::buffer_snapshot`] instead.
     pub fn line_count(&self) -> u32 {
-        self.buffer.line_count()
+        if !self.has_inlays() {
+            return self.buffer.line_count();
+        }
+        self.transforms.summary().output.lines.row + 1
     }
 
     pub fn buffer_snapshot(&self) -> &MultiBufferSnapshot {

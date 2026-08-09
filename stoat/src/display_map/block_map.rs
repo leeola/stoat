@@ -1729,10 +1729,12 @@ fn kind_rank(block: &Block) -> u8 {
 ///
 /// A replacement is held to the rows `wrap_line_count` says exist. Its span is
 /// the only placement that consumes input, so a span running past the last row
-/// would build a transform tree claiming more rows than the document has. The
-/// wrap layer can report fewer rows than the fold layer beneath it while a
-/// deferred rewrap is outstanding, and this is resolved against whichever it is
-/// showing now.
+/// would build a transform tree claiming more rows than the document has, which
+/// the builders reject on their way out.
+///
+/// Kept as a bound rather than an assumption. Nothing known reaches past the
+/// last row today, and a resolution that did would otherwise surface as a
+/// tree-extent mismatch with no mention of the placement that caused it.
 fn resolve_block_placement(
     block: &Block,
     wrap_line_count: u32,
