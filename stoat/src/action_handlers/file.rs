@@ -3273,6 +3273,61 @@ mod tests {
         assert_eq!(on_disk(&h, &path), b"one\r\ntwo\r\n");
     }
 
+    /// Restore the workspace `h` last saved into a fresh one, the way
+    /// `--continue` does.
+    fn restore_session(h: &mut TestHarness) {
+        let state_path = PathBuf::from("/state/session.ron");
+        h.stoat
+            .active_workspace()
+            .save_state(&state_path, &*h.stoat.fs_host)
+            .expect("save state");
+
+        let target = h.create_workspace();
+        h.set_active_workspace(target);
+        h.stoat.spawn_workspace_restore(target, state_path);
+        h.settle();
+        h.stoat.drive_background();
+    }
+
+    /// The buffer normalised the terminators away on open, so nothing but the
+    /// session record says the file was CRLF. A restore that forgets rewrites
+    /// every line of the file on the first save.
+    #[test]
+    fn a_restored_crlf_file_still_saves_back_as_crlf() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/crlf-restore");
+        let path = open_rs(&mut h, &root, "a.rs", b"one\r\ntwo\r\n");
+
+        restore_session(&mut h);
+
+        dispatch(&mut h.stoat, &ForceSaveBuffer);
+        h.settle();
+
+        assert_eq!(on_disk(&h, &path), b"one\r\ntwo\r\n");
+    }
+
+    /// The guard compares against the mtime recorded when the file was read, so
+    /// a restore that forgets it leaves every restored buffer overwriting
+    /// whatever else touched the file meanwhile.
+    #[test]
+    fn a_restored_buffer_still_refuses_a_save_over_a_disk_change() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/mtime-restore");
+        let path = open_rs(&mut h, &root, "a.txt", b"original\n");
+
+        restore_session(&mut h);
+        h.fake_fs().insert_file(&path, b"external\n");
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.settle();
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("file changed on disk; use :w! to overwrite"),
+        );
+        assert_eq!(on_disk(&h, &path), b"external\n");
+    }
+
     #[test]
     fn a_crlf_buffer_holds_no_carriage_returns() {
         // The whole point of normalizing on load is that nothing downstream has

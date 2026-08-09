@@ -807,6 +807,8 @@ impl BufferRegistry {
                     let guard = entry.buffer.read().expect("buffer poisoned");
                     guard.history()
                 },
+                line_ending: entry.line_ending,
+                disk_mtime: entry.disk_mtime,
             })
             .collect();
         entries.sort_by_key(|e| e.id);
@@ -860,10 +862,10 @@ impl BufferRegistry {
                     lsp_symbol_kinds: None,
                     diff: None,
                     preview: false,
-                    disk_mtime: None,
+                    disk_mtime: entry.disk_mtime,
                     auto_reload: AutoReloadMode::Off,
                     last_shown: 0,
-                    line_ending: LineEnding::default(),
+                    line_ending: entry.line_ending,
                 },
             );
         }
@@ -886,6 +888,19 @@ pub(crate) struct BufferEntrySnap {
     pub id: BufferId,
     pub path: Option<PathBuf>,
     pub history: BufferHistory,
+    /// The terminator the file was read with. Persisted because the rope was
+    /// normalised to LF on open, so the text no longer says, and a restored
+    /// buffer would otherwise rewrite a CRLF file whole on its first save.
+    ///
+    /// Defaulted so a state file written before this field loads. Such a
+    /// session restores as LF, which is what it did before either way.
+    #[serde(default)]
+    pub line_ending: LineEnding,
+    /// The mtime recorded at the last open or save, which the save guard
+    /// compares against to refuse overwriting a file something else changed.
+    /// Without it a restored buffer has no baseline and the guard never fires.
+    #[serde(default)]
+    pub disk_mtime: Option<SystemTime>,
 }
 
 /// 32-byte blake3 hash of `text`. Used both to key [`CachedDiff`] in

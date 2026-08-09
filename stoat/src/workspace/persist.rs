@@ -1359,6 +1359,73 @@ mod tests {
         assert!(guard.dirty);
     }
 
+    /// Neither of these can be recovered after a restore. The rope was
+    /// normalised to LF on open so the text no longer says which terminator it
+    /// arrived with, and re-opening the path finds it already registered and
+    /// leaves both alone. So a session that drops them leaves the buffer
+    /// rewriting a CRLF file whole on its first save, with the guard that
+    /// refuses to overwrite an externally changed file permanently disarmed.
+    #[test]
+    fn a_restored_buffer_keeps_its_line_ending_and_disk_baseline() {
+        use std::time::{Duration, UNIX_EPOCH};
+        use stoat_text::LineEnding;
+
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let file = ws_dir.join("crlf.txt");
+        let exec = executor();
+        let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let (id, _) = ws.buffers.open(&file, "one\ntwo\n");
+        ws.buffers.set_line_ending(id, LineEnding::Crlf);
+        ws.buffers.set_disk_mtime(id, mtime);
+
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+
+        assert_eq!(fresh.buffers.line_ending(id), LineEnding::Crlf);
+        assert_eq!(fresh.buffers.disk_mtime(id), Some(mtime));
+    }
+
+    /// A session written before those two fields existed still loads, and its
+    /// buffers restore the way they did then.
+    #[test]
+    fn a_state_file_without_the_line_ending_field_loads() {
+        use stoat_text::LineEnding;
+
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let file = ws_dir.join("legacy.txt");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let (id, _) = ws.buffers.open(&file, "one\n");
+        ws.buffers.set_line_ending(id, LineEnding::Crlf);
+
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let body = {
+            let mut raw = Vec::new();
+            fake.read(&state_path, &mut raw).expect("state readable");
+            let text = String::from_utf8(raw).expect("state is utf8");
+            assert!(text.contains("line_ending"), "the field is written");
+            text.replace("line_ending: Crlf,", "")
+                .replace("disk_mtime: None,", "")
+        };
+        fake.insert_file(&state_path, body.as_bytes());
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+
+        assert_eq!(fresh.buffers.line_ending(id), LineEnding::Lf);
+        assert_eq!(fresh.buffers.disk_mtime(id), None);
+    }
+
     #[test]
     fn list_ron_files_sorts_newest_first() {
         let fake = FakeFs::new();

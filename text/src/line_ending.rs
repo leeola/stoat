@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
 /// Bytes of a file's leading run the detector reads before giving up.
@@ -15,7 +16,9 @@ const SCAN_BYTES: usize = 1000;
 ///
 /// The [`Default`] is [`LineEnding::Lf`], which is what a file carrying no
 /// terminator at all gets, and what a buffer with no file behind it starts as.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Default)]
+/// A session records this per buffer, since the text it was read from no longer
+/// says which terminator it arrived with.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum LineEnding {
     #[default]
     Lf,
