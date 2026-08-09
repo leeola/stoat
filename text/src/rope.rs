@@ -966,9 +966,8 @@ impl Rope {
         // The cursor needs the text before `offset` to answer, since whether a
         // boundary exists here depends on what it would be splitting.
         let mut cursor = GraphemeCursor::new(offset, self.len(), true);
-        let mut pos = offset;
         let on_boundary = loop {
-            let Some((chunk, chunk_start)) = self.chunk_at(pos) else {
+            let Some((chunk, chunk_start)) = self.chunk_at(offset) else {
                 return offset;
             };
             match cursor.is_boundary(chunk, chunk_start) {
@@ -979,15 +978,11 @@ impl Rope {
                     };
                     cursor.provide_context(ctx, ctx_start);
                 },
-                Err(GraphemeIncomplete::PrevChunk) => {
-                    let Some((_, chunk_start)) = self.chunk_at(pos) else {
-                        return offset;
-                    };
-                    if chunk_start == 0 {
-                        return offset;
-                    }
-                    pos = chunk_start - 1;
-                },
+                // `is_boundary` asks only for pre-context, or rejects the
+                // offset outright. It never asks for a neighbouring chunk, so
+                // there is nothing to step to and no answer to be had. The
+                // stepping pair goes through `next_boundary` and
+                // `prev_boundary`, which do ask, and handle it themselves.
                 Err(_) => return offset,
             }
         };
@@ -1125,15 +1120,17 @@ impl Rope {
 
     /// The character at every offset, in one forward walk of the tree.
     ///
-    /// Each answer is what `chars_at(offset).next()` would give, so an offset
-    /// at or past the rope end reads as `None`. For a caller reading one
-    /// character at each of many places -- the cell under every block cursor,
-    /// say -- this replaces a root descent per offset with a single walk.
+    /// For an offset on a char boundary, each answer is what
+    /// `chars_at(offset).next()` would give, so one at or past the rope end
+    /// reads as `None`. For a caller reading one character at each of many
+    /// places, such as the cell under every block cursor, this replaces a root
+    /// descent per offset with a single walk.
     ///
     /// Offsets are expected to sit on char boundaries. One that splits a scalar
     /// reads as `None` rather than being clipped onto the character it lands
     /// inside, since a caller asking about a position that is not a character
-    /// has no character to be told about.
+    /// has no character to be told about. That is also where the equivalence
+    /// above stops, since `chars_at` slices from the split offset and panics.
     ///
     /// The walk only goes forward, so the offsets are visited in ascending
     /// order and only input that is actually out of order pays for a
@@ -3857,6 +3854,10 @@ mod tests {
             .iter()
             .map(|&o| rope.prev_grapheme_boundary(o))
             .collect();
+        // The char read is only pinned against the scalar on char boundaries.
+        // Off one, the batch answers None while chars_at slices from the split
+        // offset and panics, so this filter is what keeps the comparison to
+        // where the two are meant to agree.
         let reads: Vec<usize> = steps
             .iter()
             .copied()
