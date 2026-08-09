@@ -6603,6 +6603,11 @@ impl Stoat {
     ///
     /// Line endings are normalized because a terminal forwards whatever the
     /// clipboard held, and a buffer holds LF.
+    ///
+    /// Into a modal's input they then collapse to spaces, since those are drawn
+    /// as a single row and a break would leave the cursor on a row that is
+    /// never painted. Every character still arrives, which is what a reader
+    /// pasting a wrapped path or a wrapped query wants.
     fn handle_paste(&mut self, text: &str) -> UpdateEffect {
         let Some((editor_id, buffer_id)) = self.focused_editor_ids() else {
             return UpdateEffect::None;
@@ -6611,10 +6616,13 @@ impl Stoat {
             return UpdateEffect::None;
         }
 
-        let normalized = match text.contains('\r') {
+        let mut normalized = match text.contains('\r') {
             true => text.replace("\r\n", "\n").replace('\r', "\n"),
             false => text.to_owned(),
         };
+        if self.active_modal_input().is_some() {
+            normalized = normalized.replace('\n', " ");
+        }
 
         let opened = self.begin_paste_undo_group();
         self.editor_insert(editor_id, buffer_id, &normalized);
@@ -17125,6 +17133,37 @@ mod tests {
             "keep\n",
             "and the buffer behind it is untouched",
         );
+    }
+
+    /// A modal's input is painted as a single row, so a pasted line break has
+    /// nowhere to go.
+    ///
+    /// The break would put the cursor on a row the region never draws, and the
+    /// query would carry a newline no filter expects. Every character of the
+    /// paste still arrives, with a space standing in for each break.
+    #[test]
+    fn a_multi_line_paste_into_a_modal_lands_on_one_row() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "note.txt", b"keep\n");
+        h.type_keys("space p");
+        assert!(h.stoat.file_finder.is_some(), "the finder is open");
+
+        h.stoat.update(Event::Paste("a\r\nb\nc".to_string()));
+
+        let ws = h.stoat.active_workspace();
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        assert_eq!(finder.input.text(ws), "a b c");
+
+        let rows = ws
+            .buffers
+            .get(finder.input.buffer_id)
+            .expect("input buffer")
+            .read()
+            .expect("poisoned")
+            .rope()
+            .max_point()
+            .row;
+        assert_eq!(rows, 0, "and the input is still the one row it paints");
     }
 
     fn open_indent_buffer(h: &mut crate::test_harness::TestHarness, name: &str, contents: &[u8]) {
