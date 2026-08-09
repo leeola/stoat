@@ -20,6 +20,7 @@ pub(crate) mod jumplist_picker;
 pub(crate) mod layout;
 pub(crate) mod location_picker;
 pub(crate) mod pane;
+pub(crate) mod pane_cache;
 pub(crate) mod picker;
 pub(crate) mod popout;
 pub(crate) mod quit_all_confirm;

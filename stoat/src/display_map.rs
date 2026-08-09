@@ -1018,7 +1018,9 @@ pub struct DisplaySnapshot {
 /// Only equality is defined. There is no sense in which one of these is later
 /// than another, since the parts count different things, so ordering is left
 /// out rather than left to be misread.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The [`Default`] is what a freshly built map answers with, before any layer
+/// has synced or any setter has fired.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PaintVersion {
     fold: usize,
     inlay: usize,
