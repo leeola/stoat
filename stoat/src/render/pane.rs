@@ -54,18 +54,7 @@ pub(crate) fn render_pane(
 ) {
     let theme = frame.theme;
     let text_style = theme.get(crate::theme::scope::UI_TEXT);
-    let (content_area, mut status_area) = split_pane_status(pane.area);
-
-    // The single-minimap band stops one row above the bottom. A status bar on
-    // that freed row, flush against the band's left edge, reclaims the band's
-    // width so it runs edge to edge. Mid-window status rows sit beside strip
-    // rows and stay pane-width.
-    if let Some(band) = frame.minimap_band
-        && status_area.y == band.y + band.height
-        && status_area.x + status_area.width == band.x
-    {
-        status_area.width += band.width;
-    }
+    let (content_area, status_area) = pane_areas(pane.area, frame.minimap_band);
 
     let PaneCtx {
         editors,
@@ -297,6 +286,28 @@ pub(crate) fn render_pane(
             }
         }
     }
+}
+
+/// A pane's content and status rectangles, given where the single-minimap band
+/// sits.
+///
+/// The band stops one row above the bottom. A status bar on that freed row,
+/// flush against the band's left edge, reclaims the band's width so it runs
+/// edge to edge. Mid-window status rows sit beside strip rows and stay
+/// pane-width.
+///
+/// Shared with the replay cache, which has to know both rectangles to record
+/// what a pane painted, and whose key would drift from the paint if it worked
+/// the widening out for itself.
+pub(crate) fn pane_areas(pane_area: Rect, minimap_band: Option<Rect>) -> (Rect, Rect) {
+    let (content_area, mut status_area) = split_pane_status(pane_area);
+    if let Some(band) = minimap_band
+        && status_area.y == band.y + band.height
+        && status_area.x + status_area.width == band.x
+    {
+        status_area.width += band.width;
+    }
+    (content_area, status_area)
 }
 
 /// Blend every RGB cell in `area` toward `bg` by `amount`, dimming an unfocused

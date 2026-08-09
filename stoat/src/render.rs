@@ -624,6 +624,7 @@ pub(crate) fn frame(
         pane::render_tab_bar(ws, bar, frame, buf, scene);
     }
 
+    let paint_generation = stoat.paint_generation;
     let split_focused = ws.panes.focus();
     let mut lsp_badge_rect: Option<Rect> = None;
     for (id, pane) in ws.panes.split_panes() {
@@ -634,6 +635,30 @@ pub(crate) fn frame(
         if pane.area.width == 0 || pane.area.height == 0 {
             continue;
         }
+
+        // Only an unfocused editor pane is replayable. A focused one paints the
+        // selections and cursor the key says nothing about, and a run, terminal
+        // or label pane reads state this never audited.
+        let key = (!is_focused)
+            .then(|| {
+                pane_cache::pane_cache_key(
+                    pane,
+                    &mut ws.editors,
+                    &ws.buffers,
+                    frame,
+                    paint_generation,
+                )
+            })
+            .flatten();
+        if let Some(key) = key
+            && let Some(entry) = stoat.pane_cache.get(&id)
+            && entry.key == key
+        {
+            entry.replay(buf, scene, undercurls);
+            continue;
+        }
+
+        let mark = pane_cache::PaintMark::take(scene, undercurls);
         pane::render_pane(
             pane,
             is_focused,
@@ -649,6 +674,22 @@ pub(crate) fn frame(
             undercurls,
             &mut lsp_badge_rect,
         );
+        stoat.pane_paints += 1;
+
+        if let Some(key) = key {
+            let (content, status) = pane::pane_areas(pane.area, frame.minimap_band);
+            stoat.pane_cache.insert(
+                id,
+                pane_cache::PaneCacheEntry::capture(
+                    key,
+                    &[content, status],
+                    buf,
+                    scene,
+                    undercurls,
+                    mark,
+                ),
+            );
+        }
     }
     stoat.lsp_badge_rect = lsp_badge_rect;
     if lsp_badge_rect.is_none() {

@@ -37,6 +37,7 @@ use crate::{
     register,
     render::{
         commit_picker::MIN_LIST_ROWS,
+        pane_cache::PaneCacheEntry,
         undercurl::{self, UndercurlBatch},
     },
     review_session::ReviewSource,
@@ -1549,6 +1550,19 @@ pub struct Stoat {
     /// of whether the theme itself moved and is hashed into the pooled page
     /// versions.
     pub(crate) paint_generation: u64,
+    /// Each unfocused editor pane's last paint, replayed while its key holds.
+    ///
+    /// Keyed by pane so a split's panes cache independently. An entry for a
+    /// pane that has gone away is simply never looked up again, which costs one
+    /// pane's cells until the map is next written.
+    pub(crate) pane_cache: std::collections::HashMap<PaneId, PaneCacheEntry>,
+    /// How many panes this session has actually painted, as opposed to
+    /// replayed.
+    ///
+    /// The whole point of the cache is a paint that does not happen, which
+    /// leaves no trace in the frame it skipped. Counting is what lets a test
+    /// say the skip occurred rather than that the output happened to match.
+    pub(crate) pane_paints: u64,
     /// The editor chrome resolved from [`Self::theme`], rebuilt by
     /// [`Self::refresh_chrome`] when the theme has been replaced.
     ///
@@ -2017,6 +2031,8 @@ impl Stoat {
             pending_undercurls: UndercurlBatch::default(),
             theme_epoch: 0,
             paint_generation: 0,
+            pane_cache: std::collections::HashMap::new(),
+            pane_paints: 0,
             chrome: None,
             dimmed_minimap_palette: None,
             smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
@@ -15819,6 +15835,242 @@ mod tests {
             (0..total as u32).collect::<Vec<_>>(),
             "the emitted splices cover every line exactly once",
         );
+    }
+
+    /// A two-pane split with the second file focused, painted once so both
+    /// panes' caches are warm.
+    ///
+    /// The unfocused pane's buffer carries a diagnostic, so its paint reaches
+    /// all three channels. Without one it produces no undercurl span at all,
+    /// and a replay that dropped them would pass unnoticed.
+    fn split_pair(h: &mut crate::test_harness::TestHarness) {
+        h.stoat.stoatty = true;
+        h.resize(120, 16);
+        let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
+        let b = h.write_file("b.txt", "delta\necho\nfoxtrot\n");
+        h.open_file(&a);
+        publish_one_diagnostic(h, &a);
+        h.type_action("SplitRight()");
+        h.open_file(&b);
+        h.settle();
+        let _ = h.stoat.render();
+    }
+
+    /// An error over the first word of `path`'s first line, anchored against the
+    /// buffer as it stands.
+    fn publish_one_diagnostic(h: &mut crate::test_harness::TestHarness, path: &std::path::Path) {
+        use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range as LspRange};
+
+        let snapshot = {
+            let ws = h.stoat.active_workspace();
+            let id = ws.buffers.id_for_path(path).expect("buffer registered");
+            ws.buffers
+                .get(id)
+                .expect("buffer")
+                .read()
+                .expect("poisoned")
+                .snapshot
+                .clone()
+        };
+        let anchors = crate::diagnostics::PublishedSpan {
+            anchors: Some((
+                snapshot.anchors_at_batch(&[0], Bias::Right)[0],
+                snapshot.anchors_at_batch(&[5], Bias::Left)[0],
+            )),
+        };
+        h.stoat.diagnostics.replace_from_server(
+            path.to_path_buf(),
+            "test".into(),
+            vec![Diagnostic {
+                range: LspRange {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 5,
+                    },
+                },
+                severity: Some(DiagnosticSeverity::ERROR),
+                message: String::new(),
+                ..Default::default()
+            }],
+            vec![anchors],
+        );
+    }
+
+    /// One frame's three output channels, for comparing a replayed frame
+    /// against a repainted one.
+    type FrameOutput = (Buffer, Vec<u8>, Vec<(u16, u16, u16, [u8; 3])>);
+
+    fn frame_output(h: &mut crate::test_harness::TestHarness) -> FrameOutput {
+        let buf = h.stoat.render();
+        let scene = h.stoat.apc_scene.bytes().to_vec();
+        let spans = h
+            .stoat
+            .pending_undercurls
+            .spans()
+            .iter()
+            .map(|span| (span.x, span.y, span.len, span.color))
+            .collect();
+        (buf, scene, spans)
+    }
+
+    /// Replaying an unfocused pane produces the frame repainting it would have,
+    /// while the focused pane alone is painted.
+    ///
+    /// A cache that skipped work but changed the output would be worse than no
+    /// cache, so the comparison is against the same frame with the cache
+    /// emptied rather than against a recorded expectation. All three channels
+    /// are compared, since cells alone would pass while the rich gutter, the
+    /// minimap strip, and the undercurls were dropped.
+    #[test]
+    fn a_replayed_pane_paints_what_repainting_it_would() {
+        let mut h = Stoat::test();
+        split_pair(&mut h);
+
+        h.type_keys("i");
+        h.type_text("X");
+        h.settle();
+
+        let painted_before = h.stoat.pane_paints;
+        let replayed = frame_output(&mut h);
+        assert_eq!(
+            h.stoat.pane_paints - painted_before,
+            1,
+            "the edited pane painted and the other replayed",
+        );
+
+        h.stoat.pane_cache.clear();
+        let painted_before = h.stoat.pane_paints;
+        let repainted = frame_output(&mut h);
+        assert_eq!(
+            h.stoat.pane_paints - painted_before,
+            2,
+            "and with the cache emptied both panes paint",
+        );
+
+        assert_eq!(replayed.0, repainted.0, "the cells match");
+        assert_eq!(replayed.1, repainted.1, "the scene bytes match");
+        assert_eq!(replayed.2, repainted.2, "the undercurl spans match");
+    }
+
+    /// A frame driven by background activity alone paints only the focused
+    /// pane.
+    ///
+    /// This is the case the cache exists for. A spinner tick redraws at its own
+    /// rate while nothing a pane reads has moved, and every visible pane used to
+    /// repaint in full for it. The focused one still paints, since its
+    /// selections and cursor are outside the key, so the saving is every pane
+    /// but that one.
+    #[test]
+    fn a_background_tick_paints_only_the_focused_pane() {
+        let mut h = Stoat::test();
+        split_pair(&mut h);
+
+        let before = h.stoat.pane_paints;
+        h.stoat.spinner_clock += 1.0;
+        let _ = h.stoat.render();
+
+        assert_eq!(
+            h.stoat.pane_paints - before,
+            1,
+            "the spinner moved nothing the unfocused pane reads",
+        );
+    }
+
+    /// Every input a pane paints from reaches its key.
+    ///
+    /// A key that ignored one of these would leave a pane showing stale content
+    /// with nothing to say it had, which is why each is moved through the real
+    /// session rather than by building two keys by hand.
+    ///
+    /// The assertion is on the key rather than on a paint count, because the
+    /// harness renders a frame per keystroke and the search case is several of
+    /// them. A key that moved is a replay refused, since the lookup compares
+    /// keys for equality before it hands anything back.
+    #[test]
+    fn each_input_that_moves_reaches_the_key() {
+        type Case = (&'static str, fn(&mut crate::test_harness::TestHarness));
+        let cases: [Case; 6] = [
+            ("theme", |h| {
+                action_handlers::dispatch(
+                    &mut h.stoat,
+                    &stoat_action::SetTheme {
+                        name: "gruvbox-light".to_string(),
+                    },
+                );
+            }),
+            ("search", |h| {
+                h.type_keys("/");
+                h.type_text("alpha");
+                h.type_keys("enter");
+            }),
+            ("inactive dim", |h| {
+                h.stoat.settings.ui_inactive_dim = Some(0.6);
+            }),
+            ("line numbers", |h| {
+                h.stoat.settings.editor_line_numbers = Some(LineNumbers::Off);
+            }),
+            ("diagnostics", |h| {
+                let path = h.stoat.active_workspace().git_root.join("a.txt");
+                h.stoat.diagnostics.replace_from_server(
+                    path,
+                    "test".into(),
+                    Vec::new(),
+                    Vec::new(),
+                );
+            }),
+            ("the unfocused pane's own text", |h| {
+                let ws = h.stoat.active_workspace_mut();
+                let first = ws.panes.split_pane_ids()[0];
+                let editor_id = match ws.panes.pane(first).view {
+                    View::Editor(id) => id,
+                    _ => panic!("the first pane holds an editor"),
+                };
+                let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
+                let buffer = ws.buffers.get(buffer_id).expect("buffer");
+                buffer.write().expect("poisoned").edit(0..0, "Z");
+            }),
+        ];
+
+        for (what, apply) in cases {
+            let mut h = Stoat::test();
+            split_pair(&mut h);
+            let _ = h.stoat.render();
+
+            let unfocused = {
+                let ws = h.stoat.active_workspace();
+                let focused = ws.panes.focus();
+                ws.panes
+                    .split_pane_ids()
+                    .into_iter()
+                    .find(|id| *id != focused)
+                    .expect("the split has an unfocused pane")
+            };
+            let before = h
+                .stoat
+                .pane_cache
+                .get(&unfocused)
+                .expect("the unfocused pane cached its paint")
+                .key;
+
+            apply(&mut h);
+            h.settle();
+            let _ = h.stoat.render();
+
+            let after = h
+                .stoat
+                .pane_cache
+                .get(&unfocused)
+                .expect("and cached it again")
+                .key;
+            assert_ne!(
+                before, after,
+                "{what} has to reach the unfocused pane's key"
+            );
+        }
     }
 
     #[test]
