@@ -220,6 +220,18 @@ pub struct TextPass {
     last_globals: Option<TextGlobals>,
     last_region_globals: Option<TextGlobals>,
     last_static_globals: Option<TextGlobals>,
+    /// The scroll region's rectangle as the cached instances were split
+    /// against, without its offset.
+    ///
+    /// Which buffer a cell lands in follows from the rectangle, and the region
+    /// buffer is drawn with the region's scroll applied. So a cell left on the
+    /// wrong side of a moved rectangle is drawn at the wrong height, and the
+    /// split has to be redone even on a frame that damaged no row.
+    ///
+    /// The offset is deliberately not part of this. It reaches the shader
+    /// through the globals uniform rather than through the split, so a region
+    /// that only scrolled keeps the instances it had.
+    last_region_rect: Option<(u16, u16, u16, u16)>,
     /// The group-0 layout the three globals bind groups share, kept so they can
     /// be rebuilt when [`Self::occluders`] reallocates.
     globals_layout: BindGroupLayout,
@@ -672,6 +684,7 @@ impl TextPass {
             last_globals: None,
             last_region_globals: None,
             last_static_globals: None,
+            last_region_rect: None,
             globals_layout,
             occluders,
             last_occluders: Vec::new(),
@@ -1003,11 +1016,14 @@ impl TextPass {
         // Text runs pack above, so a text-run grow is already folded into the
         // content epoch grid_build reads. Scroll no longer counts -- it rides the
         // globals uniform.
+        let region_rect = region.map(|r| (r.top, r.left, r.width, r.height));
         let build = grid_build(
             rebuilt.is_empty(),
+            region_rect != self.last_region_rect,
             self.atlas.content_epoch(),
             self.grid_atlas_epoch,
         );
+        self.last_region_rect = region_rect;
 
         if build != GridBuild::Reuse {
             let epoch_at_build = self.atlas.content_epoch();
@@ -2561,7 +2577,14 @@ impl TextPass {
                 content.starts.push(content.glyphs.len() as u32);
 
                 for &(col, row, ch) in &cells[line[0] as usize..line[1] as usize] {
-                    if row >= grid.rows() || col >= grid.cols() || ch == ' ' {
+                    // No bound on the row. Content lines are laid out at
+                    // increasing rows below the box's top, so a box holding more
+                    // lines than the screen has rows puts its later ones past
+                    // the bottom, and the popover's scroll is what brings them
+                    // back up. Culling them here would leave a scrolled box
+                    // drawing nothing. The column is bounded, since nothing
+                    // slides a box sideways.
+                    if col >= grid.cols() || ch == ' ' {
                         continue;
                     }
 
@@ -2764,8 +2787,19 @@ enum GridBuild {
 /// whole grid must be re-resolved. A frame-local texture-size compare misses the
 /// eviction case. An eviction reuses a slot without resizing the texture, so
 /// only the epoch reveals it.
-fn grid_build(rebuilt_empty: bool, current_epoch: u64, cached_epoch: u64) -> GridBuild {
-    if current_epoch != cached_epoch {
+///
+/// A moved scroll-region rectangle rebuilds for a different reason. It changes
+/// which cells belong to the region buffer, and that buffer is drawn with the
+/// region's scroll applied, so a cell left on the wrong side is drawn at the
+/// wrong height. Patching the damaged rows would not move the undamaged ones
+/// the rectangle now covers, so this is a full rebuild rather than a patch.
+fn grid_build(
+    rebuilt_empty: bool,
+    region_moved: bool,
+    current_epoch: u64,
+    cached_epoch: u64,
+) -> GridBuild {
+    if current_epoch != cached_epoch || region_moved {
         GridBuild::RebuildAll
     } else if rebuilt_empty {
         GridBuild::Reuse
@@ -3405,14 +3439,23 @@ mod tests {
 
     #[test]
     fn grid_build_rebuilds_all_when_the_atlas_epoch_moves() {
-        assert_eq!(grid_build(true, 7, 7), GridBuild::Reuse);
-        assert_eq!(grid_build(false, 7, 7), GridBuild::Patch);
+        assert_eq!(grid_build(true, false, 7, 7), GridBuild::Reuse);
+        assert_eq!(grid_build(false, false, 7, 7), GridBuild::Patch);
         assert_eq!(
-            grid_build(true, 8, 7),
+            grid_build(true, false, 8, 7),
             GridBuild::RebuildAll,
             "an eviction moves UVs, so undamaged rows must still rebuild"
         );
-        assert_eq!(grid_build(false, 8, 7), GridBuild::RebuildAll);
+        assert_eq!(grid_build(false, false, 8, 7), GridBuild::RebuildAll);
+    }
+
+    /// A moved region rectangle rebuilds whatever the damage says, because the
+    /// cells it gained or lost have to change buffers and a patch only reaches
+    /// the damaged ones.
+    #[test]
+    fn grid_build_rebuilds_all_when_the_region_rectangle_moves() {
+        assert_eq!(grid_build(true, true, 7, 7), GridBuild::RebuildAll);
+        assert_eq!(grid_build(false, true, 7, 7), GridBuild::RebuildAll);
     }
 
     /// The vertex stage's half of the split position, mirrored so the round trip
@@ -4831,6 +4874,12 @@ mod tests {
         }
     }
 
+    /// The scroll below stays inside the overlay's single line of content.
+    ///
+    /// A whole-line scroll over one line moves the window off the content
+    /// entirely, which `visible_lines` answers with an empty range, so the box
+    /// would correctly build nothing and the reshift path this pins would never
+    /// run.
     #[test]
     fn overlays_reshift_cached_bases_and_rebuild_on_content_change() {
         let Some((device, queue, mut pass)) = headless_text_pass() else {
@@ -4909,7 +4958,7 @@ mod tests {
             &queue,
             &grid,
             resolution,
-            &frame(&idle, &[5.0]),
+            &frame(&idle, &[0.5]),
             &[],
         );
         assert_eq!(
@@ -4995,8 +5044,12 @@ mod tests {
             }
         }
 
-        let built = |pass: &mut TextPass, count: usize, scroll: f32| {
-            let mut grid = Grid::new(40, 20);
+        // One grid across the three builds. A fresh one per call would start its
+        // popovers epoch back at zero every time, so the pass would see an
+        // unmoved epoch and keep the first call's shaped content, and a window
+        // computed for the longer content would clamp to the stale line count.
+        let mut grid = Grid::new(40, 20);
+        let mut built = |pass: &mut TextPass, count: usize, scroll: f32| {
             grid.set_overlays(vec![overlay(lines(count))]);
 
             let popovers = [scroll];
@@ -5029,11 +5082,17 @@ mod tests {
 
         // A window that ignored the scroll would sit at the top and be just as
         // small, so the instances have to have moved on as well as stayed few.
+        //
+        // Box-sized rather than equal to the unscrolled count. The window takes
+        // a line of slack on each side for a glyph straddling an edge, and at
+        // the top there is no line above the first to take, so an unscrolled
+        // box reads one fewer than a scrolled one.
         let scrolled = built(&mut pass, 400, 200.0);
-        assert_eq!(
-            scrolled.len(),
-            short.len(),
-            "the box reads the same number of lines wherever it sits"
+        let box_holds = 5 + 2;
+        assert!(
+            scrolled.len() <= box_holds,
+            "the box reads a box's worth wherever it sits, not {}",
+            scrolled.len()
         );
         assert!(
             scrolled.iter().all(|top| !short.contains(top)),

@@ -2274,7 +2274,6 @@ impl Terminal {
         }
         if self.decorations_dirty.popovers || resized {
             apply_popovers(grid, &self.popovers);
-            grid.bump_popovers_epoch();
         }
         if self.decorations_dirty.panels || resized {
             apply_panels(grid, &self.panels, &self.panel_seq);
@@ -2290,7 +2289,6 @@ impl Terminal {
         }
         if self.decorations_dirty.text_runs || layout_changed {
             apply_text_runs(grid, &self.text_runs, &self.text_run_seq);
-            grid.bump_text_runs_epoch();
         }
         if self.decorations_dirty.bars || layout_changed {
             apply_bars(grid, &self.bars, &self.bar_seq);

@@ -88,13 +88,22 @@ impl Grid {
         }
     }
 
-    /// Change counter for the overlay/popover decorations, bumped each time
-    /// [`crate::Terminal::project`] re-applies them.
+    /// Change counter for the overlay/popover decorations, moved by every entry
+    /// point that replaces the list.
+    ///
+    /// A renderer caches shaped overlay content against this, so a list that
+    /// changed without moving the counter leaves the stale content drawn. The
+    /// counter is maintained here rather than by the caller replacing the list,
+    /// because a caller that forgets is invisible until something paints wrong.
     pub fn popovers_epoch(&self) -> u64 {
         self.popovers_epoch
     }
 
-    /// Change counter for the off-grid text-run decorations.
+    /// Change counter for the off-grid text-run decorations, moved by every
+    /// entry point that replaces the list.
+    ///
+    /// Read like [`Self::popovers_epoch`], and maintained here for the same
+    /// reason.
     pub fn text_runs_epoch(&self) -> u64 {
         self.text_runs_epoch
     }
@@ -103,14 +112,6 @@ impl Grid {
     /// and the line-summary content stores.
     pub fn minimap_epoch(&self) -> u64 {
         self.minimap_epoch
-    }
-
-    pub(crate) fn bump_popovers_epoch(&mut self) {
-        self.popovers_epoch += 1;
-    }
-
-    pub(crate) fn bump_text_runs_epoch(&mut self) {
-        self.text_runs_epoch += 1;
     }
 
     pub(crate) fn bump_minimap_epoch(&mut self) {
@@ -200,7 +201,10 @@ impl Grid {
 
     /// Resize to `rows` by `cols`, resetting every cell to [`Cell::default`].
     ///
-    /// Content is not preserved; the driver repopulates the grid afterward.
+    /// Content is not preserved. The driver repopulates the grid afterward.
+    ///
+    /// Moves [`Self::popovers_epoch`] and [`Self::text_runs_epoch`], since
+    /// dropping those lists is as much a change as replacing them.
     pub fn resize(&mut self, rows: usize, cols: usize) {
         self.rows = rows;
         self.cols = cols;
@@ -216,6 +220,9 @@ impl Grid {
         self.minimaps.clear();
         self.minimap_contents.clear();
         self.line_start_rows.clear();
+
+        self.popovers_epoch += 1;
+        self.text_runs_epoch += 1;
     }
 
     /// Reset every cell to [`Cell::default`] and drop all decorations, keeping
@@ -223,6 +230,9 @@ impl Grid {
     ///
     /// Unlike [`Self::resize`], the cell buffer is cleared in place rather than
     /// reallocated, so recycling a grid to hold new content allocates nothing.
+    ///
+    /// Moves [`Self::popovers_epoch`] and [`Self::text_runs_epoch`], as
+    /// [`Self::resize`] does.
     pub fn clear(&mut self) {
         self.cells.fill(Cell::default());
         self.border_table.clear();
@@ -235,6 +245,9 @@ impl Grid {
         self.minimaps.clear();
         self.minimap_contents.clear();
         self.line_start_rows.clear();
+
+        self.popovers_epoch += 1;
+        self.text_runs_epoch += 1;
     }
 
     /// The border set `id` names, or the borderless set for an id this grid
@@ -318,10 +331,13 @@ impl Grid {
     /// Replace the floating overlay regions.
     ///
     /// Overlays are grid-level rather than per-cell, so the projection that
-    /// rewrites cells leaves them untouched; the caller sets the full list each
+    /// rewrites cells leaves them untouched. The caller sets the full list each
     /// frame it changes.
+    ///
+    /// Moves [`Self::popovers_epoch`].
     pub fn set_overlays(&mut self, overlays: Vec<Overlay>) {
         self.overlays = overlays;
+        self.popovers_epoch += 1;
     }
 
     /// The modal-chrome panels drawn with the cells, in draw order.
@@ -373,9 +389,12 @@ impl Grid {
     /// Replace the off-grid text runs.
     ///
     /// Grid-level like the overlays, so the per-cell projection leaves them
-    /// untouched; the caller sets the full list each frame it changes.
+    /// untouched. The caller sets the full list each frame it changes.
+    ///
+    /// Moves [`Self::text_runs_epoch`].
     pub fn set_text_runs(&mut self, text_runs: Vec<TextRun>) {
         self.text_runs = text_runs;
+        self.text_runs_epoch += 1;
     }
 
     /// Replace the run list with `count` runs built by `run`, reusing the
@@ -389,10 +408,13 @@ impl Grid {
     /// The list is held out of the grid while `run` fills it, so `run` can read the
     /// grid it is building into. A run resolves its declared logical row through the
     /// line layout, which lives here.
+    ///
+    /// Moves [`Self::text_runs_epoch`].
     pub fn fill_text_runs(&mut self, count: usize, run: impl FnMut(&Grid, usize) -> TextRun) {
         let mut text_runs = mem::take(&mut self.text_runs);
         self.fill_list(&mut text_runs, count, run);
         self.text_runs = text_runs;
+        self.text_runs_epoch += 1;
     }
 
     /// Replace the bar list with `count` bars built by `bar`, reusing the vector
@@ -410,8 +432,11 @@ impl Grid {
 
     /// Replace the overlay list with `count` overlays built by `overlay`, reusing
     /// the vector already there.
+    ///
+    /// Moves [`Self::popovers_epoch`].
     pub fn fill_overlays(&mut self, count: usize, overlay: impl FnMut(usize) -> Overlay) {
         fill_owned(&mut self.overlays, count, overlay);
+        self.popovers_epoch += 1;
     }
 
     /// Replace the panel list with `count` panels built by `panel`, reusing the
@@ -450,7 +475,11 @@ impl Grid {
     /// A pool composite replaces the whole list every frame, so it wants to
     /// overwrite what is here rather than hand over a freshly collected vector
     /// and drop this one.
+    ///
+    /// Moves [`Self::text_runs_epoch`] on the way out. What the caller does with
+    /// the borrow is not observable from here, so it counts as a change.
     pub fn text_runs_mut(&mut self) -> &mut Vec<TextRun> {
+        self.text_runs_epoch += 1;
         &mut self.text_runs
     }
 
@@ -1861,6 +1890,85 @@ mod tests {
 
         grid.resize(2, 2);
         assert!(grid.text_runs().is_empty(), "resize clears the text runs");
+    }
+
+    /// A named mutation of a grid, for a table pinning what each one does.
+    type NamedChange = (&'static str, fn(&mut Grid));
+
+    fn epoch_probe_run() -> TextRun {
+        TextRun {
+            col: 0,
+            row: 0,
+            scale: 256,
+            color: Rgb::new(1, 2, 3),
+            bg: None,
+            text: "x".into(),
+            seq: 0,
+        }
+    }
+
+    fn epoch_probe_overlay() -> Overlay {
+        Overlay {
+            top: 0,
+            left: 0,
+            width: 1,
+            height: 1,
+            fill: Rgb::new(0, 0, 0),
+            border: Rgb::new(0, 0, 0),
+            content_fg: Rgb::new(0, 0, 0),
+            scale: 1,
+            offset: [0, 0],
+            bold: false,
+            content: String::new(),
+        }
+    }
+
+    /// A renderer caches against these counters, so an entry point that changes
+    /// a list without moving one leaves last frame's decorations on screen.
+    #[test]
+    fn every_entry_point_that_changes_a_decoration_list_moves_its_epoch() {
+        let runs: [NamedChange; 5] = [
+            ("set_text_runs", |g| g.set_text_runs(vec![])),
+            ("fill_text_runs", |g| {
+                g.fill_text_runs(1, |_, _| epoch_probe_run())
+            }),
+            ("text_runs_mut", |g| g.text_runs_mut().clear()),
+            ("resize", |g| g.resize(4, 4)),
+            ("clear", |g| g.clear()),
+        ];
+        for (name, change) in runs {
+            let mut grid = Grid::new(4, 4);
+            grid.set_text_runs(vec![epoch_probe_run()]);
+
+            let before = grid.text_runs_epoch();
+            change(&mut grid);
+
+            assert!(
+                grid.text_runs_epoch() > before,
+                "{name} left text_runs_epoch at {before}"
+            );
+        }
+
+        let overlays: [NamedChange; 4] = [
+            ("set_overlays", |g| g.set_overlays(vec![])),
+            ("fill_overlays", |g| {
+                g.fill_overlays(1, |_| epoch_probe_overlay())
+            }),
+            ("resize", |g| g.resize(4, 4)),
+            ("clear", |g| g.clear()),
+        ];
+        for (name, change) in overlays {
+            let mut grid = Grid::new(4, 4);
+            grid.set_overlays(vec![epoch_probe_overlay()]);
+
+            let before = grid.popovers_epoch();
+            change(&mut grid);
+
+            assert!(
+                grid.popovers_epoch() > before,
+                "{name} left popovers_epoch at {before}"
+            );
+        }
     }
 
     #[test]
