@@ -4,7 +4,7 @@ use crate::{
     diff_cache::{DiffCache, DiffCacheKey},
     display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
     editor_state::{EditorId, EditorState, ScrollGlide},
-    host::{GitHost, WatchToken},
+    host::{GitHost, GitRepo, WatchToken},
     pane::View,
     review::{line_count, MoveProvenance, ReviewFileInput, ReviewHunk, ReviewRow},
     review_apply::{chunk_to_unified_diff, line_restricted_rows, rows_to_unified_diff},
@@ -1811,20 +1811,16 @@ fn scan_commit_pure(
 ) -> Option<ReviewSession> {
     let repo = git.discover(workdir)?;
     let workdir = repo.workdir()?;
-    let new_tree = repo.commit_tree(sha)?;
-    let base_tree = match repo.parent_sha(sha) {
-        Some(parent) => repo.commit_tree(&parent).unwrap_or_default(),
-        None => std::collections::BTreeMap::new(),
-    };
-    build_session_from_trees(
+    let parent = repo.parent_sha(sha);
+    let changes = changed_or_whole(&*repo, parent.as_deref(), sha)?;
+    build_session_from_changes(
         langs,
         ReviewSource::Commit {
             workdir: workdir.clone(),
             sha: sha.to_string(),
         },
         &workdir,
-        &base_tree,
-        &new_tree,
+        changes,
     )
 }
 
@@ -1848,9 +1844,8 @@ fn scan_commit_range_pure(
 ) -> Option<ReviewSession> {
     let repo = git.discover(workdir)?;
     let workdir = repo.workdir()?;
-    let base_tree = repo.commit_tree(from).unwrap_or_default();
-    let new_tree = repo.commit_tree(to)?;
-    build_session_from_trees(
+    let changes = changed_or_whole(&*repo, Some(from), to)?;
+    build_session_from_changes(
         langs,
         ReviewSource::CommitRange {
             workdir: workdir.clone(),
@@ -1858,8 +1853,7 @@ fn scan_commit_range_pure(
             to: to.to_string(),
         },
         &workdir,
-        &base_tree,
-        &new_tree,
+        changes,
     )
 }
 
@@ -1934,39 +1928,47 @@ fn scan_agent_edits(
     Some(session)
 }
 
-/// Common builder used by the commit scans. Walks the union of paths
-/// across `base_tree` and `new_tree`, skipping any pair whose base and
-/// buffer contents are equal.
+/// The files `new` changed against `base`, falling back to what `new` holds
+/// outright when `base` cannot be read.
+///
+/// A base the repository cannot produce is treated as no base at all, so the
+/// commit still shows as whole-file additions rather than as nothing. The scans
+/// have always been this forgiving, having read the base tree with a default on
+/// failure.
+pub(super) fn changed_or_whole(
+    repo: &dyn GitRepo,
+    base: Option<&str>,
+    new: &str,
+) -> Option<Vec<(std::path::PathBuf, String, String)>> {
+    repo.changed_contents(base, new)
+        .or_else(|| repo.changed_contents(None, new))
+}
+
+/// Common builder used by the commit scans, over the changed files a repo
+/// reported as `(repo-relative path, base, buffer)`.
+///
+/// A pair whose two sides are equal is skipped, so a caller that reports a
+/// path without a content change contributes nothing.
 ///
 /// Takes the language registry directly rather than `&Stoat` so it runs
 /// inside the off-loop scan closures, including the commit-preview build in
 /// the sibling `commits` module.
-pub(super) fn build_session_from_trees(
+pub(super) fn build_session_from_changes(
     langs: &LanguageRegistry,
     source: ReviewSource,
     workdir: &Path,
-    base_tree: &std::collections::BTreeMap<std::path::PathBuf, String>,
-    new_tree: &std::collections::BTreeMap<std::path::PathBuf, String>,
+    changes: Vec<(std::path::PathBuf, String, String)>,
 ) -> Option<ReviewSession> {
-    let mut paths: std::collections::BTreeSet<&Path> = std::collections::BTreeSet::new();
-    for p in base_tree.keys() {
-        paths.insert(p.as_path());
-    }
-    for p in new_tree.keys() {
-        paths.insert(p.as_path());
-    }
-    if paths.is_empty() {
+    if changes.is_empty() {
         return None;
     }
     let mut session = ReviewSession::new(source);
     let mut inputs: Vec<ReviewFileInput> = Vec::new();
-    for rel in paths {
-        let base = base_tree.get(rel).cloned().unwrap_or_default();
-        let buffer = new_tree.get(rel).cloned().unwrap_or_default();
+    for (rel, base, buffer) in changes {
         if base == buffer {
             continue;
         }
-        let abs = workdir.join(rel);
+        let abs = workdir.join(&rel);
         let lang = langs.for_path(&abs);
         inputs.push(ReviewFileInput {
             path: abs,

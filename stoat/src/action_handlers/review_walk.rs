@@ -539,22 +539,18 @@ fn spawn_preview_load(
     redraw: Arc<tokio::sync::Notify>,
 ) -> stoat_scheduler::Task<Option<ReviewSession>> {
     executor.spawn_blocking(move || {
-        let built = match repo.commit_tree(&sha) {
-            Some(new_tree) => {
-                let base_tree = match repo.parent_sha(&sha) {
-                    Some(parent) => repo.commit_tree(&parent).unwrap_or_default(),
-                    None => std::collections::BTreeMap::new(),
-                };
+        let parent = repo.parent_sha(&sha);
+        let built = match super::review::changed_or_whole(&*repo, parent.as_deref(), &sha) {
+            Some(changes) => {
                 let source = crate::review_session::ReviewSource::Commit {
                     workdir: workdir.clone(),
                     sha: sha.clone(),
                 };
-                super::review::build_session_from_trees(
+                super::review::build_session_from_changes(
                     &language_registry,
                     source,
                     &workdir,
-                    &base_tree,
-                    &new_tree,
+                    changes,
                 )
             },
             None => None,

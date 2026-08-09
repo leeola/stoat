@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -190,6 +190,50 @@ pub trait GitRepo: Send + Sync {
     /// UTF-8 content. Returns `None` when the sha is unknown or any
     /// entry is not valid UTF-8. Used by commit and commit-range review.
     fn commit_tree(&self, sha: &str) -> Option<BTreeMap<PathBuf, String>>;
+
+    /// The files differing between `base` and `new`, each as its
+    /// repo-relative path with its content on either side.
+    ///
+    /// A file absent from one side is empty there, so an addition and a
+    /// deletion both come back as one entry rather than needing a separate
+    /// shape. `base` is `None` for a root commit, which has no side to compare
+    /// against. Returns `None` when a sha is unknown.
+    ///
+    /// A review of a commit wants exactly this, and it is typically a handful
+    /// of files where [`Self::commit_tree`] would read every blob in the
+    /// repository to find them.
+    ///
+    /// An implementation may skip a changed file whose content is not UTF-8,
+    /// since a review has no way to show it. The default cannot, because it is
+    /// built on [`Self::commit_tree`], which refuses a whole tree holding any
+    /// such blob anywhere. An implementation reading only what changed is
+    /// expected to do better than that.
+    fn changed_contents(
+        &self,
+        base: Option<&str>,
+        new: &str,
+    ) -> Option<Vec<(PathBuf, String, String)>> {
+        let new_tree = self.commit_tree(new)?;
+        let base_tree = match base {
+            Some(base) => self.commit_tree(base)?,
+            None => BTreeMap::new(),
+        };
+
+        let mut out = Vec::new();
+        for rel in base_tree
+            .keys()
+            .chain(new_tree.keys())
+            .collect::<BTreeSet<_>>()
+        {
+            let before = base_tree.get(rel).cloned().unwrap_or_default();
+            let after = new_tree.get(rel).cloned().unwrap_or_default();
+            if before != after {
+                out.push((rel.clone(), before, after));
+            }
+        }
+        Some(out)
+    }
+
     /// Sha of the first parent of `sha`, or `None` for a root commit or
     /// an unknown sha. Merge commits surface only the first parent;
     /// `CommitRange` review should be used for multi-parent walks.

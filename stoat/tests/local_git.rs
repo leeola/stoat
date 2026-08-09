@@ -4,7 +4,7 @@
 
 use git2::{FileMode, Oid, Repository, Signature};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 use stoat::host::{
@@ -338,6 +338,122 @@ fn commit_tree_reads_all_blobs() {
     assert_eq!(tree.len(), 2);
 }
 
+/// Reading only the changed blobs has to land on the same answer as comparing
+/// the two whole trees, which is what the trait's own default does.
+///
+/// The saving is invisible in the result, so the differential against the
+/// trees is the only thing that says the faster path is also the right one.
+#[test]
+fn changed_contents_agrees_with_diffing_the_whole_trees() {
+    let tr = TestRepo::new();
+    tr.write_and_stage("keep.rs", "unchanged")
+        .write_and_stage("edit.rs", "before")
+        .write_and_stage("gone.rs", "removed later")
+        .commit("c1");
+    let first = tr.head_sha();
+
+    tr.write_and_stage("edit.rs", "after")
+        .write_and_stage("added.rs", "new file")
+        .commit("c2");
+    {
+        let mut index = tr.repo.index().expect("index");
+        index.remove_path(Path::new("gone.rs")).expect("remove");
+        index.write().expect("write index");
+    }
+    tr.commit("c3");
+    let last = tr.head_sha();
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let base: BTreeMap<PathBuf, String> = repo.commit_tree(&first).expect("base tree");
+    let new: BTreeMap<PathBuf, String> = repo.commit_tree(&last).expect("new tree");
+
+    let mut expected: Vec<(PathBuf, String, String)> = Vec::new();
+    for rel in base.keys().chain(new.keys()).collect::<BTreeSet<_>>() {
+        let before = base.get(rel).cloned().unwrap_or_default();
+        let after = new.get(rel).cloned().unwrap_or_default();
+        if before != after {
+            expected.push((rel.clone(), before, after));
+        }
+    }
+
+    let mut got = repo
+        .changed_contents(Some(&first), &last)
+        .expect("changed contents");
+    got.sort_by(|a, b| a.0.cmp(&b.0));
+
+    assert_eq!(got, expected);
+    assert!(
+        !got.iter().any(|(rel, _, _)| rel == Path::new("keep.rs")),
+        "an unchanged file is never read, let alone reported",
+    );
+}
+
+/// A commit that touches a binary still yields its text changes.
+///
+/// `commit_tree` refuses a whole tree holding any non-UTF-8 blob, so a
+/// repository with one image in it could not be reviewed at all. Reading only
+/// what changed drops the file a review could not show and keeps the rest.
+#[test]
+fn changed_contents_skips_a_changed_binary_and_keeps_the_text() {
+    let tr = TestRepo::new();
+    std::fs::write(tr.join("logo.png"), [0xff, 0xd8, 0x00, 0x01]).expect("write binary");
+    tr.stage("logo.png")
+        .write_and_stage("a.rs", "v1")
+        .commit("c1");
+    let first = tr.head_sha();
+
+    // The binary changes too, so it reaches the diff rather than being absent
+    // from it, which is what makes this exercise the skip.
+    std::fs::write(tr.join("logo.png"), [0xff, 0xd8, 0x00, 0x02]).expect("rewrite binary");
+    tr.stage("logo.png")
+        .write_and_stage("a.rs", "v2")
+        .commit("c2");
+    let second = tr.head_sha();
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    assert!(
+        repo.commit_tree(&second).is_none(),
+        "the whole-tree read gives up over the binary",
+    );
+    assert_eq!(
+        repo.changed_contents(Some(&first), &second),
+        Some(vec![(
+            PathBuf::from("a.rs"),
+            "v1".to_string(),
+            "v2".to_string()
+        )]),
+    );
+}
+
+/// A file whose mode changed but whose bytes did not is not a changed file.
+///
+/// The tree diff reports it as a delta all the same, so it is the one case
+/// where the equal-contents check earns its keep. Reporting it would put a file
+/// with nothing to show into a review.
+#[test]
+fn changed_contents_ignores_a_mode_only_change() {
+    let tr = TestRepo::new();
+    tr.write_and_stage("run.sh", "echo hi").commit("c1");
+    let first = tr.head_sha();
+
+    {
+        let mut index = tr.repo.index().expect("index");
+        let mut entry = index.get_path(Path::new("run.sh"), 0).expect("entry");
+        entry.mode = u32::from(FileMode::BlobExecutable);
+        index.add(&entry).expect("re-add executable");
+        index.write().expect("write index");
+    }
+    tr.commit("c2");
+    let second = tr.head_sha();
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    assert_ne!(first, second, "the mode change made a commit of its own");
+    assert_eq!(
+        repo.changed_contents(Some(&first), &second),
+        Some(Vec::new())
+    );
+}
+
 #[test]
 fn commit_tree_unknown_sha_returns_none() {
     let tr = TestRepo::new();
@@ -380,7 +496,7 @@ fn log_commits_walks_first_parent_from_head() {
     assert_eq!(log.len(), 3, "three commits on this branch");
     assert!(log[0].summary.contains('c') || log[0].summary.is_empty());
     let shas: Vec<_> = log.iter().map(|c| c.sha.clone()).collect();
-    let unique: std::collections::BTreeSet<_> = shas.iter().collect();
+    let unique: BTreeSet<_> = shas.iter().collect();
     assert_eq!(unique.len(), 3, "shas must be distinct");
 }
 

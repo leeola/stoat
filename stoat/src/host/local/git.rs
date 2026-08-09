@@ -259,6 +259,66 @@ impl GitRepo for LocalGitRepo {
         Some(out)
     }
 
+    /// Reads only the blobs the tree diff names, so the cost tracks the
+    /// commit's size rather than the repository's.
+    ///
+    /// A changed file that is not UTF-8 is left out rather than failing the
+    /// whole call, so a commit touching a binary alongside source still yields
+    /// the source. That is the divergence from [`Self::commit_tree`], which
+    /// refuses any tree holding such a blob at all.
+    fn changed_contents(
+        &self,
+        base: Option<&str>,
+        new: &str,
+    ) -> Option<Vec<(PathBuf, String, String)>> {
+        let repo = self.repo.lock().expect("git repo lock");
+
+        let new_tree = {
+            let oid = git2::Oid::from_str(new).ok()?;
+            repo.find_commit(oid).ok()?.tree().ok()?
+        };
+        let base_tree = match base {
+            Some(base) => {
+                let oid = git2::Oid::from_str(base).ok()?;
+                Some(repo.find_commit(oid).ok()?.tree().ok()?)
+            },
+            None => None,
+        };
+
+        let mut opts = DiffOptions::new();
+        opts.include_typechange(true);
+        let diff = repo
+            .diff_tree_to_tree(base_tree.as_ref(), Some(&new_tree), Some(&mut opts))
+            .ok()?;
+
+        // A side with no blob reads as empty, which is how an addition and a
+        // deletion each become one entry rather than a shape of their own.
+        let blob_text = |id: git2::Oid| -> Option<String> {
+            if id.is_zero() {
+                return Some(String::new());
+            }
+            let blob = repo.find_blob(id).ok()?;
+            std::str::from_utf8(blob.content()).ok().map(str::to_string)
+        };
+
+        let mut out = Vec::new();
+        for delta in diff.deltas() {
+            let Some(rel) = delta.new_file().path().or_else(|| delta.old_file().path()) else {
+                continue;
+            };
+            let (Some(before), Some(after)) = (
+                blob_text(delta.old_file().id()),
+                blob_text(delta.new_file().id()),
+            ) else {
+                continue;
+            };
+            if before != after {
+                out.push((rel.to_path_buf(), before, after));
+            }
+        }
+        Some(out)
+    }
+
     fn parent_sha(&self, sha: &str) -> Option<String> {
         let repo = self.repo.lock().expect("git repo lock");
         let oid = git2::Oid::from_str(sha).ok()?;
