@@ -632,6 +632,32 @@ pub struct BlockMap {
     excerpt_header_height: u32,
     folded_buffers: HashSet<BufferId>,
     buffers_with_disabled_headers: HashSet<BufferId>,
+    carry_scratch: CarryScratch,
+    /// Holds the block list [`BlockMap::sync`] hands to the transform build.
+    ///
+    /// Kept between syncs for its allocation alone. The list is rebuilt from
+    /// scratch every time, since a sync that gets this far has already found a
+    /// reason the transforms need rebuilding.
+    blocks_scratch: Vec<Block>,
+}
+
+/// Working vectors [`BlockMap::carry_block_placements`] refills per call.
+///
+/// The carry runs on every sync that has buffer-row edits and any block, which
+/// is once per keystroke in a diff view, so the vectors live across calls
+/// rather than being allocated inside one. Each is cleared and refilled, and
+/// none of them carries meaning between calls.
+#[derive(Default)]
+struct CarryScratch {
+    /// Every block's start and end row, in block order, two entries per block.
+    rows: Vec<u32>,
+    /// Indices into `rows`, sorted by the row each names.
+    order: Vec<usize>,
+    /// The same rows in ascending order, which is what the carry consumes.
+    ascending: Vec<u32>,
+    ascending_touch: Vec<bool>,
+    /// `ascending_touch` scattered back into block order.
+    needs_touch: Vec<bool>,
 }
 
 impl Default for BlockMap {
@@ -657,11 +683,31 @@ impl BlockMap {
             excerpt_header_height: 1,
             folded_buffers: HashSet::new(),
             buffers_with_disabled_headers: HashSet::new(),
+            carry_scratch: CarryScratch::default(),
+            blocks_scratch: Vec::new(),
         }
     }
 
     pub fn mark_dirty(&mut self) {
         self.blocks_dirty = true;
+    }
+
+    /// Room the carry's row buffer is holding, in rows.
+    ///
+    /// A carry that allocates fresh every call produces the same placements as
+    /// one that reuses its buffer, so nothing about the result tells them
+    /// apart. Capacity does. A buffer carried across calls keeps the widest
+    /// block set's room, where a fresh one is sized to the call that built it.
+    #[cfg(test)]
+    pub(super) fn carry_row_capacity(&self) -> usize {
+        self.carry_scratch.rows.capacity()
+    }
+
+    /// Room the sync's block list is holding, in blocks. See
+    /// [`Self::carry_row_capacity`] for why capacity is the observable.
+    #[cfg(test)]
+    pub(super) fn block_list_capacity(&self) -> usize {
+        self.blocks_scratch.capacity()
     }
 
     pub fn insert(&mut self, blocks: Vec<BlockProperties>) -> Vec<CustomBlockId> {
@@ -727,22 +773,38 @@ impl BlockMap {
             return;
         }
 
+        // Held as a local for the call, so filling it does not borrow all of
+        // `self` while the block list is being read.
+        let mut scratch = std::mem::take(&mut self.carry_scratch);
+        let CarryScratch {
+            rows,
+            order,
+            ascending,
+            ascending_touch,
+            needs_touch,
+        } = &mut scratch;
+
         // Blocks are ordered by start row, but a Replace block's end can sit
         // past the next block's start, so the rows are visited in sorted order
         // rather than read straight off the list.
-        let mut rows: Vec<u32> = self
-            .custom_blocks
-            .iter()
-            .flat_map(|b| [b.placement.start(), b.placement.end()])
-            .collect();
-        let mut order: Vec<usize> = (0..rows.len()).collect();
+        rows.clear();
+        rows.extend(
+            self.custom_blocks
+                .iter()
+                .flat_map(|b| [b.placement.start(), b.placement.end()]),
+        );
+        order.clear();
+        order.extend(0..rows.len());
         order.sort_unstable_by_key(|&i| rows[i]);
 
-        let mut ascending: Vec<u32> = order.iter().map(|&i| rows[i]).collect();
-        let mut ascending_touch = vec![false; ascending.len()];
-        carry_rows(&mut ascending, &mut ascending_touch, buffer_row_edits);
+        ascending.clear();
+        ascending.extend(order.iter().map(|&i| rows[i]));
+        ascending_touch.clear();
+        ascending_touch.resize(ascending.len(), false);
+        carry_rows(ascending, ascending_touch, buffer_row_edits);
 
-        let mut needs_touch = vec![false; rows.len()];
+        needs_touch.clear();
+        needs_touch.resize(rows.len(), false);
         for (slot, &i) in order.iter().enumerate() {
             rows[i] = ascending[slot];
             needs_touch[i] = ascending_touch[slot];
@@ -782,6 +844,8 @@ impl BlockMap {
             *block = Arc::clone(&moved);
             self.custom_blocks_by_id.insert(moved.id, moved);
         }
+
+        self.carry_scratch = scratch;
 
         debug_assert!(
             self.custom_blocks
@@ -921,11 +985,8 @@ impl BlockMap {
             .fold_snapshot()
             .inlay_snapshot()
             .buffer_snapshot();
-        let mut blocks: Vec<Block> = self
-            .custom_blocks
-            .iter()
-            .map(|b| Block::Custom(b.clone()))
-            .collect();
+        let mut blocks = std::mem::take(&mut self.blocks_scratch);
+        blocks.extend(self.custom_blocks.iter().map(|b| Block::Custom(b.clone())));
         blocks.extend(
             self.header_and_footer_blocks(buffer_snapshot)
                 .into_iter()
@@ -957,6 +1018,11 @@ impl BlockMap {
         };
 
         let total_rows: OutputRow = transforms.extent(());
+
+        // Emptied now rather than on the next sync, so a block removed in the
+        // meantime is not held alive by the list that last mentioned it.
+        blocks.clear();
+        self.blocks_scratch = blocks;
 
         self.transforms = Some(transforms.clone());
         self.total_rows = total_rows.0;

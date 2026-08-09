@@ -2079,6 +2079,71 @@ mod tests {
         );
     }
 
+    /// Blocks at rows `5..5 + count`, replacing whatever the last call left.
+    fn padding_blocks(map: &mut DisplayMap, count: u32) {
+        map.set_conflict_padding_blocks(
+            (0..count)
+                .map(|i| {
+                    BlockProperties::from_text(
+                        BlockPlacement::Below(5 + i),
+                        vec![format!("pad{i}")],
+                        BlockStyle::Fixed,
+                    )
+                })
+                .collect(),
+        );
+    }
+
+    /// The carry and the block list run once per sync over a set that does not
+    /// change size from one keystroke to the next, so they hold their working
+    /// room rather than asking for it again each time.
+    ///
+    /// Shrinking the block set is what makes the reuse visible. Room sized for
+    /// the wide set outliving the narrow one can only have come from the wide
+    /// call, since a buffer built per call is sized to its own call.
+    #[test]
+    fn a_sync_reuses_the_room_the_previous_sync_asked_for() {
+        let text: String = (0..60).map(|i| format!("line{i}\n")).collect();
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
+        let mut display_map = DisplayMap::new(
+            MultiBuffer::singleton(BufferId::new(0), shared.clone()),
+            test_executor(),
+            crate::test_notify(),
+        );
+
+        padding_blocks(&mut display_map, 40);
+        display_map.snapshot();
+
+        shared.write().expect("poisoned").edit(0..0, "a\n");
+        display_map.snapshot();
+
+        let carry_room = display_map.block_map.carry_row_capacity();
+        let block_room = display_map.block_map.block_list_capacity();
+        assert!(
+            carry_room >= 80,
+            "40 blocks carry a start and an end each, so the carry read 80 rows, not {carry_room}",
+        );
+        assert!(
+            block_room >= 40,
+            "the sync listed 40 blocks, not {block_room}",
+        );
+
+        padding_blocks(&mut display_map, 2);
+        shared.write().expect("poisoned").edit(0..0, "b\n");
+        display_map.snapshot();
+
+        assert_eq!(
+            display_map.block_map.carry_row_capacity(),
+            carry_room,
+            "a carry over 2 blocks keeps the room the 40-block carry took",
+        );
+        assert_eq!(
+            display_map.block_map.block_list_capacity(),
+            block_room,
+            "a sync listing 2 blocks keeps the room the 40-block sync took",
+        );
+    }
+
     #[test]
     fn insert_blocks_after_snapshot_grows_line_count() {
         let mut display_map = create_display_map("line1\nline2\nline3");
