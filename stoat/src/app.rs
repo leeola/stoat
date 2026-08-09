@@ -1587,6 +1587,12 @@ pub struct Stoat {
     /// busiest keys still skip it.
     #[cfg(test)]
     pub(crate) keymap_lookups: std::cell::Cell<u64>,
+    /// How many times an editor's selection set was copied for an undo group.
+    ///
+    /// A copy nobody reads costs only time, so a test needs the count to say
+    /// that an action which edits nothing stops paying for one.
+    #[cfg(test)]
+    pub(crate) selection_snapshots: std::cell::Cell<u64>,
     /// The editor chrome resolved from [`Self::theme`], rebuilt by
     /// [`Self::refresh_chrome`] when the theme has been replaced.
     ///
@@ -2059,6 +2065,8 @@ impl Stoat {
             pane_paints: 0,
             #[cfg(test)]
             keymap_lookups: std::cell::Cell::new(0),
+            #[cfg(test)]
+            selection_snapshots: std::cell::Cell::new(0),
             chrome: None,
             dimmed_minimap_palette: None,
             smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
@@ -16016,6 +16024,49 @@ mod tests {
     /// A frame driven by background activity alone paints only the focused
     /// pane.
     ///
+    /// An action brackets itself in an undo group, and a group that takes no
+    /// edit is discarded on sealing, so the selections the seal would record are
+    /// never read. Gathering them copies the whole selection set, which at
+    /// multi-cursor scale is the cost that matters.
+    ///
+    /// The editing action still records both ends, which is what says the count
+    /// is measuring something.
+    #[test]
+    fn a_non_editing_action_captures_no_post_selections() {
+        use crate::test_harness::TestHarness;
+
+        let mut h = TestHarness::with_size(40, 6);
+        let file = h.write_file("a.rs", "hello world\nsecond line\n");
+        h.open_file(&file);
+
+        let before = h.stoat.selection_snapshots.get();
+        h.type_keys("l");
+        assert_eq!(
+            h.stoat.selection_snapshots.get() - before,
+            1,
+            "a movement captures the pre-action set and nothing after it"
+        );
+
+        // `x` selects the line, which edits nothing either.
+        let before = h.stoat.selection_snapshots.get();
+        h.type_keys("x");
+        assert_eq!(
+            h.stoat.selection_snapshots.get() - before,
+            1,
+            "selecting a line is not an edit"
+        );
+
+        // `d` deletes it, so the group materializes and the seal records where
+        // the selections ended up.
+        let before = h.stoat.selection_snapshots.get();
+        h.type_keys("d");
+        assert_eq!(
+            h.stoat.selection_snapshots.get() - before,
+            2,
+            "an edit captures both ends of its undo group"
+        );
+    }
+
     /// Typing in insert mode is the busiest thing the editor does, and a
     /// printable character never consults the keymap, so it must not pay to
     /// derive the lookup. Nothing else would notice if it started to: the

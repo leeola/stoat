@@ -1019,18 +1019,37 @@ fn begin_action_group(stoat: &mut Stoat) -> Option<BufferId> {
 /// A `None` buffer id means [`begin_action_group`] joined an already-open
 /// insert session instead of opening its own group, so there is nothing to seal
 /// and the session stays open.
+///
+/// The post-selections are gathered only for a group that took an edit, since
+/// sealing an untouched one discards them. Most actions edit nothing, and
+/// gathering costs a copy of the whole selection set.
 fn end_action_group(stoat: &mut Stoat, buffer_id: Option<BufferId>) {
     let Some(buffer_id) = buffer_id else {
         return;
     };
-    let after = focused_selection_snapshot(stoat, buffer_id);
-    if let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) {
-        buffer.write().expect("poisoned").seal_group(after);
-    }
+    let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) else {
+        return;
+    };
+
+    // Gathered under the buffer lock rather than before it. The selections live
+    // on the editor, so this reaches for no buffer and cannot reenter the lock
+    // already held.
+    let mut buffer = buffer.write().expect("poisoned");
+    let after = match buffer.group_started() {
+        true => focused_selection_snapshot(stoat, buffer_id),
+        false => Vec::new(),
+    };
+
+    buffer.seal_group(after);
 }
 
 /// Selections of `editor_id` as an owned snapshot, empty when it is gone.
 fn editor_selection_snapshot(stoat: &Stoat, editor_id: EditorId) -> Vec<Selection<Anchor>> {
+    #[cfg(test)]
+    stoat
+        .selection_snapshots
+        .set(stoat.selection_snapshots.get() + 1);
+
     stoat
         .active_workspace()
         .editors

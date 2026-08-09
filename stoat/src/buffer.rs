@@ -826,15 +826,25 @@ impl TextBuffer {
         true
     }
 
-    /// Close the open undo group, recording `selections_after` to restore on
-    /// redo. A group that took no edits was never materialized, so a non-editing
-    /// action leaves no undo step behind.
     /// Whether an undo group is open, so a caller that seals one can tell
     /// whether there was anything to seal.
     pub(crate) fn group_open(&self) -> bool {
         self.open_group
     }
 
+    /// Whether the open group has taken an edit yet.
+    ///
+    /// A group that has not is discarded on sealing, so the selections a caller
+    /// would pass to [`Self::seal_group`] are never read. Gathering them costs a
+    /// copy of the whole selection set, and most actions edit nothing, so a
+    /// caller asks this first.
+    pub(crate) fn group_started(&self) -> bool {
+        self.open_group_started
+    }
+
+    /// Close the open undo group, recording `selections_after` to restore on
+    /// redo. A group that took no edits was never materialized, so a non-editing
+    /// action leaves no undo step behind.
     pub(crate) fn seal_group(&mut self, selections_after: Vec<Selection<Anchor>>) {
         if !self.open_group {
             return;
