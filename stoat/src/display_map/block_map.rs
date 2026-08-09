@@ -1725,8 +1725,17 @@ fn kind_rank(block: &Block) -> u8 {
     }
 }
 
+/// Where `block` sits in wrap space.
+///
+/// A replacement is held to the rows `wrap_line_count` says exist. Its span is
+/// the only placement that consumes input, so a span running past the last row
+/// would build a transform tree claiming more rows than the document has. The
+/// wrap layer can report fewer rows than the fold layer beneath it while a
+/// deferred rewrap is outstanding, and this is resolved against whichever it is
+/// showing now.
 fn resolve_block_placement(
     block: &Block,
+    wrap_line_count: u32,
     inlay_cursor: &mut InlayPointCursor<'_>,
     fold_cursor: &mut FoldPointCursor<'_>,
     wrap_cursor: &mut WrapPointCursor<'_>,
@@ -1754,8 +1763,9 @@ fn resolve_block_placement(
             ResolvedPlacement::Near(map_row(row, inlay_cursor, fold_cursor, wrap_cursor) + 1)
         },
         BlockPlacement::Replace { start, end } => {
-            let start_wrap = map_row(start, inlay_cursor, fold_cursor, wrap_cursor);
-            let end_wrap = map_row(end, inlay_cursor, fold_cursor, wrap_cursor);
+            let last_row = wrap_line_count.saturating_sub(1);
+            let start_wrap = map_row(start, inlay_cursor, fold_cursor, wrap_cursor).min(last_row);
+            let end_wrap = map_row(end, inlay_cursor, fold_cursor, wrap_cursor).min(last_row);
             ResolvedPlacement::Replace {
                 start: start_wrap,
                 end: end_wrap.max(start_wrap),
@@ -2037,6 +2047,7 @@ fn sync_incremental(
                 .filter_map(|(offset, b)| {
                     let placement = resolve_block_placement(
                         b,
+                        wrap_line_count,
                         &mut inlay_cursor,
                         &mut fold_cursor,
                         &mut wrap_cursor,
@@ -2161,7 +2172,13 @@ fn build_transforms(
     let mut keyed_blocks: Vec<(ResolvedPlacement, &Block)> = Vec::with_capacity(blocks.len());
     for b in blocks {
         keyed_blocks.push((
-            resolve_block_placement(b, &mut inlay_cursor, &mut fold_cursor, &mut wrap_cursor),
+            resolve_block_placement(
+                b,
+                wrap_line_count,
+                &mut inlay_cursor,
+                &mut fold_cursor,
+                &mut wrap_cursor,
+            ),
             b,
         ));
     }
@@ -3175,6 +3192,43 @@ mod tests {
             rows.iter().any(|row| row == "near-block"),
             "the near block survives the replacement over its row: {rows:?}",
         );
+    }
+
+    /// Overlapping replacements stand for one region, and the tree consumes
+    /// each replaced row once. Emitting a span per block would leave it
+    /// claiming more input rows than the document has.
+    #[test]
+    fn overlapping_replacements_consume_each_row_once() {
+        let blocks = vec![
+            text_block(BlockPlacement::Replace { start: 1, end: 3 }, "first"),
+            text_block(BlockPlacement::Replace { start: 2, end: 4 }, "second"),
+        ];
+        let snapshot = create_block_snapshot("r0\nr1\nr2\nr3\nr4\nr5", &blocks);
+
+        let rows: Vec<String> = (0..snapshot.total_lines())
+            .map(|row| snapshot.display_line(row))
+            .collect();
+        assert_eq!(rows, ["r0", "first", "r5"], "one region over rows 1 to 4");
+    }
+
+    /// A replacement is held to the rows the document has. Its span is the only
+    /// placement that consumes input, so one reaching past the last row would
+    /// build a tree claiming rows there is no text for.
+    #[test]
+    fn a_replacement_past_the_last_row_stops_at_it() {
+        let blocks = vec![text_block(
+            BlockPlacement::Replace {
+                start: 1,
+                end: 9999,
+            },
+            "replacement",
+        )];
+        let snapshot = create_block_snapshot("r0\nr1\nr2", &blocks);
+
+        let rows: Vec<String> = (0..snapshot.total_lines())
+            .map(|row| snapshot.display_line(row))
+            .collect();
+        assert_eq!(rows, ["r0", "replacement"], "rows 1 and 2 are replaced");
     }
 
     /// A replaced range stands for the rows it replaces. A `Near` block is

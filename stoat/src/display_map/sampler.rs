@@ -214,13 +214,9 @@ pub(super) fn random_wrap_stack(seed: u64) -> (Sampler, Arc<WrapSnapshot>) {
 /// disappear rather than only shift, and it is the one that can leave a
 /// document holding no buffer text at all.
 ///
-/// One block per row, ascending, with every `Replace` range stopping short of
-/// the next block's row. `build_transforms` resolves placements through
-/// forward-only cursors, so the rows it maps have to ascend, and a `Replace`
-/// reaching the row after it would send the next block's lookup backwards.
-/// Nothing in the editor builds a `Replace` spanning more than the row it
-/// names, so this is the shape the layer is asked for rather than a restriction
-/// on the sweep.
+/// One block per row, ascending. A `Replace` range is free to span the rows
+/// after it, so a later block's anchor can fall inside a replaced span, which
+/// is the shape a `Near` block beside a replaced row already takes.
 pub(super) fn random_blocks(sampler: &mut Sampler, buffer_rows: u32) -> Vec<BlockProperties> {
     let mut rows: Vec<u32> = (0..sampler.below(4))
         .map(|_| sampler.below(buffer_rows))
@@ -229,16 +225,14 @@ pub(super) fn random_blocks(sampler: &mut Sampler, buffer_rows: u32) -> Vec<Bloc
     rows.dedup();
 
     rows.iter()
-        .enumerate()
-        .map(|(index, &row)| {
-            let next = rows.get(index + 1).copied().unwrap_or(buffer_rows);
+        .map(|&row| {
             let placement = match sampler.below(4) {
                 0 => BlockPlacement::Above(row),
                 1 => BlockPlacement::Below(row),
                 2 => BlockPlacement::Near(row),
                 _ => BlockPlacement::Replace {
                     start: row,
-                    end: row + sampler.below(2).min(next - row - 1),
+                    end: (row + sampler.below(3)).min(buffer_rows.saturating_sub(1)),
                 },
             };
             let lines = (0..1 + sampler.below(2))
