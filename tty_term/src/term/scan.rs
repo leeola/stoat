@@ -6,6 +6,7 @@
 //! one completes.
 
 use super::TermEvent;
+use std::ops::Range;
 use stoatty_protocol::frame::MAX_APC_PAYLOAD;
 
 pub(super) const ESC: u8 = 0x1b;
@@ -27,7 +28,18 @@ pub(super) enum EscEvent<'a> {
     /// content between frames. A payload split across calls is retained until its
     /// terminator arrives, and its offset is then relative to the call it
     /// completes in.
-    Apc { payload: &'a [u8], end: usize },
+    ///
+    /// `interior` is where those payload bytes sat in the scanned slice, for a
+    /// caller passing the stream on to a parser that has no use for them. It
+    /// covers only the part that arrived in this call, so it is empty for a
+    /// payload that arrived entirely in earlier ones, and it excludes the
+    /// introducer and the terminator, which such a caller still has to pass on
+    /// for the string to open and close.
+    Apc {
+        payload: &'a [u8],
+        interior: Range<usize>,
+        end: usize,
+    },
     /// An XTVERSION query (`CSI > Ps q`) completed. The parameters are dropped,
     /// since the reply is fixed.
     XtVersion,
@@ -104,6 +116,13 @@ impl EscScanner {
     pub(super) fn scan(&mut self, bytes: &[u8], emit: &mut impl FnMut(EscEvent<'_>)) {
         let mut i = 0;
 
+        // The stretch of this slice the open APC has taken as payload. A payload
+        // carried in from an earlier call has taken nothing here yet, so it
+        // starts empty at the front. Tracked rather than worked back from the
+        // terminator, which cannot be sized: `ESC ESC \` ends a string as surely
+        // as `ESC \` does, and counting back two would swallow the first `ESC`.
+        let mut apc = 0..0;
+
         while i < bytes.len() {
             let byte = bytes[i];
             match self.state {
@@ -120,6 +139,7 @@ impl EscScanner {
                     self.state = match byte {
                         APC_INTRODUCER => {
                             self.payload.clear();
+                            apc = i + 1..i + 1;
                             EscState::Apc
                         },
                         b'[' => EscState::CsiEntry,
@@ -139,14 +159,15 @@ impl EscScanner {
                 // rather than past it leaves the arms below to read it.
                 EscState::Apc => match byte {
                     ESC => self.state = EscState::ApcEscape,
-                    BEL => self.finish_apc(i + 1, emit),
+                    BEL => self.finish_apc(apc.clone(), i + 1, emit),
                     _ => {
                         i += self.push_apc_run(payload_run(&bytes[i..]));
+                        apc.end = i;
                         continue;
                     },
                 },
                 EscState::ApcEscape => match byte {
-                    STRING_TERMINATOR => self.finish_apc(i + 1, emit),
+                    STRING_TERMINATOR => self.finish_apc(apc.clone(), i + 1, emit),
                     ESC => self.state = EscState::ApcEscape,
                     _ => {
                         self.payload.clear();
@@ -242,10 +263,17 @@ impl EscScanner {
         run.len()
     }
 
-    /// Emit the buffered APC payload, ending one past its terminator at `end`.
-    fn finish_apc(&mut self, end: usize, emit: &mut impl FnMut(EscEvent<'_>)) {
+    /// Emit the buffered APC payload, ending one past its terminator at `end`,
+    /// having taken `interior` of the current slice.
+    fn finish_apc(
+        &mut self,
+        interior: Range<usize>,
+        end: usize,
+        emit: &mut impl FnMut(EscEvent<'_>),
+    ) {
         emit(EscEvent::Apc {
             payload: &self.payload,
+            interior,
             end,
         });
         self.payload.clear();
@@ -498,8 +526,19 @@ mod tests {
     fn scan_collect(scanner: &mut EscScanner, bytes: &[u8]) -> Vec<(Vec<u8>, usize)> {
         let mut out = Vec::new();
         scanner.scan(bytes, &mut |event| {
-            if let EscEvent::Apc { payload, end } = event {
+            if let EscEvent::Apc { payload, end, .. } = event {
                 out.push((payload.to_vec(), end));
+            }
+        });
+        out
+    }
+
+    /// The interiors one scan of `bytes` reports, as the slices they name.
+    fn scan_interiors<'a>(scanner: &mut EscScanner, bytes: &'a [u8]) -> Vec<&'a [u8]> {
+        let mut out = Vec::new();
+        scanner.scan(bytes, &mut |event| {
+            if let EscEvent::Apc { interior, .. } = event {
+                out.push(&bytes[interior]);
             }
         });
         out
@@ -639,6 +678,70 @@ mod tests {
             scan_collect(&mut scanner, &input),
             vec![(b"frame".to_vec(), offset)]
         );
+    }
+
+    /// A caller passing the stream on to another parser drops the interior and
+    /// keeps the rest, so the interior must name payload bytes and nothing else.
+    ///
+    /// Keeping the introducer and the terminator is what lets that parser open
+    /// and close the string, and `ESC ESC \` is here because it terminates one
+    /// while being a byte longer than the terminator it ends with.
+    #[test]
+    fn an_apc_interior_names_the_payload_and_neither_end_of_it() {
+        let cases: [(&[u8], &[&[u8]]); 5] = [
+            (b"\x1b_alpha\x1b\\", &[b"alpha"]),
+            (
+                b"pre\x1b_alpha\x1b\\mid\x1b_beta\x07post",
+                &[b"alpha", b"beta"],
+            ),
+            (b"\x1b_\x1b\\", &[b""]),
+            (b"\x1b_alpha\x1b\x1b\\", &[b"alpha"]),
+            (b"\x1b_\x07", &[b""]),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(
+                scan_interiors(&mut EscScanner::default(), input),
+                expected,
+                "interiors of {input:?}",
+            );
+        }
+    }
+
+    /// However the stream is split, an interior names payload bytes and only
+    /// payload bytes, which is what makes dropping it safe for a parser reading
+    /// the same stream.
+    ///
+    /// Only the call that completes a payload reports one, and it reports what
+    /// arrived in that call. Bytes buffered by an earlier call go unreported and
+    /// are passed on as they always were, so a split payload is skipped from
+    /// wherever it resumed rather than not at all.
+    #[test]
+    fn an_apc_interior_is_a_tail_of_its_payload_however_it_is_split() {
+        let input = b"head\x1b_alpha beta\x1b\\tail";
+        let payload: &[u8] = b"alpha beta";
+        let introducer_end = 6;
+
+        for split in 0..=input.len() {
+            let mut scanner = EscScanner::default();
+            let mut seen: Vec<u8> = Vec::new();
+            for part in [&input[..split], &input[split..]] {
+                for interior in scan_interiors(&mut scanner, part) {
+                    seen.extend_from_slice(interior);
+                }
+            }
+
+            assert!(
+                payload.ends_with(&seen),
+                "split at {split} reported {seen:?}, which is not payload",
+            );
+            if split <= introducer_end {
+                assert_eq!(
+                    seen, payload,
+                    "split at {split} left the payload whole in one call",
+                );
+            }
+        }
     }
 
     #[test]

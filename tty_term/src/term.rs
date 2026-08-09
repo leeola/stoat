@@ -36,6 +36,7 @@ use scan::{notification_from_osc, EscEvent, EscScanner, ESC, XTVERSION_REPLY};
 use std::{
     collections::{BTreeMap, HashMap},
     mem,
+    ops::Range,
     sync::Arc,
     time::Instant,
 };
@@ -106,7 +107,10 @@ pub struct Terminal {
     esc: EscScanner,
     /// Reused buffer for one advance's decoded APC frames, so the busy decode
     /// path does not allocate a fresh Vec per chunk.
-    frames_scratch: Vec<(Option<Command>, usize)>,
+    ///
+    /// Each frame is paired with the range its payload occupied in the scanned
+    /// slice and the offset one past its terminator.
+    frames_scratch: Vec<(Option<Command>, Range<usize>, usize)>,
     /// Reused per-argument decode buffers threaded through
     /// [`command::decode_with`], so the busy decode path allocates nothing per
     /// APC frame argument once warm.
@@ -836,8 +840,12 @@ impl Terminal {
         let responses = &self.responses;
         let events = &mut self.pending_events;
         self.esc.scan(scan, &mut |event| match event {
-            EscEvent::Apc { payload, end } => {
-                frames.push((command::decode_with(payload, scratch), end));
+            EscEvent::Apc {
+                payload,
+                interior,
+                end,
+            } => {
+                frames.push((command::decode_with(payload, scratch), interior, end));
             },
             EscEvent::XtVersion => responses.push(XTVERSION_REPLY.as_bytes()),
             EscEvent::OscNotify { code, payload } => {
@@ -848,40 +856,49 @@ impl Terminal {
         });
 
         // Without a redirect every byte targets the live screen, so apply the
-        // commands and feed the whole chunk verbatim, preserving the
-        // synchronized-update accounting the redirect path cannot.
+        // commands and feed the chunk to the one parser, preserving the
+        // synchronized-update accounting the redirect path cannot. Only the
+        // frame payloads are held back, which that parser would walk past.
         let involves_redirect = redirecting
-            || frames.iter().any(|(command, _)| {
+            || frames.iter().any(|(command, _, _)| {
                 matches!(
                     command,
                     Some(Command::Fill(_)) | Some(Command::Popover(_)) | Some(Command::TextRun(_))
                 )
             });
+        let prefix = bytes.len() - scan.len();
         if !involves_redirect {
-            for (command, _) in frames.drain(..) {
+            let mut fed = 0;
+            let mut start = 0;
+            for (command, interior, _) in frames.drain(..) {
+                fed += self.feed_live(&bytes[start..prefix + interior.start]);
+                start = prefix + interior.end;
+
                 if let Some(command) = command {
                     self.apply_command(command);
                 }
             }
+            fed += self.feed_live(&bytes[start..]);
             self.frames_scratch = frames;
 
-            self.parser.advance(&mut self.term, bytes);
-
-            // A redraw is warranted unless the whole chunk was held in the
+            // A redraw is warranted unless everything fed was held in the
             // parser's synchronized-update buffer (nothing reached the screen).
-            return self.parser.sync_bytes_count() < bytes.len();
+            // Measured against what was fed rather than what arrived, since the
+            // payloads left out never had a screen to reach.
+            return self.parser.sync_bytes_count() < fed;
         }
 
         // A fill redirect splits the chunk at frame boundaries: each segment up
         // to and including a marker is routed to the target active before that
         // marker, then the marker's command flips the target for the next
-        // segment. The marker's own APC bytes are ignored by whichever parser
-        // consumes them. `prefix` rebases the scan-relative offsets when a memchr
-        // skip left a plain head bound for the live screen.
-        let prefix = bytes.len() - scan.len();
+        // segment. The marker's introducer and terminator are ignored by
+        // whichever parser consumes them, and its payload is left out entirely.
+        // `prefix` rebases the scan-relative offsets when a memchr skip left a
+        // plain head bound for the live screen.
         let mut start = 0;
-        for (command, end) in frames.drain(..) {
-            self.feed_segment(&bytes[start..prefix + end]);
+        for (command, interior, end) in frames.drain(..) {
+            self.feed_segment(&bytes[start..prefix + interior.start]);
+            self.feed_segment(&bytes[prefix + interior.end..prefix + end]);
             start = prefix + end;
 
             if let Some(command) = command {
@@ -1809,6 +1826,19 @@ impl Terminal {
         }
 
         self.capture_scratch = capture.content;
+    }
+
+    /// Bytes the parser is holding back in its synchronized-update buffer.
+    #[cfg(test)]
+    fn buffered_sync_bytes(&self) -> usize {
+        self.parser.sync_bytes_count()
+    }
+
+    /// Hand `segment` to the live parser and report its length, for a caller
+    /// summing what a chunk actually presented.
+    fn feed_live(&mut self, segment: &[u8]) -> usize {
+        self.parser.advance(&mut self.term, segment);
+        segment.len()
     }
 
     /// Route a run of VT bytes to the active write target.
@@ -3540,6 +3570,46 @@ mod tests {
         terminal.project(&mut grid);
 
         assert_eq!((grid.rows(), grid.cols()), (5, 10));
+    }
+
+    /// A frame's payload is never handed to the VT parser, which has no use for
+    /// it. Inside an APC string the parser ignores everything up to the
+    /// terminator, and a payload cannot hold an ESC for it to act on, so what it
+    /// does with those bytes is walk past them.
+    ///
+    /// A synchronized update is what makes that visible. The parser buffers
+    /// whatever it is given while one is open, so the buffer grows by exactly
+    /// what reached it.
+    #[test]
+    fn a_frame_payload_never_reaches_the_vt_parser() {
+        let mut terminal = Terminal::new(2, 8, Theme::default());
+        terminal.advance(b"\x1b[?2026h");
+
+        let before = terminal.buffered_sync_bytes();
+        terminal.advance(b"\x1b_Gstoatty;border\x1b\\");
+
+        assert_eq!(
+            terminal.buffered_sync_bytes() - before,
+            4,
+            "the introducer and the terminator are passed on, the payload is not",
+        );
+    }
+
+    /// A chunk an open update swallowed whole presented nothing, so it warrants
+    /// no redraw, and a frame inside it does not change that.
+    ///
+    /// The chunk is longer than what the parser was given, so weighing the
+    /// buffer against the chunk's own length would count the payload as content
+    /// that reached the screen and repaint in the middle of an update.
+    #[test]
+    fn a_frame_inside_a_synchronized_update_warrants_no_redraw() {
+        let mut terminal = Terminal::new(2, 8, Theme::default());
+        terminal.advance(b"\x1b[?2026h");
+
+        assert!(
+            !terminal.advance(b"\x1b_Gstoatty;border\x1b\\AB"),
+            "the update is still buffering, so nothing was presented",
+        );
     }
 
     #[test]
