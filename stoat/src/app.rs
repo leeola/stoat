@@ -24067,6 +24067,33 @@ mod tests {
         );
     }
 
+    /// The insert paths reverse this list into `edit_batch`, which takes its
+    /// ranges sorted descending by start. Reversing gives descending only
+    /// because this answers ascending, and cursors are added in whatever order
+    /// the reader made them, so the sort is doing real work.
+    ///
+    /// `edit_batch` checks the order with a `debug_assert`, so a release build
+    /// has nothing but this holding it.
+    #[test]
+    fn cursor_offsets_come_back_in_ascending_order() {
+        let mut h = Stoat::test();
+        open_scratch_file(&mut h, "abcdefgh");
+
+        for offset in [6, 2, 4] {
+            insert_cursor_at(&mut h, offset);
+        }
+
+        let (editor_id, _) = h.stoat.focused_editor_ids().expect("editor");
+        let cursors = h.stoat.editor_cursor_offsets(editor_id);
+        let offsets: Vec<usize> = cursors.iter().map(|(_, offset)| *offset).collect();
+
+        assert_eq!(
+            offsets,
+            vec![0, 2, 4, 6],
+            "the cursors come back in offset order, not the order they were made",
+        );
+    }
+
     /// Adjacent cursors backspacing collapse onto one deletion.
     ///
     /// Their delete ranges touch end to start, which no other end-to-end test

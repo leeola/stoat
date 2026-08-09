@@ -1274,6 +1274,56 @@ mod tests {
         assert_eq!(merge_overlapping_spans(vec![]), vec![], "empty");
     }
 
+    /// The delete path hands this output straight to `edit_batch`, reversed,
+    /// which takes disjoint ranges sorted descending and refuses an empty range
+    /// sharing a start with a deleting one.
+    ///
+    /// Reversing gives descending only if the output ascends, disjointness is
+    /// the batch's own requirement, and non-empty in giving non-empty out is
+    /// what keeps every range in that batch a deleting one, so the shape the
+    /// batch refuses cannot arise. All three are `debug_assert`s over there, so
+    /// a release build leans on this end holding them.
+    #[test]
+    fn merged_spans_are_the_shape_a_delete_batch_needs() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        for case in 0..512 {
+            let spans: Vec<(usize, usize)> = (0..1 + (next() % 6))
+                .map(|_| {
+                    let start = (next() % 20) as usize;
+                    // Non-empty, which is what the delete path filters for
+                    // before it merges.
+                    (start, start + 1 + (next() % 5) as usize)
+                })
+                .collect();
+
+            let merged = merge_overlapping_spans(spans.clone());
+
+            for window in merged.windows(2) {
+                assert!(
+                    window[0].1 <= window[1].0,
+                    "case {case}: {merged:?} overlaps, from {spans:?}",
+                );
+                assert!(
+                    window[0].0 < window[1].0,
+                    "case {case}: {merged:?} does not ascend, from {spans:?}",
+                );
+            }
+            for span in &merged {
+                assert!(
+                    span.0 < span.1,
+                    "case {case}: {merged:?} holds an empty span, from {spans:?}",
+                );
+            }
+        }
+    }
+
     #[test]
     fn transform_resorts_after_swap() {
         let multi = singleton("abcdefghij");
