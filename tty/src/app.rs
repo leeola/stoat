@@ -927,11 +927,25 @@ impl ApplicationHandler<PtyEvent> for App {
                 rows as u16,
                 cols as u16,
                 move |output| match output {
-                    PtyOutput::Data(bytes) => {
-                        pty::push_tail(&mut tail, bytes, CHILD_OUTPUT_TAIL_CAP);
-                        // Parse on the reader thread under the shared lock.
+                    PtyOutput::Data { bytes, may_refuse } => {
+                        // Parse on the reader thread under the shared lock. The
+                        // main thread holds it to render, and waiting here would
+                        // stop the reader draining the pty, which stops the
+                        // child. Better to leave the bytes with the reader and
+                        // take them once the frame is out.
                         let (redraw, responses, events) = {
-                            let mut terminal = terminal.lock();
+                            let Some(mut terminal) = (if may_refuse {
+                                terminal.try_lock_unfair()
+                            } else {
+                                Some(terminal.lock())
+                            }) else {
+                                return false;
+                            };
+
+                            // Recorded once the bytes are ours, since refused
+                            // ones come back and would otherwise land twice.
+                            pty::push_tail(&mut tail, bytes, CHILD_OUTPUT_TAIL_CAP);
+
                             let redraw = terminal.advance(bytes);
                             // A buffering synchronized update needs the main
                             // thread to arm and drive its timeout flush.
@@ -953,11 +967,13 @@ impl ApplicationHandler<PtyEvent> for App {
                         if redraw && !dirty.swap(true, Ordering::Relaxed) {
                             let _ = proxy.send_event(PtyEvent::Redraw);
                         }
+                        true
                     },
                     PtyOutput::Eof => {
                         tracing::info!("child closed the pty");
                         let last_output = pty::strip_escapes(&String::from_utf8_lossy(&tail));
                         let _ = proxy.send_event(PtyEvent::Exited { last_output });
+                        true
                     },
                 },
             )

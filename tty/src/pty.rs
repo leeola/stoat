@@ -29,13 +29,18 @@ use std::{
 /// A chunk of PTY activity handed to the [`Pty::spawn`] sink.
 ///
 /// [`PtyOutput::Data`] borrows the reader thread's read buffer, so it is valid
-/// only for the duration of the sink call. The sink must consume it before
-/// returning and must not retain the slice, since the next read overwrites the
-/// buffer.
+/// only for the duration of the sink call. The sink must not retain the slice,
+/// since the next read overwrites the buffer.
 pub(crate) enum PtyOutput<'a> {
     /// Bytes read from the shell, borrowed from the reader buffer, to feed into
     /// the parser.
-    Data(&'a [u8]),
+    ///
+    /// The sink reports whether it took them. Refusing is how a sink that would
+    /// have to wait for something keeps the reader out of that wait, and the
+    /// bytes come back on a later call. `may_refuse` is clear when the reader
+    /// has nowhere left to hold them, and the call is then treated as taken
+    /// whatever it answers.
+    Data { bytes: &'a [u8], may_refuse: bool },
     /// The shell closed its end; no more data will follow.
     Eof,
 }
@@ -72,6 +77,10 @@ impl Pty {
     /// `sink` runs on the reader thread: it is called with [`PtyOutput::Data`]
     /// for each chunk the shell writes and once with [`PtyOutput::Eof`] when the
     /// shell exits. It must be `Send` since it runs off the main thread.
+    ///
+    /// A sink that would have to wait to take a chunk should say so rather than
+    /// wait, since the reader cannot drain the pty while it is inside the sink
+    /// and a full pty stops the child. Refused bytes are offered again.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn(
         program: &str,
@@ -83,7 +92,7 @@ impl Pty {
         theme: &str,
         rows: u16,
         cols: u16,
-        sink: impl FnMut(PtyOutput<'_>) + Send + 'static,
+        sink: impl FnMut(PtyOutput<'_>) -> bool + Send + 'static,
     ) -> io::Result<Pty> {
         let pair = portable_pty::native_pty_system()
             .openpty(PtySize {
@@ -306,6 +315,16 @@ fn prepend_path(dir: &Path, existing: Option<OsString>) -> OsString {
 /// quarter-megabyte would not fit comfortably on the reader thread's stack.
 const READ_BUF_SIZE: usize = 256 * 1024;
 
+/// Most that goes to the sink in one call.
+///
+/// The sink parses under the terminal lock, so a call is a stretch the main
+/// thread cannot render in. A buffer's worth handed over whole would put a
+/// quarter-megabyte parse in front of the next frame, where four smaller calls
+/// leave four points where the frame can go first. Splitting costs nothing:
+/// both the VT parser and the escape scanner carry their state between calls,
+/// so a sequence cut in half is resumed rather than lost.
+const HANDOFF_SLICE: usize = 64 * 1024;
+
 /// Pump `reader` to `sink` until end of input, accumulating what arrives
 /// together into one [`PtyOutput::Data`] chunk, then one [`PtyOutput::Eof`] once
 /// the shell closes its end or the read errors.
@@ -316,7 +335,7 @@ const READ_BUF_SIZE: usize = 256 * 1024;
 fn read_loop(
     mut reader: impl Read,
     readable_now: impl FnMut() -> bool,
-    sink: impl FnMut(PtyOutput<'_>),
+    sink: impl FnMut(PtyOutput<'_>) -> bool,
 ) {
     accumulate_loop(move |buf| reader.read(buf), readable_now, sink);
 }
@@ -329,22 +348,27 @@ fn read_loop(
 /// returns without blocking, so folding it into this burst costs no latency.
 /// Flushes when nothing more is waiting or the buffer fills, and flushes
 /// whatever it holds before reporting the end of input.
+///
+/// A sink that refuses a chunk is not waited on while there is still output to
+/// take in, so a busy consumer leaves the reader draining the kernel's buffer
+/// rather than parked. The child keeps running either way, which is the point:
+/// a reader that stops reading fills the pty and blocks the child in `write`.
 fn accumulate_loop(
     mut read: impl FnMut(&mut [u8]) -> io::Result<usize>,
     mut readable_now: impl FnMut() -> bool,
-    mut sink: impl FnMut(PtyOutput<'_>),
+    mut sink: impl FnMut(PtyOutput<'_>) -> bool,
 ) {
     let mut buf = vec![0u8; READ_BUF_SIZE].into_boxed_slice();
     let mut filled = 0;
 
     loop {
-        // The arms below flush and reset the moment the buffer fills, so this
-        // slice is never empty and a read cannot return zero for want of room,
-        // which would read as end of input.
+        // A forced hand-off empties the buffer, so this slice is never empty
+        // and a read cannot return zero for want of room, which would read as
+        // end of input.
         match read(&mut buf[filled..]) {
             Ok(0) | Err(_) => {
                 if filled > 0 {
-                    sink(PtyOutput::Data(&buf[..filled]));
+                    hand_off(&mut buf, filled, false, &mut sink);
                 }
                 break;
             },
@@ -353,13 +377,52 @@ fn accumulate_loop(
                 if filled < buf.len() && readable_now() {
                     continue;
                 }
-                sink(PtyOutput::Data(&buf[..filled]));
-                filled = 0;
+
+                filled = hand_off(&mut buf, filled, true, &mut sink);
+
+                // Refused. Deferring is only safe while output is waiting,
+                // since the read below would otherwise park on a quiet child
+                // and leave what is held here with nothing to release it. A
+                // full buffer cannot defer at all, having nowhere to read into.
+                if filled > 0 && !(filled < buf.len() && readable_now()) {
+                    filled = hand_off(&mut buf, filled, false, &mut sink);
+                }
             },
         }
     }
 
     sink(PtyOutput::Eof);
+}
+
+/// Offer `buf[..filled]` to `sink` in slices of at most [`HANDOFF_SLICE`], and
+/// report what is left over, moved to the front of `buf`.
+///
+/// Returns zero when `may_refuse` is clear, since a call the sink may not
+/// refuse is taken whatever it answers.
+fn hand_off(
+    buf: &mut [u8],
+    filled: usize,
+    may_refuse: bool,
+    sink: &mut impl FnMut(PtyOutput<'_>) -> bool,
+) -> usize {
+    let mut start = 0;
+    while start < filled {
+        let end = (start + HANDOFF_SLICE).min(filled);
+        let taken = sink(PtyOutput::Data {
+            bytes: &buf[start..end],
+            may_refuse,
+        });
+        if may_refuse && !taken {
+            break;
+        }
+        start = end;
+    }
+
+    if start == 0 {
+        return filled;
+    }
+    buf.copy_within(start..filled, 0);
+    filled - start
 }
 
 /// Whether `fd` has output waiting, answered without blocking.
@@ -566,7 +629,7 @@ mod tests {
         accumulate_loop, configure_child_env, dup_fd, dup_for_polling, fd_readable_now,
         prepend_path, push_tail, read_loop, shell_command, shell_or_default, spawn_writer,
         strip_escapes, wait_exit_status, AsRawFd, Child, CommandBuilder, ExitStatus, PtyOutput,
-        PtySize, MULTIPLEXER_ENV_VARS, READ_BUF_SIZE,
+        PtySize, HANDOFF_SLICE, MULTIPLEXER_ENV_VARS, READ_BUF_SIZE,
     };
     use portable_pty::ChildKiller;
     use std::{
@@ -718,9 +781,21 @@ mod tests {
     /// `readable_now` answered from `pending`. Returns the chunks the sink saw
     /// and whether it ended with `Eof`.
     fn accumulated(reads: &[&[u8]], pending: &[bool]) -> (Vec<Vec<u8>>, bool) {
+        let (chunks, eof) = accumulated_against(reads, pending, || true);
+        (chunks.into_iter().map(|(bytes, _)| bytes).collect(), eof)
+    }
+
+    /// [`accumulated`] with a sink that decides per call whether to take the
+    /// chunk. Each chunk is reported with whether that call was one it could
+    /// have refused.
+    fn accumulated_against(
+        reads: &[&[u8]],
+        pending: &[bool],
+        mut take: impl FnMut() -> bool,
+    ) -> (Vec<(Vec<u8>, bool)>, bool) {
         let mut next_read = 0;
         let mut next_pending = 0;
-        let mut chunks = Vec::new();
+        let mut chunks: Vec<(Vec<u8>, bool)> = Vec::new();
         let mut eof = false;
 
         accumulate_loop(
@@ -739,8 +814,17 @@ mod tests {
                 answer
             },
             |out| match out {
-                PtyOutput::Data(chunk) => chunks.push(chunk.to_vec()),
-                PtyOutput::Eof => eof = true,
+                PtyOutput::Data { bytes, may_refuse } => {
+                    if may_refuse && !take() {
+                        return false;
+                    }
+                    chunks.push((bytes.to_vec(), may_refuse));
+                    true
+                },
+                PtyOutput::Eof => {
+                    eof = true;
+                    true
+                },
             },
         );
 
@@ -767,17 +851,95 @@ mod tests {
         assert!(eof, "ends with Eof");
     }
 
+    /// A sink that refuses does not park the reader while output is still
+    /// waiting. Draining the pty is what keeps the child running, so the bytes
+    /// are held and the reader goes back for more.
+    #[test]
+    fn a_refused_chunk_is_held_while_there_is_more_to_read() {
+        // The first hand-off is refused with more already pending, so the
+        // reader takes that in too rather than waiting to be listened to.
+        let calls = std::cell::Cell::new(0);
+        let (chunks, eof) =
+            accumulated_against(&[b"one", b"two", b"three"], &[false, true, false], || {
+                calls.set(calls.get() + 1);
+                calls.get() > 1
+            });
+
+        assert_eq!(
+            chunks,
+            vec![(b"onetwo".to_vec(), true), (b"three".to_vec(), true)],
+            "the refused bytes come back with what was read while they waited",
+        );
+        assert!(eof, "ends with Eof");
+    }
+
+    /// Holding refused bytes is only safe while more is on its way. With
+    /// nothing left to read the next read would park on a quiet child, and the
+    /// bytes would sit there with nothing to release them, so the reader waits
+    /// on the sink instead.
+    #[test]
+    fn a_refused_chunk_with_nothing_behind_it_is_handed_over_anyway() {
+        // The read below stands in for one that would park on a quiet child.
+        // Reaching it while bytes are still held is the stall itself, so the
+        // reader has to have insisted before it gets there.
+        let holding = std::cell::Cell::new(false);
+        let mut reads = [b"only"].into_iter();
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+
+        accumulate_loop(
+            |buf| {
+                let Some(bytes) = reads.next() else {
+                    assert!(!holding.get(), "went back to a read still holding output");
+                    return Ok(0);
+                };
+                buf[..bytes.len()].copy_from_slice(bytes);
+                Ok(bytes.len())
+            },
+            || false,
+            |out| match out {
+                PtyOutput::Data { bytes, may_refuse } => {
+                    if may_refuse {
+                        holding.set(true);
+                        return false;
+                    }
+                    holding.set(false);
+                    chunks.push(bytes.to_vec());
+                    true
+                },
+                PtyOutput::Eof => true,
+            },
+        );
+
+        assert_eq!(
+            chunks,
+            vec![b"only".to_vec()],
+            "handed over on a call it could not refuse",
+        );
+    }
+
     #[test]
     fn a_full_buffer_flushes_mid_burst() {
         // Output still pending cannot hold the flush off forever, or the burst
-        // would have no bound and the sink would hold the lock for all of it.
+        // would have no bound. The buffer's worth then goes out in sink-sized
+        // calls, since one call is a stretch the main thread cannot render in.
         let flood = vec![b'x'; READ_BUF_SIZE];
         let (chunks, eof) = accumulated(&[&flood, b"tail"], &[true, true]);
 
         assert_eq!(
             chunks.iter().map(Vec::len).collect::<Vec<_>>(),
-            vec![READ_BUF_SIZE, 4],
-            "the buffer's worth, then what came after it",
+            vec![
+                HANDOFF_SLICE,
+                HANDOFF_SLICE,
+                HANDOFF_SLICE,
+                HANDOFF_SLICE,
+                4
+            ],
+            "the buffer's worth in slices, then what came after it",
+        );
+        assert_eq!(
+            chunks.concat(),
+            [flood, b"tail".to_vec()].concat(),
+            "every byte reaches the sink once, in order",
         );
         assert!(eof, "ends with Eof");
     }
@@ -839,15 +1001,30 @@ mod tests {
             Cursor::new(data),
             || false,
             |out| match out {
-                PtyOutput::Data(chunk) => sizes.push(chunk.len()),
-                PtyOutput::Eof => eof = true,
+                PtyOutput::Data { bytes, .. } => {
+                    sizes.push(bytes.len());
+                    true
+                },
+                PtyOutput::Eof => {
+                    eof = true;
+                    true
+                },
             },
         );
 
         assert_eq!(
-            sizes,
-            vec![READ_BUF_SIZE, 100],
-            "a full buffer, then the remainder"
+            sizes.iter().sum::<usize>(),
+            READ_BUF_SIZE + 100,
+            "every byte reaches the sink once"
+        );
+        assert!(
+            sizes.iter().all(|size| *size <= HANDOFF_SLICE),
+            "a buffer's worth goes out in sink-sized calls, not one: {sizes:?}",
+        );
+        assert_eq!(
+            sizes.last(),
+            Some(&100),
+            "the remainder past the buffer is its own call"
         );
         assert!(eof, "ends with Eof");
     }
@@ -950,10 +1127,11 @@ mod tests {
             reader,
             || false,
             |out| {
-                if let PtyOutput::Data(chunk) = out {
+                if let PtyOutput::Data { bytes: chunk, .. } = out {
                     chunks += 1;
                     bytes += chunk.len();
                 }
+                true
             },
         );
         let elapsed = start.elapsed();
