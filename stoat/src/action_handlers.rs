@@ -1123,6 +1123,7 @@ fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
             stoat.minimap_class_table = crate::minimap::ClassTable::from_theme(&stoat.theme);
             stoat.minimap_content.clear();
             stoat.theme_epoch += 1;
+            stoat.paint_generation += 1;
             stoat.emit_theme_default_colors();
             UpdateEffect::Redraw
         },
@@ -1671,6 +1672,51 @@ mod tests {
         assert_eq!(
             stoat.theme_epoch, 1,
             "a theme that failed to load repaints nothing, so nothing is staled",
+        );
+    }
+
+    /// The paint generation moves when something a pane paints from outside its
+    /// display map moves, and holds otherwise.
+    ///
+    /// The theme, the settings the renderer reads directly, and the search
+    /// query all reach the screen without passing through a display layer, so a
+    /// cache keyed on the display snapshot alone would hold a pane still
+    /// through a theme switch.
+    #[test]
+    fn a_theme_or_config_install_moves_the_paint_generation() {
+        let mut stoat =
+            stoat_with_config(Some("theme mine { ui.text.fg = \"#abcdef\"; }".to_string()));
+        assert_eq!(stoat.paint_generation, 0, "a fresh session starts at zero");
+
+        dispatch(
+            &mut stoat,
+            &SetTheme {
+                name: "mine".to_string(),
+            },
+        );
+        assert_eq!(stoat.paint_generation, 1, "a theme switch repaints panes");
+
+        dispatch(
+            &mut stoat,
+            &SetTheme {
+                name: "nonexistent".to_string(),
+            },
+        );
+        assert_eq!(
+            stoat.paint_generation, 1,
+            "a theme that failed to load repaints nothing",
+        );
+
+        stoat.reload_user_config("theme mine { ui.text.fg = \"#123456\"; }");
+        assert_eq!(
+            stoat.paint_generation, 2,
+            "a reload replaces the theme and the settings the renderer reads",
+        );
+
+        stoat.reload_user_config("this is not config {{{");
+        assert_eq!(
+            stoat.paint_generation, 2,
+            "a parse failure keeps the current config, so it repaints nothing",
         );
     }
 

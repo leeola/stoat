@@ -109,6 +109,9 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     {
         super::jump::push_entry(stoat, entry);
     }
+    // The query reaches the frame directly rather than through any display
+    // layer, so nothing else would report that the highlighted matches moved.
+    stoat.paint_generation += 1;
     stoat.last_search = Some(last);
     true
 }
@@ -583,6 +586,34 @@ mod tests {
             crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext),
             crate::app::UpdateEffect::None,
             "repeating a pattern that never compiled stays a no-op",
+        );
+    }
+
+    /// Submitting a search moves the paint generation, and moving the cursor
+    /// does not.
+    ///
+    /// The query is read straight off the app when a frame is built, so no
+    /// display layer reports that the highlighted matches changed. A motion
+    /// changes what is selected, which the display map already answers for.
+    #[test]
+    fn submitting_a_search_moves_the_paint_generation() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def\nabc\n");
+        let before = h.stoat.paint_generation;
+
+        h.type_keys("j");
+        assert_eq!(
+            h.stoat.paint_generation, before,
+            "a cursor motion paints from the display map alone",
+        );
+
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+        assert_eq!(
+            h.stoat.paint_generation,
+            before + 1,
+            "a submitted query changes which matches are highlighted",
         );
     }
 

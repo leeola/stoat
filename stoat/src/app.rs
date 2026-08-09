@@ -1536,6 +1536,19 @@ pub struct Stoat {
     /// hash this in, which is what makes a `:theme` switch refill them instead of
     /// gliding old-theme pixels back onto the screen.
     pub(crate) theme_epoch: u64,
+    /// Counts the changes to what a pane paints from outside its display map.
+    ///
+    /// A pane's own content is answered by
+    /// [`DisplaySnapshot::paint_version`](crate::display_map::DisplaySnapshot::paint_version),
+    /// but the theme, the settings the renderer reads straight off this struct,
+    /// and the search query all reach the screen without passing through any
+    /// display layer. A cache keyed on the snapshot alone would hold a pane
+    /// still through a theme switch.
+    ///
+    /// Distinct from [`Self::theme_epoch`], which answers the narrower question
+    /// of whether the theme itself moved and is hashed into the pooled page
+    /// versions.
+    pub(crate) paint_generation: u64,
     /// The editor chrome resolved from [`Self::theme`], rebuilt by
     /// [`Self::refresh_chrome`] when the theme has been replaced.
     ///
@@ -2003,6 +2016,7 @@ impl Stoat {
             apc_scene: ApcScene::new(),
             pending_undercurls: UndercurlBatch::default(),
             theme_epoch: 0,
+            paint_generation: 0,
             chrome: None,
             dimmed_minimap_palette: None,
             smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
@@ -2081,6 +2095,10 @@ impl Stoat {
 
         install_highlight_maps(&self.language_registry, &self.syntax_styles);
         self.minimap_content.clear();
+        // The theme, the syntax styles, and the settings the renderer reads
+        // directly all just moved, and a parse failure returned above without
+        // touching any of them.
+        self.paint_generation += 1;
         self.set_status("config reloaded");
     }
 
