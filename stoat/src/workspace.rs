@@ -235,6 +235,12 @@ pub struct Workspace {
     /// dropped when the plan completes or aborts.
     pub(crate) rebase_active: Option<ActiveRebase>,
     parse_jobs: HashMap<BufferId, ParseJob>,
+    /// How many buffer snapshots the parse driver cloned.
+    ///
+    /// A clone the gates then discard costs only time, so a test needs the
+    /// count to say a settled buffer stops paying for one.
+    #[cfg(test)]
+    parse_snapshot_clones: std::cell::Cell<u64>,
     /// In-flight diff-map population jobs, one per buffer, mirroring
     /// [`Self::parse_jobs`]. Held so the spawned blocking diff is not cancelled
     /// before it installs its [`DiffMap`] on the buffer.
@@ -296,8 +302,12 @@ pub struct Workspace {
     pub(crate) editor_bridge_waiters: HashMap<BufferId, oneshot::Sender<()>>,
 }
 
+/// A parse running for one buffer.
+///
+/// Carries no target version, unlike [`DiffJob`]. A buffer's next parse is
+/// whatever is stale when this one lands, so which version it was spawned for
+/// decides nothing once it is in flight.
 struct ParseJob {
-    target_version: u64,
     task: Task<Option<ParseJobOutput>>,
 }
 
@@ -410,6 +420,8 @@ impl Workspace {
             rebase: None,
             rebase_active: None,
             parse_jobs: HashMap::new(),
+            #[cfg(test)]
+            parse_snapshot_clones: std::cell::Cell::new(0),
             diff_jobs: HashMap::new(),
             diff_versions: HashMap::new(),
             diff_base_text: HashMap::new(),
@@ -776,9 +788,9 @@ impl Workspace {
     /// install their results, then spawn new jobs for visible buffers whose
     /// stored syntax version is stale.
     ///
-    /// At most one job per buffer is in flight at a time. If a buffer advances
-    /// past the in-flight job's `target_version`, the new job is queued only
-    /// after the old one completes. Anchors in the result are computed using
+    /// At most one job per buffer is in flight at a time. A buffer edited while
+    /// its parse runs is not parsed again until that one lands, so the edit is
+    /// picked up on the frame after. Anchors in the result are computed using
     /// the parsed snapshot, so they remain valid even if the buffer has been
     /// edited further while the parse was running.
     ///
@@ -837,28 +849,34 @@ impl Workspace {
         let mut visible = std::mem::take(&mut self.visible_buffers);
         self.collect_visible_buffer_ids(&mut visible);
 
+        // The staleness checks come first so a settled buffer costs one lock
+        // acquisition and nothing else. Its snapshot would otherwise be cloned
+        // and dropped every frame, which is two rope clones per visible buffer
+        // for an answer the version already gave.
         for &buffer_id in &visible {
-            let Some(lang) = self.buffers.language_for(buffer_id) else {
-                continue;
-            };
             let Some(shared) = self.buffers.get(buffer_id) else {
                 continue;
             };
-            let snapshot = {
-                let guard = shared.read().expect("buffer poisoned");
-                guard.snapshot.clone()
-            };
-            let cur_version = snapshot.version;
+            let cur_version = shared.read().expect("buffer poisoned").snapshot.version;
 
             if self.buffers.syntax_version(buffer_id) == Some(cur_version) {
                 continue;
             }
-            if let Some(job) = self.parse_jobs.get(&buffer_id) {
-                if job.target_version == cur_version {
-                    continue;
-                }
+            // A job in flight owns this buffer's next parse whatever version it
+            // targets, since only one runs per buffer at a time and the result
+            // installs before another can start. A job left behind by an edit
+            // it no longer covers is superseded on the frame after it lands.
+            if self.parse_jobs.contains_key(&buffer_id) {
                 continue;
             }
+            let Some(lang) = self.buffers.language_for(buffer_id) else {
+                continue;
+            };
+
+            #[cfg(test)]
+            self.parse_snapshot_clones
+                .set(self.parse_snapshot_clones.get() + 1);
+            let snapshot = shared.read().expect("buffer poisoned").snapshot.clone();
 
             // Cloned rather than taken, so everything that reads the tree keeps
             // reading the last landed one while the job flies. Both clones are
@@ -904,13 +922,7 @@ impl Workspace {
                 )
             });
             let task = executor.spawn_with_redraw(redraw_notify.clone(), parse);
-            self.parse_jobs.insert(
-                buffer_id,
-                ParseJob {
-                    target_version: cur_version,
-                    task,
-                },
-            );
+            self.parse_jobs.insert(buffer_id, ParseJob { task });
         }
 
         // Cap retained highlight state, on the passes where a parse landed.
@@ -2266,7 +2278,6 @@ mod tests {
         ws.parse_jobs.insert(
             id,
             ParseJob {
-                target_version: 1,
                 task: Task::Ready(None),
             },
         );
@@ -2276,6 +2287,65 @@ mod tests {
         assert!(
             !ws.parse_jobs.contains_key(&id),
             "swapping preview content drops the prior file's parse job"
+        );
+    }
+
+    /// The parse driver runs for every visible buffer on every redraw, and in
+    /// the steady state none of them needs parsing. A snapshot cloned before
+    /// the version is consulted is two rope clones per buffer per frame, thrown
+    /// away for an answer the version already gave.
+    ///
+    /// The stale buffer still clones, which is what says the count is measuring
+    /// something.
+    #[test]
+    fn a_settled_buffer_clones_no_snapshot_to_decide_it_is_settled() {
+        use crate::action_handlers::dispatch;
+        use stoat_action::OpenFile;
+
+        let mut h = TestHarness::with_size(24, 4);
+        let root = PathBuf::from("/settled");
+        h.fake_fs()
+            .insert_file(root.join("settled.rs"), b"fn f() {}\n");
+        h.stoat.active_workspace_mut().git_root = root.clone();
+
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: root.join("settled.rs"),
+            },
+        );
+
+        // The open leaves the buffer unparsed, so the first pass has to clone.
+        let before = h.stoat.active_workspace().parse_snapshot_clones.get();
+        h.stoat.drive_background();
+        assert!(
+            h.stoat.active_workspace().parse_snapshot_clones.get() > before,
+            "a buffer with no syntax yet is parsed, which needs its snapshot"
+        );
+
+        // Let the job land so the recorded syntax version catches up.
+        for _ in 0..8 {
+            h.tick();
+            h.stoat.drive_background();
+        }
+        let ws = h.stoat.active_workspace();
+        let id = ws
+            .buffers
+            .id_for_path(&root.join("settled.rs"))
+            .expect("the buffer opened");
+        assert!(
+            ws.buffers.syntax_version(id).is_some(),
+            "the parse landed, so the buffer is settled"
+        );
+
+        let settled = h.stoat.active_workspace().parse_snapshot_clones.get();
+        for _ in 0..4 {
+            h.stoat.drive_background();
+        }
+        assert_eq!(
+            h.stoat.active_workspace().parse_snapshot_clones.get(),
+            settled,
+            "four redraws over a settled buffer clone nothing"
         );
     }
 
