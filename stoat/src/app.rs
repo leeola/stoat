@@ -7234,10 +7234,10 @@ impl Stoat {
 
     /// The focused editor's buffer id paired with its current selections, for
     /// opening or sealing an undo group around an insert session.
-    fn focused_undo_snapshot(&self) -> Option<(BufferId, Vec<Selection<Anchor>>)> {
+    fn focused_undo_snapshot(&self) -> Option<(BufferId, Arc<[Selection<Anchor>]>)> {
         let (editor_id, buffer_id) = self.focused_editor_ids()?;
         let editor = self.active_workspace().editors.get(editor_id)?;
-        Some((buffer_id, editor.selections.all_anchors().to_vec()))
+        Some((buffer_id, editor.selections.shared_anchors()))
     }
 
     /// Move each block cursor in the focused editor back one grapheme, landing

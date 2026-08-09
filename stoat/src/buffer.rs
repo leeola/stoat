@@ -80,7 +80,7 @@ pub struct TextBuffer {
     open_group_started: bool,
     /// Editor selections captured at [`Self::begin_group`], moved into the group
     /// when it materializes and restored when the group is undone.
-    open_group_before: Vec<Selection<Anchor>>,
+    open_group_before: Arc<[Selection<Anchor>]>,
     /// Chronological log of user-driven mutations. Replaying this on a fresh
     /// [`TextBuffer`] reconstructs an identical fragment tree, anchors, and
     /// undo map, which is how workspace save/restore preserves selections and
@@ -121,9 +121,9 @@ struct UndoGroup {
     /// Edit timestamps in application order. Undo toggles them in reverse.
     edits: Vec<u64>,
     /// Editor selections captured when the group opened, restored on undo.
-    selections_before: Vec<Selection<Anchor>>,
+    selections_before: Arc<[Selection<Anchor>]>,
     /// Editor selections captured when the group sealed, restored on redo.
-    selections_after: Vec<Selection<Anchor>>,
+    selections_after: Arc<[Selection<Anchor>]>,
 }
 
 /// Serializable buffer state for persistence. Holds the op log plus the
@@ -228,7 +228,7 @@ impl TextBuffer {
             undo_floor: 0,
             open_group: false,
             open_group_started: false,
-            open_group_before: Vec::new(),
+            open_group_before: Arc::from([]),
             ops: Vec::new(),
             next_checkpoint_id: 0,
             checkpoints: Vec::new(),
@@ -774,14 +774,14 @@ impl TextBuffer {
             self.edit_history.push(UndoGroup {
                 edits: vec![timestamp],
                 selections_before: std::mem::take(&mut self.open_group_before),
-                selections_after: Vec::new(),
+                selections_after: Arc::from([]),
             });
             self.open_group_started = true;
         } else {
             self.edit_history.push(UndoGroup {
                 edits: vec![timestamp],
-                selections_before: Vec::new(),
-                selections_after: Vec::new(),
+                selections_before: Arc::from([]),
+                selections_after: Arc::from([]),
             });
         }
     }
@@ -792,9 +792,9 @@ impl TextBuffer {
     ///
     /// The group is not materialized until its first edit, so opening one around
     /// a non-editing action costs nothing and leaves the undo history unchanged.
-    pub(crate) fn begin_group(&mut self, selections_before: Vec<Selection<Anchor>>) {
+    pub(crate) fn begin_group(&mut self, selections_before: Arc<[Selection<Anchor>]>) {
         if self.open_group {
-            self.seal_group(Vec::new());
+            self.seal_group(Arc::from([]));
         }
         self.open_group = true;
         self.open_group_started = false;
@@ -815,7 +815,7 @@ impl TextBuffer {
     /// list per keystroke for nobody.
     pub(crate) fn try_begin_group(
         &mut self,
-        selections_before: impl FnOnce() -> Vec<Selection<Anchor>>,
+        selections_before: impl FnOnce() -> Arc<[Selection<Anchor>]>,
     ) -> bool {
         if self.open_group {
             return false;
@@ -845,12 +845,12 @@ impl TextBuffer {
     /// Close the open undo group, recording `selections_after` to restore on
     /// redo. A group that took no edits was never materialized, so a non-editing
     /// action leaves no undo step behind.
-    pub(crate) fn seal_group(&mut self, selections_after: Vec<Selection<Anchor>>) {
+    pub(crate) fn seal_group(&mut self, selections_after: Arc<[Selection<Anchor>]>) {
         if !self.open_group {
             return;
         }
         self.open_group = false;
-        self.open_group_before = Vec::new();
+        self.open_group_before = Arc::from([]);
         if self.open_group_started {
             self.open_group_started = false;
             if let Some(group) = self.edit_history.last_mut() {
@@ -884,7 +884,7 @@ impl TextBuffer {
         // Sealed with no selections, as `undo`, `redo` and `begin_group` all do
         // at this level. The selections a group restores come from the caller,
         // and a save has none to offer.
-        self.seal_group(Vec::new());
+        self.seal_group(Arc::from([]));
         self.saved_marker = self.frontier();
         self.saved_text = Some(self.snapshot.visible_text.clone());
         // The version the saved bytes belong to, which is not the marker above.
@@ -985,14 +985,14 @@ impl TextBuffer {
     /// The content a buffer was loaded or seeded with is not an undo target, so
     /// undoing a freshly opened file with no user edits returns `None` and
     /// leaves the file intact rather than emptying it.
-    pub fn undo(&mut self) -> Option<Vec<Selection<Anchor>>> {
+    pub fn undo(&mut self) -> Option<Arc<[Selection<Anchor>]>> {
         // An open group names the top of the history, and undoing moves that
         // top. Leaving it open would hand the next edit to whichever group the
         // pop exposed, so the group is closed against the history it was
         // opened over. The selections are the caller's to supply on redo, and
         // undo answers with the group's own `selections_before`, so an empty
         // set here is not a value anything reads back.
-        self.seal_group(Vec::new());
+        self.seal_group(Arc::from([]));
 
         if self.edit_history.len() <= self.undo_floor {
             return None;
@@ -1008,13 +1008,13 @@ impl TextBuffer {
     /// Redo the top undone group, reapplying all of its edits as one step.
     /// Returns the editor selections captured when the group sealed, or `None`
     /// when there is nothing to redo.
-    pub fn redo(&mut self) -> Option<Vec<Selection<Anchor>>> {
+    pub fn redo(&mut self) -> Option<Arc<[Selection<Anchor>]>> {
         // Symmetry with [`Self::undo`], and unreachable rather than load-bearing:
         // every edit path clears the redo history first, so a group that has
         // taken an edit and a group waiting to be redone cannot both exist. The
         // seal costs nothing and keeps the two entry points from having to be
         // reasoned about separately.
-        self.seal_group(Vec::new());
+        self.seal_group(Arc::from([]));
 
         let group = self.redo_history.pop()?;
         self.apply_undo_toggles(group.edits.iter().copied(), BufferOp::Redo);
@@ -1836,7 +1836,7 @@ pub type SharedBuffer = Arc<std::sync::RwLock<TextBuffer>>;
 #[cfg(test)]
 mod tests {
     use super::{insertion_edits, TextBuffer, TreeEdit, OPS_COMPACT_THRESHOLD};
-    use std::{cmp::Ordering, mem, ops::Range};
+    use std::{cmp::Ordering, mem, ops::Range, sync::Arc};
     use stoat_text::{
         Anchor, Bias, BufferId, IndentStyle, InsertionFragment, Locator, Point, Selection,
         SelectionGoal,
@@ -1856,13 +1856,13 @@ mod tests {
     #[test]
     fn a_save_inside_an_insert_session_is_undoable_back_to() {
         let mut b = buf("start\n");
-        b.begin_group(Vec::new());
+        b.begin_group(Arc::from([]));
         b.edit(6..6, "one\n");
         b.mark_clean();
         let saved = b.snapshot.visible_text.to_string();
 
         b.edit(10..10, "two\n");
-        b.seal_group(Vec::new());
+        b.seal_group(Arc::from([]));
         assert!(b.dirty, "the edit after the save leaves it modified");
 
         b.undo();
@@ -2826,7 +2826,7 @@ mod tests {
     #[test]
     fn an_edit_after_an_undo_undoes_on_its_own() {
         let mut b = buf("seed");
-        b.begin_group(Vec::new());
+        b.begin_group(Arc::from([]));
         b.edit(4..4, "X");
         assert_eq!(b.snapshot.visible_text.to_string(), "seedX");
 
@@ -2851,11 +2851,11 @@ mod tests {
     #[test]
     fn begin_group_collapses_edits_into_one_undo_step() {
         let mut b = buf("");
-        b.begin_group(Vec::new());
+        b.begin_group(Arc::from([]));
         b.edit(0..0, "a");
         b.edit(1..1, "b");
         b.edit(2..2, "c");
-        b.seal_group(Vec::new());
+        b.seal_group(Arc::from([]));
         assert_eq!(b.snapshot.visible_text.to_string(), "abc");
         assert!(b.undo().is_some());
         assert_eq!(
@@ -2885,11 +2885,11 @@ mod tests {
         let edits: [(Range<usize>, &str); 3] = [(0..0, "abc"), (3..3, "def"), (1..2, "")];
 
         let mut grouped = buf("");
-        grouped.begin_group(Vec::new());
+        grouped.begin_group(Arc::from([]));
         for (range, text) in &edits {
             grouped.edit(range.clone(), text);
         }
-        grouped.seal_group(Vec::new());
+        grouped.seal_group(Arc::from([]));
 
         let mut separate = buf("");
         for (range, text) in &edits {
@@ -2941,23 +2941,23 @@ mod tests {
         // character, and gathering the selections is what the caller would pay
         // for each time.
         let mut b = buf("");
-        b.begin_group(Vec::new());
+        b.begin_group(Arc::from([]));
 
         let mut asked = 0;
         assert!(
             !b.try_begin_group(|| {
                 asked += 1;
-                Vec::new()
+                Arc::from([])
             }),
             "a group was already open",
         );
         assert_eq!(asked, 0, "so nothing was gathered");
 
-        b.seal_group(Vec::new());
+        b.seal_group(Arc::from([]));
         assert!(
             b.try_begin_group(|| {
                 asked += 1;
-                Vec::new()
+                Arc::from([])
             }),
             "and now one opens",
         );
@@ -2967,14 +2967,14 @@ mod tests {
     #[test]
     fn try_begin_group_leaves_an_open_group_untouched() {
         let mut b = buf("");
-        b.begin_group(Vec::new());
+        b.begin_group(Arc::from([]));
         b.edit(0..0, "a");
         assert!(
-            !b.try_begin_group(Vec::new),
+            !b.try_begin_group(|| Arc::from([])),
             "an already-open group is not reopened"
         );
         b.edit(1..1, "b");
-        b.seal_group(Vec::new());
+        b.seal_group(Arc::from([]));
         assert!(b.undo().is_some());
         assert_eq!(
             b.snapshot.visible_text.to_string(),
@@ -2987,12 +2987,12 @@ mod tests {
     fn try_begin_group_opens_a_group_on_an_idle_buffer() {
         let mut b = buf("");
         assert!(
-            b.try_begin_group(Vec::new),
+            b.try_begin_group(|| Arc::from([])),
             "a fresh group opens when none is active"
         );
         b.edit(0..0, "a");
         b.edit(1..1, "b");
-        b.seal_group(Vec::new());
+        b.seal_group(Arc::from([]));
         assert!(b.undo().is_some());
         assert_eq!(
             b.snapshot.visible_text.to_string(),
@@ -3005,8 +3005,8 @@ mod tests {
     fn empty_group_leaves_no_undo_step() {
         let mut b = buf("hi");
         b.edit(2..2, "!");
-        b.begin_group(Vec::new());
-        b.seal_group(Vec::new());
+        b.begin_group(Arc::from([]));
+        b.seal_group(Arc::from([]));
         assert!(b.undo().is_some());
         assert_eq!(
             b.snapshot.visible_text.to_string(),
@@ -3028,20 +3028,44 @@ mod tests {
         );
     }
 
+    /// Every dispatched action opens a group, so the capture happens per
+    /// keystroke and copying the set would cost the cursor count each time.
+    /// Storing the handle makes it a refcount bump, and pointer identity is the
+    /// only way to tell the two apart from outside.
     #[test]
-    fn undo_returns_the_groups_before_selections() {
+    fn opening_a_group_shares_the_selection_set_rather_than_copying_it() {
         let mut b = buf("hello");
         let anchor = b.anchor_at(2, Bias::Right);
-        let before = vec![Selection {
+        let selections: Arc<[Selection<Anchor>]> = Arc::from([Selection {
             id: 7,
             start: anchor,
             end: anchor,
             reversed: false,
             goal: SelectionGoal::None,
-        }];
+        }]);
+
+        b.begin_group(Arc::clone(&selections));
+
+        assert!(
+            Arc::ptr_eq(&selections, &b.open_group_before),
+            "the group holds the caller's list, not a copy of it"
+        );
+    }
+
+    #[test]
+    fn undo_returns_the_groups_before_selections() {
+        let mut b = buf("hello");
+        let anchor = b.anchor_at(2, Bias::Right);
+        let before: Arc<[Selection<Anchor>]> = Arc::from([Selection {
+            id: 7,
+            start: anchor,
+            end: anchor,
+            reversed: false,
+            goal: SelectionGoal::None,
+        }]);
         b.begin_group(before);
         b.edit(5..5, " world");
-        b.seal_group(Vec::new());
+        b.seal_group(Arc::from([]));
         let restored = b.undo().expect("undo returns the group's selections");
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].id, 7);
@@ -3540,7 +3564,7 @@ mod tests {
             for _ in 0..30 {
                 match rng.below(10) {
                     0..=5 => {
-                        b.begin_group(Vec::new());
+                        b.begin_group(Arc::from([]));
 
                         for _ in 0..1 + rng.below(3) {
                             let text = b.snapshot.visible_text.to_string();
@@ -3553,7 +3577,7 @@ mod tests {
                             b.edit(a.min(z)..a.max(z), INSERTS[rng.below(INSERTS.len())]);
                         }
 
-                        b.seal_group(Vec::new());
+                        b.seal_group(Arc::from([]));
                     },
                     6..=8 => {
                         let before = fragment_spans(&b);
@@ -3676,7 +3700,7 @@ mod tests {
             for step in 0..30 {
                 match rng.below(10) {
                     0..=4 => {
-                        b.begin_group(Vec::new());
+                        b.begin_group(Arc::from([]));
                         model.begin_group();
 
                         for _ in 0..1 + rng.below(3) {
@@ -3689,7 +3713,7 @@ mod tests {
                             model.edit(a.min(z)..a.max(z), insert);
                         }
 
-                        b.seal_group(Vec::new());
+                        b.seal_group(Arc::from([]));
                     },
                     5..=6 => {
                         // The batch arrives on whatever tree the steps before it
@@ -3701,7 +3725,7 @@ mod tests {
                         // A short buffer can leave too few distinct cut points to
                         // pair, and an empty group is not the shape under test.
                         if !edits.is_empty() {
-                            b.begin_group(Vec::new());
+                            b.begin_group(Arc::from([]));
                             model.begin_group();
 
                             b.edit_batch(&edits);
@@ -3711,7 +3735,7 @@ mod tests {
                                 model.edit(range.clone(), insert);
                             }
 
-                            b.seal_group(Vec::new());
+                            b.seal_group(Arc::from([]));
                         }
                     },
                     7..=8 => {
@@ -3747,11 +3771,11 @@ mod tests {
     fn a_replayed_buffer_undoes_edit_by_edit_and_keeps_its_floor() {
         let mut b = buf("seed\n");
 
-        b.begin_group(Vec::new());
+        b.begin_group(Arc::from([]));
         b.edit(5..5, "one\n");
         b.edit(9..9, "two\n");
         b.edit(13..13, "three\n");
-        b.seal_group(Vec::new());
+        b.seal_group(Arc::from([]));
         let edited = b.snapshot.visible_text.to_string();
         assert_eq!(edited, "seed\none\ntwo\nthree\n");
 

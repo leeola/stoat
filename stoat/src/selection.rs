@@ -1,11 +1,20 @@
 use crate::multi_buffer::MultiBufferSnapshot;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use stoat_text::{next_char_boundary, Anchor, Bias, Selection, SelectionGoal};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SelectionsCollection {
     next_selection_id: usize,
-    disjoint: Vec<Selection<Anchor>>,
+    /// The selections, shared rather than owned.
+    ///
+    /// Every dispatched action captures this set for its undo group, so a set
+    /// that could only be copied made each keystroke cost a list the length of
+    /// the cursor count. Shared, a capture is a refcount bump.
+    ///
+    /// Nothing mutates through the handle. Each mutator builds a new list and
+    /// installs it, which is what the set-replacing ones did anyway.
+    disjoint: Arc<[Selection<Anchor>]>,
 }
 
 impl SelectionsCollection {
@@ -19,12 +28,21 @@ impl SelectionsCollection {
         };
         Self {
             next_selection_id: 1,
-            disjoint: vec![default],
+            disjoint: Arc::from([default]),
         }
     }
 
     pub(crate) fn all_anchors(&self) -> &[Selection<Anchor>] {
         &self.disjoint
+    }
+
+    /// The selection set as a handle that outlives the borrow.
+    ///
+    /// For a caller that has to keep the set rather than read it, such as an
+    /// undo group capturing what to restore. Costs a refcount bump, where
+    /// copying out of [`Self::all_anchors`] would cost the whole list.
+    pub(crate) fn shared_anchors(&self) -> Arc<[Selection<Anchor>]> {
+        Arc::clone(&self.disjoint)
     }
 
     pub(crate) fn newest_anchor(&self) -> &Selection<Anchor> {
@@ -46,10 +64,15 @@ impl SelectionsCollection {
     /// the result stays ordered or deduplicated. Feeding it a
     /// position-preserving map keeps both.
     pub(crate) fn reanchor(&mut self, mut remap: impl FnMut(&Anchor) -> Anchor) {
-        for selection in &mut self.disjoint {
-            selection.start = remap(&selection.start);
-            selection.end = remap(&selection.end);
-        }
+        self.disjoint = self
+            .disjoint
+            .iter()
+            .map(|selection| Selection {
+                start: remap(&selection.start),
+                end: remap(&selection.end),
+                ..selection.clone()
+            })
+            .collect();
     }
 
     pub(crate) fn insert_cursor(
@@ -94,7 +117,7 @@ impl SelectionsCollection {
             reversed: false,
             goal,
         };
-        self.disjoint.insert(pos, selection);
+        self.disjoint = insert_at(&self.disjoint, pos, selection);
     }
 
     /// Insert `selection`, minting a fresh id and keeping its span and
@@ -133,7 +156,7 @@ impl SelectionsCollection {
 
         selection.id = self.next_selection_id;
         self.next_selection_id += 1;
-        self.disjoint.insert(pos, selection);
+        self.disjoint = insert_at(&self.disjoint, pos, selection);
     }
 
     /// Replace the collection with a single 1-wide block cursor over the first
@@ -143,20 +166,20 @@ impl SelectionsCollection {
     /// like Helix, rather than the zero-width placeholder [`Self::new`] holds
     /// before a rope is available. An empty buffer leaves a zero-width cursor.
     pub(crate) fn seed_cursor(&mut self, snapshot: &MultiBufferSnapshot) {
-        self.disjoint = vec![block_cursor_at(0, SelectionGoal::None, 0, snapshot)];
+        self.disjoint = Arc::from([block_cursor_at(0, SelectionGoal::None, 0, snapshot)]);
         self.next_selection_id = 1;
     }
 
     pub(crate) fn set_single_range(&mut self, start: Anchor, end: Anchor, goal: SelectionGoal) {
         let id = self.next_selection_id;
         self.next_selection_id += 1;
-        self.disjoint = vec![Selection {
+        self.disjoint = Arc::from([Selection {
             id,
             start,
             end,
             reversed: false,
             goal,
-        }];
+        }]);
     }
 
     /// Replace the collection with a single 1-wide block cursor over the
@@ -168,14 +191,14 @@ impl SelectionsCollection {
     pub(crate) fn set_block_cursor(&mut self, offset: usize, snapshot: &MultiBufferSnapshot) {
         let id = self.next_selection_id;
         self.next_selection_id += 1;
-        self.disjoint = vec![block_cursor_at(offset, SelectionGoal::None, id, snapshot)];
+        self.disjoint = Arc::from([block_cursor_at(offset, SelectionGoal::None, id, snapshot)]);
     }
 
     /// Replace the selection set with a saved `snapshot`, e.g. the selections an
     /// undo group captured before its edits. Bumps the id allocator past the
     /// snapshot so later insertions never reuse a restored id. An empty snapshot
     /// is ignored, keeping the invariant of at least one selection.
-    pub(crate) fn restore(&mut self, snapshot: Vec<Selection<Anchor>>) {
+    pub(crate) fn restore(&mut self, snapshot: Arc<[Selection<Anchor>]>) {
         if snapshot.is_empty() {
             return;
         }
@@ -187,7 +210,7 @@ impl SelectionsCollection {
 
     pub(crate) fn keep_primary(&mut self) {
         let primary = self.newest_anchor().clone();
-        self.disjoint = vec![primary];
+        self.disjoint = Arc::from([primary]);
     }
 
     pub(crate) fn remove_primary(&mut self) {
@@ -195,7 +218,12 @@ impl SelectionsCollection {
             return;
         }
         let primary_id = self.newest_anchor().id;
-        self.disjoint.retain(|s| s.id != primary_id);
+        self.disjoint = self
+            .disjoint
+            .iter()
+            .filter(|s| s.id != primary_id)
+            .cloned()
+            .collect();
     }
 
     pub(crate) fn rotate_primary_by(&mut self, forward: bool, count: u32) {
@@ -220,7 +248,18 @@ impl SelectionsCollection {
         };
         let new_id = self.next_selection_id;
         self.next_selection_id += 1;
-        self.disjoint[new_idx].id = new_id;
+        self.disjoint = self
+            .disjoint
+            .iter()
+            .enumerate()
+            .map(|(idx, selection)| match idx == new_idx {
+                true => Selection {
+                    id: new_id,
+                    ..selection.clone()
+                },
+                false => selection.clone(),
+            })
+            .collect();
     }
 
     pub(crate) fn transform<F>(&mut self, snapshot: &MultiBufferSnapshot, mut f: F)
@@ -272,7 +311,7 @@ impl SelectionsCollection {
         F: FnMut(&Selection<Anchor>) -> Vec<Selection<Anchor>>,
     {
         let mut new_disjoint: Vec<Selection<Anchor>> = Vec::with_capacity(self.disjoint.len());
-        for sel in &self.disjoint {
+        for sel in self.disjoint.iter() {
             let pieces = split(sel);
             if pieces.is_empty() {
                 new_disjoint.push(sel.clone());
@@ -624,6 +663,23 @@ pub(crate) fn merge_overlapping_spans(mut spans: Vec<(usize, usize)>) -> Vec<(us
 
 /// Build a forward 1-wide block cursor covering the character at `offset`,
 /// widening backward at the rope end where there is no next character.
+/// `selections` with `selection` spliced in at `at`.
+///
+/// A shared list cannot be inserted into, so the whole list is rebuilt. The
+/// callers already walked it to find `at`, so this adds a pass rather than a
+/// complexity class.
+fn insert_at(
+    selections: &[Selection<Anchor>],
+    at: usize,
+    selection: Selection<Anchor>,
+) -> Arc<[Selection<Anchor>]> {
+    let mut rebuilt = Vec::with_capacity(selections.len() + 1);
+    rebuilt.extend_from_slice(&selections[..at]);
+    rebuilt.push(selection);
+    rebuilt.extend_from_slice(&selections[at..]);
+    rebuilt.into()
+}
+
 fn block_cursor_at(
     offset: usize,
     goal: SelectionGoal,
@@ -663,6 +719,41 @@ mod tests {
     };
     use std::sync::{Arc, RwLock};
     use stoat_text::Bias;
+
+    /// The undo group a keystroke opens keeps whatever this hands back, so it
+    /// has to be the list itself. A copy would put the cursor count back into
+    /// the cost of every action.
+    #[test]
+    fn sharing_the_selections_hands_back_the_same_list() {
+        let collection = SelectionsCollection::new();
+
+        assert!(
+            Arc::ptr_eq(&collection.shared_anchors(), &collection.shared_anchors()),
+            "two shares of one set name one list"
+        );
+    }
+
+    /// A share outlives the set it came from, so a mutation has to build a new
+    /// list rather than write through the one an undo group is holding.
+    #[test]
+    fn mutating_leaves_an_earlier_share_alone() {
+        let multi = singleton("abcdefgh\n");
+        let snapshot = multi.snapshot();
+
+        let mut collection = SelectionsCollection::new();
+        let held = collection.shared_anchors();
+        collection.insert_cursor(
+            snapshot.anchor_at(4, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+
+        assert_eq!(held.len(), 1, "the held list still has what it had");
+        assert!(
+            !Arc::ptr_eq(&held, &collection.shared_anchors()),
+            "and the collection moved on to a different one"
+        );
+    }
 
     fn singleton(content: &str) -> MultiBuffer {
         let id = BufferId::new(0);
@@ -734,7 +825,7 @@ mod tests {
         let snapshot = multi.snapshot();
 
         let mut collection = SelectionsCollection::new();
-        collection.restore(vec![
+        collection.restore(Arc::from([
             Selection {
                 id: 1,
                 start: snapshot.anchor_at(3, Bias::Right),
@@ -749,7 +840,7 @@ mod tests {
                 reversed: true,
                 goal: SelectionGoal::None,
             },
-        ]);
+        ]));
 
         collection.land_block_cursors(&[(1, 3)], &snapshot);
 

@@ -2343,7 +2343,7 @@ pub(super) fn commit_undo_checkpoint(stoat: &mut Stoat) -> UpdateEffect {
     };
     let editor = ws.editors.get(editor_id).expect("editor");
     let buffer_id = editor.buffer_id;
-    let selections = editor.selections.all_anchors().to_vec();
+    let selections = editor.selections.shared_anchors();
     let buffer = ws.buffers.get(buffer_id).expect("buffer");
     let mut guard = buffer.write().expect("poisoned");
 
@@ -2355,7 +2355,7 @@ pub(super) fn commit_undo_checkpoint(stoat: &mut Stoat) -> UpdateEffect {
     // opened in normal mode is one nothing would ever close, and it would go on
     // collecting later edits into a step they do not belong to.
     let was_open = guard.group_open();
-    guard.seal_group(selections.clone());
+    guard.seal_group(Arc::clone(&selections));
     if was_open {
         guard.begin_group(selections);
     }
@@ -2365,7 +2365,7 @@ pub(super) fn commit_undo_checkpoint(stoat: &mut Stoat) -> UpdateEffect {
 
 fn apply_buffer_history<F>(stoat: &mut Stoat, count: u32, op: F) -> UpdateEffect
 where
-    F: Fn(&mut crate::buffer::TextBuffer) -> Option<Vec<Selection<Anchor>>>,
+    F: Fn(&mut crate::buffer::TextBuffer) -> Option<Arc<[Selection<Anchor>]>>,
 {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
@@ -2381,7 +2381,7 @@ where
     let restored = {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        let mut restored: Option<Vec<Selection<Anchor>>> = None;
+        let mut restored: Option<Arc<[Selection<Anchor>]>> = None;
         for _ in 0..count {
             match op(&mut guard) {
                 Some(selections) => restored = Some(selections),

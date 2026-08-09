@@ -1037,14 +1037,14 @@ fn end_action_group(stoat: &mut Stoat, buffer_id: Option<BufferId>) {
     let mut buffer = buffer.write().expect("poisoned");
     let after = match buffer.group_started() {
         true => focused_selection_snapshot(stoat, buffer_id),
-        false => Vec::new(),
+        false => Arc::from([]),
     };
 
     buffer.seal_group(after);
 }
 
-/// Selections of `editor_id` as an owned snapshot, empty when it is gone.
-fn editor_selection_snapshot(stoat: &Stoat, editor_id: EditorId) -> Vec<Selection<Anchor>> {
+/// Selections of `editor_id` as a shared handle, empty when it is gone.
+fn editor_selection_snapshot(stoat: &Stoat, editor_id: EditorId) -> Arc<[Selection<Anchor>]> {
     #[cfg(test)]
     stoat
         .selection_snapshots
@@ -1054,8 +1054,8 @@ fn editor_selection_snapshot(stoat: &Stoat, editor_id: EditorId) -> Vec<Selectio
         .active_workspace()
         .editors
         .get(editor_id)
-        .map(|editor| editor.selections.all_anchors().to_vec())
-        .unwrap_or_default()
+        .map(|editor| editor.selections.shared_anchors())
+        .unwrap_or_else(|| Arc::from([]))
 }
 
 /// Selections of the focused editor when it still shows `buffer_id`, else empty.
@@ -1064,12 +1064,12 @@ fn editor_selection_snapshot(stoat: &Stoat, editor_id: EditorId) -> Vec<Selectio
 pub(crate) fn focused_selection_snapshot(
     stoat: &Stoat,
     buffer_id: BufferId,
-) -> Vec<Selection<Anchor>> {
+) -> Arc<[Selection<Anchor>]> {
     match stoat.focused_editor_ids() {
         Some((editor_id, focused_buffer)) if focused_buffer == buffer_id => {
             editor_selection_snapshot(stoat, editor_id)
         },
-        _ => Vec::new(),
+        _ => Arc::from([]),
     }
 }
 
