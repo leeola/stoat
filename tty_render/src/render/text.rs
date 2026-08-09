@@ -467,6 +467,9 @@ pub struct TextPass {
     /// The row indices rebuilt this frame, reused across frames so
     /// `rasterize_visible` allocates no per-frame temporary.
     rebuilt_scratch: Vec<usize>,
+    /// The same rows as slots, ascending, which is the order the upload plan
+    /// needs them in. Reused for the same reason.
+    patched_slots_scratch: Vec<usize>,
     /// Scratch reused each frame to flatten the row instances into a contiguous
     /// upload slice, so `patch_rows` allocates no per-frame temporary. Shared by
     /// both row buffers, which upload one after the other.
@@ -510,10 +513,15 @@ pub struct TextPass {
     /// The grid width [`Self::glyph_row_cache`] was built at; a change invalidates
     /// every cached row since columns shift.
     glyph_cache_cols: usize,
-    /// Whether this frame slid the row caches, so every surviving instance
-    /// moved and the buffers rewrite from the top rather than from the first
-    /// rebuilt row.
-    rows_shifted: bool,
+    /// Lowest slot this frame's scroll emptied, or `None` when it emptied
+    /// none.
+    ///
+    /// An emptied slot is shorter than the buffer was written with, which moves
+    /// every slot packed after it, so each buffer rewrites from here down. The
+    /// slots a scroll exposes are contiguous in display rows and so contiguous
+    /// in slot space too, save for the wrap, which lands this at zero and
+    /// rewrites the lot.
+    exposed_from: Option<usize>,
     /// The cursor cell at the previous frame, so a move can re-shape the row it
     /// left and the row it entered (the cursor breaks ligatures on its cell).
     last_cursor_cell: Option<(usize, usize)>,
@@ -797,13 +805,14 @@ impl TextPass {
             shape_cache: FxHashMap::default(),
             run_shape_cache: font::RunShapeCache::default(),
             glyph_row_cache: Vec::new(),
-            rows_shifted: false,
+            exposed_from: None,
             plain_row_instances: Vec::new(),
             region_row_instances: Vec::new(),
             region_split: None,
             underline_row_instances: Vec::new(),
             underline_rows_to_build: Vec::new(),
             rebuilt_scratch: Vec::new(),
+            patched_slots_scratch: Vec::new(),
             plain_upload_scratch: Vec::new(),
             underline_upload_scratch: Vec::new(),
             plain_pending_scratch: Vec::new(),
@@ -934,7 +943,7 @@ impl TextPass {
         let damage = frame.damage;
         let decoration_damage = frame.decoration_damage;
 
-        self.rotate_row_caches(frame.scrolled_rows);
+        self.carry_caches_across_scroll(grid.rows(), frame.scrolled_rows);
 
         // Upload one occluder per live panel, shared by the three globals bind
         // groups. Only the static globals carry a non-zero panel count, so only
@@ -954,7 +963,6 @@ impl TextPass {
         // grid and region draws carry grid rows and rotate with them. The
         // screen-anchored buffer carries rows its builders chose, including an
         // overlay's past the bottom of the screen, so it never wraps.
-        self.grid_rows = grid.rows();
         let grid_rotation = self.grid_rotation();
         let globals_with = |scroll_y: f32, panel_count: u32, rotation: RowRotation| TextGlobals {
             resolution,
@@ -1076,11 +1084,13 @@ impl TextPass {
         let region = grid.scroll_region();
 
         // Text runs pack above, so a text-run grow is already folded into the
-        // content epoch grid_build reads. Scroll no longer counts -- it rides the
-        // globals uniform.
+        // content epoch grid_build reads. A scroll's pixel offset does not count,
+        // since it rides the globals uniform, but a scroll that emptied a slot
+        // leaves that slot's instances in the buffer for the plan to clear out.
         let region_rect = region.map(|r| (r.top, r.left, r.width, r.height));
         let build = grid_build(
             rebuilt.is_empty(),
+            self.exposed_from.is_some(),
             region_rect != self.last_region_rect,
             self.atlas.content_epoch(),
             self.grid_atlas_epoch,
@@ -1774,12 +1784,13 @@ impl TextPass {
     ///
     /// Underline is a VT cell attribute, so `damage` tracks it. Unchanged rows reuse
     /// last frame's [`Self::underline_row_instances`], while damaged rows, and every
-    /// row on `Damage::Full` or a resize, rebuild. Scroll rides the globals uniform,
-    /// so a scroll-only frame reuses the buffer untouched.
+    /// row on `Damage::Full` or a resize, rebuild. Scroll rides the globals uniform
+    /// and the rotation, so a scroll-only frame rewrites from the lowest slot it
+    /// emptied and leaves the rest of the buffer untouched.
     ///
-    /// The rebuilt rows are patched where they sit, adjacent ones sharing a write. A
-    /// row that came back a different length displaced the rows after it, so from
-    /// there to the end the buffer is rewritten as one span.
+    /// The rebuilt slots are patched where they sit, adjacent ones sharing a write.
+    /// A slot that came back a different length displaced the slots after it, so
+    /// from there to the end the buffer is rewritten as one span.
     fn prepare_underlines(&mut self, device: &Device, queue: &Queue, grid: &Grid, damage: &Damage) {
         let rows = grid.rows();
         let stale = self.underline_row_instances.len() != rows;
@@ -1788,13 +1799,13 @@ impl TextPass {
         }
 
         underline_rows_to_build(damage, rows, stale, &mut self.underline_rows_to_build);
-        if self.underline_rows_to_build.is_empty() && !self.rows_shifted {
+        if self.underline_rows_to_build.is_empty() && self.exposed_from.is_none() {
             return;
         }
 
         let metrics = self.metrics;
         let rotation = self.grid_rotation();
-        let mut resized = None;
+        let mut rewrite_from = self.exposed_from;
         {
             let TextPass {
                 underline_rows_to_build,
@@ -1802,25 +1813,18 @@ impl TextPass {
                 ..
             } = self;
             for &row in underline_rows_to_build.iter() {
-                let built = &mut underline_row_instances[row];
+                let slot = rotation.slot(row);
+                let built = &mut underline_row_instances[slot];
                 let held = built.len();
 
                 built.clear();
                 build_underline_row_into(grid, row, metrics, rotation, built);
 
-                if built.len() != held && resized.is_none() {
-                    resized = Some(row);
+                if built.len() != held {
+                    rewrite_from = Some(rewrite_from.map_or(slot, |from| from.min(slot)));
                 }
             }
         }
-
-        // A rotation moved every kept instance, so the buffer rewrites from the
-        // top even on a frame that rebuilt no row.
-        let rewrite_from = if self.rows_shifted {
-            (rows > 0).then_some(0)
-        } else {
-            resized
-        };
 
         let total = row_len(&self.underline_row_instances);
         self.underline_count = total as u32;
@@ -1839,14 +1843,14 @@ impl TextPass {
             );
             self.upload_underline_rows(queue, &mut scratch, 0, 0..rows);
         } else {
-            let uploads = row_uploads(
-                &self.underline_row_instances,
-                &self.underline_rows_to_build,
-                rewrite_from,
-            );
+            let mut patched = mem::take(&mut self.patched_slots_scratch);
+            slots_of_rows(rotation, &self.underline_rows_to_build, &mut patched);
+
+            let uploads = row_uploads(&self.underline_row_instances, &patched, rewrite_from);
             for (offset, run) in uploads {
                 self.upload_underline_rows(queue, &mut scratch, offset, run);
             }
+            self.patched_slots_scratch = patched;
         }
         self.underline_upload_scratch = scratch;
     }
@@ -2180,6 +2184,7 @@ impl TextPass {
             covers: &covers,
             cursor_cell,
         };
+        let rotation = self.grid_rotation();
         let mut rebuilt = mem::take(&mut self.rebuilt_scratch);
         rebuilt.clear();
         for row in 0..rows {
@@ -2190,10 +2195,11 @@ impl TextPass {
                 || decoration_damage.is_dirty(row)
                 || cursor_touched
             {
-                let mut row_glyphs = mem::take(&mut self.glyph_row_cache[row]);
+                let slot = rotation.slot(row);
+                let mut row_glyphs = mem::take(&mut self.glyph_row_cache[slot]);
                 row_glyphs.clear();
                 self.rasterize_row(device, queue, grid, row, &shaping, &mut row_glyphs);
-                self.glyph_row_cache[row] = row_glyphs;
+                self.glyph_row_cache[slot] = row_glyphs;
                 rebuilt.push(row);
             }
         }
@@ -2201,11 +2207,24 @@ impl TextPass {
         rebuilt
     }
 
-    /// The cached glyphs of every row, concatenated in row order, ready for
-    /// [`Self::build_text_instances`].
+    /// The cached glyphs of every row, concatenated in display-row order, each
+    /// stamped with the row it is currently on.
+    ///
+    /// Walks the rows rather than the cache, since the cache is in slot order
+    /// and two passes at different rotations hold the same screen in different
+    /// slots. The stamp is what [`Self::rebuild_plain_row`] applies when it
+    /// resolves a slot, so this reports what a rebuild would see rather than
+    /// the row each glyph happened to be rasterized for.
     #[cfg(test)]
     fn collect_grid_glyphs(&self) -> Vec<PendingGlyph> {
-        self.glyph_row_cache.iter().flatten().copied().collect()
+        let rotation = self.grid_rotation();
+        (0..self.glyph_row_cache.len())
+            .flat_map(|row| {
+                self.glyph_row_cache[rotation.slot(row)]
+                    .iter()
+                    .map(move |glyph| PendingGlyph { row, ..*glyph })
+            })
+            .collect()
     }
 
     /// Resolve the cached grid glyphs into instance buffers against the atlas as
@@ -2225,28 +2244,45 @@ impl TextPass {
         self.patch_rows(device, queue, region, rebuilt, rebuild_all);
     }
 
-    /// Slide every per-row cache up by `rows` so a scrolled grid keeps the
-    /// shaping and rasterizing it already did for rows that only moved.
+    /// Carry the per-row caches across a scroll of `scrolled` rows on a grid
+    /// `grid_rows` tall, so the rows it only moved keep the shaping and
+    /// rasterizing already done for them.
     ///
-    /// Every cached glyph and built instance names the row it belongs to, so
-    /// each survivor is renumbered for the row it now sits on. Only the rows the
-    /// scroll exposed are left to rebuild.
-    fn rotate_row_caches(&mut self, rows: isize) {
-        self.rows_shifted = rows != 0;
-        let renumber = |row: &mut u32| *row = row.saturating_add_signed(-rows as i32);
+    /// Nothing is moved and no instance is rewritten. Advancing the rotation by
+    /// what the screen scrolled sends a kept row to the slot it already
+    /// occupies, since `(r + off) + by` and `(r + by) + off` are the same slot,
+    /// so its cache entry and its bytes in the buffer are both already correct.
+    /// Only the slots the scroll exposed are emptied, and they are what is left
+    /// to rebuild.
+    ///
+    /// A changed row count leaves the rotation at zero. The caches are
+    /// reallocated and every row rebuilt below, so there is nothing to carry.
+    fn carry_caches_across_scroll(&mut self, grid_rows: usize, scrolled: isize) {
+        if grid_rows != self.grid_rows {
+            self.grid_rows = grid_rows;
+            self.row_offset = 0;
+            self.exposed_from = None;
+            return;
+        }
 
-        crate::render::rotate_row_cache(&mut self.glyph_row_cache, rows, |glyph| {
-            glyph.row = glyph.row.saturating_add_signed(-rows);
-        });
-        crate::render::rotate_row_cache(&mut self.plain_row_instances, rows, |instance| {
-            renumber(&mut instance.row);
-        });
-        crate::render::rotate_row_cache(&mut self.region_row_instances, rows, |instance| {
-            renumber(&mut instance.row);
-        });
-        crate::render::rotate_row_cache(&mut self.underline_row_instances, rows, |instance| {
-            renumber(&mut instance.row);
-        });
+        self.exposed_from = None;
+        if scrolled == 0 || grid_rows == 0 {
+            return;
+        }
+
+        self.row_offset =
+            (self.row_offset + scrolled.rem_euclid(grid_rows as isize) as u32) % grid_rows as u32;
+
+        let rotation = self.grid_rotation();
+        for row in exposed_rows(Some(scrolled), grid_rows) {
+            let slot = rotation.slot(row);
+            self.glyph_row_cache[slot].clear();
+            self.plain_row_instances[slot].clear();
+            self.region_row_instances[slot].clear();
+            self.underline_row_instances[slot].clear();
+
+            self.exposed_from = Some(self.exposed_from.map_or(slot, |held| held.min(slot)));
+        }
     }
 
     /// Rebuild and re-upload only the changed rows' glyph instances.
@@ -2257,10 +2293,11 @@ impl TextPass {
     /// every UV, or text runs may grow it). A buffer that must grow is fully
     /// re-uploaded.
     ///
-    /// Rows are patched where they sit, contiguous ones sharing a write, up to
-    /// the first row that came back a different length. That row moved every
-    /// later row's place in the buffer, so from there on the rest is rewritten
-    /// as one span. Each buffer finds that row for itself.
+    /// Slots are patched where they sit, contiguous ones sharing a write, up to
+    /// the lowest slot that came back a different length. That slot moved every
+    /// later one's place in the buffer, so from there on the rest is rewritten
+    /// as one span. Each buffer finds that slot for itself, and both start no
+    /// later than a slot this frame's scroll emptied.
     ///
     /// A `region` whose rectangle differs from the one the caches were split
     /// against rebuilds every row, since the split moved.
@@ -2290,34 +2327,33 @@ impl TextPass {
             let all = (rows > 0).then_some(0);
             (all, all)
         } else {
-            let mut plain_from = None;
-            let mut region_from = None;
+            let rotation = self.grid_rotation();
+            let mut plain_from = self.exposed_from;
+            let mut region_from = self.exposed_from;
             for &row in rebuilt {
                 let resized = self.rebuild_plain_row(device, queue, row, region);
-                if resized.plain && plain_from.is_none() {
-                    plain_from = Some(row);
+                let slot = rotation.slot(row);
+                if resized.plain {
+                    plain_from = Some(plain_from.map_or(slot, |held| held.min(slot)));
                 }
-                if resized.region && region_from.is_none() {
-                    region_from = Some(row);
+                if resized.region {
+                    region_from = Some(region_from.map_or(slot, |held| held.min(slot)));
                 }
             }
-            // A rotation moved every kept instance, so a buffer rewrites from the
-            // top rather than from the first row that changed length.
-            if self.rows_shifted {
-                let all = (rows > 0).then_some(0);
-                (all, all)
-            } else {
-                (plain_from, region_from)
-            }
+            (plain_from, region_from)
         };
         if plain_from.is_none() && region_from.is_none() && rebuilt.is_empty() {
             return;
         }
 
+        let mut patched = mem::take(&mut self.patched_slots_scratch);
+        slots_of_rows(self.grid_rotation(), rebuilt, &mut patched);
+
         let mut scratch = mem::take(&mut self.plain_upload_scratch);
-        self.upload_row_buffer(device, queue, &mut scratch, rebuilt, plain_from, false);
-        self.upload_row_buffer(device, queue, &mut scratch, rebuilt, region_from, true);
+        self.upload_row_buffer(device, queue, &mut scratch, &patched, plain_from, false);
+        self.upload_row_buffer(device, queue, &mut scratch, &patched, region_from, true);
         self.plain_upload_scratch = scratch;
+        self.patched_slots_scratch = patched;
     }
 
     /// Upload one of the two row buffers, growing it when its rows outgrow it.
@@ -2427,12 +2463,22 @@ impl TextPass {
         row: usize,
         region: Option<ScrollRegion>,
     ) -> RowResized {
-        let glyphs = mem::take(&mut self.glyph_row_cache[row]);
-        let mut plain = mem::take(&mut self.plain_row_instances[row]);
-        let mut inside = mem::take(&mut self.region_row_instances[row]);
+        let rotation = self.grid_rotation();
+        let slot = rotation.slot(row);
+        let mut glyphs = mem::take(&mut self.glyph_row_cache[slot]);
+        // A scroll leaves a kept row's glyphs in the slot they were rasterized
+        // into and moves the rotation instead, so what they name is the row they
+        // were rasterized for. The slot is the authority on where they are now.
+        // Both the region split and the instance's own slot are read off the row
+        // below, which is why they are stamped here.
+        for glyph in &mut glyphs {
+            glyph.row = row;
+        }
+
+        let mut plain = mem::take(&mut self.plain_row_instances[slot]);
+        let mut inside = mem::take(&mut self.region_row_instances[slot]);
         let (held_plain, held_region) = (plain.len(), inside.len());
 
-        let rotation = self.grid_rotation();
         match region {
             // Splitting the row is what lets a region frame patch rows like any
             // other, rather than rebuilding every glyph on screen.
@@ -2476,9 +2522,9 @@ impl TextPass {
             plain: plain.len() != held_plain,
             region: inside.len() != held_region,
         };
-        self.plain_row_instances[row] = plain;
-        self.region_row_instances[row] = inside;
-        self.glyph_row_cache[row] = glyphs;
+        self.plain_row_instances[slot] = plain;
+        self.region_row_instances[slot] = inside;
+        self.glyph_row_cache[slot] = glyphs;
         resized
     }
 
@@ -2899,15 +2945,21 @@ enum GridBuild {
 /// region's scroll applied, so a cell left on the wrong side is drawn at the
 /// wrong height. Patching the damaged rows would not move the undamaged ones
 /// the rectangle now covers, so this is a full rebuild rather than a patch.
+///
+/// A scroll that emptied a slot is a patch even with nothing rebuilt. The rows
+/// it kept are already where they belong and need no write, but the emptied
+/// slot's instances are still in the buffer and would keep painting, now as
+/// whichever row the rotation sends that slot to.
 fn grid_build(
     rebuilt_empty: bool,
+    slots_emptied: bool,
     region_moved: bool,
     current_epoch: u64,
     cached_epoch: u64,
 ) -> GridBuild {
     if current_epoch != cached_epoch || region_moved {
         GridBuild::RebuildAll
-    } else if rebuilt_empty {
+    } else if rebuilt_empty && !slots_emptied {
         GridBuild::Reuse
     } else {
         GridBuild::Patch
@@ -3485,6 +3537,18 @@ fn row_slot(row: usize, row_offset: u32, rows: usize) -> usize {
     (row + row_offset as usize) % rows
 }
 
+/// The slots holding display rows `rows` under `rotation`, ascending.
+///
+/// The upload plan walks its rows once, advancing through the buffer as it goes,
+/// so it needs them in buffer order and a descending pair would ask it to count
+/// backwards. A run of display rows wraps in slot space, so rows that arrive
+/// ascending do not leave that way.
+fn slots_of_rows(rotation: RowRotation, rows: &[usize], out: &mut Vec<usize>) {
+    out.clear();
+    out.extend(rows.iter().map(|&row| rotation.slot(row)));
+    out.sort_unstable();
+}
+
 /// One underline instance per underlined cell in `row`, in column order.
 #[cfg(test)]
 fn build_underline_row(
@@ -3543,9 +3607,10 @@ mod tests {
     use super::{
         build_underline_row, cell_glyph_scale, cell_rect_scissor, cursor_cell, exposed_rows,
         fill_cell_box, font, glyph_origin, grid_build, is_cell_fill, overlay_content_cells,
-        region_split, row_len, row_slot, text_run_origin, underline_rows_to_build, visible_lines,
-        GlyphSource, GridBuild, OverlayContent, PendingGlyph, RectInstance, RowRotation,
-        RowShaping, TextGlobals, TextInstance, TextPass, UnderlineInstance, STYLE_DOTTED,
+        region_split, row_len, row_slot, slots_of_rows, text_run_origin, underline_rows_to_build,
+        visible_lines, GlyphSource, GridBuild, OverlayContent, PendingGlyph, RectInstance,
+        RowRotation, RowShaping, TextGlobals, TextInstance, TextPass, UnderlineInstance,
+        STYLE_DOTTED,
     };
     use crate::{
         atlas::{AtlasKind, GlyphInfo},
@@ -3566,14 +3631,14 @@ mod tests {
 
     #[test]
     fn grid_build_rebuilds_all_when_the_atlas_epoch_moves() {
-        assert_eq!(grid_build(true, false, 7, 7), GridBuild::Reuse);
-        assert_eq!(grid_build(false, false, 7, 7), GridBuild::Patch);
+        assert_eq!(grid_build(true, false, false, 7, 7), GridBuild::Reuse);
+        assert_eq!(grid_build(false, false, false, 7, 7), GridBuild::Patch);
         assert_eq!(
-            grid_build(true, false, 8, 7),
+            grid_build(true, false, false, 8, 7),
             GridBuild::RebuildAll,
             "an eviction moves UVs, so undamaged rows must still rebuild"
         );
-        assert_eq!(grid_build(false, false, 8, 7), GridBuild::RebuildAll);
+        assert_eq!(grid_build(false, false, false, 8, 7), GridBuild::RebuildAll);
     }
 
     /// A moved region rectangle rebuilds whatever the damage says, because the
@@ -3581,8 +3646,17 @@ mod tests {
     /// the damaged ones.
     #[test]
     fn grid_build_rebuilds_all_when_the_region_rectangle_moves() {
-        assert_eq!(grid_build(true, true, 7, 7), GridBuild::RebuildAll);
-        assert_eq!(grid_build(false, true, 7, 7), GridBuild::RebuildAll);
+        assert_eq!(grid_build(true, false, true, 7, 7), GridBuild::RebuildAll);
+        assert_eq!(grid_build(false, false, true, 7, 7), GridBuild::RebuildAll);
+    }
+
+    /// An emptied slot still holds the instances of the row that scrolled off,
+    /// and the rotation now sends that slot to a different row, so a frame that
+    /// rebuilt nothing still has a write to make.
+    #[test]
+    fn grid_build_patches_when_a_scroll_emptied_a_slot() {
+        assert_eq!(grid_build(true, true, false, 7, 7), GridBuild::Patch);
+        assert_eq!(grid_build(false, true, false, 7, 7), GridBuild::Patch);
     }
 
     /// What `slot_row` computes in text.wgsl, transcribed. A rotation is only
@@ -3644,6 +3718,34 @@ mod tests {
                 row_slot(row + scrolled as usize, before, rows),
                 "row {row} after the scroll reads the slot row {} was written to",
                 row + scrolled as usize
+            );
+        }
+    }
+
+    /// The upload plan walks its rows once, advancing through the buffer as it
+    /// goes, so a descending pair would ask it to count backwards. A run of
+    /// display rows wraps in slot space, which is exactly where that arises.
+    #[test]
+    fn the_slots_of_a_wrapped_run_of_rows_come_back_ascending() {
+        let rows = 6;
+        let every_row: Vec<usize> = (0..rows).collect();
+
+        for offset in 0..rows as u32 {
+            let rotation = RowRotation { offset, rows };
+
+            let mut slots = Vec::new();
+            slots_of_rows(rotation, &every_row, &mut slots);
+            assert_eq!(
+                slots, every_row,
+                "at offset {offset} every slot must appear once, ascending"
+            );
+
+            // A pair straddling the wrap, which is where ascending rows arrive
+            // descending and the plan would be asked to count backwards.
+            slots_of_rows(rotation, &[1, 4], &mut slots);
+            assert!(
+                slots[0] < slots[1],
+                "at offset {offset} rows 1 and 4 land at {slots:?}"
             );
         }
     }
@@ -4878,6 +4980,109 @@ mod tests {
         );
     }
 
+    /// A scroll leaves a kept row's glyphs in the slot they were rasterized
+    /// into, naming the row they were rasterized for. A moved region rectangle
+    /// then rebuilds every row's instances from those cached glyphs without
+    /// re-rasterizing any, and the split reads the row off each glyph, so a
+    /// stale one sends the glyph to the wrong buffer.
+    #[test]
+    fn a_scroll_then_a_moved_region_splits_like_a_build_that_never_scrolled() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("scrolled region split test: no wgpu adapter available, skipping");
+            return;
+        };
+        let Some((_, _, mut fresh)) = headless_text_pass() else {
+            return;
+        };
+        let resolution = [640.0, 480.0];
+        let rows = 5;
+        let lines = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+
+        let screen = |from: usize, region: ScrollRegion| {
+            let mut grid = Grid::new(rows, 20);
+            for row in 0..rows {
+                fill_row(&mut grid, row, lines[from + row]);
+            }
+            grid.set_scroll_region(Some(region));
+            grid
+        };
+        fn frame(damage: &Damage, scrolled_rows: isize) -> Frame<'_> {
+            Frame {
+                cursor: None,
+                cursor_corners: None,
+                scroll: Scroll {
+                    grid: 0.0,
+                    document: 0.0,
+                    scrollback: 0.0,
+                    region: 0.0,
+                    popovers: &[],
+                },
+                damage,
+                decoration_damage: damage,
+                scrolled_rows,
+            }
+        }
+
+        let before = ScrollRegion {
+            top: 0,
+            left: 0,
+            width: 20,
+            height: 2,
+            offset: 0,
+        };
+        let after = ScrollRegion { top: 2, ..before };
+
+        // Scroll by one, so every row but the last is carried rather than
+        // rasterized, then move the rectangle under those carried rows.
+        pass.prepare(
+            &device,
+            &queue,
+            &screen(0, before),
+            resolution,
+            &frame(&Damage::Full, 0),
+            &[],
+        );
+        let mut last_row_only = vec![false; rows];
+        last_row_only[rows - 1] = true;
+        pass.prepare(
+            &device,
+            &queue,
+            &screen(1, before),
+            resolution,
+            &frame(&Damage::Partial(last_row_only), 1),
+            &[],
+        );
+        pass.prepare(
+            &device,
+            &queue,
+            &screen(1, after),
+            resolution,
+            &frame(&Damage::Partial(vec![false; rows]), 0),
+            &[],
+        );
+
+        fresh.prepare(
+            &device,
+            &queue,
+            &screen(1, after),
+            resolution,
+            &frame(&Damage::Full, 0),
+            &[],
+        );
+
+        assert_eq!(
+            (
+                row_len(&pass.plain_row_instances),
+                row_len(&pass.region_row_instances)
+            ),
+            (
+                row_len(&fresh.plain_row_instances),
+                row_len(&fresh.region_row_instances)
+            ),
+            "the carried rows split by the rows they are on now"
+        );
+    }
+
     #[test]
     fn only_a_moved_region_rectangle_resplits_the_rows() {
         let Some((device, queue, mut pass)) = headless_text_pass() else {
@@ -5033,9 +5238,10 @@ mod tests {
         );
         for (got, want) in rotated.iter().zip(&fresh) {
             assert_eq!(
-                (got.row, got.col),
-                (want.row, want.col),
-                "every glyph lands on the cell a rebuild would put it on",
+                (got.row, got.col, got.source),
+                (want.row, want.col, want.source),
+                "every glyph lands on the cell a rebuild would put it on, and is \
+                 the glyph a rebuild would put there",
             );
         }
     }
