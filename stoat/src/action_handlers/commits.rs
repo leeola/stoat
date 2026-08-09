@@ -155,8 +155,14 @@ fn maybe_spawn_next_page(stoat: &mut Stoat) {
 }
 
 /// Spawn a background preview build for the current selection if one is
-/// not already cached or in flight. Also populates the file-change
-/// summary synchronously (cheap: one tree-diff).
+/// not already cached, and no build is in flight for any commit. Also
+/// populates the file-change summary synchronously (cheap: one tree-diff).
+///
+/// Only one build runs at a time. Dropping a [`stoat_scheduler::Task`] leaves
+/// the blocking pool running the closure regardless, so spawning per row would
+/// stack a build for every row scrolled past ahead of the row that matters.
+/// [`pump_commits`] returns here once the running build lands, which is what
+/// carries the selection's latest position through.
 fn ensure_selected_preview(stoat: &mut Stoat) {
     let Some(state) = stoat.active_workspace_mut().commits.as_mut() else {
         return;
@@ -166,8 +172,7 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
     };
     let workdir = state.workdir.clone();
     let need_summary = !state.summaries.contains_key(&sha);
-    let need_preview = !state.preview_sessions.mark_used(&sha)
-        && state.pending_preview.as_ref().is_none_or(|p| p.sha != sha);
+    let need_preview = !state.preview_sessions.mark_used(&sha) && state.pending_preview.is_none();
 
     if !need_summary && !need_preview {
         return;
@@ -312,6 +317,84 @@ fn spawn_commit_preview_load(
 #[cfg(test)]
 mod tests {
     use crate::app::Stoat;
+
+    /// Rows scrolled past do not each get a build of their own.
+    ///
+    /// A dropped task keeps running on the blocking pool, so one build per
+    /// keystroke would put every row passed through ahead of the row the
+    /// selection stops on, each waiting on the repo lock. Holding the count at
+    /// one costs nothing, since the pump comes back for the current selection
+    /// the moment the running build lands.
+    #[test]
+    fn stepping_the_selection_twice_leaves_one_build_running() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "one", &[("a.rs", "1\n")]),
+                ("b2c3d4e5", "two", &[("a.rs", "2\n")]),
+                ("c3d4e5f6", "three", &[("a.rs", "3\n")]),
+            ],
+        );
+        h.open_commits("/repo");
+
+        // Two moves with nothing polled between them, which is what holding the
+        // key down does.
+        let moved = h
+            .stoat
+            .active_workspace_mut()
+            .commits
+            .as_mut()
+            .expect("commits state")
+            .move_down(1);
+        assert!(moved, "the list has a row to step onto");
+        super::ensure_selected_preview(&mut h.stoat);
+        let first = h
+            .stoat
+            .active_workspace()
+            .commits
+            .as_ref()
+            .and_then(|s| s.pending_preview.as_ref())
+            .map(|p| p.sha.clone());
+        assert!(
+            first.is_some(),
+            "the first step has to start a build, or there is nothing to block",
+        );
+
+        h.stoat
+            .active_workspace_mut()
+            .commits
+            .as_mut()
+            .expect("commits state")
+            .move_down(1);
+        super::ensure_selected_preview(&mut h.stoat);
+
+        assert_eq!(
+            h.stoat
+                .active_workspace()
+                .commits
+                .as_ref()
+                .and_then(|s| s.pending_preview.as_ref())
+                .map(|p| p.sha.clone()),
+            first,
+            "the second step waits on the build the first one started",
+        );
+
+        // Whatever it started on, it ends up showing the row it stopped at.
+        h.settle();
+        let state = h
+            .stoat
+            .active_workspace()
+            .commits
+            .as_ref()
+            .expect("commits state");
+        let selected = state.selected_sha().expect("selection").to_string();
+        assert!(
+            state.preview_sessions.get(&selected).is_some(),
+            "the preview for the row the selection came to rest on is cached",
+        );
+    }
 
     /// The log pump polls with a noop waker, so without a wake at completion a
     /// page that lands after the last input event stays invisible until some

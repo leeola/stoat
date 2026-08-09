@@ -454,7 +454,16 @@ fn pending_sha(stoat: &Stoat) -> Option<String> {
 }
 
 /// Spawn a background [`ReviewSession`] build for the selected commit unless
-/// one is already cached or in flight for that sha.
+/// one is already cached, or any build is already in flight.
+///
+/// One build at a time, whatever it is for. A dropped [`stoat_scheduler::Task`]
+/// does not cancel the closure the blocking pool is already running, so
+/// spawning per row would put a build for every row passed through in front of
+/// the one the selection came to rest on, all of them queued on the repo lock.
+///
+/// Waiting costs nothing, because [`pump_commit_picker`] comes back here as
+/// soon as the build lands. A selection that moved while one was running is
+/// picked up then, so the picker converges on wherever it ended.
 fn ensure_selected_preview(stoat: &mut Stoat) {
     let Some(picker) = stoat.commit_picker.as_mut() else {
         return;
@@ -462,12 +471,7 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
     let Some(sha) = picker.selected_commit().map(|c| c.sha.clone()) else {
         return;
     };
-    if picker.preview_sessions.mark_used(&sha)
-        || picker
-            .pending_preview
-            .as_ref()
-            .is_some_and(|p| p.sha == sha)
-    {
+    if picker.preview_sessions.mark_used(&sha) || picker.pending_preview.is_some() {
         return;
     }
 
@@ -490,9 +494,12 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
     }
 }
 
-/// Poll the pending build, caching a finished session under its sha. A session
-/// for a sha the selection has since moved off is dropped rather than cached,
-/// since the picker only ever renders the selected commit's preview.
+/// Poll the pending build, caching a finished session under its sha.
+///
+/// The sha is checked against the one that was asked for, which holds by
+/// construction while only one build runs at a time, since the two are recorded
+/// together at the spawn. It is the invariant that lets a session be cached
+/// without asking where the selection has moved to in the meantime.
 fn poll_pending_preview(picker: &mut CommitPicker) -> bool {
     use std::{
         future::Future,
@@ -741,6 +748,52 @@ mod tests {
             notified.enable(),
             "the preview build for the newly selected commit should wake the \
              loop so the diff follows the selection on its own",
+        );
+    }
+
+    /// Rows scrolled past do not each get a build of their own.
+    ///
+    /// A dropped task keeps running on the blocking pool, so one build per
+    /// keystroke would put every row passed through ahead of the row the
+    /// selection stops on, each waiting on the repo lock. Holding the count at
+    /// one costs nothing, since the pump comes back for the current selection
+    /// the moment the running build lands.
+    #[test]
+    fn stepping_the_selection_twice_leaves_one_build_running() {
+        let mut h = harness();
+        h.type_text(":git-ls");
+        h.type_keys("enter");
+        h.settle();
+
+        // Two steps with nothing polled between them, which is what holding the
+        // key down does.
+        super::commit_picker_step(&mut h.stoat, 1);
+        let first = h
+            .stoat
+            .commit_picker
+            .as_ref()
+            .and_then(|p| p.pending_preview.as_ref())
+            .map(|p| p.sha.clone());
+        assert!(
+            first.is_some(),
+            "the first step has to start a build, or there is nothing to block",
+        );
+        super::commit_picker_step(&mut h.stoat, 1);
+
+        let picker = h.stoat.commit_picker.as_ref().expect("picker");
+        assert_eq!(
+            picker.pending_preview.as_ref().map(|p| p.sha.clone()),
+            first,
+            "the second step waits on the build the first one started",
+        );
+
+        // Whatever it started on, it ends up showing the row it stopped at.
+        h.settle();
+        let picker = h.stoat.commit_picker.as_ref().expect("picker");
+        let selected = picker.selected_commit().expect("selection").sha.clone();
+        assert!(
+            picker.preview_sessions.get(&selected).is_some(),
+            "the preview for the row the selection came to rest on is cached",
         );
     }
 
