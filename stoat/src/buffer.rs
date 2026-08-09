@@ -3724,6 +3724,59 @@ mod tests {
         }
     }
 
+    /// A replay hands back one undo step per edit, not one per session, and the
+    /// floor that protects the seed content still lands in the right place.
+    ///
+    /// Grouping is a session overlay that is never persisted, so the same
+    /// history that undid an insert in one step undoes it in as many steps as
+    /// it had edits. The floor is the sharper half: it counts groups, and the
+    /// replay changes how many groups the same edits make, so a floor off by
+    /// one would either undo the seed content away or refuse an undo that
+    /// should have been allowed.
+    #[test]
+    fn a_replayed_buffer_undoes_edit_by_edit_and_keeps_its_floor() {
+        let mut b = buf("seed\n");
+
+        b.begin_group(Vec::new());
+        b.edit(5..5, "one\n");
+        b.edit(9..9, "two\n");
+        b.edit(13..13, "three\n");
+        b.seal_group(Vec::new());
+        let edited = b.snapshot.visible_text.to_string();
+        assert_eq!(edited, "seed\none\ntwo\nthree\n");
+
+        assert!(b.undo().is_some(), "the session's three edits undo as one");
+        assert_eq!(b.snapshot.visible_text.to_string(), "seed\n");
+        assert!(
+            b.undo().is_none(),
+            "and the floor refuses to undo the seed content away",
+        );
+
+        // Back to the edited state, so the history the replay reads is the one
+        // the session saved rather than one already unwound.
+        b.redo();
+        assert_eq!(b.snapshot.visible_text.to_string(), edited);
+
+        let mut restored = TextBuffer::from_history(BufferId::new(0), &b.history());
+        assert_eq!(restored.snapshot.visible_text.to_string(), edited);
+
+        for want in ["seed\none\ntwo\n", "seed\none\n", "seed\n"] {
+            assert!(
+                restored.undo().is_some(),
+                "the replay still has {want:?} to reach"
+            );
+            assert_eq!(
+                restored.snapshot.visible_text.to_string(),
+                want,
+                "the replay steps through the states the session skipped",
+            );
+        }
+        assert!(
+            restored.undo().is_none(),
+            "the floor carried across the regrouping and still holds the seed",
+        );
+    }
+
     /// A replayed buffer resolves the original's anchors to the same offsets.
     ///
     /// That is what a restored session's cursors rest on, and text equality
