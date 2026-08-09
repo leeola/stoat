@@ -618,6 +618,15 @@ pub struct BlockMap {
     /// the one it names, and the wrap snapshot that settles which rows those
     /// are does not exist until `sync`.
     touched_placements: Vec<BlockPlacement>,
+    /// Counts syncs that rebuilt the transforms rather than handing back the
+    /// ones already in hand.
+    ///
+    /// This is what a cache above keys on, so it counts *output* changes rather
+    /// than block operations. It errs towards moving: a wrap patch touching no
+    /// block row, or a `mark_dirty` over an unchanged set, both move it, so an
+    /// unequal pair may still paint the same. An equal pair never differs,
+    /// which is the direction that matters.
+    version: u64,
     deferred_edits: Patch<u32>,
     buffer_header_height: u32,
     excerpt_header_height: u32,
@@ -642,6 +651,7 @@ impl BlockMap {
             total_rows: 0,
             blocks_dirty: true,
             touched_placements: Vec::new(),
+            version: 0,
             deferred_edits: Patch::empty(),
             buffer_header_height: 1,
             excerpt_header_height: 1,
@@ -894,10 +904,13 @@ impl BlockMap {
             && !self.blocks_dirty
             && let Some(ref transforms) = self.transforms
         {
+            // The one path that hands back what it already had, so it is also
+            // the one that leaves the version alone.
             return BlockSnapshot {
                 wrap_snapshot,
                 transforms: transforms.clone(),
                 total_rows: self.total_rows,
+                version: self.version,
             };
         }
 
@@ -948,11 +961,13 @@ impl BlockMap {
         self.transforms = Some(transforms.clone());
         self.total_rows = total_rows.0;
         self.blocks_dirty = false;
+        self.version += 1;
 
         BlockSnapshot {
             wrap_snapshot,
             transforms,
             total_rows: total_rows.0,
+            version: self.version,
         }
     }
 
@@ -1101,6 +1116,7 @@ pub struct BlockSnapshot {
     wrap_snapshot: Arc<WrapSnapshot>,
     transforms: SumTree<Transform>,
     total_rows: u32,
+    version: u64,
 }
 
 impl Deref for BlockSnapshot {
@@ -1111,6 +1127,17 @@ impl Deref for BlockSnapshot {
 }
 
 impl BlockSnapshot {
+    /// Counts the syncs that rebuilt the rows this layer paints.
+    ///
+    /// Two snapshots sharing this number came out of the same transforms, so
+    /// anything derived from those rows carries over between them. It does not
+    /// speak for the wrapping underneath, which
+    /// [`WrapSnapshot::version`](super::wrap_map::WrapSnapshot::version)
+    /// answers for, so a cache over the whole display reads both.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     /// Display position showing buffer `point`.
     ///
     /// A row a block replaces is not shown, so it has no display row of its
@@ -2410,6 +2437,88 @@ mod tests {
         let mut block_map = BlockMap::new();
         block_map.insert(props.to_vec());
         block_map.sync(wrap_snapshot, &Patch::empty(), &Patch::empty(), None)
+    }
+
+    /// A map and the wrap snapshot to sync it against, kept apart so a test can
+    /// sync the same pair more than once.
+    fn block_map_over(content: &str) -> (BlockMap, Arc<super::WrapSnapshot>) {
+        let buffer = TextBuffer::with_text(BufferId::new(0), content);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
+        let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
+        let (_, wrap_snapshot) =
+            WrapMap::new(tab_snapshot, None, test_executor(), crate::test_notify());
+        (BlockMap::new(), wrap_snapshot)
+    }
+
+    fn one_line_block(row: u32) -> BlockProperties {
+        BlockProperties::from_text(
+            BlockPlacement::Below(row),
+            vec!["block".to_string()],
+            BlockStyle::Fixed,
+        )
+    }
+
+    fn sync_blocks(
+        block_map: &mut BlockMap,
+        wrap_snapshot: &Arc<super::WrapSnapshot>,
+    ) -> super::BlockSnapshot {
+        block_map.sync(
+            wrap_snapshot.clone(),
+            &Patch::empty(),
+            &Patch::empty(),
+            None,
+        )
+    }
+
+    /// The version moves when the transforms are rebuilt and holds when the
+    /// sync hands back the ones it already had.
+    ///
+    /// A cache above the display reads this beside the wrap layer's, since a
+    /// block appearing changes the painted rows while the wrapping under it
+    /// stands still.
+    #[test]
+    fn a_sync_that_rebuilt_moves_the_version() {
+        let (mut block_map, wrap_snapshot) = block_map_over("aaa\nbbb\nccc\n");
+        let before = sync_blocks(&mut block_map, &wrap_snapshot).version();
+
+        block_map.insert(vec![one_line_block(0)]);
+        let after = sync_blocks(&mut block_map, &wrap_snapshot).version();
+
+        assert!(
+            after > before,
+            "a block appeared, so the version moved: {before} to {after}",
+        );
+    }
+
+    #[test]
+    fn a_sync_with_nothing_to_do_holds_the_version() {
+        let (mut block_map, wrap_snapshot) = block_map_over("aaa\nbbb\nccc\n");
+        let first = sync_blocks(&mut block_map, &wrap_snapshot).version();
+        let second = sync_blocks(&mut block_map, &wrap_snapshot).version();
+
+        assert_eq!(second, first, "nothing changed between the two syncs");
+    }
+
+    /// Several blocks arriving before one sync move the version one step, not
+    /// one per block.
+    ///
+    /// Each insert records a touched placement of its own, and the sync folds
+    /// them all into the single rebuild that answers them. A step per placement
+    /// would say the layer changed more times than it painted.
+    #[test]
+    fn one_sync_over_several_blocks_moves_the_version_once() {
+        let (mut block_map, wrap_snapshot) = block_map_over("aaa\nbbb\nccc\n");
+        let before = sync_blocks(&mut block_map, &wrap_snapshot).version();
+
+        block_map.insert(vec![one_line_block(0), one_line_block(2)]);
+        let after = sync_blocks(&mut block_map, &wrap_snapshot).version();
+
+        assert_eq!(after, before + 1, "two blocks, one sync, one step");
     }
 
     /// [`create_block_snapshot`] with soft wrap on and `fold` (given as buffer
