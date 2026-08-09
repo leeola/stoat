@@ -3,12 +3,14 @@ use crate::{
     multi_buffer::MultiBufferSnapshot,
 };
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::{HashMap, HashSet},
+    mem,
     ops::Range,
     sync::Arc,
 };
-use stoat_text::{Anchor, ContextLessSummary, Dimension, Item, Point, SumTree};
+use stoat_text::{patch::Patch, Anchor, ContextLessSummary, Dimension, Item, Point, SumTree};
 
 #[derive(Copy, Clone, Default, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct CreaseId(usize);
@@ -189,6 +191,18 @@ impl<'a> Dimension<'a, CreaseItemSummary> for CreaseStartOffset {
 }
 
 pub struct CreaseMap {
+    /// The creases in resolved-start order, which is the order the tree is
+    /// keyed on.
+    ///
+    /// The authority, with [`Self::creases`] derived from it. A sync carries
+    /// the offsets here in place, where collecting the tree into a fresh vector
+    /// each time cost a refcount bump per crease, and a large file holds one
+    /// per foldable region.
+    items: Vec<CreaseItem>,
+    /// The items as a tree, for the range queries a snapshot answers.
+    ///
+    /// Rebuilt only when a sync moved something, so a keystroke that lands past
+    /// every crease leaves it alone.
     creases: SumTree<CreaseItem>,
     next_id: usize,
     id_to_range: HashMap<CreaseId, Range<Anchor>>,
@@ -199,15 +213,34 @@ pub struct CreaseMap {
     /// through a caller's closure and `remove` drops items, and neither names a
     /// version the carry could start from.
     last_synced_version: Option<u64>,
+    /// How many times the tree was rebuilt from the items.
+    ///
+    /// A rebuild that changes nothing is indistinguishable from the tree it
+    /// replaces, so a test needs the count to say a keystroke below every
+    /// crease leaves it alone.
+    #[cfg(test)]
+    tree_rebuilds: u64,
+    /// How many times the offsets were carried across a patch.
+    ///
+    /// A carry that moves nothing is invisible in the result, and skipping one
+    /// is most of what the early-out buys, so a test counts them separately
+    /// from the rebuilds a carry may or may not cause.
+    #[cfg(test)]
+    carries: u64,
 }
 
 impl Default for CreaseMap {
     fn default() -> Self {
         Self {
+            items: Vec::new(),
             creases: SumTree::new(()),
             next_id: 0,
             id_to_range: HashMap::new(),
             last_synced_version: None,
+            #[cfg(test)]
+            tree_rebuilds: 0,
+            #[cfg(test)]
+            carries: 0,
         }
     }
 }
@@ -248,24 +281,26 @@ impl CreaseMap {
 
         let new_ids: Vec<CreaseId> = new_items.iter().map(|item| item.id).collect();
 
-        let new_tree = {
-            let mut tree = SumTree::new(());
-            let mut cursor = self.creases.cursor::<CreaseStartOffset>(());
+        // Merged rather than appended and re-sorted, since both sides are
+        // already in order and the existing side is the long one.
+        let merged = {
+            let mut merged = Vec::with_capacity(self.items.len() + new_items.len());
+            let mut held = self.items.drain(..).peekable();
 
             for item in new_items {
-                tree.append(
-                    cursor.slice(
-                        &CreaseStartOffset(item.resolved_start),
-                        stoat_text::Bias::Left,
-                    ),
-                    (),
-                );
-                tree.push(item, ());
+                while held
+                    .peek()
+                    .is_some_and(|existing| existing.resolved_start <= item.resolved_start)
+                {
+                    merged.push(held.next().expect("peeked"));
+                }
+                merged.push(item);
             }
-            tree.append(cursor.suffix(), ());
-            tree
+            merged.extend(held);
+            merged
         };
-        self.creases = new_tree;
+
+        self.install_items(merged);
         self.last_synced_version = None;
 
         new_ids
@@ -287,16 +322,26 @@ impl CreaseMap {
             }
         }
 
-        let items: Vec<CreaseItem> = self
-            .creases
-            .iter()
-            .filter(|item| !ids_to_remove.contains(&item.id))
-            .cloned()
-            .collect();
-        self.creases = SumTree::from_iter(items, ());
+        let mut items = mem::take(&mut self.items);
+        items.retain(|item| !ids_to_remove.contains(&item.id));
+        self.install_items(items);
         self.last_synced_version = None;
 
         removed
+    }
+
+    /// Take `items` as the crease set and rebuild the tree over it.
+    ///
+    /// `items` must be in resolved-start order, which is what the tree is keyed
+    /// on. Every caller either produced them that way or sorted first.
+    fn install_items(&mut self, items: Vec<CreaseItem>) {
+        #[cfg(test)]
+        {
+            self.tree_rebuilds += 1;
+        }
+
+        self.creases = SumTree::from_iter(items.iter().cloned(), ());
+        self.items = items;
     }
 
     /// Bring every crease's resolved offsets up to date with `buffer`.
@@ -306,109 +351,151 @@ impl CreaseMap {
     /// the offsets can be carried across the edits since the last sync, only the
     /// anchors the carry could not vouch for are resolved, and an edit that
     /// moved nothing leaves the tree alone entirely.
-    pub fn sync(&mut self, buffer: &MultiBufferSnapshot) {
+    /// `buffer_edits` is the caller's already-computed patch paired with the
+    /// version its window opened at, taken only when that matches the version
+    /// this map last synced at. A layer above can hand back a cached snapshot
+    /// and leave this one a version behind, and a patch spanning the wrong
+    /// window would carry the creases to the wrong places. `None`, or a
+    /// mismatch, falls back to computing the window here.
+    pub fn sync(
+        &mut self,
+        buffer: &MultiBufferSnapshot,
+        buffer_edits: Option<(&Patch<usize>, u64)>,
+    ) {
         let version = buffer.version();
-        if self.creases.is_empty() {
+        if self.items.is_empty() {
             self.last_synced_version = Some(version);
             return;
         }
 
-        let items: Vec<CreaseItem> = self.creases.iter().cloned().collect();
-        let stored: Vec<usize> = items
-            .iter()
-            .flat_map(|item| [item.resolved_start, item.resolved_end])
-            .collect();
+        let Some(since) = self.last_synced_version else {
+            let anchors: Vec<Anchor> = self
+                .items
+                .iter()
+                .flat_map(|item| [item.crease.range().start, item.crease.range().end])
+                .collect();
+            let resolved = buffer.resolve_anchors_batch(&anchors);
 
-        let resolved = match self.last_synced_version {
-            Some(since) => carry_resolved(&items, &stored, buffer, since),
-            None => {
-                let anchors: Vec<Anchor> = items
-                    .iter()
-                    .flat_map(|item| [item.crease.range().start, item.crease.range().end])
-                    .collect();
-                buffer.resolve_anchors_batch(&anchors)
-            },
+            self.last_synced_version = Some(version);
+            self.write_resolved(&resolved, true);
+            return;
         };
 
+        let edits = match buffer_edits {
+            Some((edits, offered_since)) if offered_since == since => Cow::Borrowed(edits),
+            _ => Cow::Owned(buffer.edits_since(since)),
+        };
         self.last_synced_version = Some(version);
-        if resolved == stored {
+
+        // Nothing about where the creases sit has moved. Every edit lands at or
+        // past the last crease's end, so no offset shifts and the tree already
+        // holds what a rebuild would produce.
+        let last_end = self.items.iter().map(|item| item.resolved_end).max();
+        let untouched = match (edits.edits().first(), last_end) {
+            (None, _) => true,
+            (Some(first), Some(end)) => first.old.start >= end,
+            (Some(_), None) => false,
+        };
+        if untouched {
             return;
         }
-        self.install_resolved(items, &resolved);
+
+        #[cfg(test)]
+        {
+            self.carries += 1;
+        }
+
+        let (resolved, reordered) = self.carry_resolved(buffer, &edits);
+        if resolved
+            .chunks_exact(2)
+            .zip(&self.items)
+            .all(|(pair, item)| pair[0] == item.resolved_start && pair[1] == item.resolved_end)
+        {
+            return;
+        }
+        self.write_resolved(&resolved, reordered);
     }
 
-    /// Write `resolved` onto `items` and rebuild the tree in offset order.
+    /// Write `resolved` onto the items and rebuild the tree.
     ///
-    /// `resolved` interleaves each crease's start and end, matching `items`. A
-    /// carry is monotone so the order usually survives it, but an edit that
-    /// swallows a range collapses its start onto another's, and the tree is
-    /// keyed on that order.
-    fn install_resolved(&mut self, mut items: Vec<CreaseItem>, resolved: &[usize]) {
+    /// `resolved` interleaves each crease's start and end, matching the items.
+    /// `reordered` says whether the write can have moved one crease's start past
+    /// another's, which is the only reason to sort: a carry is monotone, but an
+    /// edit that swallows a range collapses its start onto its neighbour's, and
+    /// the tree is keyed on that order.
+    fn write_resolved(&mut self, resolved: &[usize], reordered: bool) {
+        let mut items = mem::take(&mut self.items);
         for (item, pair) in items.iter_mut().zip(resolved.chunks_exact(2)) {
             item.resolved_start = pair[0];
             item.resolved_end = pair[1];
         }
-        items.sort_by_key(|c| c.resolved_start);
-        self.creases = SumTree::from_iter(items, ());
-    }
-}
-
-/// Carry `stored` across the edits `buffer` has taken since `since`, resolving
-/// only the anchors the carry could not place itself.
-///
-/// The carry cannot vouch for an offset an edit touched the boundary of, since a
-/// crease's anchor bias decides whether it moved and only the anchor knows.
-/// Those go back to the buffer. The rest are arithmetic.
-///
-/// `stored` interleaves each crease's start and end, matching `items`.
-fn carry_resolved(
-    items: &[CreaseItem],
-    stored: &[usize],
-    buffer: &MultiBufferSnapshot,
-    since: u64,
-) -> Vec<usize> {
-    let edits = buffer.edits_since(since);
-    let mut offsets = stored.to_vec();
-    let mut needs_resolve = vec![false; offsets.len()];
-
-    // carry_offsets walks one ascending sequence, and an earlier edit can leave
-    // the stored offsets crossed, so an index permutation is sorted instead.
-    let mut order: Vec<usize> = (0..offsets.len()).collect();
-    order.sort_unstable_by_key(|&i| offsets[i]);
-    let mut sorted: Vec<usize> = order.iter().map(|&i| offsets[i]).collect();
-    let mut sorted_flags = vec![false; sorted.len()];
-    fold_map::carry_offsets(&mut sorted, &mut sorted_flags, &edits);
-    for (slot, &i) in order.iter().enumerate() {
-        offsets[i] = sorted[slot];
-        needs_resolve[i] = sorted_flags[slot];
-    }
-
-    let affected: Vec<usize> = needs_resolve
-        .iter()
-        .enumerate()
-        .filter(|&(_, &needs)| needs)
-        .map(|(i, _)| i)
-        .collect();
-    if affected.is_empty() {
-        return offsets;
-    }
-
-    let anchor_at = |i: usize| {
-        let range = items[i / 2].crease.range();
-        match i % 2 {
-            0 => range.start,
-            _ => range.end,
+        if reordered {
+            items.sort_by_key(|c| c.resolved_start);
         }
-    };
-    let to_resolve: Vec<Anchor> = affected.iter().map(|&i| anchor_at(i)).collect();
-    for (&i, offset) in affected
-        .iter()
-        .zip(buffer.resolve_anchors_batch(&to_resolve))
-    {
-        offsets[i] = offset;
+        self.install_items(items);
     }
 
-    offsets
+    /// Carry the stored offsets across `edits`, resolving only the anchors the
+    /// carry could not place itself, and report whether any went back.
+    ///
+    /// The carry cannot vouch for an offset an edit touched the boundary of,
+    /// since a crease's anchor bias decides whether it moved and only the anchor
+    /// knows. Those go back to the buffer. The rest are arithmetic.
+    ///
+    /// The returned offsets interleave each crease's start and end, matching the
+    /// items.
+    fn carry_resolved(
+        &self,
+        buffer: &MultiBufferSnapshot,
+        edits: &Patch<usize>,
+    ) -> (Vec<usize>, bool) {
+        let mut offsets: Vec<usize> = self
+            .items
+            .iter()
+            .flat_map(|item| [item.resolved_start, item.resolved_end])
+            .collect();
+        let mut needs_resolve = vec![false; offsets.len()];
+
+        // carry_offsets walks one ascending sequence, and an earlier edit can
+        // leave the stored offsets crossed, so an index permutation is sorted
+        // instead.
+        let mut order: Vec<usize> = (0..offsets.len()).collect();
+        order.sort_unstable_by_key(|&i| offsets[i]);
+        let mut sorted: Vec<usize> = order.iter().map(|&i| offsets[i]).collect();
+        let mut sorted_flags = vec![false; sorted.len()];
+        fold_map::carry_offsets(&mut sorted, &mut sorted_flags, edits);
+        for (slot, &i) in order.iter().enumerate() {
+            offsets[i] = sorted[slot];
+            needs_resolve[i] = sorted_flags[slot];
+        }
+
+        let affected: Vec<usize> = needs_resolve
+            .iter()
+            .enumerate()
+            .filter(|&(_, &needs)| needs)
+            .map(|(i, _)| i)
+            .collect();
+        if affected.is_empty() {
+            return (offsets, false);
+        }
+
+        let anchor_at = |i: usize| {
+            let range = self.items[i / 2].crease.range();
+            match i % 2 {
+                0 => range.start,
+                _ => range.end,
+            }
+        };
+        let to_resolve: Vec<Anchor> = affected.iter().map(|&i| anchor_at(i)).collect();
+        for (&i, offset) in affected
+            .iter()
+            .zip(buffer.resolve_anchors_batch(&to_resolve))
+        {
+            offsets[i] = offset;
+        }
+
+        (offsets, true)
+    }
 }
 
 #[derive(Clone)]
@@ -485,7 +572,7 @@ impl CreaseSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{Crease, CreaseItem, CreaseMap, FoldPlaceholder, Range};
+    use super::{Crease, CreaseMap, FoldPlaceholder, Range};
     use crate::{
         buffer::{BufferId, SharedBuffer, TextBuffer},
         multi_buffer::MultiBuffer,
@@ -519,7 +606,7 @@ mod tests {
             }),
             &|a: &Anchor| snap.resolve_anchor(a),
         );
-        map.sync(&snap);
+        map.sync(&snap, None);
 
         (map, shared, multi)
     }
@@ -547,11 +634,11 @@ mod tests {
                 .edit(edit_at..edit_at, "XY");
             let after = multi.snapshot();
 
-            carried.sync(&after);
+            carried.sync(&after, None);
             // Forgetting the version is what sends a sync back to resolving
             // every anchor, which is the answer being compared against.
             resolved.last_synced_version = None;
-            resolved.sync(&after);
+            resolved.sync(&after, None);
 
             assert_eq!(
                 starts_and_ends(&carried),
@@ -571,7 +658,7 @@ mod tests {
 
         let end = text.len();
         shared.write().expect("poisoned").edit(end..end, "tail\n");
-        map.sync(&multi.snapshot());
+        map.sync(&multi.snapshot(), None);
 
         assert_eq!(
             starts_and_ends(&map),
@@ -603,13 +690,56 @@ mod tests {
             )],
             &|a: &Anchor| after.resolve_anchor(a),
         );
-        map.sync(&after);
+        map.sync(&after, None);
 
         assert_eq!(
             starts_and_ends(&map),
             vec![(8, 12), (19, 23)],
             "the first crease shifts by the edit, the second is already past it",
         );
+    }
+
+    /// This runs per keystroke with one crease per foldable region, thousands
+    /// in a large file, and most keystrokes land past all of them. Rebuilding
+    /// the tree for a set that did not move is the cost that adds up, and a
+    /// rebuild producing the same tree is invisible without counting.
+    #[test]
+    fn an_edit_below_every_crease_leaves_the_tree_alone() {
+        let text = "line0 body\nline1 body\nline2 body\n";
+        let (mut map, shared, multi) = map_over(text, &[6..10, 17..21]);
+
+        let settled = (map.tree_rebuilds, map.carries);
+        let since = map.last_synced_version.expect("map_over synced");
+
+        // Past the last crease's end, so no offset can move.
+        shared.write().expect("poisoned").edit(30..30, "XY");
+        let after = multi.snapshot();
+        map.sync(&after, Some((&after.edits_since(since), since)));
+
+        assert_eq!(
+            (map.tree_rebuilds, map.carries),
+            settled,
+            "an edit below every crease carried offsets or rebuilt the tree"
+        );
+        assert_eq!(
+            starts_and_ends(&map),
+            vec![(6, 10), (17, 21)],
+            "and left the creases where they were"
+        );
+
+        // An edit that does move one carries and rebuilds, which is what says
+        // the counts are measuring something.
+        let since = map.last_synced_version.expect("synced above");
+        shared.write().expect("poisoned").edit(0..0, "XY");
+        let after = multi.snapshot();
+        map.sync(&after, Some((&after.edits_since(since), since)));
+
+        assert_eq!(
+            (map.tree_rebuilds, map.carries),
+            (settled.0 + 1, settled.1 + 1),
+            "an edit above every crease has to carry and rebuild"
+        );
+        assert_eq!(starts_and_ends(&map), vec![(8, 12), (19, 23)]);
     }
 
     #[test]
@@ -620,7 +750,7 @@ mod tests {
         assert_eq!(starts_and_ends(&map), vec![(17, 21)]);
 
         shared.write().expect("poisoned").edit(0..0, "XY");
-        map.sync(&multi.snapshot());
+        map.sync(&multi.snapshot(), None);
 
         assert_eq!(
             starts_and_ends(&map),
@@ -688,8 +818,8 @@ mod tests {
 
         // Resolution that moves the second crease in front of the first, which
         // a real edit reaches only by collapsing the text between them.
-        let items: Vec<CreaseItem> = map.creases.iter().cloned().collect();
-        let resolved: Vec<usize> = items
+        let resolved: Vec<usize> = map
+            .items
             .iter()
             .flat_map(|item| [item.crease.range().start, item.crease.range().end])
             .map(|a| match a.offset {
@@ -698,7 +828,7 @@ mod tests {
                 other => other as usize,
             })
             .collect();
-        map.install_resolved(items, &resolved);
+        map.write_resolved(&resolved, true);
 
         let snap = map.snapshot();
         let offsets: Vec<usize> = snap.items.iter().map(|i| i.resolved_start).collect();

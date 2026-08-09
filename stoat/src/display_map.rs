@@ -232,6 +232,32 @@ pub enum DiagnosticSeverity {
     Hint = 4,
 }
 
+/// One sync of the display layers through wrapping, and the by-products a
+/// caller with more to do against the same text would otherwise rebuild.
+pub struct WrapSync {
+    pub snapshot: Arc<WrapSnapshot>,
+    /// The wrap rows the sync changed.
+    pub wrap_edits: Patch<u32>,
+    /// The same edits restated in buffer rows, which is what the block map
+    /// needs. Block placements are buffer rows, so a wrap-row patch cannot tell
+    /// it how far an edit moved them, and by the time the wrap layer has run the
+    /// buffer patch is gone.
+    pub buffer_row_edits: Patch<u32>,
+    /// The buffer the whole sync ran against. Building another would rebuild the
+    /// excerpt tree against the live buffers to arrive at the same answer, this
+    /// sync leaving the multi-buffer untouched.
+    pub buffer_snapshot: MultiBufferSnapshot,
+    /// The buffer edits the sync computed, spanning from [`Self::since_version`]
+    /// to the buffer's version now.
+    ///
+    /// For a layer synced outside this call, which would otherwise ask the
+    /// buffer for the same window again. It has to be paired with the version it
+    /// opened at, since such a layer can be at a different one and a patch
+    /// spanning the wrong window carries to the wrong places.
+    pub buffer_edits: Patch<usize>,
+    pub since_version: u64,
+}
+
 pub struct DisplayMap {
     id: DisplayMapId,
     multi_buffer: MultiBuffer,
@@ -820,26 +846,9 @@ impl DisplayMap {
         self.inserted_diff_block_signature = signature;
     }
 
-    /// Sync the layers up to wrapping, returning the wrap snapshot, the wrap
-    /// rows the sync changed, the same edits restated in buffer rows, and the
-    /// buffer snapshot the whole sync ran against.
-    ///
-    /// The buffer-row patch is what the block map needs. Block placements are
-    /// buffer rows, so a wrap-row patch cannot tell it how far an edit moved
-    /// them, and by the time the wrap layer has run the buffer patch is gone.
-    ///
-    /// The buffer snapshot comes back so a caller with more to do against the
-    /// same text reuses it. Building another would rebuild the excerpt tree
-    /// against the live buffers to arrive at the same answer, this sync leaving
-    /// the multi-buffer untouched.
-    pub fn sync_through_wrap(
-        &mut self,
-    ) -> (
-        Arc<WrapSnapshot>,
-        Patch<u32>,
-        Patch<u32>,
-        MultiBufferSnapshot,
-    ) {
+    /// Sync the layers up to wrapping, and everything that sync produced which
+    /// a caller with more to do against the same text would otherwise rebuild.
+    pub fn sync_through_wrap(&mut self) -> WrapSync {
         let buffer_snapshot = self.multi_buffer.snapshot();
         let since_version = self.last_buffer_version;
         let buffer_edits = buffer_snapshot.edits_since(since_version);
@@ -860,7 +869,15 @@ impl DisplayMap {
         );
         let (tab_snapshot, tab_edits) = self.tab_map.sync(fold_snapshot, fold_edits);
         let (wrap_snapshot, wrap_edits) = self.wrap_map.sync(tab_snapshot, &tab_edits);
-        (wrap_snapshot, wrap_edits, buffer_row_edits, buffer_snapshot)
+
+        WrapSync {
+            snapshot: wrap_snapshot,
+            wrap_edits,
+            buffer_row_edits,
+            buffer_snapshot,
+            buffer_edits,
+            since_version,
+        }
     }
 
     pub fn snapshot(&mut self) -> DisplaySnapshot {
@@ -910,8 +927,14 @@ impl DisplayMap {
             return refreshed;
         }
 
-        let (wrap_snapshot, wrap_edits, buffer_row_edits, buffer_snapshot) =
-            self.sync_through_wrap();
+        let WrapSync {
+            snapshot: wrap_snapshot,
+            wrap_edits,
+            buffer_row_edits,
+            buffer_snapshot,
+            buffer_edits,
+            since_version,
+        } = self.sync_through_wrap();
         let diff_map = buffer_snapshot.diff_map.clone();
         let diff_version = diff_map.as_ref().map(|dm| dm.version()).unwrap_or(0);
         if diff_version != self.last_diff_version
@@ -954,7 +977,8 @@ impl DisplayMap {
         );
 
         if buffer_version != self.last_crease_sync_version {
-            self.crease_map.sync(&buffer_snapshot);
+            self.crease_map
+                .sync(&buffer_snapshot, Some((&buffer_edits, since_version)));
             self.last_crease_sync_version = buffer_version;
         }
 
@@ -1638,7 +1662,7 @@ mod tests {
     use super::{
         display_width, sampler, BlockPlacement, BlockProperties, BlockRowKind, BlockStyle,
         DisplayMap, DisplayPoint, DisplayRow, DisplaySnapshot, HighlightStyle,
-        HighlightStyleInterner, InlayKind, InlayPoint, SemanticTokenHighlight,
+        HighlightStyleInterner, InlayKind, InlayPoint, SemanticTokenHighlight, WrapSync,
     };
     use crate::{
         buffer::{BufferId, TextBuffer},
@@ -3176,7 +3200,7 @@ mod tests {
         let _ = display_map.snapshot();
 
         display_map.unfold(vec![Point::new(0, 0)..Point::new(3, 5)]);
-        let (_, wrap_edits, _, _) = display_map.sync_through_wrap();
+        let wrap_edits = display_map.sync_through_wrap().wrap_edits;
         assert!(
             wrap_edits.is_empty(),
             "no fold was there to remove: {:?}",
@@ -3187,7 +3211,7 @@ mod tests {
         // emptiness above is the unfold being a no-op rather than this sync
         // never reporting anything.
         display_map.fold(vec![Point::new(2, 0)..Point::new(2, 5)]);
-        let (_, wrap_edits, _, _) = display_map.sync_through_wrap();
+        let wrap_edits = display_map.sync_through_wrap().wrap_edits;
         assert!(!wrap_edits.is_empty(), "a fold that lands rebuilds");
     }
 
@@ -3427,7 +3451,11 @@ mod tests {
 
         shared.write().expect("poisoned").edit(0..0, "x");
 
-        let (wrap_snapshot, wrap_edits, _, _) = display_map.sync_through_wrap();
+        let WrapSync {
+            snapshot: wrap_snapshot,
+            wrap_edits,
+            ..
+        } = display_map.sync_through_wrap();
         assert!(!wrap_edits.is_empty(), "the edit itself must be reported");
         assert!(
             !wrap_edits
@@ -4409,7 +4437,7 @@ mod tests {
     fn a_wrap_snapshot_shows_at_least_the_rows_beneath_it() {
         for seed in 0..256 {
             let mut display_map = sampler::random_display_map(seed);
-            let (wrap, ..) = display_map.sync_through_wrap();
+            let wrap = display_map.sync_through_wrap().snapshot;
             let fold_rows = wrap.tab_snapshot().fold_snapshot().line_count();
 
             assert!(
