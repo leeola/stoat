@@ -6601,6 +6601,43 @@ mod tests {
         assert_eq!(buffer_string(&mut h), "bca\n");
     }
 
+    /// A count is a rotation distance, not a group size.
+    ///
+    /// Three selections rotated by two land each fragment two places on. That
+    /// is what tells this apart from rotating count-sized groups by one, which
+    /// would pair the first two selections and leave the third alone. The
+    /// distance is clamped to the number of selections, so a count equal to
+    /// that number is a whole turn and changes nothing.
+    #[test]
+    fn rotating_contents_by_a_count_moves_each_fragment_that_far() {
+        let mut h = TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        set_three_single_char_selections(&mut h);
+
+        h.stoat.pending_count = Some(2);
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::RotateSelectionContentsForward,
+        );
+        assert_eq!(buffer_string(&mut h), "bca\n");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 1, false), (1, 2, false), (2, 3, false)],
+        );
+
+        h.stoat.pending_count = Some(3);
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::RotateSelectionContentsForward,
+        );
+        assert_eq!(
+            buffer_string(&mut h),
+            "bca\n",
+            "a count equal to the selection count is a whole turn",
+        );
+    }
+
     #[test]
     fn join_selections_space_joins_two_lines_and_selects_space() {
         let mut h = TestHarness::with_size(20, 5);
