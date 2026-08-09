@@ -44,17 +44,29 @@ where
 
     pub fn new(edits: Vec<Edit<T>>) -> Self {
         #[cfg(debug_assertions)]
-        {
-            let mut last_edit: Option<&Edit<T>> = None;
-            for edit in &edits {
-                if let Some(last_edit) = last_edit {
-                    assert!(edit.old.start > last_edit.old.end);
-                    assert!(edit.new.start > last_edit.new.end);
-                }
-                last_edit = Some(edit);
-            }
-        }
+        Self::assert_ordered(&edits);
         Self(edits)
+    }
+
+    /// Panic unless `edits` ascend strictly and touch nowhere, in both spaces.
+    ///
+    /// `compose` and `old_to_new` walk a patch assuming each edit begins past
+    /// where the one before it ended, on both sides. The index is reported
+    /// rather than the ranges because `T` carries no `Debug` bound here.
+    #[cfg(debug_assertions)]
+    fn assert_ordered(edits: &[Edit<T>]) {
+        for (ix, pair) in edits.windows(2).enumerate() {
+            assert!(
+                pair[1].old.start > pair[0].old.end,
+                "edits {ix} and {} overlap or descend in the old space",
+                ix + 1,
+            );
+            assert!(
+                pair[1].new.start > pair[0].new.end,
+                "edits {ix} and {} overlap or descend in the new space",
+                ix + 1,
+            );
+        }
     }
 
     pub fn edits(&self) -> &[Edit<T>] {
@@ -124,6 +136,13 @@ where
             }
         }
         self.0.truncate(write + 1);
+
+        // Merging on old-side overlap alone leaves the new side to whatever the
+        // min and max produced, so an input crossed in new space comes out
+        // still crossed and every consumer of the result is built on it not
+        // being.
+        #[cfg(debug_assertions)]
+        Self::assert_ordered(&self.0);
     }
 }
 
@@ -598,6 +617,29 @@ mod tests {
         );
     }
 
+    /// Two edits apart in old space but crossed in new space survive
+    /// consolidate untouched, because it merges on old-side overlap alone.
+    ///
+    /// Every consumer of a patch walks it assuming both sides ascend, so a
+    /// result that does not has to be rejected where it is produced rather
+    /// than quietly misread later.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "overlap or descend in the new space")]
+    fn consolidating_a_crossed_new_side_is_rejected() {
+        let mut patch = Patch(vec![
+            Edit {
+                old: 0u32..1,
+                new: 10..11,
+            },
+            Edit {
+                old: 5..6,
+                new: 0..1,
+            },
+        ]);
+        patch.consolidate();
+    }
+
     #[test]
     fn compose_two_new_edits_overlapping_one_old() {
         let original: Vec<char> = ('a'..='z').collect();
@@ -677,6 +719,76 @@ mod tests {
         }
 
         (out, Patch::new(edits))
+    }
+
+    fn shuffle<T>(seed: &mut u64, items: &mut [T]) {
+        let mut next = || {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            *seed
+        };
+
+        for i in (1..items.len()).rev() {
+            items.swap(i, (next() % (i as u64 + 1)) as usize);
+        }
+    }
+
+    /// However a valid patch's edits arrive, consolidate gives the patch back.
+    ///
+    /// consolidate is what returns a patch to the shape `Patch::new` accepts
+    /// and every consumer walks, so the order edits arrive in must reach no
+    /// further than the sort, and a patch already in that shape must have
+    /// nothing left to merge. Duplicating every edit is the one way to drive
+    /// the merge arm from a valid patch without inventing a crossed new side,
+    /// and it has to land on the same answer.
+    ///
+    /// The six fixed cases above cover pairs chosen in advance. This covers
+    /// the shapes a real edit session produces.
+    #[test]
+    fn consolidating_a_shuffled_patch_restores_it() {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut multi_edit_cases = 0;
+
+        for case in 0..200 {
+            let base: Vec<char> = ('a'..='z').cycle().take(30).collect();
+            let (_, patch) = random_step(&mut seed, &base, 'A');
+            if patch.edits().len() < 2 {
+                continue;
+            }
+            multi_edit_cases += 1;
+
+            for duplicated in [false, true] {
+                let mut edits = patch.edits().to_vec();
+                if duplicated {
+                    edits.extend(patch.edits().iter().cloned());
+                }
+                shuffle(&mut seed, &mut edits);
+
+                let mut consolidated = Patch(edits);
+                consolidated.consolidate();
+
+                assert_eq!(
+                    consolidated,
+                    patch,
+                    "case {case} duplicated {duplicated}: from {:?}",
+                    patch.edits(),
+                );
+                for offset in 0..=base.len() as u32 {
+                    assert_eq!(
+                        consolidated.old_to_new(offset),
+                        patch.old_to_new(offset),
+                        "case {case} duplicated {duplicated}: offset {offset} under {:?}",
+                        patch.edits(),
+                    );
+                }
+            }
+        }
+
+        assert!(
+            multi_edit_cases > 100,
+            "only {multi_edit_cases} cases held more than one edit to reorder",
+        );
     }
 
     /// Composing two patches describes the same change as applying them in
