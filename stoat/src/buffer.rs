@@ -3724,6 +3724,107 @@ mod tests {
         }
     }
 
+    /// A replayed buffer resolves the original's anchors to the same offsets.
+    ///
+    /// That is what a restored session's cursors rest on, and text equality
+    /// does not imply it. An anchor names a fragment and an offset inside it,
+    /// so two trees holding the same bytes split into different fragments
+    /// satisfy every round-trip check there is and still place a restored
+    /// cursor somewhere else. The live tree reaches its shape through
+    /// `edit_batch` and `split_at_boundaries`, which the sequential replay
+    /// never runs, so only the timestamps line the two up.
+    ///
+    /// Anchors are taken twice, so the set includes ones made against a tree
+    /// that later edits went on to move, and at both biases, since bias is what
+    /// decides the side of an insertion an anchor falls on.
+    #[test]
+    fn a_replayed_buffer_resolves_the_anchors_the_original_made() {
+        const INSERTS: [&str; 6] = ["", "z", "hello ", "\n", "\u{65e5}\u{672c}", "  \n  "];
+        const SEED: &str = "the quick brown fox\njumps over the lazy dog\nsphinx of quartz\n";
+
+        let mut rng = Lcg(0x5851_F42D_4C95_7F2D);
+
+        let sample = |rng: &mut Lcg, b: &TextBuffer| -> Vec<Anchor> {
+            let text = b.snapshot.visible_text.to_string();
+            (0..6)
+                .flat_map(|_| {
+                    let offset = random_boundary(rng, &text);
+                    [
+                        b.anchor_at(offset, Bias::Left),
+                        b.anchor_at(offset, Bias::Right),
+                    ]
+                })
+                .collect()
+        };
+
+        for round in 0..48 {
+            let mut b = buf(SEED);
+            let mut early: Vec<Anchor> = Vec::new();
+
+            for step in 0..20 {
+                match rng.below(10) {
+                    0..=4 => {
+                        let text = b.snapshot.visible_text.to_string();
+                        let a = random_boundary(&mut rng, &text);
+                        let z = random_boundary(&mut rng, &text);
+                        b.edit(a.min(z)..a.max(z), INSERTS[rng.below(INSERTS.len())]);
+                    },
+                    5..=6 => {
+                        let text = b.snapshot.visible_text.to_string();
+                        let edits = random_batch(&mut rng, &text, &INSERTS);
+                        if !edits.is_empty() {
+                            b.edit_batch(&edits);
+                        }
+                    },
+                    7..=8 => {
+                        b.undo();
+                    },
+                    _ => {
+                        b.redo();
+                    },
+                }
+
+                if step == 10 {
+                    early = sample(&mut rng, &b);
+                }
+            }
+
+            let late = sample(&mut rng, &b);
+            let restored = TextBuffer::from_history(BufferId::new(0), &b.history());
+
+            // The anchors first. Text and version agreeing is the weaker claim,
+            // and asserting them ahead would report a shifted replay as a text
+            // or version difference rather than as the moved cursors it is.
+            for (which, anchors) in [("mid-run", &early), ("final", &late)] {
+                let want: Vec<usize> = anchors.iter().map(|a| b.resolve_anchor(a)).collect();
+                let got: Vec<usize> = anchors.iter().map(|a| restored.resolve_anchor(a)).collect();
+                assert_eq!(
+                    got, want,
+                    "round {round}: {which} anchors move in the replay"
+                );
+            }
+
+            assert_eq!(
+                restored.snapshot.visible_text.to_string(),
+                b.snapshot.visible_text.to_string(),
+                "round {round}: the replay shows different text",
+            );
+            assert_eq!(
+                restored.version(),
+                b.version(),
+                "round {round}: the replay ends on a different version",
+            );
+
+            let mut b = b;
+            let mut restored = restored;
+            assert_eq!(
+                restored.redo().is_some(),
+                b.redo().is_some(),
+                "round {round}: the replay disagrees about there being a redo",
+            );
+        }
+    }
+
     #[test]
     fn undoing_a_delete_that_spans_multibyte_text_restores_it() {
         // Deleting the shorter run first, later in the document, then the
