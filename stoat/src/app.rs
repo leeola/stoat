@@ -7462,6 +7462,7 @@ impl Stoat {
                 syntax.tree.root_node(),
                 &syntax.rope_snapshot,
                 cursor_offset,
+                guard.indent_style().as_str(),
             ),
             None => language::line_leading_whitespace(rope, row),
         }
@@ -7576,6 +7577,7 @@ impl Stoat {
                 syntax.tree.root_node(),
                 &syntax.rope_snapshot,
                 row,
+                guard.indent_style().as_str(),
             )
             .unwrap_or_else(|| language::line_leading_whitespace(rope, row)),
             None => language::line_leading_whitespace(rope, row),
@@ -17149,6 +17151,51 @@ mod tests {
         h.type_keys("enter");
         h.settle();
         assert_eq!(focused_buffer_string(&h), "fn a() {\n\t\n}\n");
+    }
+
+    /// A buffer written in spaces indents by its own unit, not by a tab.
+    ///
+    /// The base is copied from the row and only the delta comes from the
+    /// indent style, so getting the delta wrong glues a tab onto spaces and the
+    /// new line reads a level deeper than it is. The two-space increase on the
+    /// second row is what the buffer's detector votes on.
+    #[test]
+    fn enter_indents_a_space_buffer_by_its_own_unit() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.json", b"{\n  \"a\": {\n  }\n}\n");
+        h.type_keys("j");
+        h.type_keys("A");
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(
+            focused_buffer_string(&h),
+            "{\n  \"a\": {\n    \n  }\n}\n",
+            "the opener's row is indented two, so the new line is indented four",
+        );
+    }
+
+    /// Opening a line below reads the same unit as Enter does.
+    #[test]
+    fn open_below_indents_a_space_buffer_by_its_own_unit() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.json", b"{\n  \"a\": {\n  }\n}\n");
+        h.type_keys("j");
+        h.type_keys("o");
+        h.type_text("1");
+        assert_eq!(focused_buffer_string(&h), "{\n  \"a\": {\n    1\n  }\n}\n");
+    }
+
+    /// Re-indenting an existing row reads it too, which is the other entry
+    /// point and the other query.
+    #[test]
+    fn shift_i_indents_a_space_buffer_by_its_own_unit() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.json", b"{\n  \"a\": {\n\n  }\n}\n");
+        h.type_keys("j");
+        h.type_keys("j");
+        h.type_keys("I");
+        h.type_text("1");
+        assert_eq!(focused_buffer_string(&h), "{\n  \"a\": {\n    1\n  }\n}\n");
     }
 
     #[test]
