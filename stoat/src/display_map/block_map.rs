@@ -1360,12 +1360,10 @@ impl BlockSnapshot {
 
     /// Last position holding buffer text above block row `row`.
     ///
-    /// A candidate row's own end is not always a position a caret can occupy,
-    /// because a fold placeholder straddling a soft-wrap break carries it onto
-    /// the row after. When that row is one a `Replace` block hides, the
-    /// candidate is no position at all and the scan carries on upward. Only
-    /// moving further from `row` each step is what ends the walk, since a
-    /// candidate that turned around could carry back onto the one before it.
+    /// A candidate row can hold no position the scan will take, so it carries on
+    /// upward. Only moving further from `row` each step is what ends the walk,
+    /// since a candidate that turned around could carry back onto the one
+    /// before it.
     fn scan_up(&self, row: u32) -> Option<BlockPoint> {
         let mut candidate = row;
         loop {
@@ -1374,21 +1372,18 @@ impl BlockSnapshot {
                 continue;
             }
 
-            let clipped = self.wrap_clip(candidate, self.line_len(candidate), Bias::Left);
-            if matches!(
-                self.classify_row(clipped.row),
-                BlockRowKind::BufferRow { .. }
-            ) {
-                return Some(clipped);
+            let end = self.line_len(candidate);
+            let found = self.probe(
+                candidate,
+                [(end, Bias::Left), (end.saturating_sub(1), Bias::Left)],
+            );
+            if found.is_some() {
+                return found;
             }
         }
     }
 
     /// First position holding buffer text below block row `row`.
-    ///
-    /// Column zero is clipped for the same reason [`Self::scan_up`] clips a row
-    /// end. A continuation row carries a soft-wrap indent margin holding no
-    /// text, so its first cell sits past column zero.
     fn scan_down(&self, row: u32) -> Option<BlockPoint> {
         let mut candidate = row;
         loop {
@@ -1400,14 +1395,31 @@ impl BlockSnapshot {
                 continue;
             }
 
-            let clipped = self.wrap_clip(candidate, 0, Bias::Right);
-            if matches!(
-                self.classify_row(clipped.row),
-                BlockRowKind::BufferRow { .. }
-            ) {
-                return Some(clipped);
+            let found = self.probe(candidate, [(0, Bias::Right), (0, Bias::Left)]);
+            if found.is_some() {
+                return found;
             }
         }
+    }
+
+    /// A position on `row` a caret can occupy, clipping at `probes` in order
+    /// and taking the first that lands on a row holding buffer text.
+    ///
+    /// The first probe is the end of the row the scan wants. It needs a second
+    /// because a row's own end can belong to the row after it: under soft wrap
+    /// the end of a wrapped row and the start of its continuation are one
+    /// position, and the wrap layer answers with the continuation. A `Replace`
+    /// block hiding that continuation leaves the end naming nothing, and the
+    /// probe held one cell inside the row stands in for it.
+    fn probe(&self, row: u32, probes: [(u32, Bias); 2]) -> Option<BlockPoint> {
+        probes.into_iter().find_map(|(column, bias)| {
+            let clipped = self.wrap_clip(row, column, bias);
+            matches!(
+                self.classify_row(clipped.row),
+                BlockRowKind::BufferRow { .. }
+            )
+            .then_some(clipped)
+        })
     }
 
     pub fn line_len(&self, block_row: u32) -> u32 {

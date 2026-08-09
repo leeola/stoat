@@ -1544,9 +1544,9 @@ impl Iterator for ReversedBufferCharsAt<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_width, BlockPlacement, BlockProperties, BlockRowKind, BlockStyle, DisplayMap,
-        DisplayPoint, DisplayRow, DisplaySnapshot, HighlightStyle, HighlightStyleInterner,
-        InlayKind, InlayPoint, SemanticTokenHighlight,
+        display_width, sampler, BlockPlacement, BlockProperties, BlockRowKind, BlockStyle,
+        DisplayMap, DisplayPoint, DisplayRow, DisplaySnapshot, HighlightStyle,
+        HighlightStyleInterner, InlayKind, InlayPoint, SemanticTokenHighlight,
     };
     use crate::{
         buffer::{BufferId, TextBuffer},
@@ -4040,6 +4040,110 @@ mod tests {
                 for (row, (incremental, fresh)) in rows.iter().zip(&fresh_rows).enumerate() {
                     assert_eq!(incremental, fresh, "seed {seed} round {round} row {row}",);
                 }
+            }
+        }
+    }
+
+    /// The stack end to end, over generated buffers, hints, folds, wrap widths
+    /// and block sets.
+    ///
+    /// Each layer's own suite holds it against the layer below. Nothing holds
+    /// the composition against the buffer, which is where an error every layer
+    /// reports consistently to its neighbour compounds into a display position
+    /// naming the wrong text.
+    ///
+    /// The round trip is stated from the buffer side, because going the other
+    /// way and requiring the display point back is too strong under soft wrap.
+    /// The end of a wrapped row and the start of its continuation are one
+    /// buffer position, both are positions a caret can occupy, and
+    /// [`DisplaySnapshot::buffer_to_display`] has to pick one of them.
+    ///
+    /// The round trip is skipped for a document whose every row a `Replace`
+    /// block swallowed. There is no buffer position to answer with there, so
+    /// requiring one would assert something false.
+    #[test]
+    fn the_display_stack_round_trips_and_measures_what_it_paints() {
+        use stoat_text::Bias;
+        for seed in 0..256 {
+            let mut display_map = sampler::random_display_map(seed);
+            let snapshot = display_map.snapshot();
+            let addressable = (0..snapshot.line_count())
+                .any(|row| matches!(snapshot.classify_row(row), BlockRowKind::BufferRow { .. }));
+
+            for row in 0..snapshot.line_count() {
+                for column in 0..=snapshot.line_len(row) + 1 {
+                    for bias in [Bias::Left, Bias::Right] {
+                        let clipped = snapshot.clip_point(DisplayPoint::new(row, column), bias);
+                        assert_eq!(
+                            snapshot.clip_point(clipped, bias),
+                            clipped,
+                            "seed {seed}: {row}:{column} clipped {bias:?} moves again",
+                        );
+
+                        if !addressable {
+                            continue;
+                        }
+                        let buffer = snapshot.display_to_buffer(clipped).unwrap_or_else(|| {
+                            panic!("seed {seed}: {row}:{column} {bias:?} clips off the buffer")
+                        });
+                        // A `Replace` block can hide the row a buffer position
+                        // is shown on, and then it has no display position to
+                        // read back from. That is the block layer's contract,
+                        // not a mismatch.
+                        let shown = snapshot.buffer_to_display(buffer);
+                        let Some(back) = snapshot.display_to_buffer(shown) else {
+                            continue;
+                        };
+                        assert_eq!(
+                            back, buffer,
+                            "seed {seed}: {row}:{column} {bias:?} names {buffer:?}, which does \
+                             not survive being shown and read back",
+                        );
+                    }
+                }
+            }
+
+            // Ascending buffer points give non-descending display points. Not
+            // strictly ascending, since a fold collapses a whole range onto the
+            // one position that stands for it.
+            let rope = snapshot.buffer_snapshot().rope();
+            let mut previous: Option<(Point, DisplayPoint)> = None;
+            for row in 0..=rope.max_point().row {
+                for column in 0..=rope.line_len(row) {
+                    let point = Point::new(row, column);
+                    if rope.clip_point(point, Bias::Left) != point {
+                        continue;
+                    }
+
+                    let display = snapshot.buffer_to_display(point);
+                    if let Some((last_point, last_display)) = previous {
+                        assert!(
+                            display >= last_display,
+                            "seed {seed}: {last_point:?} shows at {last_display:?} but the later \
+                             {point:?} shows at {display:?}",
+                        );
+                    }
+                    previous = Some((point, display));
+                }
+            }
+
+            for row in 0..snapshot.line_count() {
+                let painted: u32 = snapshot
+                    .highlighted_chunks(row..row + 1)
+                    .map(|chunk| {
+                        chunk
+                            .text
+                            .chars()
+                            .filter(|&ch| ch != '\n')
+                            .map(display_width)
+                            .sum::<u32>()
+                    })
+                    .sum();
+                assert_eq!(
+                    snapshot.line_len(row),
+                    painted,
+                    "seed {seed}: row {row} measures a width it does not paint",
+                );
             }
         }
     }
