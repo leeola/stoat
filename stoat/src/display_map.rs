@@ -2992,7 +2992,8 @@ mod tests {
         fresh.set_wrap_width(Some(30));
         assert_eq!(
             settled,
-            fresh.snapshot().max_point().row,
+            // Settled, since a file this size defers its first wrap as well.
+            settled_rows(&scheduler, &mut fresh),
             "the settled wrapping must match a from-scratch build",
         );
         assert!(
@@ -3020,10 +3021,89 @@ mod tests {
     }
 
     /// Rows the same content wraps to at `width`, built from nothing.
+    ///
+    /// Settled rather than taken straight from the first snapshot, since a file
+    /// this size hands its first wrap to the background too.
     fn rows_at_width(lines: usize, width: u32) -> u32 {
-        let (_scheduler, mut display_map) = wrappable_display_map(lines);
+        let (scheduler, mut display_map) = wrappable_display_map(lines);
         display_map.set_wrap_width(Some(width));
+        settled_rows(&scheduler, &mut display_map)
+    }
+
+    /// The row count once no rewrap is outstanding.
+    ///
+    /// Successive rewraps chain through the pending queue, so this drains and
+    /// re-syncs rather than assuming one pass.
+    fn settled_rows(scheduler: &Arc<TestScheduler>, display_map: &mut DisplayMap) -> u32 {
+        for _ in 0..10 {
+            scheduler.run_until_parked();
+            display_map.snapshot();
+            if !display_map.wrap_map.background_pending() {
+                break;
+            }
+        }
+        assert!(
+            !display_map.wrap_map.background_pending(),
+            "the wrapping never settled"
+        );
+
         display_map.snapshot().max_point().row
+    }
+
+    /// The first width an editor gets arrives as a change from none, and that
+    /// used to be the one case wrapping ran inline. Opening a large file
+    /// therefore walked every character of it on the run loop before anything
+    /// could paint. It now shows the file unwrapped for a beat instead.
+    #[test]
+    fn a_large_files_first_wrap_goes_to_the_background() {
+        const LINES: usize = 150;
+        let (scheduler, mut display_map) = wrappable_display_map(LINES);
+        let unwrapped = display_map.snapshot().max_point().row;
+
+        display_map.set_wrap_width(Some(20));
+        let first = display_map.snapshot().max_point().row;
+
+        assert!(
+            display_map.wrap_map.background_pending(),
+            "a large file's first wrap must not run on the UI thread",
+        );
+        assert_eq!(
+            first, unwrapped,
+            "so the frame painted meanwhile is the unwrapped one",
+        );
+
+        assert_eq!(
+            settled_rows(&scheduler, &mut display_map),
+            rows_at_width(LINES, 20),
+            "and the background result lands wrapped",
+        );
+    }
+
+    /// A short file's walk is over before a frame is due, so showing it
+    /// unwrapped for a beat would be the worse trade and it still arrives
+    /// wrapped.
+    ///
+    /// Two things keep it there, either of which suffices: the row threshold
+    /// refuses to defer, and `flush_edits` runs a small enough batch inline
+    /// even when something did. What the file shows is the same either way,
+    /// which is what this pins.
+    #[test]
+    fn a_small_files_first_wrap_still_happens_on_the_spot() {
+        const LINES: usize = 20;
+        let (_scheduler, mut display_map) = wrappable_display_map(LINES);
+        let unwrapped = display_map.snapshot().max_point().row;
+
+        display_map.set_wrap_width(Some(20));
+        let first = display_map.snapshot().max_point().row;
+
+        assert!(
+            !display_map.wrap_map.background_pending(),
+            "a small file's first wrap has nothing to defer",
+        );
+        assert!(
+            first > unwrapped,
+            "and its first frame is already wrapped, at {first} rows from {unwrapped}",
+        );
     }
 
     /// Dragging a pane edge emits a width change per resize event, and
@@ -3033,8 +3113,10 @@ mod tests {
     fn a_wide_files_width_change_rewraps_in_the_background() {
         const LINES: usize = 150;
         let (scheduler, mut display_map) = wrappable_display_map(LINES);
+        // Settled first, so the width change below is the subject rather than
+        // the first wrap this file also defers.
         display_map.set_wrap_width(Some(60));
-        let at_60 = display_map.snapshot().max_point().row;
+        let at_60 = settled_rows(&scheduler, &mut display_map);
 
         display_map.set_wrap_width(Some(20));
         let interim = display_map.snapshot().max_point().row;

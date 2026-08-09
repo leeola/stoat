@@ -284,7 +284,7 @@ impl WrapMap {
 
         let needs_full_rebuild = wrap_width_changed || (version_changed && tab_edits.is_empty());
 
-        if self.should_defer_rewrap() {
+        if self.should_defer_rewrap(tab_snapshot.line_count()) {
             if self.background_task.is_none() {
                 self.queue_rewrap(tab_snapshot);
             } else if !tab_edits.is_empty() {
@@ -340,17 +340,24 @@ impl WrapMap {
     /// already hands to the background, and a pane drag emits a width change
     /// per resize event, so running it inline stalls the UI thread repeatedly.
     ///
-    /// Only a change between two widths qualifies. Turning wrapping on or off
-    /// is a one-off rather than a per-event stream, and deferring the first
-    /// width would show a freshly opened file unwrapped for a beat before it
-    /// snapped into shape. Wrapping off could not defer in any case, since
-    /// [`Self::flush_edits`] does nothing without a width and would leave the
-    /// snapshot interpolated forever.
-    fn should_defer_rewrap(&self) -> bool {
+    /// Turning wrapping off never qualifies. [`Self::flush_edits`] does nothing
+    /// without a width, so a queued entry would never run and the snapshot
+    /// would stay interpolated forever.
+    ///
+    /// Turning it on does, above the threshold. The first width an editor gets
+    /// arrives this way, so excluding it meant every open wrapped its whole
+    /// file on the run loop. Deferring instead shows the file unwrapped for one
+    /// beat before it settles. That trade is only worth making for a file large
+    /// enough to stall on, so a small one still arrives wrapped on its first
+    /// frame.
+    ///
+    /// `tab_rows` is the file about to be wrapped rather than the one the
+    /// snapshot holds, which differ only when a sync brings new content and a
+    /// new width together. The work being weighed is over the incoming file.
+    fn should_defer_rewrap(&self, tab_rows: u32) -> bool {
         self.wrap_width != self.snapshot.wrap_width
             && self.wrap_width.is_some()
-            && self.snapshot.wrap_width.is_some()
-            && self.snapshot.tab_snapshot.line_count() >= WRAP_SYNC_THRESHOLD
+            && tab_rows >= WRAP_SYNC_THRESHOLD
     }
 
     /// Queue a full rebuild at the wanted width as an ordinary pending edit.
@@ -496,7 +503,7 @@ impl WrapMap {
                 // The result carries the width the task was spawned with, which
                 // a drag may already have moved past. Re-queue against the
                 // wanted width rather than settling on one the user left behind.
-                if self.should_defer_rewrap() {
+                if self.should_defer_rewrap(self.snapshot.tab_snapshot.line_count()) {
                     let tab_snapshot = self.snapshot.tab_snapshot.clone();
                     self.queue_rewrap(tab_snapshot);
                 } else if self.wrap_width != self.snapshot.wrap_width {
