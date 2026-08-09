@@ -298,6 +298,20 @@ pub struct DisplayMap {
     /// [`DisplayMap::snapshot_with_companion`] so a single rebuild
     /// covers any number of highlight setters fired in the same frame.
     highlights_dirty: bool,
+    /// Counts the setter calls that changed what this map paints.
+    ///
+    /// None of the layer versions can see these. A mask, a diagnostic
+    /// threshold, or a token channel changes the painted output while every
+    /// buffer, fold, inlay, wrap, and block version stands still, which is what
+    /// makes a cache keyed on those alone unsound.
+    ///
+    /// Setters whose value compares cheaply move it only on a real change,
+    /// because callers are invited to call some of them every frame. The rest
+    /// carry values with no equality to lean on, a companion or a token channel
+    /// or a folding-range set, and move it whenever the call does work. So
+    /// installing the same tokens twice counts twice, which costs a repaint and
+    /// never a wrong frame.
+    settings_generation: u64,
 }
 
 impl DisplayMap {
@@ -344,6 +358,7 @@ impl DisplayMap {
             last_show_deleted_blocks: false,
             cached_snapshot: None,
             highlights_dirty: false,
+            settings_generation: 0,
         }
     }
 
@@ -363,8 +378,12 @@ impl DisplayMap {
     /// map. Off by default. The side-by-side diff view turns it on. Nulls the
     /// snapshot cache so the next snapshot re-splices under the new setting.
     pub(crate) fn set_show_deleted_blocks(&mut self, show: bool) {
+        if self.show_deleted_blocks == show {
+            return;
+        }
         self.show_deleted_blocks = show;
         self.cached_snapshot = None;
+        self.settings_generation += 1;
     }
 
     pub fn folded_buffers(&self) -> &std::collections::HashSet<BufferId> {
@@ -381,15 +400,21 @@ impl DisplayMap {
                     .copied()
                     .collect();
                 self.block_map.remove(&ids);
+                self.settings_generation += 1;
             }
             return;
         }
         self.companion = companion;
         self.block_map.mark_dirty();
+        self.settings_generation += 1;
     }
 
     pub fn set_masked(&mut self, masked: bool) {
+        if self.masked == masked {
+            return;
+        }
         self.masked = masked;
+        self.settings_generation += 1;
     }
 
     /// Enable or disable tree-sitter syntax coloring for this editor.
@@ -401,15 +426,24 @@ impl DisplayMap {
         if self.syntax_highlighting != on {
             self.syntax_highlighting = on;
             self.highlights_dirty = true;
+            self.settings_generation += 1;
         }
     }
 
     pub fn set_clip_at_line_ends(&mut self, clip: bool) {
+        if self.clip_at_line_ends == clip {
+            return;
+        }
         self.clip_at_line_ends = clip;
+        self.settings_generation += 1;
     }
 
     pub fn set_diagnostics_max_severity(&mut self, severity: Option<DiagnosticSeverity>) {
+        if self.diagnostics_max_severity == severity {
+            return;
+        }
         self.diagnostics_max_severity = severity;
+        self.settings_generation += 1;
     }
 
     pub fn insert_blocks(&mut self, blocks: Vec<BlockProperties>) {
@@ -429,9 +463,13 @@ impl DisplayMap {
     pub fn set_conflict_padding_blocks(&mut self, blocks: Vec<BlockProperties>) {
         let stale: std::collections::HashSet<CustomBlockId> =
             self.conflict_padding_block_ids.drain(..).collect();
+        let had_none = stale.is_empty() && blocks.is_empty();
         self.block_map.remove(&stale);
         self.conflict_padding_block_ids = self.block_map.insert(blocks);
         self.cached_snapshot = None;
+        if !had_none {
+            self.settings_generation += 1;
+        }
     }
 
     pub fn fold(&mut self, ranges: Vec<Range<Point>>) {
@@ -485,6 +523,9 @@ impl DisplayMap {
             .is_some_and(|snapshot| snapshot.wrap_width() != width)
         {
             self.cached_snapshot = None;
+        }
+        if self.wrap_map.wrap_width() != width {
+            self.settings_generation += 1;
         }
         self.wrap_map.set_wrap_width(width);
     }
@@ -585,6 +626,7 @@ impl DisplayMap {
     ) {
         Arc::make_mut(&mut self.semantic_token_highlights).insert(buffer_id, channel);
         self.highlights_dirty = true;
+        self.settings_generation += 1;
     }
 
     pub fn invalidate_semantic_highlights(&mut self, buffer_id: BufferId) {
@@ -604,6 +646,7 @@ impl DisplayMap {
         let channel = self.batched_token_channel(tokens, interner);
         Arc::make_mut(&mut self.lsp_token_highlights).insert(buffer_id, channel);
         self.highlights_dirty = true;
+        self.settings_generation += 1;
     }
 
     /// Re-resolve every retained token channel through `interner`.
@@ -705,8 +748,13 @@ impl DisplayMap {
         buffer_id: BufferId,
         ranges: Vec<(Range<Anchor>, Option<String>)>,
     ) {
-        if let Some(old_ids) = self.lsp_folding_crease_ids.remove(&buffer_id) {
+        let old_ids = self.lsp_folding_crease_ids.remove(&buffer_id);
+        let had_none = old_ids.as_ref().is_none_or(Vec::is_empty) && ranges.is_empty();
+        if let Some(old_ids) = old_ids {
             self.crease_map.remove(old_ids);
+        }
+        if !had_none {
+            self.settings_generation += 1;
         }
         let creases = ranges.into_iter().map(|(range, collapsed_text)| {
             Crease::inline(
@@ -924,6 +972,7 @@ impl DisplayMap {
             syntax_highlighting: self.syntax_highlighting,
             clip_at_line_ends: self.clip_at_line_ends,
             diagnostics_max_severity: self.diagnostics_max_severity,
+            settings_generation: self.settings_generation,
         };
         self.cached_snapshot = Some(snapshot.clone());
         snapshot
@@ -941,6 +990,7 @@ impl DisplayMap {
         snapshot.lsp_token_highlights = self.lsp_token_highlights.clone();
         snapshot.inlay_highlights = self.inlay_highlights.clone();
         snapshot.syntax_highlighting = self.syntax_highlighting;
+        snapshot.settings_generation = self.settings_generation;
     }
 }
 
@@ -959,11 +1009,51 @@ pub struct DisplaySnapshot {
     syntax_highlighting: bool,
     clip_at_line_ends: bool,
     diagnostics_max_severity: Option<DiagnosticSeverity>,
+    settings_generation: u64,
+}
+
+/// Everything that decides a snapshot's painted text, gathered so two frames
+/// can be compared in one step.
+///
+/// Only equality is defined. There is no sense in which one of these is later
+/// than another, since the parts count different things, so ordering is left
+/// out rather than left to be misread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaintVersion {
+    fold: usize,
+    inlay: usize,
+    wrap: u64,
+    block: u64,
+    settings: u64,
 }
 
 impl DisplaySnapshot {
     pub fn version(&self) -> usize {
         self.fold_snapshot().version()
+    }
+
+    /// What a pane cache compares to decide whether it may reuse its cells.
+    ///
+    /// Two snapshots of the same buffer version sharing this paint the same
+    /// text. That is the direction a cache needs, and it holds because every
+    /// layer between the buffer and the screen contributes its own count, along
+    /// with the settings no layer sees.
+    ///
+    /// The converse is weaker. Several of the parts move on work that changed
+    /// no visible row, so an unequal pair may still paint the same, costing a
+    /// repaint rather than a wrong frame.
+    ///
+    /// The buffer version is not folded in, because a caller comparing frames
+    /// already holds it, and burying it here would hide which half of the
+    /// condition failed.
+    pub fn paint_version(&self) -> PaintVersion {
+        PaintVersion {
+            fold: self.fold_snapshot().version(),
+            inlay: self.inlay_snapshot().inlay_version,
+            wrap: self.block_snapshot.wrap_snapshot().version(),
+            block: self.block_snapshot.version(),
+            settings: self.settings_generation,
+        }
     }
 
     pub fn tab_snapshot(&self) -> &TabSnapshot {
@@ -1569,6 +1659,165 @@ mod tests {
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
         DisplayMap::new(multi_buffer, test_executor(), crate::test_notify())
+    }
+
+    fn no_companion_rows(
+        _: &std::collections::HashMap<super::ExcerptId, super::ExcerptId>,
+        _: &crate::multi_buffer::MultiBufferSnapshot,
+        _: &crate::multi_buffer::MultiBufferSnapshot,
+        _: (std::ops::Bound<Point>, std::ops::Bound<Point>),
+    ) -> Vec<super::CompanionExcerptPatch> {
+        Vec::new()
+    }
+
+    fn bare_companion() -> super::Companion {
+        super::Companion {
+            rhs_display_map_id: super::DisplayMapId::next(),
+            rhs_buffer_to_lhs_buffer: std::collections::HashMap::new(),
+            lhs_buffer_to_rhs_buffer: std::collections::HashMap::new(),
+            rhs_excerpt_to_lhs_excerpt: std::collections::HashMap::new(),
+            lhs_excerpt_to_rhs_excerpt: std::collections::HashMap::new(),
+            rhs_rows_to_lhs_rows: no_companion_rows,
+            lhs_rows_to_rhs_rows: no_companion_rows,
+            rhs_custom_block_to_balancing_block: std::collections::HashMap::new(),
+            lhs_custom_block_to_balancing_block: std::collections::HashMap::new(),
+        }
+    }
+
+    fn one_token(
+        display_map: &DisplayMap,
+    ) -> (Arc<[SemanticTokenHighlight]>, Arc<HighlightStyleInterner>) {
+        let snap = display_map.multi_buffer.snapshot();
+        let mut interner = HighlightStyleInterner::default();
+        let style = interner.push(HighlightStyle::default());
+        let tokens: Arc<[SemanticTokenHighlight]> = [SemanticTokenHighlight {
+            range: snap.anchor_at(0, stoat_text::Bias::Right)
+                ..snap.anchor_at(3, stoat_text::Bias::Left),
+            style,
+        }]
+        .into_iter()
+        .collect();
+        (tokens, Arc::new(interner))
+    }
+
+    fn assert_moved_once(display_map: &DisplayMap, seen: &mut u64, what: &str) {
+        assert_eq!(
+            display_map.settings_generation,
+            *seen + 1,
+            "{what} moves the generation one step",
+        );
+        *seen = display_map.settings_generation;
+    }
+
+    /// Every setter that changes what a pane paints moves the generation, one
+    /// step per call.
+    ///
+    /// No layer version sees any of these. A masked editor and an unmasked one
+    /// carry the same fold, inlay, wrap, and block versions, so a paint key
+    /// built from those alone would call them the same frame.
+    #[test]
+    fn every_setter_moves_the_settings_generation() {
+        let mut dm = create_display_map("alpha\nbeta\ngamma\n");
+        let (tokens, interner) = one_token(&dm);
+        let buffer_id = BufferId::new(0);
+        let mut seen = dm.settings_generation;
+
+        dm.set_show_deleted_blocks(true);
+        assert_moved_once(&dm, &mut seen, "set_show_deleted_blocks");
+
+        dm.set_masked(true);
+        assert_moved_once(&dm, &mut seen, "set_masked");
+
+        dm.set_syntax_highlighting(false);
+        assert_moved_once(&dm, &mut seen, "set_syntax_highlighting");
+
+        dm.set_clip_at_line_ends(true);
+        assert_moved_once(&dm, &mut seen, "set_clip_at_line_ends");
+
+        dm.set_diagnostics_max_severity(Some(super::DiagnosticSeverity::Warning));
+        assert_moved_once(&dm, &mut seen, "set_diagnostics_max_severity");
+
+        dm.set_wrap_width(Some(20));
+        assert_moved_once(&dm, &mut seen, "set_wrap_width");
+
+        dm.set_conflict_padding_blocks(vec![BlockProperties::from_text(
+            BlockPlacement::Below(0),
+            vec!["pad".to_string()],
+            BlockStyle::Fixed,
+        )]);
+        assert_moved_once(&dm, &mut seen, "set_conflict_padding_blocks");
+
+        dm.set_companion(Some(bare_companion()));
+        assert_moved_once(&dm, &mut seen, "set_companion installing");
+        dm.set_companion(None);
+        assert_moved_once(&dm, &mut seen, "set_companion clearing");
+
+        dm.set_semantic_token_highlights(buffer_id, tokens.clone(), interner.clone());
+        assert_moved_once(&dm, &mut seen, "set_semantic_token_highlights");
+
+        let channel =
+            super::highlights::BufferSemanticTokens::new(tokens.clone(), interner.clone(), |_| 0);
+        dm.set_semantic_token_channel(buffer_id, channel);
+        assert_moved_once(&dm, &mut seen, "set_semantic_token_channel");
+
+        dm.set_lsp_token_highlights(buffer_id, tokens, interner);
+        assert_moved_once(&dm, &mut seen, "set_lsp_token_highlights");
+
+        let snap = dm.multi_buffer.snapshot();
+        let range =
+            snap.anchor_at(0, stoat_text::Bias::Right)..snap.anchor_at(5, stoat_text::Bias::Left);
+        dm.set_lsp_folding_ranges(buffer_id, vec![(range, None)]);
+        assert_moved_once(&dm, &mut seen, "set_lsp_folding_ranges");
+    }
+
+    /// A setter handed the value it already holds moves nothing.
+    ///
+    /// Some of these are documented as safe to call every frame, so a
+    /// generation that moved on every call would defeat the cache it exists to
+    /// serve. Only the setters whose value compares cheaply can promise this.
+    #[test]
+    fn a_setter_handed_what_it_holds_moves_nothing() {
+        let mut dm = create_display_map("alpha\nbeta\ngamma\n");
+        dm.set_masked(true);
+        dm.set_syntax_highlighting(false);
+        dm.set_clip_at_line_ends(true);
+        dm.set_diagnostics_max_severity(Some(super::DiagnosticSeverity::Warning));
+        dm.set_wrap_width(Some(20));
+        dm.set_show_deleted_blocks(true);
+        let settled = dm.settings_generation;
+
+        dm.set_masked(true);
+        dm.set_syntax_highlighting(false);
+        dm.set_clip_at_line_ends(true);
+        dm.set_diagnostics_max_severity(Some(super::DiagnosticSeverity::Warning));
+        dm.set_wrap_width(Some(20));
+        dm.set_show_deleted_blocks(true);
+
+        assert_eq!(
+            dm.settings_generation, settled,
+            "a second round of the same values changed nothing",
+        );
+    }
+
+    /// Two snapshots with nothing between them share a paint version.
+    ///
+    /// This is what a pane cache reads to skip a repaint, so it has to hold
+    /// across a frame where the editor did nothing to the display.
+    ///
+    /// Turning syntax coloring off is the change that follows, because it
+    /// reaches the snapshot down the highlight-refresh path rather than through
+    /// a rebuild, which is the other place the generation is stamped.
+    #[test]
+    fn two_snapshots_over_an_unchanged_map_share_a_paint_version() {
+        let mut dm = create_display_map("alpha\nbeta\ngamma\n");
+        let first = dm.snapshot().paint_version();
+        let second = dm.snapshot().paint_version();
+
+        assert_eq!(second, first, "nothing changed between the two snapshots");
+
+        dm.set_syntax_highlighting(false);
+        let after = dm.snapshot().paint_version();
+        assert_ne!(after, first, "and turning syntax coloring off changed it");
     }
 
     fn create_display_map_with_diff(content: &str, diff_map: DiffMap) -> DisplayMap {
