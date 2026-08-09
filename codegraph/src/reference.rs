@@ -38,9 +38,11 @@ impl CodeGraph {
     pub(crate) fn reference_evict_inner(&mut self, file: FileId) {
         self.content_hashes.remove(&file);
         // Dropped rather than used. The sweep below finds the same edges by
-        // walking, but leaving the index behind would let it name slots a later
-        // insert has reused.
+        // walking, but leaving these indexes behind would let them name slots a
+        // later insert has reused.
         self.edges_by_file.remove(&file);
+        self.unresolved_by_name.clear();
+        self.dirty_names.clear();
         let Some(keys) = self.by_file.remove(&file) else {
             return;
         };

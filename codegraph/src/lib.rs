@@ -162,6 +162,19 @@ pub struct CodeGraph {
     /// Tombstoned slots waiting to be reused, so a project that reindexes for
     /// hours does not grow the edge vector without bound.
     free_edges: Vec<u32>,
+    /// Edge ids grouped by the name they are waiting on.
+    ///
+    /// An unresolved edge names a definition the graph has not got, and it can
+    /// only become resolvable when that name's definitions change. Keyed this
+    /// way, re-resolution reaches the edges a change could affect without
+    /// reading the ones it could not.
+    unresolved_by_name: HashMap<String, SmallVec<[u32; 4]>>,
+    /// Names whose set of definitions changed since the last re-resolution.
+    ///
+    /// An edge naming anything else would resolve exactly as it did when it was
+    /// last looked at, which is to say not at all, so this is the whole of what
+    /// a re-resolution has to consider.
+    dirty_names: HashSet<String>,
     /// Edge ids grouped by the file their `from` symbol lives in.
     ///
     /// Every edge a shard contributes originates in that shard's file, so this
@@ -251,6 +264,7 @@ impl CodeGraph {
         for sym in shard.symbols {
             files.insert(sym.file);
             let key = sym.key;
+            self.dirty_names.insert(sym.name.clone());
             self.by_name
                 .entry(sym.name.clone())
                 .or_default()
@@ -277,8 +291,9 @@ impl CodeGraph {
             if let Some(origin) = origin {
                 self.edges_by_file.entry(origin).or_default().push(id);
             }
-            if let Some(key) = linked {
-                self.link_edge(id, key);
+            match linked {
+                Some(key) => self.link_edge(id, key),
+                None => self.mark_unresolved(id),
             }
         }
     }
@@ -350,6 +365,7 @@ impl CodeGraph {
         // replaced skipped those instead.
         for id in self.edges_by_file.remove(&file).unwrap_or_default() {
             self.unlink_edge(id);
+            self.clear_unresolved(id);
             if self.edges[id as usize].take().is_some() {
                 self.free_edges.push(id);
             }
@@ -367,6 +383,9 @@ impl CodeGraph {
             self.inn.remove(key);
 
             if let Some(sym) = self.symbols.remove(key) {
+                // The name has one fewer definition, so an edge waiting on it
+                // may resolve differently than when it was last looked at.
+                self.dirty_names.insert(sym.name.clone());
                 remove_name_entry(&mut self.by_name, &sym.name, *key);
             }
         }
@@ -403,6 +422,34 @@ impl CodeGraph {
             // the `inn` entry for `key` wholesale once this returns.
             let from = edge.from;
             drop_edge_from(&mut self.out, from, id);
+            self.mark_unresolved(id);
+        }
+    }
+
+    /// File an unresolved edge under the name it is waiting on.
+    ///
+    /// A no-op for a resolved edge, which is waiting on nothing.
+    fn mark_unresolved(&mut self, id: u32) {
+        let Some(Target::Unresolved { name, .. }) = self.edge(id).map(|edge| &edge.to) else {
+            return;
+        };
+
+        let name = name.clone();
+        self.unresolved_by_name.entry(name).or_default().push(id);
+    }
+
+    /// Take an edge out of the pending index, by the name it is filed under.
+    fn clear_unresolved(&mut self, id: u32) {
+        let Some(Target::Unresolved { name, .. }) = self.edge(id).map(|edge| &edge.to) else {
+            return;
+        };
+
+        let name = name.clone();
+        if let Some(ids) = self.unresolved_by_name.get_mut(&name) {
+            ids.retain(|held| *held != id);
+            if ids.is_empty() {
+                self.unresolved_by_name.remove(&name);
+            }
         }
     }
 
@@ -455,17 +502,27 @@ impl CodeGraph {
     /// Re-link unresolved edges, indexing each one it links.
     ///
     /// Shared by [`Self::reresolve_unresolved`] and [`Self::reindex`].
+    ///
+    /// Only the edges waiting on a name whose definitions changed are looked
+    /// at. Any other edge would resolve exactly as it did when it was last
+    /// considered, which is to say not at all, since a name's candidates move
+    /// only when a symbol of that name is added or removed.
     fn reresolve_unresolved_inner(&mut self) {
-        let updates: Vec<(u32, SymbolKey, Confidence)> = self
-            .live_edges()
-            .filter(|(_, edge)| matches!(edge.to, Target::Unresolved { .. }))
-            .filter_map(|(id, edge)| {
+        let dirty: Vec<String> = self.dirty_names.drain().collect();
+        let updates: Vec<(u32, SymbolKey, Confidence)> = dirty
+            .iter()
+            .filter_map(|name| self.unresolved_by_name.get(name))
+            .flatten()
+            .filter_map(|&id| {
+                let edge = self.edge(id)?;
                 let (confidence, key) = self.resolve_target(&edge.to);
                 key.map(|key| (id, key, confidence))
             })
             .collect();
 
         for (id, key, confidence) in updates {
+            self.clear_unresolved(id);
+
             let edge = self.edges[id as usize]
                 .as_mut()
                 .expect("resolving a live edge");
