@@ -66,18 +66,33 @@ impl Encoder<ToViewport> for ToViewportCodec {
     type Error = io::Error;
 
     fn encode(&mut self, item: ToViewport, dst: &mut BytesMut) -> io::Result<()> {
-        let mut buf = BytesMut::new();
         match item {
+            // Written straight out rather than staged through the inner codec,
+            // which would copy the whole payload once to gather it and again to
+            // frame it. A frame is the largest thing this protocol carries and
+            // one goes out per repaint per connection.
             ToViewport::Frame(data) => {
-                buf.put_u8(TAG_FRAME);
-                buf.extend_from_slice(&data);
+                let len = 1 + data.len();
+                if len > self.inner.max_frame_length() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "frame exceeds the maximum frame length",
+                    ));
+                }
+
+                dst.reserve(4 + len);
+                dst.put_u32_le(len as u32);
+                dst.put_u8(TAG_FRAME);
+                dst.extend_from_slice(&data);
+                Ok(())
             },
             ToViewport::DiffResponse { result } => {
+                let mut buf = BytesMut::new();
                 buf.put_u8(TAG_DIFF_RESPONSE);
                 encode_optional_bytes(&mut buf, result.as_deref());
+                self.inner.encode(buf.freeze(), dst)
             },
         }
-        self.inner.encode(buf.freeze(), dst)
     }
 }
 
@@ -279,6 +294,64 @@ mod tests {
         codec.encode(original.clone(), &mut buf).unwrap();
         let decoded = codec.decode(&mut buf).unwrap().unwrap();
         assert_eq!(decoded, original);
+    }
+
+    /// The length codec this codec is configured with, which frames every
+    /// message the hand-written path does not.
+    fn length_codec() -> LengthDelimitedCodec {
+        LengthDelimitedCodec::builder()
+            .length_field_type::<u32>()
+            .little_endian()
+            .new_codec()
+    }
+
+    /// A frame is written without being gathered first, so the bytes it puts on
+    /// the wire have to be the ones the length codec would have put there.
+    ///
+    /// Decoding is not enough on its own. Both sides read the length the same
+    /// way, so a frame written with the wrong endianness or the wrong length
+    /// still decodes here while breaking a peer that uses the library codec.
+    #[test]
+    fn a_frame_is_framed_the_way_the_length_codec_frames_it() {
+        let data = Bytes::from_static(b"\x1b[31mhello\x1b[0m");
+
+        let mut written = BytesMut::new();
+        ToViewportCodec::new()
+            .encode(ToViewport::Frame(data.clone()), &mut written)
+            .unwrap();
+
+        let mut expected = BytesMut::new();
+        let mut payload = BytesMut::new();
+        payload.put_u8(TAG_FRAME);
+        payload.extend_from_slice(&data);
+        length_codec()
+            .encode(payload.freeze(), &mut expected)
+            .unwrap();
+
+        assert_eq!(written, expected);
+        assert_eq!(
+            ToViewportCodec::new().decode(&mut written).unwrap(),
+            Some(ToViewport::Frame(data)),
+        );
+    }
+
+    /// A frame too long to state its own length is refused rather than written
+    /// with one that wrapped, which would leave the reader taking the frames
+    /// after it from the wrong offsets.
+    ///
+    /// Sized so the tag byte alone crosses the limit, since the tag travels
+    /// inside the length-delimited payload and counts toward it.
+    #[test]
+    fn a_frame_past_the_length_limit_is_refused() {
+        let data = Bytes::from(vec![b'x'; length_codec().max_frame_length()]);
+
+        let mut buf = BytesMut::new();
+        let err = ToViewportCodec::new()
+            .encode(ToViewport::Frame(data), &mut buf)
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(buf.is_empty(), "a refused frame writes nothing");
     }
 
     #[test]
