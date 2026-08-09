@@ -189,6 +189,14 @@ pub struct WrapMap {
     /// whatever the user happened to do next while long lines rendered
     /// unwrapped.
     redraw: Arc<Notify>,
+    /// Counts syncs that produced rows different from the ones before them.
+    ///
+    /// Unlike the fold layer's version, which counts fold operations, this
+    /// counts *output* changes, because that is what something caching a
+    /// painted pane needs to key on. A settled background rewrap moves it even
+    /// though no buffer, fold, or inlay version did, which is exactly the case
+    /// a version below this layer cannot report.
+    version: u64,
 }
 
 #[derive(Clone)]
@@ -198,6 +206,13 @@ pub struct WrapSnapshot {
     wrap_width: Option<u32>,
     total_rows: u32,
     pub interpolated: bool,
+    /// The [`WrapMap`] version this snapshot was handed out at.
+    ///
+    /// Only meaningful on a snapshot that came back from [`WrapMap::sync`],
+    /// which stamps it. The ones the rebuild helpers construct carry zero until
+    /// then, since a snapshot that never left the map has nobody to compare it
+    /// against.
+    version: u64,
 }
 
 impl Deref for WrapSnapshot {
@@ -226,6 +241,7 @@ impl WrapMap {
             background_edits_taken: 0,
             executor,
             redraw,
+            version: 0,
         };
         (map, snapshot_arc)
     }
@@ -305,10 +321,16 @@ impl WrapMap {
             self.flush_edits();
         }
 
-        (
-            Arc::new(self.snapshot.clone()),
-            mem::take(&mut self.edits_since_sync),
-        )
+        // Every path above composes what it changed into `edits_since_sync`
+        // before returning, so this one place sees all of them, and a sync that
+        // changed nothing leaves the version where it was.
+        let edits = mem::take(&mut self.edits_since_sync);
+        if edits.edits().iter().any(|edit| !edit.is_empty()) {
+            self.version += 1;
+        }
+        self.snapshot.version = self.version;
+
+        (Arc::new(self.snapshot.clone()), edits)
     }
 
     /// Whether the wanted width differs from the snapshot's by enough work to
@@ -588,6 +610,7 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
         wrap_width,
         total_rows,
         interpolated: false,
+        version: 0,
     }
 }
 
@@ -618,6 +641,7 @@ fn passthrough_snapshot(tab_snapshot: TabSnapshot, tab_line_count: u32) -> WrapS
         wrap_width: None,
         total_rows: tab_line_count,
         interpolated: false,
+        version: 0,
     }
 }
 
@@ -694,6 +718,7 @@ fn sync_incremental(
         wrap_width,
         total_rows,
         interpolated: false,
+        version: 0,
     };
 
     (snapshot, wrap_edits)
@@ -874,6 +899,17 @@ impl WrapSnapshot {
 
     pub fn wrap_width(&self) -> Option<u32> {
         self.wrap_width
+    }
+
+    /// Counts the syncs that changed the rows this layer paints.
+    ///
+    /// Two snapshots sharing this number were produced from the same wrapping,
+    /// so anything derived from those rows can be reused across them. The
+    /// converse does not hold as tightly. A sync that produced a patch moves
+    /// the number whether or not the patch changed what a given row looks like,
+    /// so an unequal pair may still paint the same.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     pub fn to_tab_point(&self, wrap_point: WrapPoint) -> TabPoint {
@@ -1502,7 +1538,10 @@ mod tests {
         sync::{Arc, RwLock},
     };
     use stoat_scheduler::{Executor, TestScheduler};
-    use stoat_text::{patch::Patch, Bias, Point};
+    use stoat_text::{
+        patch::{Edit, Patch},
+        Bias, Point,
+    };
 
     fn test_executor() -> Executor {
         Executor::new(Arc::new(TestScheduler::new()))
@@ -2004,13 +2043,85 @@ mod tests {
     }
 
     fn resync(multi_buffer: &MultiBuffer, wrap_map: &mut WrapMap) -> Arc<super::WrapSnapshot> {
+        resync_with(multi_buffer, wrap_map, &Patch::empty())
+    }
+
+    /// [`resync`] handing the wrap map a tab patch of its own, which is what
+    /// picks between rebuilding and interpolating.
+    fn resync_with(
+        multi_buffer: &MultiBuffer,
+        wrap_map: &mut WrapMap,
+        tab_edits: &Patch<u32>,
+    ) -> Arc<super::WrapSnapshot> {
         let snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
         let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
-        let (wrap_snapshot, _) = wrap_map.sync(tab_snapshot, &Patch::empty());
+        let (wrap_snapshot, _) = wrap_map.sync(tab_snapshot, tab_edits);
         wrap_snapshot
+    }
+
+    /// The version moves when the wrapped rows change and holds when they do
+    /// not, which is all a cache above this layer can key on.
+    ///
+    /// No version below reports a settled background rewrap, since the buffer,
+    /// fold, and inlay versions are all unchanged when one lands. A cache keyed
+    /// on those would paint the provisional wrapping and never repaint it.
+    #[test]
+    fn a_sync_that_changed_rows_moves_the_version() {
+        let (mut wrap_map, _, multi_buffer) = make_wrap_map("abcdefghij\nshort\nxy", Some(5));
+        let before = resync(&multi_buffer, &mut wrap_map).version();
+
+        multi_buffer
+            .as_singleton()
+            .unwrap()
+            .write()
+            .unwrap()
+            .edit(0..1, "ZZ");
+        let after = resync(&multi_buffer, &mut wrap_map).version();
+
+        assert!(
+            after > before,
+            "an edit rewrapped the rows, so the version moved: {before} to {after}",
+        );
+    }
+
+    #[test]
+    fn a_sync_with_nothing_to_do_holds_the_version() {
+        let (mut wrap_map, _, multi_buffer) = make_wrap_map("abcdefghij\nshort\nxy", Some(5));
+        let first = resync(&multi_buffer, &mut wrap_map).version();
+        let second = resync(&multi_buffer, &mut wrap_map).version();
+
+        assert_eq!(second, first, "nothing changed between the two syncs");
+    }
+
+    /// With wrapping off an edit is applied by interpolation rather than a
+    /// rewrap, and that path composes into the same patch the others do.
+    ///
+    /// So it moves the version one step, not one per composed edit. A cache
+    /// only compares versions for equality, but a step per edit would say the
+    /// layer changed more times than it did.
+    #[test]
+    fn an_interpolated_sync_moves_the_version_once() {
+        let (mut wrap_map, _, multi_buffer) = make_wrap_map("abcdefghij\nshort\nxy", None);
+        let before = resync(&multi_buffer, &mut wrap_map).version();
+
+        multi_buffer
+            .as_singleton()
+            .unwrap()
+            .write()
+            .unwrap()
+            .edit(0..1, "ZZ");
+        // A non-empty tab patch with no wrap width is what reaches the
+        // interpolating arm. The rebuild arm needs an empty one.
+        let tab_edits = Patch::new(vec![Edit {
+            old: 0..1,
+            new: 0..1,
+        }]);
+        let after = resync_with(&multi_buffer, &mut wrap_map, &tab_edits).version();
+
+        assert_eq!(after, before + 1, "one interpolated sync, one step");
     }
 
     /// The decoded characters are held in one buffer reused down the rows, so
