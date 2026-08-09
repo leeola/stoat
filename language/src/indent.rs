@@ -297,7 +297,7 @@ mod tests {
     use crate::{Language, LanguageRegistry};
     use std::sync::Arc;
     use stoat_text::Rope;
-    use tree_sitter::{Parser, Tree};
+    use tree_sitter::{Parser, Query, Tree};
 
     fn lang(name: &str) -> Arc<Language> {
         LanguageRegistry::standard()
@@ -504,6 +504,80 @@ mod tests {
                     suggested_indent_scanning(query, root, &rope, row, "\t", true),
                     suggested_indent_scanning(query, root, &rope, row, "\t", false),
                     "{name} row {row} of {src:?}",
+                );
+            }
+        }
+    }
+
+    /// The two window arguments, checked against a query that captures
+    /// `@outdent`, which is the case neither test above can reach.
+    ///
+    /// No shipped `indents.scm` captures one, so the truncation branch and the
+    /// widened window have to be reached through a query written here. A line
+    /// comment stands in for the outdent marker because it can be placed on any
+    /// row, including well above the band a narrow window would read.
+    ///
+    /// The row loop is what puts [`suggested_window`]'s widening under test.
+    /// Truncation pulls a region's end back to the outdent's own position, and
+    /// an outdent above the narrow band is one that scan never sees, leaving an
+    /// end long enough to answer a test the whole-prefix scan shortens it out
+    /// of. Removing the widening makes six of these fixtures disagree.
+    ///
+    /// The offset loop is the counterpart for [`newline_window`], which has no
+    /// widening and needs none. That decision only reads regions starting on
+    /// the cursor's own row, and truncating one needs an outdent at or after
+    /// its start, so every outdent that can change the answer already sits
+    /// inside the narrow window. What the loop pins is that argument: narrowing
+    /// the window further makes it disagree.
+    #[test]
+    fn an_outdent_query_answers_what_the_whole_file_answers() {
+        let outdent_fixtures = [
+            "fn a() {\n\t// out\n\tx;\n}\n",
+            "fn a() {\n\tif b {\n\t\t// out\n\t\tx;\n\t}\n\ty;\n}\n",
+            "fn a() { // out\n\tx;\n}\n",
+            "fn a() {\n\t// o1\n\tif b {\n\t\t// o2\n\t\tx;\n\t}\n}\n",
+            "fn a() {\n\tif b { // out\n\t\tx;\n\t}\n}\n",
+            "fn a() {\n\t// out\n\tif b {\n\t\tx;\n\t}\n}\n",
+        ];
+
+        let lang = lang("rust");
+        let query = Query::new(
+            &lang.grammar,
+            "(_ \"{\" \"}\" @end) @indent\n(line_comment) @outdent\n",
+        )
+        .expect("the synthetic query builds");
+        assert!(
+            query.capture_index_for_name("outdent").is_some(),
+            "the fixtures only reach the branch if the query carries an outdent",
+        );
+
+        for src in outdent_fixtures {
+            let tree = parse(&lang, src);
+            let rope = Rope::from(src);
+            let root = tree.root_node();
+            let whole = 0..src.len();
+
+            for row in 0..=rope.max_point().row {
+                assert_eq!(
+                    suggested_indent_scanning(&query, root, &rope, row, "\t", true),
+                    suggested_indent_scanning(&query, root, &rope, row, "\t", false),
+                    "suggested_indent row {row} of {src:?}",
+                );
+                assert_eq!(
+                    suggested_window(&query, &rope, row).start,
+                    0,
+                    "and reads the whole prefix to do it, row {row} of {src:?}",
+                );
+            }
+
+            for offset in 0..=src.len() {
+                let windowed =
+                    collect_indent_ranges(&query, root, &rope, newline_window(&rope, offset));
+                let full = collect_indent_ranges(&query, root, &rope, whole.clone());
+                assert_eq!(
+                    newline_indent_from(&windowed, &rope, offset, "\t"),
+                    newline_indent_from(&full, &rope, offset, "\t"),
+                    "newline_indent offset {offset} of {src:?}",
                 );
             }
         }
