@@ -17,7 +17,14 @@ struct Globals {
     // 1 discards a fragment inside any occluder regardless of seq, for a pool
     // composite that sits under every box; 0 keeps the seq test.
     occlude_all: u32,
+    // How far the instance buffers are rotated, in rows, and the grid height it
+    // wraps at. An instance carries the slot it occupies, so the vertex stages
+    // take the slot back to the display row it paints.
+    row_offset: u32,
+    rows: u32,
     pad0: u32,
+    pad1: u32,
+    pad2: u32,
 }
 
 @group(0) @binding(0)
@@ -67,6 +74,22 @@ fn occluded(frag: vec2<f32>, seq: u32) -> bool {
     return false;
 }
 
+// The display row a slot holds, the inverse of where the builder writes a row.
+//
+// The buffers are rotated by row_offset, which is how a scroll costs an integer
+// instead of a full re-upload. Slot s holds the row s - row_offset, wrapped.
+//
+// A zero height marks a draw that is not rotated at all. Its rows are positions
+// its builder chose rather than grid rows, and an overlay taller than the
+// screen names rows past the bottom on purpose, which a wrap would fold back
+// over the box.
+fn slot_row(slot: u32) -> u32 {
+    if globals.rows == 0u {
+        return slot;
+    }
+    return (slot + globals.rows - globals.row_offset % globals.rows) % globals.rows;
+}
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -84,9 +107,10 @@ fn vs_main(
     @location(3) fg: vec3<f32>,
     @location(4) kind: u32,
     @location(5) seq: u32,
-    // Grid row `pos` is measured from. Zero for the draws whose positions are
-    // already absolute, which leaves the term below at zero for them.
-    @location(6) row: u32,
+    // Buffer slot holding the grid row `pos` is measured from. Zero for the
+    // draws whose positions are already absolute, which leaves the term below
+    // at zero for them.
+    @location(6) slot: u32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -98,7 +122,7 @@ fn vs_main(
     );
     let corner = corners[vertex_index];
 
-    let row_y = f32(row) * globals.cell_size.y;
+    let row_y = f32(slot_row(slot)) * globals.cell_size.y;
     let pixel = pos + corner * dim + vec2<f32>(0.0, row_y + globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
@@ -161,8 +185,9 @@ fn vs_underline(
     @location(0) cell_pos: vec2<f32>,
     @location(1) color: vec3<f32>,
     @location(2) style: u32,
-    // Grid row `cell_pos` is measured from, as in `vs_main`.
-    @location(3) row: u32,
+    // Buffer slot holding the grid row `cell_pos` is measured from, as in
+    // `vs_main`.
+    @location(3) slot: u32,
 ) -> UnderlineVsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -174,7 +199,7 @@ fn vs_underline(
     );
     let corner = corners[vertex_index];
 
-    let row_y = f32(row) * globals.cell_size.y;
+    let row_y = f32(slot_row(slot)) * globals.cell_size.y;
     let pixel = cell_pos + corner * globals.cell_size
         + vec2<f32>(0.0, row_y + globals.scroll_y);
     let ndc = vec2<f32>(

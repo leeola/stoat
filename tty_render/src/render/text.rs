@@ -148,8 +148,48 @@ struct TextGlobals {
     /// seq, set only for a pool composite that sits under every box; 0 keeps
     /// the seq test.
     occlude_all: u32,
-    /// Pads the struct to the 32-byte (16-aligned) size a uniform requires.
-    _pad: f32,
+    /// How far the instance buffers are rotated, in rows.
+    ///
+    /// An instance carries the slot it occupies rather than the display row it
+    /// paints, and the vertex stage recovers the row from the two. Rotating by
+    /// an integer is what lets a scroll leave the rows it kept alone.
+    row_offset: u32,
+    /// Grid height the rotation wraps at, so the vertex stage can take the
+    /// slot back to a row.
+    ///
+    /// Zero marks a draw that is not rotated at all. A screen-anchored draw's
+    /// rows are positions its builder chose rather than grid rows, and an
+    /// overlay taller than the screen names rows past the bottom on purpose,
+    /// which a wrap would fold back over the box.
+    rows: u32,
+    /// Pads the struct to the 48-byte (16-aligned) size a uniform requires.
+    _pad: [f32; 3],
+}
+
+/// How far one set of instances is rotated in the buffer holding it.
+///
+/// An instance stores the slot its row occupies rather than the row it paints,
+/// and the vertex stage inverts that. The two only agree when the rotation the
+/// builder used is the one written into the globals the draw binds, so it
+/// travels with the build instead of being read back off the pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowRotation {
+    offset: u32,
+    /// Height the rotation wraps at, or zero for an unrotated draw. Mirrors
+    /// [`TextGlobals::rows`], which is what makes the two halves comparable.
+    rows: usize,
+}
+
+impl RowRotation {
+    /// The rotation a screen-anchored draw builds under, where a slot is the
+    /// row itself and nothing wraps.
+    fn unrotated() -> Self {
+        RowRotation { offset: 0, rows: 0 }
+    }
+
+    fn slot(self, row: usize) -> usize {
+        row_slot(row, self.offset, self.rows)
+    }
 }
 
 /// One composited pool's four instance buffers and the atlas state they resolved
@@ -220,6 +260,18 @@ pub struct TextPass {
     last_globals: Option<TextGlobals>,
     last_region_globals: Option<TextGlobals>,
     last_static_globals: Option<TextGlobals>,
+    /// How far the instance buffers are rotated, in rows.
+    ///
+    /// Held at zero, where the slot map is the identity and every instance
+    /// sits at its own display row. The rotation exists on both sides of the
+    /// boundary so the arithmetic can be pinned, and starts moving when the
+    /// row-indexed caches become slot-indexed and a scroll advances it instead
+    /// of sliding them.
+    row_offset: u32,
+    /// Height of the live grid the row-indexed caches are sized to, which is
+    /// what the rotation wraps at. Held here because the rows are rebuilt from
+    /// the caches on paths that have no grid to ask.
+    grid_rows: usize,
     /// The scroll region's rectangle as the cached instances were split
     /// against, without its offset.
     ///
@@ -684,6 +736,8 @@ impl TextPass {
             last_globals: None,
             last_region_globals: None,
             last_static_globals: None,
+            row_offset: 0,
+            grid_rows: 0,
             last_region_rect: None,
             globals_layout,
             occluders,
@@ -896,13 +950,21 @@ impl TextPass {
         let cell_size = [self.metrics.width, self.metrics.height];
         // Live draws never bypass the seq test, so occlude_all stays zero. Only
         // the static globals' text-run draws occlude, and they do it by seq.
-        let globals_with = |scroll_y: f32, panel_count: u32| TextGlobals {
+        // The rotation rides the buffer its instances are drawn against. The
+        // grid and region draws carry grid rows and rotate with them. The
+        // screen-anchored buffer carries rows its builders chose, including an
+        // overlay's past the bottom of the screen, so it never wraps.
+        self.grid_rows = grid.rows();
+        let grid_rotation = self.grid_rotation();
+        let globals_with = |scroll_y: f32, panel_count: u32, rotation: RowRotation| TextGlobals {
             resolution,
             cell_size,
             scroll_y,
             panel_count,
             occlude_all: 0,
-            _pad: 0.0,
+            row_offset: rotation.offset,
+            rows: rotation.rows as u32,
+            _pad: [0.0; 3],
         };
         let grid_scroll_y =
             (scroll.grid + scroll.document + scroll.scrollback) * self.metrics.height;
@@ -911,21 +973,21 @@ impl TextPass {
             queue,
             &self.globals,
             0,
-            globals_with(grid_scroll_y, 0),
+            globals_with(grid_scroll_y, 0, grid_rotation),
             &mut self.last_globals,
         );
         crate::render::upload_globals(
             queue,
             &self.region_globals,
             0,
-            globals_with(region_scroll_y, 0),
+            globals_with(region_scroll_y, 0, grid_rotation),
             &mut self.last_region_globals,
         );
         crate::render::upload_globals(
             queue,
             &self.static_globals,
             0,
-            globals_with(0.0, panel_count),
+            globals_with(0.0, panel_count, RowRotation::unrotated()),
             &mut self.last_static_globals,
         );
 
@@ -1103,7 +1165,16 @@ impl TextPass {
                 // Built into the base's own buffer, since a scroll that crosses a
                 // line boundary reaches here on the frame it crosses.
                 base.clear();
-                self.build_text_instances_into(device, queue, content.window(window.clone()), base);
+                // An overlay draws against the screen-anchored globals, and its
+                // content rows run past the bottom of the screen whenever the
+                // box holds more lines than fit, so nothing here rotates.
+                self.build_text_instances_into(
+                    device,
+                    queue,
+                    content.window(window.clone()),
+                    RowRotation::unrotated(),
+                    base,
+                );
                 self.overlay_windows.push(window);
 
                 let anchor = [overlay.offset[0] as f32, overlay.offset[1] as f32];
@@ -1266,7 +1337,9 @@ impl TextPass {
                 scroll_y: shift_rows * self.metrics.height,
                 panel_count,
                 occlude_all,
-                _pad: 0.0,
+                row_offset: self.row_offset,
+                rows: grid.rows() as u32,
+                _pad: [0.0; 3],
             }),
         );
 
@@ -1322,10 +1395,15 @@ impl TextPass {
             },
         }
         let exposed = exposed_rows(rotate_by, rows);
+        // A pool composes its own grid, whose height is its own.
+        let rotation = RowRotation {
+            offset: self.row_offset,
+            rows: grid.rows(),
+        };
 
         for row in exposed.clone() {
             underline_rows[row].clear();
-            build_underline_row_into(grid, row, metrics, &mut underline_rows[row]);
+            build_underline_row_into(grid, row, metrics, rotation, &mut underline_rows[row]);
         }
 
         self.underline_upload_scratch.clear();
@@ -1428,7 +1506,7 @@ impl TextPass {
         self.composite_run_scratch = run_instances;
 
         let mut instances = mem::take(&mut self.composite_upload_scratch);
-        self.build_text_instances_into(device, queue, &pending, &mut instances);
+        self.build_text_instances_into(device, queue, &pending, rotation, &mut instances);
         let target = self.composite_slots.entry(pool, || new_slot(device));
         target.glyphs.count = instances.len() as u32;
         upload_instances(
@@ -1461,13 +1539,27 @@ impl TextPass {
         target.underline_rows = underline_rows;
     }
 
+    /// The rotation the live grid's row draws are built and bound under.
+    fn grid_rotation(&self) -> RowRotation {
+        RowRotation {
+            offset: self.row_offset,
+            rows: self.grid_rows,
+        }
+    }
+
     /// Build the glyph instances for `pending` into `out`, clearing it first so a
     /// reused scratch buffer holds only this frame's instances.
+    ///
+    /// Each instance stores the slot its row occupies under the rotation the
+    /// draw will be bound with, so `rotation` has to be the one written into
+    /// the globals those instances are drawn against. Screen-anchored draws
+    /// pass an unrotated one.
     fn build_text_instances_into(
         &mut self,
         device: &Device,
         queue: &Queue,
         pending: &[PendingGlyph],
+        rotation: RowRotation,
         out: &mut Vec<TextInstance>,
     ) {
         out.clear();
@@ -1524,7 +1616,7 @@ impl TextPass {
                 fg: rgb_f32(glyph.fg),
                 kind: kind_flag(info.kind),
                 seq: UNOCCLUDED_SEQ,
-                row: glyph.row as u32,
+                row: rotation.slot(glyph.row) as u32,
             });
         }
     }
@@ -1701,6 +1793,7 @@ impl TextPass {
         }
 
         let metrics = self.metrics;
+        let rotation = self.grid_rotation();
         let mut resized = None;
         {
             let TextPass {
@@ -1713,7 +1806,7 @@ impl TextPass {
                 let held = built.len();
 
                 built.clear();
-                build_underline_row_into(grid, row, metrics, built);
+                build_underline_row_into(grid, row, metrics, rotation, built);
 
                 if built.len() != held && resized.is_none() {
                     resized = Some(row);
@@ -2339,6 +2432,7 @@ impl TextPass {
         let mut inside = mem::take(&mut self.region_row_instances[row]);
         let (held_plain, held_region) = (plain.len(), inside.len());
 
+        let rotation = self.grid_rotation();
         match region {
             // Splitting the row is what lets a region frame patch rows like any
             // other, rather than rebuilding every glyph on screen.
@@ -2355,13 +2449,25 @@ impl TextPass {
                     }
                 }
 
-                self.build_text_instances_into(device, queue, &outside_pending, &mut plain);
-                self.build_text_instances_into(device, queue, &inside_pending, &mut inside);
+                self.build_text_instances_into(
+                    device,
+                    queue,
+                    &outside_pending,
+                    rotation,
+                    &mut plain,
+                );
+                self.build_text_instances_into(
+                    device,
+                    queue,
+                    &inside_pending,
+                    rotation,
+                    &mut inside,
+                );
                 self.plain_pending_scratch = outside_pending;
                 self.region_pending_scratch = inside_pending;
             },
             None => {
-                self.build_text_instances_into(device, queue, &glyphs, &mut plain);
+                self.build_text_instances_into(device, queue, &glyphs, rotation, &mut plain);
                 inside.clear();
             },
         }
@@ -3367,21 +3473,42 @@ fn cell_rect_scissor(
     (w > 0 && h > 0).then_some([x, y, w, h])
 }
 
+/// The instance-buffer slot holding display `row` of a grid `rows` tall.
+///
+/// The inverse of what the vertex stages compute from a slot, so a row written
+/// where this says is the row read back there. A height of zero marks a draw
+/// that is not rotated, where the row is its own slot and nothing wraps.
+fn row_slot(row: usize, row_offset: u32, rows: usize) -> usize {
+    if rows == 0 {
+        return row;
+    }
+    (row + row_offset as usize) % rows
+}
+
 /// One underline instance per underlined cell in `row`, in column order.
 #[cfg(test)]
-fn build_underline_row(grid: &Grid, row: usize, metrics: CellMetrics) -> Vec<UnderlineInstance> {
+fn build_underline_row(
+    grid: &Grid,
+    row: usize,
+    metrics: CellMetrics,
+    rotation: RowRotation,
+) -> Vec<UnderlineInstance> {
     let mut out = Vec::new();
-    build_underline_row_into(grid, row, metrics, &mut out);
+    build_underline_row_into(grid, row, metrics, rotation, &mut out);
     out
 }
 
 /// Append one underline instance per underlined cell in `row` to `out`, in
 /// column order. `out` is not cleared, so a caller reusing one buffer across
 /// rows accumulates them and a single-row caller clears first.
+///
+/// `rotation` must be the one the globals of the draw these are bound to
+/// carry, since each instance stores its slot rather than its row.
 fn build_underline_row_into(
     grid: &Grid,
     row: usize,
     metrics: CellMetrics,
+    rotation: RowRotation,
     out: &mut Vec<UnderlineInstance>,
 ) {
     for col in 0..grid.cols() {
@@ -3394,7 +3521,7 @@ fn build_underline_row_into(
             cell_pos: [col as f32 * metrics.width, 0.0],
             color: rgb_f32(cell.underline_color),
             style,
-            row: row as u32,
+            row: rotation.slot(row) as u32,
         });
     }
 }
@@ -3416,9 +3543,9 @@ mod tests {
     use super::{
         build_underline_row, cell_glyph_scale, cell_rect_scissor, cursor_cell, exposed_rows,
         fill_cell_box, font, glyph_origin, grid_build, is_cell_fill, overlay_content_cells,
-        region_split, row_len, text_run_origin, underline_rows_to_build, visible_lines,
-        GlyphSource, GridBuild, OverlayContent, PendingGlyph, RectInstance, RowShaping,
-        TextInstance, TextPass, UnderlineInstance, STYLE_DOTTED,
+        region_split, row_len, row_slot, text_run_origin, underline_rows_to_build, visible_lines,
+        GlyphSource, GridBuild, OverlayContent, PendingGlyph, RectInstance, RowRotation,
+        RowShaping, TextGlobals, TextInstance, TextPass, UnderlineInstance, STYLE_DOTTED,
     };
     use crate::{
         atlas::{AtlasKind, GlyphInfo},
@@ -3456,6 +3583,96 @@ mod tests {
     fn grid_build_rebuilds_all_when_the_region_rectangle_moves() {
         assert_eq!(grid_build(true, true, 7, 7), GridBuild::RebuildAll);
         assert_eq!(grid_build(false, true, 7, 7), GridBuild::RebuildAll);
+    }
+
+    /// What `slot_row` computes in text.wgsl, transcribed. A rotation is only
+    /// correct if writing through [`row_slot`] and reading through this round
+    /// trips, and nothing here runs the shader to find out.
+    fn shader_row(slot: usize, row_offset: u32, rows: usize) -> usize {
+        if rows == 0 {
+            return slot;
+        }
+
+        (slot + rows - row_offset as usize % rows) % rows
+    }
+
+    #[test]
+    fn a_row_is_read_back_from_the_slot_it_was_written_to() {
+        let rows = 5;
+        for row_offset in 0..(2 * rows as u32 + 3) {
+            let round_tripped: Vec<usize> = (0..rows)
+                .map(|row| shader_row(row_slot(row, row_offset, rows), row_offset, rows))
+                .collect();
+
+            assert_eq!(
+                round_tripped,
+                (0..rows).collect::<Vec<_>>(),
+                "at offset {row_offset} every row must land where the shader looks for it"
+            );
+        }
+    }
+
+    #[test]
+    fn every_slot_holds_exactly_one_row() {
+        let rows = 5;
+        for row_offset in 0..(2 * rows as u32 + 3) {
+            let mut slots: Vec<usize> = (0..rows)
+                .map(|row| row_slot(row, row_offset, rows))
+                .collect();
+            slots.sort_unstable();
+
+            assert_eq!(
+                slots,
+                (0..rows).collect::<Vec<_>>(),
+                "at offset {row_offset} the rows must cover the buffer without two sharing a slot"
+            );
+        }
+    }
+
+    /// The rows a scroll kept are already where the advanced offset looks for
+    /// them, which is what leaves only the exposed ones to write.
+    #[test]
+    fn a_scroll_leaves_the_rows_it_kept_where_the_shader_will_find_them() {
+        let rows = 5;
+        let scrolled = 2;
+        let before = 3;
+        let after = (before + scrolled) % rows as u32;
+
+        for row in 0..rows - scrolled as usize {
+            assert_eq!(
+                row_slot(row, after, rows),
+                row_slot(row + scrolled as usize, before, rows),
+                "row {row} after the scroll reads the slot row {} was written to",
+                row + scrolled as usize
+            );
+        }
+    }
+
+    /// An overlay taller than the screen names content rows past the bottom,
+    /// and the popover's scroll is what brings them back up. A wrap would fold
+    /// them over the box, so the screen-anchored draws rotate by nothing and
+    /// the height they carry is zero.
+    #[test]
+    fn an_unrotated_draw_leaves_a_row_past_the_bottom_alone() {
+        let unrotated = RowRotation::unrotated();
+
+        for row in [0usize, 5, 41, 4000] {
+            assert_eq!(unrotated.slot(row), row, "row {row} is its own slot");
+            assert_eq!(
+                shader_row(unrotated.slot(row), unrotated.offset, unrotated.rows),
+                row,
+                "row {row} must come back unwrapped"
+            );
+        }
+    }
+
+    #[test]
+    fn text_shader_is_valid_wgsl() {
+        let module =
+            wgsl::parse_str(include_str!("../shaders/text.wgsl")).expect("parse text.wgsl");
+        Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .expect("validate text.wgsl");
     }
 
     /// The vertex stage's half of the split position, mirrored so the round trip
@@ -3599,7 +3816,7 @@ mod tests {
         grid.get_mut(0, 1).underline_color = Rgb::new(255, 0, 0);
 
         let metrics = CellMetrics::from_font_size(30, 1.0);
-        let instances = build_underline_row(&grid, 0, metrics);
+        let instances = build_underline_row(&grid, 0, metrics, RowRotation::unrotated());
 
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].cell_pos, [metrics.width, 0.0]);
@@ -3857,7 +4074,13 @@ mod tests {
         assert!(!pending.is_empty(), "the row rasterized some glyphs");
 
         let mut from_stored = Vec::new();
-        pass.build_text_instances_into(&device, &queue, &pending, &mut from_stored);
+        pass.build_text_instances_into(
+            &device,
+            &queue,
+            &pending,
+            RowRotation::unrotated(),
+            &mut from_stored,
+        );
 
         // A mismatched epoch sends every glyph back to the atlas, so this build
         // ignores what is stored and resolves each one.
@@ -3869,7 +4092,13 @@ mod tests {
             })
             .collect();
         let mut from_lookup = Vec::new();
-        pass.build_text_instances_into(&device, &queue, &stale, &mut from_lookup);
+        pass.build_text_instances_into(
+            &device,
+            &queue,
+            &stale,
+            RowRotation::unrotated(),
+            &mut from_lookup,
+        );
 
         let bytes = |instances: &[TextInstance]| {
             bytemuck::cast_slice::<TextInstance, u8>(instances).to_vec()
@@ -3896,7 +4125,13 @@ mod tests {
             })
             .collect();
         let mut trusted = Vec::new();
-        pass.build_text_instances_into(&device, &queue, &poisoned, &mut trusted);
+        pass.build_text_instances_into(
+            &device,
+            &queue,
+            &poisoned,
+            RowRotation::unrotated(),
+            &mut trusted,
+        );
 
         let poisoned_stale: Vec<PendingGlyph> = poisoned
             .iter()
@@ -3906,7 +4141,13 @@ mod tests {
             })
             .collect();
         let mut refused = Vec::new();
-        pass.build_text_instances_into(&device, &queue, &poisoned_stale, &mut refused);
+        pass.build_text_instances_into(
+            &device,
+            &queue,
+            &poisoned_stale,
+            RowRotation::unrotated(),
+            &mut refused,
+        );
 
         assert_ne!(
             bytes(&trusted),
@@ -4586,6 +4827,57 @@ mod tests {
     /// The offset changes on every scroll tick and rides the globals uniform, so
     /// invalidating on it would rebuild every row constantly and gain nothing. The
     /// rectangle is what decides which buffer a cell's glyph goes to.
+    /// Each buffer's globals have to carry the rotation its instances were
+    /// built under, since the vertex stage reads the slot back through them.
+    /// The screen-anchored buffer carries none, because an overlay's content
+    /// rows run past the bottom of the screen and a wrap would fold them back
+    /// over the box.
+    #[test]
+    fn only_the_grid_rows_buffers_carry_a_rotation() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("globals rotation test: no wgpu adapter available, skipping");
+            return;
+        };
+        let mut grid = Grid::new(4, 20);
+        fill_row(&mut grid, 0, "cells");
+
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            [640.0, 480.0],
+            &Frame {
+                cursor: None,
+                cursor_corners: None,
+                scroll: Scroll {
+                    grid: 0.0,
+                    document: 0.0,
+                    scrollback: 0.0,
+                    region: 0.0,
+                    popovers: &[],
+                },
+                damage: &Damage::Full,
+                decoration_damage: &Damage::Full,
+                scrolled_rows: 0,
+            },
+            &[],
+        );
+
+        let rows_of = |globals: Option<TextGlobals>| globals.expect("globals written").rows;
+
+        assert_eq!(rows_of(pass.last_globals), 4, "grid draws rotate by rows");
+        assert_eq!(
+            rows_of(pass.last_region_globals),
+            4,
+            "region draws carry grid rows too"
+        );
+        assert_eq!(
+            rows_of(pass.last_static_globals),
+            0,
+            "screen-anchored draws must not wrap"
+        );
+    }
+
     #[test]
     fn only_a_moved_region_rectangle_resplits_the_rows() {
         let Some((device, queue, mut pass)) = headless_text_pass() else {
