@@ -3743,6 +3743,97 @@ mod tests {
         }
     }
 
+    /// A rope straddling several chunks, several rows, and several character
+    /// widths, so a batch walking it forward meets every seam a scalar
+    /// descending from the root would.
+    fn seamed_rope() -> Rope {
+        let text = format!(
+            "{}\u{1F1F7}\u{1F1F8}\ne\u{301}{}\n\u{4e16}\u{754c}\n{}",
+            "a".repeat(9),
+            "b".repeat(10),
+            "c".repeat(20),
+        );
+        let mut rope = Rope::new();
+        for ch in text.chars() {
+            rope.push(&ch.to_string());
+        }
+        assert!(rope.chunks().count() > 1, "the rope must straddle chunks");
+        assert!(rope.max_point().row > 1, "and hold several rows");
+        rope
+    }
+
+    /// Every offset answers what the scalar conversion answers, including the
+    /// ones past the end and the ones splitting a character.
+    ///
+    /// The batch exists to walk the tree forward from one cursor rather than
+    /// descend from the root per offset, so agreeing with the scalar is the
+    /// whole of its contract. Reversing the input is what sends it down the
+    /// permutation route instead of the ascending one, and repeating an offset
+    /// is what asks the forward-only cursor to answer the same position twice.
+    #[test]
+    fn batched_point_conversions_match_the_scalar_ones() {
+        let rope = seamed_rope();
+
+        let offsets: Vec<usize> = (0..=rope.len() + 2).collect();
+        let points: Vec<Point> = offsets.iter().map(|&o| rope.offset_to_point(o)).collect();
+
+        assert_eq!(
+            rope.offsets_to_points_batch(&offsets),
+            points,
+            "every batched point matches the scalar one",
+        );
+        assert_eq!(
+            rope.offsets_to_points_batch(&reversed(&offsets)),
+            reversed(&points),
+            "descending offsets are permuted rather than mis-answered",
+        );
+        assert_eq!(
+            rope.offsets_to_points_batch(&doubled(&offsets)),
+            doubled(&points),
+            "a repeated offset is answered twice rather than skipped",
+        );
+    }
+
+    /// The mirror of [`batched_point_conversions_match_the_scalar_ones`], over
+    /// every point rather than every offset.
+    ///
+    /// The columns run two past each row's length and the rows one past the
+    /// last, so the clamping the scalar applies to a position outside the text
+    /// has to survive the batch's forward walk too.
+    #[test]
+    fn batched_offset_conversions_match_the_scalar_ones() {
+        let rope = seamed_rope();
+
+        let points: Vec<Point> = (0..=rope.max_point().row + 1)
+            .flat_map(|row| (0..=rope.line_len(row) + 2).map(move |column| Point::new(row, column)))
+            .collect();
+        let offsets: Vec<usize> = points.iter().map(|&p| rope.point_to_offset(p)).collect();
+
+        assert_eq!(
+            rope.points_to_offsets_batch(&points),
+            offsets,
+            "every batched offset matches the scalar one",
+        );
+        assert_eq!(
+            rope.points_to_offsets_batch(&reversed(&points)),
+            reversed(&offsets),
+            "descending points are permuted rather than mis-answered",
+        );
+        assert_eq!(
+            rope.points_to_offsets_batch(&doubled(&points)),
+            doubled(&offsets),
+            "a repeated point is answered twice rather than skipped",
+        );
+    }
+
+    fn reversed<T: Copy>(xs: &[T]) -> Vec<T> {
+        xs.iter().rev().copied().collect()
+    }
+
+    fn doubled<T: Copy>(xs: &[T]) -> Vec<T> {
+        xs.iter().flat_map(|&x| [x, x]).collect()
+    }
+
     /// The batch walks the tree forward once where the scalar calls each
     /// descend from the root, so the only thing that makes it worth having is
     /// that every offset comes back with the answer the scalar gives.
