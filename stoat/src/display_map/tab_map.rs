@@ -8,7 +8,7 @@ use std::{
     ops::{Deref, Range},
     sync::Arc,
 };
-use stoat_text::{patch::Patch, Bias};
+use stoat_text::{patch::Patch, Bias, MeasuredChunk};
 
 const MAX_EXPANSION_COLUMN: u32 = 256;
 
@@ -84,9 +84,10 @@ impl TabMap {
                 let old_rows = edit.old.end - edit.old.start;
                 let new_rows = edit.new.end - edit.new.start;
                 if old_rows == new_rows && edit.new.end < fold_snapshot.line_count() {
-                    let has_tab = fold_snapshot
-                        .fold_line_chars(edit.new.end)
-                        .any(|ch| ch == '\t');
+                    // Read off the rope's tab map where the row allows it, since
+                    // this asks about a whole row per edit and the walk it
+                    // replaces decoded every character of one.
+                    let has_tab = fold_snapshot.line_has_tab(edit.new.end);
                     if has_tab {
                         new_end = new_end.max(edit.new.end + 1);
                     }
@@ -159,9 +160,9 @@ impl TabSnapshot {
     }
 
     pub fn to_tab_point(&self, fold_point: FoldPoint) -> TabPoint {
-        let chars = self.fold_snapshot.fold_line_chars(fold_point.row());
-        let expanded_column = expand_column(
-            chars,
+        let expanded_column = expand_line_column(
+            &self.fold_snapshot,
+            fold_point.row(),
             fold_point.column(),
             self.tab_size,
             self.max_expansion_column,
@@ -170,9 +171,9 @@ impl TabSnapshot {
     }
 
     pub fn to_fold_point(&self, tab_point: TabPoint, bias: Bias) -> FoldPoint {
-        let chars = self.fold_snapshot.fold_line_chars(tab_point.row());
-        let fold_column = collapse_column(
-            chars,
+        let fold_column = collapse_line_column(
+            &self.fold_snapshot,
+            tab_point.row(),
             tab_point.column(),
             self.tab_size,
             bias,
@@ -203,8 +204,9 @@ impl TabSnapshot {
 
     pub fn line_len(&self, fold_row: u32) -> u32 {
         let fold_line_len = self.fold_snapshot.line_len(fold_row);
-        expand_column(
-            self.fold_snapshot.fold_line_chars(fold_row),
+        expand_line_column(
+            &self.fold_snapshot,
+            fold_row,
             fold_line_len,
             self.tab_size,
             self.max_expansion_column,
@@ -577,6 +579,135 @@ pub(crate) fn advance_column_for_char(
     }
 }
 
+/// The display column `fold_column` sits at on `fold_row`.
+///
+/// Measures off the rope's own maps where the row allows it, adding a run's
+/// byte length in place of decoding it. A run holding a tab, a wide character
+/// or a mark, and every row an inlay or a fold writes into, falls back to the
+/// character walk, which is what the fast path has to agree with.
+pub(super) fn expand_line_column(
+    fold_snapshot: &FoldSnapshot,
+    fold_row: u32,
+    fold_column: u32,
+    tab_size: u32,
+    max_expansion_column: u32,
+) -> u32 {
+    match fold_snapshot.plain_line_runs(fold_row) {
+        Some(runs) => expand_column_runs(runs, fold_column, tab_size, max_expansion_column),
+        None => expand_column(
+            fold_snapshot.fold_line_chars(fold_row),
+            fold_column,
+            tab_size,
+            max_expansion_column,
+        ),
+    }
+}
+
+/// [`expand_column`] over runs that carry whether they measure by length.
+pub(crate) fn expand_column_runs<'a>(
+    runs: impl Iterator<Item = MeasuredChunk<'a>>,
+    fold_column: u32,
+    tab_size: u32,
+    max_expansion_column: u32,
+) -> u32 {
+    let mut expanded = 0u32;
+    let mut byte_idx = 0u32;
+    for run in runs {
+        if byte_idx >= fold_column {
+            break;
+        }
+        let wanted = (fold_column - byte_idx) as usize;
+
+        // Every byte of a measurable run is one column, so the answer for it is
+        // the same count either way, however much of it the column asks for.
+        if run.cell_per_byte {
+            let taken = wanted.min(run.text.len()) as u32;
+            expanded += taken;
+            byte_idx += taken;
+            continue;
+        }
+
+        for ch in run.text.chars() {
+            if byte_idx >= fold_column {
+                break;
+            }
+            advance_column_for_char(&mut expanded, ch, tab_size, max_expansion_column);
+            byte_idx += ch.len_utf8() as u32;
+        }
+    }
+    expanded
+}
+
+/// The fold column `tab_column` collapses to on `fold_row`, under `bias`.
+///
+/// The chunked counterpart of [`expand_line_column`], with the same fallback.
+pub(super) fn collapse_line_column(
+    fold_snapshot: &FoldSnapshot,
+    fold_row: u32,
+    tab_column: u32,
+    tab_size: u32,
+    bias: Bias,
+    max_expansion_column: u32,
+) -> u32 {
+    match fold_snapshot.plain_line_runs(fold_row) {
+        Some(runs) => collapse_column_runs(runs, tab_column, tab_size, bias, max_expansion_column),
+        None => collapse_column(
+            fold_snapshot.fold_line_chars(fold_row),
+            tab_column,
+            tab_size,
+            bias,
+            max_expansion_column,
+        ),
+    }
+}
+
+/// [`collapse_column`] over runs that carry whether they measure by length.
+pub(crate) fn collapse_column_runs<'a>(
+    runs: impl Iterator<Item = MeasuredChunk<'a>>,
+    tab_column: u32,
+    tab_size: u32,
+    bias: Bias,
+    max_expansion_column: u32,
+) -> u32 {
+    // A measurable run holds no zero-width mark and no character wider than its
+    // byte, so neither the left-bias step back nor the trailing-mark sweep the
+    // character walk ends with can land inside one. Anything else defers to
+    // that walk over the rest of the row.
+    let mut expanded = 0u32;
+    let mut fold_col = 0u32;
+    let mut runs = runs.peekable();
+    while let Some(run) = runs.peek() {
+        if expanded >= tab_column || !run.cell_per_byte {
+            break;
+        }
+        let taken = ((tab_column - expanded) as usize).min(run.text.len()) as u32;
+        expanded += taken;
+        fold_col += taken;
+        if (taken as usize) < run.text.len() {
+            break;
+        }
+        runs.next();
+    }
+
+    if expanded >= tab_column {
+        return fold_col;
+    }
+
+    // The rest of the row, walked from where the runs left off. A tab's width
+    // is its distance to the next stop, so the walk has to carry the column it
+    // starts at rather than restart at zero. A run only half consumed above
+    // already reached the target column, so what remains here starts whole.
+    collapse_column_from(
+        runs.flat_map(|run| run.text.chars()),
+        tab_column,
+        tab_size,
+        bias,
+        max_expansion_column,
+        expanded,
+        fold_col,
+    )
+}
+
 pub(super) fn expand_column(
     chars: impl Iterator<Item = char>,
     fold_column: u32,
@@ -602,9 +733,33 @@ pub(super) fn collapse_column(
     bias: Bias,
     max_expansion_column: u32,
 ) -> u32 {
+    collapse_column_from(
+        chars,
+        tab_column,
+        tab_size,
+        bias,
+        max_expansion_column,
+        0,
+        0,
+    )
+}
+
+/// [`collapse_column`] resuming a row already partly measured.
+///
+/// `expanded` and `fold_col` are what the row has covered so far, in columns
+/// and in bytes. Both have to be carried rather than restarted, since a tab's
+/// width is its distance to the next stop and a mark at the walk's start is
+/// only trailing if something came before it.
+fn collapse_column_from(
+    chars: impl Iterator<Item = char>,
+    tab_column: u32,
+    tab_size: u32,
+    bias: Bias,
+    max_expansion_column: u32,
+    mut expanded: u32,
+    mut fold_col: u32,
+) -> u32 {
     let mut chars = chars.peekable();
-    let mut expanded = 0u32;
-    let mut fold_col = 0u32;
     let mut last_char_byte_len = 0u32;
     while let Some(&ch) = chars.peek() {
         if expanded >= tab_column {
@@ -711,7 +866,7 @@ fn collapse_column_detailed(
 
 #[cfg(test)]
 mod tests {
-    use super::{TabMap, TabPoint};
+    use super::{collapse_column_runs, expand_column_runs, TabMap, TabPoint};
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::{
@@ -725,7 +880,80 @@ mod tests {
         num::NonZeroU32,
         sync::{Arc, RwLock},
     };
-    use stoat_text::{patch::Patch, Bias, Point};
+    use stoat_text::{patch::Patch, Bias, Point, Rope};
+
+    /// Measuring a run by its byte length is only sound where every byte is one
+    /// cell, and getting that wrong misplaces a cursor rather than failing, so
+    /// the chunked forms are checked against the character walk they replace at
+    /// every column of a line that mixes everything awkward.
+    ///
+    /// Driven through a rope so the runs are the real ones, split at whatever
+    /// chunk boundaries the text happens to produce.
+    #[test]
+    fn measuring_by_run_agrees_with_walking_the_characters() {
+        let lines = [
+            "plain ascii only",
+            "\tleading tab\tand another",
+            "wide \u{4e00}\u{4e8c} chars",
+            "mark e\u{301}f combining",
+            "bell \u{7} control",
+            "\u{4e00}\tmixed\te\u{301}\u{7}ending",
+            "",
+            "\t",
+            // Long enough to span rope chunks, so the runs are split.
+            &"abcdefghij".repeat(40),
+            &format!("{}\t{}", "x".repeat(60), "y".repeat(60)),
+        ];
+
+        for line in lines {
+            let rope = Rope::from(line);
+            let runs = || rope.measured_chunks_in_line(0);
+
+            for column in 0..=line.len() as u32 + 2 {
+                assert_eq!(
+                    expand_column_runs(runs(), column, 4, u32::MAX),
+                    super::expand_column(line.chars(), column, 4, u32::MAX),
+                    "expanding {line:?} at byte {column}"
+                );
+            }
+
+            let widest = super::expand_column(line.chars(), line.len() as u32, 4, u32::MAX);
+            for column in 0..=widest + 2 {
+                for bias in [Bias::Left, Bias::Right] {
+                    assert_eq!(
+                        collapse_column_runs(runs(), column, 4, bias, u32::MAX),
+                        super::collapse_column(line.chars(), column, 4, bias, u32::MAX),
+                        "collapsing {line:?} at column {column} under {bias:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The tab cap is positional, so a run measured by its length has to leave
+    /// the running column where the walk would, or the tab after it lands on
+    /// the wrong stop.
+    #[test]
+    fn measuring_by_run_agrees_past_the_expansion_cap() {
+        let line = format!("{}\tafter\tcap", "x".repeat(300));
+        let rope = Rope::from(line.as_str());
+
+        for column in [0u32, 100, 255, 256, 257, 299, 300, 301, 310] {
+            assert_eq!(
+                expand_column_runs(rope.measured_chunks_in_line(0), column, 4, 256),
+                super::expand_column(line.chars(), column, 4, 256),
+                "expanding past the cap at byte {column}"
+            );
+        }
+
+        for column in [0u32, 250, 256, 300, 305, 320] {
+            assert_eq!(
+                collapse_column_runs(rope.measured_chunks_in_line(0), column, 4, Bias::Left, 256),
+                super::collapse_column(line.chars(), column, 4, Bias::Left, 256),
+                "collapsing past the cap at column {column}"
+            );
+        }
+    }
 
     /// Byte column a display column converts to, both ways round, since a
     /// position on a character boundary must not depend on the bias.

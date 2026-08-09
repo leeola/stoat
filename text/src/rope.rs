@@ -836,6 +836,13 @@ impl Rope {
         self.chunks_in_range(range)
     }
 
+    /// One row's chunks, each saying whether its column width is its byte
+    /// length. See [`Self::measured_chunks_in_range`].
+    pub fn measured_chunks_in_line(&self, row: u32) -> MeasuredChunksInRange<'_> {
+        let range = self.row_byte_range(row);
+        self.measured_chunks_in_range(range)
+    }
+
     /// Clamp `point` to a position the rope actually holds.
     ///
     /// A column past the end of its row lands on the row's end, and one inside
@@ -1791,6 +1798,11 @@ pub struct MeasuredChunk<'a> {
     /// or anything outside printable ASCII, whose width the character has to
     /// answer for. Such a run is measured the long way.
     pub cell_per_byte: bool,
+    /// Whether any byte here is a tab.
+    ///
+    /// For a caller that only needs to know whether the expensive character is
+    /// present, such as one deciding whether a row's tab stops can move.
+    pub has_tab: bool,
 }
 
 /// A rope's chunks over a range, each paired with whether it can be measured
@@ -1815,8 +1827,9 @@ impl<'a> Iterator for MeasuredChunksInRange<'a> {
         };
 
         Some(MeasuredChunk {
-            text: &chunk.text.as_str()[span],
+            text: &chunk.text.as_str()[span.clone()],
             cell_per_byte: width == covered,
+            has_tab: bits_in(chunk.tabs, span) != 0,
         })
     }
 }

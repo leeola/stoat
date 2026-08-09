@@ -573,17 +573,11 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
         // `FoldLineChars` ends at the row's newline, so this stops there.
         chars.extend(tab_snapshot.fold_snapshot().fold_line_chars(tab_row));
 
-        // Not the decoded chars' own byte sum, which can come out short of
-        // this. `expand_column` bounds itself by the fold layer's measure, so
-        // taking any other number here would change where it stops.
-        let fold_line_len = tab_snapshot.fold_snapshot().line_len(tab_row);
-
-        let tab_line_len = tab_map::expand_column(
-            chars.iter().copied(),
-            fold_line_len,
-            tab_snapshot.tab_size(),
-            tab_snapshot.max_expansion_column(),
-        );
+        // The tab layer measures the row the same way, bounding itself by the
+        // fold layer's length rather than the decoded chars' byte sum, which
+        // can come out short of it. Asking it directly also takes the chunked
+        // path, where doing the expansion here would decode the row twice.
+        let tab_line_len = tab_snapshot.line_len(tab_row);
 
         let (wrap_columns, indent) = compute_wrap_columns(
             chars.iter().copied(),

@@ -1423,8 +1423,10 @@ impl DisplaySnapshot {
     /// - [`Self::buffer_column_at_visual`] for the way back.
     pub fn visual_column(&self, point: Point) -> u32 {
         let tabs = self.tab_snapshot();
-        tab_map::expand_column(
-            self.line_chars(point.row),
+        tab_map::expand_column_runs(
+            self.buffer_snapshot()
+                .rope()
+                .measured_chunks_in_line(point.row),
             point.column,
             tabs.tab_size(),
             tabs.max_expansion_column(),
@@ -1438,25 +1440,13 @@ impl DisplaySnapshot {
     /// rather than refusing.
     pub fn buffer_column_at_visual(&self, row: u32, visual: u32, bias: Bias) -> u32 {
         let tabs = self.tab_snapshot();
-        tab_map::collapse_column(
-            self.line_chars(row),
+        tab_map::collapse_column_runs(
+            self.buffer_snapshot().rope().measured_chunks_in_line(row),
             visual,
             tabs.tab_size(),
             bias,
             tabs.max_expansion_column(),
         )
-    }
-
-    /// Characters of buffer `row`, stopping at its line break.
-    ///
-    /// The row's extent comes from its byte range rather than a counted budget,
-    /// so a row holding multi-byte characters ends where the row does instead of
-    /// spilling into the rows below it.
-    fn line_chars(&self, row: u32) -> impl Iterator<Item = char> {
-        self.buffer_snapshot()
-            .rope()
-            .chunks_in_line(row)
-            .flat_map(str::chars)
     }
 
     pub fn classify_row(&self, display_row: u32) -> BlockRowKind<'_> {

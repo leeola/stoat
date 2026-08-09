@@ -33,7 +33,7 @@ pub use offset_utf16::OffsetUtf16;
 pub use point::{Point, PointUtf16};
 pub use rope::{
     BytesInRange, CharsAt, ChunksInLine, ChunksInRange, Cursor as RopeCursor, FindIter, Lines,
-    ReversedCharsAt, Rope, TextSummary,
+    MeasuredChunk, MeasuredChunksInRange, ReversedCharsAt, Rope, TextSummary,
 };
 pub use selection::{cursor_offset, cursor_offsets, next_char_boundary, Selection, SelectionGoal};
 pub use sum_tree::{

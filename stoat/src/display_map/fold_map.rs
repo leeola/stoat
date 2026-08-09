@@ -13,8 +13,8 @@ use std::{
 };
 use stoat_text::{
     patch::Patch, tree_map::TreeMap, Anchor, AnchorRangeExt, Bias, CharsAt, ContextLessSummary,
-    Cursor, Dimension, Dimensions, Edit, Item, KeyedItem, Point, ReversedCharsAt, Rope, SeekTarget,
-    SumTree, TextSummary,
+    Cursor, Dimension, Dimensions, Edit, Item, KeyedItem, MeasuredChunksInRange, Point,
+    ReversedCharsAt, Rope, SeekTarget, SumTree, TextSummary,
 };
 
 /// Shared empty highlight endpoints, for the row walkers that read the chunk
@@ -1702,6 +1702,47 @@ impl FoldSnapshot {
             }
         }
         result
+    }
+
+    /// The row's text as rope runs, each saying whether it measures by its
+    /// length, or `None` when the row is not a plain stretch of the buffer.
+    ///
+    /// A row carrying inlay text or a fold placeholder shows characters the
+    /// buffer does not hold at that offset, so it is not one contiguous rope
+    /// range and has to be walked. Everything else -- which is most rows, and
+    /// every long one a fold does not span -- can be measured off the rope's
+    /// own maps.
+    pub fn plain_line_runs(&self, fold_row: u32) -> Option<MeasuredChunksInRange<'_>> {
+        if self.inlay_snapshot.has_inlays() {
+            return None;
+        }
+
+        let start = FoldPoint::new(fold_row, 0);
+        let end = FoldPoint::new(fold_row, self.line_len(fold_row));
+        let inlay_range = self.to_inlay_point(start)..self.to_inlay_point(end);
+        if !self.folds_in_range(inlay_range.clone()).is_empty() {
+            return None;
+        }
+
+        // With no inlays and no fold on the row, fold offsets are inlay offsets
+        // are buffer offsets, so the row is exactly this rope range.
+        let rope = self.inlay_snapshot.rope();
+        let start = rope.point_to_offset(self.inlay_snapshot.to_buffer_point(inlay_range.start));
+        let end = rope.point_to_offset(self.inlay_snapshot.to_buffer_point(inlay_range.end));
+
+        Some(rope.measured_chunks_in_range(start..end))
+    }
+
+    /// Whether the row holds a tab.
+    ///
+    /// Answered off the rope's tab map for a plain row, where the walk it
+    /// replaces decoded every character. A row an inlay or a fold writes into
+    /// is walked, since the text it shows is not the buffer's.
+    pub fn line_has_tab(&self, fold_row: u32) -> bool {
+        match self.plain_line_runs(fold_row) {
+            Some(mut runs) => runs.any(|run| run.has_tab),
+            None => self.fold_line_chars(fold_row).any(|ch| ch == '\t'),
+        }
     }
 
     pub fn chars_at(&self, fold_point: FoldPoint) -> FoldChars<'_> {
