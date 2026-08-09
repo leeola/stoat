@@ -7,6 +7,7 @@
 //! degrades to nothing rather than erroring.
 
 use crate::frame::{self, Frame, FrameScratch};
+use std::sync::Arc;
 
 /// A decoded stoatty command.
 ///
@@ -569,7 +570,13 @@ pub struct MinimapRun {
 ///
 /// Empty for a blank line. The emitter caps the run count per line, and the wire
 /// format bounds it to 255.
-pub type LineSummary = Vec<MinimapRun>;
+///
+/// Shared rather than owned because a line is handed on several times without
+/// ever being changed. It goes from the decode into the terminal's store, from
+/// there into the grid's, and again wholesale whenever a resize reclones the
+/// store. A file's worth of lines copied at each of those is what sharing them
+/// avoids.
+pub type LineSummary = Arc<[MinimapRun]>;
 
 /// Declare a minimap strip and its rendering parameters.
 ///
@@ -1297,7 +1304,7 @@ fn write_minimap_lines_frame(
         w.write_all(&(lines.len() as u32).to_be_bytes())?;
         for line in lines {
             w.write_all(&[line.len() as u8])?;
-            for run in line {
+            for run in line.iter() {
                 w.write_all(&[run.start_col, run.len, run.class])?;
             }
         }
@@ -2785,7 +2792,7 @@ mod tests {
             content_id: 9,
             start: 3,
             removed: 2,
-            lines: vec![
+            lines: summaries(vec![
                 vec![
                     MinimapRun {
                         start_col: 0,
@@ -2803,7 +2810,7 @@ mod tests {
                     len: 8,
                     class: 1,
                 }],
-            ],
+            ]),
         };
 
         assert_eq!(
@@ -2826,6 +2833,11 @@ mod tests {
         let start = (c.start as usize).min(store.len());
         let end = start.saturating_add(c.removed as usize).min(store.len());
         store.splice(start..end, c.lines.iter().cloned());
+    }
+
+    /// The shared summaries a store holds, for stating a fixture.
+    fn summaries(lines: Vec<Vec<MinimapRun>>) -> Vec<LineSummary> {
+        lines.into_iter().map(Into::into).collect()
     }
 
     /// A splice of `lines` rows at `runs` runs each, sized by the caller to sit
@@ -2872,10 +2884,10 @@ mod tests {
     fn paginated_frames_apply_to_the_same_store_as_one_splice() {
         let command = dense_splice(4096, 12);
 
-        let mut expected: Vec<LineSummary> = vec![vec![]; 40];
+        let mut expected: Vec<LineSummary> = summaries(vec![vec![]; 40]);
         apply_splice(&mut expected, &command);
 
-        let mut got: Vec<LineSummary> = vec![vec![]; 40];
+        let mut got: Vec<LineSummary> = summaries(vec![vec![]; 40]);
         let bytes = encode_minimap_lines(&command);
         let mut frames = 0;
         for payload in apc_payloads(&bytes) {
@@ -2932,7 +2944,7 @@ mod tests {
             content_id: 4,
             start: 0,
             removed: 0,
-            lines: vec![vec![]],
+            lines: summaries(vec![vec![]]),
         };
 
         assert_eq!(
@@ -3145,14 +3157,14 @@ mod tests {
                 content_id: 9,
                 start: 2,
                 removed: 1,
-                lines: vec![
+                lines: summaries(vec![
                     vec![MinimapRun {
                         start_col: 0,
                         len: 4,
                         class: 2,
                     }],
                     vec![],
-                ],
+                ]),
             }),
             Command::MinimapView(MinimapViewCommand {
                 strip_id: 5,

@@ -2519,7 +2519,7 @@ impl Dimensions for GridSize {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cursor, CursorShape, Damage, TermEvent, Terminal, XTVERSION_REPLY};
+    use super::{Arc, Cursor, CursorShape, Damage, TermEvent, Terminal, XTVERSION_REPLY};
     use crate::{
         grid::{
             Bar, Border, BorderStyle, Cell, DocumentOffset, Flags, Grid, Icon, IconKind, Minimap,
@@ -2536,7 +2536,7 @@ mod tests {
         encode_popover, encode_reposition, encode_reset, encode_scale, encode_scroll,
         encode_scroll_region, encode_text_run, encode_window_open, encode_zoom_capture, BarCommand,
         BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, HelloCommand, IconCommand,
-        IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, MinimapCommand,
+        IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, LineSummary, MinimapCommand,
         MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
         PanelShadow as ProtoPanelShadow, PolylineCommand, PoolCursorCommand, PoolDropCommand,
         PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand,
@@ -5938,12 +5938,17 @@ mod tests {
         }
     }
 
+    /// The shared summaries a store holds, for stating one either way round.
+    fn summaries(lines: Vec<Vec<MinimapRun>>) -> Vec<LineSummary> {
+        lines.into_iter().map(Into::into).collect()
+    }
+
     fn splice(content_id: u32, start: u32, removed: u32, lines: Vec<Vec<MinimapRun>>) -> Vec<u8> {
         encode_minimap_lines(&MinimapLinesCommand {
             content_id,
             start,
             removed,
-            lines,
+            lines: summaries(lines),
         })
     }
 
@@ -5966,7 +5971,11 @@ mod tests {
         terminal.advance(&splice(9, 1, 1, vec![vec![run(2, 2, 4)]]));
         assert_eq!(
             terminal.minimap_contents[&9],
-            vec![vec![run(0, 2, 1)], vec![run(2, 2, 4)], vec![run(1, 1, 3)]],
+            summaries(vec![
+                vec![run(0, 2, 1)],
+                vec![run(2, 2, 4)],
+                vec![run(1, 1, 3)]
+            ]),
             "the middle line is replaced in place",
         );
 
@@ -5980,7 +5989,11 @@ mod tests {
         terminal.advance(&splice(9, 99, 5, vec![vec![run(0, 1, 0)]]));
         assert_eq!(
             terminal.minimap_contents[&9],
-            vec![vec![run(0, 2, 1)], vec![run(2, 2, 4)], vec![run(0, 1, 0)]],
+            summaries(vec![
+                vec![run(0, 2, 1)],
+                vec![run(2, 2, 4)],
+                vec![run(0, 1, 0)]
+            ]),
             "an out-of-range start clamps and appends",
         );
     }
@@ -6092,7 +6105,38 @@ mod tests {
         );
         assert_eq!(
             grid.minimap_content(9),
-            &[vec![run(0, 2, 1)], vec![run(1, 3, 2)]],
+            summaries(vec![vec![run(0, 2, 1)], vec![run(1, 3, 2)]]),
+        );
+    }
+
+    /// A line reaches the grid's store as the same allocation the terminal
+    /// holds, rather than a copy of it.
+    ///
+    /// Every one of these hand-offs compares equal either way, so equality says
+    /// nothing about which happened. A file's worth of lines is copied per
+    /// hand-off if they are not shared, and a resize copies the whole store
+    /// again on every frame of a window drag, so the identity is the point.
+    #[test]
+    fn a_line_reaches_the_grid_without_being_copied() {
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        let mut grid = Grid::new(4, 4);
+
+        terminal.advance(&splice(9, 0, 0, vec![vec![run(0, 2, 1)]]));
+        terminal.project(&mut grid);
+
+        let held = terminal.minimap_contents[&9][0].clone();
+        assert!(
+            Arc::ptr_eq(&grid.minimap_content(9)[0], &held),
+            "the projected line is the terminal's line",
+        );
+
+        // A resize reclones the whole store rather than replaying, which is the
+        // path that would copy the file wholesale.
+        terminal.resize(8, 8);
+        terminal.project(&mut grid);
+        assert!(
+            Arc::ptr_eq(&grid.minimap_content(9)[0], &held),
+            "the store a resize reclones is still the terminal's lines",
         );
     }
 

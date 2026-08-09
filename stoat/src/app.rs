@@ -10695,9 +10695,7 @@ fn minimap_edge_class(
 }
 
 /// Convert the engine's [`crate::minimap::Run`]s to their `minimap_lines` wire form.
-fn convert_minimap_runs(
-    runs: Vec<crate::minimap::Run>,
-) -> Vec<stoatty_protocol::command::MinimapRun> {
+fn convert_minimap_runs(runs: Vec<crate::minimap::Run>) -> stoatty_protocol::command::LineSummary {
     runs.into_iter()
         .map(|run| stoatty_protocol::command::MinimapRun {
             start_col: run.start_col,

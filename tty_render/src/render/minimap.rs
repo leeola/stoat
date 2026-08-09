@@ -490,7 +490,7 @@ fn build_strip(
     let first = (top.max(0.0) as usize).min(last);
     for (line, runs) in (first..last).zip(&content[first..last]) {
         let y = layout.strip_y + (line as f32 - top) * layout.line_h;
-        for run in runs {
+        for run in runs.iter() {
             let Some(color) = strip
                 .command
                 .palette
@@ -560,7 +560,7 @@ mod tests {
     use super::{build_strip, minimap_top, thumb_geometry, MinimapPass, MIN_THUMB_PX};
     use crate::{gpu::headless_device, render::CellMetrics};
     use std::collections::HashMap;
-    use stoatty_protocol::command::{MinimapCommand, MinimapRun};
+    use stoatty_protocol::command::{LineSummary, MinimapCommand, MinimapRun};
     use stoatty_term::grid::{Grid, Minimap, MinimapView};
     use wgpu::{
         naga::{
@@ -569,6 +569,11 @@ mod tests {
         },
         TextureFormat,
     };
+
+    /// The shared summaries a content store holds, for stating a fixture.
+    fn summaries(lines: Vec<Vec<MinimapRun>>) -> Vec<LineSummary> {
+        lines.into_iter().map(Into::into).collect()
+    }
 
     fn metrics() -> CellMetrics {
         // width 6, height 12: a minimap line at lines_per_cell 8 is 1.5px tall.
@@ -675,7 +680,7 @@ mod tests {
                 class: 2,
             },
         ]];
-        let (instances, rect) = build_strip(&strip(None), &content, metrics());
+        let (instances, rect) = build_strip(&strip(None), &summaries(content), metrics());
 
         // strip: left 10 * width 6 = x 60; width 8 * 6 = 48; col_w = 48 / 120 = 0.4;
         // height 10 * 12 = 120.
@@ -709,7 +714,7 @@ mod tests {
             top_256: 0,
             visible: 30,
         });
-        let (instances, _) = build_strip(&strip(view), &content, metrics());
+        let (instances, _) = build_strip(&strip(view), &summaries(content), metrics());
 
         // Background + one run (the single line) + thumb, nothing for the missing
         // lines the strip window covers.
@@ -727,11 +732,11 @@ mod tests {
         grid.set_minimaps(vec![strip(None)]);
         grid.set_minimap_contents(HashMap::from([(
             1,
-            vec![vec![MinimapRun {
+            summaries(vec![vec![MinimapRun {
                 start_col: 0,
                 len: 4,
                 class: 1,
-            }]],
+            }]]),
         )]));
 
         let resolution = [640.0, 480.0];
