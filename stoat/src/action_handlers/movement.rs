@@ -894,11 +894,13 @@ fn insert_with_indent(stoat: &mut Stoat, fallback: IndentFallback) -> UpdateEffe
         let ws = stoat.active_workspace_mut();
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for ins in inserts.iter().rev() {
-            if !ins.indent.is_empty() {
-                guard.edit(ins.at..ins.at, &ins.indent);
-            }
-        }
+        let batch: Vec<(Range<usize>, &str)> = inserts
+            .iter()
+            .rev()
+            .filter(|ins| !ins.indent.is_empty())
+            .map(|ins| (ins.at..ins.at, ins.indent.as_str()))
+            .collect();
+        guard.edit_batch(&batch);
     }
 
     // Every inserted indent before an offset pushes it further right in the
@@ -1241,9 +1243,13 @@ fn rotate_selection_contents(stoat: &mut Stoat, forward: bool) -> UpdateEffect {
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for (i, (_, start, end, _)) in entries.iter().enumerate().rev() {
-            guard.edit(*start..*end, &rotated[i]);
-        }
+        let batch: Vec<(Range<usize>, &str)> = entries
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(i, (_, start, end, _))| (*start..*end, rotated[i].as_str()))
+            .collect();
+        guard.edit_batch(&batch);
     }
 
     // Each selection re-covers its new text. A running length delta shifts later
@@ -1356,9 +1362,12 @@ fn join_selections_impl(stoat: &mut Stoat, select_space: bool) -> UpdateEffect {
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for (start, end, has_space) in changes.iter().rev() {
-            guard.edit(*start..*end, if *has_space { " " } else { "" });
-        }
+        let batch: Vec<(Range<usize>, &str)> = changes
+            .iter()
+            .rev()
+            .map(|(start, end, has_space)| (*start..*end, if *has_space { " " } else { "" }))
+            .collect();
+        guard.edit_batch(&batch);
     }
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
@@ -1528,9 +1537,12 @@ pub(super) fn align_selections(stoat: &mut Stoat) -> UpdateEffect {
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for (offset, text) in edits.iter().rev() {
-            guard.edit(*offset..*offset, text);
-        }
+        let batch: Vec<(Range<usize>, &str)> = edits
+            .iter()
+            .rev()
+            .map(|(offset, text)| (*offset..*offset, text.as_str()))
+            .collect();
+        guard.edit_batch(&batch);
     }
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
@@ -1666,9 +1678,12 @@ where
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for (_, s, e, new_text) in edits.iter().rev() {
-            guard.edit(*s..*e, new_text);
-        }
+        let batch: Vec<(Range<usize>, &str)> = edits
+            .iter()
+            .rev()
+            .map(|(_, s, e, new_text)| (*s..*e, new_text.as_str()))
+            .collect();
+        guard.edit_batch(&batch);
     }
 
     let edited_ranges = shifted_edit_ranges(&edits);
@@ -1769,9 +1784,12 @@ fn apply_number_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for (_, s, e, new_text) in edits.iter().rev() {
-            guard.edit(*s..*e, new_text);
-        }
+        let batch: Vec<(Range<usize>, &str)> = edits
+            .iter()
+            .rev()
+            .map(|(_, s, e, new_text)| (*s..*e, new_text.as_str()))
+            .collect();
+        guard.edit_batch(&batch);
     }
 
     let edited_ranges = shifted_edit_ranges(&edits);
@@ -1961,9 +1979,9 @@ fn delete_selection_impl(stoat: &mut Stoat, yank: bool) -> UpdateEffect {
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for (s, e) in spans.iter().rev() {
-            guard.edit(*s..*e, "");
-        }
+        let batch: Vec<(Range<usize>, &str)> =
+            spans.iter().rev().map(|(s, e)| (*s..*e, "")).collect();
+        guard.edit_batch(&batch);
     }
 
     let deleted_ids: std::collections::HashSet<usize> =
@@ -2175,9 +2193,12 @@ pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
         let ws = stoat.active_workspace_mut();
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for unit in units.iter().rev() {
-            guard.edit(unit.insert_offset..unit.insert_offset, &unit.text);
-        }
+        let batch: Vec<(Range<usize>, &str)> = units
+            .iter()
+            .rev()
+            .map(|unit| (unit.insert_offset..unit.insert_offset, unit.text.as_str()))
+            .collect();
+        guard.edit_batch(&batch);
     }
 
     let bias = match dir {
@@ -2291,9 +2312,12 @@ pub(crate) fn execute_replace(stoat: &mut Stoat, ch: char) -> UpdateEffect {
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for (_, s, e, text) in entries.iter().rev() {
-            guard.edit(*s..*e, text);
-        }
+        let batch: Vec<(Range<usize>, &str)> = entries
+            .iter()
+            .rev()
+            .map(|(_, s, e, text)| (*s..*e, text.as_str()))
+            .collect();
+        guard.edit_batch(&batch);
     }
 
     let mut id_to_post: std::collections::HashMap<usize, (usize, usize)> =
@@ -2546,9 +2570,12 @@ pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for (start, end, replacement) in edits.iter().rev() {
-            guard.edit(*start..*end, replacement);
-        }
+        let batch: Vec<(Range<usize>, &str)> = edits
+            .iter()
+            .rev()
+            .map(|(start, end, replacement)| (*start..*end, replacement.as_str()))
+            .collect();
+        guard.edit_batch(&batch);
     }
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
@@ -2663,9 +2690,12 @@ fn apply_line_indent(stoat: &mut Stoat, dir: IndentDir) -> UpdateEffect {
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for (start, end, replacement) in edits.iter().rev() {
-            guard.edit(*start..*end, replacement);
-        }
+        let batch: Vec<(Range<usize>, &str)> = edits
+            .iter()
+            .rev()
+            .map(|(start, end, replacement)| (*start..*end, replacement.as_str()))
+            .collect();
+        guard.edit_batch(&batch);
     }
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
@@ -6747,6 +6777,60 @@ mod tests {
             scan_bracket_match(&rope, len - 1, ')', '(', ')', false, None),
             Some(0),
             "and so is the open"
+        );
+    }
+
+    /// The recorded ops of the focused buffer, newest last.
+    fn focused_buffer_ops(h: &TestHarness) -> Vec<crate::buffer::BufferOp> {
+        let ws = h.stoat.active_workspace();
+        let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
+            panic!("focused pane is not an editor");
+        };
+        let buffer_id = ws.editors[editor_id].buffer_id;
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        guard.history().ops
+    }
+
+    /// Several selections take one batched edit where they used to take one
+    /// call each. A batch has to leave behind what those calls did. The
+    /// recorded ops are what says so, carrying the same ranges and the same
+    /// replacements in the same back-to-front order.
+    #[test]
+    fn switch_case_over_three_selections_records_what_three_edits_would() {
+        use crate::buffer::BufferOp;
+
+        let mut h = TestHarness::with_size(20, 6);
+        let path = h.write_file("s.txt", "ab\ncd\nef\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AddSelectionBelow);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AddSelectionBelow);
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 1, false), (3, 4, false), (6, 7, false)],
+            "one cursor per row"
+        );
+
+        let before = focused_buffer_ops(&h).len();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+
+        let ops = focused_buffer_ops(&h);
+        assert_eq!(
+            &ops[before..],
+            &[
+                BufferOp::Edit {
+                    old: 6..7,
+                    text: "E".to_owned()
+                },
+                BufferOp::Edit {
+                    old: 3..4,
+                    text: "C".to_owned()
+                },
+                BufferOp::Edit {
+                    old: 0..1,
+                    text: "A".to_owned()
+                },
+            ],
         );
     }
 }

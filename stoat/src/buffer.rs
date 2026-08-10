@@ -120,7 +120,7 @@ pub struct TextBuffer {
 /// A single replayable mutation on a [`TextBuffer`]. Edits record the `(range,
 /// text)` inputs; undos target the top of the edit history the same way
 /// interactive `u` does; redos target the top of the redo history.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BufferOp {
     Edit { old: Range<usize>, text: String },
     Undo,
