@@ -26,6 +26,7 @@ use ratatui::buffer::Buffer;
 use std::{
     backtrace::Backtrace,
     io::{self, Write},
+    ops::Range,
     panic,
     sync::{Arc, Once},
     thread,
@@ -292,22 +293,30 @@ async fn run(
     Ok(())
 }
 
-/// How long to wait for the terminal's ident reply before giving up.
+/// How long to wait before giving up on a terminal that answers neither query
+/// the handshake sends.
 ///
-/// Sized to cover an ssh round trip while bounding the startup window during
-/// which typed keystrokes are consumed here and lost.
-const IDENT_REPLY_TIMEOUT: Duration = Duration::from_millis(250);
+/// A fallback rather than a budget for the round trip. The cursor-position
+/// report is what ends the wait on a foreign terminal and the ident reply is
+/// what ends it on a stoatty, so link latency never decides the verdict and
+/// this only has to be longer than any terminal takes to answer at all.
+const HANDSHAKE_FALLBACK: Duration = Duration::from_secs(2);
 
 /// Announce this editor to the terminal and report whether a stoatty answered.
 ///
-/// Writes an APC hello frame identifying this process, then reads raw stdin for
-/// up to [`IDENT_REPLY_TIMEOUT`] for the terminal's ident reply. The hello is
-/// sent unconditionally because an APC frame degrades to nothing in a foreign
-/// terminal, so a missing reply is the normal headless, ssh, or
-/// foreign-terminal case, reported as `false`.
+/// Writes an APC hello frame identifying this process followed by a
+/// cursor-position query, then reads raw stdin until one of them is answered.
+/// A stoatty answers both through one queue, in that order. Every other
+/// terminal answers only the second. So the report arriving with no ident ahead
+/// of it settles the question, however slow the link, rather than a timeout
+/// guessing at it.
 ///
-/// Returns whether a stoatty answered, and every byte read that was not the
-/// reply. Those are what someone typed while this owned fd 0, and the caller
+/// The hello goes out unconditionally, since an APC frame degrades to nothing
+/// in a foreign terminal. A stdin that is not a tty cannot carry an answer back
+/// at all, so that case reports `false` without probing or waiting.
+///
+/// Returns whether a stoatty answered, and every byte read that was neither
+/// answer. Those are what someone typed while this owned fd 0, and the caller
 /// replays them rather than losing what was typed at launch. Crossterm cannot
 /// own stdin until this window closes, since its parser has no way to surface
 /// an APC reply, which is why the handshake reads fd 0 directly first.
@@ -321,14 +330,29 @@ fn stoatty_handshake() -> (bool, Vec<u8>) {
         version: env!("CARGO_PKG_VERSION").to_owned(),
     });
 
+    let probing = stdin_is_tty();
     {
+        // The query rides the same flush as the hello, so the terminal queues
+        // both answers together and the order between them is its own. Sent
+        // only when something can answer, since an unread report would sit in
+        // the terminal's input for whatever runs next.
         let mut stdout = io::stdout().lock();
-        if stdout.write_all(&hello).is_err() || stdout.flush().is_err() {
+        let wrote = match probing {
+            true => stdout
+                .write_all(&hello)
+                .and_then(|()| stdout.write_all(b"\x1b[6n")),
+            false => stdout.write_all(&hello),
+        };
+        if wrote.is_err() || stdout.flush().is_err() {
             return (false, Vec::new());
         }
     }
+    if !probing {
+        tracing::info!("stdin is not a tty, so no terminal can answer the handshake");
+        return (false, Vec::new());
+    }
 
-    let (reply, leftover) = read_ident_reply(IDENT_REPLY_TIMEOUT);
+    let (reply, leftover) = read_ident_reply(HANDSHAKE_FALLBACK);
     match &reply {
         Some(reply) => tracing::info!(
             stoatty_pid = reply.pid,
@@ -342,15 +366,98 @@ fn stoatty_handshake() -> (bool, Vec<u8>) {
     (reply.is_some(), leftover)
 }
 
-/// Read raw stdin for up to `timeout`, returning the terminal's ident reply if
-/// one arrives within it, and every byte read that was not part of it.
+/// What the bytes read so far say about the terminal on the other end.
+#[derive(Debug, PartialEq, Eq)]
+enum Handshake {
+    /// A stoatty answered with its ident.
+    Stoatty(IdentReply),
+    /// The cursor-position query came back with no ident ahead of it, which
+    /// only a terminal that ignored the hello does.
+    Foreign,
+    /// Neither answer has arrived in full yet.
+    Pending,
+}
+
+/// Read the handshake's answer out of `buf`, removing the bytes it accounted
+/// for and leaving the rest.
 ///
-/// The leftover is what someone typed while this owned fd 0. It is returned
-/// rather than dropped so the caller can replay it, and on timeout or EOF it is
-/// the whole buffer, which is the case every foreign terminal hits.
+/// What remains is what someone typed while the probe was running, which the
+/// caller replays. Both answers are taken out so none of a terminal's own
+/// chatter is replayed as input.
+///
+/// An APC frame that is not an ident reply is consumed and ignored, since it is
+/// some other terminal-to-program message and not the answer being waited on.
+fn scan_handshake(buf: &mut Vec<u8>) -> Handshake {
+    if let Some(span) = vt_input::apc_span(buf) {
+        let reply =
+            frame::decode(&buf[span.clone()]).and_then(|frame| command::decode_ident_reply(&frame));
+        buf.drain(span);
+        if let Some(reply) = reply {
+            // A stoatty queues the report behind the ident, so it is usually
+            // already here. Taking it now keeps it out of the replay.
+            if let Some(span) = cpr_span(buf) {
+                buf.drain(span);
+            }
+            return Handshake::Stoatty(reply);
+        }
+    }
+
+    match cpr_span(buf) {
+        Some(span) => {
+            buf.drain(span);
+            Handshake::Foreign
+        },
+        None => Handshake::Pending,
+    }
+}
+
+/// The span of a cursor-position report in `bytes`, `ESC [ row ; col R`.
+///
+/// Scans past any other CSI sequence, since a keystroke typed during the probe
+/// arrives as one and must not be mistaken for the answer.
+fn cpr_span(bytes: &[u8]) -> Option<Range<usize>> {
+    let mut from = 0;
+    while let Some(offset) = bytes[from..].windows(2).position(|pair| pair == b"\x1b[") {
+        let start = from + offset;
+        let params_at = start + 2;
+        let Some(end) = bytes[params_at..].iter().position(|byte| *byte == b'R') else {
+            // No terminator yet, and any later `ESC [` would be inside this
+            // unfinished sequence rather than a report of its own.
+            return None;
+        };
+
+        let params = &bytes[params_at..params_at + end];
+        let (row, col) = params.split_at(params.iter().position(|byte| *byte == b';')?);
+        let digits = |field: &[u8]| !field.is_empty() && field.iter().all(u8::is_ascii_digit);
+        if digits(row) && digits(&col[1..]) {
+            return Some(start..params_at + end + 1);
+        }
+        from = start + 2;
+    }
+    None
+}
+
+/// Whether fd 0 is a terminal, and so whether anything can answer the probe.
 #[cfg(unix)]
-fn read_ident_reply(timeout: Duration) -> (Option<IdentReply>, Vec<u8>) {
-    let deadline = Instant::now() + timeout;
+fn stdin_is_tty() -> bool {
+    unsafe { libc::isatty(libc::STDIN_FILENO) == 1 }
+}
+
+#[cfg(not(unix))]
+fn stdin_is_tty() -> bool {
+    false
+}
+
+/// Read raw stdin until the terminal answers one of the handshake's two
+/// queries, or `fallback` elapses, returning the ident reply if a stoatty was
+/// the one that answered.
+///
+/// The wait ends on an answer rather than on the clock, so a slow link delays
+/// startup by its own round trip instead of being misread as a foreign
+/// terminal. The elapsed case is a terminal that answered neither.
+#[cfg(unix)]
+fn read_ident_reply(fallback: Duration) -> (Option<IdentReply>, Vec<u8>) {
+    let deadline = Instant::now() + fallback;
     let mut buf = Vec::new();
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
         let ms = remaining.as_millis().min(i32::MAX as u128) as libc::c_int;
@@ -370,11 +477,10 @@ fn read_ident_reply(timeout: Duration) -> (Option<IdentReply>, Vec<u8>) {
         }
         buf.extend_from_slice(&chunk[..n as usize]);
 
-        if let Some(span) = vt_input::apc_span(&buf) {
-            let reply = frame::decode(&buf[span.clone()])
-                .and_then(|frame| command::decode_ident_reply(&frame));
-            buf.drain(span);
-            return (reply, buf);
+        match scan_handshake(&mut buf) {
+            Handshake::Stoatty(reply) => return (Some(reply), buf),
+            Handshake::Foreign => return (None, buf),
+            Handshake::Pending => {},
         }
     }
 
@@ -382,7 +488,7 @@ fn read_ident_reply(timeout: Duration) -> (Option<IdentReply>, Vec<u8>) {
 }
 
 #[cfg(not(unix))]
-fn read_ident_reply(_timeout: Duration) -> (Option<IdentReply>, Vec<u8>) {
+fn read_ident_reply(_fallback: Duration) -> (Option<IdentReply>, Vec<u8>) {
     (None, Vec::new())
 }
 
@@ -469,6 +575,91 @@ fn copy_clamped(dst: &mut Buffer, src: &Buffer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ident_frame() -> Vec<u8> {
+        command::encode_ident_reply(&IdentReply {
+            pid: 7,
+            log_id: "abc".into(),
+            hostname: "host".into(),
+            version: "1.2.3".into(),
+        })
+    }
+
+    fn ident() -> IdentReply {
+        IdentReply {
+            pid: 7,
+            log_id: "abc".into(),
+            hostname: "host".into(),
+            version: "1.2.3".into(),
+        }
+    }
+
+    /// The probe's verdict comes from what arrived, and both answers leave the
+    /// buffer so only what was typed is replayed.
+    ///
+    /// The cursor-position report is what makes this a probe rather than a
+    /// guess. A stoatty queues its ident ahead of the report, so a report with
+    /// no ident before it means no stoatty, however slow the link was.
+    #[test]
+    fn the_probe_reads_a_verdict_out_of_what_arrived() {
+        let cpr = b"\x1b[24;80R".to_vec();
+        let cases: Vec<(&str, Vec<u8>, Handshake, &[u8])> = vec![
+            (
+                "a stoatty answers the ident first, then the report",
+                [ident_frame(), cpr.clone()].concat(),
+                Handshake::Stoatty(ident()),
+                b"",
+            ),
+            (
+                "a foreign terminal answers only the report",
+                cpr.clone(),
+                Handshake::Foreign,
+                b"",
+            ),
+            (
+                "neither answer yet, so nothing is decided or consumed",
+                b"hi".to_vec(),
+                Handshake::Pending,
+                b"hi",
+            ),
+            (
+                "typing around a stoatty's answers is what is left over",
+                [b"ab".to_vec(), ident_frame(), b"cd".to_vec(), cpr.clone()].concat(),
+                Handshake::Stoatty(ident()),
+                b"abcd",
+            ),
+            (
+                "and typing around a foreign terminal's report likewise",
+                [b"ab".to_vec(), cpr.clone(), b"cd".to_vec()].concat(),
+                Handshake::Foreign,
+                b"abcd",
+            ),
+            (
+                "an arrow key is a CSI too, and is not the report",
+                b"\x1b[A".to_vec(),
+                Handshake::Pending,
+                b"\x1b[A",
+            ),
+            (
+                "an arrow key ahead of the report does not hide it",
+                [b"\x1b[A".to_vec(), cpr.clone()].concat(),
+                Handshake::Foreign,
+                b"\x1b[A",
+            ),
+            (
+                "a half-arrived report decides nothing",
+                b"\x1b[24;8".to_vec(),
+                Handshake::Pending,
+                b"\x1b[24;8",
+            ),
+        ];
+
+        for (name, bytes, verdict, leftover) in cases {
+            let mut buf = bytes;
+            assert_eq!(scan_handshake(&mut buf), verdict, "{name}");
+            assert_eq!(buf, leftover, "leftover for: {name}");
+        }
+    }
 
     /// Every event read reaches the channel, and a reader that goes away ends
     /// the loop.
