@@ -4400,15 +4400,12 @@ fn sync_symbol_finder_preview(stoat: &mut Stoat) {
         let buffer_snapshot = display_snapshot.buffer_snapshot();
         let rope = buffer_snapshot.rope();
         let clamped = offset.min(rope.len());
-        editor.selections.transform(buffer_snapshot, |sel| {
-            crate::action_handlers::movement::land_block_cursor(
-                sel.id,
-                clamped,
-                stoat_text::SelectionGoal::None,
-                rope,
-                buffer_snapshot,
-            )
-        });
+        crate::action_handlers::movement::move_cursors(
+            &mut editor.selections,
+            buffer_snapshot,
+            false,
+            |_| Some((clamped, stoat_text::SelectionGoal::None)),
+        );
     }
 }
 

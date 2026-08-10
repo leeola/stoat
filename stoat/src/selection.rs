@@ -532,6 +532,7 @@ impl SelectionsCollection {
                 head: ends[0],
                 tail: ends[1],
                 goal: sel.goal,
+                reversed: sel.reversed,
             })
             .collect()
     }
@@ -555,11 +556,73 @@ impl SelectionsCollection {
         end_cell: EndCell,
         snapshot: &MultiBufferSnapshot,
     ) {
+        let rope = snapshot.rope();
+        self.land_from_offsets(snapshot, |sel| {
+            let found = landings
+                .binary_search_by_key(&sel.id, |(id, _, _)| *id)
+                .ok()?;
+            let (_, start, goal) = landings[found];
+            let forward = next_char_boundary(rope, start);
+            // Nothing after the landing means it is on the end of the rope,
+            // where `end_cell` decides between the character before it and no
+            // character at all.
+            let (start, end) = match (forward > start, end_cell) {
+                (true, _) => (start, forward),
+                (false, EndCell::Previous) => (prev_char_boundary(rope, start), start),
+                (false, EndCell::Empty) => (start, start),
+            };
+            Some(SpanLanding {
+                id: sel.id,
+                start,
+                end,
+                reversed: false,
+                goal,
+            })
+        });
+    }
+
+    /// Replace named selections with the spans given as offsets.
+    ///
+    /// `landings` carries a selection id, the span it lands on, which way it
+    /// faces, and the goal to keep. A selection the list does not name keeps
+    /// the span, the goal, and the anchors it has. Order does not matter, the
+    /// lookup being by id.
+    ///
+    /// The counterpart to [`Self::land_block_cursors`] for a caller landing a
+    /// span rather than a cursor. What it saves is the same round trip: every
+    /// anchor is minted in one batched walk instead of two root descents per
+    /// selection.
+    pub(crate) fn replace_from_offsets(
+        &mut self,
+        landings: &[SpanLanding],
+        snapshot: &MultiBufferSnapshot,
+    ) {
+        self.land_from_offsets(snapshot, |sel| {
+            landings
+                .iter()
+                .find(|landing| landing.id == sel.id)
+                .copied()
+        });
+    }
+
+    /// Rebuild the collection from spans in offsets, one per selection.
+    ///
+    /// `landing_for` answers with where a selection lands, or [`None`] for one
+    /// the caller is not moving, whose span is read out of its anchors instead.
+    ///
+    /// From there both landing paths run the same pipeline. Every endpoint is
+    /// clipped to a grapheme boundary, the set is ordered by start, whatever
+    /// overlaps is merged, and every anchor that moved is minted in one batched
+    /// walk per bias.
+    fn land_from_offsets<F>(&mut self, snapshot: &MultiBufferSnapshot, landing_for: F)
+    where
+        F: Fn(&Selection<Anchor>) -> Option<SpanLanding>,
+    {
         assert!(
             !self.disjoint.is_empty(),
             "SelectionsCollection invariant: at least one selection"
         );
-        let named = |id: usize| landings.binary_search_by_key(&id, |(id, _, _)| *id);
+        let wanted: Vec<Option<SpanLanding>> = self.disjoint.iter().map(landing_for).collect();
 
         // Only the selections no landing names have to be read out of their
         // anchors. A landed one already knows where it is.
@@ -567,40 +630,29 @@ impl SelectionsCollection {
             let anchors: Vec<Anchor> = self
                 .disjoint
                 .iter()
-                .filter(|sel| named(sel.id).is_err())
-                .flat_map(|sel| [sel.start, sel.end])
+                .zip(&wanted)
+                .filter(|(_, landing)| landing.is_none())
+                .flat_map(|(sel, _)| [sel.start, sel.end])
                 .collect();
             snapshot.resolve_anchors_batch(&anchors)
         };
 
-        let rope = snapshot.rope();
         let mut carried = carried.chunks_exact(2);
         let mut entries: Vec<Landing> = self
             .disjoint
             .iter()
-            .map(|sel| match named(sel.id) {
-                Ok(found) => {
-                    let (_, start, goal) = landings[found];
-                    let forward = next_char_boundary(rope, start);
-                    // Nothing after the landing means it is on the end of the
-                    // rope, where `end_cell` decides between the character
-                    // before it and no character at all.
-                    let (start, end) = match (forward > start, end_cell) {
-                        (true, _) => (start, forward),
-                        (false, EndCell::Previous) => (prev_char_boundary(rope, start), start),
-                        (false, EndCell::Empty) => (start, start),
-                    };
-                    Landing {
-                        start,
-                        end,
-                        id: sel.id,
-                        reversed: false,
-                        goal,
-                        start_clipped: false,
-                        keep: None,
-                    }
+            .zip(wanted)
+            .map(|(sel, landing)| match landing {
+                Some(landing) => Landing {
+                    start: landing.start,
+                    end: landing.end,
+                    id: landing.id,
+                    reversed: landing.reversed,
+                    goal: landing.goal,
+                    start_clipped: false,
+                    keep: None,
                 },
-                Err(_) => {
+                None => {
                     let span = carried.next().expect("one span per unnamed selection");
                     Landing {
                         start: span[0],
@@ -615,6 +667,7 @@ impl SelectionsCollection {
             })
             .collect();
 
+        let rope = snapshot.rope();
         for entry in &mut entries {
             let start = rope.clip_to_grapheme_boundary(entry.start, Bias::Left);
             let end = rope.clip_to_grapheme_boundary(entry.end, Bias::Right);
@@ -708,6 +761,20 @@ impl SelectionsCollection {
     }
 }
 
+/// Where a selection lands, worked out in offsets by whoever moved it.
+///
+/// See [`SelectionsCollection::replace_from_offsets`], which takes these, and
+/// [`SelectionsCollection::land_block_cursors`], which builds them for the
+/// narrower case of a 1-wide cursor.
+#[derive(Clone, Copy)]
+pub(crate) struct SpanLanding {
+    pub(crate) id: usize,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) reversed: bool,
+    pub(crate) goal: SelectionGoal,
+}
+
 /// One selection read out of its anchors, as a motion needs it.
 ///
 /// See [`SelectionsCollection::resolved_reads`], which produces these.
@@ -716,6 +783,7 @@ pub(crate) struct ResolvedRead {
     pub(crate) head: usize,
     pub(crate) tail: usize,
     pub(crate) goal: SelectionGoal,
+    pub(crate) reversed: bool,
 }
 
 /// What a block cursor landing on the end of the rope covers, there being no
@@ -1203,6 +1271,98 @@ mod tests {
                     end: snapshot.anchor_at(end, Bias::Right),
                     reversed: false,
                     goal: SelectionGoal::None,
+                }
+            })
+            .collect();
+        through_anchors.replace_with(landed, &snapshot);
+
+        assert_eq!(
+            through_offsets.all_anchors(),
+            through_anchors.all_anchors(),
+            "the two routes have to agree on the anchors, not just the offsets",
+        );
+    }
+
+    #[test]
+    fn replacing_from_offsets_matches_building_selections_one_at_a_time() {
+        // The span path has the same job as the cursor one above, for a caller
+        // landing a range rather than a cell. Spans of differing width, some
+        // backward, some overlapping so the merge runs, and endpoints inside a
+        // combining mark and a regional-indicator pair so the clip does.
+        let text: String = (0..40)
+            .map(|i| match i % 3 {
+                0 => format!("line {i} ascii only\n"),
+                1 => format!("line {i} e\u{301}accented\n"),
+                _ => format!("line {i} \u{1F1EC}\u{1F1E7} flag\n"),
+            })
+            .collect();
+        let multi = singleton(&text);
+        let snapshot = multi.snapshot();
+
+        let seed = |collection: &mut SelectionsCollection| {
+            for row in 0..40 {
+                let at = text
+                    .match_indices('\n')
+                    .nth(row)
+                    .map(|(i, _)| i)
+                    .expect("the fixture has the rows");
+                collection.insert_cursor(
+                    snapshot.anchor_at(at.saturating_sub(row % 7), Bias::Right),
+                    SelectionGoal::None,
+                    &snapshot,
+                );
+            }
+        };
+
+        let mut through_offsets = SelectionsCollection::new();
+        let mut through_anchors = SelectionsCollection::new();
+        seed(&mut through_offsets);
+        seed(&mut through_anchors);
+
+        let landings: Vec<SpanLanding> = through_offsets
+            .all_anchors()
+            .iter()
+            .enumerate()
+            .map(|(i, sel)| {
+                let start = (i * 13) % text.len();
+                SpanLanding {
+                    id: sel.id,
+                    start,
+                    end: (start + i % 5).min(text.len()),
+                    reversed: i % 2 == 0,
+                    goal: match i % 4 {
+                        0 => SelectionGoal::Column(i as u32),
+                        _ => SelectionGoal::None,
+                    },
+                }
+            })
+            .collect();
+
+        through_offsets.replace_from_offsets(&landings, &snapshot);
+
+        let landed: Vec<Selection<Anchor>> = through_anchors
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                let landing = landings
+                    .iter()
+                    .find(|landing| landing.id == sel.id)
+                    .expect("every selection is named");
+                let rope = snapshot.rope();
+                let start = rope.clip_to_grapheme_boundary(landing.start, Bias::Left);
+                let end = rope.clip_to_grapheme_boundary(landing.end, Bias::Right);
+                Selection {
+                    id: sel.id,
+                    // A start the clip moved is not where it was asked for, and
+                    // takes the bias it was clipped toward. One that did not move
+                    // is anchored forward like every other endpoint.
+                    start: match start == landing.start {
+                        true => snapshot.anchor_at(start, Bias::Right),
+                        false => snapshot.anchor_at(start, Bias::Left),
+                    },
+                    end: snapshot.anchor_at(end, Bias::Right),
+                    reversed: landing.reversed,
+                    goal: landing.goal,
                 }
             })
             .collect();

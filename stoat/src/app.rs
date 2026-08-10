@@ -7296,12 +7296,8 @@ impl Stoat {
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
         let rope = buf_snap.rope();
-        editor.selections.transform(buf_snap, |sel| {
-            let cursor = stoat_text::cursor_offset(
-                rope,
-                buf_snap.resolve_anchor(&sel.tail()),
-                buf_snap.resolve_anchor(&sel.head()),
-            );
+        action_handlers::movement::move_cursors(&mut editor.selections, buf_snap, false, |read| {
+            let cursor = stoat_text::cursor_offset(rope, read.tail, read.head);
             // The guard peeks at the preceding scalar rather than the cluster,
             // since only a literal newline pins the cursor in place. Any other
             // cluster is stepped over whole.
@@ -7309,13 +7305,7 @@ impl Stoat {
                 Some(ch) if ch != '\n' => rope.prev_grapheme_boundary(cursor),
                 _ => cursor,
             };
-            action_handlers::movement::land_block_cursor(
-                sel.id,
-                back,
-                SelectionGoal::None,
-                rope,
-                buf_snap,
-            )
+            Some((back, SelectionGoal::None))
         });
     }
 
@@ -7379,19 +7369,9 @@ impl Stoat {
 
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        editor.selections.transform(new_buf, |sel| {
-            let cursor = stoat_text::cursor_offset(
-                new_buf.rope(),
-                new_buf.resolve_anchor(&sel.tail()),
-                new_buf.resolve_anchor(&sel.head()),
-            );
-            action_handlers::movement::land_block_cursor(
-                sel.id,
-                cursor,
-                SelectionGoal::None,
-                new_buf.rope(),
-                new_buf,
-            )
+        action_handlers::movement::move_cursors(&mut editor.selections, new_buf, false, |read| {
+            let cursor = stoat_text::cursor_offset(new_buf.rope(), read.tail, read.head);
+            Some((cursor, SelectionGoal::None))
         });
     }
 

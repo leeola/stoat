@@ -193,9 +193,8 @@ fn jump_to_match(stoat: &mut Stoat, regex: &CursorRegex, direction: SearchDirect
     };
     let Some(target) = target else { return false };
 
-    let new_buf = buffer_snapshot;
-    editor.selections.transform(new_buf, |sel| {
-        super::movement::land_block_cursor(sel.id, target, SelectionGoal::None, rope, new_buf)
+    super::movement::move_cursors(&mut editor.selections, buffer_snapshot, false, |_| {
+        Some((target, SelectionGoal::None))
     });
     true
 }
