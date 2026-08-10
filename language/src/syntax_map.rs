@@ -430,6 +430,15 @@ impl SyntaxMap {
             .map(|p| ((p.start_offset, p.end_offset, p.language.name), p))
             .collect();
 
+        // The third wants whichever prior overlaps a range, which no exact key
+        // answers, so it reads a start-ordered index of the same list.
+        let prior_key = |p: &PriorInjection| IndexKey {
+            depth: p.depth,
+            language: p.language.name,
+            span: p.start_offset as usize..p.end_offset as usize,
+        };
+        let priors_by_span = InjectionIndex::new(prior_injections.iter(), prior_key);
+
         let root_tree = match root {
             Some(tree) => tree.clone(),
             None => {
@@ -624,12 +633,14 @@ impl SyntaxMap {
                 if let Some(filter) = injection_filter_ranges {
                     let found_start = ranges.iter().map(|r| r.start).min().unwrap_or(0);
                     let found_end = ranges.iter().map(|r| r.end).max().unwrap_or(0);
-                    let prior = prior_injections.iter().find(|p| {
-                        p.depth == parent_depth + 1
-                            && p.language.name == inner_lang.name
-                            && (p.start_offset as usize) < found_end
-                            && found_start < p.end_offset as usize
-                    });
+                    let prior = priors_by_span
+                        .overlapping(
+                            parent_depth + 1,
+                            inner_lang.name,
+                            found_start..found_end,
+                            prior_key,
+                        )
+                        .next();
                     if let Some(prior) = prior {
                         ranges.extend(
                             prior
@@ -696,12 +707,14 @@ impl SyntaxMap {
                     // by the exact bounds a single-range layer is looked up on.
                     // The layer's own text is what carries across, not its
                     // extent.
-                    let prior = prior_injections.iter().find(|p| {
-                        p.depth == parent_depth + 1
-                            && p.language.name == inner_lang.name
-                            && (p.start_offset as usize) < found_end
-                            && found_start < p.end_offset as usize
-                    });
+                    let prior = priors_by_span
+                        .overlapping(
+                            parent_depth + 1,
+                            inner_lang.name,
+                            found_start..found_end,
+                            prior_key,
+                        )
+                        .next();
 
                     let merged_start = found_start;
                     let merged_end = found_end;
@@ -771,6 +784,73 @@ struct PriorInjection {
     end_offset: u32,
     language: Arc<Language>,
     tree: Tree,
+}
+
+/// Injection layers grouped by the language and depth they sit at, so a lookup
+/// answers from one group rather than from every layer in the file.
+///
+/// Within a group the layers are disjoint, so ordering them by start also
+/// orders them by end and the ones overlapping any range form a contiguous
+/// run. Both facts are what make [`Self::overlapping`] a search rather than a
+/// scan, and a markdown file's hundreds of fences make that the difference
+/// between a lookup and a walk of the file per lookup.
+///
+/// The disjointness holds because a language's injection is either combined or
+/// not. Combined gives one layer per group covering every host range;
+/// otherwise each host node gets its own layer, and host nodes do not overlap.
+struct InjectionIndex<'a, T> {
+    groups: HashMap<(u32, &'static str), Vec<&'a T>>,
+}
+
+impl<'a, T> InjectionIndex<'a, T> {
+    /// Index `items` by the `(depth, language name, start, end)` each reports.
+    fn new(items: impl IntoIterator<Item = &'a T>, key: impl Fn(&T) -> IndexKey) -> Self {
+        let mut groups: HashMap<(u32, &'static str), Vec<&'a T>> = HashMap::new();
+        for item in items {
+            let k = key(item);
+            groups.entry((k.depth, k.language)).or_default().push(item);
+        }
+        for group in groups.values_mut() {
+            group.sort_by_key(|item| key(item).span.start);
+
+            debug_assert!(
+                group
+                    .windows(2)
+                    .all(|w| key(w[0]).span.end <= key(w[1]).span.start),
+                "layers at one depth and language must not overlap, or ordering \
+                 by start would not order by end and the search below would \
+                 miss the first overlapping layer",
+            );
+        }
+        Self { groups }
+    }
+
+    /// The layers at `depth` in `language` whose span overlaps `span`, in start
+    /// order.
+    fn overlapping(
+        &self,
+        depth: u32,
+        language: &'static str,
+        span: Range<usize>,
+        key: impl Fn(&T) -> IndexKey,
+    ) -> impl Iterator<Item = &'a T> {
+        let group = self.groups.get(&(depth, language));
+        let start = group.map_or(0, |group| {
+            group.partition_point(|item| key(item).span.end <= span.start)
+        });
+
+        group
+            .into_iter()
+            .flat_map(move |group| group[start..].iter().copied())
+            .take_while(move |item| key(item).span.start < span.end)
+    }
+}
+
+/// What [`InjectionIndex`] reads off a layer to place and find it.
+struct IndexKey {
+    depth: u32,
+    language: &'static str,
+    span: Range<usize>,
 }
 
 /// Note where a freshly parsed injection layer could have restyled text.
@@ -851,6 +931,17 @@ fn carry_unvisited_injections(
 ) {
     let overlaps = |a: Range<usize>, b: &Range<usize>| a.start < b.end && b.start < a.end;
 
+    // Indexed once rather than scanned per prior layer. A markdown file with
+    // hundreds of fences has as many layers on both sides, and the fold below
+    // asks after every one of them.
+    let fresh_key = |l: &SyntaxLayer| IndexKey {
+        depth: l.depth,
+        language: l.language.name,
+        span: l.start_offset as usize..l.end_offset as usize,
+    };
+    let fresh_index = InjectionIndex::new(layers.iter(), fresh_key);
+
+    let mut carried: Vec<SyntaxLayer> = Vec::new();
     for layer in prior {
         let span = layer.start_offset as usize..layer.end_offset as usize;
 
@@ -866,13 +957,8 @@ fn carry_unvisited_injections(
         // spanning all of them, so a fresh layer can cover a prior one at a
         // different offset. Matching on overlap rather than equality keeps
         // that from producing two layers over the same text.
-        let superseding = layers
-            .iter()
-            .filter(|l| {
-                l.depth == layer.depth
-                    && l.language.name == layer.language.name
-                    && overlaps(l.start_offset as usize..l.end_offset as usize, &span)
-            })
+        let superseding = fresh_index
+            .overlapping(layer.depth, layer.language.name, span.clone(), fresh_key)
             .fold(None::<Range<usize>>, |acc, l| {
                 let extent = l.start_offset as usize..l.end_offset as usize;
                 Some(match acc {
@@ -917,7 +1003,10 @@ fn carry_unvisited_injections(
             continue;
         }
 
-        layers.push(SyntaxLayer {
+        // Held back rather than pushed, because the index above borrows
+        // `layers` for the whole loop. Carried layers cannot supersede one
+        // another anyway, so nothing later in the loop would have seen them.
+        carried.push(SyntaxLayer {
             depth: layer.depth,
             start_offset: layer.start_offset,
             end_offset: layer.end_offset,
@@ -925,6 +1014,9 @@ fn carry_unvisited_injections(
             tree: layer.tree.clone(),
         });
     }
+
+    drop(fresh_index);
+    layers.append(&mut carried);
 }
 
 /// Map a byte offset from pre-edit into post-edit coordinates.
