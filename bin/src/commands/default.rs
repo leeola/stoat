@@ -326,14 +326,17 @@ fn run_tui(
             user_themes,
             env_theme,
         );
-        stoat.set_apc_tx(apc_tx);
+        stoat.set_apc_tx(apc_tx.clone());
         stoat.set_stoatty_rx(stoatty_rx);
         stoat.set_window_ipc(std::env::var_os("STOATTY_WINDOW_SOCKET").map(PathBuf::from));
         stoat.set_version_info(VERSION_INFO);
         stoat.set_lsp_auto_spawn(true);
         stoat.set_env_auto_load(true);
         stoat.set_diff_warm_auto(true);
-        stoat.set_clipboard_host(Arc::new(LocalClipboard::new()));
+        // OSC 52 rides the same ordered channel the UI thread drains to stdout,
+        // so a large yank over SSH never blocks the event loop on the pipe and
+        // never lands mid-frame.
+        stoat.set_clipboard_host(Arc::new(LocalClipboard::new(Some(apc_tx))));
         if continue_ || resume {
             stoat.load_active_workspace_state();
         }
