@@ -41,9 +41,16 @@ impl TermSelection {
         }
     }
 
-    /// Move the reaching end to `(row, col)`, leaving the anchor fixed.
-    pub fn extend_to(&mut self, row: usize, col: usize) {
+    /// Move the reaching end to `(row, col)`, leaving the anchor fixed, and
+    /// report whether that moved it.
+    ///
+    /// A terminal in any-motion tracking reports a drag per pointer motion
+    /// rather than per cell, so a sweep across one character arrives many
+    /// times over. The answer is what lets a caller drop the repeats.
+    pub fn extend_to(&mut self, row: usize, col: usize) -> bool {
+        let moved = self.head != (row, col);
         self.head = (row, col);
+        moved
     }
 
     /// The endpoints in reading order, `(start, end)` with `start <= end`.

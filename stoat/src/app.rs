@@ -5638,6 +5638,15 @@ impl Stoat {
                 let editor = ws.editors.get_mut(editor_id).expect("editor exists");
                 let snapshot = editor.display_map.snapshot();
                 let buf_snap = snapshot.buffer_snapshot();
+
+                // The head already covers this offset, so the transform below
+                // would rebuild the selection as it stands and the frame after
+                // it would paint what is on screen.
+                let head = editor.selections.newest_anchor().head();
+                if buf_snap.resolve_anchor(&head) == offset {
+                    return false;
+                }
+
                 let head_anchor = buf_snap.anchor_at(offset, Bias::Right);
                 editor.selections.transform(buf_snap, |sel| {
                     let tail_anchor = sel.tail();
@@ -5739,10 +5748,12 @@ impl Stoat {
                 self.terminal_drag = Some((term_id, true));
                 let ws = self.active_workspace_mut();
                 let session = ws.terms.get_mut(term_id).expect("focused term exists");
-                if let Some(selection) = session.selection.as_mut() {
-                    selection.extend_to(cell_row, cell_col);
+                match session.selection.as_mut() {
+                    // Reporting no change is what drops the frame for a drag
+                    // that landed back on the cell the head already holds.
+                    Some(selection) => selection.extend_to(cell_row, cell_col),
+                    None => true,
                 }
-                true
             },
             MouseEventKind::Up(MouseButton::Left) => {
                 let Some((drag_term, moved)) = self.terminal_drag.take() else {
@@ -14695,6 +14706,32 @@ mod tests {
             h.stoat.terminal_drag.is_none(),
             "the drag clears on release"
         );
+    }
+
+    /// The terminal arm drops the same repeats the editor arm does, and for the
+    /// same reason. A release after them still copies, so the dedupe costs the
+    /// selection nothing.
+    #[test]
+    fn a_repeated_terminal_drag_on_the_settled_cell_costs_no_frame() {
+        use crossterm::event::MouseButton;
+
+        let mut h = Stoat::test();
+        let _ = focused_terminal_pane(&mut h, b"hello world");
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0));
+        let moved = h
+            .stoat
+            .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 0));
+        let repeat = h
+            .stoat
+            .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 0));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 4, 0));
+
+        assert_eq!(moved, UpdateEffect::Redraw, "the head moved, so repaint");
+        assert_eq!(repeat, UpdateEffect::None, "nothing moved, so no repaint");
+        assert_eq!(h.fake_clipboard().writes(), vec!["hello"]);
     }
 
     #[test]
@@ -26172,6 +26209,43 @@ mod tests {
             area.x + 4,
             area.y,
         ));
+        assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
+    }
+
+    /// A terminal in any-motion tracking reports a drag per pointer motion, not
+    /// per cell, so most of a sweep's events land where the last one did. The
+    /// one that moves the head paints. The repeats behind it have nothing to
+    /// show and must not cost a frame. Releasing still copies, which is what
+    /// says the drag itself was left alone.
+    #[test]
+    fn a_repeated_editor_drag_on_the_settled_cell_costs_no_frame() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "hello\nworld");
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + 1,
+            area.y,
+        ));
+
+        let moved = h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            area.x + 4,
+            area.y,
+        ));
+        let repeat = h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            area.x + 4,
+            area.y,
+        ));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            area.x + 4,
+            area.y,
+        ));
+
+        assert_eq!(moved, UpdateEffect::Redraw, "the head moved, so repaint");
+        assert_eq!(repeat, UpdateEffect::None, "nothing moved, so no repaint");
         assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
     }
 
