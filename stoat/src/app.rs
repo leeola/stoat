@@ -770,6 +770,12 @@ pub struct Stoat {
     /// Whether the window-event socket is currently connected. Gates pane
     /// detach, which needs stoatty to host the aux window and report its events.
     pub(crate) window_ipc_connected: bool,
+    /// Whether the zoom combo is currently claimed from the hosting terminal.
+    ///
+    /// The claim needs both a stoatty and a window socket reaching this process,
+    /// which arrive independently and in either order, so this keeps whichever
+    /// lands second from claiming twice and the release from going out unclaimed.
+    zoom_claimed: bool,
     /// Aux windows stoatty has been told to open, keyed by window id with the
     /// cell size last sent. [`Self::emit_windows`] diffs it against the detached
     /// panes each frame to emit the WindowOpen and WindowClose commands.
@@ -1912,6 +1918,7 @@ impl Stoat {
             window_ipc_rx,
             stoatty_rx,
             window_ipc_connected: false,
+            zoom_claimed: false,
             aux_windows: std::collections::BTreeMap::new(),
             aux_cursor: None,
             _index_build_task: None,
@@ -2228,9 +2235,30 @@ impl Stoat {
 
         self.stoatty = true;
         self.emit_theme_default_colors();
-        self.emit_zoom_capture(true);
+        self.sync_zoom_claim();
 
         UpdateEffect::Redraw
+    }
+
+    /// Claim the zoom combo once both halves of the round trip exist, and
+    /// release it when either goes away.
+    ///
+    /// The presses come back over the window socket, so claiming without one
+    /// swallows them. Stoatty stops stepping its font and queues each press for
+    /// a client that never connects. That is the ordinary state over ssh, where
+    /// the APC handshake succeeds because APC rides the link while
+    /// `STOATTY_WINDOW_SOCKET` does not.
+    ///
+    /// Called from whichever of the two arrives second, and from the
+    /// disconnect, which is what hands the combo back to a stoatty outliving
+    /// this process.
+    fn sync_zoom_claim(&mut self) {
+        let claim = self.stoatty && self.window_ipc_connected;
+        if claim == self.zoom_claimed {
+            return;
+        }
+        self.zoom_claimed = claim;
+        self.emit_zoom_capture(claim);
     }
 
     /// Connect to stoatty's window-event socket at `socket`, if set, so detached
@@ -2259,10 +2287,12 @@ impl Stoat {
         let event = match message {
             WindowIpc::Connected => {
                 self.window_ipc_connected = true;
+                self.sync_zoom_claim();
                 return UpdateEffect::None;
             },
             WindowIpc::Disconnected => {
                 self.window_ipc_connected = false;
+                self.sync_zoom_claim();
                 return UpdateEffect::None;
             },
             WindowIpc::Event(event) => event,
@@ -8454,10 +8484,11 @@ impl Stoat {
     ///
     /// While claimed the terminal forwards each press as a
     /// [`WindowIpcEvent::Zoom`] instead of stepping its own font size, which is
-    /// what lets the combo mean whatever the current context calls for. The
-    /// claim lasts the session, so this is sent once from
-    /// [`Self::handle_stoatty_present`] rather than tracked per frame, and the
-    /// terminal drops it when this process exits.
+    /// what lets the combo mean whatever the current context calls for.
+    ///
+    /// [`Self::sync_zoom_claim`] decides when to call this and holds the reason.
+    /// A claim outlives no more than the window socket carrying the presses
+    /// back, so it is not a once-per-session send.
     ///
     /// A no-op until [`Self::stoatty`] confirms a listener, since under any
     /// other terminal the combo never reaches stoat at all and that terminal
@@ -11955,10 +11986,13 @@ mod tests {
     }
 
     /// The bin layer wires the app up before the run loop drains the handshake,
-    /// so the session-scoped claims cannot go out there and ride confirmation
-    /// instead.
+    /// so the theme defaults cannot go out there and ride confirmation instead.
+    ///
+    /// The zoom claim does not ride with them. It needs the window socket to
+    /// carry the presses back, and over ssh the handshake succeeds while that
+    /// socket never crosses the link.
     #[test]
-    fn confirming_a_stoatty_sends_the_session_scoped_claims() {
+    fn confirming_a_stoatty_sends_the_theme_defaults_alone() {
         let mut h = crate::test_harness::TestHarness::with_size(80, 24);
         h.stoat.stoatty = false;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -11969,17 +12003,74 @@ mod tests {
         let sent: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
             .flatten()
             .collect();
-        let mut expected = osc_default_colors(&h.stoat.theme);
+        let expected = osc_default_colors(&h.stoat.theme);
         assert!(
             expected.starts_with(b"\x1b]10;"),
             "the harness theme defines the default colors this covers"
         );
-        stoatty_protocol::command::encode_zoom_capture_into(&mut expected, true);
         assert_eq!(
             sent, expected,
-            "confirmation pushes the theme defaults, claims the zoom combo, and \
-             sends nothing else"
+            "confirmation pushes the theme defaults and claims nothing, since \
+             a claimed combo with no socket back swallows every press"
         );
+    }
+
+    /// The zoom claim goes out once both halves of the round trip exist,
+    /// whichever arrives second, and comes back when the socket drops.
+    ///
+    /// A press only reaches stoat over the window socket, so claiming the combo
+    /// without one means stoatty stops stepping its font and queues the press
+    /// for a client that never connects. Releasing on disconnect is what hands
+    /// the combo back to a stoatty that outlives this process.
+    #[test]
+    fn the_zoom_claim_waits_for_the_socket_and_is_released_with_it() {
+        let claim = |on: bool| {
+            let mut out = Vec::new();
+            stoatty_protocol::command::encode_zoom_capture_into(&mut out, on);
+            out
+        };
+
+        for present_first in [true, false] {
+            let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+            h.stoat.stoatty = false;
+            h.stoat.window_ipc_connected = false;
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            h.stoat.set_apc_tx(tx);
+
+            let announce = |h: &mut Stoat| h.handle_stoatty_present(true);
+            let connect = |h: &mut Stoat| h.handle_window_ipc(WindowIpc::Connected);
+            match present_first {
+                true => {
+                    announce(&mut h.stoat);
+                    connect(&mut h.stoat);
+                },
+                false => {
+                    connect(&mut h.stoat);
+                    announce(&mut h.stoat);
+                },
+            }
+
+            // Every zoom frame, not a count of the claims, so a release sent
+            // before anything was claimed shows up here too.
+            let zoom_frames = |rx: &mut UnboundedReceiver<Vec<u8>>| {
+                std::iter::from_fn(|| rx.try_recv().ok())
+                    .filter(|frame| *frame == claim(true) || *frame == claim(false))
+                    .collect::<Vec<_>>()
+            };
+
+            assert_eq!(
+                zoom_frames(&mut rx),
+                vec![claim(true)],
+                "the claim is the only zoom frame, arriving present-first: {present_first}",
+            );
+
+            h.stoat.handle_window_ipc(WindowIpc::Disconnected);
+            assert_eq!(
+                zoom_frames(&mut rx),
+                vec![claim(false)],
+                "and losing the socket releases it, arriving present-first: {present_first}",
+            );
+        }
     }
 
     /// A fill frame carries raw ANSI between its APC markers, so a terminal that

@@ -606,6 +606,14 @@ struct State {
     /// the socket could not be bound, in which case aux windows still render but
     /// report nothing upstream.
     window_event_tx: Option<Sender<String>>,
+    /// Whether a child is connected to the window-event socket and reading it.
+    ///
+    /// A zoom press is only forwarded when one is. The socket being bound says
+    /// nothing about that. Over ssh the child never sees the path at all, and a
+    /// child that exits leaves the socket bound behind it. Either way the press
+    /// would queue for a reader that is not there, so the combo goes back to
+    /// stepping the font.
+    window_client_connected: Arc<AtomicBool>,
     /// Unspent vertical wheel travel in physical pixels, accumulated from
     /// high-resolution `PixelDelta` events until it reaches a whole cell so a
     /// trackpad scrolls scrollback smoothly without losing sub-line motion.
@@ -935,7 +943,7 @@ impl ApplicationHandler<PtyEvent> for App {
         // Bind the socket aux windows report focus, resize, and close over, and
         // export its path so the child editor can connect. A bind failure is
         // non-fatal. Aux windows still render, they just report nothing upstream.
-        let (window_socket, window_event_tx) = open_window_event_socket();
+        let (window_socket, window_event_tx, window_client_connected) = open_window_event_socket();
 
         let t_pty = Instant::now();
         let pty = {
@@ -1056,6 +1064,7 @@ impl ApplicationHandler<PtyEvent> for App {
             last_popovers_epoch: None,
             aux: Vec::new(),
             window_event_tx,
+            window_client_connected,
             wheel_pixels: 0.0,
             pointer_cell: (0, 0),
             pressed_button: None,
@@ -1931,7 +1940,10 @@ impl ApplicationHandler<PtyEvent> for App {
                 // control. Per-window font zoom is out of scope, so an aux zoom
                 // combo falls through and reaches the PTY as a plain keystroke.
                 if primary && let Some(delta) = font_step(platform_mod_held, &event.logical_key) {
-                    if forwards_zoom(state.zoom_capture, state.window_event_tx.is_some()) {
+                    if forwards_zoom(
+                        state.zoom_capture,
+                        state.window_client_connected.load(Ordering::Relaxed),
+                    ) {
                         send_window_event(state, WindowIpcEvent::Zoom { window: 0, delta });
                     } else {
                         apply_font_step(state, delta);
@@ -2316,11 +2328,16 @@ fn font_step(platform_mod_held: bool, key: &Key) -> Option<i32> {
 
 /// Whether a zoom-combo press goes to the child instead of stepping the font.
 ///
-/// The claim alone is not enough. Without the window socket the press has
-/// nowhere to go and would simply vanish, so a claimed combo with no way
-/// upstream falls back to font zoom rather than doing nothing.
-fn forwards_zoom(zoom_capture: bool, has_socket: bool) -> bool {
-    zoom_capture && has_socket
+/// The claim alone is not enough. A press with no reader on the other end
+/// queues for a client that may never arrive and simply vanishes, so a claimed
+/// combo with nothing upstream falls back to font zoom rather than doing
+/// nothing.
+///
+/// `client_connected` rather than the socket being bound, because those differ
+/// exactly where this goes wrong. A child reached over ssh never sees the
+/// socket path, and one that exits leaves the socket behind it.
+fn forwards_zoom(zoom_capture: bool, client_connected: bool) -> bool {
+    zoom_capture && client_connected
 }
 
 /// Step the terminal's font size by `delta` and re-fit everything measured in
@@ -3134,23 +3151,24 @@ fn app_has_focus(primary: bool, aux: impl IntoIterator<Item = bool>) -> bool {
 /// Bind the window-event socket and start its serving thread, or report that no
 /// socket is available.
 ///
-/// Returns the path to export as `STOATTY_WINDOW_SOCKET` and the channel aux
-/// windows report on. Both are `None` on a bind failure or a non-unix build,
-/// where aux windows render but report nothing upstream.
-fn open_window_event_socket() -> (Option<PathBuf>, Option<Sender<String>>) {
+/// Returns the path to export as `STOATTY_WINDOW_SOCKET`, the channel aux
+/// windows report on, and the flag saying whether a child is connected to read
+/// them. The first two are `None` on a bind failure or a non-unix build, where
+/// aux windows render but report nothing upstream, and the flag stays false.
+fn open_window_event_socket() -> (Option<PathBuf>, Option<Sender<String>>, Arc<AtomicBool>) {
     #[cfg(unix)]
     {
         match bind_window_socket() {
-            Ok((path, tx)) => (Some(path), Some(tx)),
+            Ok((path, tx, connected)) => (Some(path), Some(tx), connected),
             Err(error) => {
                 tracing::warn!(%error, "window-event socket unavailable");
-                (None, None)
+                (None, None, Arc::new(AtomicBool::new(false)))
             },
         }
     }
     #[cfg(not(unix))]
     {
-        (None, None)
+        (None, None, Arc::new(AtomicBool::new(false)))
     }
 }
 
@@ -3164,7 +3182,7 @@ fn window_socket_path(dir: &Path, pid: u32) -> PathBuf {
 /// Bind the per-pid window-event socket under the log directory and spawn the
 /// thread forwarding queued events to the connected child.
 #[cfg(unix)]
-fn bind_window_socket() -> io::Result<(PathBuf, Sender<String>)> {
+fn bind_window_socket() -> io::Result<(PathBuf, Sender<String>, Arc<AtomicBool>)> {
     let dir = stoat_log::log_dir()?;
     std::fs::create_dir_all(&dir)?;
     let path = window_socket_path(&dir, std::process::id());
@@ -3173,10 +3191,14 @@ fn bind_window_socket() -> io::Result<(PathBuf, Sender<String>)> {
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
     let (tx, rx) = mpsc::channel::<String>();
+    let connected = Arc::new(AtomicBool::new(false));
     std::thread::Builder::new()
         .name("window-events".to_string())
-        .spawn(move || serve_window_events(listener, rx))?;
-    Ok((path, tx))
+        .spawn({
+            let connected = connected.clone();
+            move || serve_window_events(listener, rx, &connected)
+        })?;
+    Ok((path, tx, connected))
 }
 
 /// Forward queued window-event lines to the connected child.
@@ -3185,18 +3207,28 @@ fn bind_window_socket() -> io::Result<(PathBuf, Sender<String>)> {
 /// line terminated by '\n' until a write fails, then the thread re-accepts.
 /// Events sent while no client is connected queue on the channel and flush to
 /// the next one. Returns when the channel closes as the app exits.
+///
+/// `connected` tracks whether a client is on the other end, which is what
+/// decides whether a zoom press has anywhere to go. It is raised on accept and
+/// dropped when the write loop breaks, so a child that exits hands the combo
+/// back to font zoom without waiting to be told.
 #[cfg(unix)]
-fn serve_window_events(listener: UnixListener, rx: Receiver<String>) {
+fn serve_window_events(listener: UnixListener, rx: Receiver<String>, connected: &AtomicBool) {
     for client in listener.incoming() {
         let Ok(mut client) = client else { continue };
+        connected.store(true, Ordering::Relaxed);
         loop {
-            let Ok(line) = rx.recv() else { return };
+            let Ok(line) = rx.recv() else {
+                connected.store(false, Ordering::Relaxed);
+                return;
+            };
             let mut bytes = line.into_bytes();
             bytes.push(b'\n');
             if client.write_all(&bytes).is_err() {
                 break;
             }
         }
+        connected.store(false, Ordering::Relaxed);
     }
 }
 
@@ -3675,8 +3707,12 @@ mod tests {
         PendingResize, PtyWrite, Visibility, EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
     };
     #[cfg(unix)]
-    use super::{window_socket_path, PathBuf};
+    use super::{
+        serve_window_events, window_socket_path, AtomicBool, Ordering, PathBuf, UnixListener,
+    };
     use alacritty_terminal::sync::FairMutex;
+    #[cfg(unix)]
+    use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
     use stoatty_protocol::command::PoolRegionCommand;
     use stoatty_term::{
@@ -3786,20 +3822,94 @@ mod tests {
         assert!(!swallow_super_combo(ModifiersState::empty()));
     }
 
-    /// A claimed combo with nowhere to send it must not vanish, so the socket
-    /// is as much a precondition as the claim itself.
+    /// A claimed combo with nowhere to send it must not vanish, so a connected
+    /// reader is as much a precondition as the claim itself.
+    ///
+    /// A connected client rather than a bound socket, because those come apart
+    /// exactly where the combo goes dead. A child reached over ssh never sees
+    /// the socket path, and one that exits leaves the socket bound behind it.
     #[test]
-    fn a_zoom_combo_forwards_only_with_both_a_claim_and_a_socket() {
-        assert!(forwards_zoom(true, true), "claimed with a socket forwards");
+    fn a_zoom_combo_forwards_only_with_both_a_claim_and_a_reader() {
+        assert!(forwards_zoom(true, true), "claimed with a reader forwards");
         assert!(
             !forwards_zoom(true, false),
-            "claimed with no socket falls back to font zoom"
+            "claimed with nobody reading falls back to font zoom"
         );
         assert!(
             !forwards_zoom(false, true),
-            "an unclaimed combo zooms the font even though a socket exists"
+            "an unclaimed combo zooms the font even though a reader is there"
         );
         assert!(!forwards_zoom(false, false), "neither forwards");
+    }
+
+    /// The connected flag follows a client across its whole life, so the combo
+    /// goes back to font zoom the moment the child stops reading.
+    ///
+    /// A client that goes away is the case a bound socket cannot see, and the
+    /// one that leaves zoom dead in a stoatty outliving its editor.
+    #[cfg(unix)]
+    #[test]
+    fn the_connected_flag_tracks_a_client_across_its_life() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("win.sock");
+        let listener = UnixListener::bind(&path).expect("bind");
+        let (tx, rx) = mpsc::channel::<String>();
+        let connected = Arc::new(AtomicBool::new(false));
+
+        let served = std::thread::spawn({
+            let connected = connected.clone();
+            move || serve_window_events(listener, rx, &connected)
+        });
+        assert!(
+            !connected.load(Ordering::Relaxed),
+            "nothing is connected before a client arrives",
+        );
+
+        // A round trip is what proves the thread reached its accept, since the
+        // flag is raised there and nothing else reports it.
+        let round_trip = |tx: &mpsc::Sender<String>,
+                          client: &mut std::os::unix::net::UnixStream| {
+            tx.send("hello".to_string()).expect("send");
+            let mut got = [0u8; 6];
+            std::io::Read::read_exact(client, &mut got).expect("read");
+            assert_eq!(&got, b"hello\n");
+        };
+        // Bounded so a flag that never moves fails here rather than hanging.
+        let settles_to = |want: bool| {
+            (0..200).any(|_| {
+                if connected.load(Ordering::Relaxed) == want {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+                false
+            })
+        };
+
+        let mut client = std::os::unix::net::UnixStream::connect(&path).expect("connect");
+        round_trip(&tx, &mut client);
+        assert!(
+            connected.load(Ordering::Relaxed),
+            "a client that is reading raises the flag",
+        );
+
+        drop(client);
+        // A write is what discovers the closed peer, so the thread needs one to
+        // fail on before it can notice.
+        tx.send("bye".to_string()).expect("send");
+        assert!(settles_to(false), "a client that went away drops the flag");
+
+        // The thread is parked in accept again by now, so a second client is
+        // what both proves it re-accepts and lets it reach the closed channel.
+        let mut next = std::os::unix::net::UnixStream::connect(&path).expect("reconnect");
+        round_trip(&tx, &mut next);
+        assert!(settles_to(true), "and the next client raises it again");
+
+        drop(tx);
+        served.join().expect("serving thread");
+        assert!(
+            !connected.load(Ordering::Relaxed),
+            "serving ending leaves nothing claimed",
+        );
     }
 
     #[test]

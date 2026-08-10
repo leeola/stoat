@@ -4143,6 +4143,7 @@ dependencies = [
  "stoatty_protocol",
  "stoatty_render",
  "stoatty_term",
+ "tempfile",
  "toml",
  "tracing",
  "vscode_theme",
