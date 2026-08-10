@@ -44,6 +44,14 @@ use stoat_scheduler::Executor;
 use stoat_text::{patch::Edit as PatchEdit, ContextLessSummary, Item, Rope, SumTree};
 use tree_sitter::{Node, Query, StreamingIterator, Tree};
 
+/// How many captures [`SyntaxSnapshot::captures`] reserves room for.
+///
+/// A guess rather than a measurement, since the count is only known after the
+/// walk. It is set where a whole-file walk of an ordinary source file lands, so
+/// the common case allocates once instead of copying everything found so far at
+/// each doubling.
+const CAPTURE_CAPACITY: usize = 256;
+
 /// One parsed tree at a particular nesting depth, anchored to a
 /// `[start_offset, end_offset)` byte range in the host buffer.
 ///
@@ -149,7 +157,19 @@ impl SyntaxSnapshot {
         rope: &'a Rope,
         select: impl Fn(&'a Language) -> Option<&'a Query>,
     ) -> Vec<SyntaxMapCapture<'a>> {
-        let mut all: Vec<SyntaxMapCapture<'a>> = Vec::new();
+        // A whole-file walk of a large buffer runs to thousands of captures,
+        // and reaching that by growth costs a copy of everything found so far
+        // at every doubling. A narrow range overshoots into an allocation it
+        // was making anyway.
+        let mut all: Vec<SyntaxMapCapture<'a>> = Vec::with_capacity(CAPTURE_CAPACITY);
+
+        // One cursor for every layer. Taking one per layer is a pool
+        // lock/unlock pair each way plus a range reset the next line
+        // overwrites, and `set_byte_range` is sticky, so the range set here
+        // covers the whole loop.
+        let mut cursor = QueryCursorHandle::new();
+        cursor.set_byte_range(byte_range.clone());
+
         for layer in self.layers.iter() {
             // Skip layers that don't intersect the requested range.
             if (layer.end_offset as usize) <= byte_range.start
@@ -160,12 +180,15 @@ impl SyntaxSnapshot {
             let Some(query) = select(layer.language.as_ref()) else {
                 continue;
             };
-            let mut cursor = QueryCursorHandle::new();
-            cursor.set_byte_range(byte_range.clone());
             let provider = RopeTextProvider { rope };
             // QueryCursor::captures yields &(QueryMatch, capture_index)
-            // tuples; the capture_index picks out which capture in the
+            // tuples. The capture_index picks out which capture in the
             // match's `captures` array this iteration is yielding.
+            //
+            // The iterator holds the cursor's mutable borrow and is dropped
+            // here at the end of the body, before the next layer asks for it.
+            // The nodes it yields borrow the tree rather than the cursor, so
+            // they outlive both.
             let mut iter = cursor.captures(query, layer.tree.root_node(), provider);
             while let Some(item) = iter.next() {
                 let pattern_match = &item.0;
@@ -178,11 +201,14 @@ impl SyntaxSnapshot {
                     language: layer.language.as_ref(),
                 });
             }
-            // cursor drops here, returns to the pool via QueryCursorHandle::drop.
         }
-        // Sort: shallower layers (smaller `depth`) come first for ties
-        // on `(start, end)`. Document order is the primary key.
-        all.sort_by_key(|c| {
+        // Document order is the primary key, and shallower layers come first
+        // where two captures share a start and an end.
+        //
+        // The keys are cached because reading a node's range crosses into
+        // tree-sitter twice. A plain comparison sort would ask both sides of
+        // every comparison rather than each capture once.
+        all.sort_by_cached_key(|c| {
             let r = c.node.byte_range();
             (r.start, Reverse(r.end), c.depth)
         });
@@ -1754,12 +1780,17 @@ mod tests {
 
     #[test]
     fn captures_merge_across_layers_in_document_order() {
-        // A markdown buffer with inline content yields two layers
-        // (markdown root + markdown-inline). `captures` should merge
-        // captures from both layers, sorted by document position so
-        // the host can iterate them in a single pass.
-        let lang = markdown_lang();
-        let source = "# Title\n\nSome **bold** text\n";
+        // Rust doc comments rather than a markdown file, because the layers
+        // have to interleave for the ordering to mean anything. Layers are
+        // walked deepest last, so where the deeper layer's text simply follows
+        // the shallower one's, a list that was never sorted comes out ordered
+        // anyway. Here the markdown starts inside the rust node holding it,
+        // and each comment's injected captures fall between the next comment's
+        // rust ones.
+        let lang = rust_lang();
+        let source = "/// one **bold**\nfn a() {}\n\
+                      /// two **bold**\nfn b() {}\n\
+                      /// three **bold**\nfn c() {}\n";
         let rope = Rope::from(source);
         let mut map = SyntaxMap::new();
         map.reparse(&rope, lang, 1, None, None).unwrap();
@@ -1770,34 +1801,40 @@ mod tests {
 
         assert!(
             !captures.is_empty(),
-            "markdown buffer with inline content must produce captures"
+            "a buffer with injected content must produce captures"
         );
 
-        // Captures must be sorted in document order.
-        let positions: Vec<usize> = captures.iter().map(|c| c.node.start_byte()).collect();
-        let mut sorted = positions.clone();
-        sorted.sort();
-        assert_eq!(positions, sorted, "captures must be sorted by start byte");
+        // The whole sort key, since ties on start are what put a shallower
+        // layer's enclosing node ahead of the text it encloses.
+        let keys: Vec<(usize, Reverse<usize>, u32)> = captures
+            .iter()
+            .map(|c| {
+                let r = c.node.byte_range();
+                (r.start, Reverse(r.end), c.depth)
+            })
+            .collect();
+        let mut ordered = keys.clone();
+        ordered.sort();
+        assert_eq!(keys, ordered, "captures must come back in document order");
 
-        // We should see captures from BOTH layers: the markdown root
-        // (depth 0) producing block-level captures (e.g. title), and
-        // the markdown-inline injection (depth 1) producing inline
-        // captures (e.g. emphasis).
+        // From every layer, not just the host: the rust root, the combined
+        // markdown over the doc comments, and the inline markdown inside it.
         let depths: std::collections::HashSet<u32> = captures.iter().map(|c| c.depth).collect();
         assert!(depths.contains(&0), "expected at least one depth-0 capture");
         assert!(depths.contains(&1), "expected at least one depth-1 capture");
+        assert!(depths.contains(&2), "expected at least one depth-2 capture");
 
-        // The depth-1 captures should fall within an inline byte
-        // range (somewhere in the "Some **bold** text" portion).
-        let bold_start = source.find("**bold**").unwrap();
-        let bold_end = bold_start + "**bold**".len();
+        // The injected captures land on the markup rather than merely
+        // somewhere inside the comment.
+        let bold = {
+            let start = source.find("**bold**").expect("fixture");
+            start..start + "**bold**".len()
+        };
         assert!(
             captures.iter().any(|c| {
-                c.depth == 1
-                    && c.node.start_byte() >= bold_start
-                    && c.node.end_byte() <= bold_end + 5 // tolerance
+                c.depth >= 2 && c.node.start_byte() >= bold.start && c.node.end_byte() <= bold.end
             }),
-            "expected a depth-1 capture inside the **bold** range"
+            "expected an inline capture inside the first **bold**"
         );
     }
 
@@ -1827,6 +1864,55 @@ mod tests {
                 half
             );
         }
+    }
+
+    /// The range filter reaches the layers queried after the first one.
+    ///
+    /// One cursor serves every layer, so a layer that came later would go
+    /// unfiltered if the range stopped applying partway through. A combined
+    /// layer is what reaches that case. It intersects a range covering one of
+    /// its host nodes while holding captures in all the others, and the root
+    /// grammar's layer is queried ahead of it.
+    ///
+    /// Ordering is left to `captures_merge_across_layers_in_document_order`. A
+    /// range this narrow returns captures that are already ordered without any
+    /// sort, so asserting it here would pin nothing.
+    #[test]
+    fn a_range_filter_reaches_a_layer_queried_after_the_first() {
+        let lang = rust_lang();
+        let source = "/// one **bold**\nfn a() {}\n\
+                      /// two **bold**\nfn b() {}\n\
+                      /// three **bold**\nfn c() {}\n";
+        let rope = Rope::from(source);
+        let mut map = SyntaxMap::new();
+        map.reparse(&rope, lang, 1, None, None).unwrap();
+        assert!(
+            map.snapshot()
+                .iter_layers()
+                .any(|l| l.depth == 1 && l.tree.included_ranges().len() > 1),
+            "the fixture must merge the doc comments into one layer",
+        );
+
+        let first = source.find("one").expect("fixture")..source.find("\nfn a").expect("fixture");
+        let captures = map
+            .snapshot()
+            .captures(first.clone(), &rope, |l| Some(&l.highlight_query));
+
+        assert!(
+            captures.iter().any(|c| c.depth == 1),
+            "the first comment must return captures from the combined layer",
+        );
+        let strays: Vec<Range<usize>> = captures
+            .iter()
+            .map(|c| c.node.byte_range())
+            .filter(|r| r.start >= first.end || r.end <= first.start)
+            .collect();
+        assert_eq!(
+            strays,
+            Vec::<Range<usize>>::new(),
+            "the other two comments' captures must not come back for a range \
+             covering only the first",
+        );
     }
 
     #[test]
