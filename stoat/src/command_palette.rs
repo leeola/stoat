@@ -6,7 +6,7 @@ use crate::{
     input_view::{InputView, SubmitTarget},
     pane::{FocusTarget, View},
     paths,
-    picker::{PathPicker, PreviewPolicy},
+    picker::{PathPicker, PreviewPolicy, Scan},
     rebase::RebasePause,
     workspace::Workspace,
 };
@@ -245,10 +245,35 @@ impl ArgPicker {
         }
     }
 
-    fn refilter(&mut self, query: &str) {
+    /// Prepare the ranking for the active list, for a caller that runs it.
+    ///
+    /// Both lists can hold a whole walk, so the matching goes to a worker like
+    /// the finder's. Browse filters its own directory walk against the partial
+    /// it holds rather than the typed tail, the directory part having already
+    /// gone into the walk's root.
+    fn begin_refilter(&mut self, query: &str) -> Option<(u64, Scan)> {
         match &mut self.browse {
-            Some(browse) => browse.picker.refilter(&browse.partial),
-            None => self.core.refilter(query),
+            Some(browse) => {
+                browse.picker.pump_scan();
+                let partial = browse.partial.clone();
+                browse.picker.begin_scan(&partial)
+            },
+            None => {
+                self.core.pump_scan();
+                self.core.begin_scan(query)
+            },
+        }
+    }
+
+    /// Bring the active list up to date here and now, for a caller about to act
+    /// on the selection rather than paint it.
+    fn settle_scan(&mut self, query: &str) {
+        match &mut self.browse {
+            Some(browse) => {
+                let partial = browse.partial.clone();
+                browse.picker.settle_scan(&partial);
+            },
+            None => self.core.settle_scan(query),
         }
     }
 
@@ -572,13 +597,24 @@ impl CommandPalette {
         ws: &mut Workspace,
         fs_host: &dyn FsHost,
         language_registry: &LanguageRegistry,
-    ) {
-        let Some(picker) = self.arg_picker.as_mut() else {
-            return;
-        };
+    ) -> Option<(u64, Scan)> {
+        let picker = self.arg_picker.as_mut()?;
         picker.pump_walk();
-        picker.refilter(tail);
+        let pending = picker.begin_refilter(tail);
         picker.sync_preview(ws, fs_host, language_registry);
+        pending
+    }
+
+    /// Bring the arg picker's rows up to date with `tail` on this thread.
+    ///
+    /// For a caller about to read the selection rather than paint it. A scan
+    /// running elsewhere answers the tail that started it, and completing or
+    /// submitting between keystrokes would otherwise act on the row the
+    /// previous tail selected.
+    pub(crate) fn settle_arg_picker(&mut self, tail: &str) {
+        if let Some(picker) = self.arg_picker.as_mut() {
+            picker.settle_scan(tail);
+        }
     }
 
     /// Re-parse the input into an optional command and refilter the action
@@ -1950,6 +1986,44 @@ mod tests {
             palette_text(&h),
             "quit-all",
             "a parameterless command completes bare, ready for Enter"
+        );
+    }
+
+    /// An argument list is a whole workspace walk, so its ranking is handed
+    /// back for a worker to run rather than done inside the keystroke.
+    ///
+    /// That it went to a worker is what this states. Whether it did so
+    /// concurrently is not observable here, the test scheduler running blocking
+    /// work inline, so the structure is the thing to pin.
+    #[test]
+    fn an_argument_list_ranks_off_the_input_thread() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/alpha.rs", ""), ("wsdir/beta.rs", "")]);
+
+        h.type_text(":OpenFile wsdir/al");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+
+        let fs_host = h.stoat.fs_host.clone();
+        let language_registry = h.stoat.language_registry.clone();
+        let active_idx = h.stoat.active_workspace;
+        let ws = &mut h.stoat.workspaces[active_idx];
+        let palette = h.stoat.command_palette.as_mut().expect("palette open");
+
+        // Invalidated so the tail is asked afresh, the sync driven by the
+        // typing above having already answered this one.
+        palette
+            .arg_picker
+            .as_mut()
+            .expect("arg picker")
+            .core
+            .invalidate();
+        assert!(
+            palette
+                .sync_arg_picker("wsdir/al", ws, &*fs_host, &language_registry)
+                .is_some(),
+            "the ranking is handed back for a worker to run",
         );
     }
 

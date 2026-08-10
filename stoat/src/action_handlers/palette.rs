@@ -3,7 +3,7 @@ use crate::{
     command_palette::PaletteOutcome,
     file_finder::Browse,
     host::FsHost,
-    picker::PathPicker,
+    picker::{PathPicker, Scan},
 };
 use std::path::{Path, PathBuf};
 use stoat_action::ValueSource;
@@ -147,10 +147,57 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
     }
 
     let fs_host = stoat.fs_host.clone();
-    let ws = &mut stoat.workspaces[active_idx];
-    if let Some(palette) = stoat.command_palette.as_mut() {
-        palette.sync_arg_picker(&tail, ws, &*fs_host, &stoat.language_registry);
+    let pending = {
+        let ws = &mut stoat.workspaces[active_idx];
+        match stoat.command_palette.as_mut() {
+            Some(palette) => {
+                palette.sync_arg_picker(&tail, ws, &*fs_host, &stoat.language_registry)
+            },
+            None => None,
+        }
+    };
+
+    if let Some((generation, scan)) = pending {
+        spawn_arg_picker_scan(stoat, generation, scan);
     }
+}
+
+/// Bring the arg picker's rows up to date with what is typed, before an action
+/// reads the selection rather than paints it.
+///
+/// A scan running elsewhere answers the tail that started it. Completing or
+/// submitting between keystrokes would otherwise act on the row the previous
+/// tail had selected, which is the wrong value.
+fn settle_arg_picker_scan(stoat: &mut Stoat) {
+    let active_idx = stoat.active_workspace;
+    let ws = &stoat.workspaces[active_idx];
+    let Some(palette) = stoat.command_palette.as_mut() else {
+        return;
+    };
+    let Some(tail) = palette.arg_tail(ws) else {
+        return;
+    };
+    palette.settle_arg_picker(&tail);
+}
+
+/// Run `scan` on a worker and report it back to the arg picker that asked.
+///
+/// The candidate list is a whole walk, which is too much to rank inside the
+/// update path without input and paint waiting on it. The rows on display stay
+/// as they are until the result lands.
+fn spawn_arg_picker_scan(stoat: &mut Stoat, generation: u64, scan: Scan) {
+    let redraw = stoat.redraw_notify.clone();
+    let executor = stoat.executor.clone();
+    let Some(picker) = stoat
+        .command_palette
+        .as_mut()
+        .and_then(|palette| palette.arg_picker.as_mut())
+    else {
+        return;
+    };
+    picker
+        .active_core()
+        .spawn_scan(&executor, redraw, generation, scan);
 }
 
 /// The immediate child directories of `root`, sorted non-hidden before hidden
@@ -271,6 +318,7 @@ fn sync_arg_picker_browse(stoat: &mut Stoat, tail: &str) {
 /// fall through to other prompt consumers.
 pub(super) fn palette_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
     stoat.command_palette.as_ref()?;
+    settle_arg_picker_scan(stoat);
     let outcome = {
         let active_idx = stoat.active_workspace;
         let workspaces = &mut stoat.workspaces;
@@ -400,6 +448,12 @@ pub(super) fn palette_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
 /// render still reads the completed entry rather than its first child.
 pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
     let active_idx = stoat.active_workspace;
+
+    // The argument arm below reads the selected row, and its cycle walks the
+    // filtered ones, so the list has to answer what is typed rather than
+    // whatever a scan still out was started for. A no-op in command-list mode,
+    // which has no argument tail.
+    settle_arg_picker_scan(stoat);
 
     let new_text = {
         let Some(palette) = stoat.command_palette.as_ref() else {

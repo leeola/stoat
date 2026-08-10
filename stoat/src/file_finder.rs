@@ -408,13 +408,16 @@ impl FileFinder {
         self.pump_modified();
         if let Some(browse) = &mut self.browse {
             browse.picker.pump_walk();
+            browse.picker.pump_scan();
             if browse.picker.all_paths.len() >= BROWSE_PATH_CAP {
                 browse.picker.all_paths.truncate(BROWSE_PATH_CAP);
                 browse.picker.stop_walk();
             }
-            browse.picker.refilter(&browse.partial);
+            // A directory walk runs to the same cap as the repo walk, so
+            // ranking it belongs on a worker for the same reason.
+            let pending = browse.picker.begin_scan(&browse.partial);
             self.remeasure_content();
-            return None;
+            return pending;
         }
         self.core.pump_walk();
         self.core.pump_scan();
@@ -473,7 +476,12 @@ impl FileFinder {
     /// A named scope catches up against the cache it filters rather than the
     /// walk, which holds a different set and would answer a different question.
     pub(crate) fn settle_scan(&mut self, query: &str) {
-        if self.browse.is_some() {
+        // Browse filters the directory walk against its own partial rather than
+        // the typed query, the leading directory having already been consumed
+        // by the walk's root.
+        if let Some(browse) = &mut self.browse {
+            let partial = browse.partial.clone();
+            browse.picker.settle_scan(&partial);
             return;
         }
         match self.scope.clone() {
@@ -1281,6 +1289,33 @@ mod tests {
             h.stoat.file_finder.as_ref().unwrap().scope(),
             &FinderScope::All,
             "backtab past AllWorkspaces wraps to All"
+        );
+    }
+
+    /// A directory browse walks to the same cap as the repo walk, so its
+    /// ranking is handed back for a worker like every other large list.
+    #[test]
+    fn a_directory_browse_ranks_off_the_input_thread() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("dir/a.rs", ""), ("dir/b.rs", "")]);
+
+        h.type_keys("space p");
+        h.type_text("/a");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+
+        let active_idx = h.stoat.active_workspace;
+        let ws = &h.stoat.workspaces[active_idx];
+        let finder = h.stoat.file_finder.as_mut().expect("finder open");
+        assert!(finder.browse.is_some(), "a path query browses");
+
+        // Invalidated so the partial is asked afresh, the sync driven by the
+        // typing above having already answered it.
+        finder.active_core().invalidate();
+        assert!(
+            finder.refilter_from_input(ws).is_some(),
+            "the ranking is handed back for a worker to run",
         );
     }
 
