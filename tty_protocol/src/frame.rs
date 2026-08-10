@@ -165,6 +165,37 @@ pub fn decode_into<'a>(
 ///
 /// A base64 argument and a UTF-8 sub-command never contain `ESC` or `BEL`, so
 /// the only such bytes are the wrapper, making the strip unambiguous.
+/// How many bytes the first frame in `bytes` occupies, or `None` when `bytes`
+/// does not open with a complete one.
+///
+/// For a caller holding a run that starts with a frame and continues with
+/// something else, such as a fill batch whose page content follows its open
+/// marker. Slicing to this length gives [`decode`] exactly the frame and none
+/// of what trails it.
+///
+/// The introducer has to be at the very start. A frame further in is not the
+/// first thing in the run, and reporting it would let a caller read a marker
+/// that belongs to whatever came before.
+pub fn first_frame_end(bytes: &[u8]) -> Option<usize> {
+    if !bytes.starts_with(INTRODUCER) {
+        return None;
+    }
+    let rest = &bytes[INTRODUCER.len()..];
+    let at = rest
+        .iter()
+        .position(|byte| *byte == BEL || *byte == TERMINATOR[0])?;
+
+    match rest[at] {
+        BEL => Some(INTRODUCER.len() + at + 1),
+        // An ESC that is not the start of a terminator is not one, and a frame
+        // body never contains one, so there is no complete frame here.
+        _ => match rest.get(at + 1) {
+            Some(&byte) if byte == TERMINATOR[1] => Some(INTRODUCER.len() + at + 2),
+            _ => None,
+        },
+    }
+}
+
 fn strip_wrapper(bytes: &[u8]) -> &[u8] {
     let bytes = bytes.strip_prefix(INTRODUCER).unwrap_or(bytes);
 

@@ -1094,6 +1094,26 @@ pub fn encode_fill_into(out: &mut Vec<u8>, pool: u32, index: u64) {
     frame::end(out);
 }
 
+/// The `(pool, index)` a batch of bytes fills, or `None` when it is not a fill.
+///
+/// A fill batch is self-contained, holding the open marker, the page's VT
+/// bytes, and the close marker. Only the marker names the page, so this decodes
+/// the first frame and stops, never walking the page content behind it.
+///
+/// The point of naming it is that pool slots are last-writer-wins and no other
+/// command reads a page's content, so a queued fill for a key that appears
+/// again later is work nobody will ever see. A sender with a backlog can drop
+/// the earlier one. `None` covers everything that has no such guarantee, from
+/// a different command to bytes that do not open with a frame at all.
+pub fn fill_batch_key(batch: &[u8]) -> Option<(u32, u64)> {
+    let end = frame::first_frame_end(batch)?;
+    let frame = frame::decode(&batch[..end])?;
+    match frame.sub.as_str() {
+        "fill" => decode_fill(&frame.args).map(|fill| (fill.pool, fill.index)),
+        _ => None,
+    }
+}
+
 /// Encode a [`Command::FillEnd`] as a full `Gstoatty;fill_end` close-marker
 /// frame.
 ///
@@ -2028,19 +2048,19 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 mod tests {
     use super::{
         decode, decode_ident_reply, decode_shadow, encode_bar, encode_border, encode_config_reload,
-        encode_fill, encode_fill_end, encode_font_step, encode_hello, encode_icon,
-        encode_ident_reply, encode_into, encode_line_layout, encode_minimap, encode_minimap_drop,
-        encode_minimap_lines, encode_minimap_view, encode_panel, encode_polyline,
-        encode_pool_cursor, encode_pool_drop, encode_pool_region, encode_popover,
-        encode_popover_end, encode_reposition, encode_reset, encode_scale, encode_scroll,
-        encode_scroll_region, encode_text_run_end, encode_window_close, encode_window_focus,
-        encode_window_open, encode_zoom_capture, BarCommand, BorderCommand, BorderStyle, Command,
-        FillCommand, HelloCommand, IconCommand, IconKind, IdentReply, LineLayoutCommand,
-        LineSummary, MinimapCommand, MinimapDropCommand, MinimapLinesCommand, MinimapRun,
-        MinimapViewCommand, PanelCommand, PanelShadow, PolylineCommand, PoolCursorCommand,
-        PoolDropCommand, PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand,
-        ScrollCommand, ScrollRegionCommand, TextRunCommand, WindowCloseCommand, WindowFocusCommand,
-        WindowOpenCommand,
+        encode_fill, encode_fill_end, encode_fill_end_into, encode_fill_into, encode_font_step,
+        encode_hello, encode_icon, encode_ident_reply, encode_into, encode_line_layout,
+        encode_minimap, encode_minimap_drop, encode_minimap_lines, encode_minimap_view,
+        encode_panel, encode_polyline, encode_pool_cursor, encode_pool_drop, encode_pool_region,
+        encode_popover, encode_popover_end, encode_reposition, encode_reset, encode_scale,
+        encode_scroll, encode_scroll_region, encode_text_run_end, encode_window_close,
+        encode_window_focus, encode_window_open, encode_zoom_capture, fill_batch_key, BarCommand,
+        BorderCommand, BorderStyle, Command, FillCommand, HelloCommand, IconCommand, IconKind,
+        IdentReply, LineLayoutCommand, LineSummary, MinimapCommand, MinimapDropCommand,
+        MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand, PanelShadow,
+        PolylineCommand, PoolCursorCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand,
+        RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
+        WindowCloseCommand, WindowFocusCommand, WindowOpenCommand,
     };
     use crate::frame::MAX_APC_PAYLOAD;
 
@@ -2627,6 +2647,42 @@ mod tests {
     #[test]
     fn fill_end_round_trips() {
         assert_eq!(decode(&encode_fill_end()), Some(Command::FillEnd));
+    }
+
+    /// The page a batch fills is read from its opening marker alone.
+    ///
+    /// A sender with a backlog uses this to drop a fill a later one replaces,
+    /// so answering for anything it cannot prove is a fill would drop bytes
+    /// that were not safe to lose.
+    #[test]
+    fn a_batch_is_keyed_only_when_it_opens_with_a_fill() {
+        let mut fill = Vec::new();
+        encode_fill_into(&mut fill, 3, 41);
+        // The page's own bytes, which the key must not walk into. The trailing
+        // frame is a whole marker of its own and must not be read either.
+        fill.extend_from_slice(b"\x1b[1;1Hpainted rows\x1b[0m");
+        encode_fill_end_into(&mut fill);
+
+        assert_eq!(fill_batch_key(&fill), Some((3, 41)));
+        assert_eq!(
+            fill_batch_key(&encode_fill_end()),
+            None,
+            "a batch that opens with another command names no page",
+        );
+        assert_eq!(
+            fill_batch_key(b"\x1b[1;1Hjust vt bytes"),
+            None,
+            "and neither does one that opens with no frame at all",
+        );
+
+        let mut truncated = Vec::new();
+        encode_fill_into(&mut truncated, 3, 41);
+        truncated.truncate(truncated.len() - 1);
+        assert_eq!(
+            fill_batch_key(&truncated),
+            None,
+            "an unterminated marker is not a page this can name",
+        );
     }
 
     #[test]

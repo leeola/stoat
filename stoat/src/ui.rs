@@ -256,7 +256,7 @@ async fn run(
                 // Write any stoatty APC byte batches the app pushed for this
                 // frame to the same stdout, after the grid frame so the pool
                 // composites over the content just drawn.
-                drain_apc(apc_rx)?;
+                drain_apc(None, apc_rx)?;
                 // Close the synchronized update so the cell diff, undercurl, and
                 // APC batch commit as one atomic frame.
                 execute!(io::stdout(), EndSynchronizedUpdate)?;
@@ -273,15 +273,13 @@ async fn run(
 
             batch = apc_rx.recv() => {
                 let Some(batch) = batch else { break };
-                let mut stdout = io::stdout();
-                // Wrap the batch, and any it coalesces via drain_apc, in a
+                // Wrap the batch, and any it drains alongside it, in a
                 // synchronized update so an async scene re-emit or multi-KB pool
-                // fill commits atomically. The existing flush carries the ESU.
-                queue!(stdout, BeginSynchronizedUpdate)?;
-                stdout.write_all(&batch)?;
-                drain_apc(apc_rx)?;
-                queue!(stdout, EndSynchronizedUpdate)?;
-                stdout.flush()?;
+                // fill commits atomically. The drain flush carries the ESU.
+                queue!(io::stdout(), BeginSynchronizedUpdate)?;
+                drain_apc(Some(batch), apc_rx)?;
+                queue!(io::stdout(), EndSynchronizedUpdate)?;
+                io::stdout().flush()?;
             }
         }
     }
@@ -530,23 +528,64 @@ fn forward_input(event_tx: &UnboundedSender<Event>, mut read: impl FnMut() -> io
     }
 }
 
-/// Write every APC byte batch already queued on `apc_rx` to stdout without
-/// blocking, then flush.
+/// Write `first`, then every APC byte batch already queued on `apc_rx`, to
+/// stdout, and flush if anything went out.
 ///
 /// Drains only the currently-queued batches. A batch arriving mid-drain is
-/// handled on the next loop wake. Ordered and lossless, unlike the render watch,
-/// so `fill` page content is never coalesced or dropped.
-fn drain_apc(apc_rx: &mut UnboundedReceiver<Vec<u8>>) -> io::Result<()> {
-    let mut stdout = io::stdout();
-    let mut wrote = false;
+/// handled on the next loop wake.
+///
+/// Ordered, and lossless for everything whose content this cannot reason
+/// about. The exception is a pool fill superseded by a later queued one for the
+/// same page, which [`supersede_stale_fills`] drops.
+fn drain_apc(first: Option<Vec<u8>>, apc_rx: &mut UnboundedReceiver<Vec<u8>>) -> io::Result<()> {
+    let mut queued: Vec<Vec<u8>> = first.into_iter().collect();
     while let Ok(batch) = apc_rx.try_recv() {
-        stdout.write_all(&batch)?;
-        wrote = true;
+        queued.push(batch);
     }
-    if wrote {
-        stdout.flush()?;
+    if queued.is_empty() {
+        return Ok(());
     }
-    Ok(())
+
+    supersede_stale_fills(&mut queued);
+
+    let mut stdout = io::stdout();
+    for batch in &queued {
+        stdout.write_all(batch)?;
+    }
+    stdout.flush()
+}
+
+/// Drop each queued pool fill that a later one for the same page replaces,
+/// leaving everything else where it was.
+///
+/// A pool slot is last-writer-wins and no queued command reads a page's
+/// content, so an earlier fill for a page written again later is work nobody
+/// will ever see. On a link slower than the emit rate a hard scroll queues
+/// megabytes of them, and without this the user watches seconds-old pages
+/// replay in order before the current one arrives.
+///
+/// Only fills are touched. Anything else is content this cannot reason about,
+/// so it keeps its place and its bytes. Walking backward is what makes the
+/// survivor the last of each page rather than the first.
+fn supersede_stale_fills(queued: &mut Vec<Vec<u8>>) {
+    let mut seen: Vec<(u32, u64)> = Vec::new();
+    let mut superseded = vec![false; queued.len()];
+
+    for (at, batch) in queued.iter().enumerate().rev() {
+        let Some(key) = command::fill_batch_key(batch) else {
+            continue;
+        };
+        match seen.contains(&key) {
+            true => superseded[at] = true,
+            false => seen.push(key),
+        }
+    }
+
+    let mut at = 0;
+    queued.retain(|_| {
+        at += 1;
+        !superseded[at - 1]
+    });
 }
 
 /// Copy `src` into `dst` over their overlapping top-left region, leaving `dst`'s
@@ -592,6 +631,68 @@ mod tests {
             hostname: "host".into(),
             version: "1.2.3".into(),
         }
+    }
+
+    /// A queued fill goes out only if nothing later replaces its page, and
+    /// everything else goes out untouched and in order.
+    ///
+    /// The dropping is what bounds the replay debt a slow link builds. Without
+    /// it a hard scroll queues megabytes of pages, and the user watches
+    /// seconds-old ones arrive in order before the current one. It is safe only
+    /// for fills, since a pool slot is last-writer-wins and nothing queued
+    /// reads a page's content, so anything else keeps its place.
+    #[test]
+    fn a_drain_writes_only_the_last_fill_of_each_page() {
+        let fill = |pool: u32, index: u64, tag: &str| {
+            let mut out = Vec::new();
+            command::encode_fill_into(&mut out, pool, index);
+            out.extend_from_slice(tag.as_bytes());
+            command::encode_fill_end_into(&mut out);
+            out
+        };
+        let other = |tag: &str| {
+            let mut out = Vec::new();
+            command::encode_pool_cursor_into(
+                &mut out,
+                &command::PoolCursorCommand {
+                    pool: 1,
+                    row: 0,
+                    col: 0,
+                },
+            );
+            out.extend_from_slice(tag.as_bytes());
+            out
+        };
+
+        let mut queued = vec![
+            fill(1, 7, "stale"),
+            other("keep me"),
+            fill(1, 8, "another page"),
+            fill(1, 7, "current"),
+            other("keep me too"),
+            fill(2, 7, "another pool"),
+        ];
+        supersede_stale_fills(&mut queued);
+
+        assert_eq!(
+            queued,
+            vec![
+                other("keep me"),
+                fill(1, 8, "another page"),
+                fill(1, 7, "current"),
+                other("keep me too"),
+                fill(2, 7, "another pool"),
+            ],
+            "only the earlier fill of the repeated page goes, and order holds",
+        );
+
+        let mut alone = vec![fill(1, 7, "the only one")];
+        supersede_stale_fills(&mut alone);
+        assert_eq!(
+            alone,
+            vec![fill(1, 7, "the only one")],
+            "and a drain with nothing to supersede coalesces nothing",
+        );
     }
 
     /// The probe's verdict comes from what arrived, and both answers leave the
