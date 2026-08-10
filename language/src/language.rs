@@ -196,6 +196,25 @@ pub enum InjectionInner {
 pub struct LanguageInjection {
     pub host_node_kind: &'static str,
     pub inner: InjectionInner,
+    /// Whether every host node parses as one document rather than one per
+    /// node.
+    ///
+    /// A language whose constructs run across host nodes has to be combined.
+    /// A rust doc comment's fenced block opens on one `doc_comment` line and
+    /// closes on another, so parsing each line alone would never see a fence.
+    /// The cost is that adding or removing a host node changes the range set,
+    /// which no incremental parse survives, so the whole layer reparses.
+    ///
+    /// A language whose host nodes are each a complete document, like a
+    /// markdown paragraph's inline text, is better off per-node. An edit then
+    /// reparses that node and leaves the rest of the file's layers alone.
+    ///
+    /// Every injection naming one inner language must agree on this, or that
+    /// language would hold a merged layer overlapping its own per-node ones.
+    ///
+    /// Ignored for [`InjectionInner::Fence`], where each fence is its own
+    /// document by construction.
+    pub combined: bool,
 }
 
 pub struct LanguageRegistry {
@@ -418,12 +437,18 @@ fn make_rust() -> Language {
         // Doc comments host a combined markdown injection, so `/// **bold**`
         // renders as styled markdown. The `doc_comment` node covers the text
         // after the `///` marker. The marker keeps its rust comment style.
+        //
+        // Combined because a doc comment's markdown runs across lines while
+        // each line is its own `doc_comment` node. A fenced block or a list
+        // spanning several `///` lines is one construct, and per-node layers
+        // would see only fragments of it.
         vec![LanguageInjection {
             host_node_kind: "doc_comment",
             inner: InjectionInner::Fixed {
                 name: "markdown",
                 language: OnceLock::new(),
             },
+            combined: true,
         }],
         AuxQuerySources {
             brackets: Some(include_str!(
@@ -486,17 +511,24 @@ fn make_toml() -> Language {
 fn make_markdown() -> Language {
     // Inline nodes the block grammar emits parse as markdown-inline, for
     // emphasis, links and code spans.
+    //
+    // Per-node because the block grammar has already cut the document at every
+    // boundary inline markup cannot cross, so one `inline` node holds one
+    // complete run of it. Typing in one paragraph then leaves the rest of the
+    // file's inline trees alone.
     let mut injections = vec![LanguageInjection {
         host_node_kind: "inline",
         inner: InjectionInner::Fixed {
             name: "markdown-inline",
             language: OnceLock::new(),
         },
+        combined: false,
     }];
     // Fenced code blocks parse as the language their info string names.
     injections.push(LanguageInjection {
         host_node_kind: "fenced_code_block",
         inner: InjectionInner::Fence,
+        combined: false,
     });
     make_language_with_injections(
         "markdown",

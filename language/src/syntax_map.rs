@@ -487,11 +487,15 @@ impl SyntaxMap {
                 continue;
             };
 
-            // Group injection matches by inner language so we can
-            // emit combined-injection trees (one tree per language
-            // covering all of that language's host ranges).
-            let mut grouped: HashMap<&'static str, (Arc<Language>, Vec<Range<usize>>)> =
-                HashMap::new();
+            // Group injection matches by inner language, so a combined
+            // language's host ranges are all in hand when its one tree is
+            // parsed over them.
+            //
+            // Keyed by language rather than by language and combined-ness,
+            // because two injections disagreeing on the flag would put a
+            // merged layer and per-node layers over the same text, which is
+            // the overlap [`InjectionIndex`] rules out.
+            let mut grouped: HashMap<&'static str, InjectionGroup> = HashMap::new();
 
             let mut cursor = QueryCursorHandle::new();
             // Refilled per fence match rather than allocated per fence match.
@@ -533,11 +537,20 @@ impl SyntaxMap {
                                 if inner_end <= inner_start {
                                     continue;
                                 }
-                                grouped
-                                    .entry(inner_lang.name)
-                                    .or_insert_with(|| (inner_lang.clone(), Vec::new()))
-                                    .1
-                                    .push(inner_start..inner_end);
+                                let group = grouped.entry(inner_lang.name).or_insert_with(|| {
+                                    InjectionGroup {
+                                        language: inner_lang.clone(),
+                                        combined: injection.combined,
+                                        ranges: Vec::new(),
+                                    }
+                                });
+                                debug_assert_eq!(
+                                    group.combined, injection.combined,
+                                    "every injection naming {} must agree on combined-ness, or \
+                                     its merged layer would overlap its per-node ones",
+                                    inner_lang.name,
+                                );
+                                group.ranges.push(inner_start..inner_end);
                             }
                         },
                         InjectionInner::Fence => {
@@ -612,22 +625,27 @@ impl SyntaxMap {
             }
             drop(cursor);
 
-            for (_, (inner_lang, mut ranges)) in grouped {
+            for (_, group) in grouped {
+                let InjectionGroup {
+                    language: inner_lang,
+                    combined,
+                    mut ranges,
+                } = group;
+
                 // A filtered walk queried only the host nodes near the edit, so
-                // the ranges it found are the whole layer only by accident. The
-                // rest are recovered from the prior layer's tree, whose included
-                // ranges `SyntaxMap::interpolate` has already shifted into
-                // current coordinates.
+                // the ranges a combined layer needs are the whole layer only by
+                // accident. The rest are recovered from the prior layer's tree,
+                // whose included ranges `SyntaxMap::interpolate` has already
+                // shifted into current coordinates.
                 //
-                // This has to happen before the combined test below, because
-                // that test reads how many host ranges this language has and a
-                // filtered walk sees only the ones it visited. Splicing after it
-                // would send a combined layer down the single-range path the one
-                // time the edit touched one of its nodes.
+                // A per-node language wants none of this. Its untouched ranges
+                // are whole prior layers, which `carry_unvisited_injections`
+                // restores, so splicing them in would reparse exactly the text
+                // the filter exists to skip.
                 //
                 // Anything the filter reached was re-walked and the fresh answer
                 // stands there, so only untouched ranges carry over.
-                if let Some(filter) = injection_filter_ranges {
+                if let (true, Some(filter)) = (combined, injection_filter_ranges) {
                     let found_start = ranges.iter().map(|r| r.start).min().unwrap_or(0);
                     let found_end = ranges.iter().map(|r| r.end).max().unwrap_or(0);
                     let prior = priors_by_span
@@ -657,43 +675,11 @@ impl SyntaxMap {
                     }
                 }
 
-                // Combined injections: if more than one host range,
-                // merge them into a single tree via set_included_ranges.
-                // For a single range we still produce one layer (the
-                // common case).
-                if ranges.len() == 1 {
-                    let r = ranges.into_iter().next().expect("len checked == 1");
-                    let prior = priors_by_host
-                        .get(&(r.start as u32, r.end as u32, inner_lang.name))
-                        .copied();
-                    let Some(inner_tree) = parse_rope_range(
-                        &inner_lang,
-                        rope,
-                        r.clone(),
-                        prior.map(|p| &p.tree),
-                        deadline,
-                    ) else {
-                        if out_of_time() {
-                            return None;
-                        }
-                        continue;
-                    };
-                    record_layer_change(
-                        &mut layer_changes,
-                        &r,
-                        prior.map(|p| &p.tree),
-                        &inner_tree,
-                    );
-                    new_layers.push(SyntaxLayer {
-                        depth: parent_depth + 1,
-                        start_offset: r.start as u32,
-                        end_offset: r.end as u32,
-                        language: inner_lang,
-                        tree: inner_tree,
-                    });
-                    queue.push_back(new_layers.len() - 1);
-                } else {
-                    // Combined: parse all ranges as one tree.
+                // A combined injection over several host ranges is the one case
+                // that parses them together. Holding a single range it is
+                // indistinguishable from a per-node layer, so it falls through
+                // to the loop below and gets the same exact-bounds prior reuse.
+                if combined && ranges.len() > 1 {
                     let mut sorted = ranges;
                     sorted.sort_by_key(|r| r.start);
                     let found_start = sorted.first().map(|r| r.start).unwrap_or(0);
@@ -747,6 +733,47 @@ impl SyntaxMap {
                         tree: inner_tree,
                     });
                     queue.push_back(new_layers.len() - 1);
+                    continue;
+                }
+
+                // The query runs once per filter range, and the filters
+                // themselves may overlap, so a host node near two edits is
+                // matched twice. Two layers over identical bounds is the
+                // overlap [`InjectionIndex`] rules out, so the duplicates go
+                // here rather than into the layer set.
+                ranges.sort_by_key(|r| r.start);
+                ranges.dedup();
+
+                for r in ranges {
+                    let prior = priors_by_host
+                        .get(&(r.start as u32, r.end as u32, inner_lang.name))
+                        .copied();
+                    let Some(inner_tree) = parse_rope_range(
+                        &inner_lang,
+                        rope,
+                        r.clone(),
+                        prior.map(|p| &p.tree),
+                        deadline,
+                    ) else {
+                        if out_of_time() {
+                            return None;
+                        }
+                        continue;
+                    };
+                    record_layer_change(
+                        &mut layer_changes,
+                        &r,
+                        prior.map(|p| &p.tree),
+                        &inner_tree,
+                    );
+                    new_layers.push(SyntaxLayer {
+                        depth: parent_depth + 1,
+                        start_offset: r.start as u32,
+                        end_offset: r.end as u32,
+                        language: inner_lang.clone(),
+                        tree: inner_tree,
+                    });
+                    queue.push_back(new_layers.len() - 1);
                 }
             }
         }
@@ -766,6 +793,19 @@ impl SyntaxMap {
         self.install_layers(new_layers, version);
         Some(layer_changes)
     }
+}
+
+/// The host ranges one injection walk found for a single inner language.
+///
+/// Collected before any of them is parsed, because a combined injection's
+/// ranges are one document and the parse cannot start until the last of them
+/// is in hand.
+struct InjectionGroup {
+    language: Arc<Language>,
+    /// Whether these ranges parse as one document, from
+    /// [`LanguageInjection::combined`].
+    combined: bool,
+    ranges: Vec<Range<usize>>,
 }
 
 /// Per-host injection layer from the previous parse.
@@ -1846,6 +1886,52 @@ mod tests {
         );
     }
 
+    /// Two edits whose filters overlap still leave one layer over the host
+    /// node they share.
+    ///
+    /// Each changed range is expanded by a row on either side and the
+    /// expansions are never merged, so edits a few rows apart hand the walk
+    /// overlapping filters. The injection query runs once per filter, which
+    /// means the paragraph reaching into both is matched twice, and a match is
+    /// what a layer is made from.
+    #[test]
+    fn two_filters_over_one_paragraph_leave_one_layer() {
+        let lang = markdown_lang();
+        // One paragraph, since markdown breaks inline content only at a blank
+        // line. Its single `inline` node is what both filters reach.
+        let source = "alpha *a*\nbravo *b*\ncharlie *c*\ndelta *d*\necho *e*\n";
+        let rope = Rope::from(source);
+
+        let changed = vec![
+            source.find("bravo").expect("fixture")..source.find("*b*").expect("fixture"),
+            source.find("delta").expect("fixture")..source.find("*d*").expect("fixture"),
+        ];
+
+        let mut map = SyntaxMap::new();
+        map.reparse_within_changed_ranges(&rope, lang.clone(), 1, Some(&changed), None, None)
+            .unwrap();
+
+        let mut fresh = SyntaxMap::new();
+        fresh.reparse(&rope, lang, 1, None, None).unwrap();
+        let inline = |map: &SyntaxMap| -> Vec<(u32, u32)> {
+            map.snapshot()
+                .iter_layers()
+                .filter(|l| l.language.name == "markdown-inline")
+                .map(|l| (l.start_offset, l.end_offset))
+                .collect()
+        };
+        assert_eq!(
+            inline(&fresh).len(),
+            1,
+            "the fixture must be one paragraph, or neither filter shares a host node"
+        );
+        assert_eq!(
+            inline(&map),
+            inline(&fresh),
+            "a host node found by two filters must not become two layers"
+        );
+    }
+
     #[test]
     fn filtered_reparse_keeps_injections_outside_the_changed_range() {
         // A filtered reparse re-walks only the edited region, so an
@@ -2311,11 +2397,11 @@ mod tests {
 
     #[test]
     fn a_filtered_reparse_keeps_the_paragraphs_the_filter_never_reached() {
-        // Markdown puts every paragraph's inline content in one combined layer.
-        // A filter covering the last paragraph reaches that layer, so the walk
-        // owns it and the carry pass will not restore it. Re-finding only the
-        // filtered paragraph would leave the layer covering that alone, and the
-        // rest of the document loses its inline highlighting.
+        // Markdown puts each paragraph's inline content in its own layer, and a
+        // filter covering the last paragraph reaches only that one. Nothing in
+        // the walk re-finds the first, so the carry pass is the only thing
+        // keeping it, and without it the rest of the document loses its inline
+        // highlighting.
         use stoat_text::patch::Edit as PatchEdit;
         let lang = markdown_lang();
         let source = "para one *em*\n\npara two *em*\n";
@@ -2323,22 +2409,24 @@ mod tests {
 
         let mut map = SyntaxMap::new();
         map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
-        let inline = |map: &SyntaxMap| -> Vec<Range<usize>> {
+        let inline = |map: &SyntaxMap| -> Vec<Vec<Range<usize>>> {
             map.snapshot()
                 .iter_layers()
-                .find(|l| l.language.name == "markdown-inline")
-                .expect("an inline layer")
-                .tree
-                .included_ranges()
-                .iter()
-                .map(|r| r.start_byte..r.end_byte)
+                .filter(|l| l.language.name == "markdown-inline")
+                .map(|l| {
+                    l.tree
+                        .included_ranges()
+                        .iter()
+                        .map(|r| r.start_byte..r.end_byte)
+                        .collect()
+                })
                 .collect()
         };
         let first = source.find("para one").expect("fixture");
         assert_eq!(
             inline(&map),
-            vec![first..first + "para one *em*".len(), 15..28],
-            "the fixture must merge both paragraphs into one layer"
+            vec![vec![first..first + "para one *em*".len()], vec![15..28]],
+            "the fixture must give each paragraph its own layer"
         );
 
         let at = source.find("para two").expect("fixture") + "para ".len();
@@ -2361,7 +2449,86 @@ mod tests {
         assert_eq!(
             inline(&map),
             inline(&fresh),
-            "the untouched first paragraph must stay in the inline layer"
+            "the untouched first paragraph must keep its inline layer"
+        );
+    }
+
+    /// Splitting one paragraph leaves every later paragraph's inline layer
+    /// exactly where interpolate put it.
+    ///
+    /// Pressing Enter mid-paragraph adds a host node, which is the change no
+    /// merged layer absorbs. One range set becomes another, the parse declines
+    /// the prior tree, and every paragraph in the file is parsed again. With a
+    /// layer per paragraph the addition is local, and the layers coming through
+    /// untouched is the condition their reuse rests on.
+    #[test]
+    fn splitting_a_paragraph_leaves_the_later_inline_layers_alone() {
+        use stoat_text::patch::Edit as PatchEdit;
+        let lang = markdown_lang();
+        let source: String = (0..6)
+            .map(|i| format!("para {i} with *em* text\n\n"))
+            .collect();
+        let old_rope = Rope::from(source.as_str());
+
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
+        let inline = |map: &SyntaxMap| -> Vec<Range<usize>> {
+            map.snapshot()
+                .iter_layers()
+                .filter(|l| l.language.name == "markdown-inline")
+                .map(|l| l.start_offset as usize..l.end_offset as usize)
+                .collect()
+        };
+        assert_eq!(
+            inline(&map).len(),
+            6,
+            "the fixture must put each paragraph in its own layer"
+        );
+
+        let at = source.find("para 1 ").expect("fixture") + "para 1 ".len();
+        let inserted = "\n\n";
+        let text = format!("{}{inserted}{}", &source[..at], &source[at..]);
+        let new_rope = Rope::from(text.as_str());
+        map.interpolate(
+            &[PatchEdit {
+                old: at..at,
+                new: at..(at + inserted.len()),
+            }],
+            &old_rope,
+            &new_rope,
+        );
+
+        let later = text.find("para 2").expect("fixture");
+        let untouched = |map: &SyntaxMap| -> Vec<Range<usize>> {
+            inline(map)
+                .into_iter()
+                .filter(|l| l.start >= later)
+                .collect()
+        };
+        let carried = untouched(&map);
+        assert_eq!(
+            carried.len(),
+            4,
+            "paragraphs 2 through 5 sit after the edit"
+        );
+
+        #[allow(clippy::single_range_in_vec_init)]
+        let changed = vec![at..(at + inserted.len())];
+        map.reparse_within_changed_ranges(&new_rope, lang.clone(), 2, Some(&changed), None, None)
+            .unwrap();
+
+        assert_eq!(
+            untouched(&map),
+            carried,
+            "a split in one paragraph must not move the layers after it"
+        );
+
+        let mut fresh = SyntaxMap::new();
+        fresh.reparse(&new_rope, lang, 2, None, None).unwrap();
+        assert_eq!(
+            inline(&map),
+            inline(&fresh),
+            "and the split paragraph must end up as the two layers a fresh parse finds"
         );
     }
 
