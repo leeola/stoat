@@ -1,19 +1,26 @@
-//! UI thread: owns the terminal and stdin event stream.
+//! Terminal IO, on two threads of its own so neither direction can stall the
+//! other or the main thread.
 //!
-//! Runs on a dedicated OS thread with its own single-threaded tokio runtime.
-//! Its only job is shuttling bytes -- forwarding input events to the main thread
-//! and flushing rendered buffers to the terminal. Physical thread isolation
-//! guarantees that terminal IO latency is independent of main-thread workload.
+//! The UI thread owns the terminal. It runs a single-threaded tokio runtime,
+//! sets the terminal up and restores it, and flushes rendered frames and
+//! stoatty APC batches to stdout.
+//!
+//! A second thread does nothing but read stdin and forward what it finds. It
+//! exists because every flush above is a blocking write, and a stdout that
+//! stops draining parks the thread doing it. Keeping the two apart is what
+//! makes typing survive a saturated link, where a multi-MB batch can take
+//! seconds to go out.
+//!
+//! Neither thread does any of the editor's work, so terminal IO latency is
+//! independent of main-thread workload as well.
 
 use crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, EventStream,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
     },
     execute, queue,
     terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
 };
-use futures::StreamExt;
 use ratatui::buffer::Buffer;
 use std::{
     backtrace::Backtrace,
@@ -155,7 +162,17 @@ async fn run(
     // what upgrades the session once one arrives.
     let _ = stoatty_tx.send(stoatty_handshake());
 
-    let mut events = EventStream::new();
+    // Only now, because the handshake reads raw fd 0 and nothing else may be
+    // reading stdin while it does.
+    //
+    // On its own thread because every arm of the loop below is a blocking write
+    // to stdout, and a full pipe parks the whole loop until it drains. Reading
+    // stdin from there means a saturated link stops keystrokes being read at
+    // all, which is the one thing this thread exists to prevent.
+    thread::spawn({
+        let event_tx = event_tx.clone();
+        move || forward_input(&event_tx, crossterm::event::read)
+    });
 
     // UI-thread-local input-to-flush latency, logged periodically. The main
     // thread keeps its own PerfStats, so this needs no cross-thread channel.
@@ -165,18 +182,11 @@ async fn run(
     let mut recorded_frames: usize = 0;
 
     loop {
-        // Biased: always drain input before flushing frames so keypresses
-        // are never starved by a burst of render buffers
+        // Biased toward the frame, because the render arm drains the APC queue
+        // itself once the grid is drawn. Taking a batch first would write pool
+        // content that the grid then paints over, which is the wrong way round.
         tokio::select! {
             biased;
-
-            event = events.next() => {
-                let Some(event) = event else { break };
-                let event = event?;
-                if event_tx.send(event).is_err() {
-                    break;
-                }
-            }
 
             changed = render_rx.changed() => {
                 if changed.is_err() {
@@ -407,10 +417,28 @@ fn log_input_latency(perf: &crate::perf::PerfStats) {
     }
 }
 
+/// Forward every event `read` produces onto `event_tx` until either end goes
+/// away.
+///
+/// `read` is [`crossterm::event::read`] in production, blocking until stdin has
+/// an event. It is a parameter so the loop's two exits can be driven without
+/// a terminal.
+///
+/// Returns when a send fails, meaning the main loop is gone, or when `read`
+/// errors. Neither is recoverable from here, and the caller's thread has
+/// nothing else to do.
+fn forward_input(event_tx: &UnboundedSender<Event>, mut read: impl FnMut() -> io::Result<Event>) {
+    while let Ok(event) = read() {
+        if event_tx.send(event).is_err() {
+            break;
+        }
+    }
+}
+
 /// Write every APC byte batch already queued on `apc_rx` to stdout without
 /// blocking, then flush.
 ///
-/// Drains only the currently-queued batches; a batch arriving mid-drain is
+/// Drains only the currently-queued batches. A batch arriving mid-drain is
 /// handled on the next loop wake. Ordered and lossless, unlike the render watch,
 /// so `fill` page content is never coalesced or dropped.
 fn drain_apc(apc_rx: &mut UnboundedReceiver<Vec<u8>>) -> io::Result<()> {
@@ -452,6 +480,60 @@ fn copy_clamped(dst: &mut Buffer, src: &Buffer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every event read reaches the channel, and a reader that goes away ends
+    /// the loop.
+    ///
+    /// The loop runs on a thread nothing joins, so the exits are the only thing
+    /// that ever ends it. One that stopped working would leave a thread reading
+    /// stdin for a session that is over, taking keystrokes meant for whatever
+    /// runs next.
+    #[test]
+    fn forwarding_ends_when_the_receiver_is_gone() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut queued = vec![Event::Resize(80, 24), Event::Resize(100, 30)].into_iter();
+        // Counted past exhaustion so a loop that reads through the error trips
+        // here rather than spinning forever on a reader that never runs out.
+        let mut past_end = 0;
+        forward_input(&tx, || match queued.next() {
+            Some(event) => Ok(event),
+            None => {
+                past_end += 1;
+                assert_eq!(
+                    past_end, 1,
+                    "a read error must end the loop, not be retried"
+                );
+                Err(io::Error::from(io::ErrorKind::UnexpectedEof))
+            },
+        });
+
+        let mut got = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            got.push(event);
+        }
+        assert_eq!(
+            got,
+            vec![Event::Resize(80, 24), Event::Resize(100, 30)],
+            "a read error ends the loop, after everything before it went out",
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        // Bounded so a loop that never notices the closed channel ends here
+        // rather than spinning on a read that always succeeds.
+        let mut reads = 0;
+        forward_input(&tx, || {
+            reads += 1;
+            match reads > 4 {
+                true => Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+                false => Ok(Event::Resize(80, 24)),
+            }
+        });
+        assert_eq!(
+            reads, 1,
+            "and a closed channel ends it on the first failed send, not later",
+        );
+    }
 
     #[test]
     fn copy_clamped_keeps_dst_area_and_copies_overlap_when_src_is_larger() {
