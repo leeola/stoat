@@ -11,9 +11,8 @@ pub mod textobject;
 
 pub use brackets::matching_bracket;
 pub use highlight::{
-    drop_syntax_in_background, edit_tree, extract_highlights, extract_highlights_rope,
-    extract_highlights_rope_with_cache, parse, parse_rope, parse_rope_range, parse_rope_within,
-    ExtractedHighlights, HighlightSpan, InjectionTreeCache, SyntaxState,
+    drop_syntax_in_background, edit_tree, extract_highlights, parse, parse_rope, parse_rope_range,
+    parse_rope_within, HighlightSpan, SyntaxState,
 };
 pub use highlight_map::{HighlightId, HighlightMap};
 pub use indent::{line_leading_whitespace, newline_indent, suggested_indent};

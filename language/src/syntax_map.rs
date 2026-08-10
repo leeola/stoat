@@ -1,16 +1,18 @@
 //! Multi-layer syntax tree storage for languages with injections.
 //!
-//! Goal: replace the single-tree [`crate::SyntaxState`] +
-//! [`crate::InjectionTreeCache`] pair with a [`SumTree`] of
-//! [`SyntaxLayer`]s. Each layer carries one parsed [`tree_sitter::Tree`]
-//! plus enough metadata to walk the layers in document order, depth-by-
-//! depth, so a single capture iterator can merge highlights across the
-//! root grammar and every injection without the per-host-node loop in
-//! [`crate::extract_highlights_rope_with_cache`].
+//! A [`SumTree`] of [`SyntaxLayer`]s, each carrying one parsed
+//! [`tree_sitter::Tree`] plus enough metadata to walk the layers in document
+//! order, depth by depth. That lets a single capture iterator merge highlights
+//! across the root grammar and every injection, at any nesting depth, rather
+//! than looping over host nodes one level down.
+//!
+//! This is the path every highlight takes. [`crate::SyntaxState`] holds the
+//! root tree alongside it for the consumers that want one tree rather than
+//! merged captures, which are the indent queries, the code index, and the next
+//! parse, since that edits the prior tree rather than building one.
 //!
 //! Pattern adapted from
-//! `references/zed/crates/language/src/syntax_map.rs`. The full target
-//! pipeline is:
+//! `references/zed/crates/language/src/syntax_map.rs`. The pipeline is:
 //!
 //! ```text
 //!   Buffer edit
@@ -22,11 +24,6 @@
 //!     -> SyntaxSnapshot::captures(range)      // merges QueryCaptures across layers
 //!         -> BufferChunks emits styled chunks
 //! ```
-//!
-//! [`crate::SyntaxState`] is still the per-buffer source of truth for
-//! highlight extraction; this module is populated in parallel and will
-//! take over once the capture-merging consumers no longer need the
-//! single-tree state.
 
 use crate::{
     highlight::{

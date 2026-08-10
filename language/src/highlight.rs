@@ -1,4 +1,4 @@
-use crate::language::{InjectionInner, Language};
+use crate::language::Language;
 use std::{
     cell::Cell,
     ops::{ControlFlow, Deref, DerefMut, Range},
@@ -48,39 +48,6 @@ pub fn drop_syntax_in_background(state: SyntaxState) {
     let _ = DROP_TX.send(state);
 }
 
-#[derive(Debug, Default)]
-pub struct InjectionTreeCache {
-    entries: Vec<InjectionTreeEntry>,
-}
-
-#[derive(Debug)]
-struct InjectionTreeEntry {
-    host_range: Range<usize>,
-    language_name: &'static str,
-    tree: Tree,
-}
-
-impl InjectionTreeCache {
-    /// Pop and return the cached tree whose host range and language match
-    /// `host_range` / `language_name`. Returns `None` if no entry matches;
-    /// callers should fall through to a full parse in that case.
-    fn take(&mut self, host_range: &Range<usize>, language_name: &'static str) -> Option<Tree> {
-        let idx = self
-            .entries
-            .iter()
-            .position(|e| e.host_range == *host_range && e.language_name == language_name)?;
-        Some(self.entries.swap_remove(idx).tree)
-    }
-
-    fn push(&mut self, host_range: Range<usize>, language_name: &'static str, tree: Tree) {
-        self.entries.push(InjectionTreeEntry {
-            host_range,
-            language_name,
-            tree,
-        });
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HighlightSpan {
     pub byte_range: Range<usize>,
@@ -94,15 +61,6 @@ pub struct HighlightSpan {
     /// against the capture name without depending on a particular
     /// theme being installed.
     pub capture_index: u32,
-}
-
-/// Result of [`extract_highlights_rope_with_cache`]: the highlight spans
-/// for `tree` plus the injection sub-trees that were parsed. Caller stores
-/// the cache on the per-buffer [`SyntaxState`] for re-use on the next
-/// reparse.
-pub struct ExtractedHighlights {
-    pub spans: Vec<HighlightSpan>,
-    pub injection_trees: InjectionTreeCache,
 }
 
 static PARSERS: LazyLock<Mutex<Vec<Parser>>> = LazyLock::new(Default::default);
@@ -412,99 +370,6 @@ fn stoat_to_ts(p: Point) -> TsPoint {
     }
 }
 
-/// Like [`extract_highlights`] but reads node text from a [`Rope`] instead of
-/// a flat `&str`. Tree-sitter pulls bytes for each captured node via the
-/// [`TextProvider`] trait, so the rope storage is the source of truth and no
-/// copy is required.
-///
-/// Walks any registered language injections via the language's pre-compiled
-/// [`crate::language::Language::injection_query`]: each query match locates
-/// a host node, the inner grammar parses that node's byte range, and the
-/// resulting highlight spans are merged into the host coordinate space.
-///
-/// Injection sub-trees are full-reparsed each call. Use
-/// [`extract_highlights_rope_with_cache`] to thread an [`InjectionTreeCache`]
-/// across reparses for incremental injection parsing.
-pub fn extract_highlights_rope(
-    language: &Language,
-    tree: &Tree,
-    rope: &Rope,
-) -> Vec<HighlightSpan> {
-    extract_highlights_rope_with_cache(language, tree, rope, InjectionTreeCache::default()).spans
-}
-
-/// Cache-aware variant of [`extract_highlights_rope`]. Reuses prior
-/// injection sub-trees from `prev_cache` whose host range and language
-/// match the current parse, and returns a fresh cache containing the
-/// trees parsed during this call so the caller can persist them on the
-/// per-buffer state.
-pub fn extract_highlights_rope_with_cache(
-    language: &Language,
-    tree: &Tree,
-    rope: &Rope,
-    mut prev_cache: InjectionTreeCache,
-) -> ExtractedHighlights {
-    let mut raw: Vec<RawSpan> = Vec::new();
-    collect_highlights_into(&mut raw, language, tree, rope);
-
-    let mut new_cache = InjectionTreeCache::default();
-
-    if let Some(injection_query) = language.injection_query.as_ref() {
-        let mut cursor = QueryCursorHandle::new();
-        let provider = RopeTextProvider { rope };
-        let mut matches = cursor.matches(injection_query, tree.root_node(), provider);
-        while let Some(m) = matches.next() {
-            let pattern_index = m.pattern_index;
-            let Some(injection) = language.injections.get(pattern_index) else {
-                continue;
-            };
-            // This single-level walk resolves only fixed injections. Fence
-            // injections need per-fence language resolution and the recursive
-            // multi-layer SyntaxMap path.
-            // An unfilled slot means the language was built outside the registry
-            // that wires these, so there is nothing to inject.
-            let InjectionInner::Fixed { language, .. } = &injection.inner else {
-                continue;
-            };
-            let Some(inner) = language.get() else {
-                continue;
-            };
-            for capture in m.captures {
-                let inner_start = capture.node.start_byte();
-                let inner_end = capture.node.end_byte();
-                if inner_end <= inner_start {
-                    continue;
-                }
-                let host_range = inner_start..inner_end;
-                let lang_name = inner.name;
-                let prev_tree = prev_cache.take(&host_range, lang_name);
-                // Parse the host node's bytes via included_ranges so the
-                // inner tree's nodes already carry rope-absolute byte
-                // offsets. No flat-string allocation, no offset translation.
-                let Some(inner_tree) =
-                    parse_rope_range(inner, rope, host_range.clone(), prev_tree.as_ref(), None)
-                else {
-                    continue;
-                };
-                collect_highlights_into(&mut raw, inner, &inner_tree, rope);
-                new_cache.push(host_range, lang_name, inner_tree);
-            }
-        }
-    }
-
-    raw.sort_by(|a, b| {
-        a.byte_range
-            .start
-            .cmp(&b.byte_range.start)
-            .then(a.pattern.cmp(&b.pattern))
-    });
-    let spans = raw.into_iter().map(RawSpan::into_highlight_span).collect();
-    ExtractedHighlights {
-        spans,
-        injection_trees: new_cache,
-    }
-}
-
 /// Working tuple used while extracting highlights. Carries the
 /// theme-resolved [`crate::HighlightId`] plus the original tree-sitter
 /// capture index so consumers can resolve the capture name later.
@@ -521,29 +386,6 @@ impl RawSpan {
             byte_range: self.byte_range,
             id: self.id,
             capture_index: self.capture_index,
-        }
-    }
-}
-
-fn collect_highlights_into(raw: &mut Vec<RawSpan>, language: &Language, tree: &Tree, rope: &Rope) {
-    let highlight_map = language.highlight_map();
-    let mut cursor = QueryCursorHandle::new();
-    let provider = RopeTextProvider { rope };
-    let mut matches = cursor.matches(&language.highlight_query, tree.root_node(), provider);
-    while let Some(m) = matches.next() {
-        let pattern = m.pattern_index;
-        for capture in m.captures {
-            let start = capture.node.start_byte();
-            let end = capture.node.end_byte();
-            if start == end {
-                continue;
-            }
-            raw.push(RawSpan {
-                byte_range: start..end,
-                pattern,
-                id: highlight_map.get(capture.index),
-                capture_index: capture.index,
-            });
         }
     }
 }
@@ -835,57 +677,6 @@ mod tests {
         let tree = super::parse_rope(&markdown(), &Rope::from("# Title\n"), Some(&rust_tree))
             .expect("mismatched-grammar old_tree must be dropped, not abort");
         assert_eq!(tree.root_node().kind(), "document");
-    }
-
-    #[test]
-    fn extract_highlights_rope_matches_string_form() {
-        use stoat_text::Rope;
-        let text = "fn main() { let x = \"hi\"; }";
-        let rope = Rope::from(text);
-        let lang = rust();
-        let tree_rope = super::parse_rope(&lang, &rope, None).unwrap();
-        let spans_rope = super::extract_highlights_rope(&lang, &tree_rope, &rope);
-        let tree_str = parse(&lang, text, None).unwrap();
-        let spans_str = extract_highlights(&lang, &tree_str, text);
-        assert_eq!(spans_rope, spans_str);
-    }
-
-    #[test]
-    fn markdown_inline_emphasis_captured_via_injection() {
-        // Top-level markdown only emits block-level captures (e.g. titles).
-        // The inline grammar is registered as an injection inside `inline`
-        // nodes, so `**bold**` produces an emphasis.strong capture when
-        // extracted via the rope path.
-        use stoat_text::Rope;
-        let lang = markdown();
-        let text = "**bold** and *italic*\n";
-        let rope = Rope::from(text);
-        let tree = super::parse_rope(&lang, &rope, None).unwrap();
-        let spans = super::extract_highlights_rope(&lang, &tree, &rope);
-
-        let bold_start = text.find("**bold**").unwrap();
-        let bold_end = bold_start + "**bold**".len();
-        // The injection layer is markdown-inline; resolve capture
-        // names against that language. We accept both "emphasis.strong"
-        // and the dotted variant the markdown-inline grammar uses.
-        let inline_lang = LanguageRegistry::standard()
-            .languages()
-            .iter()
-            .find(|l| l.name == "markdown-inline")
-            .unwrap()
-            .clone();
-        assert!(
-            spans.iter().any(|s| {
-                let in_bold = s.byte_range.start >= bold_start && s.byte_range.end <= bold_end;
-                let name = inline_lang
-                    .highlight_capture_names()
-                    .get(s.capture_index as usize)
-                    .copied()
-                    .unwrap_or("");
-                in_bold && name.contains("emphasis")
-            }),
-            "expected an emphasis capture inside `**bold**`, got {spans:?}",
-        );
     }
 
     #[test]
