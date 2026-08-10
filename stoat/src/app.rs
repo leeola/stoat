@@ -15435,6 +15435,32 @@ mod tests {
         );
     }
 
+    /// The same randomized check over the one injection that merges several
+    /// host ranges into a single tree.
+    ///
+    /// Rust doc comments are it. Every `///` line is its own host node and the
+    /// markdown parsed over them is one document, so a snippet set that writes
+    /// and deletes `///` markers moves the range set that tree was built over.
+    /// That is the case where carrying the tree forward can disagree with a
+    /// parse that never saw the old ranges.
+    #[test]
+    fn a_carried_parse_tracks_a_fresh_parse_across_doc_comments() {
+        let layers = random_edits_tracking_a_fresh_parse(
+            "a.rs",
+            "/// Adds **two** numbers.\n\
+             ///\n\
+             /// Returns `a + b`, which is the *whole* contract.\n\
+             fn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n\n\
+             /// Doubles `x`.\n\
+             fn double(x: u32) -> u32 {\n    x * 2\n}\n",
+            &["///", "/// ", "**", "`", "*", "\n", "x", " ", "//", "-"],
+        );
+        assert!(
+            layers.iter().any(|&l| l > 1),
+            "the fixture must keep a doc-comment layer alive, got {layers:?}",
+        );
+    }
+
     /// Drive randomized edits over `source`, asserting after each one that the
     /// carried parse still equals a from-scratch parse of the same snapshot.
     ///

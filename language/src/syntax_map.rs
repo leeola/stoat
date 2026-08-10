@@ -1111,12 +1111,20 @@ fn parse_rope_combined_ranges(
     // case worth reusing for.
     //
     // Reuse across a moved set is not sound here, however cheap it would make
-    // typing a new paragraph. A range set changes when a host node is added or
-    // dropped, and the prior tree carries no nodes for text the layer did not
-    // previously include, while no `Tree::edit` describes a range set changing.
-    // Dropping the guard passes this crate's own equivalence fixtures and still
-    // diverges from a from-scratch parse at step 12 of
-    // `app::tests::a_carried_parse_tracks_a_fresh_parse_across_injection_layers`.
+    // typing a new doc comment. A range set changes when a host node is added
+    // or dropped, and no `Tree::edit` describes that, so tree-sitter is left
+    // comparing the two range lists and reusing whatever subtree its external
+    // scanner state matches at. For the markdown block grammar that state does
+    // not distinguish the two layouts, and the reused blocks are the ones a
+    // parse over the same ranges would not have produced.
+    //
+    // Splicing the ranges is not the missing piece. The walk above already
+    // hands this the same set a from-scratch parse discovers, and dropping the
+    // guard still lands a combined tree holding three paragraphs where a parse
+    // over those very ranges holds two. That is what
+    // `app::tests::a_carried_parse_tracks_a_fresh_parse_across_doc_comments`
+    // catches, and it is the only fixture that does, doc comments being the
+    // one combined injection left.
     let old_tree = old_tree.filter(|t| t.included_ranges() == ts_ranges);
     parse_rope_inner(language, rope, old_tree, Some(&ts_ranges), deadline)
 }
