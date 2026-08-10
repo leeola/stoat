@@ -145,45 +145,6 @@ impl SelectionsCollection {
         self.install(insert_at(&self.disjoint, pos, selection));
     }
 
-    /// Insert `selection`, minting a fresh id and keeping its span and
-    /// direction. A duplicate of an existing span is skipped, so copying a
-    /// selection onto a line it already covers is a no-op.
-    pub(crate) fn insert_range(
-        &mut self,
-        mut selection: Selection<Anchor>,
-        snapshot: &MultiBufferSnapshot,
-    ) {
-        // Copying a selection onto another row works by column, and the target
-        // row can hold different text, so a column that was a boundary on the
-        // source can land inside a cluster here. This path never reaches
-        // [`Self::replace_with`], so it applies that same clip itself: starts
-        // clamp down and ends clamp up, growing a span out to the character it
-        // was splitting.
-        let rope = snapshot.rope();
-        let start =
-            rope.clip_to_grapheme_boundary(snapshot.resolve_anchor(&selection.start), Bias::Left);
-        let end =
-            rope.clip_to_grapheme_boundary(snapshot.resolve_anchor(&selection.end), Bias::Right);
-        selection.start = snapshot.anchor_at(start, Bias::Left);
-        selection.end = snapshot.anchor_at(end, Bias::Right);
-
-        let pos = self
-            .disjoint
-            .binary_search_by(|s| snapshot.resolve_anchor(&s.start).cmp(&start))
-            .unwrap_or_else(|p| p);
-
-        if let Some(existing) = self.disjoint.get(pos)
-            && snapshot.resolve_anchor(&existing.start) == start
-            && snapshot.resolve_anchor(&existing.end) == end
-        {
-            return;
-        }
-
-        selection.id = self.next_selection_id;
-        self.next_selection_id += 1;
-        self.install(insert_at(&self.disjoint, pos, selection));
-    }
-
     /// Replace the collection with a single 1-wide block cursor over the first
     /// character, widened against `snapshot`.
     ///
@@ -339,25 +300,51 @@ impl SelectionsCollection {
         self.replace_with(transformed, snapshot);
     }
 
-    /// Flat-map each selection into zero or more replacement pieces. Returning
-    /// an empty vec keeps the original selection unchanged; returning a
-    /// non-empty vec replaces it with the pieces, each receiving a fresh id
-    /// from this collection's allocator.
-    pub(crate) fn split_each<F>(&mut self, snapshot: &MultiBufferSnapshot, mut split: F)
+    /// Flat-map each selection into zero or more replacement pieces, given as
+    /// `(start, end)` offsets.
+    ///
+    /// An empty vec keeps the original selection unchanged. A non-empty one
+    /// replaces it with the pieces, each receiving a fresh id from this
+    /// collection's allocator.
+    ///
+    /// Pieces arrive as offsets rather than anchored so every endpoint the
+    /// split produces is minted in one walk, under `bias`. A splitter anchoring
+    /// its own would pay a root descent each, and a regex over a large
+    /// selection produces thousands.
+    pub(crate) fn split_each<F>(&mut self, snapshot: &MultiBufferSnapshot, bias: Bias, mut split: F)
     where
-        F: FnMut(&Selection<Anchor>) -> Vec<Selection<Anchor>>,
+        F: FnMut(&Selection<Anchor>) -> Vec<(usize, usize)>,
     {
+        // Which selections were split and into what, kept apart from the
+        // anchoring so the whole set's endpoints go through one batch.
+        let split_into: Vec<Vec<(usize, usize)>> = self.disjoint.iter().map(&mut split).collect();
+
+        let anchors = {
+            let flat: Vec<usize> = split_into
+                .iter()
+                .flatten()
+                .flat_map(|&(start, end)| [start, end])
+                .collect();
+            snapshot.anchors_at_batch(&flat, bias)
+        };
+
+        let mut anchors = anchors.chunks_exact(2);
         let mut new_disjoint: Vec<Selection<Anchor>> = Vec::with_capacity(self.disjoint.len());
-        for sel in self.disjoint.iter() {
-            let pieces = split(sel);
+        for (sel, pieces) in self.disjoint.iter().zip(&split_into) {
             if pieces.is_empty() {
                 new_disjoint.push(sel.clone());
                 continue;
             }
-            for mut piece in pieces {
-                piece.id = self.next_selection_id;
+            for _ in pieces {
+                let span = anchors.next().expect("two anchors per piece");
+                new_disjoint.push(Selection {
+                    id: self.next_selection_id,
+                    start: span[0],
+                    end: span[1],
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                });
                 self.next_selection_id += 1;
-                new_disjoint.push(piece);
             }
         }
         self.replace_with(new_disjoint, snapshot);
@@ -385,6 +372,70 @@ impl SelectionsCollection {
             selection.id = self.next_selection_id;
             self.next_selection_id += 1;
         }
+        self.replace_with(new_disjoint, snapshot);
+    }
+
+    /// Add `added` to the set, each taking a fresh id.
+    ///
+    /// Ids ascend in the order given, so the last one becomes the primary, as
+    /// it would had each been inserted in turn.
+    ///
+    /// Adding one at a time cost a binary search whose comparator resolved an
+    /// anchor per probe and an O(N) shift, per addition, where this is one sort
+    /// and one pass. Overlaps merge rather than surviving side by side, which
+    /// is the disjointness the collection is named for.
+    pub(crate) fn extend_with_fresh_ids(
+        &mut self,
+        added: Vec<Selection<Anchor>>,
+        snapshot: &MultiBufferSnapshot,
+    ) {
+        if added.is_empty() {
+            return;
+        }
+        let mut new_disjoint = self.disjoint.to_vec();
+        new_disjoint.extend(added.into_iter().map(|mut selection| {
+            selection.id = self.next_selection_id;
+            self.next_selection_id += 1;
+            selection
+        }));
+        self.replace_with(new_disjoint, snapshot);
+    }
+
+    /// [`Self::replace_with_fresh_ids`] from `(start, end)` offsets, minting
+    /// every endpoint under `bias` in one batched walk.
+    ///
+    /// For a producer that found its spans by scanning text rather than by
+    /// moving selections around, and so holds offsets. Anchoring them itself
+    /// would be a root descent per endpoint, which a regex over a large
+    /// selection turns into thousands.
+    pub(crate) fn replace_with_fresh_ids_from_offsets(
+        &mut self,
+        spans: &[(usize, usize)],
+        bias: Bias,
+        snapshot: &MultiBufferSnapshot,
+    ) {
+        let anchors = {
+            let flat: Vec<usize> = spans
+                .iter()
+                .flat_map(|&(start, end)| [start, end])
+                .collect();
+            snapshot.anchors_at_batch(&flat, bias)
+        };
+
+        let new_disjoint: Vec<Selection<Anchor>> = anchors
+            .chunks_exact(2)
+            .map(|span| {
+                let id = self.next_selection_id;
+                self.next_selection_id += 1;
+                Selection {
+                    id,
+                    start: span[0],
+                    end: span[1],
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                }
+            })
+            .collect();
         self.replace_with(new_disjoint, snapshot);
     }
 
@@ -427,8 +478,7 @@ impl SelectionsCollection {
         // this is where the rule is applied rather than in each of them.
         //
         // The exceptions write into `disjoint` directly and each carry the rule
-        // themselves. [`Self::insert_range`] applies the same bias pair as this
-        // does. [`Self::insert_cursor`] widens through
+        // themselves. [`Self::insert_cursor`] widens through
         // `Selection::min_width_1`, which lands on whole clusters.
         // [`Self::set_block_cursor`] and [`Self::seed_cursor`] go through
         // [`block_cursor_at`], which clamps down before widening because
@@ -933,15 +983,15 @@ mod tests {
             ("insert_cursor", |c, s| {
                 c.insert_cursor(s.anchor_at(4, Bias::Right), SelectionGoal::None, s)
             }),
-            ("insert_range", |c, s| {
-                c.insert_range(
-                    Selection {
+            ("extend_with_fresh_ids", |c, s| {
+                c.extend_with_fresh_ids(
+                    vec![Selection {
                         id: 0,
                         start: s.anchor_at(2, Bias::Right),
                         end: s.anchor_at(5, Bias::Right),
                         reversed: false,
                         goal: SelectionGoal::None,
-                    },
+                    }],
                     s,
                 )
             }),
@@ -1889,7 +1939,7 @@ mod tests {
         );
         let before_ids: Vec<usize> = collection.all_anchors().iter().map(|s| s.id).collect();
 
-        collection.split_each(&snapshot, |_| Vec::new());
+        collection.split_each(&snapshot, Bias::Right, |_| Vec::new());
 
         let after_ids: Vec<usize> = collection.all_anchors().iter().map(|s| s.id).collect();
         assert_eq!(after_ids, before_ids);
@@ -1907,24 +1957,7 @@ mod tests {
         );
         let before_ids: Vec<usize> = collection.all_anchors().iter().map(|s| s.id).collect();
 
-        collection.split_each(&snapshot, |_| {
-            vec![
-                Selection {
-                    id: 0,
-                    start: snapshot.anchor_at(0, Bias::Right),
-                    end: snapshot.anchor_at(3, Bias::Right),
-                    reversed: false,
-                    goal: SelectionGoal::None,
-                },
-                Selection {
-                    id: 0,
-                    start: snapshot.anchor_at(5, Bias::Right),
-                    end: snapshot.anchor_at(8, Bias::Right),
-                    reversed: false,
-                    goal: SelectionGoal::None,
-                },
-            ]
-        });
+        collection.split_each(&snapshot, Bias::Right, |_| vec![(0, 3), (5, 8)]);
 
         let after: Vec<(usize, usize)> = collection
             .all_anchors()
@@ -2084,15 +2117,15 @@ mod tests {
         );
     }
 
-    /// `insert_range` snaps a span that splits a cluster.
+    /// An added span that splits a cluster snaps out to cover it.
     ///
-    /// This is the one selection producer that writes into `disjoint` without
-    /// passing through `replace_with`, so the clip it would have received has to
-    /// be applied here. Its only production caller resolves its offsets through
+    /// Copying a selection onto another row works by column, and that row can
+    /// hold different text, so a column that was a boundary on the source lands
+    /// inside a cluster here. The production caller resolves its offsets through
     /// the display layer, which already snaps, so this exercises the contract
     /// directly rather than through a path that cannot violate it.
     #[test]
-    fn insert_range_snaps_a_span_that_splits_a_cluster() {
+    fn an_added_span_splitting_a_cluster_snaps_out_to_cover_it() {
         let multi = singleton("ae\u{301}b\n");
         let snapshot = multi.snapshot();
         let mut collection = SelectionsCollection::new();
@@ -2105,7 +2138,7 @@ mod tests {
             reversed: false,
             goal: SelectionGoal::None,
         };
-        collection.insert_range(split, &snapshot);
+        collection.extend_with_fresh_ids(vec![split], &snapshot);
 
         let stored = collection
             .all_anchors()
@@ -2123,6 +2156,45 @@ mod tests {
             stored,
             (1, 4),
             "the span grows out to the cluster it was splitting",
+        );
+    }
+
+    /// A copied cursor's start holds its ground when text arrives on it.
+    ///
+    /// Which side of an insertion an endpoint lands on is the anchor's bias, and
+    /// nothing about the offsets says which was used. Minting the copies' starts
+    /// the other way would let text typed at a copy's own offset push it along,
+    /// so the cursor would slide off the column it was copied to.
+    #[test]
+    fn a_copied_cursors_start_stays_before_text_inserted_at_it() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = h.write_file("s.txt", "abcdef\nabcdef\n");
+        h.open_file(&path);
+        h.type_keys("l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AddSelectionBelow);
+        assert_eq!(
+            h.selection_spans(),
+            vec![(3, 4, false), (10, 11, false)],
+            "one cursor per row at column three",
+        );
+
+        // Onto the copy's own start, which is the offset whose bias decides
+        // whether the cursor is pushed along or stays where it was put.
+        {
+            let ws = h.stoat.active_workspace();
+            let editor_id = match ws.panes.pane(ws.panes.focus()).view {
+                crate::pane::View::Editor(id) => id,
+                _ => panic!("focused pane is not an editor"),
+            };
+            let buffer_id = ws.editors[editor_id].buffer_id;
+            let buffer = ws.buffers.get(buffer_id).expect("buffer");
+            buffer.write().expect("poisoned").edit(10..10, "XY");
+        }
+
+        assert_eq!(
+            h.selection_spans(),
+            vec![(3, 4, false), (10, 13, false)],
+            "the copy's start stayed put and the insertion landed inside it",
         );
     }
 
@@ -4140,14 +4212,14 @@ mod tests {
                 buf_snap.anchor_at(5, Bias::Right),
                 SelectionGoal::None,
             );
-            editor.selections.insert_range(
-                Selection {
+            editor.selections.extend_with_fresh_ids(
+                vec![Selection {
                     id: 0,
                     start: buf_snap.anchor_at(5, Bias::Left),
                     end: buf_snap.anchor_at(7, Bias::Right),
                     reversed: false,
                     goal: SelectionGoal::None,
-                },
+                }],
                 buf_snap,
             );
         }

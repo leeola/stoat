@@ -330,10 +330,41 @@ fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEff
         return UpdateEffect::None;
     }
 
-    for copy in copies {
-        let anchored = anchor_selection(copy, buffer);
-        editor.selections.insert_range(anchored, buffer);
+    // Copying onto another row works by column, and that row can hold different
+    // text, so a column that was a boundary on the source can land inside a
+    // cluster here. Starts clamp down and ends clamp up, growing a span out to
+    // the character it was splitting.
+    let rope = buffer.rope();
+    for copy in &mut copies {
+        copy.start = rope.clip_to_grapheme_boundary(copy.start, Bias::Left);
+        copy.end = rope.clip_to_grapheme_boundary(copy.end, Bias::Right);
     }
+
+    // Starts left, ends right, matching what the anchors would have been minted
+    // with one at a time. Two walks for the whole set rather than a root descent
+    // per endpoint.
+    let starts = buffer.anchors_at_batch(
+        &copies.iter().map(|c| c.start).collect::<Vec<_>>(),
+        Bias::Left,
+    );
+    let ends = buffer.anchors_at_batch(
+        &copies.iter().map(|c| c.end).collect::<Vec<_>>(),
+        Bias::Right,
+    );
+
+    let added: Vec<Selection<Anchor>> = copies
+        .iter()
+        .zip(starts)
+        .zip(ends)
+        .map(|((copy, start), end)| Selection {
+            id: 0,
+            start,
+            end,
+            reversed: copy.reversed,
+            goal: copy.goal,
+        })
+        .collect();
+    editor.selections.extend_with_fresh_ids(added, buffer);
     UpdateEffect::Redraw
 }
 
@@ -1571,54 +1602,44 @@ pub(super) fn split_selection_on_newline(stoat: &mut Stoat) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
-    editor.selections.split_each(buffer_snapshot, |sel| {
-        let start_offset = buffer_snapshot.resolve_anchor(&sel.start);
-        let end_offset = buffer_snapshot.resolve_anchor(&sel.end);
-        if start_offset == end_offset {
-            return Vec::new();
-        }
-
-        let mut newline_positions: Vec<usize> = Vec::new();
-        let mut byte_pos = start_offset;
-        for ch in rope.chars_at(start_offset) {
-            if byte_pos >= end_offset {
-                break;
+    editor
+        .selections
+        .split_each(buffer_snapshot, Bias::Right, |sel| {
+            let start_offset = buffer_snapshot.resolve_anchor(&sel.start);
+            let end_offset = buffer_snapshot.resolve_anchor(&sel.end);
+            if start_offset == end_offset {
+                return Vec::new();
             }
-            if ch == '\n' {
-                newline_positions.push(byte_pos);
-            }
-            byte_pos += ch.len_utf8();
-        }
 
-        if newline_positions.is_empty() {
-            return Vec::new();
-        }
-
-        let mut pieces: Vec<Selection<Anchor>> = Vec::with_capacity(newline_positions.len() + 1);
-        let mut prev = start_offset;
-        for nl in &newline_positions {
-            if *nl > prev {
-                pieces.push(Selection {
-                    id: 0,
-                    start: buffer_snapshot.anchor_at(prev, Bias::Right),
-                    end: buffer_snapshot.anchor_at(*nl, Bias::Right),
-                    reversed: false,
-                    goal: SelectionGoal::None,
-                });
+            let mut newline_positions: Vec<usize> = Vec::new();
+            let mut byte_pos = start_offset;
+            for ch in rope.chars_at(start_offset) {
+                if byte_pos >= end_offset {
+                    break;
+                }
+                if ch == '\n' {
+                    newline_positions.push(byte_pos);
+                }
+                byte_pos += ch.len_utf8();
             }
-            prev = nl + 1;
-        }
-        if prev < end_offset {
-            pieces.push(Selection {
-                id: 0,
-                start: buffer_snapshot.anchor_at(prev, Bias::Right),
-                end: buffer_snapshot.anchor_at(end_offset, Bias::Right),
-                reversed: false,
-                goal: SelectionGoal::None,
-            });
-        }
-        pieces
-    });
+
+            if newline_positions.is_empty() {
+                return Vec::new();
+            }
+
+            let mut pieces: Vec<(usize, usize)> = Vec::with_capacity(newline_positions.len() + 1);
+            let mut prev = start_offset;
+            for nl in &newline_positions {
+                if *nl > prev {
+                    pieces.push((prev, *nl));
+                }
+                prev = nl + 1;
+            }
+            if prev < end_offset {
+                pieces.push((prev, end_offset));
+            }
+            pieces
+        });
     UpdateEffect::Redraw
 }
 
@@ -2210,24 +2231,10 @@ pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
         let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        editor.selections.split_each(new_buf, |sel| {
+        editor.selections.split_each(new_buf, bias, |sel| {
             cursors_by_id
                 .get(&sel.id)
-                .map(|offsets| {
-                    offsets
-                        .iter()
-                        .map(|&offset| {
-                            let anchor = new_buf.anchor_at(offset, bias);
-                            Selection {
-                                id: sel.id,
-                                start: anchor,
-                                end: anchor,
-                                reversed: false,
-                                goal: SelectionGoal::None,
-                            }
-                        })
-                        .collect()
-                })
+                .map(|offsets| offsets.iter().map(|&offset| (offset, offset)).collect())
                 .unwrap_or_default()
         });
     }
@@ -3212,46 +3219,42 @@ fn fan_selections_to_children(stoat: &mut Stoat, walk_to_multichild_parent: bool
     let snapshot = syntax_map.snapshot();
 
     let editor = ws.editors.get_mut(editor_id).expect("editor");
-    editor.selections.split_each(buffer_snapshot, |sel| {
-        let sel_start = buffer_snapshot.resolve_anchor(&sel.start);
-        let sel_end = buffer_snapshot.resolve_anchor(&sel.end);
-        let Some(layer) = deepest_containing_layer(snapshot, sel_start, sel_end) else {
-            return Vec::new();
-        };
-        let root = layer.tree.root_node();
-        let Some(node) = root.descendant_for_byte_range(sel_start, sel_end) else {
-            return Vec::new();
-        };
-        let parent_node = if walk_to_multichild_parent {
-            let mut current = node.parent();
-            while let Some(p) = current {
-                if p.named_child_count() > 1 {
-                    break;
+    editor
+        .selections
+        .split_each(buffer_snapshot, Bias::Right, |sel| {
+            let sel_start = buffer_snapshot.resolve_anchor(&sel.start);
+            let sel_end = buffer_snapshot.resolve_anchor(&sel.end);
+            let Some(layer) = deepest_containing_layer(snapshot, sel_start, sel_end) else {
+                return Vec::new();
+            };
+            let root = layer.tree.root_node();
+            let Some(node) = root.descendant_for_byte_range(sel_start, sel_end) else {
+                return Vec::new();
+            };
+            let parent_node = if walk_to_multichild_parent {
+                let mut current = node.parent();
+                while let Some(p) = current {
+                    if p.named_child_count() > 1 {
+                        break;
+                    }
+                    current = p.parent();
                 }
-                current = p.parent();
-            }
-            current
-        } else {
-            Some(node)
-        };
-        let Some(parent_node) = parent_node else {
-            return Vec::new();
-        };
-        let mut pieces: Vec<Selection<Anchor>> =
-            Vec::with_capacity(parent_node.named_child_count());
-        let mut walker = parent_node.walk();
-        for child in parent_node.named_children(&mut walker) {
-            let range = child.byte_range();
-            pieces.push(Selection {
-                id: 0,
-                start: buffer_snapshot.anchor_at(range.start, Bias::Right),
-                end: buffer_snapshot.anchor_at(range.end, Bias::Right),
-                reversed: false,
-                goal: SelectionGoal::None,
-            });
-        }
-        pieces
-    });
+                current
+            } else {
+                Some(node)
+            };
+            let Some(parent_node) = parent_node else {
+                return Vec::new();
+            };
+            let mut walker = parent_node.walk();
+            parent_node
+                .named_children(&mut walker)
+                .map(|child| {
+                    let range = child.byte_range();
+                    (range.start, range.end)
+                })
+                .collect()
+        });
     UpdateEffect::Redraw
 }
 
@@ -6367,7 +6370,7 @@ mod tests {
                 reversed: true,
                 goal: SelectionGoal::None,
             };
-            editor.selections.insert_range(reversed, buf);
+            editor.selections.extend_with_fresh_ids(vec![reversed], buf);
         }
         assert_eq!(h.selection_spans(), vec![(0, 2, false), (3, 5, true)]);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::EnsureSelectionsForward);
@@ -6406,7 +6409,7 @@ mod tests {
                 reversed: false,
                 goal: SelectionGoal::None,
             };
-            editor.selections.insert_range(sel, buf);
+            editor.selections.extend_with_fresh_ids(vec![sel], buf);
         }
     }
 

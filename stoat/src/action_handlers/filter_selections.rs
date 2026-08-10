@@ -106,23 +106,10 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let pieces = vec![
-            stoat_text::Selection {
-                id: 0,
-                start: buf_snap.anchor_at(a.0, stoat_text::Bias::Right),
-                end: buf_snap.anchor_at(a.1, stoat_text::Bias::Right),
-                reversed: false,
-                goal: stoat_text::SelectionGoal::None,
-            },
-            stoat_text::Selection {
-                id: 0,
-                start: buf_snap.anchor_at(b.0, stoat_text::Bias::Right),
-                end: buf_snap.anchor_at(b.1, stoat_text::Bias::Right),
-                reversed: false,
-                goal: stoat_text::SelectionGoal::None,
-            },
-        ];
-        editor.selections.split_each(buf_snap, |_| pieces.clone());
+        let pieces = vec![a, b];
+        editor
+            .selections
+            .split_each(buf_snap, stoat_text::Bias::Right, |_| pieces.clone());
     }
 
     #[test]

@@ -376,14 +376,14 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        editor.selections.insert_range(
-            stoat_text::Selection {
+        editor.selections.extend_with_fresh_ids(
+            vec![stoat_text::Selection {
                 id: 0,
                 start: buf_snap.anchor_at(start, stoat_text::Bias::Right),
                 end: buf_snap.anchor_at(end, stoat_text::Bias::Right),
                 reversed: false,
                 goal: stoat_text::SelectionGoal::None,
-            },
+            }],
             buf_snap,
         );
     }

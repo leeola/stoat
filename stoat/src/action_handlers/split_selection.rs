@@ -3,7 +3,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     input_view::{InputView, SubmitTarget},
 };
-use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
+use stoat_text::Bias;
 
 /// Whether the regex modal splits selections at matches or replaces them with
 /// the matches. The modal, input state, and submit path are shared. Only the
@@ -66,31 +66,29 @@ fn split_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
-    editor.selections.split_each(buffer_snapshot, |sel| {
-        let start = buffer_snapshot.resolve_anchor(&sel.start);
-        let end = buffer_snapshot.resolve_anchor(&sel.end);
-        if start == end {
-            return Vec::new();
-        }
-        let mut pieces: Vec<Selection<Anchor>> = Vec::new();
-        let mut piece_start = start;
-        for m in regex.find_iter(rope.regex_slice_input(start..end)) {
-            // Two matches touching leave nothing between them, and a selection
-            // of no width is not one, so the gap contributes no piece.
-            if start + m.start() > piece_start {
-                pieces.push(make_anchor_selection(
-                    buffer_snapshot,
-                    piece_start,
-                    start + m.start(),
-                ));
+    editor
+        .selections
+        .split_each(buffer_snapshot, Bias::Right, |sel| {
+            let start = buffer_snapshot.resolve_anchor(&sel.start);
+            let end = buffer_snapshot.resolve_anchor(&sel.end);
+            if start == end {
+                return Vec::new();
             }
-            piece_start = start + m.end();
-        }
-        if piece_start < end {
-            pieces.push(make_anchor_selection(buffer_snapshot, piece_start, end));
-        }
-        pieces
-    });
+            let mut pieces: Vec<(usize, usize)> = Vec::new();
+            let mut piece_start = start;
+            for m in regex.find_iter(rope.regex_slice_input(start..end)) {
+                // Two matches touching leave nothing between them, and a selection
+                // of no width is not one, so the gap contributes no piece.
+                if start + m.start() > piece_start {
+                    pieces.push((piece_start, start + m.start()));
+                }
+                piece_start = start + m.end();
+            }
+            if piece_start < end {
+                pieces.push((piece_start, end));
+            }
+            pieces
+        });
 }
 
 /// Replace the selections with every match found inside them. When nothing
@@ -99,7 +97,7 @@ fn select_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
     // Collected in one pass rather than asked twice. Whether anything matched
     // is a property of what was collected, so a scan of its own to answer that
     // would be the same work over the same ranges.
-    let found: Vec<Vec<Selection<Anchor>>> = {
+    let found: Vec<Vec<(usize, usize)>> = {
         let Some(editor) = focused_editor_mut(stoat) else {
             return;
         };
@@ -125,9 +123,7 @@ fn select_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
                     // matches empty therefore selects nothing, which the
                     // all-empty branch below reports.
                     .filter(|m| m.start() != m.end())
-                    .map(|m| {
-                        make_anchor_selection(buffer_snapshot, start + m.start(), start + m.end())
-                    })
+                    .map(|m| (start + m.start(), start + m.end()))
                     .collect()
             })
             .collect()
@@ -147,10 +143,10 @@ fn select_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
     // place, so a selection that matched nothing is gone rather than left
     // sitting where the user searched and found nothing. The guard above
     // returned already if that were every selection, so this is never empty.
-    let matches: Vec<Selection<Anchor>> = found.into_iter().flatten().collect();
+    let matches: Vec<(usize, usize)> = found.into_iter().flatten().collect();
     editor
         .selections
-        .replace_with_fresh_ids(matches, buffer_snapshot);
+        .replace_with_fresh_ids_from_offsets(&matches, Bias::Right, buffer_snapshot);
 }
 
 /// Cancel the input modal without splitting. Returns `true` when
@@ -162,20 +158,6 @@ pub(crate) fn cancel(stoat: &mut Stoat) -> bool {
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
     true
-}
-
-fn make_anchor_selection(
-    snapshot: &crate::multi_buffer::MultiBufferSnapshot,
-    start: usize,
-    end: usize,
-) -> Selection<Anchor> {
-    Selection {
-        id: 0,
-        start: snapshot.anchor_at(start, Bias::Right),
-        end: snapshot.anchor_at(end, Bias::Right),
-        reversed: false,
-        goal: SelectionGoal::None,
-    }
 }
 
 fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut crate::editor_state::EditorState> {
@@ -298,14 +280,14 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        editor.selections.insert_range(
-            stoat_text::Selection {
+        editor.selections.extend_with_fresh_ids(
+            vec![stoat_text::Selection {
                 id: 0,
                 start: buf_snap.anchor_at(start, stoat_text::Bias::Right),
                 end: buf_snap.anchor_at(end, stoat_text::Bias::Right),
                 reversed: false,
                 goal: stoat_text::SelectionGoal::None,
-            },
+            }],
             buf_snap,
         );
     }
