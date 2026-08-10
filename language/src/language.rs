@@ -203,11 +203,26 @@ impl LanguageRegistry {
             host_node_kind: "inline",
             inner: InjectionInner::Fixed(markdown_inline.clone()),
         }]));
+
+        // Rust injects markdown into its doc comments, so it waits for the two
+        // above. json and toml depend on nothing, so the three compile together
+        // rather than in turn, each being a highlight query of its own.
+        let (rust, json, toml) = std::thread::scope(|s| {
+            let json = s.spawn(make_json);
+            let toml = s.spawn(make_toml);
+            let rust = make_rust(markdown.clone());
+            (
+                rust,
+                json.join().expect("json language thread panicked"),
+                toml.join().expect("toml language thread panicked"),
+            )
+        });
+
         let registry = Self {
             languages: vec![
-                Arc::new(make_rust(markdown.clone())),
-                Arc::new(make_json()),
-                Arc::new(make_toml()),
+                Arc::new(rust),
+                Arc::new(json),
+                Arc::new(toml),
                 markdown,
                 markdown_inline,
             ],
