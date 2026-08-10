@@ -7,7 +7,7 @@ use crate::{
 use ast_grep_core::Pattern;
 use regex::Regex;
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex},
 };
 use stoat_language::Language;
@@ -36,7 +36,9 @@ pub(crate) enum SearchMode {
 /// trimmed snippet of the matched line.
 #[derive(Debug, Clone)]
 pub struct SearchMatch {
-    pub path: PathBuf,
+    /// Shared rather than owned, because every match in a file names that same
+    /// file and a dense one runs to [`MATCH_CAP`] of them.
+    pub path: Arc<Path>,
     pub offset: usize,
     pub line: u32,
     pub column: u32,
@@ -214,6 +216,8 @@ pub(crate) fn read_text<'a>(
 /// rather than the file behind it. Offsets are into `text`, so a caller
 /// supplying buffer text gets offsets that index that buffer.
 pub(crate) fn scan_text(regex: &Regex, text: &str, path: &Path, out: &mut Vec<SearchMatch>) {
+    let path: Arc<Path> = Arc::from(path);
+
     // Matches arrive in ascending order, so each one's position is the last
     // one's plus what lies between them. Recomputing from the start of the file
     // each time would walk the file once per match.
@@ -232,7 +236,7 @@ pub(crate) fn scan_text(regex: &Regex, text: &str, path: &Path, out: &mut Vec<Se
         counted_to = start;
 
         out.push(SearchMatch {
-            path: path.to_path_buf(),
+            path: path.clone(),
             offset: start,
             line,
             column: text[line_start..start].chars().count() as u32 + 1,

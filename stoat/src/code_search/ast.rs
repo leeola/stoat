@@ -164,6 +164,8 @@ pub(crate) fn ast_scan_file(
 ) {
     let root = cache.parsed(path, text, lang);
 
+    let path: Arc<Path> = Arc::from(path);
+
     // Tree traversal is document order, so each match's position is the last
     // one's plus what lies between them. Deriving each from the start of the
     // file would walk the file once per match.
@@ -178,7 +180,7 @@ pub(crate) fn ast_scan_file(
             debug_assert!(false, "find_all yielded {start} after {counted_to}");
             let (line, column) = offset_to_line_column(text, start);
             out.push(SearchMatch {
-                path: path.to_path_buf(),
+                path: path.clone(),
                 offset: start,
                 line,
                 column,
@@ -195,7 +197,7 @@ pub(crate) fn ast_scan_file(
         counted_to = start;
 
         out.push(SearchMatch {
-            path: path.to_path_buf(),
+            path: path.clone(),
             offset: start,
             line,
             column: text[line_start..start].chars().count() as u32 + 1,

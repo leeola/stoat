@@ -127,7 +127,12 @@ pub(crate) fn code_search_select(stoat: &mut Stoat) -> bool {
     }
     if let Some((path, offset)) = target {
         super::jump::push_jump(stoat);
-        super::dispatch(stoat, &OpenFile { path });
+        super::dispatch(
+            stoat,
+            &OpenFile {
+                path: path.to_path_buf(),
+            },
+        );
         stoat.jump_focused_to_match_offset(offset);
     }
     true
@@ -191,7 +196,7 @@ fn sync_code_search_preview(stoat: &mut Stoat) {
             // number does not describe.
             let source = match ws.buffers.id_for_path(&path) {
                 Some(id) => PreviewSource::Buffer(id),
-                None => PreviewSource::File(path),
+                None => PreviewSource::File(path.to_path_buf()),
             };
             finder.preview.sync(ws, fs_host, language_registry, source);
             finder.preview.scroll_to_line(ws, line.saturating_sub(1));
