@@ -3,6 +3,7 @@ use crate::{
     pane::View,
     register::Register,
 };
+use std::ops::Range;
 use stoat_text::{Bias, LineEnding, Point, SelectionGoal};
 
 /// Copy every non-collapsed selection's content into the
@@ -176,9 +177,13 @@ pub(super) fn replace_with_yanked(stoat: &mut Stoat) -> UpdateEffect {
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for (i, (_, start, end)) in entries.iter().enumerate().rev() {
-            guard.edit(*start..*end, &payloads[i]);
-        }
+        let batch: Vec<(Range<usize>, &str)> = entries
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(i, (_, start, end))| (*start..*end, payloads[i].as_str()))
+            .collect();
+        guard.edit_batch(&batch);
     }
 
     // Each selection re-covers its replacement. A running length delta shifts
@@ -529,9 +534,13 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for (idx, (_, off, _)) in entries.iter().enumerate().rev() {
-            guard.edit(*off..*off, &payloads[idx]);
-        }
+        let batch: Vec<(Range<usize>, &str)> = entries
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(idx, (_, off, _))| (*off..*off, payloads[idx].as_str()))
+            .collect();
+        guard.edit_batch(&batch);
     }
 
     let mut id_to_range: std::collections::HashMap<usize, (usize, usize)> =

@@ -4,6 +4,7 @@ use crate::{
     buffer::TextBuffer,
     pane::View,
 };
+use std::ops::Range;
 use stoat_text::{Bias, Rope, SelectionGoal};
 
 /// Two-step capture state for [`surround_replace`]: arms after the action
@@ -81,10 +82,15 @@ pub(crate) fn execute_surround_add(stoat: &mut Stoat, ch: char) -> UpdateEffect 
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for (_, s, e, _) in entries.iter().rev() {
-            guard.edit(*e..*e, &close_str);
-            guard.edit(*s..*s, &open_str);
-        }
+        // The close sits past the open within a selection and the selections
+        // are visited back to front, so flattening the pair per selection
+        // leaves the whole sequence descending.
+        let batch: Vec<(Range<usize>, &str)> = entries
+            .iter()
+            .rev()
+            .flat_map(|(_, s, e, _)| [(*e..*e, close_str.as_str()), (*s..*s, open_str.as_str())])
+            .collect();
+        guard.edit_batch(&batch);
     }
 
     let open_len = open.len_utf8();
@@ -211,9 +217,12 @@ fn edit_delimiters(buffer: &mut TextBuffer, mut edits: Vec<(usize, usize, &str)>
     edits.sort_unstable_by_key(|&(offset, _, _)| offset);
     edits.dedup_by_key(|&mut (offset, _, _)| offset);
 
-    for (offset, len, replacement) in edits.iter().rev() {
-        buffer.edit(*offset..*offset + *len, replacement);
-    }
+    let batch: Vec<(Range<usize>, &str)> = edits
+        .iter()
+        .rev()
+        .map(|(offset, len, replacement)| (*offset..*offset + *len, *replacement))
+        .collect();
+    buffer.edit_batch(&batch);
 }
 
 /// Walk every selection's primary cursor in the focused editor and
@@ -554,10 +563,7 @@ fn in_skip_zone(tree: Option<&stoat_language::Tree>, offset: usize) -> bool {
 /// node's byte range (half-open: `start..end_byte`). Used to
 /// disambiguate cursor-on-quote surround lookups; the calling site
 /// translates `range.end - 1` into the closing quote's byte offset.
-fn find_enclosing_string_node(
-    tree: &stoat_language::Tree,
-    offset: usize,
-) -> Option<std::ops::Range<usize>> {
+fn find_enclosing_string_node(tree: &stoat_language::Tree, offset: usize) -> Option<Range<usize>> {
     let mut node = tree.root_node().descendant_for_byte_range(offset, offset)?;
     loop {
         if node.kind().contains("string") {

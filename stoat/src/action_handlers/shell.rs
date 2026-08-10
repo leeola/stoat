@@ -2,6 +2,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     input_view::{InputView, SubmitTarget},
 };
+use std::ops::Range;
 use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
 
 /// Which shell-integration operation the input modal will perform on
@@ -139,9 +140,11 @@ fn apply_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &
     indexed.sort_by_key(|b| std::cmp::Reverse(b.0));
     {
         let mut guard = buffer.write().expect("buffer poisoned");
-        for (s, e, out) in &indexed {
-            guard.edit(*s..*e, out);
-        }
+        let batch: Vec<(Range<usize>, &str)> = indexed
+            .iter()
+            .map(|(s, e, out)| (*s..*e, out.as_str()))
+            .collect();
+        guard.edit_batch(&batch);
     }
     let new_display = editor.display_map.snapshot();
     let new_buf = new_display.buffer_snapshot();
@@ -215,9 +218,11 @@ fn apply_insert_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHos
         None => return,
     };
     let mut guard = buffer.write().expect("buffer poisoned");
-    for head in &heads {
-        guard.edit(*head..*head, &output);
-    }
+    let batch: Vec<(Range<usize>, &str)> = heads
+        .iter()
+        .map(|head| (*head..*head, output.as_str()))
+        .collect();
+    guard.edit_batch(&batch);
 }
 
 fn apply_append_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
@@ -249,9 +254,11 @@ fn apply_append_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHos
         None => return,
     };
     let mut guard = buffer.write().expect("buffer poisoned");
-    for end in &ends {
-        guard.edit(*end..*end, &output);
-    }
+    let batch: Vec<(Range<usize>, &str)> = ends
+        .iter()
+        .map(|end| (*end..*end, output.as_str()))
+        .collect();
+    guard.edit_batch(&batch);
 }
 
 fn apply_keep_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
