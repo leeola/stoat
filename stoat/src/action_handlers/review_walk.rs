@@ -1,7 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     commit_list::PendingPreview,
-    commit_picker::{CommitPicker, CommitPickerRole},
+    commit_picker::{CommitPicker, CommitPickerRole, LoadedCommits},
     review_session::{ReviewOrigin, ReviewSession},
     review_walk::{ReturnRef, ReviewWalk},
 };
@@ -101,17 +101,28 @@ fn open_commit_picker(
 ) -> UpdateEffect {
     stoat.set_focused_mode("normal".to_string());
 
-    // A browser shows the real DAG, so a merged branch's commits are rows of
-    // their own. A base picker keeps the first-parent walk, because the review
-    // chain a pick seeds is defined over first-parent history.
-    let commits = match role {
-        CommitPickerRole::Browse => repo.log_graph(&ref_sha, WALK_LIMIT),
-        CommitPickerRole::PickBase => repo.log_from(&ref_sha, WALK_LIMIT),
-    };
-    let mut branch_tips: HashMap<String, Vec<String>> = HashMap::new();
-    for (name, sha) in repo.local_branches() {
-        branch_tips.entry(sha).or_default().push(name);
-    }
+    let task = spawn_history_walk(&stoat.executor, stoat.redraw_notify.clone(), {
+        let repo = Arc::clone(repo);
+        let ref_sha = ref_sha.clone();
+        move || {
+            // A browser shows the real DAG, so a merged branch's commits are
+            // rows of their own. A base picker keeps the first-parent walk,
+            // because the review chain a pick seeds is defined over
+            // first-parent history.
+            let commits = match role {
+                CommitPickerRole::Browse => repo.log_graph(&ref_sha, WALK_LIMIT),
+                CommitPickerRole::PickBase => repo.log_from(&ref_sha, WALK_LIMIT),
+            };
+            let mut branch_tips: HashMap<String, Vec<String>> = HashMap::new();
+            for (name, sha) in repo.local_branches() {
+                branch_tips.entry(sha).or_default().push(name);
+            }
+            LoadedCommits::Root {
+                commits,
+                branch_tips,
+            }
+        }
+    });
 
     let executor = stoat.executor.clone();
     let mut picker = CommitPicker::new(
@@ -120,8 +131,6 @@ fn open_commit_picker(
         role,
         workdir,
         ref_sha,
-        commits,
-        branch_tips,
         // Ages are measured against the moment the picker opened, so they hold
         // still while the user scrolls rather than drifting under them.
         std::time::SystemTime::now()
@@ -130,9 +139,27 @@ fn open_commit_picker(
             .unwrap_or(0),
     );
     picker.scope_label = scope_label;
+    picker.pending_commits = Some(task);
     stoat.commit_picker = Some(picker);
-    ensure_selected_preview(stoat);
     UpdateEffect::Redraw
+}
+
+/// Run `walk` on a worker, waking the run loop when it lands.
+///
+/// The wake is what makes the list appear on its own. The pump reading this
+/// task polls with a noop waker, so a walk finishing after the last input event
+/// would otherwise leave the picker empty until some unrelated event happened to
+/// drive the pumps.
+fn spawn_history_walk(
+    executor: &stoat_scheduler::Executor,
+    redraw: Arc<tokio::sync::Notify>,
+    walk: impl FnOnce() -> LoadedCommits + Send + 'static,
+) -> stoat_scheduler::Task<LoadedCommits> {
+    executor.spawn_blocking(move || {
+        let loaded = walk();
+        redraw.notify_one();
+        loaded
+    })
 }
 
 fn review_error(stoat: &mut Stoat, label: &str, detail: Option<String>) -> UpdateEffect {
@@ -187,23 +214,31 @@ pub(crate) fn commit_picker_drill_in(stoat: &mut Stoat) -> UpdateEffect {
     let Some(repo) = stoat.git_host.discover(&workdir) else {
         return review_error(stoat, "not in a git repository", None);
     };
+    // One commit lookup, so this stays here and refuses a non-merge on the
+    // keystroke. The range walk behind it is the part worth deferring.
     let parents = repo.parent_shas(&sha);
     let [mainline, branch, ..] = parents.as_slice() else {
         return review_error(stoat, "not a merge commit", None);
     };
-    let commits = repo.log_range(branch, mainline, WALK_LIMIT);
-    if commits.is_empty() {
-        return review_error(stoat, "merge brought in no commits", None);
-    }
 
-    let branch = branch.clone();
+    let task = spawn_history_walk(&stoat.executor, stoat.redraw_notify.clone(), {
+        let repo = Arc::clone(&repo);
+        let (mainline, branch) = (mainline.clone(), branch.clone());
+        let label = format!("merge {short_sha}");
+        move || LoadedCommits::Scope {
+            commits: repo.log_range(&branch, &mainline, WALK_LIMIT),
+            label,
+            ref_sha: branch,
+            query_before: query,
+        }
+    });
+
     let Some(picker) = stoat.commit_picker.as_mut() else {
         return UpdateEffect::None;
     };
-    picker.push_scope(format!("merge {short_sha}"), branch, commits, query);
+    picker.pending_commits = Some(task);
 
     set_picker_query(stoat, "");
-    ensure_selected_preview(stoat);
     UpdateEffect::Redraw
 }
 
@@ -218,6 +253,9 @@ pub(crate) fn commit_picker_back(stoat: &mut Stoat) -> UpdateEffect {
     let Some(query) = picker.pop_scope() else {
         return UpdateEffect::None;
     };
+    // A drill still walking would otherwise arrive and push its scope on top of
+    // the one just returned to.
+    picker.pending_commits = None;
 
     set_picker_query(stoat, &query);
     ensure_selected_preview(stoat);
@@ -432,16 +470,89 @@ pub(crate) fn sync_commit_picker(stoat: &mut Stoat) {
 /// needed. Returns whether anything landed or was spawned, so the caller knows
 /// a redraw is warranted.
 pub(crate) fn pump_commit_picker(stoat: &mut Stoat) -> bool {
+    if stoat.commit_picker.is_none() {
+        return false;
+    }
+    let walked = install_pending_commits(stoat);
     let landed = match stoat.commit_picker.as_mut() {
         Some(picker) => poll_pending_preview(picker),
-        None => return false,
+        None => return walked,
     };
 
     let spawned_before = pending_sha(stoat).is_some();
     ensure_selected_preview(stoat);
     let spawned_after = pending_sha(stoat).is_some();
 
-    landed || (spawned_after && !spawned_before)
+    walked || landed || (spawned_after && !spawned_before)
+}
+
+/// Poll the background history walk and install it, reporting whether it landed.
+///
+/// The query is read here rather than in the picker because the input's text
+/// lives in the workspace. Whatever was typed while the walk ran filters the
+/// list it brings, so a user who starts typing into an empty picker gets the
+/// rows they asked for rather than all of them.
+fn install_pending_commits(stoat: &mut Stoat) -> bool {
+    use std::{
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    let Some(mut task) = stoat
+        .commit_picker
+        .as_mut()
+        .and_then(|picker| picker.pending_commits.take())
+    else {
+        return false;
+    };
+
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let loaded = match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(loaded) => loaded,
+        Poll::Pending => {
+            if let Some(picker) = stoat.commit_picker.as_mut() {
+                picker.pending_commits = Some(task);
+            }
+            return false;
+        },
+    };
+
+    match loaded {
+        LoadedCommits::Root {
+            commits,
+            branch_tips,
+        } => {
+            let query = match stoat.commit_picker.as_ref() {
+                Some(picker) => picker.input.text(stoat.active_workspace()),
+                None => return false,
+            };
+            if let Some(picker) = stoat.commit_picker.as_mut() {
+                picker.set_commits(commits, branch_tips, &query);
+            }
+        },
+        LoadedCommits::Scope {
+            label,
+            ref_sha,
+            commits,
+            query_before,
+        } => {
+            // Whether the merge brought anything in is only knowable once the
+            // range has been walked, so the refusal lands here rather than on
+            // the keystroke that asked for it.
+            if commits.is_empty() {
+                review_error(stoat, "merge brought in no commits", None);
+                return true;
+            }
+            if let Some(picker) = stoat.commit_picker.as_mut() {
+                picker.push_scope(label, ref_sha, commits, query_before);
+            }
+        },
+    }
+
+    ensure_selected_preview(stoat);
+    true
 }
 
 fn pending_sha(stoat: &Stoat) -> Option<String> {
@@ -608,6 +719,130 @@ mod tests {
             .find_by_source(BadgeSource::Review)
             .and_then(|id| ws.badges.get(id))
             .map(|badge| badge.label.clone())
+    }
+
+    /// Opening does not walk the history on the keystroke that asked for it.
+    ///
+    /// The walk reads and decodes up to a thousand commits under the repo lock,
+    /// which is why the picker comes up empty and fills in behind itself.
+    #[test]
+    fn opening_the_picker_leaves_the_walk_to_a_worker() {
+        let mut h = harness();
+        super::git_ls(&mut h.stoat, None);
+
+        let picker = h.stoat.commit_picker.as_ref().expect("picker is open");
+        assert!(
+            picker.pending_commits.is_some(),
+            "the walk is out at a worker rather than already done",
+        );
+        assert!(picker.commits.is_empty(), "nothing has been walked yet");
+
+        h.settle();
+        let picker = h.stoat.commit_picker.as_ref().expect("picker is open");
+        assert!(picker.pending_commits.is_none(), "the walk was installed");
+        assert_eq!(picker.commits.len(), 3, "the seeded history arrived");
+    }
+
+    /// The pump reading the walk polls with a noop waker, so without a wake at
+    /// completion the picker would sit empty after the keystroke that opened it
+    /// until some unrelated event drove the pumps.
+    ///
+    /// The query matches no row, so the walk lands on an empty selection and no
+    /// preview build follows it. That leaves the walk as the only thing that
+    /// could have woken the loop, which a preview build would otherwise mask.
+    #[test]
+    fn a_history_walk_wakes_the_run_loop_when_it_lands() {
+        use futures::FutureExt;
+
+        let mut h = harness();
+
+        // Drain any permit standing before the open, against an Arc clone so
+        // the observer never borrows `h` across settle. Notify holds at most
+        // one permit, so a single drain clears it.
+        let redraw = h.stoat.redraw_notify.clone();
+        let _ = redraw.notified().now_or_never();
+
+        super::git_ls(&mut h.stoat, None);
+        super::set_picker_query(&mut h.stoat, "zzzznomatch");
+        h.settle();
+
+        assert!(
+            h.stoat
+                .commit_picker
+                .as_ref()
+                .expect("picker")
+                .selected_commit()
+                .is_none(),
+            "nothing matched, so no preview build was spawned to wake the loop",
+        );
+
+        let notified = redraw.notified();
+        tokio::pin!(notified);
+        assert!(
+            notified.enable(),
+            "the walk should wake the loop so the list appears on its own",
+        );
+    }
+
+    /// Drilling into a merge defers its range walk the same way, and the list
+    /// it brings replaces the one drilled from.
+    #[test]
+    fn drilling_into_a_merge_leaves_the_walk_to_a_worker() {
+        let mut h = merged_harness();
+        h.type_text(":git-ls");
+        h.type_keys("enter");
+        h.settle();
+
+        let before = h
+            .stoat
+            .commit_picker
+            .as_ref()
+            .expect("picker")
+            .commits
+            .len();
+        super::commit_picker_drill_in(&mut h.stoat);
+
+        let picker = h.stoat.commit_picker.as_ref().expect("picker");
+        assert!(
+            picker.pending_commits.is_some(),
+            "the range walk is out at a worker",
+        );
+        assert_eq!(
+            picker.commits.len(),
+            before,
+            "the list drilled from is still showing until the walk lands",
+        );
+
+        h.settle();
+        let picker = h.stoat.commit_picker.as_ref().expect("picker");
+        assert!(picker.pending_commits.is_none(), "the walk was installed");
+        assert_eq!(
+            picker.commits.len(),
+            2,
+            "the merge's two branch commits replaced the list",
+        );
+    }
+
+    /// A query typed while the walk is still running filters the list it
+    /// brings, rather than being dropped because it arrived first.
+    #[test]
+    fn a_query_typed_before_the_walk_lands_filters_what_arrives() {
+        let mut h = harness();
+        super::git_ls(&mut h.stoat, None);
+        super::set_picker_query(&mut h.stoat, "tweak");
+        h.settle();
+
+        let picker = h.stoat.commit_picker.as_ref().expect("picker");
+        assert_eq!(
+            picker.filtered.len(),
+            1,
+            "only the commit the query names is listed",
+        );
+        assert_eq!(
+            picker.selected_commit().map(|c| c.sha.clone()),
+            Some("b2c3d4e5".to_string()),
+            "and the selection sits on it",
+        );
     }
 
     #[test]

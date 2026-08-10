@@ -12,7 +12,7 @@ use std::{
     mem,
     path::PathBuf,
 };
-use stoat_scheduler::Executor;
+use stoat_scheduler::{Executor, Task};
 
 /// What selecting a row in a [`CommitPicker`] does.
 ///
@@ -129,6 +129,27 @@ pub(crate) struct CommitScope {
     filter_column: Option<CommitColumn>,
 }
 
+/// A finished history walk, and which list it is.
+///
+/// The two differ in what has to be installed alongside the commits, and both
+/// sets of extras are known when the walk is spawned, so they travel with it
+/// rather than being parked separately and paired up on arrival.
+pub(crate) enum LoadedCommits {
+    /// The list the picker opened over, with the branch names to label its tips.
+    Root {
+        commits: Vec<CommitInfo>,
+        branch_tips: HashMap<String, Vec<String>>,
+    },
+    /// A merge drilled into, carrying what [`CommitPicker::push_scope`] needs to
+    /// park the scope being left.
+    Scope {
+        label: String,
+        ref_sha: String,
+        commits: Vec<CommitInfo>,
+        query_before: String,
+    },
+}
+
 /// Modal listing a ref's first-parent history, fuzzy-filtered, with the
 /// selected commit's diff previewed beside it.
 ///
@@ -160,6 +181,12 @@ pub(crate) struct CommitPicker {
     pub(crate) viewport_rows: Option<usize>,
     pub(crate) preview_sessions: PreviewCache,
     pub(crate) pending_preview: Option<PendingPreview>,
+    /// History walk running on a worker, waiting to be installed.
+    ///
+    /// Walking a thousand commits reads and decodes each one under the repo
+    /// lock, which is too long to spend in the keystroke that asked for it, so
+    /// the picker opens on nothing and fills in when the walk lands.
+    pub(crate) pending_commits: Option<Task<LoadedCommits>>,
     /// Sha the in-flight or most recent preview was requested for, so a build
     /// that lands after the selection moved on is discarded.
     pub(crate) requested_preview: Option<String>,
@@ -238,16 +265,19 @@ pub(crate) struct CommitPicker {
 }
 
 impl CommitPicker {
-    /// Build a picker over `commits`, starting on [`Self::default_selection`].
-    #[allow(clippy::too_many_arguments)]
+    /// Build a picker holding no history yet.
+    ///
+    /// The walk that fills it runs on a worker and arrives through
+    /// [`Self::set_commits`]. Building the rows, lanes and filter over the empty
+    /// list here rather than only on arrival means the picker is a consistent
+    /// one from the moment it exists, so it renders and takes input while the
+    /// walk is still running.
     pub(crate) fn new(
         ws: &mut Workspace,
         executor: Executor,
         role: CommitPickerRole,
         workdir: PathBuf,
         ref_sha: String,
-        commits: Vec<CommitInfo>,
-        branch_tips: HashMap<String, Vec<String>>,
         now_epoch: i64,
     ) -> Self {
         let input = InputView::create(ws, executor, SubmitTarget::CommitPicker, "", "insert", 1);
@@ -257,14 +287,15 @@ impl CommitPicker {
             workdir,
             ref_sha,
             input,
-            commits,
-            branch_tips,
+            commits: Vec::new(),
+            branch_tips: HashMap::new(),
             filtered: Vec::new(),
             match_indices: Vec::new(),
             selected: 0,
             viewport_rows: None,
             preview_sessions: PreviewCache::default(),
             pending_preview: None,
+            pending_commits: None,
             requested_preview: None,
             filter_column: None,
             preview_scroll: 0,
@@ -283,6 +314,27 @@ impl CommitPicker {
         picker.refilter("");
         picker.selected = picker.default_selection();
         picker
+    }
+
+    /// Install the walk the picker opened over, filtered by whatever `query` has
+    /// been typed while it ran.
+    ///
+    /// The query is the caller's to supply, as in [`Self::push_scope`], because
+    /// the input's text lives in the workspace rather than on the picker. Losing
+    /// it here would discard what the user typed against a list that had not
+    /// arrived yet.
+    pub(crate) fn set_commits(
+        &mut self,
+        commits: Vec<CommitInfo>,
+        branch_tips: HashMap<String, Vec<String>>,
+        query: &str,
+    ) {
+        self.commits = commits;
+        self.branch_tips = branch_tips;
+        self.rebuild_rows();
+        self.graph = commit_graph::assign_lanes(&self.commits);
+        self.refilter(query);
+        self.selected = self.default_selection();
     }
 
     /// Drill into a new scope, parking the current one for [`Self::pop_scope`].
@@ -648,6 +700,7 @@ mod tests {
             viewport_rows: None,
             preview_sessions: PreviewCache::default(),
             pending_preview: None,
+            pending_commits: None,
             requested_preview: None,
             filter_column: None,
             preview_scroll: 0,
@@ -2146,6 +2199,53 @@ mod tests {
     /// [`seeded_repo_harness`] with a PickBase picker installed over that
     /// history, which is the role a review walk starts from and `:git-ls`
     /// cannot produce.
+    /// The walk arrives filtered by whatever was typed while it ran.
+    ///
+    /// Installing it unfiltered would not only show every row for an instant.
+    /// The default selection is taken over the filtered list, so an unfiltered
+    /// install lands the selection on a row the query excludes, and the preview
+    /// build that follows is spent on it.
+    #[test]
+    fn a_walk_arrives_filtered_by_the_query_it_is_given() {
+        let mut h = seeded_repo_harness();
+
+        let (commits, branch_tips) = {
+            let repo = h
+                .stoat
+                .git_host
+                .discover(std::path::Path::new("/repo"))
+                .expect("seeded repo");
+            let mut branch_tips: HashMap<String, Vec<String>> = HashMap::new();
+            for (name, sha) in repo.local_branches() {
+                branch_tips.entry(sha).or_default().push(name);
+            }
+            (repo.log_from("c3d4e5f6", 100), branch_tips)
+        };
+
+        let executor = h.stoat.executor.clone();
+        let mut picker = CommitPicker::new(
+            h.stoat.active_workspace_mut(),
+            executor,
+            CommitPickerRole::PickBase,
+            PathBuf::from("/repo"),
+            "c3d4e5f6".to_string(),
+            SEEDED_NOW_EPOCH,
+        );
+        picker.set_commits(commits, branch_tips, "tweak");
+
+        assert_eq!(picker.commits.len(), 3, "the whole walk is held");
+        assert_eq!(
+            picker.filtered.len(),
+            1,
+            "only the row the query names is listed",
+        );
+        assert_eq!(
+            picker.selected_commit().map(|c| c.sha.clone()),
+            Some("b2c3d4e5".to_string()),
+            "and the selection starts on a row the query kept",
+        );
+    }
+
     fn seeded_picker_harness() -> crate::test_harness::TestHarness {
         let mut h = seeded_repo_harness();
 
@@ -2163,16 +2263,15 @@ mod tests {
         };
 
         let executor = h.stoat.executor.clone();
-        let picker = CommitPicker::new(
+        let mut picker = CommitPicker::new(
             h.stoat.active_workspace_mut(),
             executor,
             CommitPickerRole::PickBase,
             PathBuf::from("/repo"),
             "c3d4e5f6".to_string(),
-            commits,
-            branch_tips,
             SEEDED_NOW_EPOCH,
         );
+        picker.set_commits(commits, branch_tips, "");
         h.stoat.commit_picker = Some(picker);
         h.settle();
         h
