@@ -7,8 +7,9 @@
 //! highlighting. Future bonuses (in-order tokens, basename
 //! preference) layer on here so they apply uniformly.
 
+pub(crate) use nucleo::pattern::Pattern;
 use nucleo::{
-    pattern::{CaseMatching, Normalization, Pattern},
+    pattern::{CaseMatching, Normalization},
     Matcher, Utf32Str,
 };
 use std::cell::RefCell;
@@ -174,7 +175,7 @@ pub(crate) struct Ranked<'a, T> {
     pub(crate) matches: Vec<RankedMatch<'a, T>>,
     /// How many leading matches carry `matched_indices`. Past this the field is
     /// empty because it was never computed, which a caller deep enough to paint
-    /// those rows answers with [`indices_of`].
+    /// those rows answers with [`indices_of_parsed`].
     pub(crate) indexed: usize,
 }
 
@@ -198,7 +199,7 @@ pub(crate) struct Ranked<'a, T> {
 ///
 /// See also:
 /// - [`match_and_rank`] for the unbounded form, which indexes every match.
-/// - [`indices_of`] to derive one row's indices after the fact.
+/// - [`indices_of_parsed`] to derive one row's indices after the fact.
 pub(crate) fn rank_indexing_best<'a, T>(
     query: &str,
     items: impl IntoIterator<Item = (T, &'a str)>,
@@ -249,23 +250,44 @@ pub(crate) fn rank_indexing_best<'a, T>(
     })
 }
 
-/// Matched offsets for one haystack, into `out`.
+/// Matched offsets for one haystack under `query`, into `out`.
 ///
-/// Answers for a single row what [`rank_indexing_best`] holds back below its
-/// block. `out` is cleared first and is meant to be one buffer reused across a
-/// painted window. Returns whether `haystack` matched at all.
-pub(crate) fn indices_of(query: &str, haystack: &str, out: &mut Vec<u32>) -> bool {
+/// Test-only. A real caller holds its parse and its scratch across the rows it
+/// derives and reaches [`indices_of_parsed`] directly. This stays because the
+/// property worth pinning is that a late derivation equals what indexing early
+/// would have stored, and spelling out a parse and a scratch to say so would
+/// make the test about neither.
+#[cfg(test)]
+fn indices_of(query: &str, haystack: &str, out: &mut Vec<u32>) -> bool {
     out.clear();
     let Some(pattern) = parse_query(query) else {
         return false;
     };
+    indices_of_parsed(&pattern, haystack, out, &mut Scratch::default())
+}
+
+/// Matched offsets for one haystack against an already-parsed `pattern`, into
+/// `out`.
+///
+/// The parse and the scratch are both the caller's, so a painter deriving
+/// offsets for a window of rows pays for each once. Its query is the same for
+/// every row it paints, and the scratch is working memory with nothing to say
+/// between rows.
+///
+/// `out` is cleared first. Returns whether `haystack` matched at all.
+pub(crate) fn indices_of_parsed(
+    pattern: &Pattern,
+    haystack: &str,
+    out: &mut Vec<u32>,
+    scratch: &mut Scratch,
+) -> bool {
+    out.clear();
 
     with_matcher(|matcher| {
         let mut hay_buf: Vec<char> = Vec::new();
         let hay = Utf32Str::new(haystack, &mut hay_buf);
-        let mut scratch = Scratch::default();
 
-        match score_with_bonuses(&pattern, haystack, hay, matcher, &mut scratch) {
+        match score_with_bonuses(pattern, haystack, hay, matcher, scratch) {
             Some(scored) => {
                 *out = scored.indices;
                 true
@@ -297,14 +319,17 @@ struct Scored {
     indices: Vec<u32>,
 }
 
-/// Index buffers [`score_with_bonuses`] reuses across candidates.
+/// Index buffers the matching reuses across candidates.
 ///
 /// Most candidates fail to match, and each one would otherwise allocate a
 /// vector per query atom before being discarded. The buffers are cleared rather
 /// than replaced so their capacity survives, and only a candidate that actually
 /// matches takes one away.
+///
+/// Holds nothing between candidates, so a caller running [`indices_of_parsed`]
+/// over a set of rows keeps one for the whole set and never inspects it.
 #[derive(Default)]
-struct Scratch {
+pub(crate) struct Scratch {
     /// Matched indices per query atom. The atom count is fixed for a whole
     /// [`match_and_rank`] call, so this settles on the first candidate.
     per_atom: Vec<Vec<u32>>,

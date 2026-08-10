@@ -157,6 +157,18 @@ pub(crate) struct PickList {
     /// against the rows it produces, and [`Self::clear_results`] is how an
     /// owner drops both together.
     pub(crate) last_filter: Option<(String, usize)>,
+    /// The pattern half of [`Self::last_filter`], already parsed.
+    ///
+    /// A row below [`Self::indexed`] derives its own highlight offsets while
+    /// painting, and every row of a painted window derives them against this
+    /// same query, so parsing it there would be the identical parse per row per
+    /// frame.
+    ///
+    /// `None` wherever `last_filter` is, and also where the query holds no
+    /// atoms to match on. Maintained only by [`Self::remember_filter`] and
+    /// [`Self::forget_filter`], which is what keeps it from drifting away from
+    /// the query it stands for.
+    pub(crate) last_pattern: Option<fuzzy::Pattern>,
     /// How many candidates the last [`Self::refilter`] handed the matcher.
     ///
     /// A query that extends its predecessor scores only the rows that already
@@ -333,6 +345,7 @@ impl Default for PickList {
             display_roots: None,
             display: None,
             last_filter: None,
+            last_pattern: None,
             scored: 0,
         }
     }
@@ -424,7 +437,8 @@ impl PickList {
             self.indexed = listed.len();
             self.scored = 0;
             self.filtered = listed;
-            self.last_filter = Some((query.to_string(), self.base.len()));
+            let covered = self.base.len();
+            self.remember_filter(query.to_string(), covered);
             self.clamp_selected();
             return None;
         }
@@ -454,17 +468,37 @@ impl PickList {
         self.match_indices = outcome.match_indices;
         self.indexed = outcome.indexed;
         self.scored = outcome.scored;
-        self.last_filter = Some((outcome.query, outcome.covered));
+        self.remember_filter(outcome.query, outcome.covered);
         self.clamp_selected();
         self.filter_generation = next_generation();
+    }
+
+    /// Record `query` as the filter [`Self::filtered`] holds, over a base of
+    /// `covered` paths, parsing its pattern half for the highlight derivation.
+    fn remember_filter(&mut self, query: String, covered: usize) {
+        self.last_pattern = fuzzy::parse_query(split_root_anchor(&query).1);
+        self.last_filter = Some((query, covered));
+    }
+
+    /// Drop the record of what [`Self::filtered`] matched, for a caller whose
+    /// rows have stopped standing for anything.
+    fn forget_filter(&mut self) {
+        self.last_filter = None;
+        self.last_pattern = None;
     }
 
     /// Highlight offsets for filtered row `row`.
     ///
     /// A row the refilter indexed returns its stored offsets. A row past that
     /// block was never indexed, so it is derived now into `scratch`, which a
-    /// caller painting a window reuses across its rows.
-    pub(crate) fn row_indices<'a>(&'a self, row: usize, scratch: &'a mut Vec<u32>) -> &'a [u32] {
+    /// caller painting a window reuses across its rows. `matching` is working
+    /// memory for the same window, and holds nothing the caller needs to read.
+    pub(crate) fn row_indices<'a>(
+        &'a self,
+        row: usize,
+        scratch: &'a mut Vec<u32>,
+        matching: &mut fuzzy::Scratch,
+    ) -> &'a [u32] {
         if let Some(indices) = self.match_indices.get(row) {
             return indices;
         }
@@ -477,9 +511,12 @@ impl PickList {
             return scratch;
         };
 
-        let (anchor, pattern) = split_root_anchor(query);
-        let anchor_len = anchor.map_or(0, |a| a.chars().count()) as u32;
-        fuzzy::indices_of(pattern, &cache.rows[idx], scratch);
+        let anchor_len = split_root_anchor(query)
+            .0
+            .map_or(0, |anchor| anchor.chars().count()) as u32;
+        if let Some(pattern) = self.last_pattern.as_ref() {
+            fuzzy::indices_of_parsed(pattern, &cache.rows[idx], scratch, matching);
+        }
 
         *scratch = prepend_anchor(anchor_len, std::mem::take(scratch));
         scratch
@@ -565,7 +602,7 @@ impl PickList {
 
         // The remembered rows are indices into the base being replaced, so they
         // name different paths on the other side of this rebuild.
-        self.last_filter = None;
+        self.forget_filter();
 
         let display_roots = self.display_roots.as_deref();
         let rows: Vec<Arc<str>> = self
@@ -637,7 +674,7 @@ impl PickList {
     pub(crate) fn clear_results(&mut self) {
         self.filtered.clear();
         self.match_indices.clear();
-        self.last_filter = None;
+        self.forget_filter();
     }
 
     fn clamp_selected(&mut self) {
@@ -2203,11 +2240,44 @@ mod tests {
         };
 
         let mut derived = Vec::new();
+        let mut matching = fuzzy::Scratch::default();
         assert_eq!(
-            list.row_indices(deep, &mut derived),
+            list.row_indices(deep, &mut derived, &mut matching),
             stored.as_slice(),
             "deriving late gives what indexing early would have stored"
         );
+    }
+
+    /// The parse a deep row derives against is held across a painted window, so
+    /// it has to be replaced when the query behind it is. A stale one would
+    /// highlight the query before last on every row below the block, and the
+    /// rows above it would disagree.
+    #[test]
+    fn a_deep_row_derives_against_the_current_query_not_the_one_before() {
+        let base = deeper_than_the_block();
+        let mut list = list_over(&base);
+        let deep = INDEXED_ROWS + 10;
+
+        list.refilter("main", &p("/repo"));
+        let mut derived = Vec::new();
+        let mut matching = fuzzy::Scratch::default();
+        let before = list.row_indices(deep, &mut derived, &mut matching).to_vec();
+
+        list.refilter("module", &p("/repo"));
+        let after = list.row_indices(deep, &mut derived, &mut matching).to_vec();
+
+        let row = {
+            let cache = list.display.as_ref().expect("a cache");
+            cache.rows[list.filtered[deep]].clone()
+        };
+        let stored = {
+            let mut unbounded = fuzzy::match_and_rank("module", std::iter::once((0usize, &*row)))
+                .expect("the query has atoms");
+            unbounded.pop().expect("the row matches").matched_indices
+        };
+
+        assert_ne!(before, after, "the two queries match different characters");
+        assert_eq!(after, stored, "the second query is what the row derives on");
     }
 
     #[test]
@@ -2218,7 +2288,8 @@ mod tests {
 
         let deep = INDEXED_ROWS + 10;
         let mut derived = Vec::new();
-        let indices = list.row_indices(deep, &mut derived).to_vec();
+        let mut matching = fuzzy::Scratch::default();
+        let indices = list.row_indices(deep, &mut derived, &mut matching).to_vec();
 
         assert_eq!(
             &indices[..3],

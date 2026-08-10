@@ -6,6 +6,7 @@
 //! a `PathPicker`, so both render through these functions and cannot drift.
 
 use crate::{
+    fuzzy,
     input_view::InputView,
     picker::{write_row_display, PickList, Preview},
     render::{
@@ -145,8 +146,9 @@ pub(crate) fn paint_path_rows(
     let mut label = String::new();
 
     // Rows past the eagerly indexed block derive their offsets here, one row at
-    // a time into a buffer the whole window shares.
+    // a time into buffers the whole window shares.
     let mut derived = Vec::new();
+    let mut matching = fuzzy::Scratch::default();
 
     for (row_idx, &idx) in picklist
         .filtered
@@ -155,7 +157,7 @@ pub(crate) fn paint_path_rows(
         .take(rows)
         .enumerate()
     {
-        let indices = picklist.row_indices(start_row + row_idx, &mut derived);
+        let indices = picklist.row_indices(start_row + row_idx, &mut derived, &mut matching);
         let row = area.y + row_idx as u16;
         let is_selected = start_row + row_idx == picklist.selected;
         let style = if is_selected {
