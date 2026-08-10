@@ -44,8 +44,6 @@ const DEFAULT_COLS: u16 = 80;
 
 const DEFAULT_ROWS: u16 = 24;
 
-const EVENT_CHANNEL_CAP: usize = 64;
-
 /// Gap between driven keys, matching the terminal front-end's inter-key pacing
 /// so each keystroke's effects settle before the next arrives.
 const INTER_KEY_DELAY: Duration = Duration::from_millis(20);
@@ -138,8 +136,8 @@ pub enum Query {
 /// Build one with [`Self::open`], then call [`Self::run`] with a script that
 /// receives a [`Handle`] to send keys, await frames, and query the session.
 pub struct LiveHarness {
-    event_tx: mpsc::Sender<Event>,
-    event_rx: Option<mpsc::Receiver<Event>>,
+    event_tx: mpsc::UnboundedSender<Event>,
+    event_rx: Option<mpsc::UnboundedReceiver<Event>>,
     render_tx: Option<watch::Sender<Option<RenderFrame>>>,
     render_rx: watch::Receiver<Option<RenderFrame>>,
     shutdown: Arc<Notify>,
@@ -185,7 +183,11 @@ impl LiveHarness {
         }
         let socket_path = run::agent_socket_path(uid).context(SessionSocketSnafu)?;
 
-        let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAP);
+        // Unbounded to match the terminal front-end, where a bound would park
+        // the sender whenever the app stalls with the queue full. A driving
+        // script must never block on a send, and `drain_pending` collapses a
+        // whole backlog before one render either way.
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (render_tx, render_rx) = watch::channel(None);
         let shutdown = stoat.shutdown_handle();
 
@@ -236,7 +238,6 @@ impl LiveHarness {
             let driver = async move {
                 handle
                     .send_event(Event::Resize(DEFAULT_COLS, DEFAULT_ROWS))
-                    .await
                     .ok();
                 let output = script(handle).await;
                 auto_shutdown.notify_one();
@@ -251,7 +252,7 @@ impl LiveHarness {
 
 /// Driver-side handle passed to a [`LiveHarness::run`] script.
 pub struct Handle {
-    event_tx: mpsc::Sender<Event>,
+    event_tx: mpsc::UnboundedSender<Event>,
     render_rx: watch::Receiver<Option<RenderFrame>>,
     shutdown: Arc<Notify>,
     socket_path: PathBuf,
@@ -263,7 +264,7 @@ impl Handle {
     pub async fn send_keys(&self, keys: &str) -> Result<(), HarnessError> {
         let parsed = input_parse::parse_input_sequence(keys).context(ParseInputSnafu)?;
         for key in parsed {
-            self.send_event(Event::Key(key)).await?;
+            self.send_event(Event::Key(key))?;
             time::sleep(INTER_KEY_DELAY).await;
         }
         Ok(())
@@ -322,8 +323,8 @@ impl Handle {
         self.shutdown.notify_one();
     }
 
-    async fn send_event(&self, event: Event) -> Result<(), HarnessError> {
-        self.event_tx.send(event).await.ok().context(SendEventSnafu)
+    fn send_event(&self, event: Event) -> Result<(), HarnessError> {
+        self.event_tx.send(event).ok().context(SendEventSnafu)
     }
 
     fn current_frame_text(&mut self) -> Option<String> {
