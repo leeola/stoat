@@ -1,7 +1,7 @@
 use crate::multi_buffer::MultiBufferSnapshot;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use stoat_text::{next_char_boundary, Anchor, Bias, Selection, SelectionGoal};
+use stoat_text::{next_char_boundary, prev_char_boundary, Anchor, Bias, Selection, SelectionGoal};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SelectionsCollection {
@@ -504,11 +504,45 @@ impl SelectionsCollection {
         self.install(deduped.into_iter().map(|r| r.selection).collect());
     }
 
+    /// Every selection's id, cursor endpoints and vertical goal, resolved in one
+    /// batch.
+    ///
+    /// [`Self::transform_resolved`]'s prologue without the transform, for a
+    /// motion that works out where each cursor lands and hands the offsets to
+    /// [`Self::land_block_cursors`] rather than building selections of its own.
+    /// Resolving per selection instead would be two root descents each.
+    ///
+    /// Head and tail rather than start and end, matching `transform_resolved`
+    /// and what a motion asks for.
+    pub(crate) fn resolved_reads(&self, snapshot: &MultiBufferSnapshot) -> Vec<ResolvedRead> {
+        let offsets = {
+            let anchors: Vec<Anchor> = self
+                .disjoint
+                .iter()
+                .flat_map(|sel| [sel.head(), sel.tail()])
+                .collect();
+            snapshot.resolve_anchors_batch(&anchors)
+        };
+
+        self.disjoint
+            .iter()
+            .zip(offsets.chunks_exact(2))
+            .map(|(sel, ends)| ResolvedRead {
+                id: sel.id,
+                head: ends[0],
+                tail: ends[1],
+                goal: sel.goal,
+            })
+            .collect()
+    }
+
     /// Land a forward block cursor per selection, from offsets already in hand.
     ///
-    /// `landings` pairs a selection id with the offset its cursor lands on,
-    /// sorted by id. A selection the list does not name keeps the span and the
-    /// anchors it has.
+    /// `landings` carries a selection id, the offset its cursor lands on, and
+    /// the vertical goal to keep, sorted by id. A selection the list does not
+    /// name keeps the span, the goal, and the anchors it has. `end_cell` decides
+    /// what a landing on the very end of the rope covers, where there is no next
+    /// character to widen over.
     ///
     /// The clip, sort and merge are [`Self::replace_with`]'s, and the anchors
     /// come out the same. What it saves is the round trip: a caller that already
@@ -517,14 +551,15 @@ impl SelectionsCollection {
     /// straight back to the offsets it was handed.
     pub(crate) fn land_block_cursors(
         &mut self,
-        landings: &[(usize, usize)],
+        landings: &[(usize, usize, SelectionGoal)],
+        end_cell: EndCell,
         snapshot: &MultiBufferSnapshot,
     ) {
         assert!(
             !self.disjoint.is_empty(),
             "SelectionsCollection invariant: at least one selection"
         );
-        let named = |id: usize| landings.binary_search_by_key(&id, |(id, _)| *id);
+        let named = |id: usize| landings.binary_search_by_key(&id, |(id, _, _)| *id);
 
         // Only the selections no landing names have to be read out of their
         // anchors. A landed one already knows where it is.
@@ -545,13 +580,22 @@ impl SelectionsCollection {
             .iter()
             .map(|sel| match named(sel.id) {
                 Ok(found) => {
-                    let start = landings[found].1;
+                    let (_, start, goal) = landings[found];
+                    let forward = next_char_boundary(rope, start);
+                    // Nothing after the landing means it is on the end of the
+                    // rope, where `end_cell` decides between the character
+                    // before it and no character at all.
+                    let (start, end) = match (forward > start, end_cell) {
+                        (true, _) => (start, forward),
+                        (false, EndCell::Previous) => (prev_char_boundary(rope, start), start),
+                        (false, EndCell::Empty) => (start, start),
+                    };
                     Landing {
                         start,
-                        end: next_char_boundary(rope, start),
+                        end,
                         id: sel.id,
                         reversed: false,
-                        goal: SelectionGoal::None,
+                        goal,
                         start_clipped: false,
                         keep: None,
                     }
@@ -662,6 +706,30 @@ impl SelectionsCollection {
             .collect();
         self.install(landed);
     }
+}
+
+/// One selection read out of its anchors, as a motion needs it.
+///
+/// See [`SelectionsCollection::resolved_reads`], which produces these.
+pub(crate) struct ResolvedRead {
+    pub(crate) id: usize,
+    pub(crate) head: usize,
+    pub(crate) tail: usize,
+    pub(crate) goal: SelectionGoal,
+}
+
+/// What a block cursor landing on the end of the rope covers, there being no
+/// next character to widen over.
+///
+/// The two answers belong to different callers rather than to different
+/// cursors, so a batch picks one. A normal-mode motion covers a cell wherever
+/// it lands, including past the last character. An insert cursor sits at its
+/// insertion point and must not step back, which would put the point before the
+/// character just typed and corrupt what follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EndCell {
+    Previous,
+    Empty,
 }
 
 /// A selection on its way through [`SelectionsCollection::land_block_cursors`],
@@ -832,7 +900,7 @@ mod tests {
             ("rotate_primary_by", |c, _| c.rotate_primary_by(true, 1)),
             ("transform", |c, s| c.transform(s, |sel| sel.clone())),
             ("land_block_cursors", |c, s| {
-                c.land_block_cursors(&[(0, 2)], s)
+                c.land_block_cursors(&[(0, 2, SelectionGoal::None)], EndCell::Previous, s)
             }),
         ];
 
@@ -980,7 +1048,7 @@ mod tests {
             },
         ]));
 
-        collection.land_block_cursors(&[(1, 3)], &snapshot);
+        collection.land_block_cursors(&[(1, 3, SelectionGoal::None)], EndCell::Previous, &snapshot);
 
         let merged = collection.all_anchors();
         assert_eq!(merged.len(), 1, "the landing sits inside the other span");
@@ -988,6 +1056,65 @@ mod tests {
             !merged[0].reversed,
             "one input faced forward, so the merge does",
         );
+    }
+
+    /// One selection landed on `offset`, read back as `(start, end, goal)`.
+    fn land_one(
+        text: &str,
+        offset: usize,
+        goal: SelectionGoal,
+        end_cell: EndCell,
+    ) -> (usize, usize, SelectionGoal) {
+        let multi = singleton(text);
+        let snapshot = multi.snapshot();
+
+        let mut collection = SelectionsCollection::new();
+        collection.restore(Arc::from([Selection {
+            id: 1,
+            start: snapshot.anchor_at(0, Bias::Right),
+            end: snapshot.anchor_at(1, Bias::Right),
+            reversed: false,
+            goal: SelectionGoal::None,
+        }]));
+
+        collection.land_block_cursors(&[(1, offset, goal)], end_cell, &snapshot);
+
+        let landed = &collection.all_anchors()[0];
+        (
+            snapshot.resolve_anchor(&landed.start),
+            snapshot.resolve_anchor(&landed.end),
+            landed.goal,
+        )
+    }
+
+    /// A cursor landing on the rope's end has no character after it, and what
+    /// it covers is the caller's to say. A motion covers a cell wherever it
+    /// lands. An insert cursor stays on its insertion point, since stepping back
+    /// would put it before the character just typed.
+    #[test]
+    fn a_landing_on_the_rope_end_covers_what_the_caller_asked_for() {
+        let text = "ab";
+        let end = text.len();
+
+        assert_eq!(
+            land_one(text, end, SelectionGoal::None, EndCell::Previous),
+            (1, 2, SelectionGoal::None),
+            "the previous cell, so the cursor still covers a character",
+        );
+        assert_eq!(
+            land_one(text, end, SelectionGoal::None, EndCell::Empty),
+            (2, 2, SelectionGoal::None),
+            "nothing, leaving the insertion point where it is",
+        );
+    }
+
+    /// Vertical motion carries a goal column across rows, so a landing has to
+    /// arrive with the one it was given rather than a cleared one.
+    #[test]
+    fn a_landing_keeps_the_goal_it_was_given() {
+        let (start, end, goal) = land_one("abc", 1, SelectionGoal::Column(7), EndCell::Previous);
+        assert_eq!((start, end), (1, 2), "a 1-wide cursor on the cell");
+        assert_eq!(goal, SelectionGoal::Column(7));
     }
 
     /// Two backward selections merge into a backward one, so the rule is a
@@ -1051,22 +1178,22 @@ mod tests {
 
         // Landings on and off grapheme boundaries, some of them colliding so
         // the dedupe runs.
-        let mut landings: Vec<(usize, usize)> = through_offsets
+        let mut landings: Vec<(usize, usize, SelectionGoal)> = through_offsets
             .all_anchors()
             .iter()
             .enumerate()
-            .map(|(i, sel)| (sel.id, (i * 13) % text.len()))
+            .map(|(i, sel)| (sel.id, (i * 13) % text.len(), SelectionGoal::None))
             .collect();
-        landings.sort_unstable_by_key(|(id, _)| *id);
+        landings.sort_unstable_by_key(|(id, _, _)| *id);
 
-        through_offsets.land_block_cursors(&landings, &snapshot);
+        through_offsets.land_block_cursors(&landings, EndCell::Previous, &snapshot);
 
         let landed: Vec<Selection<Anchor>> = through_anchors
             .all_anchors()
             .iter()
             .map(|sel| {
                 let found = landings
-                    .binary_search_by_key(&sel.id, |(id, _)| *id)
+                    .binary_search_by_key(&sel.id, |(id, _, _)| *id)
                     .expect("every selection is named");
                 let target = landings[found].1;
                 let end = next_char_boundary(snapshot.rope(), target);

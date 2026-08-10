@@ -8,7 +8,7 @@ use crate::{
     jumplist::JumpEntry,
     multi_buffer::MultiBufferSnapshot,
     pane::View,
-    selection::merge_overlapping_spans,
+    selection::{merge_overlapping_spans, EndCell, ResolvedRead, SelectionsCollection},
 };
 use std::{
     ops::Range,
@@ -373,22 +373,36 @@ pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32, extend: bool) -> Up
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
+
+    // Step the block-cursor cell, not the raw head. A forward 1-wide selection
+    // stores its head one cell past the cursor. Both move and extend step whole
+    // grapheme clusters, crossing line boundaries like Helix. A step at the rope
+    // end returns the offset it was given, so a count that runs off the buffer
+    // stalls there instead of overshooting.
+    let step = |offset| {
+        if delta > 0 {
+            rope.next_grapheme_boundary(offset)
+        } else {
+            rope.prev_grapheme_boundary(offset)
+        }
+    };
+
+    if !extend {
+        let landings = block_cursor_landings(&editor.selections, buffer_snapshot, |read| {
+            let cursor = cursor_offset(rope, read.tail, read.head);
+            let target = (0..count).fold(cursor, |t, _| step(t));
+            (target != cursor).then_some((target, SelectionGoal::None))
+        });
+        editor
+            .selections
+            .land_block_cursors(&landings, EndCell::Previous, buffer_snapshot);
+        return UpdateEffect::Redraw;
+    }
+
     editor
         .selections
         .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
             let cursor = cursor_offset(rope, tail_offset, head_offset);
-            // Step the block-cursor cell, not the raw head: a forward 1-wide
-            // selection stores its head one cell past the cursor. Both move and
-            // extend step whole grapheme clusters, crossing line boundaries like
-            // Helix. A step at the rope end returns the offset it was given, so a
-            // count that runs off the buffer stalls there instead of overshooting.
-            let step = |offset| {
-                if delta > 0 {
-                    rope.next_grapheme_boundary(offset)
-                } else {
-                    rope.prev_grapheme_boundary(offset)
-                }
-            };
             let target = (0..count).fold(cursor, |t, _| step(t));
             if target == cursor {
                 return sel.clone();
@@ -426,62 +440,71 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
     let max_row = rope.max_point().row;
+
+    // Where a cursor at `head`/`tail` carrying `goal` lands, with the goal
+    // column it takes along. Both arms land on the same cell. Extending decides
+    // whether the anchor is left behind, never where the cursor ends up.
+    let landing_for = |head: usize, tail: usize, goal: SelectionGoal| {
+        let cursor = cursor_offset(rope, tail, head);
+        let cursor_pt = rope.offset_to_point(cursor);
+        // Cells from the line start, not bytes. The two agree only while every
+        // character is one byte and one cell, so carrying bytes between lines
+        // drifts across wide glyphs and tabs.
+        let goal_col = match goal {
+            SelectionGoal::Column(c) => c,
+            SelectionGoal::None => display_snapshot.visual_column(cursor_pt),
+        };
+        let new_row = (cursor_pt.row as i64)
+            .saturating_add(delta)
+            .clamp(0, max_row as i64) as u32;
+        // A plain j/k at the file edge stays a no-op. An overshooting count jump
+        // lands on the clamped edge row rather than doing nothing.
+        if new_row == cursor_pt.row {
+            return None;
+        }
+        // Back to a byte column on the landing line, which leaves the display
+        // round-trip below to place it across wraps and folds. A display point
+        // built from the goal directly would clip against one wrapped segment's
+        // width rather than the whole line's.
+        let col = display_snapshot.buffer_column_at_visual(new_row, goal_col, Bias::Left);
+        // The target is the same column of the target buffer line. Snap it
+        // through display space so a row hidden in a fold or beside a diff block
+        // row lands on the next visible buffer row in the travel direction
+        // rather than inside the hidden region.
+        let target = display_snapshot.buffer_to_display(Point::new(new_row, col));
+        let clipped = display_snapshot.clip_point(target, clip_bias);
+        let buffer_pt = display_snapshot.display_to_buffer(clipped)?;
+        Some((
+            rope.point_to_offset(buffer_pt),
+            SelectionGoal::Column(goal_col),
+        ))
+    };
+
+    if !extend {
+        let landings = block_cursor_landings(&editor.selections, buffer_snapshot, |read| {
+            landing_for(read.head, read.tail, read.goal)
+        });
+        editor
+            .selections
+            .land_block_cursors(&landings, EndCell::Previous, buffer_snapshot);
+        return UpdateEffect::Redraw;
+    }
+
     editor
         .selections
         .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
-            let cursor = cursor_offset(rope, tail_offset, head_offset);
-            let cursor_pt = rope.offset_to_point(cursor);
-            // Cells from the line start, not bytes. The two agree only while
-            // every character is one byte and one cell, so carrying bytes
-            // between lines drifts across wide glyphs and tabs.
-            let goal_col = match sel.goal {
-                SelectionGoal::Column(c) => c,
-                SelectionGoal::None => display_snapshot.visual_column(cursor_pt),
-            };
-            let new_row = (cursor_pt.row as i64)
-                .saturating_add(delta)
-                .clamp(0, max_row as i64) as u32;
-            // A plain j/k at the file edge stays a no-op. An overshooting count
-            // jump lands on the clamped edge row rather than doing nothing.
-            if new_row == cursor_pt.row {
-                return sel.clone();
-            }
-            // Back to a byte column on the landing line, which leaves the
-            // display round-trip below to place it across wraps and folds. A
-            // display point built from the goal directly would clip against one
-            // wrapped segment's width rather than the whole line's.
-            let col = display_snapshot.buffer_column_at_visual(new_row, goal_col, Bias::Left);
-            // The target is the same column of the target buffer line. Snap it
-            // through display space so a row hidden in a fold or beside a diff block
-            // row lands on the next visible buffer row in the travel direction
-            // rather than inside the hidden region.
-            let target = display_snapshot.buffer_to_display(Point::new(new_row, col));
-            let clipped = display_snapshot.clip_point(target, clip_bias);
-            let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped) else {
+            let Some((offset, goal)) = landing_for(head_offset, tail_offset, sel.goal) else {
                 return sel.clone();
             };
-            let offset = rope.point_to_offset(buffer_pt);
-            // Both arms land on the same cell. Extending decides whether the
-            // anchor is left behind, never where the cursor ends up.
-            if extend {
-                extend_head_to_cursor(
-                    sel,
-                    offset,
-                    head_offset,
-                    tail_offset,
-                    SelectionGoal::Column(goal_col),
-                    rope,
-                    buffer_snapshot,
-                )
-            } else {
-                land_block_cursor(
-                    sel.id,
-                    offset,
-                    SelectionGoal::Column(goal_col),
-                    rope,
-                    buffer_snapshot,
-                )
-            }
+            extend_head_to_cursor(
+                sel,
+                offset,
+                head_offset,
+                tail_offset,
+                goal,
+                rope,
+                buffer_snapshot,
+            )
         });
     UpdateEffect::Redraw
 }
@@ -650,6 +673,32 @@ fn extend_head_to_cursor(
     landed.goal = goal;
 
     anchor_selection(landed, buffer)
+}
+
+/// Work out where each selection's block cursor lands, in the shape
+/// [`SelectionsCollection::land_block_cursors`] takes.
+///
+/// `target_for` answers with the offset the cursor lands on and the goal to
+/// keep, or [`None`] for a selection this motion leaves where it is. An unnamed
+/// selection keeps its span, so returning `None` is how a motion declines to
+/// move one.
+///
+/// Sorted by id, which is what the landing lookup binary-searches.
+fn block_cursor_landings<F>(
+    selections: &SelectionsCollection,
+    buffer: &MultiBufferSnapshot,
+    target_for: F,
+) -> Vec<(usize, usize, SelectionGoal)>
+where
+    F: Fn(&ResolvedRead) -> Option<(usize, SelectionGoal)>,
+{
+    let mut landings: Vec<(usize, usize, SelectionGoal)> = selections
+        .resolved_reads(buffer)
+        .iter()
+        .filter_map(|read| target_for(read).map(|(target, goal)| (read.id, target, goal)))
+        .collect();
+    landings.sort_unstable_by_key(|(id, _, _)| *id);
+    landings
 }
 
 /// Re-anchor an offset-based selection produced by the block-cursor helpers.
@@ -968,61 +1017,51 @@ fn goto_line_boundary(stoat: &mut Stoat, boundary: LineBoundary, extend: bool) -
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
+
+    // The cell to land on, from a cursor at `head`/`tail`. The end boundary sits
+    // one past the line's last character and a block cursor has to land on a
+    // cell rather than the boundary, so it steps back. An empty line has no cell
+    // to step back to and stays at its start.
+    let target_for = |head: usize, tail: usize| {
+        // Use the block-cursor cell's row, not the raw head. A 1-wide cursor
+        // sitting at a line's end has its head on the next line's first cell,
+        // which would move the boundary to the wrong line.
+        let cursor_row = rope.offset_to_point(cursor_offset(rope, tail, head)).row;
+        let line_start = rope.point_to_offset(Point::new(cursor_row, 0));
+        match boundary {
+            LineBoundary::Start => line_start,
+            LineBoundary::End => {
+                let end = rope.point_to_offset(Point::new(cursor_row, rope.line_len(cursor_row)));
+                match end > line_start {
+                    true => rope.prev_grapheme_boundary(end),
+                    false => end,
+                }
+            },
+        }
+    };
+
+    if !extend {
+        let landings = block_cursor_landings(&editor.selections, buffer_snapshot, |read| {
+            Some((target_for(read.head, read.tail), SelectionGoal::None))
+        });
+        editor
+            .selections
+            .land_block_cursors(&landings, EndCell::Previous, buffer_snapshot);
+        return UpdateEffect::Redraw;
+    }
+
     editor
         .selections
         .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
-            // Use the block-cursor cell's row, not the raw head: a 1-wide cursor
-            // sitting at a line's end has its head on the next line's first cell,
-            // which would move the boundary to the wrong line.
-            let cursor_row = rope
-                .offset_to_point(cursor_offset(rope, tail_offset, head_offset))
-                .row;
-            let line_start = rope.point_to_offset(Point::new(cursor_row, 0));
-            let boundary_offset = match boundary {
-                LineBoundary::Start => line_start,
-                LineBoundary::End => {
-                    rope.point_to_offset(Point::new(cursor_row, rope.line_len(cursor_row)))
-                },
-            };
-            if extend {
-                // The end boundary sits one past the line's last character, and the
-                // block cursor has to land on a cell rather than the boundary. An
-                // empty line has no cell to step back to.
-                let target_cursor = match boundary {
-                    LineBoundary::Start => line_start,
-                    LineBoundary::End if boundary_offset > line_start => {
-                        rope.prev_grapheme_boundary(boundary_offset)
-                    },
-                    LineBoundary::End => boundary_offset,
-                };
-                extend_head_to_cursor(
-                    sel,
-                    target_cursor,
-                    head_offset,
-                    tail_offset,
-                    SelectionGoal::None,
-                    rope,
-                    buffer_snapshot,
-                )
-            } else {
-                // The block cursor rests on the last visible character, one
-                // grapheme before a non-empty line's end, rather than on the
-                // newline. An empty line has no character, so it stays at the
-                // line start.
-                let land_offset = match boundary {
-                    LineBoundary::End if boundary_offset > line_start => {
-                        rope.prev_grapheme_boundary(boundary_offset)
-                    },
-                    _ => boundary_offset,
-                };
-                land_block_cursor(
-                    sel.id,
-                    land_offset,
-                    SelectionGoal::None,
-                    rope,
-                    buffer_snapshot,
-                )
-            }
+            extend_head_to_cursor(
+                sel,
+                target_for(head_offset, tail_offset),
+                head_offset,
+                tail_offset,
+                SelectionGoal::None,
+                rope,
+                buffer_snapshot,
+            )
         });
     UpdateEffect::Redraw
 }
@@ -1034,37 +1073,41 @@ pub(super) fn goto_first_nonwhitespace(stoat: &mut Stoat, extend: bool) -> Updat
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
+
+    // A line that is all whitespace has nothing to go to, which leaves its
+    // cursor where it is.
+    let target_for = |head: usize, tail: usize| {
+        let row = rope.offset_to_point(cursor_offset(rope, tail, head)).row;
+        let line_start = rope.point_to_offset(Point::new(row, 0));
+        let line_end = rope.point_to_offset(Point::new(row, rope.line_len(row)));
+        first_nonwhitespace(rope, line_start, line_end)
+    };
+
+    if !extend {
+        let landings = block_cursor_landings(&editor.selections, buffer_snapshot, |read| {
+            target_for(read.head, read.tail).map(|target| (target, SelectionGoal::None))
+        });
+        editor
+            .selections
+            .land_block_cursors(&landings, EndCell::Previous, buffer_snapshot);
+        return UpdateEffect::Redraw;
+    }
+
     editor
         .selections
         .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
-            let head_cursor = cursor_offset(rope, tail_offset, head_offset);
-            let row = rope.offset_to_point(head_cursor).row;
-            let line_start = rope.point_to_offset(Point::new(row, 0));
-            let line_end = rope.point_to_offset(Point::new(row, rope.line_len(row)));
-
-            let Some(target_offset) = first_nonwhitespace(rope, line_start, line_end) else {
+            let Some(target_offset) = target_for(head_offset, tail_offset) else {
                 return sel.clone();
             };
-
-            if extend {
-                extend_head_to_cursor(
-                    sel,
-                    target_offset,
-                    head_offset,
-                    tail_offset,
-                    SelectionGoal::None,
-                    rope,
-                    buffer_snapshot,
-                )
-            } else {
-                land_block_cursor(
-                    sel.id,
-                    target_offset,
-                    SelectionGoal::None,
-                    rope,
-                    buffer_snapshot,
-                )
-            }
+            extend_head_to_cursor(
+                sel,
+                target_offset,
+                head_offset,
+                tail_offset,
+                SelectionGoal::None,
+                rope,
+                buffer_snapshot,
+            )
         });
     UpdateEffect::Redraw
 }
@@ -1146,12 +1189,12 @@ pub(super) fn collapse_selection(stoat: &mut Stoat) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
+    let landings = block_cursor_landings(&editor.selections, buffer_snapshot, |read| {
+        Some((cursor_offset(rope, read.tail, read.head), read.goal))
+    });
     editor
         .selections
-        .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
-            let cursor = cursor_offset(rope, tail_offset, head_offset);
-            land_block_cursor(sel.id, cursor, sel.goal, rope, buffer_snapshot)
-        });
+        .land_block_cursors(&landings, EndCell::Previous, buffer_snapshot);
     UpdateEffect::Redraw
 }
 
@@ -5588,7 +5631,7 @@ mod tests {
         let buffer_snapshot = snapshot.buffer_snapshot();
         let offset = buffer_snapshot.rope().point_to_offset(Point::new(row, col));
         let anchor = buffer_snapshot.anchor_at(offset, Bias::Left);
-        editor.selections = crate::selection::SelectionsCollection::new();
+        editor.selections = SelectionsCollection::new();
         editor
             .selections
             .insert_cursor(anchor, SelectionGoal::None, buffer_snapshot);

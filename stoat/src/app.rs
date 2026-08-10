@@ -42,7 +42,7 @@ use crate::{
     },
     review_session::ReviewSource,
     run::{CommandMark, GridSelection, PtyNotification, RunId},
-    selection::merge_overlapping_spans,
+    selection::{merge_overlapping_spans, EndCell},
     symbol_finder::SymbolFinder,
     term_session::{TermId, TermReturnFocus, TermSelection},
     theme_pool::{ThemePool, VscodeSource},
@@ -76,7 +76,7 @@ use stoat_language::{
     self as language, Language, LanguageRegistry, SyntaxMapCapture, SyntaxSnapshot, SyntaxState,
 };
 use stoat_scheduler::Executor;
-use stoat_text::{patch::Patch, Anchor, Bias, IndentStyle, Rope, Selection};
+use stoat_text::{patch::Patch, Anchor, Bias, IndentStyle, Rope, Selection, SelectionGoal};
 use stoatty_protocol::{
     command::PoolRegionCommand,
     window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent},
@@ -5652,7 +5652,7 @@ impl Stoat {
                     let tail_anchor = sel.tail();
                     let tail_offset = buf_snap.resolve_anchor(&tail_anchor);
                     let mut new = sel.clone();
-                    new.goal = stoat_text::SelectionGoal::None;
+                    new.goal = SelectionGoal::None;
                     if offset < tail_offset {
                         new.start = head_anchor;
                         new.end = tail_anchor;
@@ -7312,7 +7312,7 @@ impl Stoat {
             action_handlers::movement::land_block_cursor(
                 sel.id,
                 back,
-                stoat_text::SelectionGoal::None,
+                SelectionGoal::None,
                 rope,
                 buf_snap,
             )
@@ -7388,7 +7388,7 @@ impl Stoat {
             action_handlers::movement::land_block_cursor(
                 sel.id,
                 cursor,
-                stoat_text::SelectionGoal::None,
+                SelectionGoal::None,
                 new_buf.rope(),
                 new_buf,
             )
@@ -7520,7 +7520,13 @@ impl Stoat {
         };
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        editor.selections.land_block_cursors(&landings, new_buf);
+        let landings: Vec<(usize, usize, SelectionGoal)> = landings
+            .into_iter()
+            .map(|(id, offset)| (id, offset, SelectionGoal::None))
+            .collect();
+        editor
+            .selections
+            .land_block_cursors(&landings, EndCell::Empty, new_buf);
     }
 
     /// Insert a string per cursor in one multi-edit, mirroring
@@ -7936,22 +7942,25 @@ impl Stoat {
         }
         deleted_before.push(running);
 
-        let mut new_offsets: Vec<(usize, usize)> = per_sel
+        let mut new_offsets: Vec<(usize, usize, SelectionGoal)> = per_sel
             .iter()
             .map(|&(id, start, _)| {
                 (
                     id,
                     Self::offset_after_deletions(start, &merged, &deleted_before),
+                    SelectionGoal::None,
                 )
             })
             .collect();
         // Sorted so the closure can binary-search rather than hash a map built
         // for one pass over the selections.
-        new_offsets.sort_unstable_by_key(|(id, _)| *id);
+        new_offsets.sort_unstable_by_key(|(id, _, _)| *id);
 
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        editor.selections.land_block_cursors(&new_offsets, new_buf);
+        editor
+            .selections
+            .land_block_cursors(&new_offsets, EndCell::Empty, new_buf);
     }
 
     /// New offset of `target` after deleting the ascending, disjoint `ranges`.
@@ -10272,7 +10281,7 @@ impl Stoat {
             action_handlers::movement::land_block_cursor(
                 s.id,
                 offset,
-                stoat_text::SelectionGoal::None,
+                SelectionGoal::None,
                 buf_snap.rope(),
                 buf_snap,
             )
@@ -10298,7 +10307,7 @@ impl Stoat {
             action_handlers::movement::land_block_cursor(
                 s.id,
                 offset,
-                stoat_text::SelectionGoal::None,
+                SelectionGoal::None,
                 buf_snap.rope(),
                 buf_snap,
             )
@@ -24088,7 +24097,7 @@ mod tests {
         };
         editor
             .selections
-            .set_single_range(start, end, stoat_text::SelectionGoal::None);
+            .set_single_range(start, end, SelectionGoal::None);
     }
 
     /// Add a second 1-wide block cursor at `offset` in the focused editor,
@@ -24100,7 +24109,7 @@ mod tests {
         let head = buf.anchor_at(offset, Bias::Right);
         editor
             .selections
-            .insert_cursor(head, stoat_text::SelectionGoal::None, buf);
+            .insert_cursor(head, SelectionGoal::None, buf);
     }
 
     #[test]
