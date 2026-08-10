@@ -18,7 +18,7 @@ use alacritty_terminal::{
     index::{Column, Line},
     term::{
         cell::{Cell as TermCell, Flags as TermFlags},
-        Config,
+        Config, TermMode,
     },
     vte::ansi::{Color as AnsiColor, CursorShape as TermCursorShape, NamedColor, Processor},
     Term,
@@ -206,6 +206,16 @@ impl TermScreen {
                 .lock()
                 .expect("term clipboard buffer poisoned"),
         )
+    }
+
+    /// Whether the program running in this screen asked for bracketed paste.
+    ///
+    /// A program that sets DECSET 2004 wants pasted text delivered wrapped in
+    /// guard markers, so it can tell a paste from typing and refuse to execute
+    /// it. One that has not wants the bytes bare. The choice belongs to the
+    /// child, which is why the caller reads it from here rather than deciding.
+    pub fn bracketed_paste(&self) -> bool {
+        self.term.mode().contains(TermMode::BRACKETED_PASTE)
     }
 
     /// The viewport height in rows.

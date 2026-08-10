@@ -6589,6 +6589,23 @@ impl Stoat {
         UpdateEffect::None
     }
 
+    /// Encode a paste of `text` and send it to the terminal's PTY.
+    ///
+    /// Returns [`UpdateEffect::None`] on the same reasoning as a forwarded
+    /// keystroke. Nothing on screen changes until the child echoes the text
+    /// back, and that read is what asks for the repaint.
+    fn route_paste_to_term(&mut self, term_id: TermId, text: &str) -> UpdateEffect {
+        self.clear_term_selection(term_id);
+        let bracketed = self
+            .active_workspace()
+            .terms
+            .get(term_id)
+            .is_some_and(|session| session.term.bracketed_paste());
+
+        self.write_to_term(term_id, &encode_paste_to_pty(text, bracketed));
+        UpdateEffect::None
+    }
+
     /// Write raw bytes to an agent's PTY.
     ///
     /// Uses `now_or_never` because the local PTY and the test fake complete
@@ -6746,12 +6763,21 @@ impl Stoat {
     /// never painted. Every character still arrives, which is what a reader
     /// pasting a wrapped path or a wrapped query wants.
     fn handle_paste(&mut self, text: &str) -> UpdateEffect {
-        let Some((editor_id, buffer_id)) = self.focused_editor_ids() else {
-            return UpdateEffect::None;
-        };
         if text.is_empty() {
             return UpdateEffect::None;
         }
+
+        // Asked before the editor resolve, which answers `None` for a focused
+        // terminal and would drop the paste. Keystrokes in the same focus state
+        // route through this, and paste has no reason to differ. Its overlay
+        // precedence is also what keeps a modal's paste in the modal.
+        if let Some(term_id) = self.term_input_target() {
+            return self.route_paste_to_term(term_id, text);
+        }
+
+        let Some((editor_id, buffer_id)) = self.focused_editor_ids() else {
+            return UpdateEffect::None;
+        };
 
         let mut normalized = match text.contains('\r') {
             true => text.replace("\r\n", "\n").replace('\r', "\n"),
@@ -10845,6 +10871,23 @@ fn encode_key_to_pty(key: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Right => Some(b"\x1b[C".to_vec()),
         KeyCode::Left => Some(b"\x1b[D".to_vec()),
         _ => None,
+    }
+}
+
+/// The byte sequence a VT terminal sends for a paste of `text`.
+///
+/// `bracketed` is the child's own DECSET 2004 state, read from
+/// [`TermScreen::bracketed_paste`]. Under it the payload is wrapped in the
+/// guard markers, with any embedded end guard stripped so pasted bytes cannot
+/// close the bracket early and have the rest run as typed input. Without it
+/// newlines become carriage returns, which is what the Enter key sends, so a
+/// pasted multi-line command submits each line the way typing it would.
+fn encode_paste_to_pty(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        let guarded = text.replace("\x1b[201~", "");
+        format!("\x1b[200~{guarded}\x1b[201~").into_bytes()
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
     }
 }
 
@@ -18027,6 +18070,90 @@ mod tests {
             .max_point()
             .row;
         assert_eq!(rows, 0, "and the input is still the one row it paints");
+    }
+
+    /// Pasting a command into a terminal pane sends it to the child.
+    ///
+    /// Typing there already goes to the child, and paste has no reason to
+    /// differ. Newlines arrive as carriage returns because that is what the
+    /// Enter key sends, so a pasted command line runs the way a typed one does.
+    #[test]
+    fn a_paste_into_a_terminal_reaches_the_child() {
+        let mut h = Stoat::test();
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+
+        let effect = h.stoat.update(Event::Paste("echo hi\nls\r\n".to_string()));
+
+        assert_eq!(
+            h.fake_terminal().sent_bytes(),
+            vec![b"echo hi\rls\r".to_vec()],
+            "the paste reaches the child with its newlines as carriage returns",
+        );
+        assert_eq!(
+            effect,
+            UpdateEffect::None,
+            "and asks for no frame of its own, the child's echo doing that",
+        );
+    }
+
+    /// A child that asked for bracketed paste gets the guards.
+    ///
+    /// A shell or editor sets DECSET 2004 so it can tell a paste from typing
+    /// and hold it back rather than running each line as it arrives. An
+    /// embedded end guard is dropped, since text that closed the bracket early
+    /// would have the rest of itself run as keystrokes.
+    #[test]
+    fn a_bracketed_child_gets_a_guarded_paste() {
+        let mut h = Stoat::test();
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        let term_id = h
+            .stoat
+            .focused_term_id()
+            .expect("the terminal action focuses a term");
+        h.stoat
+            .active_workspace_mut()
+            .terms
+            .get_mut(term_id)
+            .expect("term session")
+            .term
+            .feed(b"\x1b[?2004h");
+
+        h.stoat
+            .update(Event::Paste("rm -rf\x1b[201~ /".to_string()));
+
+        assert_eq!(
+            h.fake_terminal().sent_bytes(),
+            vec![b"\x1b[200~rm -rf /\x1b[201~".to_vec()],
+            "the payload is wrapped and cannot close the bracket itself",
+        );
+    }
+
+    /// A modal takes the paste even over a focused terminal.
+    ///
+    /// The overlay is where typing goes while it is open, and the terminal
+    /// underneath keeps the focus that would otherwise claim it.
+    #[test]
+    fn a_paste_over_a_terminal_still_lands_in_an_open_modal() {
+        let mut h = Stoat::test();
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        h.stoat.update(Event::Key(bare(KeyCode::Esc)));
+        h.type_keys("space p");
+        assert!(h.stoat.file_finder.is_some(), "the finder is open");
+
+        h.stoat.update(Event::Paste("note".to_string()));
+
+        let ws = h.stoat.active_workspace();
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        assert_eq!(finder.input.text(ws), "note");
+        assert!(
+            h.fake_terminal().sent_bytes().is_empty(),
+            "and nothing reached the terminal behind it",
+        );
+    }
+
+    #[test]
+    fn encode_paste_to_pty_normalizes_newlines_when_unbracketed() {
+        assert_eq!(encode_paste_to_pty("a\r\nb\nc", false), b"a\rb\rc".to_vec());
     }
 
     fn open_indent_buffer(h: &mut crate::test_harness::TestHarness, name: &str, contents: &[u8]) {
