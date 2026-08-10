@@ -11310,6 +11310,12 @@ pub(crate) fn parse_buffer_step(
 /// the narrowing was not paying for itself anyway.
 const RECAPTURE_ROUNDS: usize = 8;
 
+/// One cover's re-queried tokens, or nothing when no round has asked yet.
+///
+/// A round leaves this filled for every cover, and empties only the ones whose
+/// range the next round changed.
+type CoverSpans = Option<Vec<(Range<usize>, HighlightStyleId)>>;
+
 /// A stretch of tokens that survived an edit, in both parses' index spaces.
 ///
 /// Both ranges have the same length. The prior side names where the anchors
@@ -11439,8 +11445,10 @@ fn styled_capture_spans(
     captures: Vec<SyntaxMapCapture<'_>>,
     styles: &SyntaxStyles,
 ) -> Vec<(Range<usize>, HighlightStyleId)> {
-    // highlight_map() clones a locked map, so memoize it per layer language.
-    let mut highlight_maps = std::collections::HashMap::new();
+    // highlight_map() clones a locked map, so memoize it per layer language. A
+    // parse reaches two or three languages, and scanning that many pointers
+    // costs less than hashing a key for every capture in the file.
+    let mut highlight_maps: Vec<(*const Language, _)> = Vec::new();
     captures
         .into_iter()
         .filter_map(|cap| {
@@ -11448,10 +11456,15 @@ fn styled_capture_spans(
             if range.start == range.end {
                 return None;
             }
-            let map = highlight_maps
-                .entry(cap.language as *const Language as usize)
-                .or_insert_with(|| cap.language.highlight_map());
-            let style_id = styles.id_for_highlight(map.get(cap.index))?;
+            let key = cap.language as *const Language;
+            let ix = match highlight_maps.iter().position(|(lang, _)| *lang == key) {
+                Some(ix) => ix,
+                None => {
+                    highlight_maps.push((key, cap.language.highlight_map()));
+                    highlight_maps.len() - 1
+                },
+            };
+            let style_id = styles.id_for_highlight(highlight_maps[ix].1.get(cap.index))?;
             Some((range, style_id))
         })
         .collect()
@@ -11575,7 +11588,8 @@ fn merge_ranges(ranges: &mut Vec<Range<usize>>) {
 ///
 /// `prior` is the previous parse's spans in its own byte coordinates, which
 /// `edits` carries into `rope`'s. Returns `None` when the re-query never
-/// settles, leaving the caller the full walk it would otherwise have done.
+/// settles, or when the ranges it would query grow past half the rope, leaving
+/// the caller the full walk it would otherwise have done.
 ///
 /// A query range is grown until every capture it returns lies inside it, since
 /// tree-sitter answers with each capture strictly intersecting the range and a
@@ -11592,34 +11606,84 @@ fn recapture_edited_ranges(
     styles: &SyntaxStyles,
 ) -> Option<Recaptured> {
     let mut covers = invalidated;
+    let mut fresh: Vec<CoverSpans> = covers.iter().map(|_| None).collect();
+
     for _ in 0..RECAPTURE_ROUNDS {
-        let fresh: Vec<Vec<(Range<usize>, HighlightStyleId)>> = covers
-            .iter()
-            .map(|cover| {
-                styled_capture_spans(
+        // Past half the file the narrowing has stopped paying for itself, and
+        // the caller's walk answers the same question in one query. Tested
+        // every round rather than only on the way in, since a cover that keeps
+        // growing gets there by widening rather than by arriving wide.
+        if covers.iter().map(|c| c.end - c.start).sum::<usize>() * 2 > rope.len() {
+            return None;
+        }
+
+        for (cover, spans) in covers.iter().zip(fresh.iter_mut()) {
+            if spans.is_none() {
+                *spans = Some(styled_capture_spans(
                     snapshot.captures(cover.clone(), rope, |l| Some(&l.highlight_query)),
                     styles,
-                )
-            })
-            .collect();
+                ));
+            }
+        }
 
         let mut grown: Vec<Range<usize>> = covers
             .iter()
             .zip(&fresh)
             .map(|(cover, spans)| {
-                spans.iter().fold(cover.clone(), |acc, (span, _)| {
-                    acc.start.min(span.start)..acc.end.max(span.end)
-                })
+                spans
+                    .as_ref()
+                    .expect("every cover was queried above")
+                    .iter()
+                    .fold(cover.clone(), |acc, (span, _)| {
+                        acc.start.min(span.start)..acc.end.max(span.end)
+                    })
             })
             .collect();
         merge_ranges(&mut grown);
 
         if grown == covers {
+            let fresh = fresh
+                .into_iter()
+                .map(|spans| spans.expect("every cover was queried above"))
+                .collect();
             return Some(splice_recaptured(prior, edits, &covers, fresh));
         }
+
+        fresh = carry_settled_covers(&covers, &grown, fresh);
         covers = grown;
     }
     None
+}
+
+/// Move each cover's captures onto the next round's cover list, keeping only
+/// those whose range came through untouched.
+///
+/// A cover that neither grew nor absorbed a neighbour asks the same question of
+/// the same trees over the same text, so its answer stands and the next round
+/// skips the query. Anything else is a different range and starts empty.
+///
+/// Both lists are start-ordered and disjoint, so one walk pairs them.
+fn carry_settled_covers(
+    covers: &[Range<usize>],
+    grown: &[Range<usize>],
+    mut fresh: Vec<CoverSpans>,
+) -> Vec<CoverSpans> {
+    let mut ix = 0;
+    grown
+        .iter()
+        .map(|range| {
+            while covers
+                .get(ix)
+                .is_some_and(|cover| cover.start < range.start)
+            {
+                ix += 1;
+            }
+            match covers.get(ix) {
+                Some(cover) if cover == range => fresh[ix].take(),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// Interleave the carried and re-queried tokens into one document-ordered list.
@@ -15740,6 +15804,93 @@ mod tests {
                 &styles,
             ),
             "recaptured spans must equal the full capture walk",
+        );
+    }
+
+    /// A cover keeps its captures only when the next round asks the same
+    /// question, which means the same bounds rather than merely overlapping
+    /// ones.
+    #[test]
+    fn only_an_unchanged_cover_keeps_its_captures() {
+        use crate::display_map::highlights::{HighlightStyle, HighlightStyleInterner};
+        let style = HighlightStyleInterner::default().intern(HighlightStyle::default());
+        let spans = |tag: usize| Some(vec![(tag..tag + 1, style)]);
+
+        let covers = vec![0..10, 20..30, 40..50, 60..70];
+        // The second grew, the third and fourth merged into one range covering
+        // both, and only the first came through as it was.
+        let grown = vec![0..10, 15..35, 40..70];
+        assert_eq!(
+            carry_settled_covers(
+                &covers,
+                &grown,
+                vec![spans(1), spans(2), spans(3), spans(4)],
+            ),
+            vec![spans(1), None, None],
+            "a grown or merged range is a different question and starts empty",
+        );
+    }
+
+    /// Once the ranges to re-query reach half the file, the walk the caller
+    /// would otherwise do answers the same question in one query, so the
+    /// narrowing declines rather than spending its rounds widening toward it.
+    #[test]
+    fn a_wide_invalidation_falls_through_to_the_full_walk() {
+        let (styles, lang) = carried_parse_fixture("a.rs");
+        let buffer_id = BufferId::new(1);
+        let body = "fn a() { let x = 1; }\n".repeat(20);
+        let mut buf = TextBuffer::with_text(buffer_id, &body);
+
+        let first = {
+            let mut syntax = None;
+            let mut map = None;
+            parse_buffer_step(
+                buffer_id,
+                buf.snapshot.clone(),
+                &lang,
+                &mut syntax,
+                &mut map,
+                None,
+                None,
+                &styles,
+                None,
+                None,
+            )
+            .expect("first parse should succeed")
+        };
+
+        let at = body.find("let x").expect("fixture has a binding");
+        buf.edit(at..at, "mut ");
+        let snapshot = buf.snapshot.clone();
+        let rope = snapshot.visible_text.clone();
+        let edits = snapshot.edits_since(first.syntax.version);
+
+        let mut map = first.syntax_map.clone();
+        map.interpolate(edits.edits(), &first.syntax.rope_snapshot, &rope);
+        map.reparse(&rope, lang.clone(), snapshot.version, None, None)
+            .expect("reparse should succeed");
+
+        let recapture = |cover: Range<usize>| {
+            recapture_edited_ranges(
+                map.snapshot(),
+                &rope,
+                &first.token_spans,
+                &edits,
+                vec![cover],
+                &styles,
+            )
+        };
+        // Whole lines, so the narrow cover has no capture straddling its end to
+        // grow it back over the threshold.
+        let half = rope.len() / 2;
+        let under = rope.point_to_offset(stoat_text::Point::new(rope.offset_to_point(half).row, 0));
+        assert!(
+            recapture(0..under).is_some(),
+            "a cover under half the rope must still recapture, got none at {under}",
+        );
+        assert!(
+            recapture(0..half + 1).is_none(),
+            "a cover past half the rope must leave the walk to the caller",
         );
     }
 
