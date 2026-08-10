@@ -1,18 +1,40 @@
 use crate::{Clock, Executor, LocalClock, Runnable, Scheduler, Timer};
 use futures::channel::oneshot;
-use std::{sync::Arc, time::Duration};
-use tokio::runtime::Handle;
+use std::{panic::AssertUnwindSafe, sync::Arc, time::Duration};
+use tokio::{runtime::Handle, sync::mpsc};
 
 pub struct TokioScheduler {
     handle: Handle,
     clock: LocalClock,
+    wakes: mpsc::UnboundedSender<Runnable>,
 }
 
 impl TokioScheduler {
+    /// Build a scheduler driving `handle`, starting the task that polls
+    /// everything it schedules.
+    ///
+    /// The pump runs until the scheduler is dropped or `handle`'s runtime shuts
+    /// down. It expects a current-thread runtime, where polls serialize anyway,
+    /// so draining wakes one at a time costs no parallelism. On a multi-thread
+    /// runtime it would serialize polls that could otherwise overlap.
     pub fn new(handle: Handle) -> Self {
+        let (wakes, mut pending) = mpsc::unbounded_channel::<Runnable>();
+
+        handle.spawn(async move {
+            while let Some(runnable) = pending.recv().await {
+                // Polling a task must not be able to stop the pump, or one
+                // panicking task would strand every future wake. Catching here
+                // keeps a panic to the task that raised it, as giving each wake
+                // its own tokio task used to. The panic hook has already run and
+                // printed by this point.
+                let _ = std::panic::catch_unwind(AssertUnwindSafe(|| runnable.run()));
+            }
+        });
+
         Self {
             handle,
             clock: LocalClock,
+            wakes,
         }
     }
 
@@ -23,9 +45,9 @@ impl TokioScheduler {
 
 impl Scheduler for TokioScheduler {
     fn schedule(&self, runnable: Runnable) {
-        self.handle.spawn(async move {
-            runnable.run();
-        });
+        // A closed channel means the runtime went away, so dropping the
+        // runnable cancels its task, which is what dropping an unrun spawn did.
+        let _ = self.wakes.send(runnable);
     }
 
     fn timer(&self, duration: Duration) -> Timer {
@@ -53,7 +75,7 @@ mod tests {
     use std::{
         sync::{
             atomic::{AtomicBool, Ordering},
-            Arc,
+            Arc, Mutex,
         },
         time::{Duration, Instant},
     };
@@ -73,6 +95,87 @@ mod tests {
             .await;
 
         assert!(ran.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_wakes_adds_no_tokio_tasks() {
+        let handle = Handle::current();
+        let scheduler = Arc::new(TokioScheduler::new(handle.clone()));
+        let executor = scheduler.executor();
+
+        // Let the pump reach its first await, so it counts as alive in the
+        // reading taken next.
+        tokio::task::yield_now().await;
+        let alive_before = handle.metrics().num_alive_tasks();
+
+        // Nothing is awaited here, so the runtime cannot drain the wakes these
+        // queue. Every one of them used to be a tokio task of its own.
+        let spawned: Vec<_> = (0..64).map(|i| executor.spawn(async move { i })).collect();
+
+        assert_eq!(
+            handle.metrics().num_alive_tasks(),
+            alive_before,
+            "64 pending wakes cost no tokio tasks",
+        );
+
+        let mut ran = Vec::new();
+        for task in spawned {
+            ran.push(task.await);
+        }
+        assert_eq!(ran, (0..64).collect::<Vec<_>>(), "all of them still run");
+    }
+
+    #[tokio::test]
+    async fn wakes_run_in_the_order_they_were_scheduled() {
+        let scheduler = Arc::new(TokioScheduler::new(Handle::current()));
+        let executor = scheduler.executor();
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let spawned: Vec<_> = (0..16)
+            .map(|i| {
+                let order = order.clone();
+                executor.spawn(async move {
+                    order.lock().expect("order poisoned").push(i);
+                })
+            })
+            .collect();
+        for task in spawned {
+            task.await;
+        }
+
+        let ran = order.lock().expect("order poisoned").clone();
+        assert_eq!(
+            ran,
+            (0..16).collect::<Vec<_>>(),
+            "one pump drains wakes in send order",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_task_leaves_the_scheduler_running() {
+        let scheduler = Arc::new(TokioScheduler::new(Handle::current()));
+        let executor = scheduler.executor();
+
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        executor.spawn(async { panic!("task panics") }).detach();
+        tokio::task::yield_now().await;
+        std::panic::set_hook(hook);
+
+        let ran = Arc::new(AtomicBool::new(false));
+        executor
+            .spawn({
+                let ran = ran.clone();
+                async move {
+                    ran.store(true, Ordering::SeqCst);
+                }
+            })
+            .await;
+
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "a task scheduled after a panicking one still runs",
+        );
     }
 
     #[tokio::test]
