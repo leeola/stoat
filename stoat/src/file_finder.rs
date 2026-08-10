@@ -443,14 +443,22 @@ impl FileFinder {
                 let id = base_id(BUFFERS_BASE, self.base_generation, self.buffer_paths.len());
                 self.core.refilter_with_base(&text, &self.buffer_paths, id);
             },
+            // A glob over the whole walk can keep most of it, so this scans
+            // elsewhere like the uncapped scopes. A base small enough not to
+            // need it costs one hop through the worker instead.
             FinderScope::Named(name) => {
                 self.sync_named_cache(&name);
                 // `named_cache` and `core` are disjoint fields, so the matcher
                 // reads the cached base in place rather than cloning it.
-                if let Some(cache) = &self.named_cache {
-                    let id = base_id(NAMED_BASE, cache.epoch, cache.filtered.len());
-                    self.core.refilter_with_base(&text, &cache.filtered, id);
-                }
+                let pending = match &self.named_cache {
+                    Some(cache) => {
+                        let id = base_id(NAMED_BASE, cache.epoch, cache.filtered.len());
+                        self.core.begin_scan_with_base(&text, &cache.filtered, id)
+                    },
+                    None => None,
+                };
+                self.remeasure_content();
+                return pending;
             },
         }
         self.remeasure_content();
@@ -459,14 +467,25 @@ impl FileFinder {
 
     /// Bring the rows up to date with `query` on this thread.
     ///
-    /// Only the uncapped scopes scan elsewhere, so only they can be behind. The
-    /// rest filter within their refilter call and are current already.
+    /// Only the scopes that scan elsewhere can be behind. The rest filter
+    /// within their refilter call and are current already.
+    ///
+    /// A named scope catches up against the cache it filters rather than the
+    /// walk, which holds a different set and would answer a different question.
     pub(crate) fn settle_scan(&mut self, query: &str) {
         if self.browse.is_some() {
             return;
         }
-        if matches!(self.scope, FinderScope::All | FinderScope::AllWorkspaces) {
-            self.core.settle_scan(query);
+        match self.scope.clone() {
+            FinderScope::All | FinderScope::AllWorkspaces => self.core.settle_scan(query),
+            FinderScope::Named(name) => {
+                self.sync_named_cache(&name);
+                if let Some(cache) = &self.named_cache {
+                    let id = base_id(NAMED_BASE, cache.epoch, cache.filtered.len());
+                    self.core.settle_scan_with_base(query, &cache.filtered, id);
+                }
+            },
+            FinderScope::Modified | FinderScope::Buffers => {},
         }
     }
 
@@ -1262,6 +1281,38 @@ mod tests {
             h.stoat.file_finder.as_ref().unwrap().scope(),
             &FinderScope::All,
             "backtab past AllWorkspaces wraps to All"
+        );
+    }
+
+    /// A named scope's base is whatever its glob kept, which on a large repo is
+    /// most of the walk, so its ranking goes to a worker like the uncapped
+    /// scopes rather than running inside the keystroke.
+    #[test]
+    fn a_named_scope_ranks_off_the_input_thread() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(
+            &mut h,
+            &[("src/a.rs", ""), ("src/b.rs", ""), ("docs/c.md", "")],
+        );
+        h.stoat.settings.finder_scopes =
+            BTreeMap::from([("code".to_string(), vec!["src/**".to_string()])]);
+
+        h.type_keys("space p");
+        h.type_keys("backtab");
+        h.type_keys("backtab");
+        h.type_text("a");
+
+        let active_idx = h.stoat.active_workspace;
+        let ws = &h.stoat.workspaces[active_idx];
+        let finder = h.stoat.file_finder.as_mut().expect("finder open");
+        assert_eq!(finder.scope(), &FinderScope::Named("code".to_string()));
+
+        // Invalidated so the query is asked afresh, since the sync driven by
+        // the typing above has already answered this one.
+        finder.core.invalidate();
+        assert!(
+            finder.refilter_from_input(ws).is_some(),
+            "the ranking is handed back for a worker to run",
         );
     }
 

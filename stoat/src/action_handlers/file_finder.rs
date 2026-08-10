@@ -35,24 +35,20 @@ pub(crate) fn sync_file_finder_preview(stoat: &mut Stoat) {
 
 /// Run `scan` on a worker and report it back to the finder that asked for it.
 ///
-/// The uncapped scopes scan the whole repo walk, which is too much to do inside
+/// The scanned scopes cover the whole repo walk, which is too much to do inside
 /// the update path without input and paint waiting on it. The picker keeps
-/// painting the previous query's rows until the result lands, and the redraw
-/// wakes the loop so it lands without needing another keystroke.
+/// painting the previous query's rows until the result lands.
+///
+/// Browse mode filters its own directory walk in a picker of its own, and the
+/// two are never both live, so which one asked is the same question the
+/// refilter answered.
 fn spawn_finder_scan(stoat: &mut Stoat, generation: u64, scan: Scan) {
-    let finder = stoat.file_finder.as_mut().expect("file_finder present");
-    let sink = finder.core.scan_sink();
     let redraw = stoat.redraw_notify.clone();
-
-    let task = stoat.executor.spawn_blocking(move || {
-        let outcome = scan.run();
-        if sink.send((generation, outcome)).is_ok() {
-            redraw.notify_one();
-        }
-    });
-
+    let executor = stoat.executor.clone();
     let finder = stoat.file_finder.as_mut().expect("file_finder present");
-    finder.core.hold_scan(task);
+    finder
+        .active_core()
+        .spawn_scan(&executor, redraw, generation, scan);
 }
 
 /// Bring the finder's rows up to date with what is typed, before an action

@@ -969,6 +969,60 @@ impl PathPicker {
         self.scan_tx.clone()
     }
 
+    /// Run a scan [`Self::begin_scan`] handed back on a worker.
+    ///
+    /// Matching and ranking a large base is too much to do inside the update
+    /// path, where input and paint would wait on it. The rows on display stay
+    /// as they are until [`Self::pump_scan`] takes the result, and the wake is
+    /// what makes that happen without another keystroke, since the pumps poll
+    /// with a noop waker.
+    pub(crate) fn spawn_scan(
+        &mut self,
+        executor: &Executor,
+        redraw: Arc<tokio::sync::Notify>,
+        generation: u64,
+        scan: Scan,
+    ) {
+        let sink = self.scan_sink();
+        let task = executor.spawn_blocking(move || {
+            let outcome = scan.run();
+            if sink.send((generation, outcome)).is_ok() {
+                redraw.notify_one();
+            }
+        });
+        self.hold_scan(task);
+    }
+
+    /// [`Self::begin_scan`] over a caller-owned `base` rather than the walk.
+    ///
+    /// This leaves out the matching for the caller to run elsewhere, standing
+    /// to [`Self::refilter_with_base`] as [`Self::begin_scan`] does to a plain
+    /// refilter. The identity rules are that method's, so a base whose `id` has
+    /// not moved keeps the rows already derived from it.
+    pub(crate) fn begin_scan_with_base(
+        &mut self,
+        query: &str,
+        base: &[PathBuf],
+        id: BaseId,
+    ) -> Option<(u64, Scan)> {
+        if query == self.last_filter_text && self.filter_valid {
+            return None;
+        }
+
+        self.adopt_base(base, id);
+        // The pick list now holds a caller's set rather than a prefix of the
+        // walk, so the next walk-fed refilter starts over.
+        self.synced_paths = None;
+
+        self.last_filter_text = query.to_string();
+        self.filter_valid = true;
+
+        let scan = self.picklist.begin_refilter(query, &self.git_root)?;
+        self.scan_generation = next_generation();
+        self.scan_pending = true;
+        Some((self.scan_generation, scan))
+    }
+
     /// Bring the rows up to date with `query` here and now.
     ///
     /// For a caller about to act on the selection rather than paint it. A scan
@@ -989,6 +1043,24 @@ impl PathPicker {
         self.picklist.refilter(query, &self.git_root);
         self.last_filter_text = query.to_string();
         self.filter_valid = true;
+        self.scan_pending = false;
+        self.scan_generation = next_generation();
+    }
+
+    /// [`Self::settle_scan`] over a caller-owned `base` rather than the walk.
+    ///
+    /// A base-fed picker has to catch up against the set it was filtering, not
+    /// the walk, which holds different paths and would answer a different
+    /// question.
+    pub(crate) fn settle_scan_with_base(&mut self, query: &str, base: &[PathBuf], id: BaseId) {
+        self.pump_scan();
+        if !self.scan_pending && query == self.last_filter_text && self.filter_valid {
+            return;
+        }
+
+        self.adopt_base(base, id);
+        self.synced_paths = None;
+        self.run_refilter(query);
         self.scan_pending = false;
         self.scan_generation = next_generation();
     }
@@ -2220,6 +2292,71 @@ mod tests {
             "the late result changes nothing rather than reverting the list"
         );
         assert_eq!(answered_query(&picker), Some("ma"));
+    }
+
+    /// Deferring the matching over a caller's base has to reach the same rows
+    /// as doing it inline, or a scope that starts scanning starts answering
+    /// differently.
+    #[test]
+    fn a_deferred_base_scan_lands_where_an_inline_one_does() {
+        let mut h = crate::Stoat::test();
+        let base = narrowing_base();
+        let id = BaseId {
+            identity: 7,
+            len: base.len(),
+        };
+
+        let inline = {
+            let mut picker = walked_picker(&mut h);
+            picker.refilter_with_base("main", &base, id);
+            picker.picklist.filtered.clone()
+        };
+
+        let mut picker = walked_picker(&mut h);
+        let (generation, scan) = picker
+            .begin_scan_with_base("main", &base, id)
+            .expect("a scan");
+        let sink = picker.scan_sink();
+        sink.send((generation, scan.run())).expect("listening");
+        assert!(picker.pump_scan(), "the result landed");
+
+        assert_eq!(picker.picklist.filtered, inline);
+        assert!(!inline.is_empty(), "and the query matched something");
+    }
+
+    /// Settling a base-fed picker catches up against the base it was filtering.
+    ///
+    /// The walk holds a different set, so settling against that would answer a
+    /// question the picker was never asked. The two are deliberately disjoint
+    /// here, which is what makes the wrong one visible.
+    #[test]
+    fn settling_a_base_fed_picker_uses_that_base_not_the_walk() {
+        let mut h = crate::Stoat::test();
+        let mut picker = walked_picker(&mut h);
+
+        let base = vec![p("/repo/scoped/keeper.rs"), p("/repo/scoped/other.rs")];
+        let id = BaseId {
+            identity: 11,
+            len: base.len(),
+        };
+        let (_, _scan) = picker
+            .begin_scan_with_base("keep", &base, id)
+            .expect("a scan");
+
+        // The typed query moved on before the scan could land.
+        picker.settle_scan_with_base("keeper", &base, id);
+
+        let rows: Vec<&PathBuf> = picker
+            .picklist
+            .filtered
+            .iter()
+            .map(|&i| &picker.picklist.base[i])
+            .collect();
+        assert_eq!(
+            rows,
+            vec![&p("/repo/scoped/keeper.rs")],
+            "the row comes from the caller's base, which the walk does not hold",
+        );
     }
 
     #[test]
