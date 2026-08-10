@@ -6608,10 +6608,15 @@ impl Stoat {
 
     /// Write raw bytes to an agent's PTY.
     ///
-    /// Uses `now_or_never` because the local PTY and the test fake complete
-    /// writes synchronously, so keystrokes reach the agent in order without
-    /// spawning a task. A write that errors or cannot complete synchronously is
-    /// dropped with a warning rather than stalling input.
+    /// Uses `now_or_never` because both the local PTY and the test fake finish
+    /// the moment the bytes are queued, so keystrokes reach the agent in order
+    /// without spawning a task. The local session hands them to a writer
+    /// thread, so a child that has stopped reading parks that thread rather
+    /// than this one, and nothing here can stall input.
+    ///
+    /// An error means the session can no longer take bytes at all, which for
+    /// the local one means its writer thread has exited. It is warned about and
+    /// dropped, since a keystroke has nowhere else to go.
     fn write_to_term(&self, agent_id: TermId, bytes: &[u8]) {
         let Some(session) = self
             .active_workspace()

@@ -1,7 +1,20 @@
 use async_trait::async_trait;
 use portable_pty::CommandBuilder;
-use std::{io, path::PathBuf, sync::Mutex};
+use std::{
+    io,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc as sync_mpsc, Arc, Mutex,
+    },
+};
 use tokio::sync::mpsc;
+
+/// Queued-write count that trips the writer-stall warning.
+///
+/// When this many chunks sit unwritten the child has stopped draining its
+/// input, which is the mechanism behind a terminal that looks frozen.
+const WRITE_STALL_THRESHOLD: usize = 256;
 
 /// Process-spawn parameters for [`TerminalHost::spawn`]. Carries the data
 /// needed to build a [`portable_pty::CommandBuilder`] and size the PTY.
@@ -61,11 +74,13 @@ pub trait TerminalHost: Send + Sync {
 }
 
 /// PTY-backed [`TerminalSession`]: owns the master (for resizing and
-/// process introspection), the writer to the shell's input, the child
+/// process introspection), a queue into the shell's input, the child
 /// handle, and a reader thread that pumps output into a channel.
 pub(crate) struct PtyTerminalSession {
     master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,
-    writer: Mutex<Box<dyn io::Write + Send>>,
+    writer: sync_mpsc::Sender<Vec<u8>>,
+    /// Chunks sent but not yet written, shared with the writer thread.
+    write_queue_depth: Arc<AtomicUsize>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     read_rx: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
 }
@@ -83,9 +98,12 @@ impl PtyTerminalSession {
             blocking_read_loop(reader, tx);
         });
 
+        let write_queue_depth = Arc::new(AtomicUsize::new(0));
+
         Self {
             master: Mutex::new(master),
-            writer: Mutex::new(writer),
+            writer: spawn_writer(writer, write_queue_depth.clone()),
+            write_queue_depth,
             child: Mutex::new(child),
             read_rx: tokio::sync::Mutex::new(rx),
         }
@@ -94,13 +112,29 @@ impl PtyTerminalSession {
 
 #[async_trait]
 impl TerminalSession for PtyTerminalSession {
+    /// Queue `data` for the shell's input, to be written and flushed by the
+    /// writer thread.
+    ///
+    /// Returns once the bytes are queued, never blocking on the write itself,
+    /// so a child that has stopped draining its input parks the writer thread
+    /// rather than the caller. The queue is unbounded, so nothing is dropped
+    /// while that lasts.
+    ///
+    /// An [`io::ErrorKind::BrokenPipe`] error means the writer thread has
+    /// exited, which happens once a write to the PTY fails.
     async fn write(&self, data: &[u8]) -> io::Result<()> {
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|e| io::Error::other(e.to_string()))?;
-        writer.write_all(data)?;
-        writer.flush()
+        let queued = self.write_queue_depth.fetch_add(1, Ordering::Relaxed);
+        if queued == WRITE_STALL_THRESHOLD {
+            tracing::warn!(
+                target: "stoat::agent",
+                queued = queued + 1,
+                "pty writer backlog crossed {WRITE_STALL_THRESHOLD}; the child is not draining its input"
+            );
+        }
+
+        self.writer
+            .send(data.to_vec())
+            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))
     }
 
     async fn read_chunk(&self) -> io::Result<Option<Vec<u8>>> {
@@ -225,6 +259,38 @@ fn process_name_for_pid(_pid: libc::pid_t) -> Option<String> {
     None
 }
 
+/// Spawn a thread that writes each received chunk to `writer`, flushing after
+/// each so the shell sees input promptly. Returns the sender that feeds it.
+///
+/// `depth` is decremented after each chunk is written, mirroring the increment
+/// on send, so it tracks the queued-but-unwritten backlog rather than a total.
+///
+/// This is what decouples a write from the blocking syscall behind it. A child
+/// that stops draining its input parks the `write_all` on this thread instead
+/// of on the run loop, where it would freeze every pane and all input.
+///
+/// The thread ends when the channel closes or a write fails, so dropping the
+/// session ends it. The sender drops to unblock an idle writer, and killing the
+/// child closes the PTY to unblock a parked one. Nothing joins it: something has
+/// to park while a child refuses to read, and a detached thread is the one place
+/// that costs nothing.
+fn spawn_writer(
+    mut writer: Box<dyn io::Write + Send>,
+    depth: Arc<AtomicUsize>,
+) -> sync_mpsc::Sender<Vec<u8>> {
+    let (tx, rx) = sync_mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        while let Ok(bytes) = rx.recv() {
+            let wrote = writer.write_all(&bytes).and_then(|()| writer.flush());
+            depth.fetch_sub(1, Ordering::Relaxed);
+            if wrote.is_err() {
+                break;
+            }
+        }
+    });
+    tx
+}
+
 fn blocking_read_loop(mut reader: Box<dyn io::Read + Send>, tx: mpsc::Sender<Vec<u8>>) {
     // 64KB matches stoatty's own PTY reader, so a high-throughput stream sends
     // whole chunks rather than fragmenting into 16x the messages and allocations.
@@ -244,6 +310,7 @@ fn blocking_read_loop(mut reader: Box<dyn io::Read + Send>, tx: mpsc::Sender<Vec
 mod tests {
     use super::*;
     use crate::host::local::LocalTerminalHost;
+    use std::sync::Condvar;
 
     fn rt() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
@@ -279,6 +346,111 @@ mod tests {
                 "expected hello in output, got {collected:?}",
             );
         });
+    }
+
+    /// An in-memory [`io::Write`] that parks every write on a gate until it
+    /// opens, then records the bytes, standing in for a PTY master whose child
+    /// has stopped draining its input.
+    ///
+    /// It also samples the backlog gauge on the way past. Reading it from the
+    /// writer's own thread orders the sample against the writer's decrements,
+    /// which reading it from the test thread would not.
+    struct GatedWriter {
+        gate: Arc<(Mutex<bool>, Condvar)>,
+        written: Arc<(Mutex<Vec<u8>>, Condvar)>,
+        depth: Arc<AtomicUsize>,
+        sampled: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl io::Write for GatedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let (open_lock, open_cvar) = &*self.gate;
+            let mut open = open_lock.lock().unwrap();
+            while !*open {
+                open = open_cvar.wait(open).unwrap();
+            }
+            drop(open);
+
+            self.sampled
+                .lock()
+                .unwrap()
+                .push(self.depth.load(Ordering::Relaxed));
+
+            let (buf_lock, buf_cvar) = &*self.written;
+            buf_lock.lock().unwrap().extend_from_slice(buf);
+            buf_cvar.notify_all();
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A child that has stopped reading parks the writer thread, not the
+    /// caller.
+    ///
+    /// This is the whole point of the thread. Every send comes from the run
+    /// loop, so a write that blocked there would freeze every pane, all input,
+    /// and rendering until the child read again. The backlog is counted rather
+    /// than bounded, since dropping a keystroke is the other way to lose.
+    ///
+    /// Counted is also the claim worth checking. A gauge that only ever rose
+    /// would read as a total, and the stall warning would fire on any long
+    /// session rather than on a child that stopped reading.
+    #[test]
+    fn a_parked_writer_does_not_block_the_sender() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let written = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+        let depth = Arc::new(AtomicUsize::new(0));
+        let sampled = Arc::new(Mutex::new(Vec::new()));
+        let tx = spawn_writer(
+            Box::new(GatedWriter {
+                gate: gate.clone(),
+                written: written.clone(),
+                depth: depth.clone(),
+                sampled: sampled.clone(),
+            }),
+            depth.clone(),
+        );
+
+        for chunk in [b"foo".as_slice(), b"bar".as_slice()] {
+            depth.fetch_add(1, Ordering::Relaxed);
+            tx.send(chunk.to_vec()).unwrap();
+        }
+        assert!(
+            written.0.lock().unwrap().is_empty(),
+            "the sender returns while the writer is parked, so nothing is written yet",
+        );
+        assert_eq!(
+            depth.load(Ordering::Relaxed),
+            2,
+            "both queued chunks count toward the backlog while the writer is parked",
+        );
+
+        {
+            let (open_lock, open_cvar) = &*gate;
+            *open_lock.lock().unwrap() = true;
+            open_cvar.notify_all();
+        }
+
+        let (buf_lock, buf_cvar) = &*written;
+        let mut got = buf_lock.lock().unwrap();
+        while got.len() < 6 {
+            got = buf_cvar.wait(got).unwrap();
+        }
+        assert_eq!(
+            got.as_slice(),
+            b"foobar",
+            "the queued chunks are written in order once the gate opens",
+        );
+        drop(got);
+
+        assert_eq!(
+            sampled.lock().unwrap().as_slice(),
+            [2, 1],
+            "the backlog falls as each chunk is written, rather than only rising",
+        );
     }
 
     #[test]
