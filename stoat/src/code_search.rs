@@ -7,9 +7,14 @@ use crate::{
 use ast_grep_core::Pattern;
 use regex::Regex;
 use std::{
-    path::Path,
-    sync::{Arc, Mutex},
+    ops::ControlFlow,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock,
+    },
 };
+use stoat_host::fs::WALK_BATCH_SIZE;
 use stoat_language::Language;
 use stoat_scheduler::Executor;
 
@@ -74,6 +79,23 @@ pub struct CodeSearchFinder {
     /// scan task. Held here so closing the finder drops a workspace's worth of
     /// syntax trees rather than leaving them for the process's lifetime.
     pub(crate) parse_cache: Arc<Mutex<ast::AstParseCache>>,
+    /// Every file the workspace walk found, published by the first scan that
+    /// completed one and read by every scan after it.
+    ///
+    /// Refining a query re-scans the same unchanged tree, and traversing it
+    /// while matching gitignore rules per entry is the fixed cost that
+    /// dominates on a repo of many small files. Shared with the scan task,
+    /// which is what lets a blocking walk publish to a finder it cannot reach.
+    ///
+    /// Written once, so two scans racing to fill it settle on whichever
+    /// finished first. A scan cut short by the match cap or by the user typing
+    /// again leaves it empty rather than publishing the part of the tree it
+    /// reached, which would silently shrink every later query.
+    ///
+    /// A file created or deleted while the modal is open stays invisible to
+    /// every query after the first. The cache dies with the finder, so
+    /// reopening the modal sees the tree again.
+    pub(crate) walked: Arc<OnceLock<Vec<PathBuf>>>,
 }
 
 impl CodeSearchFinder {
@@ -102,6 +124,7 @@ impl CodeSearchFinder {
             invalid_pattern: false,
             viewport_rows: None,
             parse_cache: Arc::new(Mutex::new(ast::AstParseCache::new(ast::PARSE_CACHE_CAP))),
+            walked: Arc::new(OnceLock::new()),
         }
     }
 
@@ -152,6 +175,52 @@ impl CodeSearchFinder {
 }
 
 const SNIPPET_MAX_CHARS: usize = 80;
+
+/// Call `on_batch` with every path in `paths`, spreading the batches across the
+/// machine's cores.
+///
+/// The counterpart to [`FsHost::walk_workspace_files_parallel`] for a scan that
+/// already holds its paths. Such a scan has no walker threads to do its work
+/// on, and would otherwise read and match every file on the one thread it was
+/// spawned on.
+///
+/// Batches are [`WALK_BATCH_SIZE`] paths, matching the walk, so a modal streams
+/// its matches at the same granularity whether or not it walked.
+///
+/// Returning [`ControlFlow::Break`] stops the remaining threads before their
+/// next batch, though one already inside a batch finishes it.
+pub(crate) fn scan_paths_parallel(
+    paths: &[PathBuf],
+    on_batch: &(dyn Fn(&[PathBuf]) -> ControlFlow<()> + Sync),
+) {
+    let batches = paths.len().div_ceil(WALK_BATCH_SIZE);
+    if batches == 0 {
+        return;
+    }
+
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let next = AtomicUsize::new(0);
+
+    std::thread::scope(|scope| {
+        for _ in 0..threads.min(batches) {
+            scope.spawn(|| loop {
+                let start = next.fetch_add(WALK_BATCH_SIZE, Ordering::Relaxed);
+                if start >= paths.len() {
+                    return;
+                }
+                let end = (start + WALK_BATCH_SIZE).min(paths.len());
+
+                if on_batch(&paths[start..end]).is_break() {
+                    // Parking the cursor past the end is what stops the other
+                    // threads. A caller that has stopped reading wants the rest
+                    // of the list abandoned, not just this thread's share.
+                    next.store(paths.len(), Ordering::Relaxed);
+                    return;
+                }
+            });
+        }
+    });
+}
 
 /// Read `path` through `fs_host`, scan its text for `regex`, and push one
 /// [`SearchMatch`] per match site onto `out`.
@@ -287,8 +356,8 @@ fn line_snippet(text: &str, line_start: usize, offset: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        line_snippet, line_start_at, offset_to_line_column, scan_file, SearchMatch, SearchMode,
-        MATCH_CAP,
+        line_snippet, line_start_at, offset_to_line_column, scan_file, scan_paths_parallel,
+        SearchMatch, SearchMode, MATCH_CAP, WALK_BATCH_SIZE,
     };
     use crate::{
         app::{CODE_SEARCH_AST_DEBOUNCE, CODE_SEARCH_DEBOUNCE},
@@ -296,11 +365,19 @@ mod tests {
         test_harness::TestHarness,
     };
     use regex::Regex;
-    use std::path::{Path, PathBuf};
+    use std::{
+        ops::ControlFlow,
+        path::{Path, PathBuf},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Mutex,
+        },
+    };
 
-    /// Open the code-search modal with a `.rs` file focused, then Shift-Tab into
-    /// AST mode. The focused rust buffer resolves rust as the target language.
-    fn open_ast_over(files: &[(&str, &str)], focus: &str) -> TestHarness {
+    /// Open the code-search modal with a `.rs` file focused, leaving it in regex
+    /// mode. The focused rust buffer resolves rust as the target language, so
+    /// Shift-Tab into AST mode is available.
+    fn open_over_focused(files: &[(&str, &str)], focus: &str) -> TestHarness {
         let mut h = crate::Stoat::test();
         let root = PathBuf::from("/repo");
         for (name, contents) in files {
@@ -316,6 +393,13 @@ mod tests {
         );
         h.settle();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        h
+    }
+
+    /// Open the code-search modal with a `.rs` file focused, then Shift-Tab into
+    /// AST mode.
+    fn open_ast_over(files: &[(&str, &str)], focus: &str) -> TestHarness {
+        let mut h = open_over_focused(files, focus);
         h.type_keys("backtab");
         h
     }
@@ -584,6 +668,124 @@ mod tests {
         let mut snippets: Vec<&str> = finder.matches.iter().map(|m| m.snippet.as_str()).collect();
         snippets.sort();
         assert_eq!(snippets, ["fn alpha() {}", "fn alpha_again() {}"]);
+    }
+
+    /// A session walks the tree once and scans what that walk found from then
+    /// on, so a refined query has to still reach every file. A cache missing
+    /// what the first query did not match would show up here as the broader
+    /// second query finding less than the narrower first one.
+    #[test]
+    fn a_refined_query_still_reaches_every_file() {
+        let mut h = open_over(&[
+            ("a.rs", "fn alpha() {}\n"),
+            ("b.rs", "fn alphabet() {}\n"),
+            ("c.rs", "fn alphanumeric() {}\n"),
+        ]);
+        run_query(&mut h, "fn");
+        run_query(&mut h, " alpha");
+
+        let finder = h.stoat.code_search.as_ref().expect("code search open");
+        let mut snippets: Vec<&str> = finder.matches.iter().map(|m| m.snippet.as_str()).collect();
+        snippets.sort();
+        assert_eq!(
+            snippets,
+            ["fn alpha() {}", "fn alphabet() {}", "fn alphanumeric() {}"]
+        );
+    }
+
+    /// The one walk per session is what a file appearing afterwards makes
+    /// visible. A modal lives for seconds and is reopened per search, so a
+    /// query never seeing a file created under it is the accepted price of not
+    /// re-walking the tree per keystroke.
+    #[test]
+    fn a_file_created_after_the_first_query_does_not_match_the_next() {
+        let mut h = open_over(&[("a.rs", "fn alpha() {}\n")]);
+        run_query(&mut h, "fn");
+
+        h.fake_fs()
+            .insert_file(PathBuf::from("/repo/b.rs"), b"fn alpha_again() {}\n");
+        run_query(&mut h, " alpha");
+
+        let finder = h.stoat.code_search.as_ref().expect("code search open");
+        let snippets: Vec<&str> = finder.matches.iter().map(|m| m.snippet.as_str()).collect();
+        assert_eq!(
+            snippets,
+            ["fn alpha() {}"],
+            "the second query scans the first walk, which predates b.rs"
+        );
+    }
+
+    /// One cache serves both modes, since Shift-Tab switches mode inside a
+    /// session and either mode walks the same root. The regex query here is what
+    /// walks. The AST scan after it reads what that walk found, which is why the
+    /// file written in between does not match.
+    #[test]
+    fn ast_mode_scans_the_walk_regex_mode_published() {
+        let mut h = open_over_focused(&[("a.rs", "fn alpha() {}\n")], "a.rs");
+        run_query(&mut h, "alpha");
+
+        h.fake_fs()
+            .insert_file(PathBuf::from("/repo/b.rs"), b"fn alpha() {}\n");
+        h.type_keys("backtab");
+        h.settle();
+        h.advance_clock(CODE_SEARCH_AST_DEBOUNCE);
+
+        let finder = h.stoat.code_search.as_ref().expect("code search open");
+        assert_eq!(
+            finder.matches.len(),
+            1,
+            "the AST scan reads the regex walk, which predates b.rs: {:?}",
+            finder.matches,
+        );
+        assert!(finder.matches[0].path.ends_with("a.rs"));
+    }
+
+    #[test]
+    fn scan_paths_parallel_delivers_every_path_once() {
+        let paths: Vec<PathBuf> = (0..2000)
+            .map(|i| PathBuf::from(format!("/repo/f{i}.rs")))
+            .collect();
+        let seen = Mutex::new(Vec::new());
+
+        scan_paths_parallel(&paths, &|batch| {
+            seen.lock().expect("seen poisoned").extend_from_slice(batch);
+            ControlFlow::Continue(())
+        });
+
+        let mut seen = seen.into_inner().expect("seen poisoned");
+        seen.sort();
+        let mut expected = paths;
+        expected.sort();
+        assert_eq!(seen, expected, "every path delivered exactly once");
+    }
+
+    /// One break has to stop the threads that did not break, not only the one
+    /// that did. Exactly one batch breaks here, so a run that abandons the rest
+    /// of the list looks nothing like one where the other threads carry on and
+    /// finish all of it.
+    ///
+    /// The threads still reading are stopped by their next claim, which they
+    /// reach in the time between the breaking callback returning and its
+    /// caller parking the cursor. Getting through the whole list in that window
+    /// would take them thousands of times longer than they have.
+    #[test]
+    fn scan_paths_parallel_stops_on_break() {
+        let paths: Vec<PathBuf> = (0..40_000)
+            .map(|i| PathBuf::from(format!("/repo/f{i}.rs")))
+            .collect();
+        let batches = AtomicUsize::new(0);
+
+        scan_paths_parallel(&paths, &|_| match batches.fetch_add(1, Ordering::Relaxed) {
+            0 => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        });
+
+        let batches = batches.into_inner();
+        let total = paths.len().div_ceil(WALK_BATCH_SIZE);
+        assert!(
+            batches < total,
+            "the break abandoned the rest of the list, rather than running all {total} batches"
+        );
     }
 
     #[test]

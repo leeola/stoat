@@ -2,7 +2,8 @@ use crate::{
     app::{Stoat, UpdateEffect},
     code_search::{
         ast::{ast_scan_file, AstLang},
-        read_text, scan_file, scan_text, CodeSearchFinder, SearchMatch, SearchMode, MATCH_CAP,
+        read_text, scan_file, scan_paths_parallel, scan_text, CodeSearchFinder, SearchMatch,
+        SearchMode, MATCH_CAP,
     },
     pane::View,
     picker::PreviewSource,
@@ -13,9 +14,10 @@ use std::{
     collections::{HashMap, HashSet},
     ops::ControlFlow,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 use stoat_action::OpenFile;
+use stoat_host::fs::WALK_BATCH_SIZE;
 use stoat_scheduler::Task;
 use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 
@@ -235,6 +237,49 @@ fn dirty_buffer_overlay(stoat: &Stoat) -> Arc<HashMap<PathBuf, Arc<str>>> {
     Arc::new(overlay)
 }
 
+/// Collects the paths a walk offers, so the rest of the modal session can scan
+/// them without walking again.
+///
+/// Recording is all-or-nothing. A scan stops its walk as soon as its receiver
+/// goes, which happens whenever the match cap truncates the list or the user
+/// types again, and such a walk has seen only part of the tree. Publishing that
+/// part would silently shrink every later query in the session, so a walk that
+/// broke publishes nothing and the next query walks for real.
+struct WalkRecorder {
+    paths: Option<Vec<PathBuf>>,
+}
+
+impl WalkRecorder {
+    fn new() -> Self {
+        Self {
+            paths: Some(Vec::new()),
+        }
+    }
+
+    /// Fold `batch` into the recording, or abandon the recording if `flow` says
+    /// the scan that just read `batch` gave up.
+    fn record(&mut self, batch: Vec<PathBuf>, flow: ControlFlow<()>) {
+        match flow {
+            ControlFlow::Continue(()) => {
+                if let Some(paths) = self.paths.as_mut() {
+                    paths.extend(batch);
+                }
+            },
+            ControlFlow::Break(()) => self.paths = None,
+        }
+    }
+
+    /// Publish a completed walk into `cache`, leaving a broken one unpublished.
+    ///
+    /// Losing the race to another scan is not an error. Both walked the same
+    /// tree, so either answer serves.
+    fn publish(self, cache: &OnceLock<Vec<PathBuf>>) {
+        if let Some(paths) = self.paths {
+            let _ = cache.set(paths);
+        }
+    }
+}
+
 /// Spawn the streaming workspace scan for `query` under the finder's current
 /// mode, rooted at `git_root`.
 ///
@@ -242,6 +287,11 @@ fn dirty_buffer_overlay(stoat: &Stoat) -> Arc<HashMap<PathBuf, Arc<str>>> {
 /// invalid pattern never starts a walk. Regex mode scans every file; AST mode
 /// scans only files of the finder's target language. Each non-empty batch pings
 /// the redraw notifier so the open modal repaints as matches stream in.
+///
+/// The tree is walked only until one scan finishes walking it. After that the
+/// session scans the files that walk found, which is why refining a query is
+/// cheaper than the query before it and why a file created since then does not
+/// match. See [`CodeSearchFinder::walked`].
 pub(crate) fn spawn_code_search(
     stoat: &Stoat,
     git_root: PathBuf,
@@ -253,63 +303,91 @@ pub(crate) fn spawn_code_search(
     let redraw_notify = stoat.redraw_notify.clone();
     let overlay = dirty_buffer_overlay(stoat);
 
+    let walked = finder.walked.clone();
+
     let task = match finder.mode {
         SearchMode::Regex => {
             let regex = Regex::new(query).ok()?;
             stoat.executor.spawn_blocking(move || {
-                let walked: Mutex<HashSet<PathBuf>> = Mutex::new(HashSet::new());
-                fs_host.walk_workspace_files_parallel(&git_root, &|batch| {
-                    // Cloned per batch rather than shared across the walker's
-                    // threads, which keeps them off one internal cache pool.
-                    // The clone shares the compiled program, so it costs a
-                    // refcount and amortises over the batch.
-                    let regex = regex.clone();
+                let overlaid_seen: Mutex<HashSet<PathBuf>> = Mutex::new(HashSet::new());
 
-                    // One buffer for the batch rather than one per file. The
-                    // callback is shared across the walker's threads, so it
-                    // cannot hold state between calls and this is as long as a
-                    // buffer can live.
-                    let mut read_buf = Vec::new();
+                {
+                    let scan_batch = |batch: &[PathBuf]| {
+                        // Cloned per batch rather than shared across the
+                        // scanning threads, which keeps them off one internal
+                        // cache pool. The clone shares the compiled program, so
+                        // it costs a refcount and amortises over the batch.
+                        let regex = regex.clone();
 
-                    let mut matches = Vec::new();
-                    let mut overlaid = Vec::new();
-                    for path in batch {
-                        match overlay.get(&path) {
-                            Some(text) => {
-                                overlaid.push(path.clone());
-                                scan_text(&regex, text, &path, &mut matches);
-                            },
-                            None => {
-                                scan_file(&*fs_host, &regex, &path, &mut read_buf, &mut matches)
-                            },
+                        // One buffer for the batch rather than one per file. The
+                        // callback is shared across the scanning threads, so it
+                        // cannot hold state between calls and this is as long as
+                        // a buffer can live.
+                        let mut read_buf = Vec::new();
+
+                        let mut matches = Vec::new();
+                        let mut overlaid = Vec::new();
+                        for path in batch {
+                            match overlay.get(path) {
+                                Some(text) => {
+                                    overlaid.push(path.clone());
+                                    scan_text(&regex, text, path, &mut matches);
+                                },
+                                None => {
+                                    scan_file(&*fs_host, &regex, path, &mut read_buf, &mut matches)
+                                },
+                            }
                         }
-                    }
 
-                    // Recorded per batch rather than per path, so the shared
-                    // set is touched once by a thread that saw an overlaid
-                    // file and not at all by one that did not.
-                    if !overlaid.is_empty() {
-                        walked.lock().expect("walked set poisoned").extend(overlaid);
-                    }
+                        // Recorded per batch rather than per path, so the shared
+                        // set is touched once by a thread that saw an overlaid
+                        // file and not at all by one that did not.
+                        if !overlaid.is_empty() {
+                            overlaid_seen
+                                .lock()
+                                .expect("overlaid set poisoned")
+                                .extend(overlaid);
+                        }
 
-                    if !matches.is_empty() {
-                        if tx.send(matches).is_err() {
+                        if !matches.is_empty() {
+                            if tx.send(matches).is_err() {
+                                return ControlFlow::Break(());
+                            }
+                            redraw_notify.notify_one();
+                        } else if tx.is_closed() {
                             return ControlFlow::Break(());
                         }
-                        redraw_notify.notify_one();
-                    } else if tx.is_closed() {
-                        return ControlFlow::Break(());
-                    }
-                    ControlFlow::Continue(())
-                });
-                let walked = walked.into_inner().expect("walked set poisoned");
+                        ControlFlow::Continue(())
+                    };
 
-                // A buffer the walk never offered is one the workspace does not
+                    match walked.get() {
+                        Some(paths) => scan_paths_parallel(paths, &scan_batch),
+                        None => {
+                            let recorder = Mutex::new(WalkRecorder::new());
+                            fs_host.walk_workspace_files_parallel(&git_root, &|batch| {
+                                let flow = scan_batch(&batch);
+                                recorder
+                                    .lock()
+                                    .expect("walk recorder poisoned")
+                                    .record(batch, flow);
+                                flow
+                            });
+                            recorder
+                                .into_inner()
+                                .expect("walk recorder poisoned")
+                                .publish(&walked);
+                        },
+                    }
+                }
+
+                let overlaid_seen = overlaid_seen.into_inner().expect("overlaid set poisoned");
+
+                // A buffer the scan never offered is one the workspace does not
                 // have on disk yet, or one its ignore rules skip. It is still
                 // open and still edited, so it still matches.
                 let mut matches = Vec::new();
                 for (path, text) in overlay.iter() {
-                    if !walked.contains(path) {
+                    if !overlaid_seen.contains(path) {
                         scan_text(&regex, text, path, &mut matches);
                     }
                 }
@@ -331,45 +409,71 @@ pub(crate) fn spawn_code_search(
                     ast_scan_file(text, &ast_lang, &pattern, path, &mut cache, matches);
                 };
 
-                // This walk is serial, so one buffer serves the whole of it.
-                let mut read_buf = Vec::new();
+                let mut overlaid_seen: HashSet<PathBuf> = HashSet::new();
 
-                let mut walked: HashSet<PathBuf> = HashSet::new();
-                fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
-                    let mut matches = Vec::new();
-                    for path in batch {
-                        if language_registry.for_path(&path).map(|l| l.name) != Some(target_name) {
-                            continue;
+                {
+                    // This scan is serial, so one buffer serves the whole of it.
+                    let mut read_buf = Vec::new();
+
+                    let mut scan_batch = |batch: &[PathBuf]| {
+                        let mut matches = Vec::new();
+                        for path in batch {
+                            if language_registry.for_path(path).map(|l| l.name) != Some(target_name)
+                            {
+                                continue;
+                            }
+                            match overlay.get(path) {
+                                Some(text) => {
+                                    overlaid_seen.insert(path.clone());
+                                    scan(path, text, &mut matches);
+                                },
+                                None => {
+                                    if let Some(text) = read_text(&*fs_host, path, &mut read_buf) {
+                                        scan(path, text, &mut matches);
+                                    }
+                                },
+                            }
                         }
-                        match overlay.get(&path) {
-                            Some(text) => {
-                                walked.insert(path.clone());
-                                scan(&path, text, &mut matches);
-                            },
-                            None => {
-                                if let Some(text) = read_text(&*fs_host, &path, &mut read_buf) {
-                                    scan(&path, text, &mut matches);
-                                }
-                            },
-                        }
-                    }
-                    if !matches.is_empty() {
-                        if tx.send(matches).is_err() {
+                        if !matches.is_empty() {
+                            if tx.send(matches).is_err() {
+                                return ControlFlow::Break(());
+                            }
+                            redraw_notify.notify_one();
+                        } else if tx.is_closed() {
                             return ControlFlow::Break(());
                         }
-                        redraw_notify.notify_one();
-                    } else if tx.is_closed() {
-                        return ControlFlow::Break(());
-                    }
-                    ControlFlow::Continue(())
-                });
+                        ControlFlow::Continue(())
+                    };
 
-                // A buffer the walk never offered is one the workspace does not
+                    match walked.get() {
+                        // Chunked at the walk's batch size so a reused scan
+                        // streams into the modal at the same rate a walking one
+                        // does.
+                        Some(paths) => {
+                            for batch in paths.chunks(WALK_BATCH_SIZE) {
+                                if scan_batch(batch).is_break() {
+                                    break;
+                                }
+                            }
+                        },
+                        None => {
+                            let mut recorder = WalkRecorder::new();
+                            fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
+                                let flow = scan_batch(&batch);
+                                recorder.record(batch, flow);
+                                flow
+                            });
+                            recorder.publish(&walked);
+                        },
+                    }
+                }
+
+                // A buffer the scan never offered is one the workspace does not
                 // have on disk yet, or one its ignore rules skip. It is still
                 // open and still edited, so it still matches.
                 let mut matches = Vec::new();
                 for (path, text) in overlay.iter() {
-                    if !walked.contains(path)
+                    if !overlaid_seen.contains(path)
                         && language_registry.for_path(path).map(|l| l.name) == Some(target_name)
                     {
                         scan(path, text, &mut matches);
@@ -417,5 +521,70 @@ pub(crate) fn pump_code_search(stoat: &mut Stoat) -> bool {
                 return true;
             },
         }
+    }
+}
+
+/// A walk that breaks is unreachable through the modal, since a scan under the
+/// test scheduler runs inline while its receiver is still alive. Neither the
+/// match cap nor a re-typed query can cut one short there, so the rule that
+/// keeps a partial tree out of the cache is pinned on the recorder directly.
+#[cfg(test)]
+mod tests {
+    use super::WalkRecorder;
+    use std::{ops::ControlFlow, path::PathBuf, sync::OnceLock};
+
+    fn batch(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn a_completed_walk_publishes_every_batch() {
+        let mut recorder = WalkRecorder::new();
+        recorder.record(batch(&["/repo/a.rs"]), ControlFlow::Continue(()));
+        recorder.record(batch(&["/repo/b.rs"]), ControlFlow::Continue(()));
+
+        let cache = OnceLock::new();
+        recorder.publish(&cache);
+        assert_eq!(cache.get(), Some(&batch(&["/repo/a.rs", "/repo/b.rs"])));
+    }
+
+    #[test]
+    fn a_broken_walk_publishes_nothing() {
+        let mut recorder = WalkRecorder::new();
+        recorder.record(batch(&["/repo/a.rs"]), ControlFlow::Continue(()));
+        recorder.record(batch(&["/repo/b.rs"]), ControlFlow::Break(()));
+
+        let cache = OnceLock::new();
+        recorder.publish(&cache);
+        assert_eq!(cache.get(), None, "half a tree is worse than none");
+    }
+
+    /// The parallel walker's other threads finish the batch they are inside
+    /// when one of them breaks, so batches keep arriving after the break.
+    #[test]
+    fn a_batch_after_the_break_does_not_revive_the_recording() {
+        let mut recorder = WalkRecorder::new();
+        recorder.record(batch(&["/repo/a.rs"]), ControlFlow::Break(()));
+        recorder.record(batch(&["/repo/b.rs"]), ControlFlow::Continue(()));
+
+        let cache = OnceLock::new();
+        recorder.publish(&cache);
+        assert_eq!(cache.get(), None);
+    }
+
+    #[test]
+    fn publishing_into_a_filled_cache_leaves_it_alone() {
+        let cache = OnceLock::new();
+        let _ = cache.set(batch(&["/repo/a.rs"]));
+
+        let mut recorder = WalkRecorder::new();
+        recorder.record(batch(&["/repo/b.rs"]), ControlFlow::Continue(()));
+        recorder.publish(&cache);
+
+        assert_eq!(
+            cache.get(),
+            Some(&batch(&["/repo/a.rs"])),
+            "the first walk to finish is the one the session keeps"
+        );
     }
 }
