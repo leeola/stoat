@@ -67,6 +67,17 @@ const PAGE_POOL_CAPACITY: usize = 5;
 /// `Gstoatty;scroll` fraction of `n` (a `u16`) means `n / 65536` of a page.
 const FRACTION_SCALE: f32 = 65536.0;
 
+/// How far past the live viewport a pool region is allowed to reach, per
+/// dimension.
+///
+/// A pool legitimately exceeds the viewport, since its pages straddle the edges
+/// during a partial-cell scroll, but not by much. The ceiling exists because
+/// the region's dimensions are wire values a writer chooses, and each pool
+/// eagerly builds [`PAGE_POOL_CAPACITY`] grids of them. At the `u16` maximum
+/// that is hundreds of gigabytes and an abort, so a crafted file catted to the
+/// terminal would end the session.
+const MAX_REGION_VIEWPORTS: usize = 2;
+
 /// A minimap content-store change buffered for the next projection.
 ///
 /// The projection replays these against the grid's stores in arrival order. See
@@ -115,6 +126,12 @@ pub struct Terminal {
     /// [`command::decode_with`], so the busy decode path allocates nothing per
     /// APC frame argument once warm.
     frame_scratch: FrameScratch,
+    /// Whether a pool region past the viewport has already been reported.
+    ///
+    /// One line per session rather than per command, since the writer that
+    /// sends an out-of-range region is liable to send a flood of them and a
+    /// log entry each would be its own way to bring the session down.
+    warned_region_clamp: bool,
     /// Border regions set by `Gstoatty;border` frames, stamped onto the grid by
     /// [`Self::project`]. They persist until a `Gstoatty;reset` frame clears
     /// them, since the VT projection resets each cell's borders every frame.
@@ -623,11 +640,15 @@ impl FillTarget {
     /// with a blank screen ready to receive the page's streamed bytes.
     fn new(pool: u32, index: u64, rows: usize, cols: usize) -> FillTarget {
         let responses = ResponseSink::default();
-        let term = Term::new(
-            Config::default(),
-            &GridSize { rows, cols },
-            responses.clone(),
-        );
+        // No scrollback, unlike the live screen. A page is painted once and
+        // projected onto its slot, and nothing ever scrolls this context back,
+        // so the default ten thousand lines of history would be allocated per
+        // fill context and never read.
+        let config = Config {
+            scrolling_history: 0,
+            ..Config::default()
+        };
+        let term = Term::new(config, &GridSize { rows, cols }, responses.clone());
 
         FillTarget {
             pool,
@@ -728,6 +749,7 @@ impl Terminal {
             theme,
             palette,
             esc: EscScanner::default(),
+            warned_region_clamp: false,
             frames_scratch: Vec::new(),
             frame_scratch: FrameScratch::default(),
             borders: Vec::new(),
@@ -1178,6 +1200,10 @@ impl Terminal {
                 None => self.stage_or_apply(Command::Polyline(polyline)),
             },
             Command::PoolRegion(region) => {
+                // Clamped on arrival rather than at the allocation, so the
+                // stored region the renderer places and sizes by is the same
+                // one the pages were built for.
+                let region = self.clamp_region(region);
                 let window = region.window;
                 match self.pools.get_mut(&region.pool) {
                     Some(pool) => {
@@ -1703,8 +1729,47 @@ impl Terminal {
     ///
     /// The context parked by the last page serves this one when their sizes match,
     /// so only a differently shaped region builds a new one.
+    /// Bound `region`'s dimensions to [`MAX_REGION_VIEWPORTS`] times the live
+    /// viewport, warning the first time anything is cut.
+    ///
+    /// The dimensions arrive from the wire and are multiplied by
+    /// [`PAGE_POOL_CAPACITY`] grids of cells, so a writer that names the `u16`
+    /// maximum asks for hundreds of gigabytes. Clamping turns that into a
+    /// bounded allocation instead of an abort, and costs a legitimate pool
+    /// nothing, since a region that far past the viewport paints nothing that
+    /// could be shown.
+    ///
+    /// The warning is once per session because a hostile writer sends these in
+    /// a flood, and a line per command is its own way to bring the session
+    /// down.
+    fn clamp_region(&mut self, region: PoolRegionCommand) -> PoolRegionCommand {
+        let rows = (self.term.screen_lines() * MAX_REGION_VIEWPORTS).min(u16::MAX as usize) as u16;
+        let cols = (self.term.columns() * MAX_REGION_VIEWPORTS).min(u16::MAX as usize) as u16;
+        if region.height <= rows && region.width <= cols {
+            return region;
+        }
+
+        if !self.warned_region_clamp {
+            self.warned_region_clamp = true;
+            tracing::warn!(
+                asked_width = region.width,
+                asked_height = region.height,
+                max_width = cols,
+                max_height = rows,
+                "pool region past the viewport, clamping"
+            );
+        }
+        PoolRegionCommand {
+            width: region.width.min(cols),
+            height: region.height.min(rows),
+            ..region
+        }
+    }
+
     fn begin_fill(&mut self, pool: u32, index: u64) {
         self.commit_fill();
+        // A pool's region is already clamped, so this only bounds the fallback
+        // and any pool declared before a resize shrank the viewport under it.
         let (rows, cols) = match self.pools.get(&pool) {
             Some(pool) => (
                 pool.region.height.max(1) as usize,
@@ -1712,6 +1777,8 @@ impl Terminal {
             ),
             None => (self.term.screen_lines(), self.term.columns()),
         };
+        let rows = rows.min(self.term.screen_lines() * MAX_REGION_VIEWPORTS);
+        let cols = cols.min(self.term.columns() * MAX_REGION_VIEWPORTS);
         // A committed page's context is reset and parked, so an ordinary scroll
         // paints every page through the same screen and parser. A region resize
         // is the only thing that invalidates it, and that is cold.
@@ -2528,6 +2595,7 @@ mod tests {
         },
         theme::Theme,
     };
+    use alacritty_terminal::grid::Dimensions;
     use stoatty_protocol::command::{
         encode_bar, encode_border, encode_config_reload, encode_fill, encode_fill_end,
         encode_font_step, encode_hello, encode_icon, encode_ident_reply, encode_line_layout,
@@ -5485,6 +5553,74 @@ mod tests {
             (out.rows(), out.cols()),
             (3, 4),
             "region height plus a straddle row"
+        );
+    }
+
+    /// A region past the viewport is cut down to a bounded one, in the record
+    /// the renderer reads and in the pages actually built.
+    ///
+    /// The dimensions come off the wire and each pool eagerly builds several
+    /// grids of them, so the `u16` maximum asks for hundreds of gigabytes and
+    /// aborts the process. Catting a crafted file would end the session.
+    ///
+    /// The stored record and the pages have to agree, since one places the pool
+    /// on screen and the other holds what is placed.
+    #[test]
+    fn a_pool_region_past_the_viewport_is_clamped() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        let mut stream = encode_pool_region(&PoolRegionCommand {
+            pool: 0,
+            top: 0,
+            left: 0,
+            width: u16::MAX,
+            height: u16::MAX,
+            window: 0,
+        });
+        stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 0 }));
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        let pool = terminal.pools.get(&0).expect("the pool was declared");
+        assert_eq!(
+            (pool.region.width, pool.region.height),
+            (16, 8),
+            "the stored region is cut to twice the viewport",
+        );
+
+        let page = pool.page_pool.page(0).expect("the fill committed a page");
+        assert_eq!(
+            (page.cols(), page.rows()),
+            (16, 8),
+            "and the page built for it is the same size, not the size asked for",
+        );
+    }
+
+    /// A fill into a region declared before the viewport shrank is bounded too.
+    ///
+    /// The region was in range when it arrived, so the arriving clamp let it
+    /// through. A resize can leave it far past the viewport afterwards, and the
+    /// fill context is built per page from those same dimensions.
+    #[test]
+    fn a_fill_is_clamped_when_a_resize_shrinks_the_viewport_under_it() {
+        let mut terminal = Terminal::new(64, 64, Theme::default());
+        terminal.advance(&encode_pool_region(&PoolRegionCommand {
+            pool: 0,
+            top: 0,
+            left: 0,
+            width: 64,
+            height: 64,
+            window: 0,
+        }));
+
+        terminal.resize(2, 2);
+        terminal.advance(&encode_fill(&FillCommand { pool: 0, index: 0 }));
+
+        let fill = terminal.fill.as_ref().expect("a fill is open");
+        assert_eq!(
+            (fill.term.columns(), fill.term.screen_lines()),
+            (4, 4),
+            "the fill context is twice the live viewport, not the stale region",
         );
     }
 

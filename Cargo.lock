@@ -4183,6 +4183,7 @@ dependencies = [
  "memchr",
  "parking_lot",
  "stoatty_protocol",
+ "tracing",
 ]
 
 [[package]]
