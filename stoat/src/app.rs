@@ -24610,7 +24610,7 @@ mod tests {
             // Queue one input event and drop the sender. The loop drains the
             // event (publishing its frame), then breaks on the closed channel
             // before any background redraw can supersede it in the watch.
-            event_tx.send(Event::Resize(80, 24)).await.expect("send");
+            event_tx.send(Event::Resize(80, 24)).expect("send");
             drop(event_tx);
 
             tokio::time::timeout(
