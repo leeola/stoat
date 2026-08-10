@@ -555,13 +555,30 @@ pub(crate) fn render_editor_with_overlay(
     // or dock, nothing downstream would draw it, so it is painted here.
     let delegates_cursor = scene.is_some();
     let rope = buffer_snapshot.rope();
-    // Every selection's four endpoints in one walk. Per-anchor resolution
-    // descends the fragment tree from the root, so a few hundred cursors would
-    // otherwise cost a thousand descents on every frame painted.
+
+    // The selections that can reach the viewport. `disjoint` is start-sorted and
+    // non-overlapping, so ends ascend with starts and both bounds are monotone
+    // over it. Every selection outside this window paints nothing and has no
+    // cursor to draw, which a set far longer than the screen is mostly made of.
+    //
+    // The bounds touch rather than exclude, since a zero-width selection sitting
+    // on either edge still has a cursor there. That over-includes by at most one
+    // selection per side, and an over-included one costs the same display
+    // conversion every selection used to pay.
+    let visible_selections = {
+        let all = editor.selections.all_anchors();
+        let first =
+            all.partition_point(|sel| buffer_snapshot.resolve_anchor(&sel.end) < visible.start);
+        let last =
+            all.partition_point(|sel| buffer_snapshot.resolve_anchor(&sel.start) <= visible.end);
+        &all[first..last.max(first)]
+    };
+
+    // Every endpoint in one walk. Per-anchor resolution descends the fragment
+    // tree from the root, so a few hundred cursors would otherwise cost a
+    // thousand descents on every frame painted.
     let endpoints = {
-        let anchors: Vec<Anchor> = editor
-            .selections
-            .all_anchors()
+        let anchors: Vec<Anchor> = visible_selections
             .iter()
             .flat_map(|sel| [sel.start, sel.end, sel.tail(), sel.head()])
             .collect();
@@ -588,9 +605,7 @@ pub(crate) fn render_editor_with_overlay(
     // there a visible cursor is the better of the two answers.
     let mut cursor_cells: Vec<(usize, u16, u16)> = Vec::new();
 
-    for ((selection, ends), (&cursor, &cursor_point)) in editor
-        .selections
-        .all_anchors()
+    for ((selection, ends), (&cursor, &cursor_point)) in visible_selections
         .iter()
         .zip(endpoints.chunks_exact(4))
         .zip(cursors.iter().zip(cursor_points.iter()))
@@ -618,6 +633,14 @@ pub(crate) fn render_editor_with_overlay(
                 buf,
                 None,
             );
+        }
+
+        // Display rows rise with buffer offsets, a fold hiding a range without
+        // reordering one, so a cursor outside the visible bytes is on a row
+        // outside the drawn ones. Answering that here is what keeps the descent
+        // below off the cursors no frame can show.
+        if !cursor_reaches_viewport(cursor, &visible, rope.len()) {
+            continue;
         }
 
         let display = snapshot.buffer_to_display(cursor_point);
@@ -2424,6 +2447,24 @@ fn paint_offset_range(
     }
 }
 
+/// Whether a cursor at `cursor` can land on a drawn row.
+///
+/// `visible.end` is the offset where the first undrawn row begins, so a cursor
+/// sitting exactly there is on that row and off screen. Unless the viewport runs
+/// past the last row, where that offset is the rope's end instead and a cursor
+/// there is on the last drawn row.
+///
+/// Answering yes for a cursor that turns out to be off screen costs a display
+/// conversion and paints nothing, which is what the caller did for every cursor
+/// before. Answering no for one that is on screen would lose it, so the buffer
+/// end is the case to get right.
+fn cursor_reaches_viewport(cursor: usize, visible: &Range<usize>, rope_len: usize) -> bool {
+    if cursor < visible.start {
+        return false;
+    }
+    cursor < visible.end || (cursor == visible.end && visible.end == rope_len)
+}
+
 /// Byte range of `rope` spanned by display rows `scroll_row..end_row`.
 ///
 /// Rows beyond the buffer resolve to the rope length, so the returned range is
@@ -2964,6 +3005,89 @@ mod tests {
         assert_eq!(
             with_inlay, without,
             "an inlay on line 0 must not change line 1's fast-path selection paint",
+        );
+    }
+
+    /// Cursors the viewport cannot show contribute nothing to what it paints.
+    ///
+    /// The pass skips them before converting each to a display point, and a
+    /// skip that dropped a cursor it should have drawn, or kept one it should
+    /// not have, shows up as a cell differing from the same frame painted with
+    /// only the on-screen cursors in the set.
+    #[test]
+    fn cursors_outside_the_viewport_paint_nothing() {
+        // Scrolled well down a long buffer, so cursors can sit far above and far
+        // below what is drawn.
+        const ROWS: u16 = 6;
+        const SCROLL: u32 = 40;
+
+        fn painted(extra_rows: &[u32]) -> Buffer {
+            let text: String = (0..120).map(|i| format!("line {i} of text\n")).collect();
+            let mut h = Stoat::test();
+            open_search_buffer(&mut h, &text);
+            let theme = h.stoat.theme.clone();
+            let fallback = theme.get(crate::theme::scope::UI_TEXT);
+            let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
+
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.scroll_row = SCROLL;
+
+            // A cursor on the third drawn row, plus whatever else is asked for.
+            let mut rows = vec![SCROLL + 2];
+            rows.extend_from_slice(extra_rows);
+            rows.sort_unstable();
+
+            {
+                let snapshot = editor.display_map.snapshot();
+                let buf_snap = snapshot.buffer_snapshot();
+                let rope = buf_snap.rope();
+                let spans: Vec<(usize, usize)> = rows
+                    .iter()
+                    .map(|&row| {
+                        let offset = rope.point_to_offset(Point::new(row, 0));
+                        (offset, offset + 1)
+                    })
+                    .collect();
+                editor.selections.replace_with_fresh_ids_from_offsets(
+                    &spans,
+                    Bias::Right,
+                    buf_snap,
+                );
+            }
+
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            let area = Rect::new(0, 0, 40, ROWS);
+            let mut buf = Buffer::empty(area);
+            super::render_editor_with_overlay(
+                editor,
+                area,
+                fallback,
+                &theme,
+                &chrome,
+                &mut buf,
+                true,
+                false,
+                LineNumbers::Off,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                0.0,
+                WrapMode::None,
+                80,
+            );
+            buf
+        }
+
+        let only_visible = painted(&[]);
+        let with_offscreen = painted(&[0, 3, SCROLL - 1, SCROLL + u32::from(ROWS), 119]);
+
+        assert_eq!(
+            only_visible, with_offscreen,
+            "cursors above and below the drawn rows changed what was drawn",
         );
     }
 
