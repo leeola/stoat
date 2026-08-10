@@ -67,6 +67,21 @@ new_key_type! {
 /// gutter catch up.
 pub(crate) const DIFF_SETTLE: Duration = Duration::from_millis(250);
 
+/// Largest buffer the run loop will try to parse itself before handing the
+/// work to the blocking pool.
+///
+/// The captures walk after the tree-sitter parse honours no deadline, so the
+/// only bound on it is the size of the file it walks. This is the size below
+/// which that walk is short enough to sit inside a frame.
+const INLINE_PARSE_MAX_BYTES: usize = 256 * 1024;
+
+/// How long the run loop gives an inline parse before abandoning it.
+///
+/// An edit to an already-parsed buffer reuses its tree and finishes well
+/// inside this. Anything that does not is a reparse worth moving off the run
+/// loop, which the abort does at the cost of the time already spent.
+const INLINE_PARSE_BUDGET: Duration = Duration::from_millis(1);
+
 /// Stable-across-restart workspace identifier. [`WorkspaceId`] is a SlotMap
 /// key whose generation is recycled each run, so it can't serve as an on-disk
 /// filename. [`WorkspaceUid`] is assigned once at construction time from the
@@ -833,32 +848,7 @@ impl Workspace {
             }
         });
         for out in completed {
-            installed.push((out.buffer_id, out.changed_token_rows.clone()));
-            self.buffers.store_syntax(out.buffer_id, out.syntax);
-            self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
-
-            // A viewport-only walk paints what is on screen but describes
-            // nothing beyond it, so its spans are not kept. The next parse
-            // would carry everything off screen forward as unchanged when it
-            // was never captured. Without them that parse takes the whole-file
-            // walk, which is exactly the follow-up this owes.
-            if out.captured.is_some() {
-                self.partial_token_buffers.insert(out.buffer_id);
-            } else {
-                self.partial_token_buffers.remove(&out.buffer_id);
-                self.buffers
-                    .store_token_spans(out.buffer_id, out.token_spans.clone());
-            }
-            self.buffers
-                .store_tokens(out.buffer_id, out.token_channel.clone());
-            for editor in self.editors.values_mut() {
-                if editor.buffer_id == out.buffer_id {
-                    editor
-                        .display_map
-                        .set_semantic_token_channel(out.buffer_id, out.token_channel.clone());
-                }
-            }
-            self.arm_index_debounce(executor, redraw_notify, out.buffer_id);
+            self.install_parse_output(out, executor, redraw_notify, &mut installed);
         }
 
         let mut visible = std::mem::take(&mut self.visible_buffers);
@@ -920,11 +910,37 @@ impl Workspace {
             .then(|| self.visible_rows(buffer_id))
             .flatten();
 
-            // Every buffer parses here, whatever its size. The tree-sitter parse
-            // honors a deadline, but the captures walk after it does not and is
-            // unbounded O(file), so parsing inline would hold the run loop for
-            // the whole file on a keystroke.
+            // A small buffer parses on the run loop first. The tree-sitter parse
+            // honors the deadline and the captures walk after it does not, so
+            // the size cap is what bounds that walk. Under it the whole file is
+            // small, and the fallback walk is viewport-first besides.
             //
+            // Landing here rather than a frame later is what the keystroke
+            // feels. An abort leaves the prior state untouched, which is the
+            // contract that lets the pool attempt below carry on as if this
+            // never ran.
+            let mut prior = prior;
+            let mut prior_map = prior_map;
+            if snapshot.visible_text.len() <= INLINE_PARSE_MAX_BYTES {
+                let deadline = executor.now() + INLINE_PARSE_BUDGET;
+                let inline = parse_buffer_step(
+                    buffer_id,
+                    snapshot.clone(),
+                    &lang,
+                    &mut prior,
+                    &mut prior_map,
+                    prior_spans.as_deref(),
+                    prior_anchors.as_ref(),
+                    syntax_styles,
+                    Some((deadline, executor)),
+                    viewport.clone(),
+                );
+                if let Some(out) = inline {
+                    self.install_parse_output(out, executor, redraw_notify, &mut installed);
+                    continue;
+                }
+            }
+
             // The result installs through the job poll a frame later. Until then
             // the registry still holds the last landed tree and token set, so
             // auto-indent, textobjects, and the highlight readers answer from
@@ -984,6 +1000,47 @@ impl Workspace {
         self.visible_buffers = protected;
 
         installed
+    }
+
+    /// Take one parse's result into the registry and every editor showing its
+    /// buffer.
+    ///
+    /// Shared by the two ways a parse arrives, a completed background job and
+    /// one the run loop ran inline, so the two cannot drift into installing
+    /// different things.
+    fn install_parse_output(
+        &mut self,
+        out: ParseJobOutput,
+        executor: &Executor,
+        redraw_notify: &Arc<Notify>,
+        installed: &mut Vec<(BufferId, Option<Range<u32>>)>,
+    ) {
+        installed.push((out.buffer_id, out.changed_token_rows.clone()));
+        self.buffers.store_syntax(out.buffer_id, out.syntax);
+        self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
+
+        // A viewport-only walk paints what is on screen but describes
+        // nothing beyond it, so its spans are not kept. The next parse
+        // would carry everything off screen forward as unchanged when it
+        // was never captured. Without them that parse takes the whole-file
+        // walk, which is exactly the follow-up this owes.
+        if out.captured.is_some() {
+            self.partial_token_buffers.insert(out.buffer_id);
+        } else {
+            self.partial_token_buffers.remove(&out.buffer_id);
+            self.buffers
+                .store_token_spans(out.buffer_id, out.token_spans.clone());
+        }
+        self.buffers
+            .store_tokens(out.buffer_id, out.token_channel.clone());
+        for editor in self.editors.values_mut() {
+            if editor.buffer_id == out.buffer_id {
+                editor
+                    .display_map
+                    .set_semantic_token_channel(out.buffer_id, out.token_channel.clone());
+            }
+        }
+        self.arm_index_debounce(executor, redraw_notify, out.buffer_id);
     }
 
     /// The display rows an editor is currently showing of `buffer_id`.
@@ -1669,6 +1726,7 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 mod tests {
     use super::{
         changed_byte_ranges, compute_base_highlights, BaseHighlightMemo, ParseJob, Workspace,
+        INLINE_PARSE_MAX_BYTES,
     };
     use crate::{
         buffer::BufferId, display_map::syntax_theme::SyntaxStyles, host::DiffStatus, pane::View,
@@ -2397,42 +2455,51 @@ mod tests {
         );
     }
 
-    /// The captures walk after a parse is unbounded O(file), so no buffer is
-    /// small enough to be worth running it between keystrokes. A tiny one takes
-    /// the same background path a large one does.
+    /// A buffer under the byte cap parses on the run loop, so its highlights
+    /// are there on the frame the edit landed rather than the one after.
+    ///
+    /// Driving once without ticking the scheduler is what separates the two
+    /// paths. A spawned job cannot have run yet, so a buffer settled at this
+    /// point can only have parsed inline.
     #[test]
-    fn a_small_buffer_parses_off_the_main_thread_too() {
-        use crate::action_handlers::dispatch;
-        use stoat_action::OpenFile;
-
-        let mut h = TestHarness::with_size(24, 4);
-        let root = PathBuf::from("/small");
-        h.fake_fs()
-            .insert_file(root.join("small.rs"), b"fn f() {}\n");
-        h.stoat.active_workspace_mut().git_root = root.clone();
-
-        dispatch(
-            &mut h.stoat,
-            &OpenFile {
-                path: root.join("small.rs"),
-            },
-        );
-        // Drive parse jobs once without ticking the scheduler, so the spawned
-        // background job stays pending and observable.
+    fn a_small_buffer_parses_on_the_run_loop() {
+        let (mut h, id) = harness_with_file("/small", "small.rs", b"fn f() {}\n");
         h.stoat.drive_background();
 
         let ws = h.stoat.active_workspace();
-        let id = ws
-            .buffers
-            .id_for_path(&root.join("small.rs"))
-            .expect("the buffer opened");
+        assert!(
+            !ws.parse_jobs.contains_key(&id),
+            "a buffer parsed inline spawns no background job"
+        );
+        assert!(
+            ws.buffers.syntax_version(id).is_some(),
+            "and its highlights are already installed"
+        );
+    }
+
+    /// Past the cap the captures walk is too long to sit inside a frame, so the
+    /// work goes to the pool and lands through the job poll as before.
+    #[test]
+    fn a_large_buffer_still_parses_off_the_run_loop() {
+        let source = "fn f() {}\n".repeat(INLINE_PARSE_MAX_BYTES / 10 + 1);
+        assert!(
+            source.len() > INLINE_PARSE_MAX_BYTES,
+            "the fixture must exceed the cap",
+        );
+        let (mut h, id) = harness_with_file("/large", "large.rs", source.as_bytes());
+
+        // Driven once without ticking the scheduler, so a spawned job stays
+        // pending and observable.
+        h.stoat.drive_background();
+
+        let ws = h.stoat.active_workspace();
         assert!(
             ws.parse_jobs.contains_key(&id),
-            "every buffer spawns a background parse job"
+            "a buffer past the cap spawns a background parse job"
         );
         assert!(
             ws.buffers.syntax_version(id).is_none(),
-            "and none is parsed inline on the main thread"
+            "and is not parsed on the run loop"
         );
 
         // The scheduler tick resolves the blocking task. The second
@@ -2449,6 +2516,33 @@ mod tests {
             ws.buffers.syntax_version(id).is_some(),
             "and its highlights land through the job poll"
         );
+    }
+
+    /// Open `name` under `root` with `contents` and return the harness beside
+    /// the buffer id it opened.
+    fn harness_with_file(root: &str, name: &str, contents: &[u8]) -> (TestHarness, BufferId) {
+        use crate::action_handlers::dispatch;
+        use stoat_action::OpenFile;
+
+        let mut h = TestHarness::with_size(24, 4);
+        let root = PathBuf::from(root);
+        h.fake_fs().insert_file(root.join(name), contents);
+        h.stoat.active_workspace_mut().git_root = root.clone();
+
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: root.join(name),
+            },
+        );
+
+        let id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&root.join(name))
+            .expect("the buffer opened");
+        (h, id)
     }
 
     #[test]
