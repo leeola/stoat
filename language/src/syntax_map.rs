@@ -89,20 +89,37 @@ pub struct LayerKey {
     pub start_offset: u32,
 }
 
-impl ContextLessSummary for LayerKey {
+/// What a subtree of layers reports to the one above it.
+///
+/// The key is the seek position, and the count is there because a sum-tree
+/// carries no length of its own. Without it, asking how many layers a snapshot
+/// holds means walking every one of them, which is what
+/// [`SyntaxSnapshot::layer_count`] used to do on a path that runs per edit.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LayerSummary {
+    pub key: LayerKey,
+    pub count: usize,
+}
+
+impl ContextLessSummary for LayerSummary {
     fn add_summary(&mut self, other: &Self) {
-        // For an ordered-key summary, the cumulative position is just
-        // the latest item's key. SumTree uses this for seeking.
-        *self = other.clone();
+        // The cumulative position of an ordered key is just the latest item's,
+        // which is what a seek compares against. The count is the one thing
+        // here that genuinely accumulates.
+        self.key = other.key.clone();
+        self.count += other.count;
     }
 }
 
 impl Item for SyntaxLayer {
-    type Summary = LayerKey;
-    fn summary(&self, _cx: ()) -> LayerKey {
-        LayerKey {
-            depth: self.depth,
-            start_offset: self.start_offset,
+    type Summary = LayerSummary;
+    fn summary(&self, _cx: ()) -> LayerSummary {
+        LayerSummary {
+            key: LayerKey {
+                depth: self.depth,
+                start_offset: self.start_offset,
+            },
+            count: 1,
         }
     }
 }
@@ -123,7 +140,7 @@ impl SyntaxSnapshot {
     }
 
     pub fn layer_count(&self) -> usize {
-        self.layers.iter().count()
+        self.layers.summary().count
     }
 
     /// Iterate every layer in `(depth, start_offset)` order. The
@@ -311,7 +328,11 @@ impl SyntaxMap {
 
             new_layers.push(next);
         }
-        self.install_layers(new_layers, self.snapshot.parsed_version);
+        // Built rather than installed, because installing sorts. Depth does not
+        // move here, and `translate_offset` is the identity below the first edit
+        // and monotone above it, so no layer's key can cross another's and the
+        // list is already in the order the tree wants.
+        self.snapshot.layers = SumTree::from_iter(new_layers, ());
     }
 
     /// Reparse `rope` against `language`, replacing every layer.
@@ -2149,6 +2170,71 @@ mod tests {
                 .map(|&(s, e)| (s + shift, e + shift))
                 .collect::<Vec<_>>(),
             "inserting before a layer must move its bounds by the insertion length"
+        );
+    }
+
+    /// The summarized count matches the layers actually in the tree, and
+    /// interpolation leaves them in the order the tree is seeked on.
+    ///
+    /// The count answers without a walk, so nothing else notices when it drifts
+    /// from what the tree holds. Ordering is what lets interpolation skip the
+    /// sort. Depth does not move and `translate_offset` cannot make one layer's
+    /// start pass another's, so the list it builds is already ordered. That
+    /// holds by construction rather than by the assertion below, which is here
+    /// to catch a future edit that breaks the reasoning.
+    #[test]
+    fn a_layer_tree_counts_and_orders_itself_across_an_edit() {
+        use stoat_text::patch::Edit as PatchEdit;
+        let lang = markdown_lang();
+        let old_source: String = (0..12)
+            .map(|i| format!("para {i} *em*\n\n```rust\nfn f{i}() {{}}\n```\n\n"))
+            .collect();
+        let old_rope = Rope::from(old_source.as_str());
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
+
+        let checked = |map: &SyntaxMap, when: &str| {
+            let snapshot = map.snapshot();
+            assert_eq!(
+                snapshot.layer_count(),
+                snapshot.iter_layers().count(),
+                "the summarized count must match the tree {when}",
+            );
+            let keys: Vec<(u32, u32)> = snapshot
+                .iter_layers()
+                .map(|l| (l.depth, l.start_offset))
+                .collect();
+            let mut ordered = keys.clone();
+            ordered.sort();
+            assert_eq!(keys, ordered, "layers must stay key-ordered {when}");
+            keys.len()
+        };
+        let before = checked(&map, "after a parse");
+        assert!(
+            before > 12,
+            "the fixture must inject many layers, got {before}"
+        );
+
+        // Mid-file, so layers fall on both sides of it. The ones before are
+        // left alone and the ones after have their offsets translated, and the
+        // two halves have to stay in one order between them.
+        let at = old_source.find("para 6").expect("fixture");
+        let inserted = "# Heading\n\n";
+        let new_source = format!("{}{inserted}{}", &old_source[..at], &old_source[at..]);
+        let new_rope = Rope::from(new_source.as_str());
+        map.interpolate(
+            &[PatchEdit {
+                old: at..at,
+                new: at..(at + inserted.len()),
+            }],
+            &old_rope,
+            &new_rope,
+        );
+
+        assert_eq!(
+            checked(&map, "after an interpolation"),
+            before,
+            "interpolation moves layers without adding or dropping any",
         );
     }
 
