@@ -1679,6 +1679,16 @@ pub(crate) struct ParseJobOutput {
     /// viewing the buffer. It owns the token list, so the search index inside
     /// it cannot drift from the tokens it indexes.
     pub(crate) token_channel: BufferSemanticTokens,
+    /// The byte range this parse's tokens cover, when it is not the whole
+    /// file.
+    ///
+    /// [`Some`] means the capture walk was narrowed to what was on screen, so
+    /// the tokens paint the viewport but describe nothing outside it. The tree
+    /// and layer map are whole either way, since only the walk was narrowed.
+    /// A caller that retains these tokens as the base for a later incremental
+    /// parse must not do so while this is [`Some`], or everything off screen
+    /// would be carried forward as unchanged when it was never captured.
+    pub(crate) captured: Option<Range<usize>>,
     /// This parse's tokens as raw byte spans, retained so the next parse can
     /// diff against them and report its own changed rows.
     pub(crate) token_spans: SemanticTokenSpans,
@@ -11095,6 +11105,7 @@ pub(crate) fn parse_buffer_step(
     prior_token_anchors: Option<&BufferSemanticTokens>,
     styles: &SyntaxStyles,
     deadline: Option<(std::time::Instant, &Executor)>,
+    viewport: Option<Range<u32>>,
 ) -> Option<ParseJobOutput> {
     let cur_version = snapshot.version;
     let new_rope = snapshot.visible_text.clone();
@@ -11221,14 +11232,24 @@ pub(crate) fn parse_buffer_step(
         None
     };
 
+    // The whole file unless the caller named a viewport to do first, in which
+    // case that plus a margin, so an opened file styles what is on screen
+    // rather than sorting every capture in it before painting anything.
+    let captured = match (&recaptured, viewport) {
+        (Some(_), _) | (None, None) => None,
+        (None, Some(rows)) => Some(capture_window(rows, &new_rope)),
+    };
+
     // Borrowed rather than moved out, since the recapture still owns the two
     // short lists the changed-row report reads below.
     let styled: Cow<'_, [(Range<usize>, HighlightStyleId)]> = match &recaptured {
         Some(recaptured) => Cow::Borrowed(&recaptured.spans),
         None => Cow::Owned(styled_capture_spans(
-            syntax_map
-                .snapshot()
-                .captures(0..new_rope.len(), &new_rope, |l| Some(&l.highlight_query)),
+            syntax_map.snapshot().captures(
+                captured.clone().unwrap_or(0..new_rope.len()),
+                &new_rope,
+                |l| Some(&l.highlight_query),
+            ),
             styles,
         )),
     };
@@ -11273,6 +11294,7 @@ pub(crate) fn parse_buffer_step(
         },
         syntax_map,
         token_channel,
+        captured,
         token_spans: Arc::from(styled),
         changed_token_rows,
     })
@@ -11458,6 +11480,33 @@ fn anchor_spans(
             style,
         })
         .collect()
+}
+
+/// How many rows either side of a viewport the first capture walk covers.
+///
+/// A scroll of less than this lands on tokens that are already there, which
+/// keeps a nudge of the wheel from showing unstyled text before the whole-file
+/// pass arrives.
+const CAPTURE_MARGIN_ROWS: u32 = 200;
+
+/// The byte range covering `rows` widened by [`CAPTURE_MARGIN_ROWS`].
+///
+/// `rows` are display rows, so wraps and folds make them an approximation of
+/// the buffer rows on screen. That is sound here only because a narrowed walk
+/// is always followed by a whole-file one, which makes an under-shoot a beat of
+/// unstyled text rather than text that stays wrong.
+fn capture_window(rows: Range<u32>, rope: &Rope) -> Range<usize> {
+    let last = rope.max_point().row;
+    let first_row = rows.start.saturating_sub(CAPTURE_MARGIN_ROWS);
+    let last_row = rows
+        .end
+        .saturating_add(CAPTURE_MARGIN_ROWS)
+        .min(last)
+        .max(first_row);
+
+    let start = rope.point_to_offset(stoat_text::Point::new(first_row, 0));
+    let end = rope.point_to_offset(stoat_text::Point::new(last_row, rope.line_len(last_row)));
+    start..end
 }
 
 /// The byte ranges of `new_tree` an edit could have restyled.
@@ -14843,6 +14892,73 @@ mod tests {
     }
 
     /// When `parse_buffer_step` aborts on the deadline, the prior state
+    /// A named viewport narrows the fallback walk to it, and the same buffer
+    /// with none named still walks the whole file. The narrowing has to be
+    /// visible in the tokens, not just in what the parse reports.
+    #[test]
+    fn a_named_viewport_narrows_the_fallback_capture() {
+        let (styles, lang) = carried_parse_fixture("a.rs");
+        let buffer_id = BufferId::new(1);
+
+        // Long enough that the margin cannot reach the end.
+        let rows = 4_000;
+        let text = "fn a() {}\n".repeat(rows);
+        let buf = TextBuffer::with_text(buffer_id, &text);
+
+        let parse = |viewport: Option<Range<u32>>| {
+            let mut prior = None;
+            let mut prior_map = None;
+            parse_buffer_step(
+                buffer_id,
+                buf.snapshot.clone(),
+                &lang,
+                &mut prior,
+                &mut prior_map,
+                None,
+                None,
+                &styles,
+                None,
+                viewport,
+            )
+            .expect("parse should succeed")
+        };
+
+        let whole = parse(None);
+        assert_eq!(whole.captured, None, "no viewport walks the whole file");
+
+        let narrowed = parse(Some(0..40));
+        let window = narrowed
+            .captured
+            .clone()
+            .expect("a named viewport is reported as a partial capture");
+        assert!(
+            window.end < buf.snapshot.visible_text.len(),
+            "the window must stop short of the file, got {window:?}",
+        );
+
+        assert!(
+            narrowed.token_spans.len() < whole.token_spans.len(),
+            "narrowing must produce fewer tokens: {} vs {}",
+            narrowed.token_spans.len(),
+            whole.token_spans.len(),
+        );
+        assert!(
+            !narrowed.token_spans.is_empty(),
+            "the viewport itself must still be styled",
+        );
+        assert!(
+            narrowed
+                .token_spans
+                .iter()
+                .all(|(r, _)| r.start < window.end),
+            "no token may fall outside the captured window",
+        );
+        assert!(
+            whole.token_spans.iter().any(|(r, _)| r.start >= window.end),
+            "the whole-file walk must reach past the window",
+        );
+    }
+
     /// passed via `&mut Option<_>` must remain populated so the caller
     /// can hand it to a follow-up parse without losing incrementality.
     #[test]
@@ -14871,6 +14987,7 @@ mod tests {
             None,
             &styles,
             None,
+            None,
         )
         .expect("first parse should succeed");
         let initial_version = out.syntax.version;
@@ -14891,6 +15008,7 @@ mod tests {
             None,
             &styles,
             Some((deadline, &executor)),
+            None,
         );
         assert!(result.is_none(), "expected deadline abort to return None");
         let prior_state = prior
@@ -14914,6 +15032,7 @@ mod tests {
             None,
             None,
             &styles,
+            None,
             None,
         )
         .expect("recovery parse should succeed");
@@ -14952,6 +15071,7 @@ mod tests {
             None,
             &styles,
             None,
+            None,
         )
         .expect("first parse should succeed");
 
@@ -14971,6 +15091,7 @@ mod tests {
             None,
             &styles,
             Some((deadline, &executor)),
+            None,
         )
         .expect("deadline far in the future should not abort");
 
@@ -14991,6 +15112,7 @@ mod tests {
             None,
             &styles,
             Some((deadline, &executor)),
+            None,
         );
         assert!(
             aborted.is_none(),
@@ -15034,6 +15156,7 @@ mod tests {
                 None,
                 &styles,
                 None,
+                None,
             )
             .expect("first parse should succeed")
         };
@@ -15054,6 +15177,7 @@ mod tests {
                 None,
                 &styles,
                 None,
+                None,
             )
             .expect("incremental parse should succeed")
         };
@@ -15069,6 +15193,7 @@ mod tests {
                 None,
                 None,
                 &styles,
+                None,
                 None,
             )
             .expect("from-scratch parse should succeed")
@@ -15172,6 +15297,7 @@ mod tests {
             state.anchors.as_ref(),
             styles,
             None,
+            None,
         )
         .expect("carried parse should succeed");
 
@@ -15187,6 +15313,7 @@ mod tests {
                 None,
                 None,
                 styles,
+                None,
                 None,
             )
             .expect("from-scratch parse should succeed")
@@ -15504,6 +15631,7 @@ mod tests {
                 None,
                 &styles,
                 None,
+                None,
             )
             .expect("first parse should succeed")
         };
@@ -15591,6 +15719,7 @@ mod tests {
                 None,
                 &styles,
                 None,
+                None,
             )
             .expect("first parse should succeed")
         };
@@ -15607,6 +15736,7 @@ mod tests {
             Some(&first.token_spans),
             Some(&first.token_channel),
             &styles,
+            None,
             None,
         )
         .expect("second parse should succeed")
@@ -15780,6 +15910,7 @@ mod tests {
             None,
             &styles,
             None,
+            None,
         )
         .expect("parse should succeed");
 
@@ -15820,6 +15951,7 @@ mod tests {
                 None,
                 None,
                 &styles,
+                None,
                 None,
             )
             .expect("parse should succeed")

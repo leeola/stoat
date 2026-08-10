@@ -235,6 +235,12 @@ pub struct Workspace {
     /// dropped when the plan completes or aborts.
     pub(crate) rebase_active: Option<ActiveRebase>,
     parse_jobs: HashMap<BufferId, ParseJob>,
+    /// Buffers whose last parse captured only what was on screen.
+    ///
+    /// Their tree is current but their tokens describe the viewport alone, so
+    /// the scheduling loop owes them one more parse however current their
+    /// syntax version looks. Emptied when a whole-file walk lands.
+    partial_token_buffers: std::collections::HashSet<BufferId>,
     /// How many buffer snapshots the parse driver cloned.
     ///
     /// A clone the gates then discard costs only time, so a test needs the
@@ -420,6 +426,7 @@ impl Workspace {
             rebase: None,
             rebase_active: None,
             parse_jobs: HashMap::new(),
+            partial_token_buffers: std::collections::HashSet::new(),
             #[cfg(test)]
             parse_snapshot_clones: std::cell::Cell::new(0),
             diff_jobs: HashMap::new(),
@@ -829,8 +836,19 @@ impl Workspace {
             installed.push((out.buffer_id, out.changed_token_rows.clone()));
             self.buffers.store_syntax(out.buffer_id, out.syntax);
             self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
-            self.buffers
-                .store_token_spans(out.buffer_id, out.token_spans.clone());
+
+            // A viewport-only walk paints what is on screen but describes
+            // nothing beyond it, so its spans are not kept. The next parse
+            // would carry everything off screen forward as unchanged when it
+            // was never captured. Without them that parse takes the whole-file
+            // walk, which is exactly the follow-up this owes.
+            if out.captured.is_some() {
+                self.partial_token_buffers.insert(out.buffer_id);
+            } else {
+                self.partial_token_buffers.remove(&out.buffer_id);
+                self.buffers
+                    .store_token_spans(out.buffer_id, out.token_spans.clone());
+            }
             self.buffers
                 .store_tokens(out.buffer_id, out.token_channel.clone());
             for editor in self.editors.values_mut() {
@@ -856,7 +874,12 @@ impl Workspace {
             };
             let cur_version = shared.read().expect("buffer poisoned").snapshot.version;
 
-            if self.buffers.syntax_version(buffer_id) == Some(cur_version) {
+            // A buffer whose tokens cover only its viewport is not settled,
+            // however current its tree is, so the version gate alone would
+            // strand it there.
+            if self.buffers.syntax_version(buffer_id) == Some(cur_version)
+                && !self.partial_token_buffers.contains(&buffer_id)
+            {
                 continue;
             }
             // A job in flight owns this buffer's next parse whatever version it
@@ -885,6 +908,17 @@ impl Workspace {
             // The same parse's anchored tokens, index-aligned with the spans,
             // so the incremental path can hand a carried token back its anchor.
             let prior_anchors = self.buffers.tokens_for(buffer_id).cloned();
+
+            // Only a parse with nothing to carry from takes the whole-file
+            // capture walk, so only that one is worth narrowing.
+            //
+            // A buffer already owed a full walk is never narrowed again. It has
+            // no spans either, so narrowing on that alone would re-run the
+            // viewport forever and the rest of the file would never be styled.
+            let viewport = (prior_spans.is_none()
+                && !self.partial_token_buffers.contains(&buffer_id))
+            .then(|| self.visible_rows(buffer_id))
+            .flatten();
 
             // Every buffer parses here, whatever its size. The tree-sitter parse
             // honors a deadline, but the captures walk after it does not and is
@@ -916,6 +950,7 @@ impl Workspace {
                     prior_anchors.as_ref(),
                     &styles,
                     None,
+                    viewport,
                 )
             });
             let task = executor.spawn_with_redraw(redraw_notify.clone(), parse);
@@ -949,6 +984,22 @@ impl Workspace {
         self.visible_buffers = protected;
 
         installed
+    }
+
+    /// The display rows an editor is currently showing of `buffer_id`.
+    ///
+    /// The first editor found on it, since a buffer shown twice is rare and
+    /// either viewport is a reasonable place to style first. [`None`] when no
+    /// editor shows it or none has been laid out yet, which is the preview and
+    /// just-opened cases, and leaves the caller to walk the whole file.
+    fn visible_rows(&self, buffer_id: BufferId) -> Option<Range<u32>> {
+        self.editors
+            .values()
+            .find(|editor| editor.buffer_id == buffer_id)
+            .and_then(|editor| {
+                let rows = editor.viewport_rows?;
+                Some(editor.scroll_row..editor.scroll_row.saturating_add(rows))
+            })
     }
 
     /// Buffer ids currently shown in a split-pane editor or held as a preview,
