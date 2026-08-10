@@ -198,9 +198,29 @@ pub struct BufferSemanticTokens {
     pub interner: Arc<HighlightStyleInterner>,
 }
 
-/// A run of at most [`SEGMENT_TOKENS`] tokens and the search index over them.
+/// One contiguous run of a channel's tokens, with each token's resolved end.
+///
+/// The unit a caller assembles a channel out of. A splice hands over the runs
+/// it carried from the previous channel, whose `tokens` is an [`Arc`] clone
+/// rather than a fresh allocation, alongside the ones it rebuilt.
+pub struct TokenRun {
+    pub tokens: Arc<[SemanticTokenHighlight]>,
+    /// Resolved end of each token, ordered as a query-time resolver would
+    /// order them. A carried run's ends still move with the text, so they are
+    /// the caller's to supply either way.
+    pub ends: Vec<usize>,
+}
+
+/// A run of tokens and the search index over them.
+///
+/// Segments are not a fixed stride. A rebuild that replaces one segment with a
+/// different number of tokens shifts every later token's whole-channel index,
+/// so each segment records where it starts rather than having that derived from
+/// its position.
 #[derive(Debug, Clone)]
 struct TokenSegment {
+    /// Whole-channel index of this segment's first token.
+    base: usize,
     tokens: Arc<[SemanticTokenHighlight]>,
     /// Index *within this segment* of the greatest end among its `0..=i`.
     prefix_max_end: Arc<[u32]>,
@@ -252,21 +272,44 @@ impl BufferSemanticTokens {
             "ends must have one entry per token",
         );
 
-        let len = tokens.len();
-        let mut segments: Vec<TokenSegment> = Vec::new();
+        let runs: Vec<TokenRun> = (0..tokens.len())
+            .step_by(SEGMENT_TOKENS)
+            .map(|base| {
+                let upto = (base + SEGMENT_TOKENS).min(tokens.len());
+                TokenRun {
+                    tokens: Arc::from(&tokens[base..upto]),
+                    ends: ends[base..upto].to_vec(),
+                }
+            })
+            .collect();
+
+        Self::from_runs(runs, interner)
+    }
+
+    /// Build the channel from runs the caller assembled.
+    ///
+    /// A splice hands over the runs it carried from the previous channel
+    /// alongside the ones it rebuilt, so a carried run keeps its allocation and
+    /// only takes a new base. Runs arrive in document order and are used as the
+    /// segmentation, so a caller that carries most of a large channel pays for
+    /// what it replaced rather than for the file.
+    pub fn from_runs(runs: Vec<TokenRun>, interner: Arc<HighlightStyleInterner>) -> Self {
+        let mut segments: Vec<TokenSegment> = Vec::with_capacity(runs.len());
+        let mut base = 0;
         let mut carried: Option<(u32, usize)> = None;
 
-        for base in (0..len).step_by(SEGMENT_TOKENS) {
-            let upto = (base + SEGMENT_TOKENS).min(len);
-            let local_ends = &ends[base..upto];
+        for run in runs {
+            if run.tokens.is_empty() {
+                continue;
+            }
 
-            segments.push(TokenSegment {
-                tokens: Arc::from(&tokens[base..upto]),
-                prefix_max_end: Arc::from(prefix_max_end_indices(local_ends)),
-                carried_max_end: carried.map(|(index, _)| index),
-            });
+            debug_assert_eq!(
+                run.tokens.len(),
+                run.ends.len(),
+                "a run's ends must have one entry per token",
+            );
 
-            let (local_index, local_end) = local_ends.iter().enumerate().fold(
+            let best = run.ends.iter().enumerate().fold(
                 (0usize, 0usize),
                 |(best_i, best_end), (i, &end)| {
                     if i == 0 || end > best_end {
@@ -276,16 +319,25 @@ impl BufferSemanticTokens {
                     }
                 },
             );
-            let local = ((base + local_index) as u32, local_end);
+
+            segments.push(TokenSegment {
+                base,
+                prefix_max_end: Arc::from(prefix_max_end_indices(&run.ends)),
+                tokens: run.tokens,
+                carried_max_end: carried.map(|(index, _)| index),
+            });
+
+            let local = ((base + best.0) as u32, best.1);
             carried = match carried {
                 Some((_, end)) if end >= local.1 => carried,
                 _ => Some(local),
             };
+            base += segments.last().expect("just pushed").tokens.len();
         }
 
         Self {
             segments: Arc::from(segments),
-            len,
+            len: base,
             interner,
         }
     }
@@ -326,24 +378,61 @@ impl BufferSemanticTokens {
 
         // Enter at the segment holding `start` rather than walking to it, so a
         // viewport late in a large file costs its own tokens and no more.
-        let first = start / SEGMENT_TOKENS;
-        let last = end.div_ceil(SEGMENT_TOKENS);
+        let first = self.locate(start);
 
-        self.segments[first..last]
+        self.segments[first..]
             .iter()
-            .enumerate()
-            .flat_map(move |(offset, segment)| {
-                let base = (first + offset) * SEGMENT_TOKENS;
-                let lo = start.saturating_sub(base).min(segment.tokens.len());
-                let hi = end.saturating_sub(base).min(segment.tokens.len());
+            .take_while(move |segment| segment.base < end)
+            .flat_map(move |segment| {
+                let lo = start.saturating_sub(segment.base).min(segment.tokens.len());
+                let hi = end.saturating_sub(segment.base).min(segment.tokens.len());
                 segment.tokens[lo..hi].iter()
             })
     }
 
+    /// The tokens at whole-channel indices `range`, as one or more runs.
+    ///
+    /// A segment lying wholly inside `range` is handed over by refcount, which
+    /// is what lets a splice keep most of a large channel's allocations. The
+    /// partial segments at either end are copied, so a caller carrying a range
+    /// that does not align with the segmentation pays only for its edges.
+    pub fn carve(&self, range: Range<usize>) -> Vec<Arc<[SemanticTokenHighlight]>> {
+        let end = range.end.min(self.len);
+        let start = range.start.min(end);
+        if start == end {
+            return Vec::new();
+        }
+
+        self.segments[self.locate(start)..]
+            .iter()
+            .take_while(|segment| segment.base < end)
+            .map(|segment| {
+                let lo = start.saturating_sub(segment.base);
+                let hi = (end - segment.base).min(segment.tokens.len());
+                if lo == 0 && hi == segment.tokens.len() {
+                    segment.tokens.clone()
+                } else {
+                    Arc::from(&segment.tokens[lo..hi])
+                }
+            })
+            .collect()
+    }
+
+    /// Which segment holds whole-channel index `index`.
+    ///
+    /// Segments are ordered by base and do not share one, so the last segment
+    /// starting at or before `index` is the one holding it. An index past the
+    /// end lands on the final segment, which then yields nothing.
+    fn locate(&self, index: usize) -> usize {
+        self.segments
+            .partition_point(|segment| segment.base <= index)
+            .saturating_sub(1)
+    }
+
     /// The token at whole-channel index `index`.
     fn token(&self, index: usize) -> &SemanticTokenHighlight {
-        let segment = &self.segments[index / SEGMENT_TOKENS];
-        &segment.tokens[index % SEGMENT_TOKENS]
+        let segment = &self.segments[self.locate(index)];
+        &segment.tokens[index - segment.base]
     }
 
     /// The greatest resolved end among tokens `0..=index`.
@@ -352,9 +441,8 @@ impl BufferSemanticTokens {
     /// carried in from every segment before it, which is what makes the bound
     /// global rather than segment-local.
     fn prefix_max_end(&self, index: usize, resolve: &impl Fn(&Anchor) -> usize) -> usize {
-        let segment = &self.segments[index / SEGMENT_TOKENS];
-        let local = segment.prefix_max_end[index % SEGMENT_TOKENS] as usize
-            + (index / SEGMENT_TOKENS) * SEGMENT_TOKENS;
+        let segment = &self.segments[self.locate(index)];
+        let local = segment.base + segment.prefix_max_end[index - segment.base] as usize;
         let local_end = resolve(&self.token(local).range.end);
 
         match segment.carried_max_end {

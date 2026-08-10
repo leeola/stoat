@@ -1,6 +1,8 @@
 use crate::{
     buffer::{BufferHistory, BufferId, SharedBuffer, TextBuffer},
-    display_map::{HighlightStyleInterner, SemanticTokenHighlight, SemanticTokenSpans},
+    display_map::{
+        BufferSemanticTokens, HighlightStyleInterner, SemanticTokenHighlight, SemanticTokenSpans,
+    },
     lsp::LspSymbolKind,
 };
 use lsp_types::SemanticToken;
@@ -81,7 +83,7 @@ struct BufferEntry {
     /// pipeline stores the same `(tokens, interner)` it installs onto editors,
     /// so a fresh editor built for an already-parsed buffer can be seeded and
     /// paint styled on its first frame instead of waiting for a reparse.
-    tokens: Option<(Arc<[SemanticTokenHighlight]>, Arc<HighlightStyleInterner>)>,
+    tokens: Option<BufferSemanticTokens>,
     /// LSP semantic tokens retained across editor lifetimes, keyed by the buffer
     /// version they were computed against. A fresh editor is seeded from them,
     /// and the trigger reinstalls them instead of re-requesting, but only while
@@ -518,24 +520,16 @@ impl BufferRegistry {
 
     /// Retain the tree-sitter highlight tokens the parse pipeline installed onto
     /// this buffer's editors, so a later fresh editor can be seeded from them.
-    pub(crate) fn store_tokens(
-        &mut self,
-        id: BufferId,
-        tokens: Arc<[SemanticTokenHighlight]>,
-        interner: Arc<HighlightStyleInterner>,
-    ) {
+    pub(crate) fn store_tokens(&mut self, id: BufferId, channel: BufferSemanticTokens) {
         if let Some(entry) = self.buffers.get_mut(&id) {
-            entry.tokens = Some((tokens, interner));
+            entry.tokens = Some(channel);
         }
     }
 
-    /// The retained `(tokens, interner)` pair for `id`, if the parse pipeline
-    /// has produced tree-sitter tokens for it.
-    pub(crate) fn tokens_for(
-        &self,
-        id: BufferId,
-    ) -> Option<(Arc<[SemanticTokenHighlight]>, Arc<HighlightStyleInterner>)> {
-        self.buffers.get(&id)?.tokens.clone()
+    /// The retained highlight channel for `id`, if the parse pipeline has
+    /// produced tree-sitter tokens for it.
+    pub(crate) fn tokens_for(&self, id: BufferId) -> Option<&BufferSemanticTokens> {
+        self.buffers.get(&id)?.tokens.as_ref()
     }
 
     /// Retain the LSP semantic tokens computed for `id` at buffer `version`, so
@@ -596,8 +590,8 @@ impl BufferRegistry {
     /// active when the response landed for as long as the buffer went unedited.
     pub(crate) fn swap_token_interners(&mut self, interner: &Arc<HighlightStyleInterner>) {
         for entry in self.buffers.values_mut() {
-            if let Some((_, cached)) = entry.tokens.as_mut() {
-                *cached = interner.clone();
+            if let Some(channel) = entry.tokens.as_mut() {
+                *channel = channel.with_interner(interner.clone());
             }
             if let Some((_, _, cached)) = entry.lsp_tokens.as_mut() {
                 *cached = interner.clone();
@@ -960,10 +954,13 @@ mod tests {
 
         let mut reg = BufferRegistry::new();
         let (id, _) = reg.open(Path::new("/a.rs"), "fn a() {}\n");
-        let tokens: Arc<[SemanticTokenHighlight]> = Arc::from(Vec::new());
-        let interner = Arc::new(HighlightStyleInterner::default());
+        let channel = BufferSemanticTokens::new(
+            Arc::from(Vec::new()),
+            Arc::new(HighlightStyleInterner::default()),
+            |_| 0,
+        );
 
-        reg.store_tokens(id, tokens.clone(), interner.clone());
+        reg.store_tokens(id, channel.clone());
         assert!(reg.tokens_for(id).is_some(), "stored tokens are retained");
 
         reg.clear_syntax(id);
@@ -972,7 +969,7 @@ mod tests {
             "clear_syntax drops retained tokens"
         );
 
-        reg.store_tokens(id, tokens, interner);
+        reg.store_tokens(id, channel.clone());
         let lang = LanguageRegistry::standard()
             .for_path(Path::new("/a.rs"))
             .expect("rust language");
@@ -986,12 +983,15 @@ mod tests {
     #[test]
     fn evict_hidden_highlights_spares_visible_and_the_newest_cap() {
         let mut reg = BufferRegistry::new();
-        let tokens: Arc<[SemanticTokenHighlight]> = Arc::from(Vec::new());
-        let interner = Arc::new(HighlightStyleInterner::default());
+        let channel = BufferSemanticTokens::new(
+            Arc::from(Vec::new()),
+            Arc::new(HighlightStyleInterner::default()),
+            |_| 0,
+        );
         let ids: Vec<BufferId> = (0..5)
             .map(|_| {
                 let (id, _) = reg.new_scratch();
-                reg.store_tokens(id, tokens.clone(), interner.clone());
+                reg.store_tokens(id, channel.clone());
                 reg.mark_shown(id);
                 id
             })

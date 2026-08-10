@@ -769,10 +769,10 @@ impl Workspace {
     ) -> EditorState {
         let current_version = buffer.read().expect("buffer poisoned").snapshot.version;
         let mut editor = EditorState::new(buffer_id, buffer, executor, self.redraw_notify.clone());
-        if let Some((tokens, interner)) = self.buffers.tokens_for(buffer_id) {
+        if let Some(channel) = self.buffers.tokens_for(buffer_id) {
             editor
                 .display_map
-                .set_semantic_token_highlights(buffer_id, tokens, interner);
+                .set_semantic_token_channel(buffer_id, channel.clone());
         }
         if let Some((version, tokens, interner)) = self.buffers.lsp_tokens_for(buffer_id)
             && version == current_version
@@ -831,11 +831,8 @@ impl Workspace {
             self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
             self.buffers
                 .store_token_spans(out.buffer_id, out.token_spans.clone());
-            self.buffers.store_tokens(
-                out.buffer_id,
-                out.token_anchors.clone(),
-                syntax_styles.interner.clone(),
-            );
+            self.buffers
+                .store_tokens(out.buffer_id, out.token_channel.clone());
             for editor in self.editors.values_mut() {
                 if editor.buffer_id == out.buffer_id {
                     editor
@@ -887,7 +884,7 @@ impl Workspace {
             let prior_spans = self.buffers.take_token_spans(buffer_id);
             // The same parse's anchored tokens, index-aligned with the spans,
             // so the incremental path can hand a carried token back its anchor.
-            let prior_anchors = self.buffers.tokens_for(buffer_id).map(|(tokens, _)| tokens);
+            let prior_anchors = self.buffers.tokens_for(buffer_id).cloned();
 
             // Every buffer parses here, whatever its size. The tree-sitter parse
             // honors a deadline, but the captures walk after it does not and is
@@ -916,7 +913,7 @@ impl Workspace {
                     &mut prior,
                     &mut prior_map,
                     prior_spans.as_deref(),
-                    prior_anchors.as_deref(),
+                    prior_anchors.as_ref(),
                     &styles,
                     None,
                 )

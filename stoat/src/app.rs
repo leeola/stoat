@@ -11,7 +11,8 @@ use crate::{
     command_palette::CommandPalette,
     display_map::{
         highlights::{
-            BufferSemanticTokens, HighlightStyleId, SemanticTokenHighlight, SemanticTokenSpans,
+            BufferSemanticTokens, HighlightStyleId, HighlightStyleInterner, SemanticTokenHighlight,
+            SemanticTokenSpans, TokenRun,
         },
         syntax_theme::SyntaxStyles,
         DisplayPoint, DisplaySnapshot,
@@ -1678,12 +1679,6 @@ pub(crate) struct ParseJobOutput {
     /// viewing the buffer. It owns the token list, so the search index inside
     /// it cannot drift from the tokens it indexes.
     pub(crate) token_channel: BufferSemanticTokens,
-    /// The same tokens as one flat list, index-aligned with [`Self::token_spans`].
-    ///
-    /// The channel holds them in segments, which the next parse's carry cannot
-    /// use. It pairs a span with its anchor by index, so it needs both lists
-    /// indexed the same way.
-    pub(crate) token_anchors: Arc<[SemanticTokenHighlight]>,
     /// This parse's tokens as raw byte spans, retained so the next parse can
     /// diff against them and report its own changed rows.
     pub(crate) token_spans: SemanticTokenSpans,
@@ -11097,7 +11092,7 @@ pub(crate) fn parse_buffer_step(
     prior: &mut Option<SyntaxState>,
     prior_syntax_map: &mut Option<stoat_language::SyntaxMap>,
     prior_token_spans: Option<&[(Range<usize>, HighlightStyleId)]>,
-    prior_token_anchors: Option<&[SemanticTokenHighlight]>,
+    prior_token_anchors: Option<&BufferSemanticTokens>,
     styles: &SyntaxStyles,
     deadline: Option<(std::time::Instant, &Executor)>,
 ) -> Option<ParseJobOutput> {
@@ -11210,7 +11205,7 @@ pub(crate) fn parse_buffer_step(
         // parse's tokens have to be present and line up one for one.
         prior_token_spans
             .zip(prior_token_anchors)
-            .filter(|(spans, anchors)| spans.len() == anchors.len())
+            .filter(|(spans, channel)| spans.len() == channel.len())
             .zip(edits.zip(recapture_ranges))
             .and_then(|((spans, _), (edits, invalidated))| {
                 recapture_edited_ranges(
@@ -11238,17 +11233,20 @@ pub(crate) fn parse_buffer_step(
         )),
     };
 
-    let ends: Vec<usize> = styled.iter().map(|(range, _)| range.end).collect();
-    let tokens = match (&recaptured, prior_token_anchors) {
-        (Some(recaptured), Some(prior)) => recaptured.anchor_against(prior, &snapshot),
-        _ => anchor_spans(&styled, &ends, &snapshot),
-    };
-
     // The search index is an argmax over resolved token ends, and each anchor
-    // above resolves to the offset it was just built from, so the byte ends
+    // below resolves to the offset it was just built from, so the byte ends
     // answer it without resolving anything.
-    let token_channel =
-        BufferSemanticTokens::with_resolved_ends(tokens.clone(), styles.interner.clone(), &ends);
+    let ends: Vec<usize> = styled.iter().map(|(range, _)| range.end).collect();
+    let token_channel = match (&recaptured, prior_token_anchors) {
+        (Some(recaptured), Some(prior)) => {
+            recaptured.anchor_against(prior, styles.interner.clone(), &snapshot)
+        },
+        _ => BufferSemanticTokens::with_resolved_ends(
+            anchor_spans(&styled, &ends, &snapshot),
+            styles.interner.clone(),
+            &ends,
+        ),
+    };
 
     // Which rows this parse restained, for consumers that colour per row. It
     // needs the prior parse's spans and the patch that carries them forward;
@@ -11275,7 +11273,6 @@ pub(crate) fn parse_buffer_step(
         },
         syntax_map,
         token_channel,
-        token_anchors: tokens,
         token_spans: Arc::from(styled),
         changed_token_rows,
     })
@@ -11291,14 +11288,28 @@ pub(crate) fn parse_buffer_step(
 /// the narrowing was not paying for itself anyway.
 const RECAPTURE_ROUNDS: usize = 8;
 
+/// A stretch of tokens that survived an edit, in both parses' index spaces.
+///
+/// Both ranges have the same length. The prior side names where the anchors
+/// come from, the current side where they land.
+struct CarriedRun {
+    prior: Range<usize>,
+    current: Range<usize>,
+}
+
 /// One parse's tokens, assembled from the previous parse's tokens plus a
 /// re-query of the byte ranges an edit could have restyled.
 struct Recaptured {
     /// Every token in document order, as byte spans in the new rope.
     spans: Vec<(Range<usize>, HighlightStyleId)>,
-    /// Per entry of [`Self::spans`], the index of the prior token it was
-    /// carried from, or `None` for one this parse queried afresh.
-    carried_from: Vec<Option<usize>>,
+    /// The stretches of [`Self::spans`] that came across whole from the prior
+    /// parse, each naming the prior indices it was carried from.
+    ///
+    /// Anchoring reads this rather than a per-token record, because a carried
+    /// stretch's anchors are the prior ones untouched and can be taken by
+    /// refcount. Stretches are in document order and disjoint, and whatever
+    /// falls between them is a token this parse queried afresh.
+    carried: Vec<CarriedRun>,
     /// The prior tokens the re-query replaced, in the prior parse's byte
     /// coordinates and document order.
     replaced: Vec<(Range<usize>, HighlightStyleId)>,
@@ -11318,17 +11329,25 @@ impl Recaptured {
     /// and an anchor already follows text across edits, so re-anchoring it
     /// would only recompute what it already holds. Only the re-queried tokens
     /// are minted, through the same batched pair the full walk uses.
+    ///
+    /// A carried stretch is taken as whole segments of `prior` wherever its
+    /// bounds allow, so most of a large file's anchors reach the new channel by
+    /// refcount rather than being copied into a fresh allocation.
     fn anchor_against(
         &self,
-        prior: &[SemanticTokenHighlight],
+        prior: &BufferSemanticTokens,
+        interner: Arc<HighlightStyleInterner>,
         snapshot: &TextBufferSnapshot,
-    ) -> Arc<[SemanticTokenHighlight]> {
-        let fresh: Vec<usize> = self
-            .carried_from
-            .iter()
-            .enumerate()
-            .filter_map(|(ix, from)| from.is_none().then_some(ix))
-            .collect();
+    ) -> BufferSemanticTokens {
+        // Everything outside a carried stretch this parse queried, so those are
+        // the only anchors to mint.
+        let mut fresh: Vec<usize> = Vec::new();
+        let mut at = 0;
+        for run in &self.carried {
+            fresh.extend(at..run.current.start);
+            at = run.current.end;
+        }
+        fresh.extend(at..self.spans.len());
 
         let starts: Vec<usize> = fresh.iter().map(|&ix| self.spans[ix].0.start).collect();
         let ends: Vec<usize> = fresh.iter().map(|&ix| self.spans[ix].0.end).collect();
@@ -11337,20 +11356,52 @@ impl Recaptured {
             .into_iter()
             .zip(snapshot.anchors_at_batch(&ends, Bias::Left));
 
-        self.spans
-            .iter()
-            .zip(&self.carried_from)
-            .map(|((_, style), from)| SemanticTokenHighlight {
-                range: match from {
-                    Some(ix) => prior[*ix].range.clone(),
-                    None => {
+        // A minted stretch is built here. A carried one is taken from the prior
+        // channel's segments, whole ones by refcount. Both arrive as runs, so
+        // the new channel is segmented along the splice rather than rebuilt.
+        let mut runs: Vec<TokenRun> = Vec::new();
+        let mut mint_run = |runs: &mut Vec<TokenRun>, range: Range<usize>| {
+            if range.is_empty() {
+                return;
+            }
+            let tokens: Arc<[SemanticTokenHighlight]> = range
+                .clone()
+                .map(|ix| SemanticTokenHighlight {
+                    range: {
                         let (start, end) = minted.next().expect("one mint per fresh token");
                         start..end
                     },
-                },
-                style: *style,
-            })
-            .collect()
+                    style: self.spans[ix].1,
+                })
+                .collect();
+            runs.push(TokenRun {
+                tokens,
+                ends: self.spans[range].iter().map(|(s, _)| s.end).collect(),
+            });
+        };
+
+        let mut at = 0;
+        for run in &self.carried {
+            mint_run(&mut runs, at..run.current.start);
+            // The prior segmentation decides how many chunks the stretch
+            // arrives in, so walk the current side alongside it.
+            let mut cursor = run.current.start;
+            for tokens in prior.carve(run.prior.clone()) {
+                let upto = cursor + tokens.len();
+                runs.push(TokenRun {
+                    tokens,
+                    ends: self.spans[cursor..upto]
+                        .iter()
+                        .map(|(s, _)| s.end)
+                        .collect(),
+                });
+                cursor = upto;
+            }
+            at = run.current.end;
+        }
+        mint_run(&mut runs, at..self.spans.len());
+
+        BufferSemanticTokens::from_runs(runs, interner)
     }
 }
 
@@ -11537,23 +11588,38 @@ fn splice_recaptured(
 ) -> Recaptured {
     let total = prior.len() + fresh.iter().map(Vec::len).sum::<usize>();
     let mut spans = Vec::with_capacity(total);
-    let mut carried_from = Vec::with_capacity(total);
+    let mut carried: Vec<CarriedRun> = Vec::new();
     let mut replaced = Vec::new();
     let mut next_cover = 0;
 
+    // Extend the open stretch when this token continues it, and start a new one
+    // otherwise. Consecutive prior indices landing at consecutive current ones
+    // is the ordinary case, so most of a file becomes one stretch.
+    let extend = |carried: &mut Vec<CarriedRun>, prior_ix: usize, current_ix: usize| match carried
+        .last_mut()
+    {
+        Some(run) if run.prior.end == prior_ix && run.current.end == current_ix => {
+            run.prior.end += 1;
+            run.current.end += 1;
+        },
+        _ => carried.push(CarriedRun {
+            prior: prior_ix..prior_ix + 1,
+            current: current_ix..current_ix + 1,
+        }),
+    };
+
     for (ix, (span, style)) in prior.iter().enumerate() {
-        let carried = edits.old_to_new(span.start)..edits.old_to_new(span.end);
+        let moved = edits.old_to_new(span.start)..edits.old_to_new(span.end);
 
         // A span the edit replaced outright collapses onto a point. The full
         // walk emits no empty token, so neither may this path.
-        if carried.start >= carried.end {
+        if moved.start >= moved.end {
             replaced.push((span.clone(), *style));
             continue;
         }
 
-        while next_cover < covers.len() && covers[next_cover].end <= carried.start {
+        while next_cover < covers.len() && covers[next_cover].end <= moved.start {
             spans.extend_from_slice(&fresh[next_cover]);
-            carried_from.resize(spans.len(), None);
             next_cover += 1;
         }
 
@@ -11562,24 +11628,23 @@ fn splice_recaptured(
         // intersect it.
         let intersects_cover = covers
             .get(next_cover)
-            .is_some_and(|cover| cover.start < carried.end);
+            .is_some_and(|cover| cover.start < moved.end);
         if intersects_cover {
             replaced.push((span.clone(), *style));
             continue;
         }
 
-        spans.push((carried, *style));
-        carried_from.push(Some(ix));
+        extend(&mut carried, ix, spans.len());
+        spans.push((moved, *style));
     }
 
     for cover in &fresh[next_cover..] {
         spans.extend_from_slice(cover);
-        carried_from.resize(spans.len(), None);
     }
 
     Recaptured {
         spans,
-        carried_from,
+        carried,
         replaced,
         fresh: fresh.concat(),
     }
@@ -15010,7 +15075,7 @@ mod tests {
         };
 
         let resolve = |out: &ParseJobOutput| {
-            out.token_anchors
+            out.token_channel
                 .iter()
                 .map(|t| {
                     (
@@ -15069,7 +15134,7 @@ mod tests {
         syntax: Option<SyntaxState>,
         map: Option<stoat_language::SyntaxMap>,
         spans: Option<SemanticTokenSpans>,
-        anchors: Option<Arc<[SemanticTokenHighlight]>>,
+        anchors: Option<BufferSemanticTokens>,
     }
 
     impl CarriedParse {
@@ -15104,7 +15169,7 @@ mod tests {
             &mut state.syntax,
             &mut state.map,
             state.spans.as_deref(),
-            state.anchors.as_deref(),
+            state.anchors.as_ref(),
             styles,
             None,
         )
@@ -15132,7 +15197,7 @@ mod tests {
             "{step}: carried spans must equal a from-scratch parse",
         );
         let resolved = |out: &ParseJobOutput| -> Vec<(usize, usize, HighlightStyleId)> {
-            out.token_anchors
+            out.token_channel
                 .iter()
                 .map(|t| {
                     (
@@ -15153,7 +15218,7 @@ mod tests {
         state.syntax = Some(carried.syntax);
         state.map = Some(carried.syntax_map);
         state.spans = Some(carried.token_spans);
-        state.anchors = Some(carried.token_anchors);
+        state.anchors = Some(carried.token_channel);
         layers
     }
 
@@ -15484,7 +15549,7 @@ mod tests {
         )
         .expect("a single-layer local edit must recapture");
         assert!(
-            recaptured.carried_from.iter().any(Option::is_some),
+            !recaptured.carried.is_empty(),
             "a local edit must carry tokens rather than re-query them all",
         );
         assert_eq!(
@@ -15540,7 +15605,7 @@ mod tests {
             &mut prior,
             &mut prior_map,
             Some(&first.token_spans),
-            Some(&first.token_anchors),
+            Some(&first.token_channel),
             &styles,
             None,
         )
@@ -15760,13 +15825,16 @@ mod tests {
             .expect("parse should succeed")
         };
         assert!(
-            out.token_anchors.len() > 5,
+            out.token_channel.len() > 5,
             "fixture must produce a token stream worth indexing",
         );
 
         let resolve = |a: &Anchor| snapshot.resolve_anchor(a);
-        let per_anchor =
-            BufferSemanticTokens::new(out.token_anchors.clone(), styles.interner.clone(), resolve);
+        let per_anchor = BufferSemanticTokens::new(
+            out.token_channel.iter().cloned().collect::<Arc<[_]>>(),
+            styles.interner.clone(),
+            resolve,
+        );
 
         for start in 0..=text.len() {
             for end in [start, start + 1, start + 40, text.len()] {
@@ -17165,12 +17233,7 @@ mod tests {
     ///
     /// Tokens must intern through the shared table, since that is what the
     /// minimap's class lookup is keyed by.
-    fn first_scope_style(
-        stoat: &Stoat,
-    ) -> (
-        HighlightStyleId,
-        Arc<crate::display_map::highlights::HighlightStyleInterner>,
-    ) {
+    fn first_scope_style(stoat: &Stoat) -> (HighlightStyleId, Arc<HighlightStyleInterner>) {
         let style = stoat
             .syntax_styles
             .id_for_highlight(stoat_language::HighlightId(0))
