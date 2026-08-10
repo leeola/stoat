@@ -374,10 +374,36 @@ impl Visibility {
 /// background thread and installs via [`PtyEvent::AuxGpuReady`], so the primary
 /// never stalls on aux GPU setup. Until it arrives `gpu` is `None` and redraw
 /// requests find nothing to draw.
+/// The size a batch of window events settled on, for a caller that fits the
+/// surface once rather than per event.
+///
+/// A drag delivers several `Resized` per frame, and some window managers repeat
+/// the current size on a focus change or a move. The chain each one would run
+/// reallocates the swapchain, re-derives the cell grid, and tells the child its
+/// new size, so it runs on the last size of the batch instead of every size in
+/// it.
+#[derive(Default)]
+struct PendingResize(Option<(u32, u32)>);
+
+impl PendingResize {
+    /// Note a size the window reported, displacing any earlier one.
+    fn record(&mut self, width: u32, height: u32) {
+        self.0 = Some((width, height));
+    }
+
+    /// The size to fit to, leaving nothing behind for the next batch.
+    fn take(&mut self) -> Option<(u32, u32)> {
+        self.0.take()
+    }
+}
+
 struct AuxWindow {
     id: u32,
     window: Arc<Window>,
     gpu: Option<GpuContext>,
+    /// Size this window's surface has yet to be fitted to. See
+    /// [`PendingResize`].
+    pending_resize: PendingResize,
     /// The window's composed content grid, rendered whole each redraw.
     grid: Grid,
     /// Scratch that [`Terminal::project_pool`] composes one pool into before its
@@ -455,6 +481,8 @@ struct State {
     /// by the platform zoom combo. Drives the renderer's cell metrics on each
     /// change, scaled by [`Self::scale_factor`].
     font_size: u32,
+    /// Size the primary surface has yet to be fitted to. See [`PendingResize`].
+    pending_resize: PendingResize,
     /// The window's display scale factor (physical pixels per logical point),
     /// tracked from `ScaleFactorChanged` so the cell metrics re-derive when the
     /// window moves to a display of a different density.
@@ -990,6 +1018,7 @@ impl ApplicationHandler<PtyEvent> for App {
         window.request_redraw();
         self.state = Some(State {
             window,
+            pending_resize: PendingResize::default(),
             last_title: None,
             first_frame_start: Some(self.start),
             gpu,
@@ -1123,6 +1152,7 @@ impl ApplicationHandler<PtyEvent> for App {
         // between stoatty windows (one focus-out plus one focus-in) settles to
         // no net report while a click to a foreign app reports the app unfocused.
         reconcile_app_focus(state);
+        apply_pending_resizes(state);
 
         if !state.sync_pending.load(Ordering::Relaxed) {
             event_loop.set_control_flow(ControlFlow::Wait);
@@ -1211,20 +1241,9 @@ impl ApplicationHandler<PtyEvent> for App {
                 },
                 WindowEvent::Resized(size) => {
                     let size = *size;
-                    let resized = state
-                        .aux
-                        .iter_mut()
-                        .find(|aux| aux.window.id() == id)
-                        .and_then(|aux| {
-                            let dims = aux.gpu.as_mut().map(|gpu| {
-                                gpu.resize(size.width, size.height);
-                                gpu.grid_size()
-                            });
-                            aux.window.request_redraw();
-                            dims.map(|(rows, cols)| (aux.id, cols as u16, rows as u16))
-                        });
-                    if let Some((window, cols, rows)) = resized {
-                        send_window_event(state, WindowIpcEvent::Resized { window, cols, rows });
+                    if let Some(aux) = state.aux.iter_mut().find(|aux| aux.window.id() == id) {
+                        aux.pending_resize.record(size.width, size.height);
+                        aux.window.request_redraw();
                     }
                     return;
                 },
@@ -1395,12 +1414,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 }
             },
             WindowEvent::Resized(size) => {
-                state.gpu.resize(size.width, size.height);
-
-                let (rows, cols) = state.gpu.grid_size();
-                state.terminal.lock().resize(rows, cols);
-                let _ = state.pty.resize(rows as u16, cols as u16);
-
+                state.pending_resize.record(size.width, size.height);
                 state.window.request_redraw();
             },
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -1410,13 +1424,12 @@ impl ApplicationHandler<PtyEvent> for App {
                     .set_font_size(state.font_size, scale_factor as f32);
                 update_cell_pixels(&state.terminal, state.font_size, scale_factor as f32);
 
-                // The cell metrics moved with the new density; the surface is
-                // re-fitted by the `Resized` that follows. Re-read the grid size
-                // and resize the rest now, mirroring the font-zoom chain.
-                let (rows, cols) = state.gpu.grid_size();
-                state.terminal.lock().resize(rows, cols);
-                let _ = state.pty.resize(rows as u16, cols as u16);
-
+                // The cell metrics moved with the new density, so the grid has
+                // to be re-derived even though the surface has not changed
+                // size. Recording the size it already has does that, and costs
+                // nothing at the surface, which refuses a size it is at.
+                let size = state.window.inner_size();
+                state.pending_resize.record(size.width, size.height);
                 state.window.request_redraw();
             },
             WindowEvent::RedrawRequested => {
@@ -2786,6 +2799,7 @@ fn open_aux_window(
         id: window_id,
         window: window.clone(),
         gpu: None,
+        pending_resize: PendingResize::default(),
         grid: Grid::new(0, 0),
         scratch: Grid::new(0, 0),
         focused: false,
@@ -3052,6 +3066,37 @@ fn compose_aux_grid(
 fn send_window_event(state: &State, event: WindowIpcEvent) {
     if let Some(tx) = &state.window_event_tx {
         let _ = tx.send(event.encode_line());
+    }
+}
+
+/// Fit every window whose size moved during the event batch just handled.
+///
+/// Once per batch rather than per event, so a drag pays one swapchain
+/// reallocation and one pty ioctl per frame instead of one per size the window
+/// manager reported on the way. The terminal already refuses a resize to the
+/// cell dimensions it has, so only the reaching of it moved.
+fn apply_pending_resizes(state: &mut State) {
+    if let Some((width, height)) = state.pending_resize.take() {
+        state.gpu.resize(width, height);
+        let (rows, cols) = state.gpu.grid_size();
+        state.terminal.lock().resize(rows, cols);
+        let _ = state.pty.resize(rows as u16, cols as u16);
+    }
+
+    let mut reports: Vec<(u32, u16, u16)> = Vec::new();
+    for aux in &mut state.aux {
+        let Some((width, height)) = aux.pending_resize.take() else {
+            continue;
+        };
+        let Some(gpu) = aux.gpu.as_mut() else {
+            continue;
+        };
+        gpu.resize(width, height);
+        let (rows, cols) = gpu.grid_size();
+        reports.push((aux.id, cols as u16, rows as u16));
+    }
+    for (window, cols, rows) in reports {
+        send_window_event(state, WindowIpcEvent::Resized { window, cols, rows });
     }
 }
 
@@ -3609,8 +3654,8 @@ mod tests {
         popover_overflow, refresh_popover_overflows, reposition_scroll, seed_settle_flight,
         selection_copy_text, sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes, step_cursor,
         step_document_scroll, step_grid_scroll, step_popover_scroll, step_region_scroll,
-        step_scrollback_scroll, swallow_super_combo, wheel_lines, CursorAnimation, Input, PtyWrite,
-        Visibility, EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
+        step_scrollback_scroll, swallow_super_combo, wheel_lines, CursorAnimation, Input,
+        PendingResize, PtyWrite, Visibility, EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
     };
     #[cfg(unix)]
     use super::{window_socket_path, PathBuf};
@@ -3627,6 +3672,28 @@ mod tests {
         event::MouseScrollDelta,
         keyboard::{Key, ModifiersState, NamedKey},
     };
+
+    /// A burst of sizes costs one fitting, on the size it ended at.
+    ///
+    /// A drag reports several per frame, and fitting each one reallocates the
+    /// swapchain and tells the child a size it is about to be told again. Only
+    /// the last of them describes the window.
+    #[test]
+    fn a_burst_of_sizes_settles_on_the_last_one() {
+        let mut pending = PendingResize::default();
+        assert_eq!(pending.take(), None, "a window nobody resized fits nothing");
+
+        pending.record(800, 600);
+        pending.record(802, 600);
+        pending.record(806, 604);
+
+        assert_eq!(pending.take(), Some((806, 604)));
+        assert_eq!(
+            pending.take(),
+            None,
+            "and the batch after it fits nothing again",
+        );
+    }
 
     #[test]
     fn a_visible_window_draws_every_frame_it_is_asked_for() {

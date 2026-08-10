@@ -1218,10 +1218,14 @@ impl GpuContext {
 
     /// Re-configure the surface to `width`x`height` physical pixels.
     ///
+    /// A size the surface already has costs nothing. Reconfiguring reallocates
+    /// the swapchain, and window managers repeat the current size freely, on a
+    /// focus change or a move.
+    ///
     /// Zero-area sizes (e.g. a minimized window) are ignored, since
     /// configuring a surface with a zero dimension is invalid.
     pub fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 {
+        if !needs_configure(&self.config, width, height) {
             return;
         }
 
@@ -1602,6 +1606,15 @@ fn surface_formats(available: &[TextureFormat]) -> (TextureFormat, TextureFormat
     (surface, surface.remove_srgb_suffix())
 }
 
+/// Whether a surface configured as `config` has to be reconfigured to show
+/// `width`x`height` physical pixels.
+///
+/// A zero dimension is refused outright, a surface being invalid at one, which
+/// is what a minimized window reports.
+fn needs_configure(config: &SurfaceConfiguration, width: u32, height: u32) -> bool {
+    width != 0 && height != 0 && (config.width != width || config.height != height)
+}
+
 /// Convert an [`Rgb`] to a wgpu [`Color`], normalizing each channel to 0..1
 /// with an opaque alpha.
 fn rgb_to_color(rgb: Rgb) -> Color {
@@ -1634,9 +1647,9 @@ pub fn headless_device() -> Option<(Device, Queue)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_font_system, clamp_scissor, grid_dims, headless_device, surface_formats,
-        CommandEncoderDescriptor, CursorLayer, FontConfig, Frame, PoolComposite, Renderer, Scroll,
-        TextureFormat,
+        build_font_system, clamp_scissor, grid_dims, headless_device, needs_configure,
+        surface_formats, CommandEncoderDescriptor, CursorLayer, FontConfig, Frame, PoolComposite,
+        Renderer, Scroll, SurfaceConfiguration, TextureFormat,
     };
     use crate::render::CellMetrics;
     use stoatty_term::{
@@ -1854,6 +1867,31 @@ mod tests {
             .poll(PollType::wait_indefinitely())
             .expect("poll readback");
         buffer.slice(..).get_mapped_range().to_vec()
+    }
+
+    /// Reconfiguring reallocates the swapchain, and a window manager repeats
+    /// the current size freely, on a focus change or a move, so a size the
+    /// surface already has has to cost nothing.
+    #[test]
+    fn a_surface_is_reconfigured_only_for_a_size_it_is_not_at() {
+        let config = SurfaceConfiguration {
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            format: TextureFormat::Rgba8Unorm,
+            width: 800,
+            height: 600,
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: Vec::new(),
+        };
+
+        assert!(!needs_configure(&config, 800, 600), "the size it is at");
+        assert!(needs_configure(&config, 801, 600), "a wider window");
+        assert!(needs_configure(&config, 800, 601), "a taller window");
+        assert!(
+            !needs_configure(&config, 0, 600) && !needs_configure(&config, 800, 0),
+            "a minimized window reports a zero dimension, which no surface is valid at",
+        );
     }
 
     #[test]
