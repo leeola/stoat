@@ -1,5 +1,4 @@
 use crate::{Clock, Executor, LocalClock, Runnable, Scheduler, Timer};
-use futures::channel::oneshot;
 use std::{panic::AssertUnwindSafe, sync::Arc, time::Duration};
 use tokio::{runtime::Handle, sync::mpsc};
 
@@ -51,12 +50,7 @@ impl Scheduler for TokioScheduler {
     }
 
     fn timer(&self, duration: Duration) -> Timer {
-        let (sender, receiver) = oneshot::channel();
-        self.handle.spawn(async move {
-            tokio::time::sleep(duration).await;
-            let _ = sender.send(());
-        });
-        Timer(receiver)
+        Timer::waiting(async move { tokio::time::sleep(duration).await })
     }
 
     fn clock(&self) -> &dyn Clock {
@@ -175,6 +169,28 @@ mod tests {
         assert!(
             ran.load(Ordering::SeqCst),
             "a task scheduled after a panicking one still runs",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_timer_leaves_nothing_sleeping() {
+        let handle = Handle::current();
+        let scheduler = TokioScheduler::new(handle.clone());
+
+        // Let the pump reach its first await, so it counts as alive below.
+        tokio::task::yield_now().await;
+        let alive_before = handle.metrics().num_alive_tasks();
+
+        // A debounce does this on every keystroke. It takes a timer, then
+        // drops it unfired when the next keystroke re-arms.
+        for _ in 0..32 {
+            drop(scheduler.timer(Duration::from_secs(3600)));
+        }
+
+        assert_eq!(
+            handle.metrics().num_alive_tasks(),
+            alive_before,
+            "dropping a timer cancels its sleep instead of orphaning it",
         );
     }
 

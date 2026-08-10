@@ -179,7 +179,7 @@ impl Scheduler for TestScheduler {
             _sender: sender,
         });
         state.timers.sort_by_key(|t| t.expiration);
-        Timer(receiver)
+        Timer::signalled(receiver)
     }
 
     fn clock(&self) -> &dyn Clock {

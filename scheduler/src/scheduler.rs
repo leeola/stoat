@@ -34,15 +34,48 @@ pub trait Scheduler: Send + Sync {
     fn schedule_blocking(&self, work: Box<dyn FnOnce() + Send + 'static>);
 }
 
-pub struct Timer(oneshot::Receiver<()>);
+/// A future that resolves once its scheduler decides the requested duration
+/// has passed.
+///
+/// Dropping one before it resolves cancels the wait outright, so a debounce
+/// that re-arms on every keystroke leaves nothing behind.
+pub struct Timer(TimerInner);
+
+enum TimerInner {
+    /// Resolves when the scheduler drops the paired sender, which is how a
+    /// scheduler running its own clock expires a timer on demand.
+    Signalled(oneshot::Receiver<()>),
+    /// Resolves when the scheduler's own wait completes. Dropping it drops
+    /// that wait, which is what makes cancellation free.
+    Waiting(Pin<Box<dyn Future<Output = ()> + Send>>),
+}
+
+impl Timer {
+    /// A timer the scheduler fires by dropping or sending on the paired
+    /// sender.
+    pub(crate) fn signalled(receiver: oneshot::Receiver<()>) -> Self {
+        Self(TimerInner::Signalled(receiver))
+    }
+
+    /// A timer that resolves when `wait` does.
+    ///
+    /// `wait` is first polled when the timer is, not when it is built, so a
+    /// scheduler may hand over work that needs its runtime in scope.
+    pub(crate) fn waiting(wait: impl Future<Output = ()> + Send + 'static) -> Self {
+        Self(TimerInner::Waiting(Box::pin(wait)))
+    }
+}
 
 impl Future for Timer {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        match Pin::new(&mut self.0).poll(cx) {
-            Poll::Ready(_) => Poll::Ready(()),
-            Poll::Pending => Poll::Pending,
+        match &mut self.0 {
+            TimerInner::Signalled(receiver) => match Pin::new(receiver).poll(cx) {
+                Poll::Ready(_) => Poll::Ready(()),
+                Poll::Pending => Poll::Pending,
+            },
+            TimerInner::Waiting(wait) => wait.as_mut().poll(cx),
         }
     }
 }
