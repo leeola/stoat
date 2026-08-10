@@ -4078,6 +4078,7 @@ dependencies = [
 name = "stoat_language"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "cc",
  "divan",
  "imara-diff",

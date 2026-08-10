@@ -49,7 +49,7 @@ pub use moves::{find_moves, ChangesetMoveRecord, FileMoveInput, MoveRecord};
 use std::{ops::Range, path::PathBuf, sync::Arc};
 pub use tree_diff::{
     diff_changeset, diff_changeset_from_slots, diff_with_language, diff_with_language_cancellable,
-    finalize_single, prepare_diff, ChangesetSlot, PreparedDiff,
+    finalize_single, prepare_diff, ChangesetSlot, PreparedDiff, TreeCache, TreeMemo,
 };
 pub use unchanged::{
     mark_unchanged, ChangeKind as PreprocessChangeKind, ChangeMap, PreprocessResult,

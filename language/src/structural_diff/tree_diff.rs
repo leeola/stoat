@@ -33,11 +33,12 @@ use super::{
 };
 use crate::{parse, Language};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     marker::PhantomData,
     ops::Range,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{atomic::AtomicBool, Arc, Mutex},
 };
+use tree_sitter::Tree;
 
 /// Run the full structural-diff pipeline against two source strings.
 ///
@@ -57,7 +58,85 @@ use std::{
 /// per-edit cost-optimal pairing). On parse failure the function
 /// returns `None` and the caller falls through to [`super::diff_lines`].
 pub fn diff_with_language(language: &Arc<Language>, lhs: &str, rhs: &str) -> Option<DiffResult> {
-    diff_with_language_cancellable(language, lhs, rhs, None)
+    diff_with_language_cancellable(language, lhs, rhs, None, None)
+}
+
+/// Parsed trees kept by the text they came from, so a side that has not
+/// changed is parsed once across the diffs that read it.
+///
+/// Two repeats make this worth keeping. A review refresh re-diffs files whose
+/// base commit has not moved, and a three-way merge diffs both sides against
+/// one ancestor, so the base text arrives already parsed more often than not.
+/// Parsing dominates the per-file cost, which turns the repeat into a hash.
+///
+/// Only the tree is kept. The lowered arena borrows the source text through
+/// its atom content slices, so it cannot outlive the call that built it.
+#[derive(Default)]
+pub struct TreeMemo {
+    entries: VecDeque<(TreeKey, Tree)>,
+}
+
+/// A shared [`TreeMemo`]. Callers that want hits across separate diffs hold
+/// one and hand it to each.
+pub type TreeCache = Arc<Mutex<TreeMemo>>;
+
+/// The text a tree was parsed from, plus the language that parsed it. Two
+/// languages over identical text produce different trees, so the name is part
+/// of the key.
+type TreeKey = ([u8; 32], &'static str);
+
+/// How many trees a memo holds before the oldest is dropped.
+///
+/// A diff reads one base per file, and the runs that repeat are a refresh over
+/// the files on screen or a merge over one ancestor, so the working set is
+/// small. Trees are large enough that keeping more of them to catch a rarer
+/// hit is the wrong trade.
+const MEMO_CAPACITY: usize = 8;
+
+impl TreeMemo {
+    fn get(&self, key: &TreeKey) -> Option<Tree> {
+        self.entries
+            .iter()
+            .find(|(entry, _)| entry == key)
+            .map(|(_, tree)| tree.clone())
+    }
+
+    fn insert(&mut self, key: TreeKey, tree: Tree) {
+        if self.entries.iter().any(|(entry, _)| *entry == key) {
+            return;
+        }
+        if self.entries.len() == MEMO_CAPACITY {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((key, tree));
+    }
+}
+
+/// Parse `text`, answering from `memo` when it has already parsed that exact
+/// text with that language.
+///
+/// The parse runs outside the lock, which a miss holds only long enough to
+/// look up and to store. A changeset warms one diff job per changed file on
+/// the blocking pool, and parsing under the lock would queue every one of them
+/// behind whichever job got there first. Two jobs missing at once both parse,
+/// which is the price. Identical text and language give identical trees, so
+/// whichever lands first is kept.
+fn parse_memoized(language: &Arc<Language>, text: &str, memo: Option<&TreeCache>) -> Option<Tree> {
+    let Some(memo) = memo else {
+        return parse(language, text, None);
+    };
+
+    let key: TreeKey = (blake3::hash(text.as_bytes()).into(), language.name);
+    if let Some(tree) = memo.lock().expect("tree memo poisoned").get(&key) {
+        return Some(tree);
+    }
+
+    let tree = parse(language, text, None)?;
+    memo.lock()
+        .expect("tree memo poisoned")
+        .insert(key, tree.clone());
+
+    Some(tree)
 }
 
 /// Variant of [`diff_with_language`] that accepts an optional
@@ -66,13 +145,17 @@ pub fn diff_with_language(language: &Arc<Language>, lhs: &str, rhs: &str) -> Opt
 /// through to the preprocessing-only diff. Intended for
 /// cancel-on-edit scheduling: the caller sets the flag when a newer
 /// edit supersedes the in-flight job.
+///
+/// `memo` retains the parsed `lhs` tree, so a caller diffing the same base
+/// repeatedly parses it once. Pass [`None`] to parse both sides every call.
 pub fn diff_with_language_cancellable(
     language: &Arc<Language>,
     lhs: &str,
     rhs: &str,
     cancel: Option<&AtomicBool>,
+    memo: Option<&TreeCache>,
 ) -> Option<DiffResult> {
-    let prepared = prepare_diff(language, lhs, rhs, cancel)?;
+    let prepared = prepare_diff(language, lhs, rhs, cancel, memo)?;
     Some(finalize_single(&prepared))
 }
 
@@ -102,8 +185,9 @@ pub fn prepare_diff<'a>(
     lhs: &'a str,
     rhs: &'a str,
     cancel: Option<&AtomicBool>,
+    memo: Option<&TreeCache>,
 ) -> Option<PreparedDiff<'a>> {
-    prepare_per_file(language, lhs, rhs, cancel).map(|prepared| PreparedDiff {
+    prepare_per_file(language, lhs, rhs, cancel, memo).map(|prepared| PreparedDiff {
         prepared,
         _marker: PhantomData,
     })
@@ -159,7 +243,11 @@ pub fn finalize_single(prepared: &PreparedDiff<'_>) -> DiffResult {
 /// `language` is `None` (or whose parse fails) fall back to
 /// [`super::diff_lines`] for that file and do not participate in
 /// cross-file move detection.
-pub fn diff_changeset(inputs: Vec<FileDiffInput<'_>>) -> Vec<DiffResult> {
+///
+/// `memo` retains each input's parsed `lhs_text`, so re-running a changeset
+/// whose bases have not moved parses none of them again. Pass [`None`] to
+/// parse every side afresh.
+pub fn diff_changeset(inputs: Vec<FileDiffInput<'_>>, memo: Option<&TreeCache>) -> Vec<DiffResult> {
     let slots: Vec<ChangesetSlot<'_>> = inputs
         .into_iter()
         .map(|input| {
@@ -170,7 +258,7 @@ pub fn diff_changeset(inputs: Vec<FileDiffInput<'_>>) -> Vec<DiffResult> {
                 rhs_text,
             } = input;
             match language.as_ref() {
-                Some(lang) => match prepare_diff(lang, lhs_text, rhs_text, None) {
+                Some(lang) => match prepare_diff(lang, lhs_text, rhs_text, None, memo) {
                     Some(prepared) => ChangesetSlot::Prepared(buffer, Box::new(prepared)),
                     None => ChangesetSlot::LineDiff {
                         lhs: lhs_text,
@@ -325,8 +413,12 @@ fn prepare_per_file<'a>(
     lhs: &'a str,
     rhs: &'a str,
     cancel: Option<&AtomicBool>,
+    memo: Option<&TreeCache>,
 ) -> Option<PreparedFile<'a>> {
-    let lhs_tree = parse(language, lhs, None)?;
+    // Only `lhs` is memoized. It is the base in every caller, where `rhs` is
+    // the buffer being edited, so retaining `rhs` would never be read back and
+    // would evict live base entries.
+    let lhs_tree = parse_memoized(language, lhs, memo)?;
     let rhs_tree = parse(language, rhs, None)?;
     let (mut lhs_arena, lhs_root) = lower_tree(&lhs_tree, lhs);
     let (mut rhs_arena, rhs_root) = lower_tree(&rhs_tree, rhs);
@@ -1054,6 +1146,110 @@ mod tests {
         );
     }
 
+    /// The changes a diff produced, as comparable text.
+    fn change_shape(result: &DiffResult) -> Vec<(Side, DiffChangeKind, Range<usize>)> {
+        result
+            .changes
+            .iter()
+            .map(|c| (c.side, c.kind, c.byte_range.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn a_memoized_base_diffs_the_same_as_a_cold_one() {
+        let lang = rust_lang();
+        let base = "fn a() { one(); two(); }\nfn b() { three(); }\n";
+        let memo: TreeCache = TreeCache::default();
+
+        // Two edits against one base, which is the shape a keystroke burst
+        // produces and the shape the memo exists for.
+        for rhs in ["fn a() { one(); TWO(); }\nfn b() { three(); }\n", base] {
+            let cold = diff_with_language(&lang, base, rhs).expect("cold diff parses");
+            let warm = diff_with_language_cancellable(&lang, base, rhs, None, Some(&memo))
+                .expect("memoized diff parses");
+
+            assert_eq!(
+                change_shape(&warm),
+                change_shape(&cold),
+                "a memoized base yields the same changes as a fresh parse",
+            );
+            assert_eq!(warm.fell_back_to_line_diff, cold.fell_back_to_line_diff);
+        }
+
+        assert_eq!(
+            memo.lock().expect("memo poisoned").entries.len(),
+            1,
+            "one base parsed once, however many edits are diffed against it",
+        );
+    }
+
+    #[test]
+    fn a_memo_separates_languages_over_identical_text() {
+        // What matters is that one language's tree is never handed to another.
+        // The key is what prevents it, so the key is what this reads.
+        let rust = rust_lang();
+        let text = "fn a() { one(); }\n";
+        let memo: TreeCache = TreeCache::default();
+
+        diff_with_language_cancellable(&rust, text, text, None, Some(&memo)).expect("diff parses");
+        let stored = memo.lock().expect("memo poisoned").entries[0].0;
+        assert_eq!(
+            stored.1, rust.name,
+            "the key names the language that parsed"
+        );
+        assert_eq!(
+            stored.0,
+            <[u8; 32]>::from(blake3::hash(text.as_bytes())),
+            "the key names the text that was parsed",
+        );
+    }
+
+    #[test]
+    fn a_memo_hit_is_read_rather_than_reparsed() {
+        let lang = rust_lang();
+        let wanted = "fn a() { one(); }\n";
+        let decoy_text = "fn zzz() { }\n";
+        let memo: TreeCache = TreeCache::default();
+
+        // Seed the slot `wanted` would take with a tree parsed from other
+        // text. Nothing in production can produce a memo in this state. It is
+        // what makes the read observable, since parsing `wanted` afresh could
+        // never yield this tree.
+        let key: TreeKey = (blake3::hash(wanted.as_bytes()).into(), lang.name);
+        let decoy = parse(&lang, decoy_text, None).expect("decoy parses");
+        memo.lock().expect("memo poisoned").insert(key, decoy);
+
+        let got = parse_memoized(&lang, wanted, Some(&memo)).expect("resolves");
+        assert_eq!(
+            got.root_node().to_sexp(),
+            parse(&lang, decoy_text, None)
+                .expect("decoy parses")
+                .root_node()
+                .to_sexp(),
+            "a stored tree is handed back instead of parsing again",
+        );
+    }
+
+    #[test]
+    fn a_memo_drops_its_oldest_tree_past_capacity() {
+        let lang = rust_lang();
+        let memo: TreeCache = TreeCache::default();
+
+        for i in 0..MEMO_CAPACITY + 2 {
+            let base = format!("fn f{i}() {{ call(); }}\n");
+            diff_with_language_cancellable(&lang, &base, "fn g() {}\n", None, Some(&memo))
+                .expect("diff parses");
+        }
+
+        let guard = memo.lock().expect("memo poisoned");
+        assert_eq!(guard.entries.len(), MEMO_CAPACITY, "capacity is the bound");
+        let oldest = <[u8; 32]>::from(blake3::hash(b"fn f0() { call(); }\n"));
+        assert!(
+            !guard.entries.iter().any(|(key, _)| key.0 == oldest),
+            "the first base is the one evicted",
+        );
+    }
+
     #[test]
     fn cancellation_flag_returns_preprocessing_only_result() {
         // Setting the cancel flag before the first vertex expansion
@@ -1064,7 +1260,7 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let lhs = "fn a() { call(arg1, arg2, arg3); }";
         let rhs = "fn b() { call(arg1, arg2, arg3); }";
-        let result = diff_with_language_cancellable(&lang, lhs, rhs, Some(&cancel))
+        let result = diff_with_language_cancellable(&lang, lhs, rhs, Some(&cancel), None)
             .expect("parse succeeds even on cancel");
         assert!(!result.fell_back_to_line_diff);
         // The structural-diff pipeline completed; we got changes even
@@ -1101,7 +1297,7 @@ mod tests {
             },
         ];
 
-        let results = diff_changeset(inputs);
+        let results = diff_changeset(inputs, None);
         assert_eq!(results.len(), 2);
 
         let file_a_lhs_moved: Vec<&DiffChange> = results[0]
@@ -1168,7 +1364,7 @@ mod tests {
                        fn alpha() { let x = 1; let y = 2; let z = 3; }",
         }];
 
-        let results = diff_changeset(inputs);
+        let results = diff_changeset(inputs, None);
         assert_eq!(results.len(), 1);
         let moved: Vec<&DiffChange> = results[0]
             .changes

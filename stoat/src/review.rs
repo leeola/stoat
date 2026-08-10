@@ -140,7 +140,7 @@ pub fn extract_review_hunks_changeset(
         })
         .collect();
 
-    let diff_results = structural_diff::diff_changeset(inputs);
+    let diff_results = structural_diff::diff_changeset(inputs, None);
 
     files
         .iter()
@@ -184,6 +184,7 @@ pub fn extract_review_hunks_single(
             &file.base_text,
             &file.buffer_text,
             cancel,
+            None,
         )
         .unwrap_or_else(|| structural_diff::diff(&file.base_text, &file.buffer_text)),
         None => structural_diff::diff(&file.base_text, &file.buffer_text),
@@ -222,10 +223,14 @@ pub(crate) fn aligned_rows(
     language: Option<&Arc<Language>>,
 ) -> Vec<ReviewRow> {
     let diff = match language {
-        Some(language) => {
-            structural_diff::diff_with_language_cancellable(language, base_text, buffer_text, None)
-                .unwrap_or_else(|| structural_diff::diff(base_text, buffer_text))
-        },
+        Some(language) => structural_diff::diff_with_language_cancellable(
+            language,
+            base_text,
+            buffer_text,
+            None,
+            None,
+        )
+        .unwrap_or_else(|| structural_diff::diff(base_text, buffer_text)),
         None => structural_diff::diff(base_text, buffer_text),
     };
     aligned_rows_from_diff(&diff, base_text, buffer_text, &|_| None)
