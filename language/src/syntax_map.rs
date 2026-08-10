@@ -514,7 +514,13 @@ impl SyntaxMap {
                         continue;
                     };
                     match &injection.inner {
-                        InjectionInner::Fixed(inner_lang) => {
+                        InjectionInner::Fixed { language, .. } => {
+                            // Unfilled when the language was built outside the
+                            // registry that wires these, leaving nothing to
+                            // inject rather than a layer with no grammar.
+                            let Some(inner_lang) = language.get() else {
+                                continue;
+                            };
                             for capture in m.captures {
                                 let inner_start = capture.node.start_byte();
                                 let inner_end = capture.node.end_byte();

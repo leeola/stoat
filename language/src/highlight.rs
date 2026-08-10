@@ -461,7 +461,12 @@ pub fn extract_highlights_rope_with_cache(
             // This single-level walk resolves only fixed injections. Fence
             // injections need per-fence language resolution and the recursive
             // multi-layer SyntaxMap path.
-            let InjectionInner::Fixed(inner) = &injection.inner else {
+            // An unfilled slot means the language was built outside the registry
+            // that wires these, so there is nothing to inject.
+            let InjectionInner::Fixed { language, .. } = &injection.inner else {
+                continue;
+            };
+            let Some(inner) = language.get() else {
                 continue;
             };
             for capture in m.captures {
