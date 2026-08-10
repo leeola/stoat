@@ -174,3 +174,74 @@ fn walk_workspace_files_excludes_baked_in_defaults() {
 
     assert_eq!(walked, vec!["src.rs".to_string()]);
 }
+
+/// The parallel walk has to deliver every file, which the serial one gets for
+/// free. Each of its threads buffers a batch and flushes the remainder when it
+/// ends, so a count that is not a multiple of the batch size is what catches a
+/// missing flush.
+#[test]
+fn walk_workspace_files_parallel_delivers_every_file() {
+    use std::{
+        ops::ControlFlow,
+        sync::{Arc, Mutex},
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    // Enough to fill batches on several threads and leave each a partial one.
+    let count = 700;
+    for i in 0..count {
+        std::fs::write(dir.path().join(format!("f{i}.txt")), b"x").unwrap();
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    LocalFs.walk_workspace_files_parallel(dir.path(), &move |batch| {
+        sink.lock().unwrap().extend(batch);
+        ControlFlow::Continue(())
+    });
+
+    let mut got = seen.lock().unwrap().clone();
+    got.sort();
+    let mut want = LocalFs.walk_workspace_files(dir.path());
+    want.sort();
+    assert_eq!(got.len(), count, "every file arrives exactly once");
+    assert_eq!(
+        got, want,
+        "and the parallel walk sees what the serial one does"
+    );
+}
+
+/// Breaking stops the walk rather than running it out, which is what lets a
+/// closed search abandon a large tree.
+#[test]
+fn walk_workspace_files_parallel_stops_on_break() {
+    use std::{
+        ops::ControlFlow,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..4_000 {
+        std::fs::write(dir.path().join(format!("f{i}.txt")), b"x").unwrap();
+    }
+
+    let batches = Arc::new(AtomicUsize::new(0));
+    let counter = batches.clone();
+    LocalFs.walk_workspace_files_parallel(dir.path(), &move |_batch| {
+        counter.fetch_add(1, Ordering::Relaxed);
+        ControlFlow::Break(())
+    });
+
+    // Every thread may be inside a batch when the first break lands, and each
+    // flushes its remainder on the way out, so the bound is generous. What it
+    // rules out is the walk running to completion, which 4000 files over a
+    // 256-path batch would take far more than this.
+    let seen = batches.load(Ordering::Relaxed);
+    assert!(
+        seen < 8,
+        "a break must stop the walk promptly, saw {seen} batches",
+    );
+}

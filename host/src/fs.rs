@@ -135,6 +135,49 @@ pub trait FsHost: Send + Sync {
             let _ = on_batch(paths);
         }
     }
+
+    /// Parallel counterpart to [`Self::walk_workspace_files_streaming`], which
+    /// calls `on_batch` from several threads at once.
+    ///
+    /// The callback is shared rather than owned, which is what forces it to be
+    /// `Fn + Sync` where the streaming one is `FnMut`. This exists for a caller
+    /// doing real work per batch rather than collecting paths to work on
+    /// later. The work lands on the walker's threads instead of queueing
+    /// behind one consumer.
+    ///
+    /// Ordering is weaker than the streaming walk's, which is already
+    /// unsorted. Batches from different threads interleave arbitrarily.
+    ///
+    /// Returning [`ControlFlow::Break`] stops the walk as before, though
+    /// threads already inside a batch finish it.
+    ///
+    /// The default impl runs the streaming walk on the calling thread, so a
+    /// host without a parallel walker still satisfies the contract.
+    fn walk_workspace_files_parallel(
+        &self,
+        root: &Path,
+        on_batch: &(dyn Fn(Vec<PathBuf>) -> ControlFlow<()> + Sync),
+    ) {
+        self.walk_workspace_files_streaming(root, &mut |batch| on_batch(batch));
+    }
+}
+
+/// One parallel-walk visitor's in-flight batch.
+///
+/// Exists for its [`Drop`], which is where a thread's last partial batch gets
+/// delivered. Without it those paths would be dropped with the visitor, and a
+/// caller would silently miss up to a batch of files per walker thread.
+struct BatchSink<'a> {
+    buffer: Vec<PathBuf>,
+    on_batch: &'a (dyn Fn(Vec<PathBuf>) -> ControlFlow<()> + Sync),
+}
+
+impl Drop for BatchSink<'_> {
+    fn drop(&mut self) {
+        if !self.buffer.is_empty() {
+            let _ = (self.on_batch)(std::mem::take(&mut self.buffer));
+        }
+    }
 }
 
 /// Batch size used by streaming walkers. Small enough that early
@@ -458,6 +501,57 @@ impl FsHost for LocalFs {
         if !buffer.is_empty() {
             let _ = on_batch(buffer);
         }
+    }
+
+    fn walk_workspace_files_parallel(
+        &self,
+        root: &Path,
+        on_batch: &(dyn Fn(Vec<PathBuf>) -> ControlFlow<()> + Sync),
+    ) {
+        let defaults = build_default_ignore(root);
+        let walker = WalkBuilder::new(root)
+            .hidden(false)
+            .require_git(false)
+            .add_custom_ignore_filename(".stoatignore")
+            .filter_entry(move |entry| {
+                let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+                !defaults.matched(entry.path(), is_dir).is_ignore()
+            })
+            .build_parallel();
+
+        walker.run(|| {
+            // Each visitor owns its buffer, so batches never cross threads and
+            // the walker's threads never contend for one. The sink flushes what
+            // is left when the visitor ends, which is the only thing that gets
+            // a thread's final partial batch scanned.
+            let mut sink = BatchSink {
+                buffer: Vec::with_capacity(WALK_BATCH_SIZE),
+                on_batch,
+            };
+            Box::new(move |entry| {
+                let Ok(entry) = entry else {
+                    return ignore::WalkState::Continue;
+                };
+                if !entry.file_type().is_some_and(|t| t.is_file()) {
+                    return ignore::WalkState::Continue;
+                }
+
+                sink.buffer.push(entry.into_path());
+                if sink.buffer.len() < WALK_BATCH_SIZE {
+                    return ignore::WalkState::Continue;
+                }
+
+                let batch =
+                    std::mem::replace(&mut sink.buffer, Vec::with_capacity(WALK_BATCH_SIZE));
+                match on_batch(batch) {
+                    // Quit rather than Skip, since a caller that has stopped
+                    // reading wants the whole walk abandoned, not this
+                    // directory alone.
+                    ControlFlow::Break(()) => ignore::WalkState::Quit,
+                    ControlFlow::Continue(()) => ignore::WalkState::Continue,
+                }
+            })
+        });
     }
 }
 

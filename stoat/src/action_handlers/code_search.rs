@@ -13,7 +13,7 @@ use std::{
     collections::{HashMap, HashSet},
     ops::ControlFlow,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 use stoat_action::OpenFile;
 use stoat_scheduler::Task;
@@ -252,18 +252,33 @@ pub(crate) fn spawn_code_search(
         SearchMode::Regex => {
             let regex = Regex::new(query).ok()?;
             stoat.executor.spawn_blocking(move || {
-                let mut walked: HashSet<PathBuf> = HashSet::new();
-                fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
+                let walked: Mutex<HashSet<PathBuf>> = Mutex::new(HashSet::new());
+                fs_host.walk_workspace_files_parallel(&git_root, &|batch| {
+                    // Cloned per batch rather than shared across the walker's
+                    // threads, which keeps them off one internal cache pool.
+                    // The clone shares the compiled program, so it costs a
+                    // refcount and amortises over the batch.
+                    let regex = regex.clone();
+
                     let mut matches = Vec::new();
+                    let mut overlaid = Vec::new();
                     for path in batch {
                         match overlay.get(&path) {
                             Some(text) => {
-                                walked.insert(path.clone());
+                                overlaid.push(path.clone());
                                 scan_text(&regex, text, &path, &mut matches);
                             },
                             None => scan_file(&*fs_host, &regex, &path, &mut matches),
                         }
                     }
+
+                    // Recorded per batch rather than per path, so the shared
+                    // set is touched once by a thread that saw an overlaid
+                    // file and not at all by one that did not.
+                    if !overlaid.is_empty() {
+                        walked.lock().expect("walked set poisoned").extend(overlaid);
+                    }
+
                     if !matches.is_empty() {
                         if tx.send(matches).is_err() {
                             return ControlFlow::Break(());
@@ -274,6 +289,7 @@ pub(crate) fn spawn_code_search(
                     }
                     ControlFlow::Continue(())
                 });
+                let walked = walked.into_inner().expect("walked set poisoned");
 
                 // A buffer the walk never offered is one the workspace does not
                 // have on disk yet, or one its ignore rules skip. It is still
