@@ -410,6 +410,17 @@ pub enum ThemeError {
         #[snafu(implicit)]
         location: snafu::Location,
     },
+    /// A VSCode theme file reached by the resolved theme's inheritance chain
+    /// is not readable as a color theme. Raised when the theme is selected
+    /// rather than when the file is read, since the file is only converted
+    /// once something resolves it.
+    #[snafu(display("theme {name} failed: {message}"))]
+    ImportFailed {
+        name: String,
+        message: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
     #[snafu(display("unknown palette ref or named color: '{name}'"))]
     UnknownColor {
         name: String,

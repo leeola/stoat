@@ -45,6 +45,7 @@ use crate::{
     selection::merge_overlapping_spans,
     symbol_finder::SymbolFinder,
     term_session::{TermId, TermReturnFocus, TermSelection},
+    theme_pool::{ThemePool, VscodeSource},
     ui::RenderFrame,
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
     workspace_picker::WorkspacePicker,
@@ -70,7 +71,7 @@ use std::{
     sync::Arc,
 };
 use stoat_action::{Conflict, Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
-use stoat_config::{LineNumbers, MinimapMode, Settings, Spanned, TabBarMode, ThemeBlock, WrapMode};
+use stoat_config::{LineNumbers, MinimapMode, Settings, TabBarMode, WrapMode};
 use stoat_language::{
     self as language, Language, LanguageRegistry, SyntaxMapCapture, SyntaxSnapshot, SyntaxState,
 };
@@ -162,7 +163,7 @@ struct ConfigArtifacts {
     keymap: Keymap,
     settings: Settings,
     theme: crate::theme::Theme,
-    theme_blocks: Vec<Spanned<ThemeBlock>>,
+    theme_pool: ThemePool,
     syntax_styles: SyntaxStyles,
     minimap_class_table: crate::minimap::ClassTable,
 }
@@ -174,8 +175,9 @@ struct ConfigArtifacts {
 /// `config` *is* the embedded default, which is also how the theme precedence
 /// below tells a user-chosen theme from the shipped one.
 ///
-/// `imported` are the already-converted VSCode theme blocks, slotted between the
-/// embedded and user blocks so a user config's own `theme` block still wins.
+/// `imported` are the VSCode themes, slotted between the embedded and user
+/// blocks so a user config's own `theme` block still wins. They are carried as
+/// unconverted sources, so only the theme resolved here is paid for.
 ///
 /// `env_theme` names the theme inherited from the environment. It applies only
 /// when neither `cli_settings` nor a user config picks one, and only when the
@@ -186,22 +188,28 @@ struct ConfigArtifacts {
 fn build_config_artifacts(
     config: Option<stoat_config::Config>,
     embedded: Option<stoat_config::Config>,
-    imported: &[Spanned<ThemeBlock>],
+    imported: &[Arc<VscodeSource>],
     cli_settings: Settings,
     env_theme: Option<String>,
 ) -> ConfigArtifacts {
     // The whole pool is retained so SetTheme can re-resolve any theme at
     // runtime, and so an `inherits PARENT` sees every candidate parent.
-    let theme_blocks: Vec<Spanned<ThemeBlock>> = {
-        let mut blocks = Vec::new();
+    let theme_pool = {
+        let mut pool = ThemePool::default();
         if let Some(base) = embedded.as_ref() {
-            blocks.extend(base.themes.iter().cloned());
+            for block in &base.themes {
+                pool.push_parsed(block.clone());
+            }
         }
-        blocks.extend(imported.iter().cloned());
+        for source in imported {
+            pool.push_vscode(source.clone());
+        }
         if let Some(c) = config.as_ref() {
-            blocks.extend(c.themes.iter().cloned());
+            for block in &c.themes {
+                pool.push_parsed(block.clone());
+            }
         }
-        blocks
+        pool
     };
 
     let settings = {
@@ -221,7 +229,7 @@ fn build_config_artifacts(
             && !user_theme_set
             && let Some(name) = env_theme
         {
-            if theme_blocks.iter().any(|b| b.node.name.node == name) {
+            if theme_pool.contains(&name) {
                 settings.theme = Some(name);
             } else {
                 tracing::warn!("STOAT_THEME '{name}' names no known theme; using the default");
@@ -233,11 +241,10 @@ fn build_config_artifacts(
 
     let theme = {
         let name = settings.theme.as_deref().unwrap_or("default_dark");
-        if theme_blocks.is_empty() {
+        if theme_pool.is_empty() {
             crate::theme::Theme::empty()
         } else {
-            let all: Vec<&Spanned<ThemeBlock>> = theme_blocks.iter().collect();
-            crate::theme::Theme::from_blocks(name, &all).unwrap_or_else(|e| {
+            theme_pool.resolve(name).unwrap_or_else(|e| {
                 tracing::error!("theme '{name}' load failed: {e}");
                 crate::theme::Theme::empty()
             })
@@ -265,7 +272,7 @@ fn build_config_artifacts(
         keymap,
         settings,
         theme,
-        theme_blocks,
+        theme_pool,
         syntax_styles,
         minimap_class_table,
     }
@@ -598,14 +605,15 @@ pub struct Stoat {
     /// flag passed on the command line outranks the file both times.
     pub(crate) cli_settings: Settings,
     pub theme: Arc<crate::theme::Theme>,
-    /// The combined embedded-plus-user `theme` blocks the active theme was built
-    /// from, retained so [`ActionKind::SetTheme`] can re-resolve a different
-    /// theme at runtime without reparsing the config.
-    pub(crate) theme_blocks: Vec<Spanned<ThemeBlock>>,
-    /// The VSCode themes converted at startup, both built-in and from the user's
-    /// theme directory. Retained so a config reload rebuilds the same pool
-    /// without re-reading or re-parsing the theme files.
-    pub(crate) imported_theme_blocks: Vec<Spanned<ThemeBlock>>,
+    /// Every theme the session can switch to, the active one among them,
+    /// retained so [`ActionKind::SetTheme`] can re-resolve a different theme at
+    /// runtime without reparsing the config.
+    pub(crate) theme_pool: ThemePool,
+    /// The VSCode themes read at startup, both built-in and from the user's
+    /// theme directory, held as their unconverted JSON. Retained so a config
+    /// reload rebuilds the same pool without re-reading the theme files, and so
+    /// a theme converted before the reload stays converted after it.
+    pub(crate) imported_themes: Vec<Arc<VscodeSource>>,
     /// How far the user has zoomed each modal past the size its content asks
     /// for, in steps of a tenth of the screen. An absent kind sits at zero.
     ///
@@ -1742,7 +1750,7 @@ impl Stoat {
         user_themes: Vec<(String, String)>,
         env_theme: Option<String>,
     ) -> Self {
-        let (config, theme_base, mut config_error) = match user_config {
+        let (config, theme_base, config_error) = match user_config {
             Some(source) => {
                 let (parsed, errors) = stoat_config::parse(&source);
                 if errors.is_empty() {
@@ -1762,50 +1770,35 @@ impl Stoat {
             None => (Self::parse_default_keymap(), None, None),
         };
 
-        // Converting the VSCode themes once and retaining the blocks lets a
-        // mid-session reload rebuild the identical pool without re-reading the
-        // theme directory, and keeps the parse errors on the startup path where
-        // the transient status lives.
-        let imported_theme_blocks = {
+        // Retaining the sources lets a mid-session reload rebuild the identical
+        // pool without re-reading the theme directory, and lets a theme already
+        // converted stay converted across the reload.
+        let imported_themes: Vec<Arc<VscodeSource>> = {
             let builtins = [
                 ("one-dark", THEME_ONE_DARK),
                 ("gruvbox-dark", THEME_GRUVBOX_DARK),
                 ("gruvbox-light", THEME_GRUVBOX_LIGHT),
                 ("one-light", THEME_ONE_LIGHT),
             ];
-            let sources = builtins
+            builtins
                 .into_iter()
                 .map(|(stem, source)| (stem.to_string(), source.to_string()))
-                .chain(user_themes);
-
-            let mut blocks = Vec::new();
-            for (stem, source) in sources {
-                match vscode_theme::parse(&source) {
-                    Ok(theme) => blocks.push(crate::theme_vscode::theme_block(&stem, &theme)),
-                    Err(error) => {
-                        let message = format!("theme {stem} failed: {error}");
-                        tracing::error!("{message}");
-                        config_error = Some(match config_error.take() {
-                            Some(existing) => format!("{existing}; {message}"),
-                            None => message,
-                        });
-                    },
-                }
-            }
-            blocks
+                .chain(user_themes)
+                .map(|(stem, source)| Arc::new(VscodeSource::new(stem, source)))
+                .collect()
         };
 
         let ConfigArtifacts {
             keymap,
             settings,
             theme,
-            theme_blocks,
+            theme_pool,
             syntax_styles,
             minimap_class_table,
         } = build_config_artifacts(
             config,
             theme_base,
-            &imported_theme_blocks,
+            &imported_themes,
             cli_settings.clone(),
             env_theme,
         );
@@ -1861,8 +1854,8 @@ impl Stoat {
             settings,
             cli_settings,
             theme: Arc::new(theme),
-            theme_blocks,
-            imported_theme_blocks,
+            theme_pool,
+            imported_themes,
             modal_zoom: std::collections::BTreeMap::new(),
             modal_split: std::collections::BTreeMap::new(),
             command_palette: None,
@@ -2134,13 +2127,13 @@ impl Stoat {
             keymap,
             settings,
             theme,
-            theme_blocks,
+            theme_pool,
             syntax_styles,
             minimap_class_table,
         } = build_config_artifacts(
             config,
             Self::parse_default_keymap(),
-            &self.imported_theme_blocks,
+            &self.imported_themes,
             self.cli_settings.clone(),
             None,
         );
@@ -2148,7 +2141,7 @@ impl Stoat {
         self.keymap = keymap;
         self.settings = settings;
         self.theme = Arc::new(theme);
-        self.theme_blocks = theme_blocks;
+        self.theme_pool = theme_pool;
         self.syntax_styles = syntax_styles;
         self.minimap_class_table = minimap_class_table;
 
@@ -21438,22 +21431,18 @@ mod tests {
         );
 
         assert!(
-            stoat
-                .theme_blocks
-                .iter()
-                .any(|b| b.node.name.node == "my-gruvbox"),
+            stoat.theme_pool.contains("my-gruvbox"),
             "the user theme joins the pool",
         );
         assert!(
-            stoat
-                .theme_blocks
-                .iter()
-                .any(|b| b.node.name.node == "gruvbox-dark"),
+            stoat.theme_pool.contains("gruvbox-dark"),
             "the built-in themes join the pool too",
         );
 
-        let all: Vec<&Spanned<ThemeBlock>> = stoat.theme_blocks.iter().collect();
-        let theme = crate::theme::Theme::from_blocks("my-gruvbox", &all).expect("theme resolves");
+        let theme = stoat
+            .theme_pool
+            .resolve("my-gruvbox")
+            .expect("theme resolves");
         assert_eq!(
             theme.get("ui.background").bg,
             Some(Color::Rgb(0x28, 0x28, 0x28))
@@ -21461,10 +21450,13 @@ mod tests {
     }
 
     #[test]
-    fn broken_user_theme_surfaces_in_status() {
+    fn only_the_resolved_theme_converts() {
         let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-        let user_themes = vec![("bad".to_string(), "{ not json".to_string())];
-        let stoat = Stoat::new_with_user_config(
+        let user_themes = vec![(
+            "unused".to_string(),
+            r##"{ "name": "unused", "colors": { "editor.background": "#282828" } }"##.to_string(),
+        )];
+        let mut stoat = Stoat::new_with_user_config(
             scheduler.executor(),
             Settings::default(),
             PathBuf::new(),
@@ -21473,9 +21465,62 @@ mod tests {
             None,
         );
 
+        assert_eq!(
+            stoat.theme.name, "default_dark",
+            "an embedded theme is active"
+        );
         assert!(
-            !stoat.theme_blocks.iter().any(|b| b.node.name.node == "bad"),
-            "a theme that fails to parse is skipped",
+            stoat.imported_themes.iter().all(|t| !t.is_converted()),
+            "startup resolves an embedded theme, so no VSCode theme is converted",
+        );
+
+        action_handlers::dispatch(
+            &mut stoat,
+            &stoat_action::SetTheme {
+                name: "unused".to_string(),
+            },
+        );
+        let converted: Vec<&str> = stoat
+            .imported_themes
+            .iter()
+            .filter(|t| t.is_converted())
+            .map(|t| t.name())
+            .collect();
+        assert_eq!(
+            converted,
+            ["unused"],
+            "selecting a theme converts that theme and no other",
+        );
+    }
+
+    #[test]
+    fn broken_user_theme_surfaces_when_selected() {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let user_themes = vec![("bad".to_string(), "{ not json".to_string())];
+        let mut stoat = Stoat::new_with_user_config(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::new(),
+            None,
+            user_themes,
+            None,
+        );
+
+        assert_eq!(
+            stoat.pending_message, None,
+            "an unselected theme is never read, so startup reports nothing",
+        );
+        assert!(
+            stoat.theme_pool.contains("bad"),
+            "the theme is listed by file stem, which reading it cannot change",
+        );
+
+        let before = stoat.theme.name.clone();
+        action_handlers::dispatch(
+            &mut stoat,
+            &stoat_action::SetTheme {
+                name: "bad".to_string(),
+            },
         );
         assert!(
             stoat
@@ -21483,8 +21528,10 @@ mod tests {
                 .as_deref()
                 .unwrap_or_default()
                 .contains("theme bad failed"),
-            "the failure surfaces in the transient status",
+            "selecting it surfaces the failure in the transient status: {:?}",
+            stoat.pending_message,
         );
+        assert_eq!(stoat.theme.name, before, "the active theme is kept");
     }
 
     fn stoat_with_env_theme(user_config: Option<&str>, cli: Settings, env: &str) -> Stoat {

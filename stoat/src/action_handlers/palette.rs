@@ -54,9 +54,8 @@ pub(super) fn arg_candidates(stoat: &Stoat, source: ValueSource) -> Option<ArgCa
         ValueSource::Themes => {
             let mut seen = std::collections::HashSet::new();
             let names = stoat
-                .theme_blocks
-                .iter()
-                .map(|b| b.node.name.node.as_str())
+                .theme_pool
+                .names()
                 .filter(|name| seen.insert(name.to_string()))
                 .map(PathBuf::from)
                 .collect();

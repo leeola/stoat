@@ -67,6 +67,7 @@ pub(crate) mod symbol_finder;
 pub mod term_screen;
 pub mod term_session;
 pub mod theme;
+pub(crate) mod theme_pool;
 mod theme_vscode;
 pub mod ui;
 pub mod workspace;

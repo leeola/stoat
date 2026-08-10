@@ -1125,8 +1125,7 @@ fn open_last_picker(stoat: &mut Stoat) -> UpdateEffect {
 /// table rather than by reparsing or re-requesting them, which would leave them
 /// showing the previous theme until an edit or a server response arrived.
 fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
-    let all: Vec<_> = stoat.theme_blocks.iter().collect();
-    match crate::theme::Theme::from_blocks(name, &all) {
+    match stoat.theme_pool.resolve(name) {
         Ok(theme) => {
             stoat.theme = Arc::new(theme);
             stoat.syntax_styles = SyntaxStyles::from_theme(&stoat.theme);

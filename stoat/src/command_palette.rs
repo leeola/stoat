@@ -2250,9 +2250,9 @@ mod tests {
         let mut h = Stoat::test();
         let (cfg, errors) = stoat_config::parse("theme probe { ui.text.fg = \"#abcdef\"; }");
         assert!(errors.is_empty(), "seed theme parses");
-        h.stoat
-            .theme_blocks
-            .extend(cfg.expect("parsed config").themes);
+        for block in cfg.expect("parsed config").themes {
+            h.stoat.theme_pool.push_parsed(block);
+        }
 
         h.type_text(":SetTheme ");
         h.snapshot();
@@ -2293,9 +2293,9 @@ mod tests {
         let mut h = Stoat::test();
         let (cfg, errors) = stoat_config::parse("theme probe { ui.text.fg = \"#abcdef\"; }");
         assert!(errors.is_empty(), "seed theme parses");
-        h.stoat
-            .theme_blocks
-            .extend(cfg.expect("parsed config").themes);
+        for block in cfg.expect("parsed config").themes {
+            h.stoat.theme_pool.push_parsed(block);
+        }
 
         h.type_text(":theme ");
         h.snapshot();
