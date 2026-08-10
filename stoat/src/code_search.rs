@@ -169,6 +169,16 @@ pub(crate) fn scan_file(
     let Ok(text) = std::str::from_utf8(&buf) else {
         return;
     };
+    scan_text(regex, text, path, out);
+}
+
+/// Scan `text` for `regex`, pushing one [`SearchMatch`] per match site onto
+/// `out`, each reporting `path` as where it was found.
+///
+/// The text is the caller's, which is what lets a search read an edited buffer
+/// rather than the file behind it. Offsets are into `text`, so a caller
+/// supplying buffer text gets offsets that index that buffer.
+pub(crate) fn scan_text(regex: &Regex, text: &str, path: &Path, out: &mut Vec<SearchMatch>) {
     // Matches arrive in ascending order, so each one's position is the last
     // one's plus what lies between them. Recomputing from the start of the file
     // each time would walk the file once per match.
@@ -295,6 +305,144 @@ mod tests {
         h.type_text(query);
         h.settle();
         h.advance_clock(CODE_SEARCH_DEBOUNCE);
+    }
+
+    /// Open `name` under the root, type `insert` into it, and leave it dirty
+    /// and unsaved, then open the code-search modal over the workspace.
+    fn open_over_with_edit(files: &[(&str, &str)], name: &str, insert: &str) -> TestHarness {
+        let mut h = crate::Stoat::test();
+        let root = PathBuf::from("/repo");
+        for (file, contents) in files {
+            h.fake_fs()
+                .insert_file(root.join(file), contents.as_bytes());
+        }
+        h.stoat.active_workspace_mut().git_root = root.clone();
+
+        h.open_file(&root.join(name));
+        h.settle();
+        h.type_keys("i");
+        h.type_text(insert);
+        h.type_keys("escape");
+        h.settle();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        h
+    }
+
+    /// A search reads the buffer the user is editing, not the file behind it.
+    /// The word typed here exists nowhere on disk.
+    #[test]
+    fn an_unsaved_edit_is_searchable() {
+        let mut h = open_over_with_edit(&[("a.rs", "fn saved() {}\n")], "a.rs", "// scribbled\n");
+        run_query(&mut h, "scribbled");
+
+        let finder = h.stoat.code_search.as_ref().expect("modal open");
+        assert_eq!(
+            finder.matches.len(),
+            1,
+            "the unsaved word matches: {:?}",
+            finder.matches,
+        );
+        assert!(finder.matches[0].path.ends_with("a.rs"));
+    }
+
+    /// The overlay replaces the file rather than adding to it, so text present
+    /// only on disk does not match while the buffer over it is edited.
+    #[test]
+    fn a_dirty_buffer_hides_what_only_disk_holds() {
+        let mut h = crate::Stoat::test();
+        let root = PathBuf::from("/repo");
+        h.fake_fs()
+            .insert_file(root.join("a.rs"), b"fn kept() {}\n");
+        h.stoat.active_workspace_mut().git_root = root.clone();
+
+        h.open_file(&root.join("a.rs"));
+        h.settle();
+        h.type_keys("i");
+        h.type_text("// edited\n");
+        h.type_keys("escape");
+        h.settle();
+
+        // The file moves on under the open buffer, which is what an external
+        // write does. The buffer never saw this word, so a search that reads
+        // the buffer must not find it.
+        h.fake_fs()
+            .insert_file(root.join("a.rs"), b"fn kept() {}\nfn disk_only() {}\n");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        run_query(&mut h, "disk_only");
+
+        let finder = h.stoat.code_search.as_ref().expect("modal open");
+        assert!(
+            finder.matches.is_empty(),
+            "text only on disk must not match under a dirty buffer: {:?}",
+            finder.matches,
+        );
+    }
+
+    /// A buffer the walk never offers still matches, which is what lets a file
+    /// that has never been written show up at all.
+    #[test]
+    fn a_dirty_buffer_outside_the_walk_still_matches() {
+        // The walk is rooted at /repo, so a buffer under /elsewhere is never
+        // offered to it.
+        let mut h = crate::Stoat::test();
+        h.fake_fs()
+            .insert_file(PathBuf::from("/elsewhere/b.rs"), b"fn other() {}\n");
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+
+        h.open_file(Path::new("/elsewhere/b.rs"));
+        h.settle();
+        h.type_keys("i");
+        h.type_text("// offsite\n");
+        h.type_keys("escape");
+        h.settle();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        run_query(&mut h, "offsite");
+
+        let finder = h.stoat.code_search.as_ref().expect("modal open");
+        assert_eq!(
+            finder.matches.len(),
+            1,
+            "an unwalked dirty buffer still matches: {:?}",
+            finder.matches,
+        );
+    }
+
+    /// The offset a match reports has to index the text it was found in, since
+    /// selecting it jumps the live buffer to that byte.
+    #[test]
+    fn a_match_offset_indexes_the_edited_buffer() {
+        let inserted = "// pad pad pad\n";
+        let mut h = open_over_with_edit(&[("a.rs", "fn target() {}\n")], "a.rs", inserted);
+        run_query(&mut h, "target");
+
+        let finder = h.stoat.code_search.as_ref().expect("modal open");
+        assert_eq!(finder.matches.len(), 1, "one match: {:?}", finder.matches);
+        let found = &finder.matches[0];
+
+        let text = {
+            let ws = h.stoat.active_workspace();
+            let id = ws
+                .buffers
+                .id_for_path(Path::new("/repo/a.rs"))
+                .expect("the buffer is open");
+            let buffer = ws.buffers.get(id).expect("the buffer is open");
+            let read = buffer.read().expect("buffer poisoned");
+            read.snapshot.visible_text.to_string()
+        };
+        assert!(
+            text[found.offset..].starts_with("target"),
+            "offset {} must land on the match in the buffer, found {:?}",
+            found.offset,
+            &text[found.offset..(found.offset + 10).min(text.len())],
+        );
+        assert!(
+            found.offset > inserted.len() - 2,
+            "and must have moved past the inserted text, got {}",
+            found.offset,
+        );
     }
 
     /// Twelve matches over a viewport of six, so a page is three rows and both

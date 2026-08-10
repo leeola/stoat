@@ -2,14 +2,19 @@ use crate::{
     app::{Stoat, UpdateEffect},
     code_search::{
         ast::{ast_scan_file, AstLang},
-        scan_file, CodeSearchFinder, SearchMatch, SearchMode, MATCH_CAP,
+        scan_file, scan_text, CodeSearchFinder, SearchMatch, SearchMode, MATCH_CAP,
     },
     pane::View,
     picker::PreviewSource,
 };
 use ast_grep_core::Pattern;
 use regex::Regex;
-use std::{ops::ControlFlow, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::ControlFlow,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use stoat_action::OpenFile;
 use stoat_scheduler::Task;
 use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
@@ -181,13 +186,48 @@ fn sync_code_search_preview(stoat: &mut Stoat) {
     };
     match selected {
         Some((path, line)) => {
-            finder
-                .preview
-                .sync(ws, fs_host, language_registry, PreviewSource::File(path));
+            // An open buffer is what the match was found in when the file is
+            // edited, so previewing the file would show text the match's line
+            // number does not describe.
+            let source = match ws.buffers.id_for_path(&path) {
+                Some(id) => PreviewSource::Buffer(id),
+                None => PreviewSource::File(path),
+            };
+            finder.preview.sync(ws, fs_host, language_registry, source);
             finder.preview.scroll_to_line(ws, line.saturating_sub(1));
         },
         None => finder.preview.clear(ws),
     }
+}
+
+/// The unsaved text of every dirty file-backed buffer, keyed by its path.
+///
+/// A search reads these instead of the files behind them, so a match reflects
+/// what the user is looking at and its offset indexes that same text. Clean
+/// buffers are left out because they equal their files, and scratch buffers
+/// because they have no path a walked one could equal.
+///
+/// Taken once per query rather than read per file, so one scan sees one
+/// consistent state of the workspace even while the user keeps typing.
+fn dirty_buffer_overlay(stoat: &Stoat) -> Arc<HashMap<PathBuf, Arc<str>>> {
+    let buffers = &stoat.active_workspace().buffers;
+    let overlay = buffers
+        .dirty_buffers()
+        .into_iter()
+        .filter_map(|dirty| {
+            let path = dirty.path?;
+            let buffer = buffers.get(dirty.id)?;
+            let text = buffer
+                .read()
+                .expect("buffer poisoned")
+                .snapshot
+                .visible_text
+                .to_string();
+            Some((path, Arc::from(text.as_str())))
+        })
+        .collect();
+
+    Arc::new(overlay)
 }
 
 /// Spawn the streaming workspace scan for `query` under the finder's current
@@ -206,15 +246,23 @@ pub(crate) fn spawn_code_search(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let fs_host = stoat.fs_host.clone();
     let redraw_notify = stoat.redraw_notify.clone();
+    let overlay = dirty_buffer_overlay(stoat);
 
     let task = match finder.mode {
         SearchMode::Regex => {
             let regex = Regex::new(query).ok()?;
             stoat.executor.spawn_blocking(move || {
+                let mut walked: HashSet<PathBuf> = HashSet::new();
                 fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
                     let mut matches = Vec::new();
                     for path in batch {
-                        scan_file(&*fs_host, &regex, &path, &mut matches);
+                        match overlay.get(&path) {
+                            Some(text) => {
+                                walked.insert(path.clone());
+                                scan_text(&regex, text, &path, &mut matches);
+                            },
+                            None => scan_file(&*fs_host, &regex, &path, &mut matches),
+                        }
                     }
                     if !matches.is_empty() {
                         if tx.send(matches).is_err() {
@@ -226,6 +274,19 @@ pub(crate) fn spawn_code_search(
                     }
                     ControlFlow::Continue(())
                 });
+
+                // A buffer the walk never offered is one the workspace does not
+                // have on disk yet, or one its ignore rules skip. It is still
+                // open and still edited, so it still matches.
+                let mut matches = Vec::new();
+                for (path, text) in overlay.iter() {
+                    if !walked.contains(path) {
+                        scan_text(&regex, text, path, &mut matches);
+                    }
+                }
+                if !matches.is_empty() && tx.send(matches).is_ok() {
+                    redraw_notify.notify_one();
+                }
             })
         },
         SearchMode::Ast => {
@@ -236,25 +297,31 @@ pub(crate) fn spawn_code_search(
             let target_name = lang.name;
             let parse_cache = finder.parse_cache.clone();
             stoat.executor.spawn_blocking(move || {
+                let scan = |path: &Path, text: &str, matches: &mut Vec<_>| {
+                    let mut cache = parse_cache.lock().expect("parse cache poisoned");
+                    ast_scan_file(text, &ast_lang, &pattern, path, &mut cache, matches);
+                };
+
+                let mut walked: HashSet<PathBuf> = HashSet::new();
                 fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
                     let mut matches = Vec::new();
                     for path in batch {
                         if language_registry.for_path(&path).map(|l| l.name) != Some(target_name) {
                             continue;
                         }
-                        let mut buf = Vec::new();
-                        if fs_host.read(&path, &mut buf).is_ok()
-                            && let Ok(text) = std::str::from_utf8(&buf)
-                        {
-                            let mut cache = parse_cache.lock().expect("parse cache poisoned");
-                            ast_scan_file(
-                                text,
-                                &ast_lang,
-                                &pattern,
-                                &path,
-                                &mut cache,
-                                &mut matches,
-                            );
+                        match overlay.get(&path) {
+                            Some(text) => {
+                                walked.insert(path.clone());
+                                scan(&path, text, &mut matches);
+                            },
+                            None => {
+                                let mut buf = Vec::new();
+                                if fs_host.read(&path, &mut buf).is_ok()
+                                    && let Ok(text) = std::str::from_utf8(&buf)
+                                {
+                                    scan(&path, text, &mut matches);
+                                }
+                            },
                         }
                     }
                     if !matches.is_empty() {
@@ -267,6 +334,21 @@ pub(crate) fn spawn_code_search(
                     }
                     ControlFlow::Continue(())
                 });
+
+                // A buffer the walk never offered is one the workspace does not
+                // have on disk yet, or one its ignore rules skip. It is still
+                // open and still edited, so it still matches.
+                let mut matches = Vec::new();
+                for (path, text) in overlay.iter() {
+                    if !walked.contains(path)
+                        && language_registry.for_path(path).map(|l| l.name) == Some(target_name)
+                    {
+                        scan(path, text, &mut matches);
+                    }
+                }
+                if !matches.is_empty() && tx.send(matches).is_ok() {
+                    redraw_notify.notify_one();
+                }
             })
         },
     };
