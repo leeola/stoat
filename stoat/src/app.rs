@@ -2845,7 +2845,7 @@ impl Stoat {
 
     pub async fn run(
         &mut self,
-        mut events: Receiver<Event>,
+        mut events: UnboundedReceiver<Event>,
         render: watch::Sender<Option<RenderFrame>>,
     ) -> io::Result<()> {
         self.start_index_build();
@@ -3198,7 +3198,7 @@ impl Stoat {
     /// Each channel is drained only to its currently-queued extent. Messages
     /// that arrive mid-drain are handled on the next loop iteration, which
     /// keeps render forward-progress under a sustained producer.
-    fn drain_pending(&mut self, events: &mut Receiver<Event>) -> (UpdateEffect, usize) {
+    fn drain_pending(&mut self, events: &mut UnboundedReceiver<Event>) -> (UpdateEffect, usize) {
         let mut effect = UpdateEffect::None;
         let mut coalesced = 0;
 
@@ -22399,15 +22399,49 @@ mod tests {
     #[test]
     fn drain_pending_applies_every_queued_event() {
         let mut h = Stoat::test();
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(16);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
         for size in [(80u16, 24u16), (100, 30), (120, 40)] {
-            tx.try_send(Event::Resize(size.0, size.1)).unwrap();
+            tx.send(Event::Resize(size.0, size.1)).unwrap();
         }
         let (effect, coalesced) = h.stoat.drain_pending(&mut rx);
         assert_eq!(effect, UpdateEffect::Redraw);
         assert_eq!(coalesced, 3, "all three queued events counted");
         assert_eq!(h.stoat.size(), Rect::new(0, 0, 120, 40));
         assert!(rx.try_recv().is_err(), "drain must empty the channel");
+    }
+
+    /// A backlog deeper than any queue bound still lands in one drain, with
+    /// every send returning rather than waiting for room.
+    ///
+    /// The sender is the UI thread, inside the same loop that flushes frames
+    /// and polls stdin. A send that waited would park that loop, and with it
+    /// the only reader of fd 0, so the backpressure would land in the kernel's
+    /// tty buffer where an overflow tears escape sequences into garbage. Mouse
+    /// capture makes a depth like this ordinary rather than exotic, since
+    /// pointer motion alone produces hundreds of events a second.
+    #[test]
+    fn a_backlog_past_any_bound_queues_without_waiting() {
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+
+        // Well past the 64 the channel used to hold, and past any bound that
+        // would replace it.
+        let sizes: Vec<(u16, u16)> = (0..500).map(|i| (80 + i % 40, 24 + i % 20)).collect();
+        for &(width, rows) in &sizes {
+            tx.send(Event::Resize(width, rows))
+                .expect("a queued send never waits for room");
+        }
+
+        let (effect, coalesced) = h.stoat.drain_pending(&mut rx);
+        assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(coalesced, sizes.len(), "the whole backlog applies at once");
+
+        let (width, rows) = *sizes.last().expect("fixture");
+        assert_eq!(
+            h.stoat.size(),
+            Rect::new(0, 0, width, rows),
+            "and the last one queued is the one left standing",
+        );
     }
 
     #[test]
@@ -24433,7 +24467,7 @@ mod tests {
             let shutdown = h.stoat.shutdown_handle();
             shutdown.notify_one();
 
-            let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
             let (render_tx, render_rx) = watch::channel(None);
             // Hold the event sender and render receiver so a closed channel
             // cannot end the loop. Only the shutdown notify can.
@@ -24480,7 +24514,7 @@ mod tests {
             let mut h = Stoat::test();
             h.stoat.persistence_disabled = true;
 
-            let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
             let (render_tx, render_rx) = watch::channel(None);
             // Queue one input event and drop the sender. The loop drains the
             // event (publishing its frame), then breaks on the closed channel
@@ -24520,7 +24554,7 @@ mod tests {
             h.stoat.update(Event::Resize(80, 24));
             let shutdown = h.stoat.shutdown_handle();
 
-            let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
             let (render_tx, render_rx) = watch::channel(None);
             // A redraw-notify wakes a frame with no input behind it. The biased
             // loop takes the redraw arm, publishing a frame, then quits.

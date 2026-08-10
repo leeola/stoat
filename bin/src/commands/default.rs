@@ -8,7 +8,7 @@ use stoat::{
 };
 use stoat_cli::{CommonArgs, FixtureArgs, FixtureSub};
 use stoat_scheduler::{Executor, TokioScheduler};
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender;
 
 const VERSION_INFO: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -195,7 +195,14 @@ fn run_tui(
 
     stoat::ui::install_panic_hook();
 
-    let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+    // Unbounded because the UI thread forwards onto this inside the same loop
+    // that flushes frames and polls stdin. A bound parks that thread once the
+    // main thread stalls with the queue full, and nothing reads fd 0 while it is
+    // parked, so backpressure lands in the kernel's tty buffer where an
+    // overflow tears escape sequences into garbage input. Input events are
+    // small and human-rate, and `drain_pending` applies a whole backlog before
+    // one render, so a queue grown during a stall collapses on the next wake.
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     // Latest-frame-wins: the main loop ships frames without ever parking on a
     // slow flush, so input acceptance is never stalled behind rendering.
     // Redundant frames coalesce; only the most recently sent frame is drawn.
@@ -438,11 +445,11 @@ const INTER_KEY_DELAY: Duration = Duration::from_millis(20);
 /// `--inputs` self-driver, run on the shared executor so a scripted session
 /// exercises the same input path a human keyboard drives. Stops early if the
 /// receiver has gone away.
-async fn drive_inputs(tx: Sender<Event>, keys: Vec<KeyEvent>, executor: Executor) {
+async fn drive_inputs(tx: UnboundedSender<Event>, keys: Vec<KeyEvent>, executor: Executor) {
     executor.timer(READINESS_DELAY).await;
     for key in keys {
         executor.timer(INTER_KEY_DELAY).await;
-        if tx.send(Event::Key(key)).await.is_err() {
+        if tx.send(Event::Key(key)).is_err() {
             break;
         }
     }
@@ -480,7 +487,7 @@ mod tests {
     fn drive_inputs_paces_parsed_keys_onto_the_channel() {
         let scheduler = Arc::new(TestScheduler::new());
         let executor = scheduler.executor();
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
 
         let keys = input_parse::parse_input_sequence("if<Esc>").expect("parse");
         let expected: Vec<Event> = keys.iter().cloned().map(Event::Key).collect();

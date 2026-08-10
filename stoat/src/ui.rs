@@ -28,7 +28,7 @@ use stoatty_protocol::{
     frame,
 };
 use tokio::sync::{
-    mpsc::{Sender, UnboundedReceiver, UnboundedSender},
+    mpsc::{UnboundedReceiver, UnboundedSender},
     watch,
 };
 
@@ -96,7 +96,7 @@ pub fn install_panic_hook() {
 /// app cannot learn it any other way, since the handshake needs raw mode and
 /// sole ownership of fd 0, both of which live on this thread.
 pub fn spawn(
-    event_tx: Sender<Event>,
+    event_tx: UnboundedSender<Event>,
     mut render_rx: watch::Receiver<Option<RenderFrame>>,
     mut apc_rx: UnboundedReceiver<Vec<u8>>,
     stoatty_tx: UnboundedSender<bool>,
@@ -135,7 +135,7 @@ pub fn spawn(
 }
 
 async fn run(
-    event_tx: &Sender<Event>,
+    event_tx: &UnboundedSender<Event>,
     render_rx: &mut watch::Receiver<Option<RenderFrame>>,
     apc_rx: &mut UnboundedReceiver<Vec<u8>>,
     stoatty_tx: &UnboundedSender<bool>,
@@ -145,7 +145,6 @@ async fn run(
     let size = terminal.size()?;
     if event_tx
         .send(Event::Resize(size.width, size.height))
-        .await
         .is_err()
     {
         return Ok(());
@@ -174,7 +173,7 @@ async fn run(
             event = events.next() => {
                 let Some(event) = event else { break };
                 let event = event?;
-                if event_tx.send(event).await.is_err() {
+                if event_tx.send(event).is_err() {
                     break;
                 }
             }
