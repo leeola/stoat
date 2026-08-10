@@ -157,7 +157,7 @@ pub fn run_with_io<W: Write>(
     };
 
     let per_file = cached_hunks_via_socket(socket_dir, &inputs)
-        .unwrap_or_else(|| extract_review_hunks_changeset(&inputs, 3));
+        .unwrap_or_else(|| extract_review_hunks_changeset(&inputs, 3, None));
 
     render_all(out, &inputs, &per_file, opts).map_err(|e| {
         if e.kind() == io::ErrorKind::BrokenPipe {

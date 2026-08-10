@@ -284,10 +284,11 @@ async fn cache_rpc_hit_uses_cached_hunks() {
         base_text: Arc::new("synthetic_left".to_string()),
         buffer_text: Arc::new("synthetic_right".to_string()),
     };
-    let synthetic_hunks = extract_review_hunks_changeset(std::slice::from_ref(&synthetic_input), 3)
-        .into_iter()
-        .next()
-        .expect("synthetic hunks");
+    let synthetic_hunks =
+        extract_review_hunks_changeset(std::slice::from_ref(&synthetic_input), 3, None)
+            .into_iter()
+            .next()
+            .expect("synthetic hunks");
     let synthetic_payload = serialize_hunks(&synthetic_hunks);
 
     let payload_for_listener = synthetic_payload.clone();

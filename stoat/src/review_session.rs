@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use stoat_language::Language;
+use stoat_language::{structural_diff::TreeCache, Language};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ReviewChunkId(u32);
@@ -339,6 +339,12 @@ pub(crate) struct ReviewSession {
     pub stashed_display_row: Option<u32>,
     /// Bumped on any mutation so editor-level caches can detect staleness.
     pub version: u64,
+    /// Base-side parse trees retained across this session's diffs.
+    ///
+    /// A refresh re-diffs the session's files against bases that have usually
+    /// not moved, so the parses carry over while the buffers reparse. Scoped
+    /// to the session because that is the span over which a base repeats.
+    tree_cache: TreeCache,
     /// Where the user launched this review from; consulted on close.
     pub origin: ReviewOrigin,
     /// Filesystem-watch tokens covering each path in [`Self::files`].
@@ -362,6 +368,7 @@ impl ReviewSession {
             toggled_off: false,
             stashed_display_row: None,
             version: 0,
+            tree_cache: TreeCache::default(),
             origin: ReviewOrigin::Standalone,
             watch_tokens: Vec::new(),
             next_id: 0,
@@ -397,7 +404,10 @@ impl ReviewSession {
     /// (with an empty chunk list) so that subsequent file indices
     /// stay stable.
     pub(crate) fn add_files(&mut self, files: Vec<ReviewFileInput>) -> Vec<Vec<ReviewChunkId>> {
-        let hunks_per_file = extract_review_hunks_changeset(&files, 3);
+        let hunks_per_file = {
+            let memo = self.tree_cache.clone();
+            extract_review_hunks_changeset(&files, 3, Some(&memo))
+        };
         self.add_files_with_hunks(files, hunks_per_file)
     }
 
@@ -823,7 +833,7 @@ mod tests {
 
         let mut via_hunks = in_memory_session();
         let file_set = files();
-        let precomputed = extract_review_hunks_changeset(&file_set, 3);
+        let precomputed = extract_review_hunks_changeset(&file_set, 3, None);
         let ids_hunks = via_hunks.add_files_with_hunks(file_set, precomputed);
 
         assert_eq!(

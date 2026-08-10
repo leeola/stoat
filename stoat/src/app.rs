@@ -1302,6 +1302,10 @@ pub struct Stoat {
     /// Memoized tree-sitter parses of git-base texts, so the diff view's
     /// syntax-highlighted left column parses each base once across edits.
     pub(crate) base_highlights_cache: crate::workspace::BaseHighlightCache,
+    /// Memoized tree-sitter parses of git-base texts for the structural diff,
+    /// so the per-file warm that re-runs on every debounced edit parses that
+    /// file's unchanged HEAD text once rather than per edit.
+    pub(crate) diff_tree_cache: stoat_language::structural_diff::TreeCache,
     /// Tracks `$/progress` notifications so the status bar can show
     /// the freshest in-progress operation. Drained from
     /// [`crate::host::LspHost::try_recv_notification`] inside
@@ -2023,6 +2027,7 @@ impl Stoat {
             base_highlights_cache: Arc::new(std::sync::Mutex::new(
                 crate::workspace::BaseHighlightMemo::default(),
             )),
+            diff_tree_cache: stoat_language::structural_diff::TreeCache::default(),
             lsp_progress: crate::lsp::progress::LspProgressMap::new(),
             lsp_server_list: crate::render::LspServerList::default(),
             lsp_message: None,

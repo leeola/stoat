@@ -8,6 +8,7 @@ use std::{
 use stoat_language::{
     structural_diff::{
         self, BufferRef, ChangeKind as LangChangeKind, DiffChange, DiffResult, FileDiffInput, Side,
+        TreeCache,
     },
     Language,
 };
@@ -123,9 +124,13 @@ mod range_vec_codec {
 /// [`stoat_language::structural_diff::DiffChange::move_metadata`] field
 /// and a per-row [`MoveProvenance`] chip that the renderer paints
 /// next to cross-file moved rows.
+///
+/// `memo` retains each file's parsed base, so re-running the same changeset
+/// after an edit reparses only the buffers that moved.
 pub fn extract_review_hunks_changeset(
     files: &[ReviewFileInput],
     context: u32,
+    memo: Option<&TreeCache>,
 ) -> Vec<Vec<ReviewHunk>> {
     let inputs: Vec<FileDiffInput<'_>> = files
         .iter()
@@ -140,7 +145,7 @@ pub fn extract_review_hunks_changeset(
         })
         .collect();
 
-    let diff_results = structural_diff::diff_changeset(inputs, None);
+    let diff_results = structural_diff::diff_changeset(inputs, memo);
 
     files
         .iter()
@@ -177,6 +182,7 @@ pub fn extract_review_hunks_single(
     file: &ReviewFileInput,
     context: u32,
     cancel: Option<&AtomicBool>,
+    memo: Option<&TreeCache>,
 ) -> Vec<ReviewHunk> {
     let diff = match &file.language {
         Some(language) => structural_diff::diff_with_language_cancellable(
@@ -184,7 +190,7 @@ pub fn extract_review_hunks_single(
             &file.base_text,
             &file.buffer_text,
             cancel,
-            None,
+            memo,
         )
         .unwrap_or_else(|| structural_diff::diff(&file.base_text, &file.buffer_text)),
         None => structural_diff::diff(&file.base_text, &file.buffer_text),
@@ -217,10 +223,14 @@ fn extract_review_hunks_from_diff(
 /// `left` on each row is the base side and `right` the buffer side. Every base
 /// line appears exactly once as a `left`-Some row, so two walks that share an
 /// ancestor can be paired positionally by the three-way merge view.
+///
+/// `memo` retains the parsed `base_text`, so two walks sharing an ancestor
+/// parse it once between them.
 pub(crate) fn aligned_rows(
     base_text: &str,
     buffer_text: &str,
     language: Option<&Arc<Language>>,
+    memo: Option<&TreeCache>,
 ) -> Vec<ReviewRow> {
     let diff = match language {
         Some(language) => structural_diff::diff_with_language_cancellable(
@@ -228,7 +238,7 @@ pub(crate) fn aligned_rows(
             base_text,
             buffer_text,
             None,
-            None,
+            memo,
         )
         .unwrap_or_else(|| structural_diff::diff(base_text, buffer_text)),
         None => structural_diff::diff(base_text, buffer_text),
@@ -734,7 +744,7 @@ mod tests {
             base_text: Arc::new(base.to_string()),
             buffer_text: Arc::new(buffer.to_string()),
         }];
-        extract_review_hunks_changeset(&inputs, ctx)
+        extract_review_hunks_changeset(&inputs, ctx, None)
             .into_iter()
             .next()
             .unwrap_or_default()
@@ -751,7 +761,7 @@ mod tests {
             base_text: Arc::new(base.to_string()),
             buffer_text: Arc::new(buffer.to_string()),
         }];
-        extract_review_hunks_changeset(&inputs, ctx)
+        extract_review_hunks_changeset(&inputs, ctx, None)
             .into_iter()
             .next()
             .unwrap_or_default()
@@ -806,7 +816,7 @@ mod tests {
             },
         ];
 
-        let per_file = extract_review_hunks_changeset(&inputs, 3);
+        let per_file = extract_review_hunks_changeset(&inputs, 3, None);
 
         assert!(
             per_file[0].is_empty(),

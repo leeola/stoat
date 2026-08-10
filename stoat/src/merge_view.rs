@@ -3,7 +3,7 @@ use crate::{
     review::{ReviewRow, ReviewSide},
 };
 use std::{ops::Range, sync::Arc};
-use stoat_language::Language;
+use stoat_language::{structural_diff::TreeCache, Language};
 
 /// One row of the three-column merge view, aligning the common ancestor with
 /// the two sides of a conflict.
@@ -33,8 +33,12 @@ pub(crate) fn build_merge_rows(
     theirs: &str,
     language: Option<&Arc<Language>>,
 ) -> Vec<MergeRow> {
-    let ours_rows = review::aligned_rows(ancestor, ours, language);
-    let theirs_rows = review::aligned_rows(ancestor, theirs, language);
+    // Both walks diff against the same ancestor, so the memo is what stops it
+    // being parsed twice. It lives only as long as this call, since the two
+    // walks are the whole repeat.
+    let ancestor_tree = TreeCache::default();
+    let ours_rows = review::aligned_rows(ancestor, ours, language, Some(&ancestor_tree));
+    let theirs_rows = review::aligned_rows(ancestor, theirs, language, Some(&ancestor_tree));
 
     let mut rows = Vec::new();
     let mut i = 0;
@@ -767,6 +771,35 @@ mod tests {
 
     fn text(side: &Option<ReviewSide>) -> Option<&str> {
         side.as_ref().map(|s| s.text.as_str())
+    }
+
+    /// Both walks share one memo of the ancestor's parse, so this covers the
+    /// second walk reading a tree the first one stored. Every other test here
+    /// passes no language, which routes around the structural diff entirely.
+    #[test]
+    fn a_parsed_ancestor_merges_the_same_as_an_unparsed_one() {
+        let language =
+            stoat_language::LanguageRegistry::standard().for_path(std::path::Path::new("x.rs"));
+        assert!(language.is_some(), "rust resolves");
+
+        let ancestor = "fn a() {\n    one();\n    two();\n}\n";
+        let ours = "fn a() {\n    ONE();\n    two();\n}\n";
+        let theirs = "fn a() {\n    one();\n    TWO();\n}\n";
+
+        let parsed = build_merge_rows(ancestor, ours, theirs, language.as_ref());
+        let unparsed = build_merge_rows(ancestor, ours, theirs, None);
+
+        assert_eq!(
+            conflicts(&parsed),
+            conflicts(&unparsed),
+            "the same lines conflict either way",
+        );
+        let ours_texts: Vec<_> = parsed.iter().map(|r| text(&r.ours)).collect();
+        assert_eq!(
+            ours_texts,
+            unparsed.iter().map(|r| text(&r.ours)).collect::<Vec<_>>(),
+            "and both walks land on the same ancestor lines",
+        );
     }
 
     #[test]

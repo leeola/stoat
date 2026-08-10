@@ -29,7 +29,7 @@ use std::{
         Arc, Mutex,
     },
 };
-use stoat_language::LanguageRegistry;
+use stoat_language::{structural_diff::TreeCache, LanguageRegistry};
 use stoat_scheduler::Task;
 
 /// An in-flight background warm pass.
@@ -121,13 +121,22 @@ pub(crate) fn spawn_file_warm(stoat: &mut Stoat, path: PathBuf) {
     let fs_host = stoat.fs_host.clone();
     let langs = stoat.language_registry.clone();
     let cache = stoat.diff_cache.clone();
+    let tree_cache = stoat.diff_tree_cache.clone();
     let redraw = stoat.redraw_notify.clone();
     let done = Arc::new(AtomicBool::new(false));
 
     let task = {
         let done = done.clone();
         stoat.executor.spawn_blocking(move || {
-            warm_file(&*git_host, &*fs_host, &langs, &git_root, &path, &cache);
+            warm_file(
+                &*git_host,
+                &*fs_host,
+                &langs,
+                &git_root,
+                &path,
+                &cache,
+                &tree_cache,
+            );
             done.store(true, Ordering::Relaxed);
             redraw.notify_one();
         })
@@ -214,6 +223,7 @@ fn warm_file(
     git_root: &Path,
     path: &Path,
     cache: &Mutex<DiffCache>,
+    tree_cache: &TreeCache,
 ) {
     let Some(repo) = git.discover(git_root) else {
         return;
@@ -244,7 +254,7 @@ fn warm_file(
         buffer_text: Arc::new(buffer_text),
     };
 
-    let hunks = extract_review_hunks_single(&input, 3, None);
+    let hunks = extract_review_hunks_single(&input, 3, None, Some(tree_cache));
     if hunks.is_empty() {
         return;
     }
