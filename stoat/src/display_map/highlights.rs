@@ -174,30 +174,55 @@ pub struct SemanticTokenHighlight {
 /// edit, and that movement is exactly what the diff needs to observe.
 pub type SemanticTokenSpans = Arc<[(Range<usize>, HighlightStyleId)]>;
 
+/// How many tokens one segment of a channel holds.
+///
+/// Sized so a buffer's tokens land in tens of segments rather than thousands,
+/// keeping the per-segment bookkeeping small while still being fine enough
+/// that an edit's covers touch only a few segments.
+const SEGMENT_TOKENS: usize = 4096;
+
 /// One buffer's semantic tokens for a highlight channel, plus a search index
 /// that bounds the per-frame endpoint build to the viewport.
 ///
-/// `tokens` is sorted by `range.start`. `prefix_max_end[i]` is the index of the
-/// token with the greatest resolved end among `0..=i`. Because anchor
+/// Tokens are sorted by `range.start` and held in fixed-size segments rather
+/// than one whole-file allocation, so a rebuild can replace only the segments
+/// an edit reached and let the rest carry by refcount.
+///
+/// The search index is an argmax over resolved token ends. Because anchor
 /// resolution preserves relative order across edits, that argmax never changes
 /// once computed, so it stays valid for every later frame without a rebuild.
 #[derive(Debug, Clone)]
 pub struct BufferSemanticTokens {
-    pub tokens: Arc<[SemanticTokenHighlight]>,
+    segments: Arc<[TokenSegment]>,
+    len: usize,
     pub interner: Arc<HighlightStyleInterner>,
+}
+
+/// A run of at most [`SEGMENT_TOKENS`] tokens and the search index over them.
+#[derive(Debug, Clone)]
+struct TokenSegment {
+    tokens: Arc<[SemanticTokenHighlight]>,
+    /// Index *within this segment* of the greatest end among its `0..=i`.
     prefix_max_end: Arc<[u32]>,
+    /// Index, in whole-channel terms, of the greatest end among every token in
+    /// the segments before this one. [`None`] in the first segment.
+    ///
+    /// This is what keeps the composed argmax global. A token enclosing the
+    /// viewport from an earlier segment is invisible to a segment's own index,
+    /// so the search has to consider both.
+    carried_max_end: Option<u32>,
 }
 
 impl BufferSemanticTokens {
-    /// Build the channel, resolving each token's end once to fill
-    /// `prefix_max_end`. `resolve` need only be order-consistent with the
-    /// resolver used at query time. Any buffer snapshot satisfies that, since
-    /// resolution preserves relative order.
+    /// Build the channel, resolving each token's end once for the search index.
+    ///
+    /// `resolve` need only be order-consistent with the resolver used at query
+    /// time. Any buffer snapshot satisfies that, since resolution preserves
+    /// relative order.
     ///
     /// Costs one `resolve` call per token. A caller that already holds the
     /// resolved ends, or the byte offsets the anchors were just built from,
-    /// should pair [`prefix_max_end_indices`] with
-    /// [`Self::with_prefix_max_end`] instead.
+    /// should call [`Self::with_resolved_ends`] instead.
     pub fn new(
         tokens: Arc<[SemanticTokenHighlight]>,
         interner: Arc<HighlightStyleInterner>,
@@ -207,52 +232,143 @@ impl BufferSemanticTokens {
             .iter()
             .map(|token| resolve(&token.range.end))
             .collect();
-        Self::with_prefix_max_end(tokens, interner, prefix_max_end_indices(&ends))
+        Self::with_resolved_ends(tokens, interner, &ends)
     }
 
-    /// Build the channel from an already-computed `prefix_max_end` index.
+    /// Build the channel from token ends the caller already resolved.
     ///
-    /// `prefix_max_end` must come from [`prefix_max_end_indices`] over ends
-    /// ordered the same way a query-time resolver would order them, and must
-    /// have one entry per token. Anchor resolution preserves relative order,
+    /// `ends` must hold one entry per token, ordered the way a query-time
+    /// resolver would order them. Anchor resolution preserves relative order,
     /// so the byte offsets a batch of anchors was just created from satisfy
     /// that without any anchor being resolved.
-    pub fn with_prefix_max_end(
+    pub fn with_resolved_ends(
         tokens: Arc<[SemanticTokenHighlight]>,
         interner: Arc<HighlightStyleInterner>,
-        prefix_max_end: Vec<u32>,
+        ends: &[usize],
     ) -> Self {
         debug_assert_eq!(
             tokens.len(),
-            prefix_max_end.len(),
-            "prefix_max_end must have one entry per token",
+            ends.len(),
+            "ends must have one entry per token",
         );
+
+        let len = tokens.len();
+        let mut segments: Vec<TokenSegment> = Vec::new();
+        let mut carried: Option<(u32, usize)> = None;
+
+        for base in (0..len).step_by(SEGMENT_TOKENS) {
+            let upto = (base + SEGMENT_TOKENS).min(len);
+            let local_ends = &ends[base..upto];
+
+            segments.push(TokenSegment {
+                tokens: Arc::from(&tokens[base..upto]),
+                prefix_max_end: Arc::from(prefix_max_end_indices(local_ends)),
+                carried_max_end: carried.map(|(index, _)| index),
+            });
+
+            let (local_index, local_end) = local_ends.iter().enumerate().fold(
+                (0usize, 0usize),
+                |(best_i, best_end), (i, &end)| {
+                    if i == 0 || end > best_end {
+                        (i, end)
+                    } else {
+                        (best_i, best_end)
+                    }
+                },
+            );
+            let local = ((base + local_index) as u32, local_end);
+            carried = match carried {
+                Some((_, end)) if end >= local.1 => carried,
+                _ => Some(local),
+            };
+        }
+
         Self {
-            tokens,
+            segments: Arc::from(segments),
+            len,
             interner,
-            prefix_max_end: Arc::from(prefix_max_end),
         }
     }
 
     /// The same tokens resolved through a different interner.
     ///
     /// For a theme switch, where style ids keep their meaning but the styles
-    /// behind them change. `prefix_max_end` carries over because it is an
+    /// behind them change. The search index carries over because it is an
     /// argmax over resolved anchor ends, and re-interning moves no anchor.
     pub fn with_interner(&self, interner: Arc<HighlightStyleInterner>) -> Self {
         Self {
-            tokens: self.tokens.clone(),
+            segments: self.segments.clone(),
+            len: self.len,
             interner,
-            prefix_max_end: self.prefix_max_end.clone(),
         }
     }
 
-    /// The half-open index range of [`Self::tokens`] that can overlap `byte_range`.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Every token in the channel, in start order.
+    pub fn iter(&self) -> impl Iterator<Item = &SemanticTokenHighlight> {
+        self.segments.iter().flat_map(|s| s.tokens.iter())
+    }
+
+    /// The tokens at whole-channel indices `range`, in start order.
     ///
-    /// Tokens are start-sorted, so a `partition_point` caps the upper bound at the
+    /// Takes the flat range [`Self::overlap_bounds`] returns and walks it
+    /// across however many segments it spans.
+    pub fn range(&self, range: Range<usize>) -> impl Iterator<Item = &SemanticTokenHighlight> {
+        let end = range.end.min(self.len);
+        let start = range.start.min(end);
+
+        // Enter at the segment holding `start` rather than walking to it, so a
+        // viewport late in a large file costs its own tokens and no more.
+        let first = start / SEGMENT_TOKENS;
+        let last = end.div_ceil(SEGMENT_TOKENS);
+
+        self.segments[first..last]
+            .iter()
+            .enumerate()
+            .flat_map(move |(offset, segment)| {
+                let base = (first + offset) * SEGMENT_TOKENS;
+                let lo = start.saturating_sub(base).min(segment.tokens.len());
+                let hi = end.saturating_sub(base).min(segment.tokens.len());
+                segment.tokens[lo..hi].iter()
+            })
+    }
+
+    /// The token at whole-channel index `index`.
+    fn token(&self, index: usize) -> &SemanticTokenHighlight {
+        let segment = &self.segments[index / SEGMENT_TOKENS];
+        &segment.tokens[index % SEGMENT_TOKENS]
+    }
+
+    /// The greatest resolved end among tokens `0..=index`.
+    ///
+    /// Composed from the containing segment's own argmax and the argmax
+    /// carried in from every segment before it, which is what makes the bound
+    /// global rather than segment-local.
+    fn prefix_max_end(&self, index: usize, resolve: &impl Fn(&Anchor) -> usize) -> usize {
+        let segment = &self.segments[index / SEGMENT_TOKENS];
+        let local = segment.prefix_max_end[index % SEGMENT_TOKENS] as usize
+            + (index / SEGMENT_TOKENS) * SEGMENT_TOKENS;
+        let local_end = resolve(&self.token(local).range.end);
+
+        match segment.carried_max_end {
+            Some(carried) => local_end.max(resolve(&self.token(carried as usize).range.end)),
+            None => local_end,
+        }
+    }
+
+    /// The half-open whole-channel index range that can overlap `byte_range`.
+    ///
+    /// Tokens are start-sorted, so a binary search caps the upper bound at the
     /// first token starting at or past `byte_range.end`. The lower bound reads
-    /// `prefix_max_end`, so a multi-line token enclosing the range from earlier is
-    /// kept while tokens ending before it are skipped without resolving them.
+    /// the argmax index, so a multi-line token enclosing the range from earlier
+    /// is kept while tokens ending before it are skipped without resolving them.
     ///
     /// Tokens in the returned range still need a per-token end check. Some end at
     /// or before `byte_range.start` and only ride along under an enclosing token's
@@ -262,15 +378,23 @@ impl BufferSemanticTokens {
         byte_range: &Range<usize>,
         resolve: impl Fn(&Anchor) -> usize,
     ) -> Range<usize> {
-        let hi = self
-            .tokens
-            .partition_point(|token| resolve(&token.range.start) < byte_range.end);
+        let hi = {
+            let (mut left, mut right) = (0, self.len);
+            while left < right {
+                let mid = left + (right - left) / 2;
+                if resolve(&self.token(mid).range.start) < byte_range.end {
+                    left = mid + 1;
+                } else {
+                    right = mid;
+                }
+            }
+            left
+        };
 
         let (mut left, mut right) = (0, hi);
         while left < right {
             let mid = left + (right - left) / 2;
-            let max_end = resolve(&self.tokens[self.prefix_max_end[mid] as usize].range.end);
-            if max_end > byte_range.start {
+            if self.prefix_max_end(mid, &resolve) > byte_range.start {
                 right = mid;
             } else {
                 left = mid + 1;
@@ -286,7 +410,7 @@ impl BufferSemanticTokens {
 /// Entry `i` is the index of the greatest end among `0..=i`. Ties keep the
 /// earlier index. Which index wins a tie is not observable, since both name
 /// a token with the same end and the search reads the same bound either way.
-pub(crate) fn prefix_max_end_indices(ends: &[usize]) -> Vec<u32> {
+fn prefix_max_end_indices(ends: &[usize]) -> Vec<u32> {
     let mut indices = Vec::with_capacity(ends.len());
     let mut max_end = 0;
     let mut max_idx = 0;
@@ -638,7 +762,7 @@ fn push_semantic_endpoints(
         let bounds = channel.overlap_bounds(range, resolver.one);
         let lo = bounds.start;
 
-        let tokens = &channel.tokens[bounds];
+        let tokens: Vec<&SemanticTokenHighlight> = channel.range(bounds).collect();
         let resolved = resolve_pairs(
             tokens.iter().map(|t| (&t.range.start, &t.range.end)),
             resolver,
@@ -1440,15 +1564,100 @@ mod tests {
         );
     }
 
+    /// Every other channel test fits inside one segment, so nothing else here
+    /// exercises a lookup that has to compose across them.
+    #[test]
+    fn a_channel_spanning_segments_bounds_like_a_flat_one() {
+        use super::{
+            BufferSemanticTokens, HighlightStyleInterner, SemanticTokenHighlight, SEGMENT_TOKENS,
+        };
+
+        let mut interner = HighlightStyleInterner::default();
+        let style = interner.intern(HighlightStyle::default());
+        let interner = Arc::new(interner);
+
+        // Two and a bit segments of small tokens, with one at the very front
+        // reaching past the end of them all. That leading token is what the
+        // carried argmax exists for. A lookup late in the channel has to see
+        // it, and no segment's own index knows about it.
+        let count = SEGMENT_TOKENS * 2 + 17;
+        let mut spans: Vec<(usize, usize)> = vec![(0, count * 4 + 8)];
+        spans.extend((1..count).map(|i| (i * 4, i * 4 + 3)));
+
+        let tokens: Arc<[SemanticTokenHighlight]> = spans
+            .iter()
+            .map(|&(s, e)| SemanticTokenHighlight {
+                range: anchor(s)..anchor(e),
+                style,
+            })
+            .collect();
+        let resolve = |a: &Anchor| a.offset as usize;
+        let channel = BufferSemanticTokens::new(tokens, interner, resolve);
+        assert!(
+            channel.segments.len() > 2,
+            "the fixture must actually span segments",
+        );
+
+        // Probe around each segment seam, plus the ends, where a composed
+        // lookup is most likely to read the wrong segment's index.
+        let seams = [
+            0,
+            1,
+            SEGMENT_TOKENS - 1,
+            SEGMENT_TOKENS,
+            SEGMENT_TOKENS + 1,
+            SEGMENT_TOKENS * 2 - 1,
+            SEGMENT_TOKENS * 2,
+            SEGMENT_TOKENS * 2 + 1,
+            count - 1,
+        ];
+        for token_index in seams {
+            let start = token_index * 4;
+            for range in [start..start + 1, start..start + 9, start.max(1) - 1..start] {
+                let expected = {
+                    let hi = spans.partition_point(|(s, _)| *s < range.end);
+                    let mut running = 0;
+                    let lo = (0..hi)
+                        .find(|&i| {
+                            running = running.max(spans[i].1);
+                            running > range.start
+                        })
+                        .unwrap_or(hi);
+                    lo..hi
+                };
+                assert_eq!(
+                    channel.overlap_bounds(&range, resolve),
+                    expected,
+                    "segmented bounds must match a flat scan for {range:?}",
+                );
+            }
+        }
+
+        // The flat-range walk has to cross segments too, not just index one.
+        let all: Vec<_> = channel.range(0..channel.len()).collect();
+        assert_eq!(all.len(), count, "every token is reachable in order");
+        let crossing: Vec<_> = channel
+            .range(SEGMENT_TOKENS - 2..SEGMENT_TOKENS + 2)
+            .map(|t| resolve(&t.range.start))
+            .collect();
+        assert_eq!(
+            crossing,
+            [
+                (SEGMENT_TOKENS - 2) * 4,
+                (SEGMENT_TOKENS - 1) * 4,
+                SEGMENT_TOKENS * 4,
+                (SEGMENT_TOKENS + 1) * 4,
+            ],
+            "a range straddling a seam yields both sides in order",
+        );
+    }
+
     /// The parse path builds the search index straight from the byte offsets it
     /// anchored, never resolving an anchor. That is only sound if it lands on
     /// the same index the resolving constructor computes.
     #[test]
-    fn with_prefix_max_end_matches_the_resolving_constructor() {
-        use super::{
-            prefix_max_end_indices, BufferSemanticTokens, HighlightStyleInterner,
-            SemanticTokenHighlight,
-        };
+    fn with_resolved_ends_matches_the_resolving_constructor() {
+        use super::{BufferSemanticTokens, HighlightStyleInterner, SemanticTokenHighlight};
 
         // Ends run deliberately out of order relative to starts. An enclosing
         // token comes first, two nest inside it, one reaches past everything,
@@ -1478,16 +1687,15 @@ mod tests {
         let resolving = BufferSemanticTokens::new(tokens.clone(), interner.clone(), resolve);
 
         let ends: Vec<usize> = spans.iter().map(|&(_, e)| e).collect();
-        let batched = BufferSemanticTokens::with_prefix_max_end(
-            tokens,
-            interner,
-            prefix_max_end_indices(&ends),
-        );
+        let batched = BufferSemanticTokens::with_resolved_ends(tokens, interner, &ends);
 
-        assert_eq!(
-            &*batched.prefix_max_end, &*resolving.prefix_max_end,
-            "byte-offset ends must yield the same argmax as resolved ends",
-        );
+        for i in 0..batched.len() {
+            assert_eq!(
+                batched.prefix_max_end(i, &resolve),
+                resolving.prefix_max_end(i, &resolve),
+                "byte-offset ends must yield the same argmax as resolved ends at {i}",
+            );
+        }
         for start in 0..=40 {
             for end in start..=40 {
                 assert_eq!(

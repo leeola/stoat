@@ -11,8 +11,7 @@ use crate::{
     command_palette::CommandPalette,
     display_map::{
         highlights::{
-            prefix_max_end_indices, BufferSemanticTokens, HighlightStyleId, SemanticTokenHighlight,
-            SemanticTokenSpans,
+            BufferSemanticTokens, HighlightStyleId, SemanticTokenHighlight, SemanticTokenSpans,
         },
         syntax_theme::SyntaxStyles,
         DisplayPoint, DisplaySnapshot,
@@ -1679,6 +1678,12 @@ pub(crate) struct ParseJobOutput {
     /// viewing the buffer. It owns the token list, so the search index inside
     /// it cannot drift from the tokens it indexes.
     pub(crate) token_channel: BufferSemanticTokens,
+    /// The same tokens as one flat list, index-aligned with [`Self::token_spans`].
+    ///
+    /// The channel holds them in segments, which the next parse's carry cannot
+    /// use. It pairs a span with its anchor by index, so it needs both lists
+    /// indexed the same way.
+    pub(crate) token_anchors: Arc<[SemanticTokenHighlight]>,
     /// This parse's tokens as raw byte spans, retained so the next parse can
     /// diff against them and report its own changed rows.
     pub(crate) token_spans: SemanticTokenSpans,
@@ -10565,7 +10570,7 @@ fn minimap_line_tokens(
         };
         let bounds =
             channel.overlap_bounds(&byte_range, |anchor| buffer_snap.resolve_anchor(anchor));
-        for span in &channel.tokens[bounds] {
+        for span in channel.range(bounds) {
             let class = class_table.class_of(span.style);
             if class == 0 {
                 continue;
@@ -11242,11 +11247,8 @@ pub(crate) fn parse_buffer_step(
     // The search index is an argmax over resolved token ends, and each anchor
     // above resolves to the offset it was just built from, so the byte ends
     // answer it without resolving anything.
-    let token_channel = BufferSemanticTokens::with_prefix_max_end(
-        tokens,
-        styles.interner.clone(),
-        prefix_max_end_indices(&ends),
-    );
+    let token_channel =
+        BufferSemanticTokens::with_resolved_ends(tokens.clone(), styles.interner.clone(), &ends);
 
     // Which rows this parse restained, for consumers that colour per row. It
     // needs the prior parse's spans and the patch that carries them forward;
@@ -11273,6 +11275,7 @@ pub(crate) fn parse_buffer_step(
         },
         syntax_map,
         token_channel,
+        token_anchors: tokens,
         token_spans: Arc::from(styled),
         changed_token_rows,
     })
@@ -15007,8 +15010,7 @@ mod tests {
         };
 
         let resolve = |out: &ParseJobOutput| {
-            out.token_channel
-                .tokens
+            out.token_anchors
                 .iter()
                 .map(|t| {
                     (
@@ -15130,8 +15132,7 @@ mod tests {
             "{step}: carried spans must equal a from-scratch parse",
         );
         let resolved = |out: &ParseJobOutput| -> Vec<(usize, usize, HighlightStyleId)> {
-            out.token_channel
-                .tokens
+            out.token_anchors
                 .iter()
                 .map(|t| {
                     (
@@ -15152,7 +15153,7 @@ mod tests {
         state.syntax = Some(carried.syntax);
         state.map = Some(carried.syntax_map);
         state.spans = Some(carried.token_spans);
-        state.anchors = Some(carried.token_channel.tokens);
+        state.anchors = Some(carried.token_anchors);
         layers
     }
 
@@ -15539,7 +15540,7 @@ mod tests {
             &mut prior,
             &mut prior_map,
             Some(&first.token_spans),
-            Some(&first.token_channel.tokens),
+            Some(&first.token_anchors),
             &styles,
             None,
         )
@@ -15759,16 +15760,13 @@ mod tests {
             .expect("parse should succeed")
         };
         assert!(
-            out.token_channel.tokens.len() > 5,
+            out.token_anchors.len() > 5,
             "fixture must produce a token stream worth indexing",
         );
 
         let resolve = |a: &Anchor| snapshot.resolve_anchor(a);
-        let per_anchor = BufferSemanticTokens::new(
-            out.token_channel.tokens.clone(),
-            styles.interner.clone(),
-            resolve,
-        );
+        let per_anchor =
+            BufferSemanticTokens::new(out.token_anchors.clone(), styles.interner.clone(), resolve);
 
         for start in 0..=text.len() {
             for end in [start, start + 1, start + 40, text.len()] {

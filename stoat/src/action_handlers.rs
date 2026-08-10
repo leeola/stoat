@@ -1523,7 +1523,7 @@ mod tests {
             .unwrap_or_default();
         let count = channels
             .values()
-            .flat_map(|channel| channel.tokens.iter())
+            .flat_map(|channel| channel.iter())
             .filter(|token| token.style == style_id)
             .count();
         (color, count)

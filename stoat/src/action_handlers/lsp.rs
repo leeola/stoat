@@ -10519,7 +10519,7 @@ mod tests {
         snapshot
             .lsp_token_highlights()
             .values()
-            .map(|channel| channel.tokens.len())
+            .map(|channel| channel.len())
             .sum()
     }
 
@@ -10693,7 +10693,7 @@ mod tests {
         snapshot
             .semantic_token_highlights()
             .values()
-            .map(|channel| channel.tokens.len())
+            .map(|channel| channel.len())
             .sum()
     }
 
@@ -10960,7 +10960,7 @@ mod tests {
         let ids: Vec<_> = snapshot
             .lsp_token_highlights()
             .values()
-            .flat_map(|channel| channel.tokens.iter().map(|token| token.style))
+            .flat_map(|channel| channel.iter().map(|token| token.style))
             .collect();
         assert_eq!(ids, vec![expected]);
     }

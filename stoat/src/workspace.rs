@@ -833,7 +833,7 @@ impl Workspace {
                 .store_token_spans(out.buffer_id, out.token_spans.clone());
             self.buffers.store_tokens(
                 out.buffer_id,
-                out.token_channel.tokens.clone(),
+                out.token_anchors.clone(),
                 syntax_styles.interner.clone(),
             );
             for editor in self.editors.values_mut() {

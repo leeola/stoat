@@ -25,7 +25,7 @@ pub use crease_map::{
     Crease, CreaseId, CreaseMap, CreaseMetadata, CreaseSnapshot, RenderToggleFn, RenderTrailerFn,
 };
 pub use fold_map::{FoldMap, FoldMetadata, FoldOffset, FoldPlaceholder, FoldPoint, FoldSnapshot};
-use highlights::{prefix_max_end_indices, AnchorResolver};
+use highlights::AnchorResolver;
 pub use highlights::{
     BufferSemanticTokens, CachedHighlightEndpoints, Chunk, ChunkRenderer, ChunkRendererId,
     ChunkReplacement, HighlightKey, HighlightLayer, HighlightStyle, HighlightStyleId,
@@ -634,9 +634,9 @@ impl DisplayMap {
     ) -> BufferSemanticTokens {
         let snapshot = self.multi_buffer.snapshot();
         let ends: Vec<Anchor> = tokens.iter().map(|token| token.range.end).collect();
-        let prefix_max_end = prefix_max_end_indices(&snapshot.resolve_anchors_batch(&ends));
+        let resolved = snapshot.resolve_anchors_batch(&ends);
 
-        BufferSemanticTokens::with_prefix_max_end(tokens, interner, prefix_max_end)
+        BufferSemanticTokens::with_resolved_ends(tokens, interner, &resolved)
     }
 
     /// Install a channel the caller already built.
