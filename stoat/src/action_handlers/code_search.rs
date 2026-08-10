@@ -2,7 +2,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     code_search::{
         ast::{ast_scan_file, AstLang},
-        scan_file, scan_text, CodeSearchFinder, SearchMatch, SearchMode, MATCH_CAP,
+        read_text, scan_file, scan_text, CodeSearchFinder, SearchMatch, SearchMode, MATCH_CAP,
     },
     pane::View,
     picker::PreviewSource,
@@ -260,6 +260,12 @@ pub(crate) fn spawn_code_search(
                     // refcount and amortises over the batch.
                     let regex = regex.clone();
 
+                    // One buffer for the batch rather than one per file. The
+                    // callback is shared across the walker's threads, so it
+                    // cannot hold state between calls and this is as long as a
+                    // buffer can live.
+                    let mut read_buf = Vec::new();
+
                     let mut matches = Vec::new();
                     let mut overlaid = Vec::new();
                     for path in batch {
@@ -268,7 +274,9 @@ pub(crate) fn spawn_code_search(
                                 overlaid.push(path.clone());
                                 scan_text(&regex, text, &path, &mut matches);
                             },
-                            None => scan_file(&*fs_host, &regex, &path, &mut matches),
+                            None => {
+                                scan_file(&*fs_host, &regex, &path, &mut read_buf, &mut matches)
+                            },
                         }
                     }
 
@@ -318,6 +326,9 @@ pub(crate) fn spawn_code_search(
                     ast_scan_file(text, &ast_lang, &pattern, path, &mut cache, matches);
                 };
 
+                // This walk is serial, so one buffer serves the whole of it.
+                let mut read_buf = Vec::new();
+
                 let mut walked: HashSet<PathBuf> = HashSet::new();
                 fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
                     let mut matches = Vec::new();
@@ -331,10 +342,7 @@ pub(crate) fn spawn_code_search(
                                 scan(&path, text, &mut matches);
                             },
                             None => {
-                                let mut buf = Vec::new();
-                                if fs_host.read(&path, &mut buf).is_ok()
-                                    && let Ok(text) = std::str::from_utf8(&buf)
-                                {
+                                if let Some(text) = read_text(&*fs_host, &path, &mut read_buf) {
                                     scan(&path, text, &mut matches);
                                 }
                             },

@@ -151,25 +151,60 @@ impl CodeSearchFinder {
 
 const SNIPPET_MAX_CHARS: usize = 80;
 
-/// Read `path` through `fs_host`, scan its UTF-8 text for `regex`, and push one
+/// Read `path` through `fs_host`, scan its text for `regex`, and push one
 /// [`SearchMatch`] per match site onto `out`.
 ///
-/// A file that fails to read, or whose bytes are not valid UTF-8, contributes
-/// nothing, so the scan is total over an arbitrary workspace tree.
+/// `read_buf` is the caller's, so a walk hands the same one to every file it
+/// visits rather than sizing a fresh buffer per file. Its contents afterwards
+/// are the last file read and are not otherwise meaningful.
+///
+/// Anything [`read_text`] does not call text contributes nothing, so the scan
+/// is total over an arbitrary workspace tree.
 pub(crate) fn scan_file(
     fs_host: &dyn FsHost,
     regex: &Regex,
     path: &Path,
+    read_buf: &mut Vec<u8>,
     out: &mut Vec<SearchMatch>,
 ) {
-    let mut buf = Vec::new();
-    if fs_host.read(path, &mut buf).is_err() {
-        return;
-    }
-    let Ok(text) = std::str::from_utf8(&buf) else {
+    let Some(text) = read_text(fs_host, path, read_buf) else {
         return;
     };
     scan_text(regex, text, path, out);
+}
+
+/// How much of a file's head is examined for the NUL byte that says it is not
+/// text.
+///
+/// A binary essentially always has one in its header. Reading further to be
+/// surer would cost the scan more than the rare miss does, and a file that
+/// reaches this far without one is treated as text and left to UTF-8
+/// validation.
+const BINARY_SNIFF_BYTES: usize = 8192;
+
+/// Read `path` into `read_buf` and return it as text, or [`None`] when it is
+/// not text at all.
+///
+/// `read_buf` is the caller's so a walk can reuse one allocation across the
+/// files it visits rather than sizing a fresh one per file.
+///
+/// A NUL near the start ends it before UTF-8 validation, which is what keeps a
+/// large binary from being validated end to end only to be thrown away. Files
+/// that fail to read contribute nothing either, so a scan is total over an
+/// arbitrary tree.
+pub(crate) fn read_text<'a>(
+    fs_host: &dyn FsHost,
+    path: &Path,
+    read_buf: &'a mut Vec<u8>,
+) -> Option<&'a str> {
+    fs_host.read(path, read_buf).ok()?;
+
+    let head = &read_buf[..read_buf.len().min(BINARY_SNIFF_BYTES)];
+    if head.contains(&0) {
+        return None;
+    }
+
+    std::str::from_utf8(read_buf).ok()
 }
 
 /// Scan `text` for `regex`, pushing one [`SearchMatch`] per match site onto
@@ -680,8 +715,9 @@ mod tests {
     ) -> Result<Vec<SearchMatch>, regex::Error> {
         let regex = Regex::new(pattern)?;
         let mut matches = Vec::new();
+        let mut read_buf = Vec::new();
         for path in fs_host.walk_workspace_files(git_root) {
-            scan_file(fs_host, &regex, &path, &mut matches);
+            scan_file(fs_host, &regex, &path, &mut read_buf, &mut matches);
         }
         Ok(matches)
     }
@@ -728,7 +764,13 @@ mod tests {
 
         let regex = Regex::new("needle").expect("the pattern compiles");
         let mut found = Vec::new();
-        scan_file(&fs, &regex, &root.join("dense.rs"), &mut found);
+        scan_file(
+            &fs,
+            &regex,
+            &root.join("dense.rs"),
+            &mut Vec::new(),
+            &mut found,
+        );
 
         assert!(
             found.len() > 100,
@@ -760,7 +802,13 @@ mod tests {
 
         let regex = Regex::new("needle").expect("the pattern compiles");
         let mut found = Vec::new();
-        scan_file(&fs, &regex, &root.join("many.rs"), &mut found);
+        scan_file(
+            &fs,
+            &regex,
+            &root.join("many.rs"),
+            &mut Vec::new(),
+            &mut found,
+        );
 
         assert_eq!(
             found.len(),
@@ -812,6 +860,40 @@ mod tests {
         let matches = perform_search(&fs, &root, "hello").unwrap();
         assert_eq!(matches.len(), 1);
         assert!(matches[0].path.ends_with("good.rs"));
+    }
+
+    /// A NUL in the sniffed head rejects the file before UTF-8 validation, and
+    /// one past the head does not, which pins the window rather than only the
+    /// rule. A file whose NUL sits beyond it is still rejected, just later, by
+    /// the UTF-8 check that a NUL alone would pass.
+    #[test]
+    fn a_nul_in_the_head_rejects_the_file_before_validating_it() {
+        use super::BINARY_SNIFF_BYTES;
+
+        let fs = FakeFs::new();
+        let root = PathBuf::from("/repo");
+
+        let mut early = b"needle ".to_vec();
+        early.push(0);
+        fs.insert_file(root.join("early.bin"), early);
+
+        // Text right up to the window, then a NUL past it. Valid UTF-8
+        // throughout, so only the sniff decides, and only where it looks.
+        let mut late = vec![b'x'; BINARY_SNIFF_BYTES];
+        late.extend_from_slice(b" needle ");
+        late.push(0);
+        fs.insert_file(root.join("late.bin"), late);
+
+        let matches = perform_search(&fs, &root, "needle").unwrap();
+        let found: Vec<_> = matches
+            .iter()
+            .map(|m| m.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(
+            found,
+            ["late.bin"],
+            "only the file whose NUL sits past the sniff window is scanned",
+        );
     }
 
     #[test]
