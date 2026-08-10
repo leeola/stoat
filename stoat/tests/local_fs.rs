@@ -213,6 +213,12 @@ fn walk_workspace_files_parallel_delivers_every_file() {
 
 /// Breaking stops the walk rather than running it out, which is what lets a
 /// closed search abandon a large tree.
+///
+/// Measured in files rather than batches. How many batches a break costs
+/// depends on how many walker threads were mid-batch when it landed, and each
+/// flushes its remainder on the way out, so any batch count is a fact about the
+/// machine. What the contract promises is that the rest of the tree goes
+/// unenumerated, and that is what a file count shows on any machine.
 #[test]
 fn walk_workspace_files_parallel_stops_on_break() {
     use std::{
@@ -224,24 +230,21 @@ fn walk_workspace_files_parallel_stops_on_break() {
     };
 
     let dir = tempfile::tempdir().unwrap();
-    for i in 0..4_000 {
+    let count = 4_000;
+    for i in 0..count {
         std::fs::write(dir.path().join(format!("f{i}.txt")), b"x").unwrap();
     }
 
-    let batches = Arc::new(AtomicUsize::new(0));
-    let counter = batches.clone();
-    LocalFs.walk_workspace_files_parallel(dir.path(), &move |_batch| {
-        counter.fetch_add(1, Ordering::Relaxed);
+    let delivered = Arc::new(AtomicUsize::new(0));
+    let counter = delivered.clone();
+    LocalFs.walk_workspace_files_parallel(dir.path(), &move |batch| {
+        counter.fetch_add(batch.len(), Ordering::Relaxed);
         ControlFlow::Break(())
     });
 
-    // Every thread may be inside a batch when the first break lands, and each
-    // flushes its remainder on the way out, so the bound is generous. What it
-    // rules out is the walk running to completion, which 4000 files over a
-    // 256-path batch would take far more than this.
-    let seen = batches.load(Ordering::Relaxed);
+    let seen = delivered.load(Ordering::Relaxed);
     assert!(
-        seen < 8,
-        "a break must stop the walk promptly, saw {seen} batches",
+        seen < count,
+        "a break must abandon the rest of the tree, but all {count} files arrived",
     );
 }
