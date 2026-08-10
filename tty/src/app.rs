@@ -1963,9 +1963,16 @@ impl ApplicationHandler<PtyEvent> for App {
                     Key::Character(c) if c.eq_ignore_ascii_case("v")
                 );
                 if clip_combo && is_paste_key {
+                    // A failed read leaves the handle cached, unlike a failed
+                    // write. X11 reports an error for a clipboard that is empty
+                    // or holds something other than text, which says nothing
+                    // about the handle, and reopening per paste from an empty
+                    // clipboard is the cost this avoids.
+                    let pasted = clipboard_handle(state).and_then(|cb| cb.get_text().ok());
+
                     // Consume the combo whether or not the clipboard read
                     // succeeds, so encode_key never sends a stray "v".
-                    if let Ok(text) = arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+                    if let Some(text) = pasted {
                         Input {
                             terminal: &state.terminal,
                             pty: &mut state.pty,
@@ -3285,29 +3292,39 @@ fn deliver_notification(title: Option<&str>, body: &str) {
 #[cfg(not(unix))]
 fn deliver_notification(_title: Option<&str>, _body: &str) {}
 
-/// Copy `text` to the OS clipboard through the handle cached on [`State`].
+/// The clipboard handle cached on [`State`], opening one on first use.
 ///
-/// The handle is held across copies rather than reopened each time because X11
-/// selection ownership lasts only while an `arboard::Clipboard` and its
-/// background server thread stay alive. A handle opened and dropped per copy
-/// releases ownership at once, losing the copied text before any paste unless a
-/// clipboard manager races to grab it, and arboard's debug build prints a drop
-/// warning to the launching terminal.
+/// The handle is held across uses rather than reopened each time. Opening one
+/// costs a display-server connection and a background thread, which is several
+/// milliseconds inside the event loop on X11 and Wayland.
 ///
-/// A failed open or copy is reported rather than fatal. A failed copy also
-/// clears the cache so the next call reopens the handle.
-fn copy_to_clipboard(state: &mut State, text: &str) {
+/// A copy needs it held for a further reason. X11 selection ownership lasts
+/// only while an `arboard::Clipboard` and its server thread stay alive, so a
+/// handle opened and dropped per copy releases ownership at once, losing the
+/// copied text before any paste unless a clipboard manager races to grab it,
+/// and arboard's debug build prints a drop warning to the launching terminal.
+///
+/// `None` when the clipboard cannot be opened, which is reported rather than
+/// fatal and leaves nothing cached, so the next call tries again.
+fn clipboard_handle(state: &mut State) -> Option<&mut arboard::Clipboard> {
     if state.clipboard.is_none() {
         match arboard::Clipboard::new() {
             Ok(clipboard) => state.clipboard = Some(clipboard),
             Err(err) => {
                 eprintln!("stoatty: failed to open clipboard: {err}");
-                return;
+                return None;
             },
         }
     }
+    state.clipboard.as_mut()
+}
 
-    let Some(clipboard) = state.clipboard.as_mut() else {
+/// Copy `text` to the OS clipboard through the handle cached on [`State`].
+///
+/// A failed copy is reported rather than fatal, and drops the handle so the
+/// next call opens a fresh one.
+fn copy_to_clipboard(state: &mut State, text: &str) {
+    let Some(clipboard) = clipboard_handle(state) else {
         return;
     };
     if let Err(err) = clipboard.set_text(text.to_owned()) {
