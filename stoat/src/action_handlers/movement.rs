@@ -13,6 +13,7 @@ use crate::{
     },
 };
 use std::{
+    cmp::Ordering,
     ops::Range,
     path::{Path, PathBuf},
     sync::{mpsc, Arc},
@@ -4038,12 +4039,11 @@ fn bracket_partner(
     }
 
     let (open, close, forward) = bracket_pair(ch)?;
-    if let Some(tree) = tree
-        && is_in_string_or_comment(tree, cursor)
-    {
+    let scan = PairScan::around(tree, cursor);
+    if scan.skips(cursor) {
         return None;
     }
-    scan_bracket_match(rope, cursor, ch, open, close, forward, tree)
+    scan_bracket_match(rope, cursor, ch, open, close, forward, &scan)
 }
 
 /// How far a pair scan walks before giving up, in characters each way.
@@ -4070,6 +4070,120 @@ fn bracket_pair(ch: char) -> Option<(char, char, bool)> {
     }
 }
 
+/// How far either side of a cursor a pair scan can reach, in bytes.
+///
+/// [`MAX_PAIR_SCAN`] counts characters and a character is at most four bytes,
+/// so this is the furthest a scan can look however the text is encoded.
+const PAIR_SCAN_WINDOW_BYTES: usize = MAX_PAIR_SCAN * 4;
+
+/// The byte ranges a pair scan reads as text rather than as code.
+///
+/// A bracket inside a string or a comment is not a delimiter. Asking the syntax
+/// tree that per character means a descendant lookup from the root plus an
+/// ancestor walk each time, and a scan crosses thousands of characters per
+/// press, per cursor. Collected once for the window a scan can reach and
+/// answered by binary search instead.
+///
+/// Ranges are sorted by start and non-overlapping, a nested one having been
+/// merged into whatever encloses it.
+pub(crate) struct SkipZones {
+    ranges: Vec<Range<usize>>,
+}
+
+impl SkipZones {
+    /// Every string or comment node of `tree` intersecting `window`.
+    ///
+    /// A wider window is always safe. It only collects zones a scan never asks
+    /// about, and asking outside the collected window is what would be wrong.
+    pub(crate) fn collect(tree: Option<&stoat_language::Tree>, window: Range<usize>) -> Self {
+        let mut ranges: Vec<Range<usize>> = Vec::new();
+        let Some(tree) = tree else {
+            return Self { ranges };
+        };
+
+        let mut pending = vec![tree.root_node()];
+        while let Some(node) = pending.pop() {
+            let range = node.byte_range();
+            if range.start >= window.end || range.end <= window.start {
+                continue;
+            }
+            let kind = node.kind();
+            if kind.contains("string") || kind.contains("comment") {
+                // Whatever is inside is inside this range too, so the subtree
+                // adds nothing.
+                ranges.push(range);
+                continue;
+            }
+            for i in 0..node.child_count() as u32 {
+                if let Some(child) = node.child(i) {
+                    pending.push(child);
+                }
+            }
+        }
+
+        ranges.sort_unstable_by_key(|range| range.start);
+        let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            match merged.last_mut() {
+                Some(prev) if range.start <= prev.end => prev.end = prev.end.max(range.end),
+                _ => merged.push(range),
+            }
+        }
+        Self { ranges: merged }
+    }
+
+    pub(crate) fn contains(&self, offset: usize) -> bool {
+        self.ranges
+            .binary_search_by(|range| {
+                if range.end <= offset {
+                    Ordering::Less
+                } else if range.start > offset {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            })
+            .is_ok()
+    }
+}
+
+/// A syntax tree together with the skip zones a pair scan reads off it.
+///
+/// The scans need the tree itself for the one question zones cannot answer,
+/// which is where the string node under a cursor begins and ends. Carrying both
+/// replaces the tree the scans already thread rather than adding a second
+/// parameter beside it.
+pub(crate) struct PairScan<'a> {
+    pub(crate) tree: Option<&'a stoat_language::Tree>,
+    pub(crate) zones: SkipZones,
+}
+
+impl<'a> PairScan<'a> {
+    /// Zones for everything a scan from `cursor` can reach.
+    pub(crate) fn around(tree: Option<&'a stoat_language::Tree>, cursor: usize) -> Self {
+        Self::over(tree, window_around(cursor))
+    }
+
+    pub(crate) fn over(tree: Option<&'a stoat_language::Tree>, window: Range<usize>) -> Self {
+        Self {
+            zones: SkipZones::collect(tree, window),
+            tree,
+        }
+    }
+
+    pub(crate) fn skips(&self, offset: usize) -> bool {
+        self.zones.contains(offset)
+    }
+}
+
+/// The byte window a scan from `cursor` can reach.
+pub(crate) fn window_around(cursor: usize) -> Range<usize> {
+    cursor.saturating_sub(PAIR_SCAN_WINDOW_BYTES)..cursor.saturating_add(PAIR_SCAN_WINDOW_BYTES)
+}
+
+/// Test-only since the scans read [`SkipZones`] instead. It stays as what that
+/// list is checked against, being the rule the list has to reproduce.
+#[cfg(test)]
 pub(crate) fn is_in_string_or_comment(tree: &stoat_language::Tree, offset: usize) -> bool {
     let Some(mut node) = tree.root_node().descendant_for_byte_range(offset, offset) else {
         return false;
@@ -4093,13 +4207,10 @@ fn scan_bracket_match(
     open: char,
     close: char,
     forward: bool,
-    tree: Option<&stoat_language::Tree>,
+    scan: &PairScan<'_>,
 ) -> Option<usize> {
     let mut depth: u32 = 1;
-    let in_skip_zone = |offset: usize| match tree {
-        Some(t) => is_in_string_or_comment(t, offset),
-        None => false,
-    };
+    let in_skip_zone = |offset: usize| scan.skips(offset);
     // Bounded like the surround walks. A language with no bracket query leaves
     // the tree absent, so an unmatched bracket would otherwise read to the end
     // of the file to report that there is no match, once per press.
@@ -6625,12 +6736,20 @@ mod tests {
         let (rope, len) = spaced_brackets(MAX_PAIR_SCAN + 100);
 
         assert_eq!(
-            scan_bracket_match(&rope, 0, '(', '(', ')', true, None),
+            scan_bracket_match(&rope, 0, '(', '(', ')', true, &PairScan::around(None, 0)),
             None,
             "scanning forward, the close is past where the scan gives up"
         );
         assert_eq!(
-            scan_bracket_match(&rope, len - 1, ')', '(', ')', false, None),
+            scan_bracket_match(
+                &rope,
+                len - 1,
+                ')',
+                '(',
+                ')',
+                false,
+                &PairScan::around(None, 0)
+            ),
             None,
             "and scanning back, so is the open"
         );
@@ -6642,12 +6761,20 @@ mod tests {
         let (rope, len) = spaced_brackets(filler);
 
         assert_eq!(
-            scan_bracket_match(&rope, 0, '(', '(', ')', true, None),
+            scan_bracket_match(&rope, 0, '(', '(', ')', true, &PairScan::around(None, 0)),
             Some(1 + filler),
             "a close inside the cap is where it always was"
         );
         assert_eq!(
-            scan_bracket_match(&rope, len - 1, ')', '(', ')', false, None),
+            scan_bracket_match(
+                &rope,
+                len - 1,
+                ')',
+                '(',
+                ')',
+                false,
+                &PairScan::around(None, 0)
+            ),
             Some(0),
             "and so is the open"
         );

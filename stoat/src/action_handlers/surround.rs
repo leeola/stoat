@@ -1,5 +1,5 @@
 use crate::{
-    action_handlers::movement::MAX_PAIR_SCAN,
+    action_handlers::movement::{window_around, PairScan, MAX_PAIR_SCAN},
     app::{Stoat, UpdateEffect},
     buffer::TextBuffer,
     pane::View,
@@ -266,14 +266,45 @@ fn collect_surround_pairs(
     };
 
     let ws = stoat.active_workspace();
-    let mut pairs: Vec<(usize, usize, char, char)> = cursors
-        .into_iter()
-        .filter_map(|head| match pair {
-            Some((open, close)) => surround_pair_at(ws, buffer_id, head, open, close)
+    let buffer = ws.buffers.get(buffer_id)?;
+    let rope = buffer.read().expect("poisoned").rope().clone();
+    let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
+
+    // One window covering every cursor's reach, so cursors in the same layer
+    // collect their zones once between them rather than once each. A window
+    // wider than any single cursor needs only adds zones nothing asks about.
+    let window = {
+        let first = cursors.iter().copied().min().unwrap_or(0);
+        let last = cursors.iter().copied().max().unwrap_or(0);
+        window_around(first).start..window_around(last).end
+    };
+
+    // Cursors can sit in different layers, so the zones are keyed on the tree
+    // they came from rather than shared outright.
+    let mut scans: Vec<(*const stoat_language::Tree, PairScan<'_>)> = Vec::new();
+
+    let mut pairs: Vec<(usize, usize, char, char)> = Vec::with_capacity(cursors.len());
+    for head in cursors {
+        let tree = deepest_tree_at(snapshot, head);
+        let key = tree.map_or(std::ptr::null(), |t| t as *const _);
+        let idx = match scans.iter().position(|(seen, _)| *seen == key) {
+            Some(idx) => idx,
+            None => {
+                scans.push((key, PairScan::over(tree, window.clone())));
+                scans.len() - 1
+            },
+        };
+        let scan = &scans[idx].1;
+
+        let found = match pair {
+            Some((open, close)) => find_surround_pair(&rope, head, open, close, scan)
                 .map(|(open_off, close_off)| (open_off, close_off, open, close)),
-            None => closest_pair_at(ws, buffer_id, head),
-        })
-        .collect();
+            None => closest_surround_pair(&rope, head, scan)
+                .map(|(open, close, open_off, close_off)| (open_off, close_off, open, close)),
+        };
+        pairs.extend(found);
+    }
+
     pairs.sort_unstable();
     pairs.dedup();
     Some(pairs)
@@ -296,24 +327,7 @@ pub(crate) fn surround_pair_at(
     let rope = buffer.read().expect("poisoned").rope().clone();
     let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
     let tree = deepest_tree_at(snapshot, cursor);
-    find_surround_pair(&rope, cursor, open, close, tree)
-}
-
-/// The innermost enclosing pair of any type around `cursor`, as
-/// `(open_off, close_off, open, close)`. The `None`-pair variant of
-/// [`surround_pair_at`], driving `m d m` / `m r m`. Delegates to
-/// [`closest_surround_pair`] over the deepest covering syntax layer.
-fn closest_pair_at(
-    ws: &crate::workspace::Workspace,
-    buffer_id: crate::buffer::BufferId,
-    cursor: usize,
-) -> Option<(usize, usize, char, char)> {
-    let buffer = ws.buffers.get(buffer_id)?;
-    let rope = buffer.read().expect("poisoned").rope().clone();
-    let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
-    let tree = deepest_tree_at(snapshot, cursor);
-    closest_surround_pair(&rope, cursor, tree)
-        .map(|(open, close, open_off, close_off)| (open_off, close_off, open, close))
+    find_surround_pair(&rope, cursor, open, close, &PairScan::around(tree, cursor))
 }
 
 /// The tree of the deepest syntax layer whose byte span covers
@@ -363,7 +377,7 @@ const SURROUND_PAIRS: [(char, char); 7] = [
 pub(crate) fn closest_surround_pair(
     rope: &Rope,
     cursor: usize,
-    tree: Option<&stoat_language::Tree>,
+    scan: &PairScan<'_>,
 ) -> Option<(char, char, usize, usize)> {
     let at_cursor = rope.chars_at(cursor).next();
 
@@ -375,12 +389,12 @@ pub(crate) fn closest_surround_pair(
     for (i, (open, close)) in SURROUND_PAIRS.into_iter().enumerate() {
         if open == close && at_cursor == Some(open) {
             settled[i] = true;
-            resolved[i] = enclosing_string_pair(rope, tree, cursor, open);
+            resolved[i] = enclosing_string_pair(rope, scan.tree, cursor, open);
         }
     }
 
-    let opens = scan_left_for_opens(rope, cursor, at_cursor, &settled, tree);
-    let closes = scan_right_for_closes(rope, cursor, at_cursor, &settled, tree);
+    let opens = scan_left_for_opens(rope, cursor, at_cursor, &settled, scan);
+    let closes = scan_right_for_closes(rope, cursor, at_cursor, &settled, scan);
     for i in 0..SURROUND_PAIRS.len() {
         if !settled[i] {
             resolved[i] = opens[i].zip(closes[i]);
@@ -413,7 +427,7 @@ fn scan_left_for_opens(
     cursor: usize,
     at_cursor: Option<char>,
     settled: &[bool; SURROUND_PAIRS.len()],
-    tree: Option<&stoat_language::Tree>,
+    scan: &PairScan<'_>,
 ) -> [Option<usize>; SURROUND_PAIRS.len()] {
     let mut found: [Option<usize>; SURROUND_PAIRS.len()] = Default::default();
     let mut step_over = [0usize; SURROUND_PAIRS.len()];
@@ -421,7 +435,7 @@ fn scan_left_for_opens(
 
     // An open under the cursor is that type's open, without walking anywhere.
     for (i, (open, close)) in SURROUND_PAIRS.into_iter().enumerate() {
-        if !done[i] && open != close && at_cursor == Some(open) && !in_skip_zone(tree, cursor) {
+        if !done[i] && open != close && at_cursor == Some(open) && !scan.skips(cursor) {
             found[i] = Some(cursor);
             done[i] = true;
         }
@@ -435,7 +449,7 @@ fn scan_left_for_opens(
         pos = next;
 
         let Some(i) = pair_index(c) else { continue };
-        if done[i] || in_skip_zone(tree, pos) {
+        if done[i] || scan.skips(pos) {
             continue;
         }
 
@@ -467,14 +481,14 @@ fn scan_right_for_closes(
     cursor: usize,
     at_cursor: Option<char>,
     settled: &[bool; SURROUND_PAIRS.len()],
-    tree: Option<&stoat_language::Tree>,
+    scan: &PairScan<'_>,
 ) -> [Option<usize>; SURROUND_PAIRS.len()] {
     let mut found: [Option<usize>; SURROUND_PAIRS.len()] = Default::default();
     let mut step_over = [0usize; SURROUND_PAIRS.len()];
     let mut done = *settled;
 
     for (i, (open, close)) in SURROUND_PAIRS.into_iter().enumerate() {
-        if !done[i] && open != close && at_cursor == Some(close) && !in_skip_zone(tree, cursor) {
+        if !done[i] && open != close && at_cursor == Some(close) && !scan.skips(cursor) {
             found[i] = Some(cursor);
             done[i] = true;
         }
@@ -484,7 +498,7 @@ fn scan_right_for_closes(
     for c in rope.chars_at(pos).take(MAX_PAIR_SCAN) {
         if let Some(i) = pair_index(c)
             && !done[i]
-            && !in_skip_zone(tree, pos)
+            && !scan.skips(pos)
         {
             let (open, close) = SURROUND_PAIRS[i];
             if open == close || c == close && step_over[i] == 0 {
@@ -532,29 +546,22 @@ pub(crate) fn find_surround_pair(
     cursor: usize,
     open: char,
     close: char,
-    tree: Option<&stoat_language::Tree>,
+    scan: &PairScan<'_>,
 ) -> Option<(usize, usize)> {
     if open == close {
         if rope.chars_at(cursor).next() == Some(open) {
-            if let Some(pair) = enclosing_string_pair(rope, tree, cursor, open) {
+            if let Some(pair) = enclosing_string_pair(rope, scan.tree, cursor, open) {
                 return Some(pair);
             }
             return None;
         }
-        let open_pos = walk_left_for_symmetric(rope, cursor, open, tree)?;
-        let close_pos = walk_right_for_symmetric(rope, cursor, open, tree)?;
+        let open_pos = walk_left_for_symmetric(rope, cursor, open, scan)?;
+        let close_pos = walk_right_for_symmetric(rope, cursor, open, scan)?;
         Some((open_pos, close_pos))
     } else {
-        let open_pos = walk_left_for_open(rope, cursor, open, close, tree)?;
-        let close_pos = walk_right_for_close(rope, cursor, open, close, tree)?;
+        let open_pos = walk_left_for_open(rope, cursor, open, close, scan)?;
+        let close_pos = walk_right_for_close(rope, cursor, open, close, scan)?;
         Some((open_pos, close_pos))
-    }
-}
-
-fn in_skip_zone(tree: Option<&stoat_language::Tree>, offset: usize) -> bool {
-    match tree {
-        Some(t) => super::movement::is_in_string_or_comment(t, offset),
-        None => false,
     }
 }
 
@@ -603,12 +610,12 @@ fn walk_right_for_close(
     cursor: usize,
     open: char,
     close: char,
-    tree: Option<&stoat_language::Tree>,
+    scan: &PairScan<'_>,
 ) -> Option<usize> {
     let mut chars = rope.chars_at(cursor);
     let mut pos = cursor;
     let first = chars.next()?;
-    if first == close && !in_skip_zone(tree, pos) {
+    if first == close && !scan.skips(pos) {
         return Some(pos);
     }
     pos += first.len_utf8();
@@ -617,9 +624,9 @@ fn walk_right_for_close(
     // root plus an ancestor walk, and every character that is not a delimiter
     // discarded it.
     for c in chars.take(MAX_PAIR_SCAN) {
-        if c == open && !in_skip_zone(tree, pos) {
+        if c == open && !scan.skips(pos) {
             step_over += 1;
-        } else if c == close && !in_skip_zone(tree, pos) {
+        } else if c == close && !scan.skips(pos) {
             if step_over == 0 {
                 return Some(pos);
             }
@@ -635,18 +642,18 @@ fn walk_left_for_open(
     cursor: usize,
     open: char,
     close: char,
-    tree: Option<&stoat_language::Tree>,
+    scan: &PairScan<'_>,
 ) -> Option<usize> {
-    if rope.chars_at(cursor).next() == Some(open) && !in_skip_zone(tree, cursor) {
+    if rope.chars_at(cursor).next() == Some(open) && !scan.skips(cursor) {
         return Some(cursor);
     }
     let mut pos = cursor;
     let mut step_over: usize = 0;
     for c in rope.reversed_chars_at(cursor).take(MAX_PAIR_SCAN) {
         pos = pos.checked_sub(c.len_utf8())?;
-        if c == close && !in_skip_zone(tree, pos) {
+        if c == close && !scan.skips(pos) {
             step_over += 1;
-        } else if c == open && !in_skip_zone(tree, pos) {
+        } else if c == open && !scan.skips(pos) {
             if step_over == 0 {
                 return Some(pos);
             }
@@ -660,11 +667,11 @@ fn walk_right_for_symmetric(
     rope: &Rope,
     cursor: usize,
     ch: char,
-    tree: Option<&stoat_language::Tree>,
+    scan: &PairScan<'_>,
 ) -> Option<usize> {
     let mut pos = cursor;
     for c in rope.chars_at(cursor).take(MAX_PAIR_SCAN) {
-        if c == ch && !in_skip_zone(tree, pos) {
+        if c == ch && !scan.skips(pos) {
             return Some(pos);
         }
         pos += c.len_utf8();
@@ -676,12 +683,12 @@ fn walk_left_for_symmetric(
     rope: &Rope,
     cursor: usize,
     ch: char,
-    tree: Option<&stoat_language::Tree>,
+    scan: &PairScan<'_>,
 ) -> Option<usize> {
     let mut pos = cursor;
     for c in rope.reversed_chars_at(cursor).take(MAX_PAIR_SCAN) {
         pos = pos.checked_sub(c.len_utf8())?;
-        if c == ch && !in_skip_zone(tree, pos) {
+        if c == ch && !scan.skips(pos) {
             return Some(pos);
         }
     }
@@ -739,12 +746,12 @@ mod tests {
         let (rope, len) = spaced_pair(MAX_PAIR_SCAN + 100);
 
         assert_eq!(
-            walk_right_for_close(&rope, 1, '(', ')', None),
+            walk_right_for_close(&rope, 1, '(', ')', &PairScan::around(None, 0)),
             None,
             "the close is past where the walk gives up"
         );
         assert_eq!(
-            walk_left_for_open(&rope, len - 1, '(', ')', None),
+            walk_left_for_open(&rope, len - 1, '(', ')', &PairScan::around(None, 0)),
             None,
             "and so is the open, walking the other way"
         );
@@ -756,12 +763,12 @@ mod tests {
         let (rope, len) = spaced_pair(filler);
 
         assert_eq!(
-            walk_right_for_close(&rope, 1, '(', ')', None),
+            walk_right_for_close(&rope, 1, '(', ')', &PairScan::around(None, 0)),
             Some(1 + filler),
             "a close inside the cap is where it always was"
         );
         assert_eq!(
-            walk_left_for_open(&rope, len - 1, '(', ')', None),
+            walk_left_for_open(&rope, len - 1, '(', ')', &PairScan::around(None, 0)),
             Some(0),
             "and so is the open"
         );
@@ -777,7 +784,7 @@ mod tests {
         SURROUND_PAIRS
             .into_iter()
             .filter_map(|(open, close)| {
-                find_surround_pair(rope, cursor, open, close, tree)
+                find_surround_pair(rope, cursor, open, close, &PairScan::around(tree, cursor))
                     .map(|(open_off, close_off)| (open, close, open_off, close_off))
             })
             .max_by_key(|&(_, _, open_off, _)| open_off)
@@ -811,12 +818,103 @@ mod tests {
                     continue;
                 }
                 assert_eq!(
-                    closest_surround_pair(&rope, cursor, None),
+                    closest_surround_pair(&rope, cursor, &PairScan::around(None, cursor)),
                     closest_by_type(&rope, cursor, None),
                     "seed {seed}, cursor {cursor}, in {text:?}"
                 );
             }
         }
+    }
+
+    /// The collected zones answer exactly what asking the tree per character
+    /// answered.
+    ///
+    /// This is the whole of what the change to a collected list rests on. A
+    /// node's range contains an offset only when that node is an ancestor of the
+    /// smallest node there, so the two should agree everywhere, but a boundary
+    /// offset is one node's end and the next one's start and the two ways of
+    /// asking could split on it. Every offset of a fixture holding strings,
+    /// comments, and brackets inside both is what settles that.
+    #[test]
+    fn collected_zones_answer_what_asking_the_tree_per_character_did() {
+        let mut h = TestHarness::with_size(60, 10);
+        let src = "let a = (\"str (with) [brackets]\"); // {comment} 'x'\n\
+                   let b = [c(d), e{f}, \"g'h\"];\n\
+                   let c = `raw (x)` + 'y';\n";
+        let path = seed_rs(&mut h, src);
+
+        let ws = h.stoat.active_workspace();
+        let buffer_id = ws.buffers.id_for_path(&path).expect("buffer is open");
+        let rope = ws
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .rope()
+            .clone();
+        let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
+        assert!(snapshot.is_some(), "the fixture has to have parsed");
+
+        let mut zoned = 0usize;
+        for cursor in 0..=rope.len() {
+            let tree = deepest_tree_at(snapshot, cursor).expect("a covering layer");
+            let scan = PairScan::around(Some(tree), cursor);
+            let expected = crate::action_handlers::movement::is_in_string_or_comment(tree, cursor);
+            zoned += usize::from(expected);
+            assert_eq!(scan.skips(cursor), expected, "offset {cursor}");
+        }
+
+        assert!(
+            zoned > 0,
+            "the fixture has to put some offsets inside a zone for this to say anything",
+        );
+    }
+
+    /// The zones cover as far as the scan reaches, not just around the cursor.
+    ///
+    /// A scan walks thousands of characters, so a window sized to the cursor's
+    /// neighbourhood would leave a distant string unclassified and its brackets
+    /// counted as code. The decoy here sits thousands of bytes from the cursor,
+    /// which is where a too-small window stops covering and starts answering
+    /// with the wrong pair.
+    #[test]
+    fn a_decoy_bracket_far_from_the_cursor_is_still_inside_its_string() {
+        let mut h = TestHarness::with_size(60, 10);
+        let padding = "        1,\n".repeat(500);
+        let src = format!("fn f() {{\n    let a = (\n        \"decoy ( unclosed\",\n{padding}        x\n    );\n}}\n");
+        let path = seed_rs(&mut h, &src);
+
+        let ws = h.stoat.active_workspace();
+        let buffer_id = ws.buffers.id_for_path(&path).expect("buffer is open");
+        let rope = ws
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .rope()
+            .clone();
+        let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
+
+        let real_open = src.find("let a = (").expect("the tuple opens") + "let a = ".len();
+        let decoy = src[real_open + 1..]
+            .find('(')
+            .map(|i| real_open + 1 + i)
+            .expect("the string holds a decoy");
+        let cursor = src.rfind('x').expect("the fixture ends with x");
+        assert!(
+            cursor - decoy > 4_000,
+            "the decoy has to be far enough that a small window would miss it",
+        );
+
+        let tree = deepest_tree_at(snapshot, cursor);
+        let found = closest_surround_pair(&rope, cursor, &PairScan::around(tree, cursor));
+        assert_eq!(
+            found.map(|(open, _, open_off, _)| (open, open_off)),
+            Some(('(', real_open)),
+            "the pair is the real one, not the bracket inside the string",
+        );
     }
 
     /// The same comparison over a buffer with a real syntax tree, so the skip
@@ -847,7 +945,7 @@ mod tests {
             let tree = deepest_tree_at(snapshot, cursor);
             assert!(tree.is_some(), "a covering layer at {cursor}");
             assert_eq!(
-                closest_surround_pair(&rope, cursor, tree),
+                closest_surround_pair(&rope, cursor, &PairScan::around(tree, cursor)),
                 closest_by_type(&rope, cursor, tree),
                 "cursor {cursor}"
             );
@@ -963,56 +1061,86 @@ mod tests {
     #[test]
     fn find_pair_paren_cursor_inside() {
         let r = rope("(abc)");
-        assert_eq!(find_surround_pair(&r, 2, '(', ')', None), Some((0, 4)));
+        assert_eq!(
+            find_surround_pair(&r, 2, '(', ')', &PairScan::around(None, 0)),
+            Some((0, 4))
+        );
     }
 
     #[test]
     fn find_pair_paren_cursor_on_open() {
         let r = rope("(abc)");
-        assert_eq!(find_surround_pair(&r, 0, '(', ')', None), Some((0, 4)));
+        assert_eq!(
+            find_surround_pair(&r, 0, '(', ')', &PairScan::around(None, 0)),
+            Some((0, 4))
+        );
     }
 
     #[test]
     fn find_pair_paren_cursor_on_close() {
         let r = rope("(abc)");
-        assert_eq!(find_surround_pair(&r, 4, '(', ')', None), Some((0, 4)));
+        assert_eq!(
+            find_surround_pair(&r, 4, '(', ')', &PairScan::around(None, 0)),
+            Some((0, 4))
+        );
     }
 
     #[test]
     fn find_pair_paren_no_match_returns_none() {
         let r = rope("abc");
-        assert_eq!(find_surround_pair(&r, 1, '(', ')', None), None);
+        assert_eq!(
+            find_surround_pair(&r, 1, '(', ')', &PairScan::around(None, 0)),
+            None
+        );
     }
 
     #[test]
     fn find_pair_nested_paren_finds_innermost() {
         let r = rope("((abc))");
-        assert_eq!(find_surround_pair(&r, 3, '(', ')', None), Some((1, 5)));
+        assert_eq!(
+            find_surround_pair(&r, 3, '(', ')', &PairScan::around(None, 0)),
+            Some((1, 5))
+        );
     }
 
     #[test]
     fn find_pair_unbalanced_paren_returns_none() {
         let r = rope("(abc");
-        assert_eq!(find_surround_pair(&r, 1, '(', ')', None), None);
+        assert_eq!(
+            find_surround_pair(&r, 1, '(', ')', &PairScan::around(None, 0)),
+            None
+        );
     }
 
     #[test]
     fn find_pair_quote_cursor_inside() {
         let r = rope("\"abc\"");
-        assert_eq!(find_surround_pair(&r, 2, '"', '"', None), Some((0, 4)));
+        assert_eq!(
+            find_surround_pair(&r, 2, '"', '"', &PairScan::around(None, 2)),
+            Some((0, 4))
+        );
     }
 
     #[test]
     fn find_pair_quote_cursor_on_quote_is_ambiguous() {
         let r = rope("\"abc\"");
-        assert_eq!(find_surround_pair(&r, 0, '"', '"', None), None);
-        assert_eq!(find_surround_pair(&r, 4, '"', '"', None), None);
+        assert_eq!(
+            find_surround_pair(&r, 0, '"', '"', &PairScan::around(None, 0)),
+            None
+        );
+        assert_eq!(
+            find_surround_pair(&r, 4, '"', '"', &PairScan::around(None, 4)),
+            None
+        );
     }
 
     #[test]
     fn find_pair_quote_no_match_returns_none() {
         let r = rope("abc");
-        assert_eq!(find_surround_pair(&r, 1, '"', '"', None), None);
+        assert_eq!(
+            find_surround_pair(&r, 1, '"', '"', &PairScan::around(None, 1)),
+            None
+        );
     }
 
     #[test]
@@ -1233,8 +1361,14 @@ mod tests {
     #[test]
     fn surround_pair_on_quote_no_tree_returns_none() {
         let r = rope("\"abc\"");
-        assert_eq!(find_surround_pair(&r, 0, '"', '"', None), None);
-        assert_eq!(find_surround_pair(&r, 4, '"', '"', None), None);
+        assert_eq!(
+            find_surround_pair(&r, 0, '"', '"', &PairScan::around(None, 0)),
+            None
+        );
+        assert_eq!(
+            find_surround_pair(&r, 4, '"', '"', &PairScan::around(None, 4)),
+            None
+        );
     }
 
     fn primary_range(h: &mut TestHarness) -> (usize, usize) {

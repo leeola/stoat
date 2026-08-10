@@ -154,7 +154,8 @@ fn find_textobject(
             };
             let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
             let tree = super::surround::deepest_tree_at(snapshot, cursor);
-            super::surround::closest_surround_pair(&rope, cursor, tree).map(
+            let scan = crate::action_handlers::movement::PairScan::around(tree, cursor);
+            super::surround::closest_surround_pair(&rope, cursor, &scan).map(
                 |(open, close, open_off, close_off)| {
                     pair_to_range(open, close, open_off, close_off, mode)
                 },
