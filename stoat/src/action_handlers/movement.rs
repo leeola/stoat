@@ -3982,9 +3982,7 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
         .and_then(|sm| sm.snapshot().iter_layers().next().map(|l| l.tree.clone()));
 
     let language = ws.buffers.language_for(buffer_id);
-    let bracket_query = language
-        .as_ref()
-        .and_then(|lang| lang.bracket_query.as_ref());
+    let bracket_query = language.as_ref().and_then(|lang| lang.bracket_query());
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
     let display_snapshot = editor.display_map.snapshot();

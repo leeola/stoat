@@ -221,7 +221,7 @@ fn find_textobject_treesitter(
                     acc
                 }
             })?;
-    let query = layer.language.textobjects_query.as_ref()?;
+    let query = layer.language.textobjects_query()?;
     let buffer = ws.buffers.get(buffer_id)?;
     let guard = buffer.read().ok()?;
     let capture_name = format!("{kind}.{}", mode.capture_suffix());

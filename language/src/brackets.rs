@@ -118,7 +118,7 @@ mod tests {
         let tree = parse(&lang, src);
         let rope = Rope::from(src);
         matching_bracket(
-            lang.bracket_query.as_ref().expect("bracket query"),
+            lang.bracket_query().expect("bracket query"),
             tree.root_node(),
             &rope,
             offset,
@@ -149,7 +149,7 @@ mod tests {
         let src = nested_source();
         let tree = parse(&lang, &src);
         let rope = Rope::from(src.as_str());
-        let query = lang.bracket_query.as_ref().expect("bracket query");
+        let query = lang.bracket_query().expect("bracket query");
 
         let mut answered = 0;
         for offset in 0..src.len() {

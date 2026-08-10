@@ -102,7 +102,7 @@ fn collect_capture_starts_for_buffer(
     let Some(layer) = layer else {
         return Vec::new();
     };
-    let Some(query) = layer.language.textobjects_query.as_ref() else {
+    let Some(query) = layer.language.textobjects_query() else {
         return Vec::new();
     };
     let Some(buffer) = ws.buffers.get(buffer_id) else {

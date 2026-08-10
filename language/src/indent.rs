@@ -323,7 +323,7 @@ mod tests {
         let tree = parse(&lang, src);
         let rope = Rope::from(src);
         newline_indent(
-            lang.indent_query.as_ref().expect("indent query"),
+            lang.indent_query().expect("indent query"),
             tree.root_node(),
             &rope,
             cursor,
@@ -340,7 +340,7 @@ mod tests {
         let tree = parse(&lang, src);
         let rope = Rope::from(src);
         suggested_indent(
-            lang.indent_query.as_ref().expect("indent query"),
+            lang.indent_query().expect("indent query"),
             tree.root_node(),
             &rope,
             row,
@@ -432,7 +432,7 @@ mod tests {
         let lang = lang("rust");
         let tree = parse(&lang, src);
         let rope = Rope::from(src);
-        let query = lang.indent_query.as_ref().expect("indent query");
+        let query = lang.indent_query().expect("indent query");
         let root = tree.root_node();
         let whole = 0..src.len();
 
@@ -496,7 +496,7 @@ mod tests {
             let lang = lang(name);
             let tree = parse(&lang, src);
             let rope = Rope::from(src);
-            let query = lang.indent_query.as_ref().expect("indent query");
+            let query = lang.indent_query().expect("indent query");
             let root = tree.root_node();
 
             for row in 0..=rope.max_point().row {

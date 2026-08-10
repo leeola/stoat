@@ -878,12 +878,8 @@ mod tests {
         let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
         let rope = Rope::from(text);
         let tree = parse_rope(rust, &rope, None).unwrap();
-        let defs = extract_symbols(
-            rust.outline_query.as_ref().unwrap(),
-            tree.root_node(),
-            &rope,
-        );
-        let refs = extract_references(rust.tags_query.as_ref().unwrap(), tree.root_node(), &rope);
+        let defs = extract_symbols(rust.outline_query().unwrap(), tree.root_node(), &rope);
+        let refs = extract_references(rust.tags_query().unwrap(), tree.root_node(), &rope);
         build_shard(file, file_rel, [0u8; 32], text, defs, refs)
     }
 

@@ -28,36 +28,12 @@ pub struct Language {
     /// capture names match the host node kinds. `None` when there are no
     /// injections configured.
     pub injection_query: Option<Query>,
-    /// Bracket-pair query loaded from `brackets.scm`. Captures `@open` and
-    /// `@close` for matched bracket-like tokens, driving the editor's
-    /// match-brackets motion through [`crate::matching_bracket`]. `None` for
-    /// grammars that ship no `brackets.scm`.
-    pub bracket_query: Option<Query>,
-    /// Indent query loaded from `indents.scm`. Captures `@indent` and
-    /// `@end` markers for grammar-driven auto-indentation. Loaded but
-    /// not yet wired.
-    pub indent_query: Option<Query>,
-    /// Textobjects query loaded from `textobjects.scm`. Captures
-    /// `@function.around` / `@function.inside`, `@class.around` /
-    /// `@class.inside`, `@parameter.around` / `@parameter.inside`,
-    /// `@comment.around` / `@comment.inside`, plus auxiliaries
-    /// (`@entry`, `@test`) used by `select_textobject_around` and
-    /// `select_textobject_inner`. `None` for languages without
-    /// structural textobjects (json, markdown).
-    pub textobjects_query: Option<Query>,
-    /// Outline query loaded from `outline.scm`. Captures `@item` (a
-    /// definition's full range), `@name` (its identifier), `@context`
-    /// (keyword and modifier tokens), and `@annotation` (attributes,
-    /// doc comments) for the symbols a file defines. Loaded but not yet
-    /// wired into a consumer. Reserved for symbol extraction. `None` for
-    /// languages without an `outline.scm` (e.g. toml).
-    pub outline_query: Option<Query>,
-    /// Tags query loaded from `tags.scm`. Captures `@reference.call`
-    /// at each call site (free functions, method calls, and macro
-    /// invocations) for building a call graph. Loaded but not yet
-    /// wired into a consumer. Reserved for reference extraction.
-    /// `None` for languages without a `tags.scm` (only rust ships one).
-    pub tags_query: Option<Query>,
+    /// The action-driven queries, compiled the first time one is asked for.
+    ///
+    /// None of these is read to paint a frame, and each costs tens of
+    /// milliseconds to compile, so a session that never runs a bracket motion
+    /// never pays for `brackets.scm`.
+    aux: AuxQueries,
     /// Line-comment marker for languages that have one (e.g. `"//"`
     /// for rust, `"#"` for toml). `None` for languages without line
     /// comments (e.g. JSON, markdown). Used by the `ToggleComments`
@@ -72,7 +48,101 @@ pub struct Language {
     pub fence_candidates: OnceLock<Vec<Arc<Language>>>,
 }
 
+/// The queries no frame needs, held as source until something asks.
+///
+/// Each is compiled at most once, on first access. A source that does not match
+/// the bundled grammar compiles to nothing and stays that way, which is the
+/// best-effort contract every reader already tolerates.
+#[derive(Default)]
+struct AuxQueries {
+    brackets: LazyQuery,
+    indents: LazyQuery,
+    textobjects: LazyQuery,
+    outline: LazyQuery,
+    tags: LazyQuery,
+}
+
+/// One optional query, compiled from its source the first time it is read.
+#[derive(Default)]
+struct LazyQuery {
+    /// `None` for a grammar that ships no such file, which compiles to nothing
+    /// without being asked.
+    src: Option<&'static str>,
+    compiled: OnceLock<Option<Query>>,
+}
+
+impl LazyQuery {
+    fn new(src: Option<&'static str>) -> LazyQuery {
+        LazyQuery {
+            src,
+            compiled: OnceLock::new(),
+        }
+    }
+
+    /// The compiled query, compiling it on the first call.
+    ///
+    /// A source that fails against the bundled grammar yields nothing and is
+    /// not retried. These are optional files that may lag a grammar bump, so
+    /// dropping one is better than failing the build over it, and every reader
+    /// already handles their absence.
+    fn get(&self, grammar: &TsLanguage) -> Option<&Query> {
+        self.compiled
+            .get_or_init(|| self.src.and_then(|src| Query::new(grammar, src).ok()))
+            .as_ref()
+    }
+}
+
 impl Language {
+    /// Bracket-pair query loaded from `brackets.scm`. Captures `@open` and
+    /// `@close` for matched bracket-like tokens, driving the editor's
+    /// match-brackets motion through [`crate::matching_bracket`]. `None` for
+    /// grammars that ship no `brackets.scm`.
+    ///
+    /// Compiled on the first call, which costs tens of milliseconds.
+    pub fn bracket_query(&self) -> Option<&Query> {
+        self.aux.brackets.get(&self.grammar)
+    }
+
+    /// Indent query loaded from `indents.scm`. Captures `@indent` and `@end`
+    /// markers for grammar-driven auto-indentation. Compiled on the first call.
+    pub fn indent_query(&self) -> Option<&Query> {
+        self.aux.indents.get(&self.grammar)
+    }
+
+    /// Textobjects query loaded from `textobjects.scm`. Captures
+    /// `@function.around` / `@function.inside`, `@class.around` /
+    /// `@class.inside`, `@parameter.around` / `@parameter.inside`,
+    /// `@comment.around` / `@comment.inside`, plus auxiliaries (`@entry`,
+    /// `@test`) used by `select_textobject_around` and
+    /// `select_textobject_inner`. `None` for languages without structural
+    /// textobjects (json, markdown).
+    ///
+    /// Compiled on the first call.
+    pub fn textobjects_query(&self) -> Option<&Query> {
+        self.aux.textobjects.get(&self.grammar)
+    }
+
+    /// Outline query loaded from `outline.scm`. Captures `@item` (a
+    /// definition's full range), `@name` (its identifier), `@context` (keyword
+    /// and modifier tokens), and `@annotation` (attributes, doc comments) for
+    /// the symbols a file defines. `None` for languages without an
+    /// `outline.scm` (e.g. toml).
+    ///
+    /// Compiled on the first call.
+    pub fn outline_query(&self) -> Option<&Query> {
+        self.aux.outline.get(&self.grammar)
+    }
+
+    /// Tags query loaded from `tags.scm`. Captures `@reference.call` at each
+    /// call site (free functions, method calls, and macro invocations) for
+    /// building a call graph. `None` for languages without a `tags.scm` (only
+    /// rust ships one).
+    ///
+    /// Compiled on the first call.
+    pub fn tags_query(&self) -> Option<&Query> {
+        self.aux.tags.get(&self.grammar)
+    }
+
     /// Capture names from the highlight query, in capture-index order.
     /// Used by callers that want to build a [`HighlightMap`] against a
     /// host theme without having to crack open `highlight_query`.
@@ -242,53 +312,12 @@ fn make_language_with_injections(
         line_comment,
     } = aux;
 
+    // Only these two are read to paint, so only these two are compiled here.
     // Each Query::new is tens of milliseconds against the rust grammar, and the
-    // seven are independent, so compile them concurrently to shrink the
-    // pre-first-frame path. The grammar and injections are shared immutably and
-    // the scoped threads join before either is moved into the returned Language.
-    let (
-        highlight_query,
-        injection_query,
-        bracket_query,
-        indent_query,
-        textobjects_query,
-        outline_query,
-        tags_query,
-    ) = std::thread::scope(|s| {
-        let injection_handle = s.spawn(|| build_injection_query(name, &grammar, &injections));
-        let bracket_handle =
-            s.spawn(|| brackets.and_then(|src| try_compile_query(name, "brackets", &grammar, src)));
-        let indent_handle =
-            s.spawn(|| indents.and_then(|src| try_compile_query(name, "indents", &grammar, src)));
-        let textobjects_handle = s.spawn(|| {
-            textobjects.and_then(|src| try_compile_query(name, "textobjects", &grammar, src))
-        });
-        let outline_handle =
-            s.spawn(|| outline.and_then(|src| try_compile_query(name, "outline", &grammar, src)));
-        let tags_handle =
-            s.spawn(|| tags.and_then(|src| try_compile_query(name, "tags", &grammar, src)));
-
-        let highlight_query = Query::new(&grammar, highlight_src)
-            .unwrap_or_else(|e| panic!("highlight query for {name} failed to compile: {e}"));
-
-        (
-            highlight_query,
-            injection_handle
-                .join()
-                .expect("injection query thread panicked"),
-            bracket_handle
-                .join()
-                .expect("brackets query thread panicked"),
-            indent_handle.join().expect("indents query thread panicked"),
-            textobjects_handle
-                .join()
-                .expect("textobjects query thread panicked"),
-            outline_handle
-                .join()
-                .expect("outline query thread panicked"),
-            tags_handle.join().expect("tags query thread panicked"),
-        )
-    });
+    // action-driven five wait until something asks for them.
+    let highlight_query = Query::new(&grammar, highlight_src)
+        .unwrap_or_else(|e| panic!("highlight query for {name} failed to compile: {e}"));
+    let injection_query = build_injection_query(name, &grammar, &injections);
 
     Language {
         name,
@@ -298,26 +327,16 @@ fn make_language_with_injections(
         highlight_map: Mutex::new(HighlightMap::default()),
         injections,
         injection_query,
-        bracket_query,
-        indent_query,
-        textobjects_query,
-        outline_query,
-        tags_query,
+        aux: AuxQueries {
+            brackets: LazyQuery::new(brackets),
+            indents: LazyQuery::new(indents),
+            textobjects: LazyQuery::new(textobjects),
+            outline: LazyQuery::new(outline),
+            tags: LazyQuery::new(tags),
+        },
         line_comment,
         fence_candidates: OnceLock::new(),
     }
-}
-
-fn try_compile_query(
-    _lang_name: &'static str,
-    _query_kind: &'static str,
-    grammar: &TsLanguage,
-    src: &str,
-) -> Option<Query> {
-    // Silent best-effort compilation: optional aux queries that don't match
-    // the bundled grammar version are dropped instead of breaking the build.
-    // Consumers must tolerate `None`.
-    Query::new(grammar, src).ok()
 }
 
 /// Build a tree-sitter [`Query`] that captures every host node configured in
@@ -469,8 +488,45 @@ fn make_markdown_inline() -> Language {
 
 #[cfg(test)]
 mod tests {
-    use super::LanguageRegistry;
+    use super::{LanguageRegistry, LazyQuery};
     use std::path::Path;
+
+    /// Nothing action-driven is compiled until something asks for it, which is
+    /// what keeps it off the path to the first frame. Each costs tens of
+    /// milliseconds, and a session may never run the motion that needs one.
+    #[test]
+    fn an_aux_query_waits_to_be_asked_for_and_then_is_compiled_once() {
+        let reg = LanguageRegistry::standard();
+        let rust = reg.for_path(Path::new("a.rs")).expect("rust");
+
+        assert!(
+            rust.aux.brackets.compiled.get().is_none(),
+            "building the language did not compile it",
+        );
+
+        let first = rust.bracket_query().expect("rust ships brackets.scm") as *const _;
+        assert_eq!(
+            rust.bracket_query().expect("still there") as *const _,
+            first,
+            "and asking again hands back the one already compiled",
+        );
+    }
+
+    /// A grammar that ships no such file has nothing to compile, and asking
+    /// settles that rather than leaving it to be re-decided per call.
+    #[test]
+    fn an_absent_aux_query_is_settled_by_the_first_ask() {
+        let reg = LanguageRegistry::standard();
+        let rust = reg.for_path(Path::new("a.rs")).expect("rust");
+        let absent = LazyQuery::new(None);
+
+        assert!(absent.get(&rust.grammar).is_none());
+        assert_eq!(
+            absent.compiled.get(),
+            Some(&None),
+            "the answer is recorded, so a second ask is not another attempt",
+        );
+    }
 
     #[test]
     fn for_path_resolves_extensions() {
@@ -598,16 +654,16 @@ mod tests {
         let reg = LanguageRegistry::standard();
         let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
         assert!(
-            rust.bracket_query.is_some(),
+            rust.bracket_query().is_some(),
             "rust brackets.scm must compile against the bundled grammar"
         );
         assert!(
-            rust.indent_query.is_some(),
+            rust.indent_query().is_some(),
             "rust indents.scm must compile against the bundled grammar"
         );
         let json = reg.languages().iter().find(|l| l.name == "json").unwrap();
         assert!(
-            json.bracket_query.is_some(),
+            json.bracket_query().is_some(),
             "json brackets.scm must compile"
         );
     }
@@ -617,17 +673,17 @@ mod tests {
         let reg = LanguageRegistry::standard();
         let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
         assert!(
-            rust.textobjects_query.is_some(),
+            rust.textobjects_query().is_some(),
             "rust textobjects.scm must compile against the bundled grammar"
         );
         let toml = reg.languages().iter().find(|l| l.name == "toml").unwrap();
         assert!(
-            toml.textobjects_query.is_some(),
+            toml.textobjects_query().is_some(),
             "toml textobjects.scm must compile against the bundled grammar"
         );
         let json = reg.languages().iter().find(|l| l.name == "json").unwrap();
         assert!(
-            json.textobjects_query.is_none(),
+            json.textobjects_query().is_none(),
             "json has no textobjects.scm; query should be None"
         );
     }
@@ -638,14 +694,14 @@ mod tests {
         for name in ["rust", "json", "markdown"] {
             let lang = reg.languages().iter().find(|l| l.name == name).unwrap();
             assert!(
-                lang.outline_query.is_some(),
+                lang.outline_query().is_some(),
                 "{name} outline.scm must compile against the bundled grammar"
             );
         }
 
         let json = reg.languages().iter().find(|l| l.name == "json").unwrap();
         assert!(
-            json.outline_query
+            json.outline_query()
                 .as_ref()
                 .unwrap()
                 .capture_index_for_name("name")
@@ -659,7 +715,7 @@ mod tests {
         let reg = LanguageRegistry::standard();
         let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
         assert!(
-            rust.tags_query
+            rust.tags_query()
                 .as_ref()
                 .expect("rust tags.scm must compile against the bundled grammar")
                 .capture_index_for_name("reference.call")
@@ -669,7 +725,7 @@ mod tests {
 
         let json = reg.languages().iter().find(|l| l.name == "json").unwrap();
         assert!(
-            json.tags_query.is_none(),
+            json.tags_query().is_none(),
             "json has no tags.scm; query should be None"
         );
     }

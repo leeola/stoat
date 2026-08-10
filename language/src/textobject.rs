@@ -175,7 +175,7 @@ mod tests {
         let src = nested_source();
         let tree = parse(&lang, &src);
         let rope = Rope::from(src.as_str());
-        let query = lang.textobjects_query.as_ref().expect("textobjects query");
+        let query = lang.textobjects_query().expect("textobjects query");
         let root = tree.root_node();
         let whole = 0..src.len();
 

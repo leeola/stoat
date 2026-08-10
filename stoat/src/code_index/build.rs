@@ -407,12 +407,12 @@ pub(crate) fn extract_shard(
     let root = tree.root_node();
 
     let defs = language
-        .outline_query
+        .outline_query()
         .as_ref()
         .map(|query| extract_symbols(query, root, rope))
         .unwrap_or_default();
     let refs = language
-        .tags_query
+        .tags_query()
         .as_ref()
         .map(|query| extract_references(query, root, rope))
         .unwrap_or_default();

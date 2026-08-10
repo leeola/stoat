@@ -288,7 +288,7 @@ fn main() {
     fn extract_sorted() -> Vec<SymbolDef> {
         let reg = LanguageRegistry::standard();
         let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
-        let query = rust.outline_query.as_ref().unwrap();
+        let query = rust.outline_query().unwrap();
         let rope = Rope::from(SNIPPET);
         let tree = parse_rope(rust, &rope, None).unwrap();
         let mut syms = extract_symbols(query, tree.root_node(), &rope);
@@ -368,7 +368,7 @@ fn demo() {
     fn extract_references_over_rust_snippet() {
         let reg = LanguageRegistry::standard();
         let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
-        let query = rust.tags_query.as_ref().unwrap();
+        let query = rust.tags_query().unwrap();
         let rope = Rope::from(CALLS);
         let tree = parse_rope(rust, &rope, None).unwrap();
         let mut refs = extract_references(query, tree.root_node(), &rope);
@@ -402,7 +402,7 @@ fn demo() {
     fn extract_type_references_over_rust_snippet() {
         let reg = LanguageRegistry::standard();
         let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
-        let query = rust.tags_query.as_ref().unwrap();
+        let query = rust.tags_query().unwrap();
         let rope = Rope::from(TYPE_USES);
         let tree = parse_rope(rust, &rope, None).unwrap();
         let mut refs = extract_references(query, tree.root_node(), &rope);
@@ -425,7 +425,7 @@ fn demo() {
     fn scoped_type_yields_single_reference() {
         let reg = LanguageRegistry::standard();
         let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
-        let query = rust.tags_query.as_ref().unwrap();
+        let query = rust.tags_query().unwrap();
         let rope = Rope::from("fn f(p: foo::Bar) {}");
         let tree = parse_rope(rust, &rope, None).unwrap();
         let refs = extract_references(query, tree.root_node(), &rope);
@@ -438,7 +438,7 @@ fn demo() {
     fn impl_header_yields_implements_and_type_references() {
         let reg = LanguageRegistry::standard();
         let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
-        let query = rust.tags_query.as_ref().unwrap();
+        let query = rust.tags_query().unwrap();
         let rope = Rope::from("impl Greet for Point {}");
         let tree = parse_rope(rust, &rope, None).unwrap();
         let refs = extract_references(query, tree.root_node(), &rope);
@@ -460,7 +460,7 @@ fn demo() {
     fn scoped_impl_captures_bare_trait_name() {
         let reg = LanguageRegistry::standard();
         let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
-        let query = rust.tags_query.as_ref().unwrap();
+        let query = rust.tags_query().unwrap();
         let rope = Rope::from("impl foo::Greet for Point {}");
         let tree = parse_rope(rust, &rope, None).unwrap();
         let refs = extract_references(query, tree.root_node(), &rope);
