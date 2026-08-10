@@ -14,6 +14,7 @@
 //! Neither thread does any of the editor's work, so terminal IO latency is
 //! independent of main-thread workload as well.
 
+use crate::vt_input;
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
@@ -160,7 +161,17 @@ async fn run(
     // The app renders its first frames while this is still waiting for a reply,
     // so they go out through the foreign-terminal fallback and the report is
     // what upgrades the session once one arrives.
-    let _ = stoatty_tx.send(stoatty_handshake());
+    let (stoatty, typed) = stoatty_handshake();
+    let _ = stoatty_tx.send(stoatty);
+
+    // What was typed while the handshake owned fd 0, replayed before the input
+    // thread starts so it arrives ahead of anything typed after. Decoding is
+    // best-effort, and the alternative it replaces was dropping all of it.
+    for event in vt_input::decode(&typed) {
+        if event_tx.send(event).is_err() {
+            return Ok(());
+        }
+    }
 
     // Only now, because the handshake reads raw fd 0 and nothing else may be
     // reading stdin while it does.
@@ -295,11 +306,12 @@ const IDENT_REPLY_TIMEOUT: Duration = Duration::from_millis(250);
 /// terminal, so a missing reply is the normal headless, ssh, or
 /// foreign-terminal case, reported as `false`.
 ///
-/// Any keystrokes typed during the read window are consumed here and lost. This
-/// wart is tolerated because crossterm's [`EventStream`] cannot surface an APC
-/// reply and must not own stdin until the window closes, so the handshake reads
-/// fd 0 directly first.
-fn stoatty_handshake() -> bool {
+/// Returns whether a stoatty answered, and every byte read that was not the
+/// reply. Those are what someone typed while this owned fd 0, and the caller
+/// replays them rather than losing what was typed at launch. Crossterm cannot
+/// own stdin until this window closes, since its parser has no way to surface
+/// an APC reply, which is why the handshake reads fd 0 directly first.
+fn stoatty_handshake() -> (bool, Vec<u8>) {
     let hello = command::encode_hello(&HelloCommand {
         pid: std::process::id(),
         log_id: stoat_log::ident::get()
@@ -312,32 +324,32 @@ fn stoatty_handshake() -> bool {
     {
         let mut stdout = io::stdout().lock();
         if stdout.write_all(&hello).is_err() || stdout.flush().is_err() {
-            return false;
+            return (false, Vec::new());
         }
     }
 
-    match read_ident_reply(IDENT_REPLY_TIMEOUT) {
-        Some(reply) => {
-            tracing::info!(
-                stoatty_pid = reply.pid,
-                stoatty_log_id = %reply.log_id,
-                stoatty_hostname = %reply.hostname,
-                stoatty_version = %reply.version,
-                "stoatty ident"
-            );
-            true
-        },
-        None => {
-            tracing::info!("no stoatty ident reply (headless or foreign terminal)");
-            false
-        },
+    let (reply, leftover) = read_ident_reply(IDENT_REPLY_TIMEOUT);
+    match &reply {
+        Some(reply) => tracing::info!(
+            stoatty_pid = reply.pid,
+            stoatty_log_id = %reply.log_id,
+            stoatty_hostname = %reply.hostname,
+            stoatty_version = %reply.version,
+            "stoatty ident"
+        ),
+        None => tracing::info!("no stoatty ident reply (headless or foreign terminal)"),
     }
+    (reply.is_some(), leftover)
 }
 
 /// Read raw stdin for up to `timeout`, returning the terminal's ident reply if
-/// one arrives within it. Bytes that are not the reply frame are dropped.
+/// one arrives within it, and every byte read that was not part of it.
+///
+/// The leftover is what someone typed while this owned fd 0. It is returned
+/// rather than dropped so the caller can replay it, and on timeout or EOF it is
+/// the whole buffer, which is the case every foreign terminal hits.
 #[cfg(unix)]
-fn read_ident_reply(timeout: Duration) -> Option<IdentReply> {
+fn read_ident_reply(timeout: Duration) -> (Option<IdentReply>, Vec<u8>) {
     let deadline = Instant::now() + timeout;
     let mut buf = Vec::new();
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
@@ -358,43 +370,20 @@ fn read_ident_reply(timeout: Duration) -> Option<IdentReply> {
         }
         buf.extend_from_slice(&chunk[..n as usize]);
 
-        if let Some(span) = extract_apc_payload(&buf) {
-            return frame::decode(span).and_then(|frame| command::decode_ident_reply(&frame));
+        if let Some(span) = vt_input::apc_span(&buf) {
+            let reply = frame::decode(&buf[span.clone()])
+                .and_then(|frame| command::decode_ident_reply(&frame));
+            buf.drain(span);
+            return (reply, buf);
         }
     }
 
-    if !buf.is_empty() {
-        tracing::debug!(
-            dropped = buf.len(),
-            "dropped non-APC stdin bytes during handshake"
-        );
-    }
-    None
+    (None, buf)
 }
 
 #[cfg(not(unix))]
-fn read_ident_reply(_timeout: Duration) -> Option<IdentReply> {
-    None
-}
-
-/// The first complete APC frame span in `bytes`, from `ESC _` through its `ESC \`
-/// or `BEL` terminator inclusive, or `None` if no complete span is present yet.
-///
-/// Leading bytes before the introducer (stray keystrokes) are skipped.
-fn extract_apc_payload(bytes: &[u8]) -> Option<&[u8]> {
-    let start = bytes.windows(2).position(|pair| pair == b"\x1b_")?;
-    let rest = &bytes[start..];
-    let mut i = 2;
-    while i < rest.len() {
-        if rest[i] == 0x07 {
-            return Some(&rest[..=i]);
-        }
-        if rest[i] == 0x1b && rest.get(i + 1) == Some(&b'\\') {
-            return Some(&rest[..=i + 1]);
-        }
-        i += 1;
-    }
-    None
+fn read_ident_reply(_timeout: Duration) -> (Option<IdentReply>, Vec<u8>) {
+    (None, Vec::new())
 }
 
 /// Frames between periodic input-to-flush latency log lines.
@@ -543,25 +532,6 @@ mod tests {
         copy_clamped(&mut dst, &src);
 
         assert_eq!(dst, Buffer::with_lines(["ab"]));
-    }
-
-    #[test]
-    fn extract_apc_payload_returns_a_complete_st_span() {
-        let bytes = b"\x1b_Gstoatty;ident\x1b\\";
-        assert_eq!(extract_apc_payload(bytes), Some(&bytes[..]));
-    }
-
-    #[test]
-    fn extract_apc_payload_skips_leading_garbage_and_accepts_bel() {
-        assert_eq!(
-            extract_apc_payload(b"junk\x1b_Gstoatty;ident\x07"),
-            Some(&b"\x1b_Gstoatty;ident\x07"[..])
-        );
-    }
-
-    #[test]
-    fn extract_apc_payload_is_none_when_the_span_is_incomplete() {
-        assert_eq!(extract_apc_payload(b"\x1b_Gstoatty;ident"), None);
     }
 
     #[test]
