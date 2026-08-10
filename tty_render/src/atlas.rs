@@ -38,7 +38,13 @@ pub enum AtlasKind {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlyphInfo {
     pub kind: AtlasKind,
-    /// Atlas texture coordinates as `[u_min, v_min, u_max, v_max]`.
+    /// Atlas coordinates in texels, as `[x_min, y_min, x_max, y_max]`.
+    ///
+    /// Texels rather than the normalized coordinates a sampler wants, because
+    /// normalizing here would tie every cached instance to the atlas size it
+    /// was cut at, and a grow would invalidate the lot. The shader divides by
+    /// the size the globals carry instead. Etagere keeps a glyph's texels
+    /// across a grow, so these survive one.
     pub uv: [f32; 4],
     /// Glyph bitmap size in texels, `[width, height]`.
     pub size: [u32; 2],
@@ -147,20 +153,21 @@ impl GlyphAtlas {
 
     /// The mask and color atlas texture dimensions, in texels.
     ///
-    /// Each grows (doubles) only when a glyph no longer fits, which moves every
-    /// packed glyph's UV. A caller that caches glyph instances compares this
-    /// across a frame to tell whether reused UVs are still valid.
+    /// Each doubles when a glyph no longer fits, which replaces its texture and
+    /// so its view. A caller compares this across a frame to tell whether a
+    /// bind group holding those views is stale, and divides a glyph's texel
+    /// coordinates by it to sample.
     pub fn texture_dims(&self) -> (u32, u32) {
         (self.mask.size, self.color.size)
     }
 
-    /// A generation counter that changes whenever any packed glyph's UV moves,
+    /// A generation counter that changes whenever any packed glyph moves,
     /// across both the mask and color atlases.
     ///
-    /// A grow or an eviction in either atlas bumps it. A caller that cached
-    /// glyph instances against an earlier frame's atlas may reuse them only
-    /// while this is unchanged. A difference means some UV moved, so the cached
-    /// instances now point at the wrong pixels and must be rebuilt.
+    /// An eviction in either atlas bumps it, a freed slot being one another
+    /// glyph packs into. A grow does not: the texture doubles and every glyph
+    /// keeps its texels. A caller that cached glyph instances against an
+    /// earlier frame's atlas may reuse them only while this is unchanged.
     pub fn content_epoch(&self) -> u64 {
         self.mask.epoch.wrapping_add(self.color.epoch)
     }
@@ -178,10 +185,12 @@ struct Atlas {
     /// this frame's when its stamp matches, which is what protects it from
     /// eviction, so nothing has to be reset between frames.
     frame: u64,
-    /// Bumped whenever a packed glyph's UV changes: a grow rescales every
-    /// normalized coordinate, and an eviction frees a slot another glyph then
-    /// reuses. A caller reusing glyph instances across frames compares it to
-    /// tell whether the UVs it cached still point at the right pixels.
+    /// Bumped whenever a packed glyph moves, which only an eviction does. It
+    /// frees a slot another glyph then packs into, so a cached instance naming
+    /// those texels would draw the wrong pixels.
+    ///
+    /// A grow leaves this alone. Every glyph keeps the texels it was cut at,
+    /// which is what a cached instance names.
     epoch: u64,
 }
 
@@ -207,10 +216,10 @@ impl Atlas {
     /// `Some` if `id` is cached (inner value `None` for an empty glyph),
     /// `None` if it must be rasterized.
     fn lookup(&mut self, id: CacheId) -> Option<Option<GlyphInfo>> {
-        let (kind, size, frame) = (self.kind, self.size, self.frame);
+        let (kind, frame) = (self.kind, self.frame);
         let cached = self.cache.get_mut(&id)?;
         cached.used_frame = frame;
-        Some(glyph_info(cached, kind, size))
+        Some(glyph_info(cached, kind))
     }
 
     /// Pack and cache a font glyph's swash bitmap. A later grow copies it
@@ -255,7 +264,7 @@ impl Atlas {
             top: image.placement.top,
             used_frame: self.frame,
         };
-        let info = glyph_info(&cached, self.kind, self.size);
+        let info = glyph_info(&cached, self.kind);
         self.cache.put(id, cached);
 
         info
@@ -299,7 +308,7 @@ impl Atlas {
             top: 0,
             used_frame: self.frame,
         };
-        let info = glyph_info(&cached, self.kind, self.size);
+        let info = glyph_info(&cached, self.kind);
         self.cache.put(id, cached);
 
         info
@@ -358,9 +367,13 @@ impl Atlas {
 
     /// Double the atlas (up to the device limit) and copy the old texture into
     /// the new one. etagere preserves existing coordinates across the grow, so
-    /// a single GPU texture-to-texture copy relocates every packed glyph. The
-    /// epoch still bumps because the larger texture rescales every normalized
-    /// UV. `false` if already at the device limit.
+    /// a single GPU texture-to-texture copy relocates every packed glyph.
+    ///
+    /// The epoch holds. A glyph keeps the texels it was cut at, and a cached
+    /// instance names those rather than a fraction of the atlas, so nothing
+    /// that was built against this atlas has to be built again.
+    ///
+    /// `false` if already at the device limit.
     fn grow(&mut self, device: &Device, queue: &Queue) -> bool {
         if self.size >= self.max_dim {
             return false;
@@ -391,7 +404,6 @@ impl Atlas {
 
         self.view = self.texture.create_view(&TextureViewDescriptor::default());
         self.size = new_size;
-        self.epoch = self.epoch.wrapping_add(1);
         true
     }
 }
@@ -428,14 +440,14 @@ impl CachedGlyph {
 
 /// The atlas placement of `glyph` for the text pass to draw, or `None` for an
 /// empty glyph that occupies no atlas space.
-fn glyph_info(glyph: &CachedGlyph, kind: AtlasKind, atlas_size: u32) -> Option<GlyphInfo> {
+fn glyph_info(glyph: &CachedGlyph, kind: AtlasKind) -> Option<GlyphInfo> {
     if glyph.width == 0 || glyph.height == 0 {
         return None;
     }
 
     Some(GlyphInfo {
         kind,
-        uv: uv_rect(glyph.x, glyph.y, glyph.width, glyph.height, atlas_size),
+        uv: uv_rect(glyph.x, glyph.y, glyph.width, glyph.height),
         size: [glyph.width, glyph.height],
         placement: [glyph.left, glyph.top],
     })
@@ -448,14 +460,10 @@ fn atlas_kind(content: Content) -> AtlasKind {
     }
 }
 
-fn uv_rect(x: u32, y: u32, width: u32, height: u32, atlas_size: u32) -> [f32; 4] {
-    let size = atlas_size as f32;
-    [
-        x as f32 / size,
-        y as f32 / size,
-        (x + width) as f32 / size,
-        (y + height) as f32 / size,
-    ]
+/// A glyph's rectangle in texels, which the shader normalizes against the atlas
+/// it is sampled from.
+fn uv_rect(x: u32, y: u32, width: u32, height: u32) -> [f32; 4] {
+    [x as f32, y as f32, (x + width) as f32, (y + height) as f32]
 }
 
 fn create_texture(device: &Device, kind: AtlasKind, size: u32) -> Texture {
@@ -532,10 +540,12 @@ mod tests {
         TexelCopyTextureInfo, Texture, TextureAspect,
     };
 
+    /// The rectangle is in texels and says nothing about the atlas holding it,
+    /// which is what lets a cached instance outlive a grow.
     #[test]
-    fn uv_rect_normalizes_to_atlas_size() {
-        assert_eq!(uv_rect(64, 32, 16, 8, 256), [0.25, 0.125, 0.3125, 0.15625]);
-        assert_eq!(uv_rect(0, 0, 256, 256, 256), [0.0, 0.0, 1.0, 1.0]);
+    fn uv_rect_names_texels_not_a_fraction_of_the_atlas() {
+        assert_eq!(uv_rect(64, 32, 16, 8), [64.0, 32.0, 80.0, 40.0]);
+        assert_eq!(uv_rect(0, 0, 256, 256), [0.0, 0.0, 256.0, 256.0]);
     }
 
     /// Residency is a stamp compared against the atlas's frame counter, so what
@@ -579,6 +589,21 @@ mod tests {
             initial,
             "a glyph left over from an earlier frame is evicted rather than grown around",
         );
+
+        // Which of the two moved a glyph is what the epoch reports. Growing
+        // copies every glyph to the texels it already had, so an instance built
+        // against the atlas still draws the right pixels. Eviction hands those
+        // texels to another glyph, so it does not.
+        assert_eq!(
+            within_one_frame.content_epoch(),
+            0,
+            "growing moved nothing, so nothing built against it is stale",
+        );
+        assert_ne!(
+            a_frame_apart.content_epoch(),
+            0,
+            "evicting did, so anything built against it has to be rebuilt",
+        );
     }
 
     #[test]
@@ -590,6 +615,7 @@ mod tests {
 
         let mut atlas = GlyphAtlas::new(&device);
         let (initial, _) = atlas.texture_dims();
+        let epoch_before = atlas.content_epoch();
 
         // Insert 20x20 solid glyphs in one frame (no begin_frame, so none are
         // evictable) until the mask atlas overflows and grows.
@@ -607,13 +633,25 @@ mod tests {
 
         let (grown, _) = atlas.texture_dims();
         assert_eq!(grown, initial * 2, "mask atlas doubled to fit the glyphs");
+        assert_eq!(
+            atlas.content_epoch(),
+            epoch_before,
+            "nothing was evicted, so no instance built against this atlas is stale",
+        );
 
         // The first glyph's coordinates are preserved across the grow, so its
-        // solid coverage must survive the texture-to-texture copy. Its pixel
-        // position is the pre-grow uv scaled by the pre-grow size.
+        // solid coverage must survive the texture-to-texture copy. Its
+        // rectangle is in texels, which the grow leaves where they were.
         let first = first.expect("first glyph packed");
-        let x = (first.uv[0] * initial as f32).round() as u32;
-        let y = (first.uv[1] * initial as f32).round() as u32;
+        assert_eq!(
+            atlas
+                .get_or_insert_procedural(&device, &queue, 0, glyph, glyph, Vec::new)
+                .map(|info| info.uv),
+            Some(first.uv),
+            "and looking it up in the grown atlas gives the same texels",
+        );
+        let x = first.uv[0].round() as u32;
+        let y = first.uv[1].round() as u32;
 
         let pixels = read_mask(&device, &queue, &atlas.mask.texture, grown);
         let at = |x: u32, y: u32| pixels[(y * grown + x) as usize];

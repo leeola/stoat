@@ -134,6 +134,15 @@ struct RectInstance {
 struct TextGlobals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
+    /// Edge lengths of the mask and color atlases, in texels, indexed by
+    /// [`AtlasKind`]'s own numbering.
+    ///
+    /// An instance carries its glyph's rectangle in texels, so that it survives
+    /// the atlas doubling under it, and the vertex stage divides by the entry
+    /// its glyph's kind selects. A pair indexed by the kind rather than a
+    /// branch on it, because which size belongs to which kind is only visible
+    /// on a frame where the two atlases differ in size.
+    atlas_size: [f32; 2],
     /// Vertical scroll offset in pixels, added to each glyph's Y in the vertex
     /// shader so a scroll-only frame rewrites this uniform instead of rebuilding
     /// the glyph instances. Differs per draw: grid scroll for plain glyphs,
@@ -163,7 +172,7 @@ struct TextGlobals {
     /// which a wrap would fold back over the box.
     rows: u32,
     /// Pads the struct to the 48-byte (16-aligned) size a uniform requires.
-    _pad: [f32; 3],
+    _pad: u32,
 }
 
 /// How far one set of instances is rotated in the buffer holding it.
@@ -197,8 +206,8 @@ impl RowRotation {
 ///
 /// A pool draws in four parts, so a slot carries a buffer for each rather than the
 /// single one the other passes need. The epoch belongs here too, because the reuse
-/// it guards is per pool. One pool's prepare can grow the atlas and move the UVs
-/// another pool already froze.
+/// it guards is per pool. One pool's prepare can evict a glyph another pool
+/// already froze the texels of.
 struct TextCompositeSlot {
     glyphs: CompositeSlot,
     underlines: CompositeSlot,
@@ -207,9 +216,9 @@ struct TextCompositeSlot {
     text_runs: CompositeSlot,
     rects: CompositeSlot,
     /// The atlas content-epoch these instances resolved against. A shift-only
-    /// composite reuses them only while the atlas still matches. A grow or
-    /// eviction since means their UVs moved, so the pool must be reshaped even
-    /// though its grid content held steady.
+    /// composite reuses them only while the atlas still matches. An eviction
+    /// since means a glyph moved, so the pool must be reshaped even though its
+    /// grid content held steady. A grow leaves the texels alone.
     epoch: u64,
     /// What each row shaped to, kept so a scrolled frame can slide them and
     /// re-shape only the rows the scroll exposed.
@@ -316,11 +325,9 @@ pub struct TextPass {
     last_text_run_epoch: u64,
     last_atlas_epoch: u64,
     /// The [`Atlas::content_epoch`] the cached grid-glyph instances were last
-    /// built against. A frame-local texture-size compare only catches a grow in
-    /// the current frame, so it misses an atlas change from any earlier pass -- a
-    /// pool composite between frames, or an eviction (which reuses a slot without
-    /// moving the texture size). Persisting the epoch heals those cached rows on
-    /// the next prepare.
+    /// built against. An eviction reuses a slot without moving the texture size,
+    /// and one can come from any earlier pass, such as a pool composite between
+    /// frames. Persisting the epoch heals those cached rows on the next prepare.
     ///
     /// This records the epoch the *settled* atlas reached, after any in-frame
     /// re-resolve. A build that moved the atlas itself is healed within the same
@@ -360,8 +367,8 @@ pub struct TextPass {
     /// rebuilt.
     last_popovers_epoch: u64,
     /// The [`Atlas::content_epoch`] [`Self::overlay_bases`] were built against.
-    /// A change means a grow or eviction moved the UVs, so the bases are
-    /// rebuilt even when the content held.
+    /// A change means an eviction moved a glyph, so the bases are rebuilt even
+    /// when the content held.
     last_overlay_atlas_epoch: u64,
     /// The popover scroll offsets the uploaded overlay instances carry. While
     /// the bases are reused and these still match, the shift and upload are
@@ -434,8 +441,8 @@ pub struct TextPass {
     glyph_row_cache: Vec<Vec<PendingGlyph>>,
     /// The built plain-glyph instances of each row from the previous frame, so a
     /// damaged frame rebuilds and re-uploads only the rows that changed rather
-    /// than every glyph on screen. Holds resolved atlas rects, so an atlas grow
-    /// (which moves every UV) rebuilds all rows.
+    /// than every glyph on screen. Holds resolved atlas rects in texels, which a
+    /// grow leaves alone, so only an eviction rebuilds all rows.
     ///
     /// A row's glyphs inside an active scroll region go to
     /// [`Self::region_row_instances`] instead, since the two are drawn from
@@ -897,7 +904,8 @@ impl TextPass {
         self.last_occluders.extend_from_slice(occluders);
     }
 
-    /// The glyph atlas content epoch, which changes on a grow or eviction.
+    /// The glyph atlas content epoch, which changes when an eviction moves a
+    /// glyph.
     ///
     /// A caller that draws instances built against one epoch and then packs more
     /// glyphs can compare this before and after to tell whether the earlier
@@ -964,40 +972,9 @@ impl TextPass {
         // screen-anchored buffer carries rows its builders chose, including an
         // overlay's past the bottom of the screen, so it never wraps.
         let grid_rotation = self.grid_rotation();
-        let globals_with = |scroll_y: f32, panel_count: u32, rotation: RowRotation| TextGlobals {
-            resolution,
-            cell_size,
-            scroll_y,
-            panel_count,
-            occlude_all: 0,
-            row_offset: rotation.offset,
-            rows: rotation.rows as u32,
-            _pad: [0.0; 3],
-        };
         let grid_scroll_y =
             (scroll.grid + scroll.document + scroll.scrollback) * self.metrics.height;
         let region_scroll_y = scroll.region * self.metrics.height;
-        crate::render::upload_globals(
-            queue,
-            &self.globals,
-            0,
-            globals_with(grid_scroll_y, 0, grid_rotation),
-            &mut self.last_globals,
-        );
-        crate::render::upload_globals(
-            queue,
-            &self.region_globals,
-            0,
-            globals_with(region_scroll_y, 0, grid_rotation),
-            &mut self.last_region_globals,
-        );
-        crate::render::upload_globals(
-            queue,
-            &self.static_globals,
-            0,
-            globals_with(0.0, panel_count, RowRotation::unrotated()),
-            &mut self.last_static_globals,
-        );
 
         // Underlines are built first, before the glyph path can return early on
         // an all-blank grid: an underlined space has no glyph but still draws.
@@ -1046,17 +1023,15 @@ impl TextPass {
 
         // Off-grid text runs are screen-anchored. No grid or region scroll
         // offset is applied, so they sit at their declared position. They pack
-        // here, before the grid-instance build below, so a text-run atlas grow
-        // bumps the content epoch that build reads instead of invalidating its
-        // UVs. The run build packs and emits in one pass, so a grow midway
-        // through it would freeze the earlier instances at the pre-grow size;
-        // it re-resolves once when that happens (below).
+        // here, before the grid-instance build below, so an eviction packing
+        // them causes bumps the content epoch that build reads. The run build
+        // packs and emits in one pass, so an eviction midway through it would
+        // leave the earlier instances naming texels another glyph now holds. It
+        // re-resolves once when that happens (below).
         //
         // The chrome the runs back changes rarely, so reuse the instances built
-        // on an earlier frame while the run content and their atlas UVs both
-        // held. Such a frame skips the build and upload and keeps the counts. A
-        // skip packs no run glyphs, so it cannot grow the atlas and the grid UVs
-        // are unaffected.
+        // on an earlier frame while the run content and their atlas texels both
+        // held. Such a frame skips the build and upload and keeps the counts.
         let text_runs_epoch = grid.text_runs_epoch();
         let runs_rebuilt = text_runs_epoch != self.last_text_run_epoch
             || self.atlas.content_epoch() != self.last_atlas_epoch;
@@ -1134,9 +1109,9 @@ impl TextPass {
 
         // The base instances (positions before the anchor and scroll shift, with
         // final atlas UVs) are reused while the overlay content and the atlas UVs
-        // both held. A grow or eviction anywhere this frame bumps the content
-        // epoch, so the check also catches an overlay glyph re-inserted by the
-        // touch above. Each overlay's scissor depends only on its geometry, so it
+        // both held. An eviction anywhere this frame bumps the content epoch, so
+        // the check also catches an overlay glyph re-inserted by the touch
+        // above. Each overlay's scissor depends only on its geometry, so it
         // rides the same cache.
         //
         // A base spans only the lines its box can show, so the window it was built
@@ -1297,6 +1272,60 @@ impl TextPass {
                 self.atlas.color_view(),
             );
         }
+
+        // Each globals buffer carries its own scroll. The plain glyphs take the
+        // grid scroll, the region glyphs the region scroll, and the
+        // screen-anchored runs and overlays none. Each buffer is sent only when
+        // its value moved, so a scroll-only frame refreshes just the uniforms it
+        // changed without rebuilding instances, and an idle frame writes none of
+        // them.
+        //
+        // Written after the packing above rather than before it, because the
+        // atlas sizes they carry are what the instances are normalized by, and
+        // packing is what grows an atlas. Written earlier they would name the
+        // size the atlas had before this frame's glyphs arrived, and every glyph
+        // would sample at the wrong scale for a frame. Everything else here
+        // settled before the packing and is unmoved by it.
+        //
+        // Live draws never bypass the seq test, so occlude_all stays zero. Only
+        // the static globals' text-run draws occlude, and they do it by seq. The
+        // rotation rides the buffer its instances are drawn against. The grid
+        // and region draws carry grid rows and rotate with them. The
+        // screen-anchored buffer carries rows its builders chose, including an
+        // overlay's past the bottom of the screen, so it never wraps.
+        let (mask_size, color_size) = self.atlas.texture_dims();
+        let globals_with = |scroll_y: f32, panel_count: u32, rotation: RowRotation| TextGlobals {
+            resolution,
+            cell_size,
+            atlas_size: [mask_size as f32, color_size as f32],
+            scroll_y,
+            panel_count,
+            occlude_all: 0,
+            row_offset: rotation.offset,
+            rows: rotation.rows as u32,
+            _pad: 0,
+        };
+        crate::render::upload_globals(
+            queue,
+            &self.globals,
+            0,
+            globals_with(grid_scroll_y, 0, grid_rotation),
+            &mut self.last_globals,
+        );
+        crate::render::upload_globals(
+            queue,
+            &self.region_globals,
+            0,
+            globals_with(region_scroll_y, 0, grid_rotation),
+            &mut self.last_region_globals,
+        );
+        crate::render::upload_globals(
+            queue,
+            &self.static_globals,
+            0,
+            globals_with(0.0, panel_count, RowRotation::unrotated()),
+            &mut self.last_static_globals,
+        );
     }
 
     /// Shape, rasterize, and upload a pool grid's plain glyphs and underlines
@@ -1338,20 +1367,9 @@ impl TextPass {
         // alone.
         self.upload_occluders(device, queue, occluders);
         let (panel_count, occlude_all) = occlusion_globals(occluders);
-        queue.write_buffer(
-            &self.globals,
-            u64::from(globals_offset(slot)),
-            bytemuck::bytes_of(&TextGlobals {
-                resolution,
-                cell_size: [self.metrics.width, self.metrics.height],
-                scroll_y: shift_rows * self.metrics.height,
-                panel_count,
-                occlude_all,
-                row_offset: self.row_offset,
-                rows: grid.rows() as u32,
-                _pad: [0.0; 3],
-            }),
-        );
+        // Held before the composite slot below takes the name, since the
+        // globals are not written until after the packing.
+        let globals_slot = slot;
 
         // During a pure sub-cell glide the composed rows are identical and only
         // the shift moved, which the globals write above already carried. Reuse
@@ -1539,6 +1557,26 @@ impl TextPass {
                 self.atlas.color_view(),
             );
         }
+
+        // After the packing above, which is what can grow an atlas. The sizes
+        // here are what the instances just built are normalized by, so naming a
+        // pre-grow one would draw this pool at the wrong scale for a frame.
+        let (mask_size, color_size) = self.atlas.texture_dims();
+        queue.write_buffer(
+            &self.globals,
+            u64::from(globals_offset(globals_slot)),
+            bytemuck::bytes_of(&TextGlobals {
+                resolution,
+                cell_size: [self.metrics.width, self.metrics.height],
+                atlas_size: [mask_size as f32, color_size as f32],
+                scroll_y: shift_rows * self.metrics.height,
+                panel_count,
+                occlude_all,
+                row_offset: self.row_offset,
+                rows: grid.rows() as u32,
+                _pad: 0,
+            }),
+        );
 
         // Record the atlas state these instances resolved against, so a later
         // shift-only frame can tell whether their UVs still hold.
@@ -2934,11 +2972,11 @@ enum GridBuild {
 /// damaged and how the atlas content epoch compares to the one the cached
 /// instances were built against.
 ///
-/// A changed epoch means a grow or eviction moved some glyph's UV, so every
-/// cached row -- even an undamaged one -- now points at the wrong pixels and the
-/// whole grid must be re-resolved. A frame-local texture-size compare misses the
-/// eviction case. An eviction reuses a slot without resizing the texture, so
-/// only the epoch reveals it.
+/// A changed epoch means an eviction moved some glyph, so every cached row --
+/// even an undamaged one -- now points at the wrong pixels and the whole grid
+/// must be re-resolved. An eviction reuses a slot without resizing the texture,
+/// so only the epoch reveals it; a grow, which does resize it, leaves every
+/// glyph where it was.
 ///
 /// A moved scroll-region rectangle rebuilds for a different reason. It changes
 /// which cells belong to the region buffer, and that buffer is drawn with the

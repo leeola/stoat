@@ -12,6 +12,11 @@
 struct Globals {
     resolution: vec2<f32>,
     cell_size: vec2<f32>,
+    // Edge lengths of the mask and color atlases, in texels, indexed by the
+    // KIND_ constants below. A glyph instance carries its rectangle in texels
+    // so that it survives the atlas doubling under it, and the vertex stage
+    // divides by the entry its kind selects.
+    atlas_size: vec2<f32>,
     scroll_y: f32,
     panel_count: u32,
     // 1 discards a fragment inside any occluder regardless of seq, for a pool
@@ -22,8 +27,6 @@ struct Globals {
     // take the slot back to the display row it paints.
     row_offset: u32,
     rows: u32,
-    pad0: u32,
-    pad1: u32,
     pad2: u32,
 }
 
@@ -129,9 +132,15 @@ fn vs_main(
         1.0 - pixel.y / globals.resolution.y * 2.0
     );
 
+    // The instance's rectangle is in texels, which is what keeps it valid when
+    // the atlas doubles under it. Normalizing here rather than in the fragment
+    // costs one divide per vertex instead of one per covered pixel, and hands
+    // the sampler the coordinate it wants either way.
+    let atlas_size = globals.atlas_size[kind];
+
     var out: VsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
-    out.uv = mix(uv.xy, uv.zw, corner);
+    out.uv = mix(uv.xy, uv.zw, corner) / atlas_size;
     out.fg = fg;
     out.kind = kind;
     out.seq = seq;

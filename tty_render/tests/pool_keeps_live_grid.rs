@@ -643,14 +643,17 @@ fn pool_grow_heals_live_instances() {
     );
 }
 
-/// Compositing a pool page of never-seen glyphs that overflow the atlas bumps
-/// the content epoch; recompositing the same page (glyphs now resident) leaves
-/// it unchanged.
+/// Compositing a pool page of never-seen glyphs that overflow the atlas leaves
+/// the content epoch alone, and so does recompositing the same page once those
+/// glyphs are resident.
 ///
-/// This is the detection `render_with_pools` reports back so the app schedules a
-/// heal frame only when a pool pass actually moved the atlas UVs.
+/// This is the detection `render_with_pools` reports back, so the app schedules
+/// a heal frame only when a pool pass actually moved a glyph. Overflowing grows
+/// the atlas, which copies every glyph to the texels it already had, so nothing
+/// built against it went stale. Only an eviction, which hands a glyph's texels
+/// to another, is worth healing.
 #[test]
-fn composite_pool_bumps_content_epoch_only_on_atlas_change() {
+fn composite_pool_leaves_the_content_epoch_alone_across_a_grow() {
     let Some((device, queue)) = headless_device() else {
         eprintln!("pool_keeps_live_grid: no wgpu adapter available, skipping");
         return;
@@ -725,9 +728,9 @@ fn composite_pool_bumps_content_epoch_only_on_atlas_change() {
         0,
     );
     let after_new = renderer.content_epoch();
-    assert_ne!(
+    assert_eq!(
         after_new, before,
-        "a burst of never-seen glyphs that overflows the atlas must bump the epoch"
+        "a burst of never-seen glyphs grew the atlas, which moved none of them"
     );
 
     renderer.composite_pool(
