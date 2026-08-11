@@ -77,6 +77,16 @@ const SCROLLBACK_SCROLL_MULTIPLIER: i32 = 3;
 /// holding the whole session's scrollback.
 const CHILD_OUTPUT_TAIL_CAP: usize = 2048;
 
+/// Aux OS windows one session may hold open at once.
+///
+/// Each one costs a real window and a GPU-context build thread, and the count
+/// is driven entirely by wire frames a writer chooses to send. One 64KB APC
+/// chunk carries roughly two thousand `window_open` frames, so without a
+/// ceiling a single crafted file catted to the terminal buries the desktop.
+/// Detached panes are a handful in practice, so the limit costs a real session
+/// nothing.
+const MAX_AUX_WINDOWS: usize = 8;
+
 /// Open the stoatty window running the launch command, or the resolved stoat
 /// editor when none is given, at the winit default window size.
 ///
@@ -601,6 +611,12 @@ struct State {
     /// Live aux OS windows, each hosting a detached pane's window-bound pools.
     /// Empty until a [`TermEvent::WindowOpen`] opens the first one.
     aux: Vec<AuxWindow>,
+    /// Whether a refused `window_open` has already been reported.
+    ///
+    /// One line per session rather than per frame, since the writer that sends
+    /// a refused open is the one liable to send thousands, and a log entry each
+    /// would be its own way to bring the session down.
+    warned_window_open_refused: bool,
     /// Channel to the thread serving the window-event socket, carrying encoded
     /// [`WindowIpcEvent`] lines to forward to the connected child. `None` when
     /// the socket could not be bound, in which case aux windows still render but
@@ -1063,6 +1079,7 @@ impl ApplicationHandler<PtyEvent> for App {
             overflows_scratch: Vec::new(),
             last_popovers_epoch: None,
             aux: Vec::new(),
+            warned_window_open_refused: false,
             window_event_tx,
             window_client_connected,
             wheel_pixels: 0.0,
@@ -2785,6 +2802,50 @@ fn set_window_title(window: &Window, last: &mut Option<String>, title: &str) {
     *last = Some(title.to_owned());
 }
 
+/// What a `window_open` frame is allowed to do, decided before any OS window
+/// exists.
+enum WindowOpenVerdict {
+    /// No open window carries the id and there is room for another.
+    Open,
+    /// A window already carries the id, so the frame names one that exists.
+    Duplicate,
+    /// [`MAX_AUX_WINDOWS`] are already open.
+    AtCapacity,
+}
+
+/// Rule a `window_open` for `window_id` in or out, given the ids already open.
+///
+/// A duplicate is reported rather than opened because every aux lookup resolves
+/// by first match. A second window carrying a live id would permanently shadow
+/// the first, which could then never again be focused, redrawn, or handed its
+/// GPU.
+fn classify_window_open(
+    open_ids: impl IntoIterator<Item = u32>,
+    window_id: u32,
+) -> WindowOpenVerdict {
+    let mut open = 0;
+    for id in open_ids {
+        if id == window_id {
+            return WindowOpenVerdict::Duplicate;
+        }
+        open += 1;
+    }
+
+    if open >= MAX_AUX_WINDOWS {
+        return WindowOpenVerdict::AtCapacity;
+    }
+    WindowOpenVerdict::Open
+}
+
+/// Report the first `window_open` this session to be refused, naming `reason`.
+fn warn_window_open_refused(state: &mut State, window_id: u32, reason: &str) {
+    if state.warned_window_open_refused {
+        return;
+    }
+    state.warned_window_open_refused = true;
+    tracing::warn!(window = window_id, reason, "refused a window_open");
+}
+
 /// Create the aux OS window a [`WindowOpenCommand`] asks for and start building
 /// its renderer off the main thread.
 ///
@@ -2794,6 +2855,9 @@ fn set_window_title(window: &Window, last: &mut Option<String>, title: &str) {
 /// and device acquisition block there, never on the run loop -- and installed via
 /// [`PtyEvent::AuxGpuReady`], so opening a window never stalls the primary. Until
 /// it arrives the window's redraws find no GPU and draw nothing.
+///
+/// A frame [`classify_window_open`] rules out opens nothing. A duplicate id
+/// focuses the window already carrying it, which is what the frame names.
 fn open_aux_window(
     state: &mut State,
     event_loop: &ActiveEventLoop,
@@ -2806,6 +2870,21 @@ fn open_aux_window(
         rows,
         title,
     } = cmd;
+
+    match classify_window_open(state.aux.iter().map(|aux| aux.id), window_id) {
+        WindowOpenVerdict::Open => {},
+        WindowOpenVerdict::Duplicate => {
+            warn_window_open_refused(state, window_id, "id is already open");
+            if let Some(aux) = state.aux.iter().find(|aux| aux.id == window_id) {
+                aux.window.focus_window();
+            }
+            return;
+        },
+        WindowOpenVerdict::AtCapacity => {
+            warn_window_open_refused(state, window_id, "aux window limit reached");
+            return;
+        },
+    }
 
     let [cell_w, cell_h] = render::cell_size(state.font_size, state.scale_factor as f32);
     let attributes = Window::default_attributes()
@@ -3698,13 +3777,14 @@ fn reposition_scroll(current: f32, target: u64) -> f32 {
 mod tests {
     use super::{
         alternate_scroll_bytes, anchored_cursor_pos, app_has_focus, aux_drag_event,
-        bell_should_ring, block_corners, cell_at, copy_pool_region, cursor_in_region, ease,
-        ease_corners, encode_key, font_step, forwards_zoom, ipc_button, modifier_bits, paste_bytes,
-        popover_overflow, refresh_popover_overflows, reposition_scroll, seed_settle_flight,
-        selection_copy_text, sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes, step_cursor,
-        step_document_scroll, step_grid_scroll, step_popover_scroll, step_region_scroll,
-        step_scrollback_scroll, swallow_super_combo, wheel_lines, CursorAnimation, Input,
-        PendingResize, PtyWrite, Visibility, EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
+        bell_should_ring, block_corners, cell_at, classify_window_open, copy_pool_region,
+        cursor_in_region, ease, ease_corners, encode_key, font_step, forwards_zoom, ipc_button,
+        modifier_bits, paste_bytes, popover_overflow, refresh_popover_overflows, reposition_scroll,
+        seed_settle_flight, selection_copy_text, sgr_button_bytes, sgr_motion_bytes,
+        sgr_wheel_bytes, step_cursor, step_document_scroll, step_grid_scroll, step_popover_scroll,
+        step_region_scroll, step_scrollback_scroll, swallow_super_combo, wheel_lines,
+        CursorAnimation, Input, PendingResize, PtyWrite, Visibility, WindowOpenVerdict,
+        EASE_BASELINE_FRAME, MAX_AUX_WINDOWS, SCROLLBACK_MIN_STEP,
     };
     #[cfg(unix)]
     use super::{
@@ -3790,6 +3870,41 @@ mod tests {
         assert!(
             !visibility.set_occluded(false),
             "no redraw was asked for while it was away",
+        );
+    }
+
+    #[test]
+    fn window_open_is_refused_when_the_id_is_open_or_the_list_is_full() {
+        let full: Vec<u32> = (0..MAX_AUX_WINDOWS as u32).collect();
+
+        assert!(matches!(
+            classify_window_open([7, 9], 4),
+            WindowOpenVerdict::Open
+        ));
+        assert!(matches!(
+            classify_window_open(std::iter::empty(), 4),
+            WindowOpenVerdict::Open
+        ));
+        assert!(matches!(
+            classify_window_open([7, 9], 9),
+            WindowOpenVerdict::Duplicate
+        ));
+        assert!(matches!(
+            classify_window_open(full.iter().copied(), 99),
+            WindowOpenVerdict::AtCapacity
+        ));
+        // A duplicate outranks the cap, so a full list still reports the id
+        // rather than hiding it behind the limit.
+        assert!(matches!(
+            classify_window_open(full.iter().copied(), 0),
+            WindowOpenVerdict::Duplicate
+        ));
+        assert!(
+            matches!(
+                classify_window_open(full[1..].iter().copied(), 99),
+                WindowOpenVerdict::Open
+            ),
+            "one below the cap still opens"
         );
     }
 
