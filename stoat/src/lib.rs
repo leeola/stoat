@@ -71,6 +71,7 @@ pub(crate) mod theme_pool;
 mod theme_vscode;
 pub mod ui;
 mod vt_input;
+pub mod walkthrough;
 pub mod workspace;
 pub mod workspace_picker;
 
