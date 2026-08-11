@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 use snafu::{Location as ErrorLocation, Snafu};
 use std::path::{Path, PathBuf};
 
+pub mod store;
+
 /// One authored walkthrough, the whole contents of its JSON file.
 ///
 /// Field order is the wire order.
