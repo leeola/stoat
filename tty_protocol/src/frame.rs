@@ -116,11 +116,21 @@ pub fn decode(bytes: &[u8]) -> Option<Frame> {
     Some(Frame { sub, args })
 }
 
+/// Arguments a single frame may carry.
+///
+/// The widest command in the protocol sends four, so the ceiling is double what
+/// anything real needs. It exists because [`FrameScratch`] retains a buffer per
+/// argument position for the terminal's lifetime, and a frame is only bounded by
+/// [`MAX_APC_PAYLOAD`]. Without the cap one 64KB frame of semicolons would pin
+/// tens of thousands of buffers for the session.
+pub const MAX_FRAME_ARGS: usize = 8;
+
 /// Reusable argument buffers for [`decode_into`], retained across frames.
 ///
-/// Holds one decoded-argument `Vec` per position. A steady stream of frames
-/// grows these once and then decodes into the retained capacity, so the busy
-/// path allocates nothing per frame after warm-up.
+/// Holds one decoded-argument `Vec` per position, at most [`MAX_FRAME_ARGS`] of
+/// them. A steady stream of frames grows these once and then decodes into the
+/// retained capacity, so the busy path allocates nothing per frame after
+/// warm-up.
 #[derive(Default)]
 pub struct FrameScratch {
     args: Vec<Vec<u8>>,
@@ -133,6 +143,10 @@ pub struct FrameScratch {
 /// is borrowed from `bytes` rather than owned, and each argument decodes into a
 /// retained buffer instead of a fresh `Vec`. The returned slice borrows
 /// `scratch`, so it is valid only until the next call reusing the same scratch.
+///
+/// A frame carrying more than [`MAX_FRAME_ARGS`] arguments is rejected whole
+/// rather than truncated, since a command read from a prefix of its fields would
+/// be a different command.
 pub fn decode_into<'a>(
     bytes: &'a [u8],
     scratch: &'a mut FrameScratch,
@@ -148,6 +162,12 @@ pub fn decode_into<'a>(
 
     let mut count = 0;
     for (i, field) in fields.enumerate() {
+        // Checked before the growth below, or the frame this rejects has already
+        // taken the memory the cap exists to deny it.
+        if i == MAX_FRAME_ARGS {
+            return None;
+        }
+
         if i == scratch.args.len() {
             scratch.args.push(Vec::new());
         } else {
@@ -210,13 +230,44 @@ fn strip_wrapper(bytes: &[u8]) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode, encode, Frame};
+    use super::{decode, decode_into, encode, Frame, FrameScratch, MAX_FRAME_ARGS};
 
     fn frame(sub: &str, args: &[&[u8]]) -> Frame {
         Frame {
             sub: sub.to_owned(),
             args: args.iter().map(|arg| arg.to_vec()).collect(),
         }
+    }
+
+    /// The scratch is retained for the terminal's lifetime, so whatever one
+    /// frame grows it to is memory the session never gets back.
+    #[test]
+    fn a_frame_past_the_arg_cap_is_rejected_and_leaves_the_scratch_small() {
+        let mut scratch = FrameScratch::default();
+        let flood = frame("border", &vec![b"".as_slice(); 5000]);
+
+        assert_eq!(
+            decode_into(&encode(&flood), &mut scratch),
+            None,
+            "a frame past the cap decodes to nothing"
+        );
+        assert!(
+            scratch.args.len() <= MAX_FRAME_ARGS,
+            "the rejected frame grew the scratch no further than the cap, got {}",
+            scratch.args.len()
+        );
+    }
+
+    /// The widest real command sends four arguments, so the cap has to admit at
+    /// least that many, and admitting exactly the cap pins it off by one.
+    #[test]
+    fn a_frame_at_the_arg_cap_still_decodes() {
+        let mut scratch = FrameScratch::default();
+        let full = frame("border", &[b"x".as_slice(); MAX_FRAME_ARGS]);
+
+        let encoded = encode(&full);
+        let (sub, args) = decode_into(&encoded, &mut scratch).expect("the cap is inclusive");
+        assert_eq!((sub, args.len()), ("border", MAX_FRAME_ARGS));
     }
 
     #[test]
