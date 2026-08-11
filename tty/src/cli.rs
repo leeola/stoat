@@ -7,12 +7,24 @@ use stoat_cli::{CommonArgs, FixtureArgs};
 ///
 /// Shape is `<semver> (<hash>[-dirty] <date>)`. `STOATTY_BUILD_INFO` is the
 /// git hash and date emitted by build.rs.
+///
+/// This is the diagnostic form, for a bug report that has to name the exact
+/// build. A consumer comparing versions wants [`PACKAGE_VERSION`] instead,
+/// since the spaces and parentheses here defeat an ordinary version parse.
 pub(crate) const VERSION_INFO: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
     env!("STOATTY_BUILD_INFO"),
     ")",
 );
+
+/// The bare package version, exported to child programs via
+/// `TERM_PROGRAM_VERSION`.
+///
+/// The ecosystem convention that variable belongs to exists so a program
+/// decides what a terminal supports by comparing versions, so it carries a
+/// plain semver rather than the build detail [`VERSION_INFO`] adds.
+pub(crate) const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Per-invocation launch overrides for the stoatty terminal, parsed from argv.
 ///

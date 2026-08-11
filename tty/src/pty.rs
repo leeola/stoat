@@ -248,10 +248,23 @@ const MULTIPLEXER_ENV_VARS: [&str; 5] = [
 
 /// Set the environment a stoatty child shell inherits.
 ///
-/// `TERM` selects the terminfo the shell and its children load. `STOATTY` marks
-/// the shell as running under stoatty, so a child can gate stoatty-only output
-/// on its presence synchronously at startup, without the `XTVERSION` query round
-/// trip. `STOATTY_LOG_ID`, when set, carries this session's log id so a child
+/// `TERM` selects the terminfo the shell and its children load.
+///
+/// `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` name the terminal itself, the pair
+/// the rest of the ecosystem already reads to tell one terminal from another.
+/// Assigning them also replaces whatever an outer terminal exported, so a
+/// stoatty launched from another program does not leave its children reading
+/// that program's name. `TERM_PROGRAM_VERSION` is a bare semver, since a
+/// consumer compares it.
+///
+/// `STOATTY` marks the shell as running under stoatty, so a child can gate
+/// stoatty-only output on its presence synchronously at startup, without the
+/// `XTVERSION` query round trip. It stays the marker stoat's own detection
+/// reads, since `TERM_PROGRAM` says which terminal this is and not that it
+/// speaks the protocol. `STOATTY_VERSION` carries the full build string rather
+/// than the bare version, for a bug report that has to name the exact build.
+///
+/// `STOATTY_LOG_ID`, when set, carries this session's log id so a child
 /// prefixes its own log filenames with it and one session's files sort together.
 /// `STOATTY_WINDOW_SOCKET`, when set, is the unix-socket path a child editor
 /// connects to for upstream window focus, resize, and close events.
@@ -274,6 +287,8 @@ fn configure_child_env(
     theme: &str,
 ) {
     command.env("TERM", "xterm-256color");
+    command.env("TERM_PROGRAM", "stoatty");
+    command.env("TERM_PROGRAM_VERSION", crate::cli::PACKAGE_VERSION);
     command.env("STOATTY", "1");
     command.env("STOATTY_VERSION", crate::cli::VERSION_INFO);
     if let Some(id) = log_id {
@@ -734,6 +749,27 @@ mod tests {
         assert_eq!(
             command.get_env("STOATTY_VERSION"),
             Some(OsStr::new(crate::cli::VERSION_INFO)),
+        );
+    }
+
+    /// A stoatty launched from another terminal inherits that terminal's
+    /// `TERM_PROGRAM`, so a child reads the wrong name unless this replaces it.
+    #[test]
+    fn configure_child_env_names_stoatty_as_the_terminal() {
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.env("TERM_PROGRAM", "iTerm.app");
+        command.env("TERM_PROGRAM_VERSION", "3.4.19");
+
+        configure_child_env(&mut command, None, None, None, "");
+
+        assert_eq!(command.get_env("TERM_PROGRAM"), Some(OsStr::new("stoatty")));
+        assert_eq!(
+            command.get_env("TERM_PROGRAM_VERSION"),
+            Some(OsStr::new(crate::cli::PACKAGE_VERSION)),
+        );
+        assert!(
+            !crate::cli::PACKAGE_VERSION.contains(' '),
+            "a consumer parses this as a version, so it carries no build detail",
         );
     }
 
