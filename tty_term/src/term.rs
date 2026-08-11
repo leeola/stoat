@@ -717,6 +717,13 @@ impl Pool {
 struct FillTarget {
     pool: u32,
     index: u64,
+    /// Whether the painted page is thrown away rather than committed.
+    ///
+    /// A viewport resize empties every pool's pages, so the page in flight has
+    /// nothing left to land on. The context stays open regardless, because
+    /// closing it would route the rest of the page to the live parser and paint
+    /// it onto the screen.
+    discard: bool,
     term: Term<ResponseSink>,
     parser: Processor,
     /// The sink [`Self::term`]'s listener writes into, kept reachable so a
@@ -756,6 +763,7 @@ impl FillTarget {
         FillTarget {
             pool,
             index,
+            discard: false,
             term,
             parser: Processor::new(),
             responses,
@@ -779,6 +787,7 @@ impl FillTarget {
     /// The captured decorations are not this method's to clear. [`Terminal::commit_fill`]
     /// moves them out on its way here, so they are already empty.
     fn recycle(&mut self) {
+        self.discard = false;
         self.parser.stop_sync(&mut self.term);
         self.parser.advance(&mut self.term, b"\x18\x1bc");
 
@@ -1998,7 +2007,7 @@ impl Terminal {
     /// page painted move onto the slot with it. A no-op when no fill is open, so
     /// every close trigger (`fill_end`, the next `fill`, `reset`) can call it
     /// unconditionally. The painted page is discarded if its pool was dropped
-    /// mid-fill.
+    /// mid-fill, or if a resize emptied the pages it would have landed on.
     ///
     /// The fill context itself is reset and parked in [`Self::fill_scratch`] for
     /// the next page to paint through.
@@ -2013,7 +2022,9 @@ impl Terminal {
         let bars = mem::take(&mut fill.bars);
         let polylines = mem::take(&mut fill.polylines);
 
-        if let Some(pool) = self.pools.get_mut(&fill.pool) {
+        if !fill.discard
+            && let Some(pool) = self.pools.get_mut(&fill.pool)
+        {
             let grid = pool.page_pool.fill(fill.index);
             project_term_cells(grid, &fill.term, &self.theme, &self.palette);
             pool.page_pool
@@ -2277,7 +2288,12 @@ impl Terminal {
             );
             pool.content_version = pool.content_version.wrapping_add(1);
         }
-        self.fill = None;
+        // Doomed rather than closed. The page in flight has nowhere to land now,
+        // but the context has to stay open to swallow the rest of it, since the
+        // bytes would otherwise route to the live parser and paint the screen.
+        if let Some(fill) = &mut self.fill {
+            fill.discard = true;
+        }
     }
 
     /// Move the viewport `delta` lines through scrollback history: positive
@@ -4730,6 +4746,44 @@ mod tests {
             bars.len(),
             MAX_DECORATIONS,
             "the page's bar list stops growing at the cap"
+        );
+    }
+
+    /// A window drag during an editor refill resizes mid-fill. Closing the fill
+    /// there would route the rest of the page to the live parser, painting page
+    /// content across the screen.
+    #[test]
+    fn a_resize_mid_fill_discards_the_page_instead_of_painting_it_live() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        declare_pool(&mut terminal, 0, 4, 8);
+        terminal.advance(&encode_fill(&FillCommand { pool: 0, index: 0 }));
+        terminal.advance(b"page");
+
+        terminal.resize(4, 10);
+        terminal.advance(b"LEAK");
+        terminal.advance(&encode_fill_end());
+
+        let mut grid = Grid::new(4, 10);
+        terminal.project(&mut grid);
+        let row_text =
+            |grid: &Grid, row: usize| grid.row(row).iter().map(|cell| cell.ch).collect::<String>();
+        assert_eq!(
+            row_text(&grid, 0).trim_end(),
+            "",
+            "page bytes after the resize never reach the live screen"
+        );
+        assert!(
+            terminal.pools[&0].page_pool.page_decorations(0).is_none(),
+            "the abandoned page is discarded rather than committed onto the slot"
+        );
+
+        terminal.advance(b"ok");
+        terminal.project(&mut grid);
+        assert_eq!(
+            row_text(&grid, 0).trim_end(),
+            "ok",
+            "ordinary output paints the live screen once the fill ends"
         );
     }
 
