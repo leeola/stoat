@@ -21,7 +21,9 @@ use std::{
     time::Duration,
 };
 use stoatty_protocol::command::BorderStyle;
-use stoatty_widgets::{border::Border, scroll_region::ScrollRegion, ApcScene};
+use stoatty_widgets::{
+    border::Border, scroll_region::ScrollRegion, ApcScene, ApcSession, SessionOptions,
+};
 
 /// Left (fixed) pane border, in 0-based grid coordinates.
 const LEFT: Rect = Rect {
@@ -136,24 +138,33 @@ const RENDER_RS: [&str; BUFFER_LINES] = [
 ];
 
 fn main() {
+    // The session's scene carries the borders. The scroll region needs a scene
+    // of its own because its bytes are written raw, never behind the reset a
+    // flush prefixes. It is told the session's verdict so a foreign host gets
+    // nothing from either.
+    let mut session = ApcSession::new(SessionOptions::default());
+    let mut scroll_scene = ApcScene::new();
+    scroll_scene.set_live(session.live());
+
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).expect("build the terminal");
-    let mut border_scene = ApcScene::new();
-    let mut scroll_scene = ApcScene::new();
 
     terminal.clear().expect("clear the screen");
 
+    // Cycles until the window closes, which ends the process outright, so the
+    // session's own restore never runs and its panic hook is what covers a
+    // crash.
     loop {
         for (cursor_line, settle_ms) in CURSOR_JUMPS {
             let scroll = cursor_line.saturating_sub(CURSOR_MARGIN).min(MAX_SCROLL);
 
-            border_scene.clear();
+            session.scene().clear();
             scroll_scene.clear();
             terminal
                 .draw(|frame| {
                     render_frame(
                         frame,
-                        &mut border_scene,
+                        session.scene(),
                         &mut scroll_scene,
                         scroll,
                         cursor_line,
@@ -161,9 +172,9 @@ fn main() {
                 })
                 .expect("draw a frame");
 
+            session.flush().expect("write the borders");
             let mut out = io::stdout();
-            border_scene.flush_to(&mut out).expect("write the borders");
-            out.write_all(scroll_scene.buffer())
+            out.write_all(scroll_scene.bytes())
                 .expect("write the scroll region");
             out.flush().expect("flush a frame");
 

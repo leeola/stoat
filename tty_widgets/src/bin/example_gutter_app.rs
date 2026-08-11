@@ -27,16 +27,13 @@ use ratatui::{
     style::{Color, Style},
     Frame, Terminal,
 };
-use std::{
-    io::{self, Write},
-    thread,
-};
+use std::{io, thread};
 use stoatty_protocol::command::BorderStyle;
 use stoatty_widgets::{
     border::Border,
     gutter::{Diagnostic, GitMark, Gutter, GutterLine},
     text_run::TextRun,
-    ApcScene,
+    ApcScene, ApcSession, SessionOptions,
 };
 
 /// Editor background (`#282c34`) and foreground (`#abb2bf`), the One Dark colors
@@ -212,20 +209,20 @@ const FLAGGED_LINE: usize = 6;
 fn main() {
     let lines = gutter_lines();
 
+    let mut session = ApcSession::new(SessionOptions::default());
+
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).expect("build the terminal");
-    let mut scene = ApcScene::new();
 
     terminal.clear().expect("clear the screen");
     terminal
-        .draw(|frame| draw_scene(frame, &mut scene, &lines))
+        .draw(|frame| draw_scene(frame, session.scene(), &lines))
         .expect("draw the scene");
-
-    let mut out = io::stdout();
-    scene.flush_to(&mut out).expect("write the decoration");
-    out.flush().expect("flush the decoration");
+    session.flush().expect("write the decoration");
 
     // Hold so the panes stay still and the window keeps the process alive.
+    // Closing the window ends the process outright, so the session's own restore
+    // never runs and its panic hook is what covers a crash.
     loop {
         thread::park();
     }

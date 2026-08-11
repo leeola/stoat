@@ -3,8 +3,19 @@
 //! renderer features.
 //!
 //! Kept dependency-light -- no GPU, windowing, or terminal-state deps --
-//! so a program needs only this crate to emit stoatty bytes, and the
-//! frames degrade to ignorable escape sequences in any other terminal.
+//! so a program needs only this crate to emit stoatty bytes.
+//!
+//! # What degrades, and what does not
+//!
+//! A frame degrades to an ignorable escape sequence in any other terminal,
+//! since an APC string is consumed and never drawn. That covers every
+//! command in [`command`].
+//!
+//! Streamed content does not degrade. A popover's text, a text run's
+//! characters, and a page fill's cells travel outside the frame wrapper as
+//! ordinary bytes, so a terminal that never opened the capture prints them
+//! over whatever is on screen. Settle which terminal answers with
+//! [`detect`] before you emit any of it.
 //!
 //! # Evolving a command
 //!

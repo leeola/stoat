@@ -18,11 +18,8 @@ use ratatui::{
     style::{Color, Style},
     Frame, Terminal,
 };
-use std::{
-    io::{self, Write},
-    thread,
-};
-use stoatty_widgets::{scale::Scale, ApcScene};
+use std::{io, thread};
+use stoatty_widgets::{scale::Scale, ApcScene, ApcSession, SessionOptions};
 
 /// Editor background (`#282c34`) and foreground (`#abb2bf`), the One Dark colors
 /// the default theme uses, set explicitly so the scene looks the same under any
@@ -48,22 +45,24 @@ const GLYPH_ROW: u16 = 6;
 const LABEL_ROW: u16 = 4;
 
 fn main() {
+    let mut session = ApcSession::new(SessionOptions {
+        hide_cursor: true,
+        ..SessionOptions::default()
+    });
+
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).expect("build the terminal");
-    let mut scene = ApcScene::new();
 
     terminal.clear().expect("clear the screen");
     terminal
-        .draw(|frame| draw_scene(frame, &mut scene))
+        .draw(|frame| draw_scene(frame, session.scene()))
         .expect("draw the scene");
-
-    let mut out = io::stdout();
-    out.write_all(b"\x1b[?25l").expect("hide the cursor");
-    scene.flush_to(&mut out).expect("write the decoration");
-    out.flush().expect("flush the scene");
+    session.flush().expect("write the decoration");
 
     // Hold so the scene stays still and the window keeps the process alive;
-    // nothing animates.
+    // nothing animates. Closing the window ends the process outright, so the
+    // session's own restore never runs and its panic hook is what covers a
+    // crash.
     loop {
         thread::park();
     }

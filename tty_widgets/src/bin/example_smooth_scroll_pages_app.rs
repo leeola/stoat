@@ -12,25 +12,22 @@
 //! when hidden.
 //!
 //! Each pool also paints its visible rows into the live grid as the resting "live
-//! screen" the renderer hands back to once a glide settles, so the demo is a
-//! plainly scrolling split view in any terminal that ignores the pool frames.
+//! screen" the renderer hands back to once a glide settles. That paint is plain
+//! VT, so the demo is a plainly scrolling split view anywhere else. Off a
+//! stoatty the pooled lane is withheld entirely rather than ignored, because a
+//! page's cells stream outside the APC wrapper and print over the screen.
 //!
 //! Runs in raw mode with mouse reporting on. Ctrl-F / Ctrl-B page the active pool
 //! a whole region at a time; `o` toggles the overlay; `q` or Ctrl-C quits. Run as
 //! the PTY shell by the `smooth_scroll_pages` example.
 
-use ratatui::crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
-    },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode},
-};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 use std::io::{self, Write};
 use stoatty_protocol::command::{
     encode_fill_end_into, encode_fill_into, encode_pool_drop_into, encode_pool_region_into,
     encode_scroll_into, PoolRegionCommand, ScrollCommand,
 };
+use stoatty_widgets::{ApcSession, SessionOptions};
 
 /// Viewport size in cells, matching the window the `smooth_scroll_pages` example
 /// opens.
@@ -142,10 +139,19 @@ impl Pool {
         encode_pool_region_into(out, &self.region);
     }
 
-    /// Paint the visible rows into the live grid, refill the buffered window, and
-    /// report the scroll target: the per-frame work for one pool.
-    fn emit(&mut self, out: &mut Vec<u8>) {
+    /// Paint the visible rows into the live grid, and on a stoatty refill the
+    /// buffered window and report the scroll target.
+    ///
+    /// The live paint is plain VT and goes out to any host. The pooled work is
+    /// withheld from the rest, because a page's cells stream outside the APC
+    /// wrapper and a terminal that never opened the fill prints them over the
+    /// screen.
+    fn emit(&mut self, out: &mut Vec<u8>, live: bool) {
         self.paint_live(out);
+        if !live {
+            return;
+        }
+
         self.refill(out);
         self.emit_scroll(out);
     }
@@ -206,23 +212,25 @@ impl Pool {
 }
 
 fn main() {
-    enable_raw_mode().expect("enable raw mode");
-    let mut stdout = io::stdout();
-    execute!(stdout, EnableMouseCapture).expect("enable mouse capture");
-    let _ = stdout.write_all(b"\x1b[?25l");
-    let _ = stdout.flush();
+    // The session holds raw mode, mouse reporting, and the hidden cursor for as
+    // long as it lives, and gives all three back on the way out of main --
+    // including the way out an `expect` below takes, which its panic hook covers.
+    let session = ApcSession::new(SessionOptions {
+        raw_mode: true,
+        mouse_capture: true,
+        hide_cursor: true,
+        ..SessionOptions::default()
+    });
 
-    run();
-
-    let _ = execute!(stdout, DisableMouseCapture);
-    let _ = stdout.write_all(b"\x1b[?25h");
-    let _ = stdout.flush();
-    disable_raw_mode().ok();
+    run(session.live());
 }
 
 /// Scroll the panes and overlay under mouse and key control until the user quits,
-/// returning so [`main`] can restore the terminal.
-fn run() {
+/// returning so [`main`]'s session restores the terminal.
+///
+/// `live` is whether the host renders pools. Without it the panes still scroll,
+/// but only through the plain rows each pool paints into the live grid.
+fn run(live: bool) {
     let mut left = Pool::new(
         LEFT_POOL,
         PANE_TOP,
@@ -246,10 +254,12 @@ fn run() {
 
     let mut out = Vec::new();
     write_chrome(&mut out);
-    left.declare(&mut out);
-    right.declare(&mut out);
-    left.emit(&mut out);
-    right.emit(&mut out);
+    if live {
+        left.declare(&mut out);
+        right.declare(&mut out);
+    }
+    left.emit(&mut out, live);
+    right.emit(&mut out, live);
     flush(&mut out);
 
     loop {
@@ -270,7 +280,7 @@ fn run() {
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Char('c') if ctrl => break,
-                    KeyCode::Char('o') => toggle_overlay(&mut overlay, &mut active, &mut out),
+                    KeyCode::Char('o') => toggle_overlay(&mut overlay, &mut active, &mut out, live),
                     KeyCode::Char('f') if ctrl => {
                         with_active(active, &mut left, &mut right, &mut overlay, |pool| {
                             pool.scroll_by(PAGE_STEP)
@@ -287,10 +297,10 @@ fn run() {
             _ => continue,
         }
 
-        left.emit(&mut out);
-        right.emit(&mut out);
+        left.emit(&mut out, live);
+        right.emit(&mut out, live);
         if let Some(overlay) = overlay.as_mut() {
-            overlay.emit(&mut out);
+            overlay.emit(&mut out, live);
         }
         flush(&mut out);
     }
@@ -316,14 +326,20 @@ fn with_active(
     }
 }
 
-/// Show or hide the overlay pool. Showing declares its region and makes it
-/// active; hiding retires it with `pool_drop` and repaints the chrome, so the
-/// divider cells it covered are restored while the panes' own repaint covers the
-/// rest.
-fn toggle_overlay(overlay: &mut Option<Pool>, active: &mut u32, out: &mut Vec<u8>) {
+/// Show or hide the overlay pool.
+///
+/// Showing declares its region and makes it active. Hiding retires it with
+/// `pool_drop` and repaints the chrome, so the divider cells it covered are
+/// restored while the panes' own repaint covers the rest.
+///
+/// `live` is whether the host renders pools. Off, the overlay is still tracked
+/// and painted into the live grid, but its pool is neither declared nor retired.
+fn toggle_overlay(overlay: &mut Option<Pool>, active: &mut u32, out: &mut Vec<u8>, live: bool) {
     match overlay.take() {
         Some(_) => {
-            encode_pool_drop_into(out, OVERLAY_POOL);
+            if live {
+                encode_pool_drop_into(out, OVERLAY_POOL);
+            }
             write_chrome(out);
             *active = LEFT_POOL;
         },
@@ -337,7 +353,9 @@ fn toggle_overlay(overlay: &mut Option<Pool>, active: &mut u32, out: &mut Vec<u8
                 OVERLAY_BG,
                 "OVL",
             );
-            pool.declare(out);
+            if live {
+                pool.declare(out);
+            }
             *overlay = Some(pool);
             *active = OVERLAY_POOL;
         },

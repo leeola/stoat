@@ -13,11 +13,8 @@
 //! `doc_tooltip` example.
 
 use ratatui::{backend::CrosstermBackend, layout::Rect, style::Style, Frame, Terminal};
-use std::{
-    io::{self, Write},
-    thread,
-};
-use stoatty_widgets::{popover::Popover, ApcScene};
+use std::{io, thread};
+use stoatty_widgets::{popover::Popover, ApcScene, ApcSession, SessionOptions};
 
 /// The static code buffer, drawn from the top-left.
 const BUFFER: [&str; 5] = [
@@ -54,21 +51,21 @@ const TOOLTIP_LINES: [&str; 14] = [
 fn main() {
     let content = TOOLTIP_LINES.join("\n");
 
+    let mut session = ApcSession::new(SessionOptions::default());
+
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).expect("build the terminal");
-    let mut scene = ApcScene::new();
 
     terminal.clear().expect("clear the screen");
     terminal
-        .draw(|frame| draw_scene(frame, &mut scene, &content))
+        .draw(|frame| draw_scene(frame, session.scene(), &content))
         .expect("draw the scene");
+    session.flush().expect("write the decoration");
 
-    let mut out = io::stdout();
-    scene.flush_to(&mut out).expect("write the decoration");
-    out.flush().expect("flush the scene");
-
-    // Hold so the buffer stays still and the window keeps the process alive; the
-    // app auto-scrolls the overflowing tooltip content on its own.
+    // Hold so the buffer stays still and the window keeps the process alive. The
+    // app auto-scrolls the overflowing tooltip content on its own. Closing the
+    // window ends the process outright, so the session's own restore never runs
+    // and its panic hook is what covers a crash.
     loop {
         thread::park();
     }

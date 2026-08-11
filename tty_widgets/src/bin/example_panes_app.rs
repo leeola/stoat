@@ -18,13 +18,9 @@ use ratatui::{
     style::{Color, Style},
     Frame, Terminal,
 };
-use std::{
-    io::{self, Write},
-    thread,
-    time::Duration,
-};
+use std::{io, thread, time::Duration};
 use stoatty_protocol::command::BorderStyle;
-use stoatty_widgets::{border::Border, ApcScene};
+use stoatty_widgets::{border::Border, ApcScene, ApcSession, SessionOptions};
 
 /// Editor background (`#282c34`) and foreground (`#abb2bf`), the One Dark colors
 /// the default theme uses, set explicitly so the scene looks the same under any
@@ -245,22 +241,23 @@ const OUTPUT: &[&str] = &[
 ];
 
 fn main() {
+    let mut session = ApcSession::new(SessionOptions::default());
+
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).expect("build the terminal");
-    let mut scene = ApcScene::new();
 
     terminal.clear().expect("clear the screen");
 
+    // Cycles until the window closes, which ends the process outright, so the
+    // session's own restore never runs and its panic hook is what covers a
+    // crash.
     loop {
         for panes in LAYOUTS {
-            scene.clear();
+            session.scene().clear();
             terminal
-                .draw(|frame| render_step(frame, &mut scene, panes))
+                .draw(|frame| render_step(frame, session.scene(), panes))
                 .expect("draw a layout");
-
-            let mut out = io::stdout();
-            scene.flush_to(&mut out).expect("write the decoration");
-            out.flush().expect("flush a layout");
+            session.flush().expect("write the decoration");
 
             thread::sleep(STEP_PAUSE);
         }

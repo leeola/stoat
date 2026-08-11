@@ -25,7 +25,7 @@ use std::{
     thread,
 };
 use stoatty_protocol::command::IconKind;
-use stoatty_widgets::{icon::Icon, popover::Popover, ApcScene};
+use stoatty_widgets::{icon::Icon, popover::Popover, ApcScene, ApcSession, SessionOptions};
 
 /// Editor background (`#282c34`) and foreground (`#abb2bf`), the One Dark colors
 /// the default theme uses, set explicitly so erased cells and body text share the
@@ -68,23 +68,29 @@ const ERROR_TEXT: &str = "from_str";
 const TOOLTIP_CONTENT: &str = "  no method `from_str` found\n  help: did you mean `parse`?";
 
 fn main() {
+    let mut session = ApcSession::new(SessionOptions::default());
+
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).expect("build the terminal");
-    let mut scene = ApcScene::new();
 
     terminal.clear().expect("clear the screen");
     terminal
-        .draw(|frame| draw_scene(frame, &mut scene))
+        .draw(|frame| draw_scene(frame, session.scene()))
         .expect("draw the scene");
 
+    // The squiggles are plain VT, so they go out whatever the host is. Both
+    // handles share the one buffered stdout, so they still bracket the scene in
+    // the order written.
     let mut out = io::stdout();
     underline_spans(&mut out);
-    scene.flush_to(&mut out).expect("write the decoration");
+    session.flush().expect("write the decoration");
     rest_cursor(&mut out);
     out.flush().expect("flush the scene");
 
     // Hold so the buffer stays still and the window keeps the process alive;
-    // nothing animates.
+    // nothing animates. Closing the window ends the process outright, so the
+    // session's own restore never runs and its panic hook is what covers a
+    // crash.
     loop {
         thread::park();
     }
