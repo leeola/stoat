@@ -99,6 +99,27 @@ const MAX_CAPTURE_BYTES: usize = 1 << 20;
 /// anything a working emitter reaches.
 const MAX_DECORATIONS: usize = 4096;
 
+/// Pools one terminal may hold at once.
+///
+/// A pool is created by any unseen wire id and survives `reset`, retired only
+/// by an explicit `pool_drop`, so a writer looping fresh ids grows this for the
+/// terminal's lifetime. Each pool also costs per-redraw work, since the
+/// renderer walks all of them every frame. A real session runs one pool per
+/// visible pane.
+const MAX_POOLS: usize = 64;
+
+/// Minimap content stores one terminal may hold at once.
+///
+/// Created by any unseen `content_id` and, like pools, retired only by an
+/// explicit drop. A real session runs one store per minimap strip.
+const MAX_MINIMAP_STORES: usize = 256;
+
+/// Line summaries one minimap content store may hold.
+///
+/// A store grows by splices the writer sends, so without a ceiling one store id
+/// is enough to exhaust memory. The bound is far above any real document.
+const MAX_MINIMAP_LINES: usize = 2_000_000;
+
 /// A minimap content-store change buffered for the next projection.
 ///
 /// The projection replays these against the grid's stores in arrival order. See
@@ -167,6 +188,14 @@ pub struct Terminal {
     /// The emitter that fills one list is the one re-stamping every frame, so
     /// it would otherwise log on every frame forever.
     warned_decoration_cap: bool,
+    /// Whether a pool refused at [`MAX_POOLS`] has already been reported.
+    warned_pool_cap: bool,
+    /// Whether minimap input bounded at [`MAX_MINIMAP_STORES`] or
+    /// [`MAX_MINIMAP_LINES`] has already been reported.
+    ///
+    /// One flag for both because they are the same defence against the same
+    /// writer, and the log line names which of the two fired.
+    warned_minimap_cap: bool,
     /// Border regions set by `Gstoatty;border` frames, stamped onto the grid by
     /// [`Self::project`]. They persist until a `Gstoatty;reset` frame clears
     /// them, since the VT projection resets each cell's borders every frame.
@@ -483,6 +512,21 @@ fn push_capped<T>(list: &mut Vec<T>, item: T, warned: &mut bool) -> bool {
 
     list.push(item);
     true
+}
+
+/// How many lines a splice may insert into a store of `store_len` before it
+/// would pass [`MAX_MINIMAP_LINES`].
+///
+/// `start` and the removal end clamp to the store length exactly as
+/// [`grid::splice_summaries`] clamps them, so the count this returns is the one
+/// that leaves the spliced store at the cap rather than over it. A splice that
+/// removes as much as it inserts always has room.
+fn insert_room(store_len: usize, start: u32, removed: u32) -> usize {
+    let start = (start as usize).min(store_len);
+    let end = start.saturating_add(removed as usize).min(store_len);
+    let surviving = store_len - (end - start);
+
+    MAX_MINIMAP_LINES.saturating_sub(surviving)
 }
 
 /// Clear `dirty` when `current` already matches `retained`, and take a copy
@@ -811,6 +855,8 @@ impl Terminal {
             warned_region_clamp: false,
             warned_capture_cap: false,
             warned_decoration_cap: false,
+            warned_pool_cap: false,
+            warned_minimap_cap: false,
             frames_scratch: Vec::new(),
             frame_scratch: FrameScratch::default(),
             borders: Vec::new(),
@@ -1287,6 +1333,10 @@ impl Terminal {
                         }
                     },
                     None => {
+                        if self.pools.len() >= MAX_POOLS {
+                            self.warn_pool_cap(region.pool);
+                            return;
+                        }
                         self.pools.insert(region.pool, Pool::new(region));
                     },
                 }
@@ -1414,14 +1464,73 @@ impl Terminal {
     /// Splice the command's lines into the content store `content_id`, replacing
     /// `removed` lines from `start` with the inserted ones.
     ///
-    /// Creates the store when absent, so a first splice populates it. Records the
-    /// command on [`Self::minimap_journal`] so the next projection replays the
-    /// same splice into the grid instead of re-cloning every store.
-    fn splice_minimap_content(&mut self, command: MinimapLinesCommand) {
+    /// Creates the store when absent, so a first splice populates it, unless
+    /// [`MAX_MINIMAP_STORES`] already exist. Records the command on
+    /// [`Self::minimap_journal`] so the next projection replays the same splice
+    /// into the grid instead of re-cloning every store.
+    ///
+    /// Lines past [`MAX_MINIMAP_LINES`] are trimmed from the command itself,
+    /// before both the splice and the journal push, so the grid replays the same
+    /// bounded splice and its stores keep matching these.
+    fn splice_minimap_content(&mut self, mut command: MinimapLinesCommand) {
+        let Some(store_len) = self.minimap_store_len(command.content_id) else {
+            return;
+        };
+
+        let room = insert_room(store_len, command.start, command.removed);
+        if command.lines.len() > room {
+            command.lines.truncate(room);
+            self.warn_minimap_cap("minimap content store past the line cap, trimming");
+        }
+
         let store = self.minimap_contents.entry(command.content_id).or_default();
         grid::splice_summaries(store, command.start, command.removed, &command.lines);
         self.minimap_content_dirty = true;
         self.minimap_journal.push(MinimapJournal::Splice(command));
+    }
+
+    /// The length of store `content_id`, or `None` when it does not exist and
+    /// [`MAX_MINIMAP_STORES`] already do.
+    ///
+    /// An absent store reports zero rather than `None` while there is room, so
+    /// the caller creates it as before.
+    fn minimap_store_len(&mut self, content_id: u32) -> Option<usize> {
+        if let Some(store) = self.minimap_contents.get(&content_id) {
+            return Some(store.len());
+        }
+
+        if self.minimap_contents.len() >= MAX_MINIMAP_STORES {
+            self.warn_minimap_cap("minimap store limit reached, refusing a new id");
+            return None;
+        }
+        Some(0)
+    }
+
+    /// Report the first pool this session refused at [`MAX_POOLS`].
+    fn warn_pool_cap(&mut self, pool: u32) {
+        if self.warned_pool_cap {
+            return;
+        }
+        self.warned_pool_cap = true;
+        tracing::warn!(
+            pool,
+            cap = MAX_POOLS,
+            "pool limit reached, refusing a new id"
+        );
+    }
+
+    /// Report the first minimap input this session to be bounded, naming which
+    /// limit fired through `reason`.
+    fn warn_minimap_cap(&mut self, reason: &str) {
+        if self.warned_minimap_cap {
+            return;
+        }
+        self.warned_minimap_cap = true;
+        tracing::warn!(
+            max_stores = MAX_MINIMAP_STORES,
+            max_lines = MAX_MINIMAP_LINES,
+            "{reason}"
+        );
     }
 
     /// Route a decoration command to the live lists now, or defer it while a DEC
@@ -2698,8 +2807,9 @@ impl Dimensions for GridSize {
 #[cfg(test)]
 mod tests {
     use super::{
-        Arc, Cursor, CursorShape, Damage, TermEvent, Terminal, ESC, MAX_CAPTURE_BYTES,
-        MAX_DECORATIONS, XTVERSION_REPLY,
+        insert_room, Arc, Cursor, CursorShape, Damage, MinimapJournal, TermEvent, Terminal, ESC,
+        MAX_CAPTURE_BYTES, MAX_DECORATIONS, MAX_MINIMAP_LINES, MAX_MINIMAP_STORES, MAX_POOLS,
+        XTVERSION_REPLY,
     };
     use crate::{
         grid::{
@@ -4485,6 +4595,119 @@ mod tests {
             0,
             "the newest is dropped, so the scene as first stamped survives"
         );
+    }
+
+    /// Pools survive a reset and are retired only by an explicit drop, so a
+    /// writer looping fresh ids would otherwise hold memory, and per-frame
+    /// renderer work, for the terminal's lifetime.
+    #[test]
+    fn pools_past_the_cap_are_refused_while_an_existing_one_still_resizes() {
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        for id in 0..(MAX_POOLS as u32 + 16) {
+            declare_pool(&mut terminal, id, 2, 4);
+        }
+
+        assert_eq!(
+            terminal.pools.len(),
+            MAX_POOLS,
+            "a fresh id past the cap creates no pool"
+        );
+        assert!(
+            !terminal.pools.contains_key(&(MAX_POOLS as u32)),
+            "the refused id is the late one, not an established pool"
+        );
+
+        declare_pool(&mut terminal, 0, 4, 6);
+        assert_eq!(
+            (
+                terminal.pools[&0].region.height,
+                terminal.pools[&0].region.width
+            ),
+            (4, 6),
+            "a pool that already exists still re-declares at the cap"
+        );
+    }
+
+    /// A store is created by any unseen content id and retired only by its own
+    /// drop, so the count needs the same ceiling the pools have.
+    #[test]
+    fn minimap_stores_past_the_cap_are_refused() {
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        for content_id in 0..(MAX_MINIMAP_STORES as u32 + 16) {
+            terminal.splice_minimap_content(MinimapLinesCommand {
+                content_id,
+                start: 0,
+                removed: 0,
+                lines: vec![summary_line()],
+            });
+        }
+
+        assert_eq!(
+            terminal.minimap_contents.len(),
+            MAX_MINIMAP_STORES,
+            "a fresh content id past the cap creates no store"
+        );
+    }
+
+    /// The projection replays each journaled splice into the grid's own stores,
+    /// so trimming the term's store without trimming the command would leave the
+    /// grid growing past the cap and diverging from the term.
+    #[test]
+    fn a_store_stops_growing_at_the_line_cap_and_the_journal_is_trimmed_with_it() {
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        terminal.splice_minimap_content(MinimapLinesCommand {
+            content_id: 1,
+            start: 0,
+            removed: 0,
+            lines: vec![summary_line(); MAX_MINIMAP_LINES + 16],
+        });
+
+        assert_eq!(
+            terminal.minimap_contents[&1].len(),
+            MAX_MINIMAP_LINES,
+            "the store stops growing at the line cap"
+        );
+        let journaled = match terminal.minimap_journal.as_slice() {
+            [MinimapJournal::Splice(command)] => command.lines.len(),
+            journal => panic!("one splice is journaled, got {} entries", journal.len()),
+        };
+        assert_eq!(
+            journaled, MAX_MINIMAP_LINES,
+            "the grid replays the same trimmed splice, so its store matches"
+        );
+    }
+
+    #[test]
+    fn insert_room_leaves_the_spliced_store_at_the_cap() {
+        assert_eq!(insert_room(0, 0, 0), MAX_MINIMAP_LINES, "an empty store");
+        assert_eq!(insert_room(MAX_MINIMAP_LINES, 0, 0), 0, "a full store");
+        assert_eq!(
+            insert_room(MAX_MINIMAP_LINES, 0, 10),
+            10,
+            "removing ten makes room for ten"
+        );
+        // start and the removal end clamp to the length, so an out-of-range
+        // splice removes nothing rather than inventing room.
+        assert_eq!(
+            insert_room(100, 500, 10),
+            MAX_MINIMAP_LINES - 100,
+            "a start past the end removes nothing"
+        );
+        assert_eq!(
+            insert_room(100, 0, 500),
+            MAX_MINIMAP_LINES,
+            "a removal past the end clears the store"
+        );
+    }
+
+    /// One shared summary, cloned per line, so a cap-sized splice costs atomic
+    /// bumps rather than a heap allocation each.
+    fn summary_line() -> LineSummary {
+        Arc::from([MinimapRun {
+            start_col: 0,
+            len: 1,
+            class: 1,
+        }])
     }
 
     /// Page decorations accumulate on the open fill rather than the live lists,
