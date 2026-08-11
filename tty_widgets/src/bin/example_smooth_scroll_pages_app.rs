@@ -11,6 +11,11 @@
 //! both (a higher id is a higher z-order) and is retired with `Gstoatty;pool_drop`
 //! when hidden.
 //!
+//! One [`SmoothScrollState`] tracks all three pools, and every pool emits
+//! through [`pool::emit_into`], which owns the region declaration, the buffered
+//! page window, and the scroll target. Each pool contributes only its own
+//! document bytes and where it is scrolled to.
+//!
 //! Each pool also paints its visible rows into the live grid as the resting "live
 //! screen" the renderer hands back to once a glide settles. That paint is plain
 //! VT, so the demo is a plainly scrolling split view anywhere else. Off a
@@ -23,11 +28,11 @@
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 use std::io::{self, Write};
-use stoatty_protocol::command::{
-    encode_fill_end_into, encode_fill_into, encode_pool_drop_into, encode_pool_region_into,
-    encode_scroll_into, PoolRegionCommand, ScrollCommand,
+use stoatty_protocol::command::PoolRegionCommand;
+use stoatty_widgets::{
+    pool::{self, SmoothScrollState},
+    ApcSession, SessionOptions,
 };
-use stoatty_widgets::{ApcSession, SessionOptions};
 
 /// Viewport size in cells, matching the window the `smooth_scroll_pages` example
 /// opens.
@@ -55,9 +60,6 @@ const LEFT_POOL: u32 = 1;
 const RIGHT_POOL: u32 = 2;
 const OVERLAY_POOL: u32 = 3;
 
-/// Pages kept buffered around each pool's cursor, the pool's capacity.
-const WINDOW_PAGES: u64 = 5;
-
 /// Rows a single wheel notch scrolls, a sub-page step stoatty eases across.
 const STEP_ROWS: f32 = 3.0;
 
@@ -80,8 +82,12 @@ const HEADER_FG: [u8; 3] = [97, 175, 239];
 /// divider.
 const CHROME_FG: [u8; 3] = [229, 192, 123];
 
-/// One scrollable pool: a declared region over a numbered document, with the
-/// fractional scroll position and the buffered page window for that pool.
+/// One scrollable pool, a declared region over a numbered document.
+///
+/// The pool holds only what the document looks like and where it is scrolled to.
+/// What has been declared to the terminal for it -- the region, the buffered
+/// pages, the last scroll target -- lives in the shared [`SmoothScrollState`]
+/// every pool emits through, keyed by [`Self::id`].
 struct Pool {
     id: u32,
     region: PoolRegionCommand,
@@ -89,9 +95,6 @@ struct Pool {
     label: &'static str,
     /// Scroll position in document pages; a page is `region.height` rows.
     position: f32,
-    /// Half-open page range filled into the pool, refilled only when the integer
-    /// page changes so a sub-page move reuses the buffered pages.
-    window_start: Option<u64>,
 }
 
 impl Pool {
@@ -117,7 +120,6 @@ impl Pool {
             bg,
             label,
             position: 0.0,
-            window_start: None,
         }
     }
 
@@ -133,27 +135,32 @@ impl Pool {
         self.position = (self.position + pages).max(0.0);
     }
 
-    /// Declare the pool's region, so its later fills and scrolls have a pool to
-    /// land in. Sent once when the pool first appears.
-    fn declare(&self, out: &mut Vec<u8>) {
-        encode_pool_region_into(out, &self.region);
-    }
-
-    /// Paint the visible rows into the live grid, and on a stoatty refill the
-    /// buffered window and report the scroll target.
+    /// Paint the visible rows into the live grid, and on a stoatty declare the
+    /// region, refill the buffered window, and report the scroll target.
     ///
     /// The live paint is plain VT and goes out to any host. The pooled work is
     /// withheld from the rest, because a page's cells stream outside the APC
     /// wrapper and a terminal that never opened the fill prints them over the
     /// screen.
-    fn emit(&mut self, out: &mut Vec<u8>, live: bool) {
+    ///
+    /// The document never changes, so the content version is a constant, and the
+    /// demo emits only on an event rather than every frame, so it does not hold
+    /// while idle.
+    fn emit(&self, out: &mut Vec<u8>, state: &mut SmoothScrollState, live: bool) {
         self.paint_live(out);
         if !live {
             return;
         }
 
-        self.refill(out);
-        self.emit_scroll(out);
+        pool::emit_into(
+            out,
+            state,
+            self.region,
+            self.position * self.rows() as f32,
+            0,
+            false,
+            |page| self.page_bytes(page),
+        );
     }
 
     /// Paint the document rows currently under `position` into the live grid's
@@ -170,44 +177,19 @@ impl Pool {
         }
     }
 
-    fn refill(&mut self, out: &mut Vec<u8>) {
-        let start = (self.position as u64).saturating_sub(WINDOW_PAGES / 2);
-        if self.window_start == Some(start) {
-            return;
-        }
-        self.window_start = Some(start);
-
-        for page in start..start + WINDOW_PAGES {
-            encode_fill_into(out, self.id, page);
-            self.write_page(out, page);
-            encode_fill_end_into(out);
-        }
-    }
-
-    /// Stream one region of the document into the pool slot for `page`, homing the
-    /// cursor first so the bytes paint a fresh slot sized to the region.
-    fn write_page(&self, out: &mut Vec<u8>, page: u64) {
-        out.extend_from_slice(b"\x1b[H");
+    /// One region of the document as the self-contained VT bytes painting the
+    /// pool slot for `page`, homing the cursor first so they paint a fresh slot
+    /// sized to the region.
+    fn page_bytes(&self, page: u64) -> Vec<u8> {
+        let mut out = Vec::from(b"\x1b[H".as_slice());
         for row in 0..self.rows() {
             let (fg, text) = document_line(self.label, page as usize * self.rows() + row);
-            write_line(out, fg, self.bg, self.region.width as usize, &text);
+            write_line(&mut out, fg, self.bg, self.region.width as usize, &text);
             if row + 1 < self.rows() {
                 out.extend_from_slice(b"\r\n");
             }
         }
-    }
-
-    fn emit_scroll(&self, out: &mut Vec<u8>) {
-        let page = self.position.floor();
-        let fraction = ((self.position - page) * 65536.0) as u16;
-        encode_scroll_into(
-            out,
-            &ScrollCommand {
-                pool: self.id,
-                page: page as u64,
-                fraction,
-            },
-        );
+        out
     }
 }
 
@@ -251,15 +233,12 @@ fn run(live: bool) {
     );
     let mut overlay: Option<Pool> = None;
     let mut active = LEFT_POOL;
+    let mut state = SmoothScrollState::default();
 
     let mut out = Vec::new();
     write_chrome(&mut out);
-    if live {
-        left.declare(&mut out);
-        right.declare(&mut out);
-    }
-    left.emit(&mut out, live);
-    right.emit(&mut out, live);
+    left.emit(&mut out, &mut state, live);
+    right.emit(&mut out, &mut state, live);
     flush(&mut out);
 
     loop {
@@ -280,7 +259,7 @@ fn run(live: bool) {
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Char('c') if ctrl => break,
-                    KeyCode::Char('o') => toggle_overlay(&mut overlay, &mut active, &mut out, live),
+                    KeyCode::Char('o') => toggle_overlay(&mut overlay, &mut active, &mut out),
                     KeyCode::Char('f') if ctrl => {
                         with_active(active, &mut left, &mut right, &mut overlay, |pool| {
                             pool.scroll_by(PAGE_STEP)
@@ -297,11 +276,18 @@ fn run(live: bool) {
             _ => continue,
         }
 
-        left.emit(&mut out, live);
-        right.emit(&mut out, live);
-        if let Some(overlay) = overlay.as_mut() {
-            overlay.emit(&mut out, live);
+        left.emit(&mut out, &mut state, live);
+        right.emit(&mut out, &mut state, live);
+        if let Some(overlay) = overlay.as_ref() {
+            overlay.emit(&mut out, &mut state, live);
         }
+
+        // A surface is retired by leaving its id out of the declared set, so a
+        // hidden overlay drops here rather than at the keypress that hid it.
+        let mut declared = vec![LEFT_POOL, RIGHT_POOL];
+        declared.extend(overlay.as_ref().map(|overlay| overlay.id));
+        state.drop_absent(&mut out, &declared);
+
         flush(&mut out);
     }
 }
@@ -328,23 +314,18 @@ fn with_active(
 
 /// Show or hide the overlay pool.
 ///
-/// Showing declares its region and makes it active. Hiding retires it with
-/// `pool_drop` and repaints the chrome, so the divider cells it covered are
-/// restored while the panes' own repaint covers the rest.
-///
-/// `live` is whether the host renders pools. Off, the overlay is still tracked
-/// and painted into the live grid, but its pool is neither declared nor retired.
-fn toggle_overlay(overlay: &mut Option<Pool>, active: &mut u32, out: &mut Vec<u8>, live: bool) {
+/// Showing makes it active, and its first emit declares its region. Hiding
+/// repaints the chrome, so the divider cells it covered are restored while the
+/// panes' own repaint covers the rest, and leaves the retirement to the frame's
+/// `drop_absent`.
+fn toggle_overlay(overlay: &mut Option<Pool>, active: &mut u32, out: &mut Vec<u8>) {
     match overlay.take() {
         Some(_) => {
-            if live {
-                encode_pool_drop_into(out, OVERLAY_POOL);
-            }
             write_chrome(out);
             *active = LEFT_POOL;
         },
         None => {
-            let pool = Pool::new(
+            *overlay = Some(Pool::new(
                 OVERLAY_POOL,
                 OVERLAY_TOP,
                 OVERLAY_LEFT,
@@ -352,11 +333,7 @@ fn toggle_overlay(overlay: &mut Option<Pool>, active: &mut u32, out: &mut Vec<u8
                 OVERLAY_HEIGHT,
                 OVERLAY_BG,
                 "OVL",
-            );
-            if live {
-                pool.declare(out);
-            }
-            *overlay = Some(pool);
+            ));
             *active = OVERLAY_POOL;
         },
     }

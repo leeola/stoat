@@ -81,7 +81,10 @@ use stoatty_protocol::{
     command::PoolRegionCommand,
     window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent},
 };
-use stoatty_widgets::ApcScene;
+use stoatty_widgets::{
+    pool::{self, MinimapWindowInputs, SmoothScrollState},
+    ApcScene,
+};
 use tokio::{
     io::AsyncBufReadExt,
     sync::{
@@ -1650,7 +1653,7 @@ pub struct Stoat {
     /// Smooth-scroll pool emit state for the focused editor. Tracks the
     /// last-declared pool region, filled page window, and emitted scroll row
     /// so each frame emits only the deltas.
-    pub(crate) smooth_scroll: crate::smooth_scroll::SmoothScrollState,
+    pub(crate) smooth_scroll: SmoothScrollState,
     /// Per-line minimap summaries for the strips declared this session, keyed by
     /// `(workspace, buffer)` so a buffer id reused across workspaces never
     /// aliases another workspace's content.
@@ -2102,7 +2105,7 @@ impl Stoat {
             focused_mode_reads: std::cell::Cell::new(0),
             chrome: None,
             dimmed_minimap_palette: None,
-            smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
+            smooth_scroll: SmoothScrollState::default(),
             minimap_content: std::collections::HashMap::new(),
             minimap_next_content_id: 0,
             minimap_build_pending: false,
@@ -8755,7 +8758,7 @@ impl Stoat {
                 });
                 // A non-editor pane holds a single page, so only page 0 fills
                 // and the rest of the buffered window stays empty.
-                crate::smooth_scroll::emit_into(
+                pool::emit_into(
                     out,
                     &mut self.smooth_scroll,
                     region,
@@ -8823,7 +8826,7 @@ impl Stoat {
             let mut buf = Buffer::empty(row);
             crate::render::pane::paint_pane_status_cells(&cells, row, &mut buf);
             let bytes = crate::smooth_scroll::serialize_buffer(&mut buf, &self.theme);
-            crate::smooth_scroll::emit_into(
+            pool::emit_into(
                 out,
                 &mut self.smooth_scroll,
                 region,
@@ -9414,7 +9417,7 @@ impl Stoat {
                     theme_epoch,
                 ),
             };
-            let entered = crate::smooth_scroll::emit_into(
+            let entered = pool::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
@@ -9447,11 +9450,7 @@ impl Stoat {
                 // has nothing to convert that the last one did not.
                 let snapshot = editor.display_map.snapshot();
                 let rows = region.height as u32;
-                let inputs = crate::smooth_scroll::MinimapWindowInputs::new(
-                    scroll_offset,
-                    snapshot.version(),
-                    rows,
-                );
+                let inputs = MinimapWindowInputs::new(scroll_offset, snapshot.version(), rows);
                 self.smooth_scroll.emit_minimap_view(
                     &mut out,
                     strip_id,
@@ -9589,7 +9588,7 @@ impl Stoat {
                 hasher.finish()
             };
             let home = self.home.as_deref();
-            crate::smooth_scroll::emit_into(
+            pool::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
@@ -9633,7 +9632,7 @@ impl Stoat {
                 palette.generation.hash(&mut hasher);
                 hasher.finish()
             };
-            crate::smooth_scroll::emit_into(
+            pool::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
@@ -9693,7 +9692,7 @@ impl Stoat {
                 hasher.finish()
             };
             let home = self.home.as_deref();
-            crate::smooth_scroll::emit_into(
+            pool::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
@@ -9731,7 +9730,7 @@ impl Stoat {
             let content_version = (state.commits.len() as u64) << 2
                 | ((state.pending_load.is_some() as u64) << 1)
                 | (state.reached_end as u64);
-            crate::smooth_scroll::emit_into(
+            pool::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
@@ -9773,7 +9772,7 @@ impl Stoat {
                 lanes.hash(&mut hasher);
                 hasher.finish()
             };
-            crate::smooth_scroll::emit_into(
+            pool::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
@@ -9826,7 +9825,7 @@ impl Stoat {
                 crate::render::commits::preview_row_count(&session).hash(&mut hasher);
                 hasher.finish()
             };
-            crate::smooth_scroll::emit_into(
+            pool::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
@@ -9861,7 +9860,7 @@ impl Stoat {
             // completion_generation, so that counter is the pool's content
             // version. A re-query refills without hashing every label each emit.
             let content_version = self.completion_generation;
-            crate::smooth_scroll::emit_into(
+            pool::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
@@ -9902,7 +9901,7 @@ impl Stoat {
                 help.generation.hash(&mut hasher);
                 hasher.finish()
             };
-            crate::smooth_scroll::emit_into(
+            pool::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
                 list_region,
@@ -9940,7 +9939,7 @@ impl Stoat {
                     .hash(&mut hasher);
                 hasher.finish()
             };
-            crate::smooth_scroll::emit_into(
+            pool::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
                 detail_region,
@@ -9983,7 +9982,7 @@ impl Stoat {
                 popup.generation.hash(&mut hasher);
                 hasher.finish()
             };
-            crate::smooth_scroll::emit_into(
+            pool::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
@@ -10408,9 +10407,9 @@ fn osc_default_colors(theme: &crate::theme::Theme) -> Vec<u8> {
 /// buffer copy, and a serialize per frame.
 ///
 /// The region belongs in the hash even though nothing inside the pane draws it.
-/// Acting on a match skips [`emit_into`](crate::smooth_scroll::emit_into)
-/// altogether, and with it the region declaration that a resize or a move to
-/// another window would otherwise emit.
+/// Acting on a match skips [`pool::emit_into`] altogether, and with it the
+/// region declaration that a resize or a move to another window otherwise
+/// emits.
 fn window_content_version(
     view: &View,
     region: PoolRegionCommand,

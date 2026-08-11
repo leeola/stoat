@@ -31,6 +31,7 @@ pub mod icon;
 pub mod minimap;
 pub mod panel;
 pub mod polyline;
+pub mod pool;
 pub mod popover;
 pub mod scale;
 pub mod scroll_region;
