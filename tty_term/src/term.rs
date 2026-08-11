@@ -1045,9 +1045,12 @@ impl Terminal {
                 // its slot (the Bar arm and commit_capture route them there), so
                 // they act too. The minimap content, view, and drop commands are
                 // persistent state whose incremental splices must not be dropped
-                // mid-fill, so they act as well. Every other decoration is
-                // target-bound and would leak onto the live grid, so it is dropped
-                // while a page paints or a content capture runs.
+                // mid-fill, so they act as well. The pool commands are persistent
+                // state too, and none of them touches a live-grid decoration, so
+                // the leak below does not reach them. Dropping a pool_drop here
+                // would strand the pool and its page grids instead. Every other
+                // decoration is target-bound and would leak onto the live grid,
+                // so it is dropped while a page paints or a content capture runs.
                 let routed = matches!(
                     command,
                     Command::Fill(_)
@@ -1059,6 +1062,11 @@ impl Terminal {
                         | Command::TextRunEnd
                         | Command::Bar(_)
                         | Command::Polyline(_)
+                        | Command::PoolRegion(_)
+                        | Command::Scroll(_)
+                        | Command::PoolCursor(_)
+                        | Command::Reposition(_)
+                        | Command::PoolDrop(_)
                         | Command::MinimapLines(_)
                         | Command::MinimapView(_)
                         | Command::MinimapDrop(_)
@@ -1389,8 +1397,13 @@ impl Terminal {
             },
             Command::PoolDrop(drop) => {
                 self.pools.remove(&drop.pool);
-                if self.fill.as_ref().map(|fill| fill.pool) == Some(drop.pool) {
-                    self.fill = None;
+                // Doomed rather than closed, since the page has lost the pool it
+                // was painting for. Closing the context would route the rest of
+                // the page to the live parser and paint it on the screen.
+                if let Some(fill) = &mut self.fill
+                    && fill.pool == drop.pool
+                {
+                    fill.discard = true;
                 }
             },
             // A minimap declaration is a decoration cleared by reset, staged like
@@ -5308,6 +5321,71 @@ mod tests {
             terminal.take_events(),
             vec![TermEvent::ZoomCapture(true), TermEvent::FontStep(1)],
             "both route past a fill redirect"
+        );
+    }
+
+    /// Pool state is not a live-grid decoration, so holding it behind a redirect
+    /// only strands the pool and the page grids the drop was retiring.
+    #[test]
+    fn a_pool_drop_during_another_pools_fill_still_retires_the_pool() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_pool(&mut terminal, 1, 2, 4);
+        declare_pool(&mut terminal, 2, 2, 4);
+
+        terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 0 }));
+        terminal.advance(&encode_pool_drop(&PoolDropCommand { pool: 2 }));
+        terminal.advance(&encode_fill_end());
+
+        assert_eq!(
+            terminal.pools.keys().copied().collect::<Vec<_>>(),
+            [1],
+            "the drop retires pool 2 while pool 1 paints"
+        );
+    }
+
+    /// Dropping the pool a page is painting for reaches an arm that was
+    /// unreachable while the command itself was held behind the redirect.
+    #[test]
+    fn a_pool_drop_of_the_filling_pool_retires_it_without_leaking_the_page() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_pool(&mut terminal, 1, 4, 8);
+
+        terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 0 }));
+        terminal.advance(b"page");
+        terminal.advance(&encode_pool_drop(&PoolDropCommand { pool: 1 }));
+        terminal.advance(b"LEAK");
+        terminal.advance(&encode_fill_end());
+
+        assert!(terminal.pools.is_empty(), "the pool is retired");
+
+        let mut grid = Grid::new(4, 8);
+        terminal.project(&mut grid);
+        let row_text = grid.row(0).iter().map(|cell| cell.ch).collect::<String>();
+        assert_eq!(
+            row_text.trim_end(),
+            "",
+            "page bytes after the drop never reach the live screen"
+        );
+    }
+
+    /// A scroll held behind a redirect is lost outright, leaving the pool at a
+    /// position the app has already moved past.
+    #[test]
+    fn a_scroll_during_a_fill_still_lands_on_the_pool() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_pool(&mut terminal, 1, 2, 4);
+
+        terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 0 }));
+        terminal.advance(&encode_scroll(&ScrollCommand {
+            pool: 1,
+            page: 3,
+            fraction: 0,
+        }));
+        terminal.advance(&encode_fill_end());
+
+        assert_eq!(
+            terminal.pools[&1].scroll_target.page, 3,
+            "the scroll applies rather than being dropped"
         );
     }
 

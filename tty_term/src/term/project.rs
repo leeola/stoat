@@ -31,10 +31,9 @@ use alacritty_terminal::{
 ///
 /// The two grids are sized independently, so the copy is clamped to their overlap
 /// rather than assuming they agree, leaving any cell outside it with the pool's
-/// clear. They do agree in practice: a fill's context is built at its pool region's
-/// size, and a region re-declaration is dropped while a fill paints, so the region
-/// cannot move under an open fill. The clamp keeps that an invariant this function
-/// does not depend on.
+/// clear. They usually agree, since a fill's context is built at its pool region's
+/// size. A region re-declaration mid-fill moves the region under the open fill and
+/// is the case the clamp exists for.
 pub(super) fn project_term_cells(
     grid: &mut Grid,
     term: &Term<ResponseSink>,
