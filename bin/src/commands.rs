@@ -5,3 +5,4 @@ pub mod dump;
 pub mod editor;
 pub mod fixture;
 pub mod query;
+pub mod walkthrough;

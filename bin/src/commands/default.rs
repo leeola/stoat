@@ -98,6 +98,12 @@ enum Command {
         #[command(subcommand)]
         sub: crate::commands::query::QueryCommand,
     },
+    /// Create, list, show, and delete the guided walkthroughs stored in this
+    /// workspace under `.stoat/walkthroughs`.
+    Walkthrough {
+        #[command(subcommand)]
+        sub: crate::commands::walkthrough::WalkthroughCommand,
+    },
     /// Materialize a deterministic fixture and open the editor inside it. `ls`
     /// lists the catalog.
     Fixture(FixtureArgs),
@@ -126,6 +132,7 @@ pub fn run(args: Args) -> Result<(), Whatever> {
         Some(Command::AgentApi { sub }) => crate::commands::agent_api::run(sub),
         Some(Command::Editor { file }) => crate::commands::editor::run(file),
         Some(Command::Query { sub }) => crate::commands::query::run(sub),
+        Some(Command::Walkthrough { sub }) => crate::commands::walkthrough::run(sub),
         Some(Command::Fixture(fixture)) => run_fixture(fixture, text_proto_log, common),
         Some(Command::Completions { shell }) => {
             clap_complete::generate(shell, &mut Args::command(), "stoat", &mut std::io::stdout());
