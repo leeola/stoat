@@ -9,3 +9,8 @@ workspace = true
 
 [dependencies]
 base64.workspace = true
+
+# Detection reads the terminal's answer off raw fd 0, which needs poll and
+# isatty. Nothing else in the crate touches the platform.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

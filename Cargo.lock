@@ -4155,6 +4155,7 @@ name = "stoatty_protocol"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "libc",
 ]
 
 [[package]]

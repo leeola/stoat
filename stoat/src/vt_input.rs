@@ -10,7 +10,6 @@
 //! than what it costs.
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use std::ops::Range;
 
 /// Decode `bytes` into the events a terminal would have produced for them.
 ///
@@ -278,32 +277,10 @@ fn bare(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
-/// The first complete APC frame span in `bytes`, from `ESC _` through its
-/// `ESC \` or `BEL` terminator inclusive, or `None` if no complete span is
-/// present yet.
-///
-/// A range rather than the bytes, so a caller holding the buffer can splice the
-/// frame out and keep what was typed around it. Leading bytes before the
-/// introducer are skipped.
-pub(crate) fn apc_span(bytes: &[u8]) -> Option<Range<usize>> {
-    let start = bytes.windows(2).position(|pair| pair == b"\x1b_")?;
-    let rest = &bytes[start..];
-    let mut i = 2;
-    while i < rest.len() {
-        if rest[i] == 0x07 {
-            return Some(start..start + i + 1);
-        }
-        if rest[i] == 0x1b && rest.get(i + 1) == Some(&b'\\') {
-            return Some(start..start + i + 2);
-        }
-        i += 1;
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stoatty_protocol::frame;
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
         Event::Key(KeyEvent::new(code, modifiers))
@@ -312,18 +289,18 @@ mod tests {
     #[test]
     fn apc_span_covers_a_complete_st_frame() {
         let bytes = b"\x1b_Gstoatty;ident\x1b\\";
-        assert_eq!(apc_span(bytes), Some(0..bytes.len()));
+        assert_eq!(frame::apc_span(bytes), Some(0..bytes.len()));
     }
 
     #[test]
     fn apc_span_skips_leading_garbage_and_accepts_bel() {
         let bytes = b"junk\x1b_Gstoatty;ident\x07";
-        assert_eq!(apc_span(bytes), Some(4..bytes.len()));
+        assert_eq!(frame::apc_span(bytes), Some(4..bytes.len()));
     }
 
     #[test]
     fn apc_span_is_none_when_the_frame_is_incomplete() {
-        assert_eq!(apc_span(b"\x1b_Gstoatty;ident"), None);
+        assert_eq!(frame::apc_span(b"\x1b_Gstoatty;ident"), None);
     }
 
     /// Every class a person types at launch, decoded the way crossterm would
@@ -432,7 +409,7 @@ mod tests {
     #[test]
     fn a_reply_frame_splices_out_leaving_what_was_typed() {
         let mut buf = b"ab\x1b_Gstoatty;ident\x1b\\cd".to_vec();
-        let span = apc_span(&buf).expect("a complete frame");
+        let span = frame::apc_span(&buf).expect("a complete frame");
         assert_eq!(&buf[span.clone()], b"\x1b_Gstoatty;ident\x1b\\");
 
         buf.drain(span);

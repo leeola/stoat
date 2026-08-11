@@ -10,7 +10,7 @@
 //! terminator.
 
 use base64::{engine::general_purpose::STANDARD, write::EncoderWriter, Engine};
-use std::io::Write;
+use std::{io::Write, ops::Range};
 
 /// APC introducer, `ESC _`.
 const INTRODUCER: &[u8] = b"\x1b_";
@@ -185,6 +185,30 @@ pub fn decode_into<'a>(
     }
 
     Some((sub, &scratch.args[..count]))
+}
+
+/// The first complete APC frame span in `bytes`, from `ESC _` through its
+/// `ESC \` or `BEL` terminator inclusive, or `None` if no complete span is
+/// present yet.
+///
+/// A range rather than the bytes, so a caller holding the buffer can splice the
+/// frame out and keep what surrounds it. That is what a program reading its own
+/// stdin needs, where a terminal's reply arrives mixed in with what someone
+/// typed. Leading bytes before the introducer are skipped.
+pub fn apc_span(bytes: &[u8]) -> Option<Range<usize>> {
+    let start = bytes.windows(2).position(|pair| pair == INTRODUCER)?;
+    let rest = &bytes[start..];
+    let mut i = 2;
+    while i < rest.len() {
+        if rest[i] == BEL {
+            return Some(start..start + i + 1);
+        }
+        if rest[i] == INTRODUCER[0] && rest.get(i + 1) == Some(&TERMINATOR[1]) {
+            return Some(start..start + i + 2);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Strip an optional leading `ESC _` and a trailing `ESC \` or `BEL`.
