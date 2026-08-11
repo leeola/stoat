@@ -214,7 +214,7 @@ fn run_tui(
     // The UI thread's one report of whether a stoatty answered the startup ident
     // handshake, which only it can run: the reply arrives on raw stdin, which
     // that thread owns.
-    let (stoatty_tx, stoatty_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+    let (stoatty_tx, stoatty_rx) = tokio::sync::mpsc::unbounded_channel::<Option<u32>>();
 
     let mouse_capture_policy = stoat::default_mouse_capture_policy();
     let mouse_captured =

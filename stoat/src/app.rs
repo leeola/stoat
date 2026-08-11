@@ -766,7 +766,7 @@ pub struct Stoat {
     /// [`Self::run`] matches `Some` on this arm rather than testing for a closed
     /// channel, which parks the arm once it closes instead of waking the loop on
     /// every poll. Born closed, since a process with no UI thread never reports.
-    stoatty_rx: UnboundedReceiver<bool>,
+    stoatty_rx: UnboundedReceiver<Option<u32>>,
     /// Whether the window-event socket is currently connected. Gates pane
     /// detach, which needs stoatty to host the aux window and report its events.
     pub(crate) window_ipc_connected: bool,
@@ -1554,6 +1554,14 @@ pub struct Stoat {
     /// that are not APC-wrapped rather than dropping them. No frame may assume
     /// rich output before this is set.
     pub(crate) stoatty: bool,
+    /// The protocol version the stoatty on the other end announced, or zero
+    /// while none has, which is also what a stoatty predating the version field
+    /// reports.
+    ///
+    /// Read before emitting anything a peer might not understand. Meaningless
+    /// unless [`Self::stoatty`] is set, since a foreign terminal answers no
+    /// handshake at all.
+    pub(crate) stoatty_protocol: u32,
     /// Reused per-frame APC decoration buffer. Widgets append their component
     /// frames while painting; [`Self::emit_apc_scene`] diffs it against the last
     /// flush so unchanged decoration costs no bytes. Empty until a widget appends.
@@ -1859,7 +1867,7 @@ impl Stoat {
         // Dropped at once, leaving the channel closed until `set_stoatty_rx`
         // installs the UI thread's end. Closed is the truthful state for a
         // process that has no UI thread to hear from.
-        let (_, stoatty_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+        let (_, stoatty_rx) = tokio::sync::mpsc::unbounded_channel::<Option<u32>>();
 
         let env_host: Arc<dyn EnvHost> = Arc::new(LocalEnv);
         let home = env_host.var("HOME").map(PathBuf::from);
@@ -2079,6 +2087,7 @@ impl Stoat {
             next_aux_window: 1,
             apc_tx: None,
             stoatty: false,
+            stoatty_protocol: 0,
             apc_scene: ApcScene::new(),
             pending_undercurls: UndercurlBatch::default(),
             theme_epoch: 0,
@@ -2209,7 +2218,7 @@ impl Stoat {
     /// this end over once the app exists. Left uncalled, [`Self::stoatty`] stays
     /// false for the process's life, which is what a headless or embedded run
     /// wants.
-    pub fn set_stoatty_rx(&mut self, stoatty_rx: UnboundedReceiver<bool>) {
+    pub fn set_stoatty_rx(&mut self, stoatty_rx: UnboundedReceiver<Option<u32>>) {
         self.stoatty_rx = stoatty_rx;
     }
 
@@ -2228,12 +2237,13 @@ impl Stoat {
     /// Only the confirming report does anything. A `false` report is the state
     /// the app already starts in, and a repeat cannot arrive since the handshake
     /// runs once.
-    fn handle_stoatty_present(&mut self, present: bool) -> UpdateEffect {
-        if !present || self.stoatty {
+    fn handle_stoatty_present(&mut self, protocol: Option<u32>) -> UpdateEffect {
+        let Some(protocol) = protocol.filter(|_| !self.stoatty) else {
             return UpdateEffect::None;
-        }
+        };
 
         self.stoatty = true;
+        self.stoatty_protocol = protocol;
         self.emit_theme_default_colors();
         self.sync_zoom_claim();
 
@@ -11981,8 +11991,33 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(80, 24);
         h.stoat.stoatty = false;
 
-        assert_eq!(h.stoat.handle_stoatty_present(true), UpdateEffect::Redraw);
+        assert_eq!(
+            h.stoat
+                .handle_stoatty_present(Some(stoatty_protocol::PROTOCOL_VERSION)),
+            UpdateEffect::Redraw
+        );
         assert!(h.stoat.stoatty, "and the flag stays set");
+        assert_eq!(
+            h.stoat.stoatty_protocol,
+            stoatty_protocol::PROTOCOL_VERSION,
+            "the peer's version is kept for gating what may be emitted"
+        );
+    }
+
+    /// A stoatty from before the version field answers the handshake without
+    /// one, and is still a stoatty. Reading the report as a bare presence flag
+    /// would lose the distinction the version exists to carry.
+    #[test]
+    fn a_stoatty_predating_the_version_field_still_confirms_at_version_zero() {
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        h.stoat.stoatty = false;
+
+        assert_eq!(
+            h.stoat.handle_stoatty_present(Some(0)),
+            UpdateEffect::Redraw
+        );
+        assert!(h.stoat.stoatty, "a version-less reply is still a stoatty");
+        assert_eq!(h.stoat.stoatty_protocol, 0);
     }
 
     /// The bin layer wires the app up before the run loop drains the handshake,
@@ -11998,7 +12033,8 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
 
-        h.stoat.handle_stoatty_present(true);
+        h.stoat
+            .handle_stoatty_present(Some(stoatty_protocol::PROTOCOL_VERSION));
 
         let sent: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
             .flatten()
@@ -12037,7 +12073,8 @@ mod tests {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
             h.stoat.set_apc_tx(tx);
 
-            let announce = |h: &mut Stoat| h.handle_stoatty_present(true);
+            let announce =
+                |h: &mut Stoat| h.handle_stoatty_present(Some(stoatty_protocol::PROTOCOL_VERSION));
             let connect = |h: &mut Stoat| h.handle_window_ipc(WindowIpc::Connected);
             match present_first {
                 true => {
@@ -12116,7 +12153,7 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(80, 24);
         h.stoat.stoatty = false;
 
-        assert_eq!(h.stoat.handle_stoatty_present(false), UpdateEffect::None);
+        assert_eq!(h.stoat.handle_stoatty_present(None), UpdateEffect::None);
         assert!(!h.stoat.stoatty, "a silent terminal is a foreign one");
     }
 

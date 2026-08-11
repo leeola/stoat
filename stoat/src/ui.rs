@@ -101,14 +101,15 @@ pub fn install_panic_hook() {
     });
 }
 
-/// `stoatty_tx` carries the ident handshake's one-shot answer to the app. The
+/// `stoatty_tx` carries the ident handshake's one-shot answer to the app: the
+/// peer's protocol version when a stoatty replied, `None` when none did. The
 /// app cannot learn it any other way, since the handshake needs raw mode and
 /// sole ownership of fd 0, both of which live on this thread.
 pub fn spawn(
     event_tx: UnboundedSender<Event>,
     mut render_rx: watch::Receiver<Option<RenderFrame>>,
     mut apc_rx: UnboundedReceiver<Vec<u8>>,
-    stoatty_tx: UnboundedSender<bool>,
+    stoatty_tx: UnboundedSender<Option<u32>>,
     mouse_captured: bool,
 ) -> thread::JoinHandle<io::Result<()>> {
     thread::spawn(move || {
@@ -147,7 +148,7 @@ async fn run(
     event_tx: &UnboundedSender<Event>,
     render_rx: &mut watch::Receiver<Option<RenderFrame>>,
     apc_rx: &mut UnboundedReceiver<Vec<u8>>,
-    stoatty_tx: &UnboundedSender<bool>,
+    stoatty_tx: &UnboundedSender<Option<u32>>,
     terminal: &mut ratatui::DefaultTerminal,
 ) -> io::Result<()> {
     // Main thread needs terminal dimensions before it can render the first frame
@@ -313,12 +314,13 @@ const HANDSHAKE_FALLBACK: Duration = Duration::from_secs(2);
 /// in a foreign terminal. A stdin that is not a tty cannot carry an answer back
 /// at all, so that case reports `false` without probing or waiting.
 ///
-/// Returns whether a stoatty answered, and every byte read that was neither
+/// Returns the stoatty's protocol version when one answered and `None` when
+/// none did, plus every byte read that was neither
 /// answer. Those are what someone typed while this owned fd 0, and the caller
 /// replays them rather than losing what was typed at launch. Crossterm cannot
 /// own stdin until this window closes, since its parser has no way to surface
 /// an APC reply, which is why the handshake reads fd 0 directly first.
-fn stoatty_handshake() -> (bool, Vec<u8>) {
+fn stoatty_handshake() -> (Option<u32>, Vec<u8>) {
     let hello = command::encode_hello(&HelloCommand {
         pid: std::process::id(),
         log_id: stoat_log::ident::get()
@@ -343,12 +345,12 @@ fn stoatty_handshake() -> (bool, Vec<u8>) {
             false => stdout.write_all(&hello),
         };
         if wrote.is_err() || stdout.flush().is_err() {
-            return (false, Vec::new());
+            return (None, Vec::new());
         }
     }
     if !probing {
         tracing::info!("stdin is not a tty, so no terminal can answer the handshake");
-        return (false, Vec::new());
+        return (None, Vec::new());
     }
 
     let (reply, leftover) = read_ident_reply(HANDSHAKE_FALLBACK);
@@ -358,11 +360,12 @@ fn stoatty_handshake() -> (bool, Vec<u8>) {
             stoatty_log_id = %reply.log_id,
             stoatty_hostname = %reply.hostname,
             stoatty_version = %reply.version,
+            stoatty_protocol = reply.protocol,
             "stoatty ident"
         ),
         None => tracing::info!("no stoatty ident reply (headless or foreign terminal)"),
     }
-    (reply.is_some(), leftover)
+    (reply.map(|reply| reply.protocol), leftover)
 }
 
 /// What the bytes read so far say about the terminal on the other end.
