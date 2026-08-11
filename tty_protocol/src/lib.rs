@@ -23,6 +23,16 @@
 //! Anything a decoder cannot express as an append needs a new sub-command
 //! instead, which an older terminal ignores whole rather than misreading.
 
+/// The revision of this protocol each side announces in the handshake.
+///
+/// A peer reports what it can render, so an emitter can hold back a command the
+/// other end predates rather than sending bytes it will print raw. Bumped
+/// whenever a command is added or an existing one grows a field.
+///
+/// Zero is reserved for a peer whose handshake carries no version at all, which
+/// is every build from before the field existed.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 pub mod command;
 pub mod frame;
 pub mod window_ipc;

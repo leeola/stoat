@@ -959,6 +959,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     log_id: ident.id.to_string(),
                     hostname: stoat_log::ident::hostname(),
                     version: crate::cli::VERSION_INFO.to_string(),
+                    protocol: stoatty_protocol::PROTOCOL_VERSION,
                 });
         }
         let dirty = Arc::new(AtomicBool::new(false));

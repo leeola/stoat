@@ -3440,6 +3440,7 @@ mod tests {
             log_id: "20260718-143000-42".to_string(),
             hostname: "host".to_string(),
             version: "v".to_string(),
+            protocol: stoatty_protocol::PROTOCOL_VERSION,
         };
         terminal.set_ident(ident.clone());
 
@@ -3448,6 +3449,7 @@ mod tests {
             log_id: "20260718-143022-99".to_string(),
             hostname: "remote".to_string(),
             version: "pv".to_string(),
+            protocol: stoatty_protocol::PROTOCOL_VERSION,
         };
         terminal.advance(&encode_hello(&hello));
 
@@ -3464,6 +3466,7 @@ mod tests {
             log_id: "20260718-143022-99".to_string(),
             hostname: "remote".to_string(),
             version: "pv".to_string(),
+            protocol: stoatty_protocol::PROTOCOL_VERSION,
         };
         terminal.advance(&encode_hello(&hello));
 

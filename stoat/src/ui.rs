@@ -326,6 +326,7 @@ fn stoatty_handshake() -> (bool, Vec<u8>) {
             .unwrap_or_default(),
         hostname: stoat_log::ident::hostname(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
+        protocol: stoatty_protocol::PROTOCOL_VERSION,
     });
 
     let probing = stdin_is_tty();
@@ -621,6 +622,7 @@ mod tests {
             log_id: "abc".into(),
             hostname: "host".into(),
             version: "1.2.3".into(),
+            protocol: stoatty_protocol::PROTOCOL_VERSION,
         })
     }
 
@@ -630,6 +632,7 @@ mod tests {
             log_id: "abc".into(),
             hostname: "host".into(),
             version: "1.2.3".into(),
+            protocol: stoatty_protocol::PROTOCOL_VERSION,
         }
     }
 
