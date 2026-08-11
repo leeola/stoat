@@ -1,22 +1,24 @@
 //! The `stoat walkthrough` CRUD surface over a workspace's walkthroughs.
 //!
 //! A walkthrough is authored out of band rather than from inside the editor,
-//! so this is how one is created, inspected, and removed. The file it manages
-//! is plain JSON under `.stoat/walkthroughs/`, which is what lets an agent
-//! write the stops and annotations directly and use these commands only for
-//! the lifecycle around them.
+//! so this is how one is created, filled in, and removed. The file it manages
+//! is plain JSON under `.stoat/walkthroughs/`, and these commands own the
+//! parts an author has no business hand-writing. Those are the id assignment,
+//! the ordering, and above all the captured snippets, which have to be read out
+//! of the real file to be worth comparing later.
 //!
 //! Each subcommand returns its output text and leaves the printing to [`run`],
 //! so the output is asserted directly rather than through a captured stdout.
 
-use clap::Subcommand;
-use snafu::{whatever, ResultExt, Whatever};
+use clap::{Args, Subcommand};
+use snafu::{whatever, OptionExt, ResultExt, Whatever};
 use std::path::{Path, PathBuf};
 use stoat::{
     host::{FsHost, LocalFs},
     walkthrough::{
+        self,
         store::{self, StoreError},
-        Walkthrough,
+        AnnotationEdit, Location, MoveTarget, Point, Range, StopEdit, Walkthrough,
     },
 };
 
@@ -33,82 +35,447 @@ pub enum WalkthroughCommand {
         #[arg(long)]
         title: Option<String>,
 
-        /// Workspace root. Defaults to the repository enclosing the current
-        /// directory.
-        #[arg(long)]
-        workspace: Option<PathBuf>,
+        #[command(flatten)]
+        workspace: WorkspaceArgs,
     },
 
     /// Print every walkthrough as `slug`, stop count, and title, tab separated.
     List {
-        /// Workspace root. Defaults to the repository enclosing the current
-        /// directory.
-        #[arg(long)]
-        workspace: Option<PathBuf>,
+        #[command(flatten)]
+        workspace: WorkspaceArgs,
     },
 
     /// Print a walkthrough's stored JSON.
     Show {
         slug: String,
 
-        /// Workspace root. Defaults to the repository enclosing the current
-        /// directory.
-        #[arg(long)]
-        workspace: Option<PathBuf>,
+        #[command(flatten)]
+        workspace: WorkspaceArgs,
     },
 
     /// Remove a walkthrough and print the file it deleted.
     Delete {
         slug: String,
 
-        /// Workspace root. Defaults to the repository enclosing the current
-        /// directory.
+        #[command(flatten)]
+        workspace: WorkspaceArgs,
+    },
+
+    /// Add a stop focused on a range of a file, and print its new id.
+    AddStop {
+        slug: String,
+
+        /// File the stop is about. Must be inside the workspace.
         #[arg(long)]
-        workspace: Option<PathBuf>,
+        file: PathBuf,
+
+        /// Range within the file, as `L`, `L-L`, or `L:C-L:C`.
+        #[arg(long)]
+        range: String,
+
+        /// Short heading for the stop.
+        #[arg(long)]
+        title: Option<String>,
+
+        #[command(flatten)]
+        narration: NarrationArgs,
+
+        /// Insert before this stop rather than appending.
+        #[arg(long)]
+        before: Option<String>,
+
+        #[command(flatten)]
+        workspace: WorkspaceArgs,
+    },
+
+    /// Change a stop's focus, title, or narration, and print its id.
+    EditStop {
+        slug: String,
+        stop: String,
+
+        /// New file for the focus. Re-captures the snippet.
+        #[arg(long)]
+        file: Option<PathBuf>,
+
+        /// New range for the focus. Re-captures the snippet.
+        #[arg(long)]
+        range: Option<String>,
+
+        #[arg(long)]
+        title: Option<String>,
+
+        /// Drop the stop's title.
+        #[arg(long, conflicts_with = "title")]
+        no_title: bool,
+
+        #[command(flatten)]
+        narration: NarrationArgs,
+
+        #[command(flatten)]
+        workspace: WorkspaceArgs,
+    },
+
+    /// Remove a stop and its annotations, and print its id.
+    RemoveStop {
+        slug: String,
+        stop: String,
+
+        #[command(flatten)]
+        workspace: WorkspaceArgs,
+    },
+
+    /// Move a stop within the walkthrough, and print its id.
+    MoveStop {
+        slug: String,
+        stop: String,
+
+        #[command(flatten)]
+        to: MoveArgs,
+
+        #[command(flatten)]
+        workspace: WorkspaceArgs,
+    },
+
+    /// Add a labeled annotation inside a stop's file, and print its new id.
+    AddAnnotation {
+        slug: String,
+        stop: String,
+
+        /// Range within the stop's focus file, as `L`, `L-L`, or `L:C-L:C`.
+        #[arg(long)]
+        range: String,
+
+        #[arg(long)]
+        label: String,
+
+        #[command(flatten)]
+        workspace: WorkspaceArgs,
+    },
+
+    /// Change an annotation's range or label, and print its id.
+    EditAnnotation {
+        slug: String,
+        stop: String,
+        annotation: String,
+
+        /// New range. Re-captures the snippet.
+        #[arg(long)]
+        range: Option<String>,
+
+        #[arg(long)]
+        label: Option<String>,
+
+        #[command(flatten)]
+        workspace: WorkspaceArgs,
+    },
+
+    /// Remove an annotation and print its id.
+    RemoveAnnotation {
+        slug: String,
+        stop: String,
+        annotation: String,
+
+        #[command(flatten)]
+        workspace: WorkspaceArgs,
     },
 }
 
+/// Which workspace a subcommand operates on.
+///
+/// Flattened into every subcommand rather than repeated, since all of them need
+/// it and none of them treat it differently.
+#[derive(Args, Debug)]
+pub struct WorkspaceArgs {
+    /// Workspace root. Defaults to the repository enclosing the current
+    /// directory.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+}
+
+/// Where a stop's narration text comes from.
+///
+/// The two sources are exclusive, and both are optional so an edit that touches
+/// neither leaves the narration alone. The file form exists because narration
+/// is markdown that runs to paragraphs, which is painful to pass as one shell
+/// argument.
+#[derive(Args, Debug)]
+#[group(multiple = false)]
+pub struct NarrationArgs {
+    /// Markdown narration, given inline.
+    #[arg(long)]
+    narration: Option<String>,
+
+    /// Read the markdown narration from a file, or from stdin for `-`.
+    #[arg(long)]
+    narration_file: Option<PathBuf>,
+}
+
+/// Where [`WalkthroughCommand::MoveStop`] puts the stop.
+///
+/// Exactly one, enforced by clap rather than checked at run time, so naming two
+/// destinations fails at the command line with a usage message.
+#[derive(Args, Debug)]
+#[group(required = true, multiple = false)]
+pub struct MoveArgs {
+    /// Put the stop before this one.
+    #[arg(long)]
+    before: Option<String>,
+
+    /// Put the stop after this one.
+    #[arg(long)]
+    after: Option<String>,
+
+    /// Put the stop at the end.
+    #[arg(long)]
+    last: bool,
+}
+
+/// A range as the command line spells it, before a file says how long its lines
+/// are.
+///
+/// The bare-line forms cover whole lines, and where a line ends depends on the
+/// content. Keeping that unresolved is what lets [`parse_range`] stay pure, and
+/// keeps a [`Range`] from ever holding a column that names no byte.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RangeSpec {
+    /// `L` or `L-L`, covering those lines whole.
+    Lines { start: u32, end: u32 },
+    /// `L:C-L:C`, naming exact bytes.
+    Points(Range),
+}
+
 pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
+    let fs = &LocalFs;
     let text = match sub {
         WalkthroughCommand::New {
             slug,
             title,
             workspace,
-        } => {
-            let root = resolve_root(workspace.as_deref())?;
-            new(&LocalFs, &root, &slug, title.as_deref())
-        },
-        WalkthroughCommand::List { workspace } => {
-            let root = resolve_root(workspace.as_deref())?;
-            list(&LocalFs, &root)
-        },
-        WalkthroughCommand::Show { slug, workspace } => {
-            let root = resolve_root(workspace.as_deref())?;
-            show(&LocalFs, &root, &slug)
-        },
-        WalkthroughCommand::Delete { slug, workspace } => {
-            let root = resolve_root(workspace.as_deref())?;
-            delete(&LocalFs, &root, &slug)
-        },
+        } => new(fs, &workspace.resolve()?, &slug, title.as_deref()),
+
+        WalkthroughCommand::List { workspace } => list(fs, &workspace.resolve()?),
+
+        WalkthroughCommand::Show { slug, workspace } => show(fs, &workspace.resolve()?, &slug),
+
+        WalkthroughCommand::Delete { slug, workspace } => delete(fs, &workspace.resolve()?, &slug),
+
+        WalkthroughCommand::AddStop {
+            slug,
+            file,
+            range,
+            title,
+            narration,
+            before,
+            workspace,
+        } => add_stop(
+            fs,
+            &workspace.resolve()?,
+            &slug,
+            &file,
+            &range,
+            title,
+            narration.read()?.unwrap_or_default(),
+            before.as_deref(),
+        ),
+
+        WalkthroughCommand::EditStop {
+            slug,
+            stop,
+            file,
+            range,
+            title,
+            no_title,
+            narration,
+            workspace,
+        } => edit_stop(
+            fs,
+            &workspace.resolve()?,
+            &slug,
+            &stop,
+            file.as_deref(),
+            range.as_deref(),
+            title_edit(title, no_title),
+            narration.read()?,
+        ),
+
+        WalkthroughCommand::RemoveStop {
+            slug,
+            stop,
+            workspace,
+        } => remove_stop(fs, &workspace.resolve()?, &slug, &stop),
+
+        WalkthroughCommand::MoveStop {
+            slug,
+            stop,
+            to,
+            workspace,
+        } => move_stop(fs, &workspace.resolve()?, &slug, &stop, &to),
+
+        WalkthroughCommand::AddAnnotation {
+            slug,
+            stop,
+            range,
+            label,
+            workspace,
+        } => add_annotation(fs, &workspace.resolve()?, &slug, &stop, &range, label),
+
+        WalkthroughCommand::EditAnnotation {
+            slug,
+            stop,
+            annotation,
+            range,
+            label,
+            workspace,
+        } => edit_annotation(
+            fs,
+            &workspace.resolve()?,
+            &slug,
+            &stop,
+            &annotation,
+            range.as_deref(),
+            label,
+        ),
+
+        WalkthroughCommand::RemoveAnnotation {
+            slug,
+            stop,
+            annotation,
+            workspace,
+        } => remove_annotation(fs, &workspace.resolve()?, &slug, &stop, &annotation),
     }?;
 
     println!("{text}");
     Ok(())
 }
 
-/// The workspace to operate on, being `workspace` when given and otherwise the
-/// repository enclosing the current directory.
+impl WorkspaceArgs {
+    /// The workspace to operate on, being the given root or the repository
+    /// enclosing the current directory.
+    ///
+    /// An explicit root is taken as-is rather than searched upward from, so a
+    /// caller that already knows where the workspace is never has the answer
+    /// second-guessed.
+    fn resolve(&self) -> Result<PathBuf, Whatever> {
+        let Some(explicit) = &self.workspace else {
+            let cwd = std::env::current_dir().whatever_context("read the current directory")?;
+            return store::workspace_root(&cwd)
+                .whatever_context(format!("find the workspace enclosing {}", cwd.display()));
+        };
+        Ok(explicit.clone())
+    }
+}
+
+impl NarrationArgs {
+    /// The narration these flags name, or `None` when neither was given.
+    ///
+    /// `-` reads stdin, which is how a long markdown narration arrives without
+    /// becoming one enormous shell argument.
+    fn read(&self) -> Result<Option<String>, Whatever> {
+        if let Some(inline) = &self.narration {
+            return Ok(Some(inline.clone()));
+        }
+        let Some(path) = &self.narration_file else {
+            return Ok(None);
+        };
+
+        let text = match path.as_os_str() == "-" {
+            true => std::io::read_to_string(std::io::stdin())
+                .whatever_context("read the narration from stdin")?,
+            false => std::fs::read_to_string(path)
+                .whatever_context(format!("read the narration from {}", path.display()))?,
+        };
+        Ok(Some(text))
+    }
+}
+
+impl MoveArgs {
+    /// The destination these flags name.
+    fn target(&self) -> MoveTarget<'_> {
+        match (&self.before, &self.after) {
+            (Some(id), _) => MoveTarget::Before(id),
+            (_, Some(id)) => MoveTarget::After(id),
+            _ => MoveTarget::Last,
+        }
+    }
+}
+
+/// Parse a `--range` argument.
 ///
-/// An explicit root is taken as-is rather than searched upward from, so a
-/// caller that already knows where the workspace is never has the answer
-/// second-guessed.
-fn resolve_root(workspace: Option<&Path>) -> Result<PathBuf, Whatever> {
-    let Some(explicit) = workspace else {
-        let cwd = std::env::current_dir().whatever_context("read the current directory")?;
-        return store::workspace_root(&cwd)
-            .whatever_context(format!("find the workspace enclosing {}", cwd.display()));
+/// Accepts `L` for one whole line, `L-L` for a span of whole lines, and
+/// `L:C-L:C` for exact byte positions. Lines and columns are 1-based and both
+/// ends are inclusive, matching how an editor reports a selection.
+///
+/// A mixed form such as `3-4:2` is refused rather than guessed at. Half a range
+/// in columns means the author meant columns for both ends, so accepting it
+/// silently widens or narrows the span they asked for.
+pub fn parse_range(text: &str) -> Result<RangeSpec, Whatever> {
+    let Some((start, end)) = text.split_once('-') else {
+        let line = parse_line(text)?;
+        return Ok(RangeSpec::Lines {
+            start: line,
+            end: line,
+        });
     };
-    Ok(explicit.to_path_buf())
+
+    match (start.split_once(':'), end.split_once(':')) {
+        (None, None) => Ok(RangeSpec::Lines {
+            start: parse_line(start)?,
+            end: parse_line(end)?,
+        }),
+        (Some((start_line, start_col)), Some((end_line, end_col))) => {
+            Ok(RangeSpec::Points(Range {
+                start: Point {
+                    line: parse_line(start_line)?,
+                    col: parse_line(start_col)?,
+                },
+                end: Point {
+                    line: parse_line(end_line)?,
+                    col: parse_line(end_col)?,
+                },
+            }))
+        },
+        _ => whatever!("'{text}' mixes a line with a line:column, which is not a range"),
+    }
+}
+
+/// One 1-based number of a range.
+fn parse_line(text: &str) -> Result<u32, Whatever> {
+    let value: u32 = text
+        .parse()
+        .ok()
+        .with_whatever_context(|| format!("'{text}' is not a number"))?;
+    match value {
+        0 => whatever!("lines and columns start at 1, so 0 names nothing"),
+        value => Ok(value),
+    }
+}
+
+/// Resolve `spec` against `content`, filling in where the lines it names end.
+fn resolve_range(spec: RangeSpec, content: &str) -> Result<Range, Whatever> {
+    let (start, end) = match spec {
+        RangeSpec::Points(range) => return Ok(range),
+        RangeSpec::Lines { start, end } => (start, end),
+    };
+
+    let bytes = content
+        .lines()
+        .nth(end as usize - 1)
+        .with_whatever_context(|| format!("the file has no line {end}"))?
+        .len();
+    if bytes == 0 {
+        whatever!("line {end} is empty, so no range covers it");
+    }
+
+    Ok(Range {
+        start: Point {
+            line: start,
+            col: 1,
+        },
+        end: Point {
+            line: end,
+            col: bytes as u32,
+        },
+    })
 }
 
 /// Create the walkthrough `slug`, returning the file it wrote.
@@ -125,7 +492,7 @@ fn new(fs: &dyn FsHost, root: &Path, slug: &str, title: Option<&str>) -> Result<
         Ok(_) => whatever!("walkthrough '{slug}' already exists"),
         Err(StoreError::UnknownWalkthrough { .. }) => {},
         Err(error) => {
-            return Err(error).whatever_context(format!("read the existing walkthrough '{slug}'"))
+            return Err(error).whatever_context(format!("read the existing walkthrough '{slug}'"));
         },
     }
 
@@ -155,8 +522,7 @@ fn list(fs: &dyn FsHost, root: &Path) -> Result<String, Whatever> {
 /// Re-serialized rather than echoed byte for byte, which reads the same because
 /// the store wrote it with the same formatting.
 fn show(fs: &dyn FsHost, root: &Path, slug: &str) -> Result<String, Whatever> {
-    let walkthrough =
-        store::load(fs, root, slug).whatever_context(format!("read walkthrough '{slug}'"))?;
+    let walkthrough = load(fs, root, slug)?;
     serde_json::to_string_pretty(&walkthrough)
         .whatever_context(format!("render walkthrough '{slug}'"))
 }
@@ -165,6 +531,273 @@ fn show(fs: &dyn FsHost, root: &Path, slug: &str) -> Result<String, Whatever> {
 fn delete(fs: &dyn FsHost, root: &Path, slug: &str) -> Result<String, Whatever> {
     store::delete(fs, root, slug).whatever_context(format!("delete walkthrough '{slug}'"))?;
     Ok(relative_path(root, slug))
+}
+
+/// Add a stop focused on `range` of `file`, returning its new id.
+#[allow(clippy::too_many_arguments)]
+fn add_stop(
+    fs: &dyn FsHost,
+    root: &Path,
+    slug: &str,
+    file: &Path,
+    range: &str,
+    title: Option<String>,
+    narration: String,
+    before: Option<&str>,
+) -> Result<String, Whatever> {
+    let mut walkthrough = load(fs, root, slug)?;
+    let focus = capture(fs, root, file, range)?;
+
+    let id = walkthrough
+        .add_stop(title, narration, focus, before)
+        .whatever_context("add the stop")?
+        .id
+        .clone();
+
+    save(fs, root, &walkthrough, slug)?;
+    Ok(id)
+}
+
+/// Change the stop `stop`, returning its id.
+///
+/// The focus is re-captured only when `file` or `range` is given, each falling
+/// back to what the stop already holds. An edit that names neither leaves the
+/// captured snippet alone, so changing a title never re-baselines a range the
+/// author did not mention.
+#[allow(clippy::too_many_arguments)]
+fn edit_stop(
+    fs: &dyn FsHost,
+    root: &Path,
+    slug: &str,
+    stop: &str,
+    file: Option<&Path>,
+    range: Option<&str>,
+    title: Option<Option<String>>,
+    narration: Option<String>,
+) -> Result<String, Whatever> {
+    let mut walkthrough = load(fs, root, slug)?;
+
+    let focus = match (file, range) {
+        (None, None) => None,
+        _ => {
+            let current = &find_stop(&walkthrough, stop)?.focus;
+            let file = file.map_or_else(|| root.join(&current.path), Path::to_path_buf);
+            let range = match range {
+                Some(text) => parse_range(text)?,
+                None => RangeSpec::Points(current.range),
+            };
+            Some(capture_resolved(fs, root, &file, range)?)
+        },
+    };
+
+    walkthrough
+        .edit_stop(
+            stop,
+            StopEdit {
+                title,
+                narration,
+                focus,
+            },
+        )
+        .whatever_context(format!("edit stop '{stop}'"))?;
+
+    save(fs, root, &walkthrough, slug)?;
+    Ok(stop.to_owned())
+}
+
+/// Remove the stop `stop` and its annotations, returning its id.
+fn remove_stop(fs: &dyn FsHost, root: &Path, slug: &str, stop: &str) -> Result<String, Whatever> {
+    let mut walkthrough = load(fs, root, slug)?;
+    walkthrough
+        .remove_stop(stop)
+        .whatever_context(format!("remove stop '{stop}'"))?;
+
+    save(fs, root, &walkthrough, slug)?;
+    Ok(stop.to_owned())
+}
+
+/// Move the stop `stop` to where `to` names, returning its id.
+fn move_stop(
+    fs: &dyn FsHost,
+    root: &Path,
+    slug: &str,
+    stop: &str,
+    to: &MoveArgs,
+) -> Result<String, Whatever> {
+    let mut walkthrough = load(fs, root, slug)?;
+    walkthrough
+        .move_stop(stop, to.target())
+        .whatever_context(format!("move stop '{stop}'"))?;
+
+    save(fs, root, &walkthrough, slug)?;
+    Ok(stop.to_owned())
+}
+
+/// Add an annotation over `range` of the stop's focus file, returning its id.
+fn add_annotation(
+    fs: &dyn FsHost,
+    root: &Path,
+    slug: &str,
+    stop: &str,
+    range: &str,
+    label: String,
+) -> Result<String, Whatever> {
+    let mut walkthrough = load(fs, root, slug)?;
+
+    let file = root.join(&find_stop(&walkthrough, stop)?.focus.path);
+    let captured = capture_resolved(fs, root, &file, parse_range(range)?)?;
+
+    let id = walkthrough
+        .add_annotation(stop, captured.range, captured.snippet, label)
+        .whatever_context(format!("annotate stop '{stop}'"))?
+        .id
+        .clone();
+
+    save(fs, root, &walkthrough, slug)?;
+    Ok(id)
+}
+
+/// Change the annotation `annotation`, returning its id.
+///
+/// A new range re-captures the snippet from the stop's focus file. A label-only
+/// edit leaves it alone.
+fn edit_annotation(
+    fs: &dyn FsHost,
+    root: &Path,
+    slug: &str,
+    stop: &str,
+    annotation: &str,
+    range: Option<&str>,
+    label: Option<String>,
+) -> Result<String, Whatever> {
+    let mut walkthrough = load(fs, root, slug)?;
+
+    let captured = match range {
+        None => None,
+        Some(range) => {
+            let file = root.join(&find_stop(&walkthrough, stop)?.focus.path);
+            Some(capture_resolved(fs, root, &file, parse_range(range)?)?)
+        },
+    };
+
+    walkthrough
+        .edit_annotation(
+            stop,
+            annotation,
+            AnnotationEdit {
+                range: captured.as_ref().map(|location| location.range),
+                snippet: captured.map(|location| location.snippet),
+                label,
+            },
+        )
+        .whatever_context(format!("edit annotation '{annotation}'"))?;
+
+    save(fs, root, &walkthrough, slug)?;
+    Ok(annotation.to_owned())
+}
+
+/// Remove the annotation `annotation`, returning its id.
+fn remove_annotation(
+    fs: &dyn FsHost,
+    root: &Path,
+    slug: &str,
+    stop: &str,
+    annotation: &str,
+) -> Result<String, Whatever> {
+    let mut walkthrough = load(fs, root, slug)?;
+    walkthrough
+        .remove_annotation(stop, annotation)
+        .whatever_context(format!("remove annotation '{annotation}'"))?;
+
+    save(fs, root, &walkthrough, slug)?;
+    Ok(annotation.to_owned())
+}
+
+/// The location `range` of `file` names, with the bytes it covers right now.
+fn capture(fs: &dyn FsHost, root: &Path, file: &Path, range: &str) -> Result<Location, Whatever> {
+    capture_resolved(fs, root, file, parse_range(range)?)
+}
+
+/// The location `spec` of `file` names, with the bytes it covers right now.
+///
+/// `file` is canonicalized and required to sit inside the workspace, then
+/// stored relative to it. An absolute path in a stored walkthrough breaks the
+/// moment the repository is cloned somewhere else.
+fn capture_resolved(
+    fs: &dyn FsHost,
+    root: &Path,
+    file: &Path,
+    spec: RangeSpec,
+) -> Result<Location, Whatever> {
+    let relative = within_workspace(fs, root, file)?;
+    let content = store::workspace_reader(fs, root)(&relative)
+        .with_whatever_context(|| format!("read {}", relative.display()))?;
+
+    let range = resolve_range(spec, &content)?;
+    let snippet = walkthrough::snippet_for(&content, range)
+        .whatever_context(format!("capture the snippet from {}", relative.display()))?;
+
+    Ok(Location {
+        path: relative,
+        range,
+        snippet,
+    })
+}
+
+/// `file` as a path relative to the workspace root.
+fn within_workspace(fs: &dyn FsHost, root: &Path, file: &Path) -> Result<PathBuf, Whatever> {
+    let root = fs
+        .canonicalize(root)
+        .whatever_context(format!("resolve the workspace {}", root.display()))?;
+    let file = fs
+        .canonicalize(file)
+        .whatever_context(format!("resolve {}", file.display()))?;
+
+    file.strip_prefix(&root)
+        .ok()
+        .map(Path::to_path_buf)
+        .with_whatever_context(|| {
+            format!(
+                "{} is outside the workspace {}",
+                file.display(),
+                root.display()
+            )
+        })
+}
+
+/// The stop `stop`, or an error naming the id that is not there.
+fn find_stop<'a>(
+    walkthrough: &'a Walkthrough,
+    stop: &str,
+) -> Result<&'a walkthrough::Stop, Whatever> {
+    walkthrough
+        .stops
+        .iter()
+        .find(|candidate| candidate.id == stop)
+        .with_whatever_context(|| format!("no stop '{stop}'"))
+}
+
+/// Which of `--title` and `--no-title` the caller gave, as the format layer's
+/// two-layer edit.
+fn title_edit(title: Option<String>, no_title: bool) -> Option<Option<String>> {
+    match (title, no_title) {
+        (Some(title), _) => Some(Some(title)),
+        (None, true) => Some(None),
+        (None, false) => None,
+    }
+}
+
+fn load(fs: &dyn FsHost, root: &Path, slug: &str) -> Result<Walkthrough, Whatever> {
+    store::load(fs, root, slug).whatever_context(format!("read walkthrough '{slug}'"))
+}
+
+fn save(
+    fs: &dyn FsHost,
+    root: &Path,
+    walkthrough: &Walkthrough,
+    slug: &str,
+) -> Result<(), Whatever> {
+    store::save(fs, root, walkthrough).whatever_context(format!("write walkthrough '{slug}'"))
 }
 
 /// Where `slug` lives, written relative to the workspace.
@@ -183,18 +816,397 @@ fn relative_path(root: &Path, slug: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{delete, list, new, show};
+    use super::{
+        add_annotation, add_stop, delete, edit_annotation, edit_stop, list, move_stop, new,
+        parse_range, remove_annotation, remove_stop, show, MoveArgs, Point, Range, RangeSpec,
+    };
     use git2::Repository;
-    use std::path::Path;
-    use stoat::host::LocalFs;
+    use std::path::{Path, PathBuf};
+    use stoat::{host::LocalFs, walkthrough::store};
     use tempfile::TempDir;
 
-    /// A workspace to operate in. A repository, since that is what
-    /// `workspace_root` discovers, though these tests pass the root directly.
+    const SOURCE: &str = "use std::io;\nfn main() {\n    println!(\"hi\");\n}\n";
+
+    /// A workspace holding one source file to focus stops on.
     fn workspace() -> TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         Repository::init(dir.path()).expect("init");
+        std::fs::write(dir.path().join("main.rs"), SOURCE).expect("write");
         dir
+    }
+
+    /// A walkthrough with one stop over line 2 of `main.rs`.
+    fn with_stop(dir: &TempDir) -> PathBuf {
+        new(&LocalFs, dir.path(), "tour", None).expect("new");
+        add_stop(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            &dir.path().join("main.rs"),
+            "2",
+            None,
+            "the entry point".to_owned(),
+            None,
+        )
+        .expect("add-stop");
+        dir.path().join("main.rs")
+    }
+
+    fn stored(dir: &TempDir) -> stoat::walkthrough::Walkthrough {
+        store::load(&LocalFs, dir.path(), "tour").expect("load")
+    }
+
+    fn lines(start: u32, end: u32) -> RangeSpec {
+        RangeSpec::Lines { start, end }
+    }
+
+    fn points(start: (u32, u32), end: (u32, u32)) -> RangeSpec {
+        RangeSpec::Points(Range {
+            start: Point {
+                line: start.0,
+                col: start.1,
+            },
+            end: Point {
+                line: end.0,
+                col: end.1,
+            },
+        })
+    }
+
+    #[test]
+    fn parse_range_reads_every_accepted_form() {
+        assert_eq!(parse_range("3").ok(), Some(lines(3, 3)));
+        assert_eq!(parse_range("3-7").ok(), Some(lines(3, 7)));
+        assert_eq!(parse_range("3:1-7:12").ok(), Some(points((3, 1), (7, 12))));
+    }
+
+    #[test]
+    fn parse_range_refuses_what_it_cannot_read() {
+        for text in [
+            "", "x", "3-", "-7", "3-4:2", "3:1-7", "0", "3:0-4:1", "3:1-4",
+        ] {
+            assert!(parse_range(text).is_err(), "accepted {text:?}");
+        }
+    }
+
+    /// A bare line covers the line whole, which needs the file to say where it
+    /// ends.
+    #[test]
+    fn a_bare_line_captures_the_whole_line() {
+        let dir = workspace();
+        with_stop(&dir);
+
+        let focus = &stored(&dir).stops[0].focus;
+        assert_eq!(focus.path, Path::new("main.rs"));
+        assert_eq!(focus.snippet, "fn main() {");
+        assert_eq!(focus.range.start, Point { line: 2, col: 1 });
+        assert_eq!(focus.range.end, Point { line: 2, col: 11 });
+    }
+
+    #[test]
+    fn add_stop_prints_the_new_id_and_appends() {
+        let dir = workspace();
+        with_stop(&dir);
+
+        let second = add_stop(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            &dir.path().join("main.rs"),
+            "1",
+            Some("Imports".to_owned()),
+            String::new(),
+            None,
+        )
+        .expect("add-stop");
+
+        assert_eq!(second, "s2");
+        let walkthrough = stored(&dir);
+        assert_eq!(
+            walkthrough
+                .stops
+                .iter()
+                .map(|stop| stop.id.as_str())
+                .collect::<Vec<_>>(),
+            ["s1", "s2"]
+        );
+        assert_eq!(walkthrough.stops[1].title.as_deref(), Some("Imports"));
+    }
+
+    #[test]
+    fn add_stop_inserts_before_the_named_stop() {
+        let dir = workspace();
+        with_stop(&dir);
+        add_stop(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            &dir.path().join("main.rs"),
+            "1",
+            None,
+            String::new(),
+            Some("s1"),
+        )
+        .expect("add-stop");
+
+        assert_eq!(
+            stored(&dir)
+                .stops
+                .iter()
+                .map(|stop| stop.id.as_str())
+                .collect::<Vec<_>>(),
+            ["s2", "s1"]
+        );
+    }
+
+    /// A re-baselined snippet the author never mentioned quietly makes a stale
+    /// range look current.
+    #[test]
+    fn a_title_only_edit_leaves_the_snippet_alone() {
+        let dir = workspace();
+        let file = with_stop(&dir);
+        std::fs::write(&file, "CHANGED\nfn main() {\n").expect("rewrite");
+
+        edit_stop(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            None,
+            None,
+            Some(Some("Named".to_owned())),
+            None,
+        )
+        .expect("edit-stop");
+
+        let stop = &stored(&dir).stops[0];
+        assert_eq!(stop.title.as_deref(), Some("Named"));
+        assert_eq!(
+            stop.focus.snippet, "fn main() {",
+            "the capture is untouched"
+        );
+    }
+
+    #[test]
+    fn an_edit_naming_a_range_recaptures_the_snippet() {
+        let dir = workspace();
+        with_stop(&dir);
+
+        edit_stop(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            None,
+            Some("1"),
+            None,
+            None,
+        )
+        .expect("edit-stop");
+
+        assert_eq!(stored(&dir).stops[0].focus.snippet, "use std::io;");
+    }
+
+    #[test]
+    fn move_stop_reaches_each_destination() {
+        let dir = workspace();
+        with_stop(&dir);
+        for _ in 0..2 {
+            add_stop(
+                &LocalFs,
+                dir.path(),
+                "tour",
+                &dir.path().join("main.rs"),
+                "1",
+                None,
+                String::new(),
+                None,
+            )
+            .expect("add-stop");
+        }
+
+        let ids = |dir: &TempDir| {
+            stored(dir)
+                .stops
+                .iter()
+                .map(|stop| stop.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let to = |before: Option<&str>, after: Option<&str>, last: bool| MoveArgs {
+            before: before.map(str::to_owned),
+            after: after.map(str::to_owned),
+            last,
+        };
+
+        move_stop(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s3",
+            &to(Some("s1"), None, false),
+        )
+        .expect("move-stop");
+        assert_eq!(ids(&dir), ["s3", "s1", "s2"]);
+
+        move_stop(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s3",
+            &to(None, Some("s1"), false),
+        )
+        .expect("move-stop");
+        assert_eq!(ids(&dir), ["s1", "s3", "s2"]);
+
+        move_stop(&LocalFs, dir.path(), "tour", "s1", &to(None, None, true)).expect("move-stop");
+        assert_eq!(ids(&dir), ["s3", "s2", "s1"]);
+    }
+
+    #[test]
+    fn remove_stop_takes_the_stop_and_its_annotations() {
+        let dir = workspace();
+        with_stop(&dir);
+        add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            "2:4-2:7",
+            "the name".to_owned(),
+        )
+        .expect("add-annotation");
+
+        assert_eq!(
+            remove_stop(&LocalFs, dir.path(), "tour", "s1").expect("remove-stop"),
+            "s1"
+        );
+        assert_eq!(stored(&dir).stops, Vec::new());
+    }
+
+    #[test]
+    fn an_annotation_captures_from_the_stops_file() {
+        let dir = workspace();
+        with_stop(&dir);
+
+        let id = add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            "2:4-2:7",
+            "the name".to_owned(),
+        )
+        .expect("add-annotation");
+
+        assert_eq!(id, "a1");
+        let annotation = &stored(&dir).stops[0].annotations[0];
+        assert_eq!(
+            (annotation.snippet.as_str(), annotation.label.as_str()),
+            ("main", "the name")
+        );
+    }
+
+    #[test]
+    fn editing_an_annotations_range_recaptures_it() {
+        let dir = workspace();
+        with_stop(&dir);
+        add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            "2:4-2:7",
+            "l".to_owned(),
+        )
+        .expect("add-annotation");
+
+        edit_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            "a1",
+            Some("1:5-1:7"),
+            Some("moved".to_owned()),
+        )
+        .expect("edit-annotation");
+
+        let annotation = &stored(&dir).stops[0].annotations[0];
+        assert_eq!(
+            (annotation.snippet.as_str(), annotation.label.as_str()),
+            ("std", "moved")
+        );
+    }
+
+    #[test]
+    fn a_label_only_annotation_edit_leaves_the_snippet_alone() {
+        let dir = workspace();
+        let file = with_stop(&dir);
+        add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            "2:4-2:7",
+            "l".to_owned(),
+        )
+        .expect("add-annotation");
+        std::fs::write(&file, "CHANGED\nCHANGED\n").expect("rewrite");
+
+        edit_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            "a1",
+            None,
+            Some("renamed".to_owned()),
+        )
+        .expect("edit-annotation");
+
+        let annotation = &stored(&dir).stops[0].annotations[0];
+        assert_eq!(
+            (annotation.snippet.as_str(), annotation.label.as_str()),
+            ("main", "renamed")
+        );
+    }
+
+    #[test]
+    fn remove_annotation_takes_only_that_annotation() {
+        let dir = workspace();
+        with_stop(&dir);
+        add_annotation(&LocalFs, dir.path(), "tour", "s1", "1", "one".to_owned())
+            .expect("add-annotation");
+        add_annotation(&LocalFs, dir.path(), "tour", "s1", "2", "two".to_owned())
+            .expect("add-annotation");
+
+        remove_annotation(&LocalFs, dir.path(), "tour", "s1", "a1").expect("remove-annotation");
+
+        let annotations = &stored(&dir).stops[0].annotations;
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].id, "a2");
+    }
+
+    /// A stored path has to survive the repository being cloned elsewhere, so a
+    /// file outside the workspace has no form that still resolves.
+    #[test]
+    fn a_file_outside_the_workspace_is_refused() {
+        let dir = workspace();
+        let outside = tempfile::tempdir().expect("tempdir");
+        std::fs::write(outside.path().join("other.rs"), SOURCE).expect("write");
+        new(&LocalFs, dir.path(), "tour", None).expect("new");
+
+        assert!(add_stop(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            &outside.path().join("other.rs"),
+            "1",
+            None,
+            String::new(),
+            None,
+        )
+        .is_err());
     }
 
     #[test]
