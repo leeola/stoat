@@ -1950,18 +1950,6 @@ impl Terminal {
         Some(frac - 1.0)
     }
 
-    /// Open a page-fill redirect onto pool `pool`'s slot for document page
-    /// `index`.
-    ///
-    /// Any already-open fill is committed first, so a dropped `fill_end` cannot
-    /// strand the redirect: the next `fill` (or a `reset`) closes the previous
-    /// page. The context is sized to the pool's region, matching the slots
-    /// [`Self::commit_fill`] writes into. An unknown pool falls back to the
-    /// viewport so the redirect still captures (and later discards) the bytes
-    /// rather than leaking them onto the live grid.
-    ///
-    /// The context parked by the last page serves this one when their sizes match,
-    /// so only a differently shaped region builds a new one.
     /// Bound `region`'s dimensions to [`MAX_REGION_VIEWPORTS`] times the live
     /// viewport, warning the first time anything is cut.
     ///
@@ -1999,6 +1987,18 @@ impl Terminal {
         }
     }
 
+    /// Open a page-fill redirect onto pool `pool`'s slot for document page
+    /// `index`.
+    ///
+    /// Any already-open fill is committed first, so a dropped `fill_end` cannot
+    /// strand the redirect: the next `fill` (or a `reset`) closes the previous
+    /// page. The context is sized to the pool's region, matching the slots
+    /// [`Self::commit_fill`] writes into. An unknown pool falls back to the
+    /// viewport so the redirect still captures (and later discards) the bytes
+    /// rather than leaking them onto the live grid.
+    ///
+    /// The context parked by the last page serves this one when their sizes match,
+    /// so only a differently shaped region builds a new one.
     fn begin_fill(&mut self, pool: u32, index: u64) {
         self.commit_fill();
         // A pool's region is already clamped, so this only bounds the fallback
