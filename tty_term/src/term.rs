@@ -114,6 +114,14 @@ const MAX_POOLS: usize = 64;
 /// explicit drop. A real session runs one store per minimap strip.
 const MAX_MINIMAP_STORES: usize = 256;
 
+/// Minimap thumb views one terminal may hold at once.
+///
+/// A view is created by any unseen `strip_id`, and only a reset retires the
+/// ones the scene has stopped declaring, so a writer that loops ids without
+/// ever resetting grows the map for the session. A real scene runs about one
+/// strip per pane, the same order as [`MAX_POOLS`].
+const MAX_MINIMAP_VIEWS: usize = 64;
+
 /// Line summaries one minimap content store may hold.
 ///
 /// A store grows by splices the writer sends, so without a ceiling one store id
@@ -190,11 +198,12 @@ pub struct Terminal {
     warned_decoration_cap: bool,
     /// Whether a pool refused at [`MAX_POOLS`] has already been reported.
     warned_pool_cap: bool,
-    /// Whether minimap input bounded at [`MAX_MINIMAP_STORES`] or
-    /// [`MAX_MINIMAP_LINES`] has already been reported.
+    /// Whether minimap input bounded at [`MAX_MINIMAP_STORES`],
+    /// [`MAX_MINIMAP_LINES`], or [`MAX_MINIMAP_VIEWS`] has already been
+    /// reported.
     ///
-    /// One flag for both because they are the same defence against the same
-    /// writer, and the log line names which of the two fired.
+    /// One flag for all three because they are the same defence against the
+    /// same writer, and the log line names which of them fired.
     warned_minimap_cap: bool,
     /// Border regions set by `Gstoatty;border` frames, stamped onto the grid by
     /// [`Self::project`]. They persist until a `Gstoatty;reset` frame clears
@@ -1428,6 +1437,15 @@ impl Terminal {
             Command::Minimap(_) => self.stage_or_apply(command),
             Command::MinimapLines(lines) => self.splice_minimap_content(lines),
             Command::MinimapView(view) => {
+                // An id already drawn keeps advancing its thumb at the cap, so
+                // the limit costs a real scene nothing and refuses only the
+                // fresh ids a looping writer invents.
+                if !self.minimap_views.contains_key(&view.strip_id)
+                    && self.minimap_views.len() >= MAX_MINIMAP_VIEWS
+                {
+                    self.warn_minimap_cap("minimap view limit reached, refusing a new strip id");
+                    return;
+                }
                 self.minimap_views.insert(
                     view.strip_id,
                     MinimapView {
@@ -1567,6 +1585,7 @@ impl Terminal {
         tracing::warn!(
             max_stores = MAX_MINIMAP_STORES,
             max_lines = MAX_MINIMAP_LINES,
+            max_views = MAX_MINIMAP_VIEWS,
             "{reason}"
         );
     }
@@ -2862,8 +2881,8 @@ impl Dimensions for GridSize {
 mod tests {
     use super::{
         insert_room, Arc, Cursor, CursorShape, Damage, MinimapJournal, TermEvent, Terminal, ESC,
-        MAX_CAPTURE_BYTES, MAX_DECORATIONS, MAX_MINIMAP_LINES, MAX_MINIMAP_STORES, MAX_POOLS,
-        XTVERSION_REPLY,
+        MAX_CAPTURE_BYTES, MAX_DECORATIONS, MAX_MINIMAP_LINES, MAX_MINIMAP_STORES,
+        MAX_MINIMAP_VIEWS, MAX_POOLS, XTVERSION_REPLY,
     };
     use crate::{
         grid::{
@@ -6866,6 +6885,36 @@ mod tests {
         assert!(
             terminal.minimap_views.contains_key(&5),
             "the view survives reset",
+        );
+    }
+
+    /// The reset prune only fires when a reset arrives, so a writer that loops
+    /// strip ids without ever sending one needs a ceiling of its own.
+    #[test]
+    fn views_past_the_cap_are_refused_while_an_established_strip_still_advances() {
+        let view = |strip_id: u32, top_256: u32| {
+            encode_minimap_view(&MinimapViewCommand {
+                strip_id,
+                top_256,
+                visible_lines: 20,
+            })
+        };
+
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        for strip_id in 0..(MAX_MINIMAP_VIEWS as u32 + 16) {
+            terminal.advance(&view(strip_id, 256));
+        }
+
+        assert_eq!(
+            terminal.minimap_views.len(),
+            MAX_MINIMAP_VIEWS,
+            "a fresh strip id past the cap creates no view"
+        );
+
+        terminal.advance(&view(0, 512));
+        assert_eq!(
+            terminal.minimap_views[&0].top_256, 512,
+            "a strip already drawn keeps advancing its thumb at the cap"
         );
     }
 
