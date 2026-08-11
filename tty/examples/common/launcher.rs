@@ -46,17 +46,20 @@ fn build_emitter(bin: &str) -> PathBuf {
     profile_dir.join(bin)
 }
 
-/// The crate an emitter bin is built from. Component-using emitters have migrated
-/// to `stoatty_widgets`; the rest remain in `stoatty_protocol`.
+/// The crate an emitter bin is built from.
+///
+/// The pure-VT emitters are named one by one. Every other bin resolves to
+/// `stoatty_widgets`.
+///
+/// Component-using emitters live in the widget crate, and they are the ones
+/// that keep arriving. The default points there so that a new demo in
+/// `tty_widgets/src/bin/` builds with no edit here. Only the rarer pure-VT
+/// addition needs a name in the list.
 fn emitter_package(bin: &str) -> &'static str {
     match bin {
-        "example_gutter_app"
-        | "example_diagnostics_app"
-        | "example_doc_tooltip_app"
-        | "example_panes_app"
-        | "example_scale_app"
-        | "example_smooth_scroll_pages_app"
-        | "example_split_scroll_app" => "stoatty_widgets",
-        _ => "stoatty_protocol",
+        "example_edit_app" | "example_hello_app" | "example_smooth_scroll_history_app" => {
+            "stoatty_protocol"
+        },
+        _ => "stoatty_widgets",
     }
 }
