@@ -2274,8 +2274,17 @@ impl Terminal {
         self.bar_seq.clear();
         self.polyline_seq.clear();
         // A minimap declaration is a decoration and clears here. Its content
-        // stores and views are persistent state and survive, retired only by
-        // their own drop.
+        // store is persistent state that survives, retired by its own drop.
+        //
+        // A view has no drop of its own, since minimap_drop keys on the content
+        // id, so this is the only place one can be retired. The prune runs
+        // against the outgoing declarations, before they are cleared. An emitter
+        // prefixes a reset to every re-stamp, so a strip the scene still draws
+        // has to keep its thumb across that reset, while one it has stopped
+        // declaring is what this retires.
+        let declared = &self.minimaps;
+        self.minimap_views
+            .retain(|strip_id, _| declared.iter().any(|strip| strip.strip_id == *strip_id));
         self.minimaps.clear();
         self.minimap_seq.clear();
         self.decoration_seq = 1;
@@ -6857,6 +6866,56 @@ mod tests {
         assert!(
             terminal.minimap_views.contains_key(&5),
             "the view survives reset",
+        );
+    }
+
+    /// No command retires a view on its own, so a view whose strip the scene
+    /// never drew would sit in the map for the terminal's lifetime.
+    #[test]
+    fn reset_retires_views_for_strips_the_scene_does_not_declare() {
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        terminal.advance(&encode_minimap(&minimap_cmd(5, 9)));
+        for strip_id in [5, 7] {
+            terminal.advance(&encode_minimap_view(&MinimapViewCommand {
+                strip_id,
+                top_256: 256,
+                visible_lines: 20,
+            }));
+        }
+
+        terminal.advance(&encode_reset());
+
+        assert_eq!(
+            terminal.minimap_views.keys().copied().collect::<Vec<_>>(),
+            [5],
+            "the undeclared strip's view is retired, the declared one's is kept"
+        );
+    }
+
+    /// A real emitter retires a view by simply not drawing its strip again. The
+    /// reset prefixing the next frame is where the thumb state then goes.
+    #[test]
+    fn a_strip_the_scene_stops_declaring_loses_its_view() {
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        terminal.advance(&encode_minimap(&minimap_cmd(5, 9)));
+        terminal.advance(&encode_minimap_view(&MinimapViewCommand {
+            strip_id: 5,
+            top_256: 256,
+            visible_lines: 20,
+        }));
+        terminal.advance(&encode_reset());
+        assert!(
+            terminal.minimap_views.contains_key(&5),
+            "the strip was still declared, so its view carries over"
+        );
+
+        // The next frame draws no strip at all, so the reset that follows it
+        // finds nothing declaring strip 5.
+        terminal.advance(&encode_reset());
+
+        assert!(
+            terminal.minimap_views.is_empty(),
+            "the view goes once the scene stops declaring its strip"
         );
     }
 
