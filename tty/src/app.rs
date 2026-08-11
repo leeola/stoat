@@ -66,6 +66,14 @@ const DEFAULT_TITLE: &str = "stoatty";
 /// unreadable size.
 const FONT_SIZE_FLOOR: u32 = 6;
 
+/// Largest font size the live zoom allows.
+///
+/// A `font_step` carries a delta the writer chooses, so without a ceiling one
+/// frame can drive the size arbitrarily high and hand the renderer a cell
+/// larger than any surface. Far past the size anyone reads at, so a person
+/// stepping the zoom never reaches it.
+const FONT_SIZE_CEIL: u32 = 256;
+
 /// Lines of terminal-owned scrollback the wheel moves per line of wheel travel,
 /// the idiomatic multi-line wheel step common terminals use (e.g. alacritty's
 /// default scroll multiplier of 3). Applies only to local scrollback, never to
@@ -2357,6 +2365,18 @@ fn forwards_zoom(zoom_capture: bool, client_connected: bool) -> bool {
     zoom_capture && client_connected
 }
 
+/// The size `delta` steps `current` to, held inside the live-zoom range.
+///
+/// The delta arrives from the wire, so the add saturates rather than
+/// overflowing, which would panic in debug and wrap a huge size into range in
+/// release. A `current` already outside the range is pulled back into it, so a
+/// size set from elsewhere cannot survive a step.
+fn stepped_font_size(current: u32, delta: i32) -> u32 {
+    current
+        .saturating_add_signed(delta)
+        .clamp(FONT_SIZE_FLOOR, FONT_SIZE_CEIL)
+}
+
 /// Step the terminal's font size by `delta` and re-fit everything measured in
 /// cells.
 ///
@@ -2365,7 +2385,7 @@ fn forwards_zoom(zoom_capture: bool, client_connected: bool) -> bool {
 /// size, so the grid is re-read and the terminal and pty resized without a
 /// `gpu.resize`.
 fn apply_font_step(state: &mut State, delta: i32) {
-    let font_size = (state.font_size as i32 + delta).max(FONT_SIZE_FLOOR as i32) as u32;
+    let font_size = stepped_font_size(state.font_size, delta);
     state.font_size = font_size;
     state
         .gpu
@@ -3782,9 +3802,10 @@ mod tests {
         modifier_bits, paste_bytes, popover_overflow, refresh_popover_overflows, reposition_scroll,
         seed_settle_flight, selection_copy_text, sgr_button_bytes, sgr_motion_bytes,
         sgr_wheel_bytes, step_cursor, step_document_scroll, step_grid_scroll, step_popover_scroll,
-        step_region_scroll, step_scrollback_scroll, swallow_super_combo, wheel_lines,
-        CursorAnimation, Input, PendingResize, PtyWrite, Visibility, WindowOpenVerdict,
-        EASE_BASELINE_FRAME, MAX_AUX_WINDOWS, SCROLLBACK_MIN_STEP,
+        step_region_scroll, step_scrollback_scroll, stepped_font_size, swallow_super_combo,
+        wheel_lines, CursorAnimation, Input, PendingResize, PtyWrite, Visibility,
+        WindowOpenVerdict, EASE_BASELINE_FRAME, FONT_SIZE_CEIL, FONT_SIZE_FLOOR, MAX_AUX_WINDOWS,
+        SCROLLBACK_MIN_STEP,
     };
     #[cfg(unix)]
     use super::{
@@ -3870,6 +3891,41 @@ mod tests {
         assert!(
             !visibility.set_occluded(false),
             "no redraw was asked for while it was away",
+        );
+    }
+
+    /// The delta comes off the wire, so the extremes are reachable input rather
+    /// than hypotheticals.
+    #[test]
+    fn font_step_saturates_and_clamps_to_the_zoom_range() {
+        assert_eq!(stepped_font_size(14, 1), 15);
+        assert_eq!(stepped_font_size(14, -1), 13);
+
+        assert_eq!(
+            stepped_font_size(14, i32::MAX),
+            FONT_SIZE_CEIL,
+            "the add saturates instead of overflowing"
+        );
+        assert_eq!(
+            stepped_font_size(14, i32::MIN),
+            FONT_SIZE_FLOOR,
+            "a step far below the floor lands on it"
+        );
+
+        assert_eq!(
+            stepped_font_size(FONT_SIZE_CEIL, 1),
+            FONT_SIZE_CEIL,
+            "the ceiling holds against another step up"
+        );
+        assert_eq!(
+            stepped_font_size(FONT_SIZE_FLOOR, -1),
+            FONT_SIZE_FLOOR,
+            "the floor holds against another step down"
+        );
+        assert_eq!(
+            stepped_font_size(u32::MAX, 0),
+            FONT_SIZE_CEIL,
+            "a size set from outside the zoom is pulled back into range"
         );
     }
 
