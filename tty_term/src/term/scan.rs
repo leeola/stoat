@@ -88,6 +88,11 @@ enum EscState {
     Apc,
     /// Seen `ESC` inside an APC payload, awaiting the `\` that terminates it.
     ApcEscape,
+    /// Inside an APC whose payload overran the cap, skipped to its terminator so
+    /// the scanner leaves the string where the vte parser does.
+    ApcSkip,
+    /// Seen `ESC` inside a skipped APC.
+    ApcSkipEscape,
     /// Seen `ESC [`, waiting on the `>` that marks the private query.
     CsiEntry,
     /// Seen `ESC [ >`, consuming parameter bytes until the final byte.
@@ -174,6 +179,19 @@ impl EscScanner {
                         self.state = EscState::Ground;
                     },
                 },
+                EscState::ApcSkip => match byte {
+                    ESC => self.state = EscState::ApcSkipEscape,
+                    BEL => self.state = EscState::Ground,
+                    _ => {
+                        i += payload_run(&bytes[i..]).len();
+                        continue;
+                    },
+                },
+                EscState::ApcSkipEscape => match byte {
+                    STRING_TERMINATOR => self.state = EscState::Ground,
+                    ESC => self.state = EscState::ApcSkipEscape,
+                    _ => self.state = EscState::ApcSkip,
+                },
 
                 EscState::CsiEntry => {
                     self.state = match byte {
@@ -253,12 +271,17 @@ impl EscScanner {
     /// can never be the thing this discards. Overrunning discards the whole frame,
     /// so the bytes buffered before the cap was reached are of no use and the run
     /// is dropped entire rather than filled to the brim first.
+    ///
+    /// Abandoning the frame skips to its terminator rather than returning to
+    /// ground. The vte parser is still inside the string, and a scanner that
+    /// left early would decode a frame buried in the oversized tail as a real
+    /// command, applying it to a screen the parser never painted it on.
     fn push_apc_run(&mut self, run: &[u8]) -> usize {
         if self.payload.len() + run.len() <= MAX_APC_PAYLOAD {
             self.payload.extend_from_slice(run);
         } else {
             self.payload.clear();
-            self.state = EscState::Ground;
+            self.state = EscState::ApcSkip;
         }
         run.len()
     }
@@ -633,6 +656,28 @@ mod tests {
             scan_collect(&mut scanner, b"\x1b_ok\x1b\\"),
             vec![(b"ok".to_vec(), 6)],
             "the scanner recovers for the next frame",
+        );
+    }
+
+    /// The vte parser stays inside the APC string until its terminator, so a
+    /// scanner that returned to ground on overflow would decode a frame buried
+    /// in the tail and apply a command the parser never saw as one.
+    #[test]
+    fn a_frame_inside_an_over_cap_apc_tail_is_not_decoded() {
+        let mut scanner = EscScanner::default();
+        let mut seq = b"\x1b_".to_vec();
+        seq.resize(seq.len() + MAX_APC_PAYLOAD + 1, b'a');
+        seq.extend_from_slice(b"\x1b_Gstoatty;fill\x1b\\");
+        seq.extend_from_slice(b"\x1b\\");
+
+        assert!(
+            scan_collect(&mut scanner, &seq).is_empty(),
+            "nothing buried in the over-cap string is decoded",
+        );
+        assert_eq!(
+            scan_collect(&mut scanner, b"\x1b_ok\x1b\\"),
+            vec![(b"ok".to_vec(), 6)],
+            "and the scanner still recovers for the next frame",
         );
     }
 
