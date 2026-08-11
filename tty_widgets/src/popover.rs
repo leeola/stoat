@@ -6,7 +6,7 @@ use ratatui::{
     symbols::border,
     widgets::StatefulWidget,
 };
-use stoatty_protocol::command;
+use stoatty_protocol::command::{self, PopoverCommand};
 
 /// A floating popover box drawn above the grid.
 ///
@@ -42,17 +42,19 @@ impl StatefulWidget for Popover<'_> {
 
         command::encode_popover_into(
             scene.buffer(),
-            area.y,
-            area.x,
-            area.width,
-            area.height,
-            self.fill,
-            self.border,
-            self.content_fg,
-            self.scale,
-            self.offset,
-            self.bold,
-            self.content,
+            &PopoverCommand {
+                top: area.y,
+                left: area.x,
+                width: area.width,
+                height: area.height,
+                fill: self.fill,
+                border: self.border,
+                content_fg: self.content_fg,
+                scale: self.scale,
+                offset: self.offset,
+                bold: self.bold,
+                content: self.content,
+            },
         );
     }
 }

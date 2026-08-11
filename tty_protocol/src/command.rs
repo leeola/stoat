@@ -277,8 +277,15 @@ pub struct ScaleCommand {
 ///
 /// `content` is a line of text drawn inside the box in `content_fg`, drawn at
 /// `scale` times the cell size from the box's top-left, clipped to the box.
+///
+/// The content is generic over its container so an emitter re-declaring a
+/// popover every frame can hand a borrowed slice, while a decoded command owns
+/// its copy. It defaults to the owned form, so a holder that is not encoding
+/// writes the type with no parameter. A scope encoder takes its content from a
+/// closure instead and reads only the head fields, so `PopoverCommand<()>`
+/// names a head with no content of its own.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct PopoverCommand {
+pub struct PopoverCommand<S = String> {
     pub top: u16,
     pub left: u16,
     pub width: u16,
@@ -297,7 +304,7 @@ pub struct PopoverCommand {
     /// Shape the content text at bold weight rather than the default. Only the
     /// content is affected. The box chrome is unchanged.
     pub bold: bool,
-    pub content: String,
+    pub content: S,
 }
 
 /// Declare a scrollable sub-rectangle of the grid.
@@ -428,14 +435,21 @@ pub enum IconKind {
 /// run's full width (spaces included) before the glyphs alpha-blend over it, so
 /// it need not match whatever lies beneath. `None` draws the glyphs with no
 /// backing box, blending them directly over the surface behind the run.
+///
+/// The text is generic over its container so an emitter formatting a run every
+/// frame can hand a borrowed slice, while a decoded command owns its copy. It
+/// defaults to the owned form, so a holder that is not encoding writes the type
+/// with no parameter. A scope encoder takes its text from a closure instead and
+/// reads only the head fields, so `TextRunCommand<()>` names a head with no
+/// text of its own.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct TextRunCommand {
+pub struct TextRunCommand<S = String> {
     pub col: i16,
     pub row: i16,
     pub scale: u16,
     pub color: [u8; 3],
     pub bg: Option<[u8; 3]>,
-    pub text: String,
+    pub text: S,
 }
 
 /// Fill a thin rectangle off the cell grid in a solid color.
@@ -800,111 +814,69 @@ pub fn encode_scale_into(out: &mut Vec<u8>, command: &ScaleCommand) {
 
 /// Encode a [`PopoverCommand`] as a full `Gstoatty;popover` frame for an emitter.
 ///
-/// The region, colors, and scale ride in a fixed 18-byte first argument; the
-/// variable content text is a second argument.
-pub fn encode_popover(command: &PopoverCommand) -> Vec<u8> {
+/// The region, colors, scale, offset, and bold flag ride in a fixed 23-byte
+/// argument on the open marker. The content streams between the markers.
+pub fn encode_popover<S: AsRef<str>>(command: &PopoverCommand<S>) -> Vec<u8> {
     let mut out = Vec::new();
-    encode_popover_into(
-        &mut out,
-        command.top,
-        command.left,
-        command.width,
-        command.height,
-        command.fill,
-        command.border,
-        command.content_fg,
-        command.scale,
-        command.offset,
-        command.bold,
-        &command.content,
-    );
+    encode_popover_into(&mut out, command);
     out
 }
 
 /// Append a `Gstoatty;popover` open marker, its streamed `content`, and a
 /// `Gstoatty;popover_end` close marker to `out`.
 ///
-/// The fixed head fields ride in the open marker's single argument; `content`
-/// streams as the raw bytes between the two markers, so it is not bounded by the
-/// per-frame size cap. `content` is borrowed so an emitter can pass a slice of
-/// its own buffer rather than build an owned [`String`] per frame.
+/// The fixed head fields ride in the open marker's single argument, and
+/// `command.content` streams as the raw bytes between the two markers, so it is
+/// not bounded by the per-frame size cap. The content's container is generic, so
+/// an emitter passes a slice of its own buffer rather than building an owned
+/// [`String`] per frame.
 ///
-/// `content` must be plain text. Riding outside the APC wrapper is what frees
+/// The content must be plain text. Riding outside the APC wrapper is what frees
 /// it from the size cap and is also what makes it indistinguishable from
 /// terminal control bytes, so the terminal cuts the capture at the first `ESC`
 /// and keeps only what came before. An emitter that wants styled content sets
 /// the colors in the head fields rather than with escape sequences in the text.
-#[allow(clippy::too_many_arguments)]
-pub fn encode_popover_into(
-    out: &mut Vec<u8>,
-    top: u16,
-    left: u16,
-    width: u16,
-    height: u16,
-    fill: [u8; 3],
-    border: [u8; 3],
-    content_fg: [u8; 3],
-    scale: u8,
-    offset: [i16; 2],
-    bold: bool,
-    content: &str,
-) {
-    encode_popover_scope(
-        out,
-        top,
-        left,
-        width,
-        height,
-        fill,
-        border,
-        content_fg,
-        scale,
-        offset,
-        bold,
-        |out| out.extend_from_slice(content.as_bytes()),
-    );
+pub fn encode_popover_into<S: AsRef<str>>(out: &mut Vec<u8>, command: &PopoverCommand<S>) {
+    let content = command.content.as_ref();
+    encode_popover_scope(out, command, |out| {
+        out.extend_from_slice(content.as_bytes())
+    });
 }
 
 /// Append a whole popover to `out`, being the open marker, whatever `content`
 /// writes, then the close marker.
 ///
 /// The streaming form of [`encode_popover_into`], for a caller that formats its
-/// text into the output buffer rather than holding it as one borrowed string.
-/// Both emit the same bytes and neither has a way to leave the close marker
-/// out, which matters because an unclosed popover keeps capturing until the
-/// next marker and swallows whatever the emitter writes next.
+/// text into the output buffer rather than holding it as one string. Both emit
+/// the same bytes and neither has a way to leave the close marker out, which
+/// matters because an unclosed popover keeps capturing until the next marker
+/// and swallows whatever the emitter writes next.
+///
+/// Only `command`'s head fields are read, so its content container is
+/// unconstrained. Write `PopoverCommand<()>` with `content: ()` to say the
+/// closure supplies the text.
 ///
 /// The plain-text rule applies here too. The terminal cuts the capture at the
 /// first `ESC`, so `content` must write text and set its colors through the
 /// head fields.
-#[allow(clippy::too_many_arguments)]
-pub fn encode_popover_scope(
+pub fn encode_popover_scope<S>(
     out: &mut Vec<u8>,
-    top: u16,
-    left: u16,
-    width: u16,
-    height: u16,
-    fill: [u8; 3],
-    border: [u8; 3],
-    content_fg: [u8; 3],
-    scale: u8,
-    offset: [i16; 2],
-    bold: bool,
+    command: &PopoverCommand<S>,
     content: impl FnOnce(&mut Vec<u8>),
 ) {
     frame::begin(out, "popover");
     frame::push_arg(out, |w| {
-        w.write_all(&top.to_be_bytes())?;
-        w.write_all(&left.to_be_bytes())?;
-        w.write_all(&width.to_be_bytes())?;
-        w.write_all(&height.to_be_bytes())?;
-        w.write_all(&fill)?;
-        w.write_all(&border)?;
-        w.write_all(&content_fg)?;
-        w.write_all(&[scale])?;
-        w.write_all(&offset[0].to_be_bytes())?;
-        w.write_all(&offset[1].to_be_bytes())?;
-        w.write_all(&[bold as u8])
+        w.write_all(&command.top.to_be_bytes())?;
+        w.write_all(&command.left.to_be_bytes())?;
+        w.write_all(&command.width.to_be_bytes())?;
+        w.write_all(&command.height.to_be_bytes())?;
+        w.write_all(&command.fill)?;
+        w.write_all(&command.border)?;
+        w.write_all(&command.content_fg)?;
+        w.write_all(&[command.scale])?;
+        w.write_all(&command.offset[0].to_be_bytes())?;
+        w.write_all(&command.offset[1].to_be_bytes())?;
+        w.write_all(&[command.bold as u8])
     });
     frame::end(out);
     content(out);
@@ -1045,19 +1017,13 @@ pub fn encode_icon_into(out: &mut Vec<u8>, command: &IconCommand) {
 /// Encode a [`TextRunCommand`] as a full `Gstoatty;text_run` frame for an
 /// emitter.
 ///
-/// The position, scale, color, and background ride in a fixed 12-byte first
-/// argument; the variable run text is a second argument.
-pub fn encode_text_run(command: &TextRunCommand) -> Vec<u8> {
+/// The position, scale, color, and background ride in a fixed 13-byte argument
+/// on the open marker, the last byte saying whether the background is present.
+/// A 12-byte head is still decoded as the legacy form that always carries one.
+/// The run text streams between the markers.
+pub fn encode_text_run<S: AsRef<str>>(command: &TextRunCommand<S>) -> Vec<u8> {
     let mut out = Vec::new();
-    encode_text_run_into(
-        &mut out,
-        command.col,
-        command.row,
-        command.scale,
-        command.color,
-        command.bg,
-        &command.text,
-    );
+    encode_text_run_into(&mut out, command);
     out
 }
 
@@ -1068,58 +1034,49 @@ pub fn encode_text_run(command: &TextRunCommand) -> Vec<u8> {
 ///
 /// The fixed head fields ride in the open marker's single argument; `text`
 /// streams as the raw bytes between the two markers, so it is not bounded by the
-/// per-frame size cap. `text` is borrowed so an emitter can pass a slice of a
-/// reused buffer (a gutter formats line numbers into a stack buffer) rather than
-/// build an owned [`String`] per frame.
+/// per-frame size cap. The text's container is generic, so an emitter passes a
+/// slice of a reused buffer (a gutter formats line numbers into a stack buffer)
+/// rather than building an owned [`String`] per frame.
 ///
-/// `text` must be plain text. Riding outside the APC wrapper is what frees it
-/// from the size cap and is also what makes it indistinguishable from terminal
+/// The text must be plain. Riding outside the APC wrapper is what frees it from
+/// the size cap and is also what makes it indistinguishable from terminal
 /// control bytes, so the terminal cuts the capture at the first `ESC` and keeps
 /// only what came before. An emitter that wants a styled run sets `color` and
 /// `bg` rather than writing escape sequences into the text.
-pub fn encode_text_run_into(
-    out: &mut Vec<u8>,
-    col: i16,
-    row: i16,
-    scale: u16,
-    color: [u8; 3],
-    bg: Option<[u8; 3]>,
-    text: &str,
-) {
-    encode_text_run_scope(out, col, row, scale, color, bg, |out| {
-        out.extend_from_slice(text.as_bytes())
-    });
+pub fn encode_text_run_into<S: AsRef<str>>(out: &mut Vec<u8>, command: &TextRunCommand<S>) {
+    let text = command.text.as_ref();
+    encode_text_run_scope(out, command, |out| out.extend_from_slice(text.as_bytes()));
 }
 
 /// Append a whole text run to `out`, being the open marker, whatever `text`
 /// writes, then the close marker.
 ///
 /// The streaming form of [`encode_text_run_into`], for a caller that formats
-/// its text into the output buffer rather than holding it as one borrowed
-/// string. Both emit the same bytes and neither has a way to leave the close
-/// marker out, which matters because an unclosed run keeps capturing until the
-/// next marker and swallows whatever the emitter writes next.
+/// its text into the output buffer rather than holding it as one string. Both
+/// emit the same bytes and neither has a way to leave the close marker out,
+/// which matters because an unclosed run keeps capturing until the next marker
+/// and swallows whatever the emitter writes next.
+///
+/// Only `command`'s head fields are read, so its text container is
+/// unconstrained. Write `TextRunCommand<()>` with `text: ()` to say the closure
+/// supplies the text.
 ///
 /// The plain-text rule applies here too. The terminal cuts the capture at the
-/// first `ESC`, so `text` must write text and set its colors through `color`
-/// and `bg`.
-pub fn encode_text_run_scope(
+/// first `ESC`, so `text` must write text and set its colors through
+/// `command.color` and `command.bg`.
+pub fn encode_text_run_scope<S>(
     out: &mut Vec<u8>,
-    col: i16,
-    row: i16,
-    scale: u16,
-    color: [u8; 3],
-    bg: Option<[u8; 3]>,
+    command: &TextRunCommand<S>,
     text: impl FnOnce(&mut Vec<u8>),
 ) {
     frame::begin(out, "text_run");
     frame::push_arg(out, |w| {
-        w.write_all(&col.to_be_bytes())?;
-        w.write_all(&row.to_be_bytes())?;
-        w.write_all(&scale.to_be_bytes())?;
-        w.write_all(&color)?;
-        w.write_all(&bg.unwrap_or([0, 0, 0]))?;
-        w.write_all(&[bg.is_some() as u8])
+        w.write_all(&command.col.to_be_bytes())?;
+        w.write_all(&command.row.to_be_bytes())?;
+        w.write_all(&command.scale.to_be_bytes())?;
+        w.write_all(&command.color)?;
+        w.write_all(&command.bg.unwrap_or([0, 0, 0]))?;
+        w.write_all(&[command.bg.is_some() as u8])
     });
     frame::end(out);
     text(out);
@@ -1754,27 +1711,12 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::Border(c) => encode_border_into(out, c),
         Command::Panel(c) => encode_panel_into(out, c),
         Command::Scale(c) => encode_scale_into(out, c),
-        Command::Popover(c) => encode_popover_into(
-            out,
-            c.top,
-            c.left,
-            c.width,
-            c.height,
-            c.fill,
-            c.border,
-            c.content_fg,
-            c.scale,
-            c.offset,
-            c.bold,
-            &c.content,
-        ),
+        Command::Popover(c) => encode_popover_into(out, c),
         Command::PopoverEnd => encode_popover_end_into(out),
         Command::ScrollRegion(c) => encode_scroll_region_into(out, c),
         Command::PoolRegion(c) => encode_pool_region_into(out, c),
         Command::Icon(c) => encode_icon_into(out, c),
-        Command::TextRun(c) => {
-            encode_text_run_into(out, c.col, c.row, c.scale, c.color, c.bg, &c.text)
-        },
+        Command::TextRun(c) => encode_text_run_into(out, c),
         Command::TextRunEnd => encode_text_run_end_into(out),
         Command::Bar(c) => encode_bar_into(out, c),
         Command::Polyline(c) => encode_polyline_into(out, c),
@@ -3400,7 +3342,18 @@ mod tests {
         );
 
         let mut run = Vec::new();
-        encode_text_run_scope(&mut run, 0, 0, 16, [1, 2, 3], None, |_| {});
+        encode_text_run_scope(
+            &mut run,
+            &TextRunCommand {
+                col: 0,
+                row: 0,
+                scale: 16,
+                color: [1, 2, 3],
+                bg: None,
+                text: (),
+            },
+            |_| {},
+        );
         assert_eq!(
             decode_stream(&run),
             vec![
@@ -3430,18 +3383,9 @@ mod tests {
             text: "src/main.rs".to_owned(),
         };
         let mut scoped = Vec::new();
-        encode_text_run_scope(
-            &mut scoped,
-            run.col,
-            run.row,
-            run.scale,
-            run.color,
-            run.bg,
-            {
-                let text = run.text.clone();
-                move |out| out.extend_from_slice(text.as_bytes())
-            },
-        );
+        encode_text_run_scope(&mut scoped, &run, |out| {
+            out.extend_from_slice(run.text.as_bytes())
+        });
         assert_eq!(scoped, encode_text_run(&run), "text_run");
 
         let popover = PopoverCommand {
@@ -3458,24 +3402,54 @@ mod tests {
             content: "hover text".to_owned(),
         };
         let mut scoped = Vec::new();
-        encode_popover_scope(
-            &mut scoped,
-            popover.top,
-            popover.left,
-            popover.width,
-            popover.height,
-            popover.fill,
-            popover.border,
-            popover.content_fg,
-            popover.scale,
-            popover.offset,
-            popover.bold,
-            {
-                let content = popover.content.clone();
-                move |out| out.extend_from_slice(content.as_bytes())
-            },
-        );
+        encode_popover_scope(&mut scoped, &popover, |out| {
+            out.extend_from_slice(popover.content.as_bytes())
+        });
         assert_eq!(scoped, encode_popover(&popover), "popover");
+    }
+
+    fn popover_holding<S>(content: S) -> PopoverCommand<S> {
+        PopoverCommand {
+            top: 1,
+            left: 2,
+            width: 4,
+            height: 3,
+            fill: [10, 20, 30],
+            border: [40, 50, 60],
+            content_fg: [70, 80, 90],
+            scale: 2,
+            offset: [4, -2],
+            bold: true,
+            content,
+        }
+    }
+
+    fn run_holding<S>(text: S) -> TextRunCommand<S> {
+        TextRunCommand {
+            col: -3,
+            row: 8,
+            scale: 160,
+            color: [1, 2, 3],
+            bg: Some([4, 5, 6]),
+            text,
+        }
+    }
+
+    /// What the container generic is for. An emitter re-declaring a popover
+    /// every frame hands a slice rather than building a `String`, so the two
+    /// containers have to reach the wire as the same command.
+    #[test]
+    fn a_borrowed_container_encodes_like_an_owned_one() {
+        assert_eq!(
+            encode_popover(&popover_holding("hover text")),
+            encode_popover(&popover_holding("hover text".to_owned())),
+            "popover",
+        );
+        assert_eq!(
+            encode_text_run(&run_holding("src/main.rs")),
+            encode_text_run(&run_holding("src/main.rs".to_owned())),
+            "text_run",
+        );
     }
 
     /// The page a batch fills is read from its opening marker alone.

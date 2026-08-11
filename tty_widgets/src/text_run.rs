@@ -1,6 +1,6 @@
 use crate::ApcScene;
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
-use stoatty_protocol::command;
+use stoatty_protocol::command::{self, TextRunCommand};
 
 /// A run of text drawn at a fractional scale, off the cell grid.
 ///
@@ -37,12 +37,14 @@ impl StatefulWidget for TextRun<'_> {
 
         command::encode_text_run_into(
             scene.buffer(),
-            col,
-            row,
-            self.scale,
-            self.color,
-            self.bg,
-            self.text,
+            &TextRunCommand {
+                col,
+                row,
+                scale: self.scale,
+                color: self.color,
+                bg: self.bg,
+                text: self.text,
+            },
         );
     }
 }
