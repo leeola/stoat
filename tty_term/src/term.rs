@@ -78,6 +78,18 @@ const FRACTION_SCALE: f32 = 65536.0;
 /// terminal would end the session.
 const MAX_REGION_VIEWPORTS: usize = 2;
 
+/// How much streamed text one popover or text run may accumulate before the
+/// capture is committed early.
+///
+/// Streamed content arrives outside the APC frame, so
+/// [`MAX_APC_PAYLOAD`](stoatty_protocol::frame::MAX_APC_PAYLOAD) does not bound
+/// it, and while a capture is open no byte reaches the live screen.
+/// Every close path is something the writer sends, so an emitter that dies
+/// mid-capture buffers its shell parent's entire remaining output behind a
+/// screen that looks hung. Committing at the cap trades the tail of one
+/// oversized run for a session that keeps rendering.
+const MAX_CAPTURE_BYTES: usize = 1 << 20;
+
 /// A minimap content-store change buffered for the next projection.
 ///
 /// The projection replays these against the grid's stores in arrival order. See
@@ -132,6 +144,13 @@ pub struct Terminal {
     /// sends an out-of-range region is liable to send a flood of them and a
     /// log entry each would be its own way to bring the session down.
     warned_region_clamp: bool,
+    /// Whether a capture committed early at [`MAX_CAPTURE_BYTES`] has already
+    /// been reported.
+    ///
+    /// Once per session for the same reason as [`Self::warned_region_clamp`]:
+    /// the writer that overruns one capture is liable to overrun every
+    /// following one.
+    warned_capture_cap: bool,
     /// Border regions set by `Gstoatty;border` frames, stamped onto the grid by
     /// [`Self::project`]. They persist until a `Gstoatty;reset` frame clears
     /// them, since the VT projection resets each cell's borders every frame.
@@ -750,6 +769,7 @@ impl Terminal {
             palette,
             esc: EscScanner::default(),
             warned_region_clamp: false,
+            warned_capture_cap: false,
             frames_scratch: Vec::new(),
             frame_scratch: FrameScratch::default(),
             borders: Vec::new(),
@@ -1895,6 +1915,18 @@ impl Terminal {
         self.capture_scratch = capture.content;
     }
 
+    /// Report the first capture this session to overrun [`MAX_CAPTURE_BYTES`].
+    fn warn_capture_cap(&mut self) {
+        if self.warned_capture_cap {
+            return;
+        }
+        self.warned_capture_cap = true;
+        tracing::warn!(
+            max_bytes = MAX_CAPTURE_BYTES,
+            "streamed content past the capture cap, committing early"
+        );
+    }
+
     /// Bytes the parser is holding back in its synchronized-update buffer.
     #[cfg(test)]
     fn buffered_sync_bytes(&self) -> usize {
@@ -1914,9 +1946,16 @@ impl Terminal {
     /// nested inside a page captures its text rather than painting it into the
     /// page cells. An open fill with no capture takes the bytes, and with
     /// neither open the live parser does.
+    ///
+    /// A capture that reaches [`MAX_CAPTURE_BYTES`] is committed with the text
+    /// it has, which restores live routing for everything after it.
     fn feed_segment(&mut self, segment: &[u8]) {
         if let Some(capture) = &mut self.capture {
             capture.content.extend_from_slice(segment);
+            if capture.content.len() >= MAX_CAPTURE_BYTES {
+                self.warn_capture_cap();
+                self.commit_capture();
+            }
         } else if let Some(fill) = &mut self.fill {
             fill.parser.advance(&mut fill.term, segment);
         } else {
@@ -2586,7 +2625,10 @@ impl Dimensions for GridSize {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, Cursor, CursorShape, Damage, TermEvent, Terminal, XTVERSION_REPLY};
+    use super::{
+        Arc, Cursor, CursorShape, Damage, TermEvent, Terminal, ESC, MAX_CAPTURE_BYTES,
+        XTVERSION_REPLY,
+    };
     use crate::{
         grid::{
             Bar, Border, BorderStyle, Cell, DocumentOffset, Flags, Grid, Icon, IconKind, Minimap,
@@ -4251,6 +4293,83 @@ mod tests {
             grid.text_runs()[0].text.as_ref(),
             "o\u{fffd}",
             "the invalid byte becomes a replacement character",
+        );
+    }
+
+    /// The open marker alone, with the content and close marker cut off, is what
+    /// a writer that died mid-capture leaves behind.
+    fn open_marker_of(frame: &[u8]) -> &[u8] {
+        let open_end = frame
+            .windows(2)
+            .position(|pair| pair == [ESC, b'\\'])
+            .expect("the open marker is terminated")
+            + 2;
+        &frame[..open_end]
+    }
+
+    /// Nothing the writer sends can close a stranded capture, so the cap is the
+    /// only path back to a painting screen.
+    #[test]
+    fn a_capture_past_the_cap_commits_and_restores_live_routing() {
+        let frame = encode_popover(&PopoverCommand {
+            top: 1,
+            left: 2,
+            width: 6,
+            height: 3,
+            fill: [10, 20, 30],
+            border: [40, 50, 60],
+            content_fg: [70, 80, 90],
+            scale: 1,
+            offset: [0, 0],
+            bold: false,
+            content: String::new(),
+        });
+
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(open_marker_of(&frame));
+        terminal.advance(&vec![b'x'; MAX_CAPTURE_BYTES]);
+        terminal.advance(b"live");
+        terminal.project(&mut grid);
+
+        let overlay = match grid.overlays() {
+            [overlay] => overlay,
+            overlays => panic!("the overrun capture commits one popover, got {overlays:?}"),
+        };
+        assert_eq!(
+            overlay.content.len(),
+            MAX_CAPTURE_BYTES,
+            "the popover keeps the text captured up to the cap"
+        );
+        assert_eq!(
+            [
+                grid.get(0, 0).ch,
+                grid.get(0, 1).ch,
+                grid.get(0, 2).ch,
+                grid.get(0, 3).ch
+            ],
+            ['l', 'i', 'v', 'e'],
+            "bytes after the cap paint the live grid"
+        );
+    }
+
+    /// The shell parent keeps writing after its editor dies, and that output has
+    /// to reach the screen rather than pile up in the abandoned run's text.
+    #[test]
+    fn a_stranded_text_run_stops_swallowing_output_at_the_cap() {
+        let frame = text_run_frame("");
+
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(open_marker_of(&frame));
+        terminal.advance(&vec![b'.'; MAX_CAPTURE_BYTES]);
+        terminal.advance(b"ok");
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            [grid.get(0, 0).ch, grid.get(0, 1).ch],
+            ['o', 'k'],
+            "output past the cap paints the live screen"
         );
     }
 
