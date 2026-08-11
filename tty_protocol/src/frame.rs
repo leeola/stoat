@@ -96,8 +96,8 @@ pub(crate) fn end(out: &mut Vec<u8>) {
 ///
 /// Accepts either the full frame or the bare payload a VT parser yields after
 /// stripping `ESC _` and the terminator. Returns `None` for anything to ignore:
-/// a foreign or absent `Gstoatty` prefix, a missing sub-command, or an argument
-/// that is not valid base64.
+/// a foreign or absent `Gstoatty` prefix, a missing sub-command, an argument
+/// that is not valid base64, or more than [`MAX_FRAME_ARGS`] arguments.
 pub fn decode(bytes: &[u8]) -> Option<Frame> {
     let body = strip_wrapper(bytes);
     let body = body.strip_prefix(PREFIX)?;
@@ -110,6 +110,9 @@ pub fn decode(bytes: &[u8]) -> Option<Frame> {
 
     let mut args = Vec::new();
     for field in fields {
+        if args.len() == MAX_FRAME_ARGS {
+            return None;
+        }
         args.push(STANDARD.decode(field).ok()?);
     }
 
@@ -119,10 +122,13 @@ pub fn decode(bytes: &[u8]) -> Option<Frame> {
 /// Arguments a single frame may carry.
 ///
 /// The widest command in the protocol sends four, so the ceiling is double what
-/// anything real needs. It exists because [`FrameScratch`] retains a buffer per
-/// argument position for the terminal's lifetime, and a frame is only bounded by
-/// [`MAX_APC_PAYLOAD`]. Without the cap one 64KB frame of semicolons would pin
-/// tens of thousands of buffers for the session.
+/// anything real needs. Both [`decode`] and [`decode_into`] hold to it, so a
+/// frame is well-formed or not for every reader alike.
+///
+/// The sharper reason is [`decode_into`]'s: it fills a [`FrameScratch`] that
+/// retains a buffer per argument position for the terminal's lifetime, and a
+/// frame is otherwise bounded only by [`MAX_APC_PAYLOAD`], so one 64KB frame of
+/// semicolons would pin tens of thousands of buffers for the session.
 pub const MAX_FRAME_ARGS: usize = 8;
 
 /// Reusable argument buffers for [`decode_into`], retained across frames.
@@ -255,6 +261,28 @@ mod tests {
             scratch.args.len() <= MAX_FRAME_ARGS,
             "the rejected frame grew the scratch no further than the cap, got {}",
             scratch.args.len()
+        );
+    }
+
+    /// Two entry points that disagree on what a well-formed frame is would let a
+    /// caller act on one the terminal's own ingest refuses.
+    #[test]
+    fn both_decoders_agree_on_the_arg_cap() {
+        let mut scratch = FrameScratch::default();
+        let full = encode(&frame("border", &[b"x".as_slice(); MAX_FRAME_ARGS]));
+        let over = encode(&frame("border", &[b"x".as_slice(); MAX_FRAME_ARGS + 1]));
+
+        assert!(decode(&full).is_some(), "the owning decoder takes the cap");
+        assert!(
+            decode_into(&full, &mut scratch).is_some(),
+            "the borrowing decoder takes it too"
+        );
+
+        assert_eq!(decode(&over), None, "the owning decoder rejects past it");
+        assert_eq!(
+            decode_into(&over, &mut scratch),
+            None,
+            "and the borrowing decoder agrees"
         );
     }
 
