@@ -8,18 +8,14 @@
 //!
 //! The panes are framed by the [`Border`] widget and the sidebar and viewport
 //! flow through a ratatui [`Terminal`]. The two decorations have different
-//! lifecycles: the borders are static, so a dedicated [`ApcScene`] flushes them
-//! once (its skip-when-unchanged emits nothing after the first frame); the
-//! scroll region updates every jump, so its scene's bytes are written directly,
-//! never behind a `Gstoatty;reset` that would drop the eased position. Run as the
-//! PTY shell by the `split_scroll` example.
+//! lifecycles, and the scene's two lanes carry that difference. The borders are
+//! static, so the decoration lane emits them once and skips every frame after.
+//! The scroll region changes on every jump, so [`ScrollRegion`] emits into the
+//! dynamic lane, which flushes with no reset in front of it and leaves the eased
+//! position standing. Run as the PTY shell by the `split_scroll` example.
 
 use ratatui::{backend::CrosstermBackend, layout::Rect, style::Style, Frame, Terminal};
-use std::{
-    io::{self, Write},
-    thread,
-    time::Duration,
-};
+use std::{io, thread, time::Duration};
 use stoatty_protocol::command::BorderStyle;
 use stoatty_widgets::{
     border::Border, scroll_region::ScrollRegion, ApcScene, ApcSession, SessionOptions,
@@ -138,13 +134,7 @@ const RENDER_RS: [&str; BUFFER_LINES] = [
 ];
 
 fn main() {
-    // The session's scene carries the borders. The scroll region needs a scene
-    // of its own because its bytes are written raw, never behind the reset a
-    // flush prefixes. It is told the session's verdict so a foreign host gets
-    // nothing from either.
     let mut session = ApcSession::new(SessionOptions::default());
-    let mut scroll_scene = ApcScene::new();
-    scroll_scene.set_live(session.live());
 
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).expect("build the terminal");
@@ -159,24 +149,11 @@ fn main() {
             let scroll = cursor_line.saturating_sub(CURSOR_MARGIN).min(MAX_SCROLL);
 
             session.scene().clear();
-            scroll_scene.clear();
             terminal
-                .draw(|frame| {
-                    render_frame(
-                        frame,
-                        session.scene(),
-                        &mut scroll_scene,
-                        scroll,
-                        cursor_line,
-                    )
-                })
+                .draw(|frame| render_frame(frame, session.scene(), scroll, cursor_line))
                 .expect("draw a frame");
 
-            session.flush().expect("write the borders");
-            let mut out = io::stdout();
-            out.write_all(scroll_scene.bytes())
-                .expect("write the scroll region");
-            out.flush().expect("flush a frame");
+            session.flush().expect("write the frame");
 
             thread::sleep(Duration::from_millis(settle_ms));
         }
@@ -188,13 +165,7 @@ fn main() {
 ///
 /// The window keeps the cursor [`CURSOR_MARGIN`] rows from its top where it can,
 /// so a cursor jump moves the window with it.
-fn render_frame(
-    frame: &mut Frame<'_>,
-    border_scene: &mut ApcScene,
-    scroll_scene: &mut ApcScene,
-    scroll: usize,
-    cursor_line: usize,
-) {
+fn render_frame(frame: &mut Frame<'_>, scene: &mut ApcScene, scroll: usize, cursor_line: usize) {
     for rect in [LEFT, RIGHT] {
         frame.render_stateful_widget(
             Border {
@@ -202,7 +173,7 @@ fn render_frame(
                 color: BORDER_COLOR,
             },
             rect,
-            border_scene,
+            scene,
         );
     }
 
@@ -214,7 +185,7 @@ fn render_frame(
             offset: scroll as u16,
         },
         INNER,
-        scroll_scene,
+        scene,
     );
 
     frame.set_cursor_position((INNER.x, INNER.y + (cursor_line - scroll) as u16));

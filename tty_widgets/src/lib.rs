@@ -46,19 +46,31 @@ pub mod text_run;
 /// zero traffic. Both buffers are reused across frames, so steady-state emission
 /// allocates nothing.
 ///
+/// The scene has two lanes, because the protocol has two kinds of command. A
+/// *decoration* (a border, a panel, a bar) is re-declared every frame and is
+/// what the leading reset clears, so removing one from the scene is all it takes
+/// to remove it from the screen. A *persistent* command instead updates state
+/// the terminal keeps, and a reset in front of it is either wasteful or
+/// destructive. A re-declared `scroll_region` whose region the reset just
+/// cleared seeds a full-height glide rather than easing from where it was.
+/// [`Self::buffer`] is the decoration lane and [`Self::dynamic_buffer`] the
+/// persistent one.
+///
 /// A scene may also be *dead*, which is how a host that is not stoatty is
 /// described to the widgets. [`Self::live`] reports it so each widget picks its
 /// cell form, and a dead scene swallows anything pushed into it, so a fork
 /// nobody remembered to update emits nothing rather than half a frame.
 ///
-/// Per frame: [`Self::clear`], let widgets append via [`Self::buffer`], then
-/// [`Self::flush_to`].
+/// Per frame: [`Self::clear`], let widgets append via [`Self::buffer`] or
+/// [`Self::dynamic_buffer`], then [`Self::flush_to`].
 pub struct ApcScene {
     current: Vec<u8>,
     previous: Vec<u8>,
+    dynamic_current: Vec<u8>,
+    dynamic_previous: Vec<u8>,
     live: bool,
-    /// Where [`Self::buffer`] sends writes while dead. Cleared on every handout,
-    /// so it never holds more than the one append its borrow allows.
+    /// Where the two buffer handouts send writes while dead. Cleared on every
+    /// handout, so it never holds more than the one append its borrow allows.
     discard: Vec<u8>,
 }
 
@@ -69,6 +81,8 @@ impl ApcScene {
         ApcScene {
             current: Vec::new(),
             previous: Vec::new(),
+            dynamic_current: Vec::new(),
+            dynamic_previous: Vec::new(),
             live: true,
             discard: Vec::new(),
         }
@@ -89,19 +103,49 @@ impl ApcScene {
         self.live = live;
     }
 
-    /// Empty the scene buffer so widgets can build the next frame from scratch.
+    /// Empty both scene lanes so widgets build the next frame from scratch.
     pub fn clear(&mut self) {
         self.current.clear();
+        self.dynamic_current.clear();
     }
 
-    /// The buffer widgets append their APC frames into via the protocol's
+    /// The buffer widgets append their decoration frames into via the protocol's
     /// `encode_*_into` encoders.
+    ///
+    /// This is the lane the flush's leading reset clears, so a widget that stops
+    /// appending here leaves the screen on the next flush. Every widget in the
+    /// kit but [`scroll_region::ScrollRegion`] emits into it.
     ///
     /// While dead this hands back a scratch buffer instead, so the append lands
     /// nowhere.
     pub fn buffer(&mut self) -> &mut Vec<u8> {
         match self.live {
             true => &mut self.current,
+            false => {
+                self.discard.clear();
+                &mut self.discard
+            },
+        }
+    }
+
+    /// The buffer widgets append persistent commands into, the ones no reset
+    /// precedes.
+    ///
+    /// A command belongs here when it updates terminal state that outlives the
+    /// frame rather than re-declaring a decoration. `scroll_region` is the
+    /// standing case, since the terminal eases it by the change between
+    /// declarations, and a reset in front of it restarts that ease from
+    /// nothing. The pool commands driving a smooth scroll are the same shape.
+    ///
+    /// Appending here does not mean the terminal never drops the command. A
+    /// reset the decoration lane emits still clears whatever it clears, which is
+    /// why [`Self::flush_to`] re-sends this lane whole behind one.
+    ///
+    /// While dead this hands back a scratch buffer instead, so the append lands
+    /// nowhere.
+    pub fn dynamic_buffer(&mut self) -> &mut Vec<u8> {
+        match self.live {
+            true => &mut self.dynamic_current,
             false => {
                 self.discard.clear();
                 &mut self.discard
@@ -124,22 +168,34 @@ impl ApcScene {
         command::encode_line_layout_into(self.buffer(), heights);
     }
 
-    /// Flush the built scene to `out`, but only when it differs from the last
-    /// flush.
+    /// Flush the built scene to `out`, lane by lane, writing only what differs
+    /// from the last flush.
     ///
-    /// On a change, writes a leading `Gstoatty;reset` so the terminal drops the
-    /// prior scene, then the new bytes, and records them as the baseline for the
-    /// next comparison. An unchanged scene writes nothing, since the terminal-side
-    /// components from the previous flush still stand.
+    /// A changed decoration lane writes a leading `Gstoatty;reset` so the
+    /// terminal drops the prior scene, then the new bytes. An unchanged one
+    /// writes nothing, since the terminal-side components from the previous
+    /// flush still stand.
+    ///
+    /// The dynamic lane follows, never behind a reset of its own. It writes when
+    /// it changed, and also whenever the decoration lane just reset the terminal,
+    /// because that reset clears the persistent commands it holds too and an
+    /// unchanged lane never puts them back on its own. Writing it last is what
+    /// puts it after the reset rather than under it.
+    ///
+    /// Each lane it writes becomes the baseline for the next comparison.
     pub fn flush_to(&mut self, out: &mut impl Write) -> io::Result<()> {
-        if self.current == self.previous {
-            return Ok(());
+        let decorations_changed = self.current != self.previous;
+        if decorations_changed {
+            out.write_all(&command::encode_reset())?;
+            out.write_all(&self.current)?;
+            std::mem::swap(&mut self.current, &mut self.previous);
         }
 
-        out.write_all(&command::encode_reset())?;
-        out.write_all(&self.current)?;
+        if decorations_changed || self.dynamic_current != self.dynamic_previous {
+            out.write_all(&self.dynamic_current)?;
+            std::mem::swap(&mut self.dynamic_current, &mut self.dynamic_previous);
+        }
 
-        std::mem::swap(&mut self.current, &mut self.previous);
         Ok(())
     }
 }
@@ -386,8 +442,8 @@ fn install_panic_hook() {
 mod tests {
     use super::{restore_bytes, ApcScene};
     use stoatty_protocol::command::{
-        self, encode_border, encode_line_layout, encode_reset, BorderCommand, BorderStyle,
-        LineLayoutCommand,
+        self, encode_border, encode_line_layout, encode_reset, encode_scroll_region, BorderCommand,
+        BorderStyle, LineLayoutCommand, ScrollRegionCommand,
     };
 
     fn border() -> BorderCommand {
@@ -398,6 +454,16 @@ mod tests {
             height: 4,
             style: BorderStyle::Light,
             color: [1, 2, 3],
+        }
+    }
+
+    fn region() -> ScrollRegionCommand {
+        ScrollRegionCommand {
+            top: 1,
+            left: 0,
+            width: 20,
+            height: 10,
+            offset: 4,
         }
     }
 
@@ -415,7 +481,7 @@ mod tests {
     }
 
     /// Widgets branch on liveness themselves, but one that forgets to must not
-    /// be able to put half a frame on the wire.
+    /// be able to put half a frame on the wire. Both lanes swallow alike.
     #[test]
     fn a_dead_scene_swallows_what_is_pushed_into_it() {
         let mut scene = ApcScene::new();
@@ -423,6 +489,7 @@ mod tests {
 
         command::encode_border_into(scene.buffer(), &border());
         scene.set_line_layout(&[1, 2, 3]);
+        command::encode_scroll_region_into(scene.dynamic_buffer(), &region());
 
         assert!(!scene.live(), "and reports itself dead to the widgets");
         assert!(scene.bytes().is_empty(), "nothing reached the scene");
@@ -435,14 +502,75 @@ mod tests {
     fn flush_skips_an_unchanged_scene() {
         let mut scene = ApcScene::new();
         command::encode_border_into(scene.buffer(), &border());
+        command::encode_scroll_region_into(scene.dynamic_buffer(), &region());
         scene.flush_to(&mut Vec::new()).expect("vec write");
 
         scene.clear();
         command::encode_border_into(scene.buffer(), &border());
+        command::encode_scroll_region_into(scene.dynamic_buffer(), &region());
         let mut out = Vec::new();
         scene.flush_to(&mut out).expect("vec write");
 
         assert!(out.is_empty(), "an unchanged scene emits nothing");
+    }
+
+    /// The whole point of the second lane. A reset in front of a `scroll_region`
+    /// drops the region the terminal eases, so a lane-only change must reach the
+    /// wire bare.
+    #[test]
+    fn a_dynamic_change_flushes_without_a_reset() {
+        let mut scene = ApcScene::new();
+        command::encode_border_into(scene.buffer(), &border());
+        command::encode_scroll_region_into(scene.dynamic_buffer(), &region());
+        scene.flush_to(&mut Vec::new()).expect("vec write");
+
+        scene.clear();
+        command::encode_border_into(scene.buffer(), &border());
+        let scrolled = ScrollRegionCommand {
+            offset: 12,
+            ..region()
+        };
+        command::encode_scroll_region_into(scene.dynamic_buffer(), &scrolled);
+        let mut out = Vec::new();
+        scene.flush_to(&mut out).expect("vec write");
+
+        assert_eq!(out, encode_scroll_region(&scrolled));
+    }
+
+    /// A reset clears the region too, and the dynamic lane holds the same bytes
+    /// as last frame, so nothing but this re-send puts the region back.
+    #[test]
+    fn a_decoration_change_re_sends_the_dynamic_lane() {
+        let mut scene = ApcScene::new();
+        command::encode_border_into(scene.buffer(), &border());
+        command::encode_scroll_region_into(scene.dynamic_buffer(), &region());
+        scene.flush_to(&mut Vec::new()).expect("vec write");
+
+        scene.clear();
+        let moved = BorderCommand { top: 7, ..border() };
+        command::encode_border_into(scene.buffer(), &moved);
+        command::encode_scroll_region_into(scene.dynamic_buffer(), &region());
+        let mut out = Vec::new();
+        scene.flush_to(&mut out).expect("vec write");
+
+        let mut expected = encode_reset();
+        expected.extend(encode_border(&moved));
+        expected.extend(encode_scroll_region(&region()));
+        assert_eq!(out, expected, "and the region lands after the reset");
+    }
+
+    #[test]
+    fn clear_empties_both_lanes() {
+        let mut scene = ApcScene::new();
+        command::encode_border_into(scene.buffer(), &border());
+        command::encode_scroll_region_into(scene.dynamic_buffer(), &region());
+
+        scene.clear();
+        let mut out = Vec::new();
+        scene.flush_to(&mut out).expect("vec write");
+
+        assert!(scene.bytes().is_empty(), "the decoration lane is empty");
+        assert!(out.is_empty(), "and so is the dynamic one");
     }
 
     #[test]

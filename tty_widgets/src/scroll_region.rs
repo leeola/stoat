@@ -5,10 +5,16 @@ use stoatty_protocol::command::{self, ScrollRegionCommand};
 /// Declare the render area as a scrollable sub-rectangle of the grid.
 ///
 /// Emits a `scroll_region` APC frame reporting the region's current scroll
-/// position in rows; a stoatty terminal eases the region's content as the offset
+/// position in rows. A stoatty terminal eases the region's content as the offset
 /// changes between frames, so the program reports an absolute position and the
-/// terminal owns the animation. There is no cell fallback: in any other terminal
+/// terminal owns the animation. There is no cell fallback. In any other terminal
 /// the content scrolls ordinarily, which the frame degrades to.
+///
+/// This is the one widget in the kit that emits into
+/// [`ApcScene::dynamic_buffer`] rather than the decoration lane. The ease is
+/// seeded by the change between declarations, so a reset in front of the frame
+/// drops the region and makes the next declaration glide the whole way in from
+/// nothing.
 pub struct ScrollRegion {
     /// Current scroll position of the region, in rows.
     pub offset: u16,
@@ -19,7 +25,7 @@ impl StatefulWidget for ScrollRegion {
 
     fn render(self, area: Rect, _buf: &mut Buffer, scene: &mut ApcScene) {
         command::encode_scroll_region_into(
-            scene.buffer(),
+            scene.dynamic_buffer(),
             &ScrollRegionCommand {
                 top: area.y,
                 left: area.x,
@@ -53,7 +59,14 @@ mod tests {
             height: 20,
             offset: 5,
         });
-        assert_eq!(scene.buffer().as_slice(), expected.as_slice());
+        assert!(
+            scene.bytes().is_empty(),
+            "the frame skips the decoration lane"
+        );
+
+        let mut out = Vec::new();
+        scene.flush_to(&mut out).expect("vec write");
+        assert_eq!(out, expected, "and flushes with no reset in front of it");
     }
 
     #[test]
