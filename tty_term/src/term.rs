@@ -1337,7 +1337,10 @@ impl Terminal {
                 // one the pages were built for.
                 let region = self.clamp_region(region);
                 let window = region.window;
-                match self.pools.get_mut(&region.pool) {
+                // Whether the declare left the pool's pages newly built or
+                // rebuilt, so a page painting into them lost the slot it started
+                // on. A re-declare at the size already held moves nothing.
+                let pages_replaced = match self.pools.get_mut(&region.pool) {
                     Some(pool) => {
                         let resized = pool.region.width != region.width
                             || pool.region.height != region.height;
@@ -1348,6 +1351,7 @@ impl Terminal {
                                 region.width.max(1) as usize,
                             );
                         }
+                        resized
                     },
                     None => {
                         if self.pools.len() >= MAX_POOLS {
@@ -1355,7 +1359,19 @@ impl Terminal {
                             return;
                         }
                         self.pools.insert(region.pool, Pool::new(region));
+                        true
                     },
+                };
+
+                // The open page was built for geometry this declare just moved,
+                // so it no longer describes the slot it would land on. Doomed
+                // rather than closed, since closing it would route the rest of
+                // the page to the live parser and paint it on the screen.
+                if pages_replaced
+                    && let Some(fill) = &mut self.fill
+                    && fill.pool == region.pool
+                {
+                    fill.discard = true;
                 }
                 self.mark_window_dirty(window);
             },
@@ -5365,6 +5381,76 @@ mod tests {
             row_text.trim_end(),
             "",
             "page bytes after the drop never reach the live screen"
+        );
+    }
+
+    /// Whether pool `id`'s page `index` holds a committed page.
+    fn page_committed(terminal: &Terminal, id: u32, index: u64) -> bool {
+        terminal.pools[&id]
+            .page_pool
+            .page_decorations(index)
+            .is_some()
+    }
+
+    /// The re-declare rebuilds the pool's pages, so the context still painting
+    /// at the old geometry describes a slot that no longer exists.
+    #[test]
+    fn a_region_redeclare_mid_fill_leaves_the_page_uncommitted() {
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        declare_pool(&mut terminal, 1, 4, 8);
+
+        terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 0 }));
+        terminal.advance(b"page");
+        declare_pool(&mut terminal, 1, 6, 8);
+        terminal.advance(&encode_fill_end());
+
+        assert!(
+            !page_committed(&terminal, 1, 0),
+            "the page painted for the old region is discarded"
+        );
+    }
+
+    /// A fill naming a pool that does not exist yet paints into a viewport-sized
+    /// fallback that was never meant to land, which only stayed discarded while
+    /// the pool lookup at commit failed.
+    #[test]
+    fn declaring_a_pool_mid_fill_leaves_the_page_uncommitted() {
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+
+        terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 0 }));
+        terminal.advance(b"page");
+        declare_pool(&mut terminal, 1, 4, 8);
+        terminal.advance(&encode_fill_end());
+
+        assert!(
+            !page_committed(&terminal, 1, 0),
+            "the fallback page is discarded rather than landing on the new pool"
+        );
+    }
+
+    /// An app re-declares a region routinely, so a declare that moves nothing
+    /// must not cost the page being painted.
+    #[test]
+    fn a_region_redeclare_at_the_same_size_still_commits_the_page() {
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        declare_pool(&mut terminal, 1, 4, 8);
+
+        terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 0 }));
+        terminal.advance(b"page");
+        declare_pool(&mut terminal, 1, 4, 8);
+        terminal.advance(&encode_fill_end());
+
+        assert!(
+            page_committed(&terminal, 1, 0),
+            "an unchanged re-declare rebuilds nothing, so the page still lands"
+        );
+        assert_eq!(
+            (
+                pool_page(&terminal, 1, 0).get(0, 0).ch,
+                pool_page(&terminal, 1, 0).get(0, 1).ch
+            ),
+            ('p', 'a'),
+            "and it carries the content painted before the declare"
         );
     }
 
