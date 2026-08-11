@@ -1453,7 +1453,7 @@ pub fn encode_hello_into(out: &mut Vec<u8>, command: &HelloCommand) {
 }
 
 fn decode_zoom_capture(args: &[Vec<u8>]) -> Option<Command> {
-    let [on] = args else {
+    let [on, ..] = args else {
         return None;
     };
     match on.as_slice() {
@@ -1464,7 +1464,7 @@ fn decode_zoom_capture(args: &[Vec<u8>]) -> Option<Command> {
 }
 
 fn decode_font_step(args: &[Vec<u8>]) -> Option<Command> {
-    let [delta] = args else {
+    let [delta, ..] = args else {
         return None;
     };
     Some(Command::FontStep {
@@ -1473,7 +1473,7 @@ fn decode_font_step(args: &[Vec<u8>]) -> Option<Command> {
 }
 
 fn decode_hello(args: &[Vec<u8>]) -> Option<HelloCommand> {
-    let [pid, log_id, hostname, version] = args else {
+    let [pid, log_id, hostname, version, ..] = args else {
         return None;
     };
     Some(HelloCommand {
@@ -1513,7 +1513,7 @@ pub fn decode_ident_reply(frame: &Frame) -> Option<IdentReply> {
     if frame.sub != "ident" {
         return None;
     }
-    let [pid, log_id, hostname, version] = frame.args.as_slice() else {
+    let [pid, log_id, hostname, version, ..] = frame.args.as_slice() else {
         return None;
     };
     Some(IdentReply {
@@ -1622,14 +1622,14 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
 }
 
 fn decode_border(args: &[Vec<u8>]) -> Option<BorderCommand> {
-    let arg: &[u8; 12] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 12] = args.first()?.get(..12)?.try_into().ok()?;
 
     Some(BorderCommand {
         top: u16::from_be_bytes([arg[0], arg[1]]),
         left: u16::from_be_bytes([arg[2], arg[3]]),
         width: u16::from_be_bytes([arg[4], arg[5]]),
         height: u16::from_be_bytes([arg[6], arg[7]]),
-        style: decode_style(arg[8])?,
+        style: decode_style(arg[8]),
         color: [arg[9], arg[10], arg[11]],
     })
 }
@@ -1645,7 +1645,7 @@ fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
         left: u16::from_be_bytes([arg[2], arg[3]]),
         width: u16::from_be_bytes([arg[4], arg[5]]),
         height: u16::from_be_bytes([arg[6], arg[7]]),
-        style: decode_style(arg[8])?,
+        style: decode_style(arg[8]),
         border: [arg[9], arg[10], arg[11]],
         corner_radius: arg[12],
         fill: (arg[13] != 0).then_some([arg[14], arg[15], arg[16]]),
@@ -1656,7 +1656,7 @@ fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
 }
 
 fn decode_scale(args: &[Vec<u8>]) -> Option<ScaleCommand> {
-    let arg: &[u8; 5] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 5] = args.first()?.get(..5)?.try_into().ok()?;
 
     Some(ScaleCommand {
         top: u16::from_be_bytes([arg[0], arg[1]]),
@@ -1669,7 +1669,7 @@ fn decode_scale(args: &[Vec<u8>]) -> Option<ScaleCommand> {
 /// bytes after this frame and is captured by the terminal between the open
 /// marker and [`Command::PopoverEnd`], so it is empty here.
 fn decode_popover(args: &[Vec<u8>]) -> Option<PopoverCommand> {
-    let region: &[u8; 23] = args.first()?.as_slice().try_into().ok()?;
+    let region: &[u8; 23] = args.first()?.get(..23)?.try_into().ok()?;
 
     Some(PopoverCommand {
         top: u16::from_be_bytes([region[0], region[1]]),
@@ -1690,7 +1690,7 @@ fn decode_popover(args: &[Vec<u8>]) -> Option<PopoverCommand> {
 }
 
 fn decode_scroll_region(args: &[Vec<u8>]) -> Option<ScrollRegionCommand> {
-    let arg: &[u8; 10] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 10] = args.first()?.get(..10)?.try_into().ok()?;
 
     Some(ScrollRegionCommand {
         top: u16::from_be_bytes([arg[0], arg[1]]),
@@ -1702,7 +1702,7 @@ fn decode_scroll_region(args: &[Vec<u8>]) -> Option<ScrollRegionCommand> {
 }
 
 fn decode_pool_region(args: &[Vec<u8>]) -> Option<PoolRegionCommand> {
-    let arg: &[u8; 16] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 16] = args.first()?.get(..16)?.try_into().ok()?;
 
     Some(PoolRegionCommand {
         pool: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
@@ -1715,10 +1715,10 @@ fn decode_pool_region(args: &[Vec<u8>]) -> Option<PoolRegionCommand> {
 }
 
 fn decode_window_open(args: &[Vec<u8>]) -> Option<WindowOpenCommand> {
-    let [head, title] = args else {
+    let [head, title, ..] = args else {
         return None;
     };
-    let head: &[u8; 8] = head.as_slice().try_into().ok()?;
+    let head: &[u8; 8] = head.get(..8)?.try_into().ok()?;
 
     Some(WindowOpenCommand {
         window: u32::from_be_bytes([head[0], head[1], head[2], head[3]]),
@@ -1729,14 +1729,14 @@ fn decode_window_open(args: &[Vec<u8>]) -> Option<WindowOpenCommand> {
 }
 
 fn decode_window_close(args: &[Vec<u8>]) -> Option<WindowCloseCommand> {
-    let arg: &[u8; 4] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 4] = args.first()?.get(..4)?.try_into().ok()?;
     Some(WindowCloseCommand {
         window: u32::from_be_bytes(*arg),
     })
 }
 
 fn decode_window_focus(args: &[Vec<u8>]) -> Option<WindowFocusCommand> {
-    let arg: &[u8; 4] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 4] = args.first()?.get(..4)?.try_into().ok()?;
     Some(WindowFocusCommand {
         window: u32::from_be_bytes(*arg),
     })
@@ -1761,7 +1761,7 @@ fn decode_icon(args: &[Vec<u8>]) -> Option<IconCommand> {
     Some(IconCommand {
         top: u16::from_be_bytes([arg[0], arg[1]]),
         left: u16::from_be_bytes([arg[2], arg[3]]),
-        kind: decode_icon_kind(arg[4])?,
+        kind: decode_icon_kind(arg[4]),
         color: [arg[5], arg[6], arg[7]],
         size: arg[8],
         offset,
@@ -1796,7 +1796,7 @@ fn decode_text_run(args: &[Vec<u8>]) -> Option<TextRunCommand> {
 }
 
 fn decode_bar(args: &[Vec<u8>]) -> Option<BarCommand> {
-    let arg: &[u8; 11] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 11] = args.first()?.get(..11)?.try_into().ok()?;
 
     Some(BarCommand {
         x: i16::from_be_bytes([arg[0], arg[1]]),
@@ -1848,7 +1848,7 @@ fn decode_line_layout(args: &[Vec<u8>]) -> Option<LineLayoutCommand> {
 }
 
 fn decode_fill(args: &[Vec<u8>]) -> Option<FillCommand> {
-    let arg: &[u8; 12] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 12] = args.first()?.get(..12)?.try_into().ok()?;
 
     Some(FillCommand {
         pool: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
@@ -1859,7 +1859,7 @@ fn decode_fill(args: &[Vec<u8>]) -> Option<FillCommand> {
 }
 
 fn decode_scroll(args: &[Vec<u8>]) -> Option<ScrollCommand> {
-    let arg: &[u8; 14] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 14] = args.first()?.get(..14)?.try_into().ok()?;
 
     Some(ScrollCommand {
         pool: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
@@ -1871,7 +1871,7 @@ fn decode_scroll(args: &[Vec<u8>]) -> Option<ScrollCommand> {
 }
 
 fn decode_pool_cursor(args: &[Vec<u8>]) -> Option<PoolCursorCommand> {
-    let arg: &[u8; 14] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 14] = args.first()?.get(..14)?.try_into().ok()?;
 
     Some(PoolCursorCommand {
         pool: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
@@ -1883,7 +1883,7 @@ fn decode_pool_cursor(args: &[Vec<u8>]) -> Option<PoolCursorCommand> {
 }
 
 fn decode_reposition(args: &[Vec<u8>]) -> Option<RepositionCommand> {
-    let arg: &[u8; 12] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 12] = args.first()?.get(..12)?.try_into().ok()?;
 
     Some(RepositionCommand {
         pool: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
@@ -1894,7 +1894,7 @@ fn decode_reposition(args: &[Vec<u8>]) -> Option<RepositionCommand> {
 }
 
 fn decode_pool_drop(args: &[Vec<u8>]) -> Option<PoolDropCommand> {
-    let arg: &[u8; 4] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 4] = args.first()?.get(..4)?.try_into().ok()?;
 
     Some(PoolDropCommand {
         pool: u32::from_be_bytes(*arg),
@@ -1902,7 +1902,7 @@ fn decode_pool_drop(args: &[Vec<u8>]) -> Option<PoolDropCommand> {
 }
 
 fn decode_minimap(args: &[Vec<u8>]) -> Option<MinimapCommand> {
-    let head: &[u8; 29] = args.first()?.as_slice().try_into().ok()?;
+    let head: &[u8; 29] = args.first()?.get(..29)?.try_into().ok()?;
     let palette_bytes = args.get(1)?;
     if palette_bytes.len() % 3 != 0 || palette_bytes.len() / 3 > 64 {
         return None;
@@ -1971,7 +1971,7 @@ fn decode_minimap_lines(args: &[Vec<u8>]) -> Option<MinimapLinesCommand> {
 }
 
 fn decode_minimap_view(args: &[Vec<u8>]) -> Option<MinimapViewCommand> {
-    let arg: &[u8; 10] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 10] = args.first()?.get(..10)?.try_into().ok()?;
 
     Some(MinimapViewCommand {
         strip_id: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
@@ -1981,20 +1981,22 @@ fn decode_minimap_view(args: &[Vec<u8>]) -> Option<MinimapViewCommand> {
 }
 
 fn decode_minimap_drop(args: &[Vec<u8>]) -> Option<MinimapDropCommand> {
-    let arg: &[u8; 4] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 4] = args.first()?.get(..4)?.try_into().ok()?;
 
     Some(MinimapDropCommand {
         content_id: u32::from_be_bytes(*arg),
     })
 }
 
-fn decode_style(code: u8) -> Option<BorderStyle> {
+/// An unknown code falls back to `Light` rather than killing the command, so a
+/// style added later draws in the plainest form an older terminal has instead of
+/// making the whole border vanish.
+fn decode_style(code: u8) -> BorderStyle {
     match code {
-        0 => Some(BorderStyle::Light),
-        1 => Some(BorderStyle::Heavy),
-        2 => Some(BorderStyle::Double),
-        3 => Some(BorderStyle::Rounded),
-        _ => None,
+        1 => BorderStyle::Heavy,
+        2 => BorderStyle::Double,
+        3 => BorderStyle::Rounded,
+        _ => BorderStyle::Light,
     }
 }
 
@@ -2027,12 +2029,14 @@ fn decode_shadow(code: u8) -> PanelShadow {
     }
 }
 
-fn decode_icon_kind(code: u8) -> Option<IconKind> {
+/// An unknown code falls back to `Info` rather than killing the command, so a
+/// kind added later still marks its line, at the mildest severity an older
+/// terminal knows, instead of leaving nothing there.
+fn decode_icon_kind(code: u8) -> IconKind {
     match code {
-        0 => Some(IconKind::Error),
-        1 => Some(IconKind::Warning),
-        2 => Some(IconKind::Info),
-        _ => None,
+        0 => IconKind::Error,
+        1 => IconKind::Warning,
+        _ => IconKind::Info,
     }
 }
 
@@ -2122,6 +2126,265 @@ mod tests {
             decode(&encode_border(&command)),
             Some(Command::Border(command))
         );
+    }
+
+    /// The frame an encoder emits today with bytes appended to its head
+    /// argument, the shape a later version's added field arrives in.
+    fn with_grown_head(encoded: &[u8]) -> Vec<u8> {
+        let mut frame = crate::frame::decode(encoded).expect("the encoder emits a valid frame");
+        frame
+            .args
+            .first_mut()
+            .expect("a head argument")
+            .extend_from_slice(&[0xab, 0xcd]);
+        crate::frame::encode(&frame)
+    }
+
+    /// The frame with one argument more than it carries today, the shape a later
+    /// version arrives in when it appends a whole field rather than widening the
+    /// head.
+    fn with_extra_arg(encoded: &[u8]) -> Vec<u8> {
+        let mut frame = crate::frame::decode(encoded).expect("the encoder emits a valid frame");
+        frame.args.push(b"later".to_vec());
+        crate::frame::encode(&frame)
+    }
+
+    /// Just the opening frame of a streamed command's encoding, which is the
+    /// only part a whole-frame decode can read.
+    fn open_marker(encoded: &[u8]) -> Vec<u8> {
+        let end = crate::frame::first_frame_end(encoded).expect("the encoding opens with a frame");
+        encoded[..end].to_vec()
+    }
+
+    /// One command per fixed-head family, enough to encode and grow.
+    fn fixed_head_samples() -> Vec<(&'static str, Vec<u8>)> {
+        vec![
+            (
+                "border",
+                encode_border(&BorderCommand {
+                    top: 1,
+                    left: 2,
+                    width: 3,
+                    height: 4,
+                    style: BorderStyle::Heavy,
+                    color: [5, 6, 7],
+                }),
+            ),
+            (
+                "scale",
+                encode_scale(&ScaleCommand {
+                    top: 1,
+                    left: 2,
+                    scale: 3,
+                }),
+            ),
+            (
+                "scroll_region",
+                encode_scroll_region(&ScrollRegionCommand {
+                    top: 1,
+                    left: 2,
+                    width: 3,
+                    height: 4,
+                    offset: 5,
+                }),
+            ),
+            (
+                "pool_region",
+                encode_pool_region(&PoolRegionCommand {
+                    pool: 1,
+                    top: 2,
+                    left: 3,
+                    width: 4,
+                    height: 5,
+                    window: 6,
+                }),
+            ),
+            (
+                "window_close",
+                encode_window_close(&WindowCloseCommand { window: 1 }),
+            ),
+            (
+                "window_focus",
+                encode_window_focus(&WindowFocusCommand { window: 1 }),
+            ),
+            (
+                "bar",
+                encode_bar(&BarCommand {
+                    x: 1,
+                    y: 2,
+                    width: 3,
+                    height: 4,
+                    color: [5, 6, 7],
+                }),
+            ),
+            ("fill", encode_fill(&FillCommand { pool: 1, index: 2 })),
+            (
+                "scroll",
+                encode_scroll(&ScrollCommand {
+                    pool: 1,
+                    page: 2,
+                    fraction: 3,
+                }),
+            ),
+            (
+                "pool_cursor",
+                encode_pool_cursor(&PoolCursorCommand {
+                    pool: 1,
+                    row: 2,
+                    col: 3,
+                }),
+            ),
+            (
+                "reposition",
+                encode_reposition(&RepositionCommand { pool: 1, page: 2 }),
+            ),
+            ("pool_drop", encode_pool_drop(&PoolDropCommand { pool: 1 })),
+            (
+                "minimap_view",
+                encode_minimap_view(&MinimapViewCommand {
+                    strip_id: 1,
+                    top_256: 2,
+                    visible_lines: 3,
+                }),
+            ),
+            (
+                "minimap_drop",
+                encode_minimap_drop(&MinimapDropCommand { content_id: 1 }),
+            ),
+            // A popover's encoding is an open marker, its streamed content, and
+            // a close marker, so only the opening frame is a decodable one.
+            (
+                "popover",
+                open_marker(&encode_popover(&PopoverCommand {
+                    top: 1,
+                    left: 2,
+                    width: 3,
+                    height: 4,
+                    fill: [5, 6, 7],
+                    border: [8, 9, 10],
+                    content_fg: [11, 12, 13],
+                    scale: 1,
+                    offset: [0, 0],
+                    bold: false,
+                    content: String::new(),
+                })),
+            ),
+            (
+                "minimap",
+                encode_minimap(&MinimapCommand {
+                    top: 1,
+                    left: 2,
+                    width: 3,
+                    height: 4,
+                    strip_id: 5,
+                    content_id: 6,
+                    lines_per_cell: 7,
+                    max_columns: 8,
+                    bg: [9, 10, 11, 12],
+                    thumb: [13, 14, 15, 16],
+                    thumb_border: [17, 18, 19],
+                    palette: vec![[20, 21, 22]],
+                }),
+            ),
+        ]
+    }
+
+    /// A field appended to a command's head must not make an older terminal drop
+    /// the whole frame. Tolerance is only useful if it ships before the field,
+    /// so this pins it now rather than when the first one grows.
+    #[test]
+    fn fixed_head_decoders_tolerate_a_later_versions_appended_field() {
+        for (name, encoded) in fixed_head_samples() {
+            let plain = decode(&encoded);
+            assert!(plain.is_some(), "{name} decodes as emitted today");
+            assert_eq!(
+                decode(&with_grown_head(&encoded)),
+                plain,
+                "{name} reads the same command with bytes appended to its head"
+            );
+        }
+    }
+
+    /// The same guarantee for the commands that count arguments rather than
+    /// measure a head, where a later version appends a whole argument.
+    #[test]
+    fn arg_counted_decoders_tolerate_a_later_versions_extra_argument() {
+        let samples = [
+            ("zoom_capture", encode_zoom_capture(true)),
+            ("font_step", encode_font_step(-2)),
+            (
+                "window_open",
+                encode_window_open(&WindowOpenCommand {
+                    window: 1,
+                    cols: 2,
+                    rows: 3,
+                    title: "t".to_owned(),
+                }),
+            ),
+            (
+                "hello",
+                encode_hello(&HelloCommand {
+                    pid: 1,
+                    log_id: "l".to_owned(),
+                    hostname: "h".to_owned(),
+                    version: "v".to_owned(),
+                }),
+            ),
+        ];
+
+        for (name, encoded) in samples {
+            let plain = decode(&encoded);
+            assert!(plain.is_some(), "{name} decodes as emitted today");
+            assert_eq!(
+                decode(&with_extra_arg(&encoded)),
+                plain,
+                "{name} reads the same command with an argument appended"
+            );
+        }
+    }
+
+    /// A code added to either enum later must degrade to a member an older
+    /// terminal knows rather than taking the whole command down with it.
+    #[test]
+    fn unknown_enum_codes_fall_back_instead_of_dropping_the_command() {
+        assert_eq!(super::decode_style(9), BorderStyle::Light);
+        assert_eq!(super::decode_icon_kind(9), IconKind::Info);
+
+        let mut border = encode_border(&BorderCommand {
+            top: 1,
+            left: 2,
+            width: 3,
+            height: 4,
+            style: BorderStyle::Heavy,
+            color: [5, 6, 7],
+        });
+        // The style byte sits at offset 8 of the head, so rewrite it through the
+        // frame rather than guessing where base64 put it.
+        let mut frame = crate::frame::decode(&border).expect("a valid frame");
+        frame.args[0][8] = 9;
+        border = crate::frame::encode(&frame);
+
+        assert!(
+            matches!(decode(&border), Some(Command::Border(command)) if command.style == BorderStyle::Light),
+            "an unknown style still draws a border"
+        );
+    }
+
+    /// The ident reply travels terminal-to-program and decodes through its own
+    /// entry point, so it needs the same tolerance proven separately.
+    #[test]
+    fn ident_reply_tolerates_a_later_versions_extra_argument() {
+        let reply = IdentReply {
+            pid: 1,
+            log_id: "l".to_owned(),
+            hostname: "h".to_owned(),
+            version: "v".to_owned(),
+        };
+        let encoded = encode_ident_reply(&reply);
+        let mut frame = crate::frame::decode(&encoded).expect("the encoder emits a valid frame");
+        frame.args.push(b"later".to_vec());
+
+        assert_eq!(decode_ident_reply(&frame), Some(reply));
     }
 
     #[test]
