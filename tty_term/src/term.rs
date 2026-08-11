@@ -90,6 +90,15 @@ const MAX_REGION_VIEWPORTS: usize = 2;
 /// oversized run for a session that keeps rendering.
 const MAX_CAPTURE_BYTES: usize = 1 << 20;
 
+/// Entries one decoration list may hold between resets.
+///
+/// Only `Gstoatty;reset` empties these lists, so an emitter that re-stamps its
+/// scene without ever sending one grows them without limit, and every
+/// projection re-walks the whole list on the way to running out of memory. A
+/// real scene stamps tens of decorations per frame, so the ceiling is far above
+/// anything a working emitter reaches.
+const MAX_DECORATIONS: usize = 4096;
+
 /// A minimap content-store change buffered for the next projection.
 ///
 /// The projection replays these against the grid's stores in arrival order. See
@@ -151,6 +160,13 @@ pub struct Terminal {
     /// the writer that overruns one capture is liable to overrun every
     /// following one.
     warned_capture_cap: bool,
+    /// Whether a decoration dropped at [`MAX_DECORATIONS`] has already been
+    /// reported.
+    ///
+    /// Once per session for the same reason as [`Self::warned_region_clamp`].
+    /// The emitter that fills one list is the one re-stamping every frame, so
+    /// it would otherwise log on every frame forever.
+    warned_decoration_cap: bool,
     /// Border regions set by `Gstoatty;border` frames, stamped onto the grid by
     /// [`Self::project`]. They persist until a `Gstoatty;reset` frame clears
     /// them, since the VT projection resets each cell's borders every frame.
@@ -443,6 +459,30 @@ struct ProjectedDecorations {
     minimap_views: HashMap<u32, MinimapView>,
     scroll_region: Option<ScrollRegionCommand>,
     line_layout: Option<LineLayoutCommand>,
+}
+
+/// Push `item` onto `list` unless it already holds [`MAX_DECORATIONS`],
+/// reporting the first refusal through `warned` and returning whether the push
+/// landed.
+///
+/// The newest is what gets dropped. A list at the cap is one an emitter is
+/// still stamping into, so the entries already there are the scene as it was
+/// last coherent, and keeping them beats replacing them with the tail of a
+/// flood.
+///
+/// A free function rather than a method so a caller can pass a list borrowed
+/// out of an open fill and the flag borrowed from the terminal in one call.
+fn push_capped<T>(list: &mut Vec<T>, item: T, warned: &mut bool) -> bool {
+    if list.len() >= MAX_DECORATIONS {
+        if !*warned {
+            *warned = true;
+            tracing::warn!(cap = MAX_DECORATIONS, "decoration list full, dropping");
+        }
+        return false;
+    }
+
+    list.push(item);
+    true
 }
 
 /// Clear `dirty` when `current` already matches `retained`, and take a copy
@@ -770,6 +810,7 @@ impl Terminal {
             esc: EscScanner::default(),
             warned_region_clamp: false,
             warned_capture_cap: false,
+            warned_decoration_cap: false,
             frames_scratch: Vec::new(),
             frame_scratch: FrameScratch::default(),
             borders: Vec::new(),
@@ -1210,13 +1251,21 @@ impl Terminal {
             // A page-targeted bar rides the open fill's slot at feed time. A live
             // bar accumulates onto the grid and stages like the other decorations.
             Command::Bar(bar) => match &mut self.fill {
-                Some(fill) => fill.bars.push(bar),
+                Some(fill) => {
+                    push_capped(&mut fill.bars, bar, &mut self.warned_decoration_cap);
+                },
                 None => self.stage_or_apply(Command::Bar(bar)),
             },
             // Stroked paths take the same fork as bars. They land on the open
             // fill's slot when one is capturing, and on the live grid otherwise.
             Command::Polyline(polyline) => match &mut self.fill {
-                Some(fill) => fill.polylines.push(polyline),
+                Some(fill) => {
+                    push_capped(
+                        &mut fill.polylines,
+                        polyline,
+                        &mut self.warned_decoration_cap,
+                    );
+                },
                 None => self.stage_or_apply(Command::Polyline(polyline)),
             },
             Command::PoolRegion(region) => {
@@ -1401,60 +1450,77 @@ impl Terminal {
     fn apply_decoration(&mut self, command: Command) {
         match command {
             Command::Border(border) => {
-                self.borders.push(border);
-                self.decorations_dirty.borders = true;
+                if push_capped(&mut self.borders, border, &mut self.warned_decoration_cap) {
+                    self.decorations_dirty.borders = true;
+                }
             },
             Command::Panel(panel) => {
-                self.panels.push(panel);
-                self.panel_seq.push(self.decoration_seq);
-                self.decoration_seq += 1;
-                self.decorations_dirty.panels = true;
+                if push_capped(&mut self.panels, panel, &mut self.warned_decoration_cap) {
+                    self.panel_seq.push(self.decoration_seq);
+                    self.decoration_seq += 1;
+                    self.decorations_dirty.panels = true;
+                }
             },
             Command::Scale(scale) => {
-                self.scales.push(scale);
-                self.decorations_dirty.scales = true;
+                if push_capped(&mut self.scales, scale, &mut self.warned_decoration_cap) {
+                    self.decorations_dirty.scales = true;
+                }
             },
             Command::ScrollRegion(region) => {
                 self.scroll_region = Some(region);
                 self.decorations_dirty.scroll_region = true;
             },
             Command::Icon(icon) => {
-                self.icons.push(icon);
-                self.icon_seq.push(self.decoration_seq);
-                self.decoration_seq += 1;
-                self.decorations_dirty.icons = true;
+                if push_capped(&mut self.icons, icon, &mut self.warned_decoration_cap) {
+                    self.icon_seq.push(self.decoration_seq);
+                    self.decoration_seq += 1;
+                    self.decorations_dirty.icons = true;
+                }
             },
             Command::LineLayout(layout) => {
                 self.line_layout = Some(layout);
                 self.decorations_dirty.line_layout = true;
             },
             Command::Bar(bar) => {
-                self.bars.push(bar);
-                self.bar_seq.push(self.decoration_seq);
-                self.decoration_seq += 1;
-                self.decorations_dirty.bars = true;
+                if push_capped(&mut self.bars, bar, &mut self.warned_decoration_cap) {
+                    self.bar_seq.push(self.decoration_seq);
+                    self.decoration_seq += 1;
+                    self.decorations_dirty.bars = true;
+                }
             },
             Command::Polyline(polyline) => {
-                self.polylines.push(polyline);
-                self.polyline_seq.push(self.decoration_seq);
-                self.decoration_seq += 1;
-                self.decorations_dirty.polylines = true;
+                if push_capped(
+                    &mut self.polylines,
+                    polyline,
+                    &mut self.warned_decoration_cap,
+                ) {
+                    self.polyline_seq.push(self.decoration_seq);
+                    self.decoration_seq += 1;
+                    self.decorations_dirty.polylines = true;
+                }
             },
             Command::Popover(popover) => {
-                self.popovers.push(popover);
-                self.decorations_dirty.popovers = true;
+                if push_capped(&mut self.popovers, popover, &mut self.warned_decoration_cap) {
+                    self.decorations_dirty.popovers = true;
+                }
             },
             Command::TextRun(text_run) => {
-                self.text_runs.push(text_run.into());
-                self.text_run_seq.push(self.decoration_seq);
-                self.decoration_seq += 1;
-                self.decorations_dirty.text_runs = true;
+                if push_capped(
+                    &mut self.text_runs,
+                    text_run.into(),
+                    &mut self.warned_decoration_cap,
+                ) {
+                    self.text_run_seq.push(self.decoration_seq);
+                    self.decoration_seq += 1;
+                    self.decorations_dirty.text_runs = true;
+                }
             },
             Command::Minimap(minimap) => {
-                self.minimaps.push(minimap);
-                self.minimap_seq.push(self.decoration_seq);
-                self.decoration_seq += 1;
-                self.decorations_dirty.minimaps = true;
+                if push_capped(&mut self.minimaps, minimap, &mut self.warned_decoration_cap) {
+                    self.minimap_seq.push(self.decoration_seq);
+                    self.decoration_seq += 1;
+                    self.decorations_dirty.minimaps = true;
+                }
             },
             Command::Reset => self.clear_decorations(),
             // None of these reach here. apply_command routes them at feed time:
@@ -1906,7 +1972,13 @@ impl Terminal {
             CaptureTarget::TextRun(mut command) => {
                 command.text = text;
                 match &mut self.fill {
-                    Some(fill) => fill.text_runs.push(command),
+                    Some(fill) => {
+                        push_capped(
+                            &mut fill.text_runs,
+                            command,
+                            &mut self.warned_decoration_cap,
+                        );
+                    },
                     None => self.stage_or_apply(Command::TextRun(command)),
                 }
             },
@@ -2627,7 +2699,7 @@ impl Dimensions for GridSize {
 mod tests {
     use super::{
         Arc, Cursor, CursorShape, Damage, TermEvent, Terminal, ESC, MAX_CAPTURE_BYTES,
-        XTVERSION_REPLY,
+        MAX_DECORATIONS, XTVERSION_REPLY,
     };
     use crate::{
         grid::{
@@ -4370,6 +4442,71 @@ mod tests {
             [grid.get(0, 0).ch, grid.get(0, 1).ch],
             ['o', 'k'],
             "output past the cap paints the live screen"
+        );
+    }
+
+    /// A bar frame per `x`, enough of them to run a decoration list past its
+    /// cap.
+    fn bar_frames(count: usize) -> Vec<u8> {
+        let mut stream = Vec::new();
+        for x in 0..count {
+            stream.extend_from_slice(&encode_bar(&BarCommand {
+                x: x as i16,
+                y: 0,
+                width: 1,
+                height: 1,
+                color: [1, 2, 3],
+            }));
+        }
+        stream
+    }
+
+    /// Only a reset empties a decoration list, so an emitter that re-stamps
+    /// without sending one would otherwise grow it until the session dies.
+    #[test]
+    fn live_decorations_past_the_cap_are_dropped_rather_than_grown() {
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&bar_frames(MAX_DECORATIONS + 16));
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.bars().len(),
+            MAX_DECORATIONS,
+            "the list stops growing at the cap"
+        );
+        assert_eq!(
+            terminal.bar_seq.len(),
+            terminal.bars.len(),
+            "a dropped bar skips its seq entry, so the pair stays aligned"
+        );
+        assert_eq!(
+            grid.bars()[0].x,
+            0,
+            "the newest is dropped, so the scene as first stamped survives"
+        );
+    }
+
+    /// Page decorations accumulate on the open fill rather than the live lists,
+    /// so they need the same ceiling.
+    #[test]
+    fn page_decorations_past_the_cap_are_dropped() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+
+        declare_pool(&mut terminal, 0, 2, 4);
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+        stream.extend_from_slice(&bar_frames(MAX_DECORATIONS + 16));
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        let (_runs, bars, _polylines) = terminal.pools[&0]
+            .page_pool
+            .page_decorations(0)
+            .expect("page buffered");
+        assert_eq!(
+            bars.len(),
+            MAX_DECORATIONS,
+            "the page's bar list stops growing at the cap"
         );
     }
 
