@@ -92,6 +92,18 @@ pub(crate) fn end(out: &mut Vec<u8>) {
     out.extend_from_slice(TERMINATOR);
 }
 
+/// How much of the [`MAX_APC_PAYLOAD`] budget a `frame_len`-byte frame spends.
+///
+/// The cap covers everything between the introducer and the terminator, so an
+/// encoder measuring what it just appended has to discount the wrapper. This
+/// owns that arithmetic, since the wrapper's size is this module's business.
+///
+/// Assumes the `ESC \` terminator [`end`] writes, not the `BEL` a decoder also
+/// accepts, so it answers for encoder output rather than arbitrary input.
+pub(crate) fn payload_len(frame_len: usize) -> usize {
+    frame_len.saturating_sub(INTRODUCER.len() + TERMINATOR.len())
+}
+
 /// Parse a stoatty frame, or `None` if `bytes` is not a well-formed one.
 ///
 /// Accepts either the full frame or the bare payload a VT parser yields after

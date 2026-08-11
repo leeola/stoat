@@ -828,6 +828,12 @@ pub fn encode_popover(command: &PopoverCommand) -> Vec<u8> {
 /// streams as the raw bytes between the two markers, so it is not bounded by the
 /// per-frame size cap. `content` is borrowed so an emitter can pass a slice of
 /// its own buffer rather than build an owned [`String`] per frame.
+///
+/// `content` must be plain text. Riding outside the APC wrapper is what frees
+/// it from the size cap and is also what makes it indistinguishable from
+/// terminal control bytes, so the terminal cuts the capture at the first `ESC`
+/// and keeps only what came before. An emitter that wants styled content sets
+/// the colors in the head fields rather than with escape sequences in the text.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_popover_into(
     out: &mut Vec<u8>,
@@ -1022,6 +1028,12 @@ pub fn encode_text_run(command: &TextRunCommand) -> Vec<u8> {
 /// per-frame size cap. `text` is borrowed so an emitter can pass a slice of a
 /// reused buffer (a gutter formats line numbers into a stack buffer) rather than
 /// build an owned [`String`] per frame.
+///
+/// `text` must be plain text. Riding outside the APC wrapper is what frees it
+/// from the size cap and is also what makes it indistinguishable from terminal
+/// control bytes, so the terminal cuts the capture at the first `ESC` and keeps
+/// only what came before. An emitter that wants a styled run sets `color` and
+/// `bg` rather than writing escape sequences into the text.
 pub fn encode_text_run_into(
     out: &mut Vec<u8>,
     col: i16,
@@ -1099,7 +1111,16 @@ pub fn encode_polyline(command: &PolylineCommand) -> Vec<u8> {
 /// come first, then each vertex as a pair of big-endian `i16`s. The points are
 /// streamed straight into the base64 sink rather than through an intermediate
 /// buffer.
+///
+/// One frame carries at most 12283 points. The terminal's scanner drops a
+/// payload past [`frame::MAX_APC_PAYLOAD`] whole rather than truncating it, so
+/// one point too many loses the whole path silently. Split a longer path into
+/// several polylines that repeat the vertex they meet at, which draws as one
+/// continuous stroke. Passing more panics in debug and emits a frame the
+/// terminal discards in release.
 pub fn encode_polyline_into(out: &mut Vec<u8>, command: &PolylineCommand) {
+    let start = out.len();
+
     frame::begin(out, "polyline");
     frame::push_arg(out, |w| {
         w.write_all(&command.width.to_be_bytes())?;
@@ -1111,6 +1132,13 @@ pub fn encode_polyline_into(out: &mut Vec<u8>, command: &PolylineCommand) {
         Ok(())
     });
     frame::end(out);
+
+    debug_assert!(
+        frame::payload_len(out.len() - start) <= frame::MAX_APC_PAYLOAD,
+        "a {}-point polyline overruns the frame cap; split it into paths that \
+         share the vertex they meet at",
+        command.points.len(),
+    );
 }
 
 /// Encode a [`LineLayoutCommand`] as a full `Gstoatty;line_layout` frame for an
@@ -1129,7 +1157,17 @@ pub fn encode_line_layout(command: &LineLayoutCommand) -> Vec<u8> {
 ///
 /// `heights` is borrowed and streamed as consecutive big-endian `u16`s straight
 /// into the base64 sink, so no intermediate byte buffer is built.
+///
+/// One frame carries at most 24567 heights. The terminal's scanner drops a
+/// payload past [`frame::MAX_APC_PAYLOAD`] whole rather than truncating it, so
+/// one height too many loses the entire layout with nothing on screen to say
+/// so. A layout is replaced whole and has no split form, unlike a `minimap_lines`
+/// splice, so an emitter with a longer surface has to send the window it
+/// declares rather than the whole document. Passing more panics in debug and
+/// emits a frame the terminal discards in release.
 pub fn encode_line_layout_into(out: &mut Vec<u8>, heights: &[u16]) {
+    let start = out.len();
+
     frame::begin(out, "line_layout");
     frame::push_arg(out, |w| {
         for height in heights {
@@ -1138,6 +1176,13 @@ pub fn encode_line_layout_into(out: &mut Vec<u8>, heights: &[u16]) {
         Ok(())
     });
     frame::end(out);
+
+    debug_assert!(
+        frame::payload_len(out.len() - start) <= frame::MAX_APC_PAYLOAD,
+        "a {}-height line_layout overruns the frame cap; declare the visible \
+         window instead, since a layout has no split form",
+        heights.len(),
+    );
 }
 
 /// Encode a [`FillCommand`] as a full `Gstoatty;fill` open-marker frame.
@@ -2148,7 +2193,7 @@ mod tests {
         PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
         TextRunCommand, WindowCloseCommand, WindowFocusCommand, WindowOpenCommand,
     };
-    use crate::frame::MAX_APC_PAYLOAD;
+    use crate::frame::{self, MAX_APC_PAYLOAD};
 
     #[test]
     fn border_round_trips() {
@@ -2191,7 +2236,7 @@ mod tests {
             version: "0.2.0".to_string(),
             protocol: crate::PROTOCOL_VERSION,
         };
-        let frame = crate::frame::decode(&encode_ident_reply(&reply)).expect("ident frame decodes");
+        let frame = frame::decode(&encode_ident_reply(&reply)).expect("ident frame decodes");
         assert_eq!(decode_ident_reply(&frame), Some(reply));
     }
 
@@ -2215,28 +2260,28 @@ mod tests {
     /// The frame an encoder emits today with bytes appended to its head
     /// argument, the shape a later version's added field arrives in.
     fn with_grown_head(encoded: &[u8]) -> Vec<u8> {
-        let mut frame = crate::frame::decode(encoded).expect("the encoder emits a valid frame");
+        let mut frame = frame::decode(encoded).expect("the encoder emits a valid frame");
         frame
             .args
             .first_mut()
             .expect("a head argument")
             .extend_from_slice(&[0xab, 0xcd]);
-        crate::frame::encode(&frame)
+        frame::encode(&frame)
     }
 
     /// The frame with one argument more than it carries today, the shape a later
     /// version arrives in when it appends a whole field rather than widening the
     /// head.
     fn with_extra_arg(encoded: &[u8]) -> Vec<u8> {
-        let mut frame = crate::frame::decode(encoded).expect("the encoder emits a valid frame");
+        let mut frame = frame::decode(encoded).expect("the encoder emits a valid frame");
         frame.args.push(b"later".to_vec());
-        crate::frame::encode(&frame)
+        frame::encode(&frame)
     }
 
     /// Just the opening frame of a streamed command's encoding, which is the
     /// only part a whole-frame decode can read.
     fn open_marker(encoded: &[u8]) -> Vec<u8> {
-        let end = crate::frame::first_frame_end(encoded).expect("the encoding opens with a frame");
+        let end = frame::first_frame_end(encoded).expect("the encoding opens with a frame");
         encoded[..end].to_vec()
     }
 
@@ -2442,19 +2487,19 @@ mod tests {
 
         // The frame a build predating the field emits, which is this one minus
         // its appended argument.
-        let mut frame = crate::frame::decode(&encode_hello(&hello)).expect("a valid frame");
+        let mut frame = frame::decode(&encode_hello(&hello)).expect("a valid frame");
         assert_eq!(frame.args.len(), 5, "the encoder appends the version");
         frame.args.pop();
 
         assert!(
             matches!(
-                decode(&crate::frame::encode(&frame)),
+                decode(&frame::encode(&frame)),
                 Some(Command::Hello(command)) if command.protocol == 0
             ),
             "an older program's hello still decodes, reporting no version"
         );
 
-        let mut reply = crate::frame::decode(&encode_ident_reply(&IdentReply {
+        let mut reply = frame::decode(&encode_ident_reply(&IdentReply {
             pid: 7,
             log_id: "l".to_owned(),
             hostname: "h".to_owned(),
@@ -2488,9 +2533,9 @@ mod tests {
         });
         // The style byte sits at offset 8 of the head, so rewrite it through the
         // frame rather than guessing where base64 put it.
-        let mut frame = crate::frame::decode(&border).expect("a valid frame");
+        let mut frame = frame::decode(&border).expect("a valid frame");
         frame.args[0][8] = 9;
-        border = crate::frame::encode(&frame);
+        border = frame::encode(&frame);
 
         assert!(
             matches!(decode(&border), Some(Command::Border(command)) if command.style == BorderStyle::Light),
@@ -2510,7 +2555,7 @@ mod tests {
             protocol: crate::PROTOCOL_VERSION,
         };
         let encoded = encode_ident_reply(&reply);
-        let mut frame = crate::frame::decode(&encoded).expect("the encoder emits a valid frame");
+        let mut frame = frame::decode(&encoded).expect("the encoder emits a valid frame");
         frame.args.push(b"later".to_vec());
 
         assert_eq!(decode_ident_reply(&frame), Some(reply));
@@ -3153,6 +3198,65 @@ mod tests {
         assert!(decode(b"Gstoatty;line_layout;YWJj").is_none());
     }
 
+    /// Heights a `line_layout` frame holds. The doc names this ceiling, so the
+    /// pair of tests below pins it from both sides.
+    const LINE_LAYOUT_CAP: usize = 24567;
+
+    /// Points a `polyline` frame holds, pinned the same way.
+    const POLYLINE_CAP: usize = 12283;
+
+    #[test]
+    fn a_line_layout_at_the_cap_round_trips() {
+        let command = LineLayoutCommand {
+            heights: vec![1; LINE_LAYOUT_CAP],
+        };
+        let encoded = encode_line_layout(&command);
+
+        assert!(
+            frame::payload_len(encoded.len()) <= MAX_APC_PAYLOAD,
+            "the frame at the documented ceiling fits the scanner's budget, got {}",
+            frame::payload_len(encoded.len()),
+        );
+        assert_eq!(decode(&encoded), Some(Command::LineLayout(command)));
+    }
+
+    /// One height past the ceiling. The terminal drops an over-cap payload
+    /// whole, so without this the layout vanishes with nothing to say why.
+    #[test]
+    #[should_panic(expected = "overruns the frame cap")]
+    fn a_line_layout_past_the_cap_panics_in_debug() {
+        encode_line_layout(&LineLayoutCommand {
+            heights: vec![1; LINE_LAYOUT_CAP + 1],
+        });
+    }
+
+    #[test]
+    fn a_polyline_at_the_cap_round_trips() {
+        let command = PolylineCommand {
+            width: 8,
+            color: [1, 2, 3],
+            points: vec![[4, 5]; POLYLINE_CAP],
+        };
+        let encoded = encode_polyline(&command);
+
+        assert!(
+            frame::payload_len(encoded.len()) <= MAX_APC_PAYLOAD,
+            "the frame at the documented ceiling fits the scanner's budget, got {}",
+            frame::payload_len(encoded.len()),
+        );
+        assert_eq!(decode(&encoded), Some(Command::Polyline(command)));
+    }
+
+    #[test]
+    #[should_panic(expected = "overruns the frame cap")]
+    fn a_polyline_past_the_cap_panics_in_debug() {
+        encode_polyline(&PolylineCommand {
+            width: 8,
+            color: [1, 2, 3],
+            points: vec![[4, 5]; POLYLINE_CAP + 1],
+        });
+    }
+
     #[test]
     fn fill_round_trips() {
         let command = FillCommand {
@@ -3288,7 +3392,7 @@ mod tests {
     /// Assemble a frame for `sub` from raw (pre-base64) argument bytes, for
     /// crafting the malformed payloads the rejection tests probe.
     fn frame_bytes(sub: &str, args: Vec<Vec<u8>>) -> Vec<u8> {
-        crate::frame::encode(&crate::frame::Frame {
+        frame::encode(&frame::Frame {
             sub: sub.to_string(),
             args,
         })
