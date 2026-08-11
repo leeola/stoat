@@ -18,7 +18,8 @@ use stoat::{
     walkthrough::{
         self,
         store::{self, StoreError},
-        AnnotationEdit, Location, MoveTarget, Point, Range, StopEdit, Walkthrough,
+        AnnotationEdit, Finding, FindingKind, Location, MoveTarget, Point, Range, StopEdit,
+        Walkthrough,
     },
 };
 
@@ -178,6 +179,16 @@ pub enum WalkthroughCommand {
         #[command(flatten)]
         workspace: WorkspaceArgs,
     },
+
+    /// Report every range whose file or captured bytes have moved on. Prints
+    /// nothing and exits 0 when every walkthrough still matches.
+    Check {
+        /// Check only this walkthrough. Omit to check them all.
+        slug: Option<String>,
+
+        #[command(flatten)]
+        workspace: WorkspaceArgs,
+    },
 }
 
 /// Which workspace a subcommand operates on.
@@ -247,6 +258,10 @@ pub enum RangeSpec {
 pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
     let fs = &LocalFs;
     let text = match sub {
+        WalkthroughCommand::Check { slug, workspace } => {
+            return report(check(fs, &workspace.resolve()?, slug.as_deref())?);
+        },
+
         WalkthroughCommand::New {
             slug,
             title,
@@ -713,6 +728,72 @@ fn remove_annotation(
     Ok(annotation.to_owned())
 }
 
+/// Every range in `root` that no longer reads what it captured, one line each.
+///
+/// Checks the walkthrough `slug` names, or all of them in slug order when it is
+/// `None`. An empty result means every stop still points at what it was written
+/// against.
+///
+/// A line reads `<slug>/<stop>[/<annotation>]: <kind>: <detail>`, where `error`
+/// means the file or the range is gone and `stale` means the range still reads
+/// but no longer reads the same bytes. The two are worth telling apart: an
+/// error needs the range re-pointed, while a stale finding often just needs the
+/// snippet re-captured.
+fn check(fs: &dyn FsHost, root: &Path, slug: Option<&str>) -> Result<Vec<String>, Whatever> {
+    let slugs = match slug {
+        Some(slug) => vec![slug.to_owned()],
+        None => store::list(fs, root)
+            .whatever_context(format!("list the walkthroughs in {}", root.display()))?
+            .into_iter()
+            .map(|summary| summary.slug)
+            .collect(),
+    };
+
+    let read = store::workspace_reader(fs, root);
+    let mut lines = Vec::new();
+    for slug in slugs {
+        let walkthrough = load(fs, root, &slug)?;
+        lines.extend(
+            walkthrough::validate(&walkthrough, &read)
+                .iter()
+                .map(|finding| finding_line(&slug, finding)),
+        );
+    }
+
+    Ok(lines)
+}
+
+/// One finding as the line `check` prints for it.
+fn finding_line(slug: &str, finding: &Finding) -> String {
+    let target = match &finding.annotation {
+        Some(annotation) => format!("{slug}/{}/{annotation}", finding.stop),
+        None => format!("{slug}/{}", finding.stop),
+    };
+    let kind = match finding.kind {
+        FindingKind::Error => "error",
+        FindingKind::Stale => "stale",
+    };
+    format!("{target}: {kind}: {}", finding.detail)
+}
+
+/// Print `findings` and fail when there are any.
+///
+/// The failure exists to make the exit status non-zero, which is what an agent
+/// gates on after editing code. It carries only a count, since `main` prints
+/// the error on the same stream as the findings, so restating them there prints
+/// every line twice.
+fn report(findings: Vec<String>) -> Result<(), Whatever> {
+    for line in &findings {
+        println!("{line}");
+    }
+
+    match findings.len() {
+        0 => Ok(()),
+        1 => whatever!("1 finding"),
+        count => whatever!("{count} findings"),
+    }
+}
+
 /// The location `range` of `file` names, with the bytes it covers right now.
 fn capture(fs: &dyn FsHost, root: &Path, file: &Path, range: &str) -> Result<Location, Whatever> {
     capture_resolved(fs, root, file, parse_range(range)?)
@@ -817,7 +898,7 @@ fn relative_path(root: &Path, slug: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_annotation, add_stop, delete, edit_annotation, edit_stop, list, move_stop, new,
+        add_annotation, add_stop, check, delete, edit_annotation, edit_stop, list, move_stop, new,
         parse_range, remove_annotation, remove_stop, show, MoveArgs, Point, Range, RangeSpec,
     };
     use git2::Repository;
@@ -1299,6 +1380,99 @@ mod tests {
     fn delete_needs_the_walkthrough_to_exist() {
         let dir = workspace();
         assert!(delete(&LocalFs, dir.path(), "missing").is_err());
+    }
+
+    #[test]
+    fn check_says_nothing_about_a_walkthrough_that_still_matches() {
+        let dir = workspace();
+        with_stop(&dir);
+        add_annotation(&LocalFs, dir.path(), "tour", "s1", "1", "l".to_owned())
+            .expect("add-annotation");
+
+        assert_eq!(check(&LocalFs, dir.path(), None).expect("check"), [""; 0]);
+    }
+
+    /// The whole point of capturing snippets. A range that still resolves but
+    /// covers different bytes is drift, and nothing else reports it.
+    #[test]
+    fn check_reports_an_edited_file_as_stale() {
+        let dir = workspace();
+        let file = with_stop(&dir);
+        std::fs::write(&file, "use std::io;\nfn MAIN() {\n").expect("rewrite");
+
+        let found = check(&LocalFs, dir.path(), None).expect("check");
+        assert_eq!(found.len(), 1, "got {found:?}");
+        assert!(
+            found[0].starts_with("tour/s1: stale: "),
+            "got {:?}",
+            found[0]
+        );
+        assert!(
+            found[0].contains("fn main() {") && found[0].contains("fn MAIN() {"),
+            "the line shows what was captured and what is there: {:?}",
+            found[0],
+        );
+    }
+
+    #[test]
+    fn check_reports_a_deleted_file_as_an_error() {
+        let dir = workspace();
+        let file = with_stop(&dir);
+        std::fs::remove_file(&file).expect("remove");
+
+        let found = check(&LocalFs, dir.path(), None).expect("check");
+        assert_eq!(found, ["tour/s1: error: cannot read main.rs"]);
+    }
+
+    #[test]
+    fn check_names_the_annotation_that_drifted() {
+        let dir = workspace();
+        let file = with_stop(&dir);
+        add_annotation(&LocalFs, dir.path(), "tour", "s1", "1", "l".to_owned())
+            .expect("add-annotation");
+        // Line 2 stays put, so only the annotation over line 1 drifts.
+        std::fs::write(&file, "USE STD::IO;\nfn main() {\n").expect("rewrite");
+
+        let found = check(&LocalFs, dir.path(), None).expect("check");
+        assert_eq!(found.len(), 1, "got {found:?}");
+        assert!(
+            found[0].starts_with("tour/s1/a1: stale: "),
+            "an annotation finding names it after its stop: {:?}",
+            found[0],
+        );
+    }
+
+    /// An agent checking one tour must not be failed by another one's drift.
+    #[test]
+    fn checking_one_slug_ignores_the_others() {
+        let dir = workspace();
+        let file = with_stop(&dir);
+        new(&LocalFs, dir.path(), "other", None).expect("new");
+        add_stop(
+            &LocalFs,
+            dir.path(),
+            "other",
+            &file,
+            "1",
+            None,
+            String::new(),
+            None,
+        )
+        .expect("add-stop");
+        std::fs::write(&file, "USE STD::IO;\nfn MAIN() {\n").expect("rewrite");
+
+        assert_eq!(
+            check(&LocalFs, dir.path(), Some("tour"))
+                .expect("check")
+                .len(),
+            1,
+            "only the named walkthrough is checked",
+        );
+        assert_eq!(
+            check(&LocalFs, dir.path(), None).expect("check").len(),
+            2,
+            "and a bare check covers both",
+        );
     }
 
     /// The slug rule belongs to the store, but a bad one has to surface as a
