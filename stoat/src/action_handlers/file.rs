@@ -1491,6 +1491,7 @@ mod tests {
     use stoat_action::{
         CloseBuffer, ForceSaveBuffer, MoveDown, OpenBuffer, OpenFile, SaveBuffer, WriteQuit,
     };
+    use stoatty_protocol::command;
 
     /// Open `name` (seeded with `seed`) under `root`, dirty the buffer with a
     /// leading insert, and return its absolute path. The open records the disk
@@ -2898,7 +2899,7 @@ mod tests {
         h: &mut TestHarness,
         path: &Path,
         stoatty_config: &Path,
-    ) -> Vec<stoatty_protocol::command::Command> {
+    ) -> Vec<command::Command> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
 
@@ -2908,7 +2909,7 @@ mod tests {
         while let Ok(batch) = rx.try_recv() {
             bytes.extend_from_slice(&batch);
         }
-        crate::test_harness::apc::decode_apc_stream(&bytes)
+        command::decode_stream(&bytes)
     }
 
     /// Dispatch `action` with an APC channel installed, and return every
@@ -2916,7 +2917,7 @@ mod tests {
     fn commands_from(
         h: &mut TestHarness,
         action: &dyn stoat_action::Action,
-    ) -> Vec<stoatty_protocol::command::Command> {
+    ) -> Vec<command::Command> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
 
@@ -2926,7 +2927,7 @@ mod tests {
         while let Ok(batch) = rx.try_recv() {
             bytes.extend_from_slice(&batch);
         }
-        crate::test_harness::apc::decode_apc_stream(&bytes)
+        command::decode_stream(&bytes)
     }
 
     #[test]
@@ -2978,7 +2979,7 @@ mod tests {
 
         assert_eq!(
             commands,
-            vec![stoatty_protocol::command::Command::ConfigReload],
+            vec![command::Command::ConfigReload],
             "exactly one reload reaches the terminal"
         );
         assert_eq!(

@@ -658,7 +658,7 @@ mod tests {
     };
     use crossterm::event::{MouseButton, MouseEventKind};
     use std::{collections::HashMap, path::PathBuf};
-    use stoatty_protocol::command::PolylineCommand;
+    use stoatty_protocol::command::{self, PolylineCommand};
 
     fn commit(sha: &str, summary: &str) -> CommitInfo {
         CommitInfo {
@@ -769,7 +769,7 @@ mod tests {
     fn node_discs(scene: &mut stoatty_widgets::ApcScene) -> Vec<(u16, [u8; 3])> {
         use stoatty_protocol::command::Command;
 
-        crate::test_harness::apc::decode_apc_stream(scene.buffer())
+        command::decode_stream(scene.buffer())
             .into_iter()
             .filter_map(|cmd| match cmd {
                 Command::Polyline(line) if line.points.len() == 1 => Some((line.width, line.color)),
@@ -784,7 +784,7 @@ mod tests {
     fn lane_transitions(scene: &mut stoatty_widgets::ApcScene) -> Vec<PolylineCommand> {
         use stoatty_protocol::command::Command;
 
-        crate::test_harness::apc::decode_apc_stream(scene.buffer())
+        command::decode_stream(scene.buffer())
             .into_iter()
             .filter_map(|cmd| match cmd {
                 Command::Polyline(line)
@@ -1474,10 +1474,10 @@ mod tests {
     /// Every APC command emitted since the last drain.
     fn drained_apc(
         rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
-    ) -> Vec<stoatty_protocol::command::Command> {
+    ) -> Vec<command::Command> {
         let mut cmds = Vec::new();
         while let Ok(batch) = rx.try_recv() {
-            cmds.extend(crate::test_harness::apc::decode_apc_stream(&batch));
+            cmds.extend(command::decode_stream(&batch));
         }
         cmds
     }

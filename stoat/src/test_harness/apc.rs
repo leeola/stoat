@@ -7,49 +7,7 @@
 //! cell-fallback layout on top of the rendered buffer.
 
 use ratatui::{buffer::Buffer, style::Color};
-use stoatty_protocol::command::{self, Command, IconKind};
-
-/// Decode every `Gstoatty;` APC frame in `bytes` into a command, in stream order.
-///
-/// `text_run` and `popover` stream their text as raw bytes between the open frame
-/// and the matching `_end` frame, so [`command::decode`] returns them empty. This
-/// stitches those bytes back onto the command from the gap before the next frame.
-pub(crate) fn decode_apc_stream(bytes: &[u8]) -> Vec<Command> {
-    let mut out = Vec::new();
-    let mut rest = bytes;
-    while let Some(start) = rest.windows(2).position(|w| w == b"\x1b_") {
-        let after = &rest[start..];
-        let Some(end) = after.windows(2).position(|w| w == b"\x1b\\") else {
-            break;
-        };
-        let cmd = command::decode(&after[..end + 2]);
-        rest = &after[end + 2..];
-        match cmd {
-            Some(Command::TextRun(mut c)) => {
-                let n = next_frame(rest);
-                c.text = String::from_utf8_lossy(&rest[..n]).into_owned();
-                rest = &rest[n..];
-                out.push(Command::TextRun(c));
-            },
-            Some(Command::Popover(mut c)) => {
-                let n = next_frame(rest);
-                c.content = String::from_utf8_lossy(&rest[..n]).into_owned();
-                rest = &rest[n..];
-                out.push(Command::Popover(c));
-            },
-            Some(cmd) => out.push(cmd),
-            None => {},
-        }
-    }
-    out
-}
-
-/// Byte offset of the next APC frame marker in `rest`, or its full length.
-fn next_frame(rest: &[u8]) -> usize {
-    rest.windows(2)
-        .position(|w| w == b"\x1b_")
-        .unwrap_or(rest.len())
-}
+use stoatty_protocol::command::{Command, IconKind};
 
 /// Draw each decoded component's cell-fallback layout onto `buf`, in `cmds`
 /// (paint) order.

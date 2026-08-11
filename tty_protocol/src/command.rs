@@ -672,6 +672,65 @@ pub fn decode_with(bytes: &[u8], scratch: &mut FrameScratch) -> Option<Command> 
     dispatch(sub, args)
 }
 
+/// Decode every stoatty frame in an emitted byte stream, in emission order.
+///
+/// This is what an emitter asserts its own output with. [`decode`] reads one
+/// frame, and a program that emits a scene produces a run of them mixed with
+/// content that rides outside the wrapper, so reading a scene back needs a walk
+/// rather than a parse.
+///
+/// [`Command::TextRun`] and [`Command::Popover`] stream their text between the
+/// open frame and the matching `_end`, so [`decode`] alone yields them empty.
+/// This stitches those bytes back onto the command from the gap that follows
+/// the open frame. The gap ends at the next frame introducer, not at the first
+/// `ESC`, so a `fill` batch works too: a page's VT carries its own escape
+/// sequences, and the walk steps over them to the `fill_end` rather than
+/// stopping mid-page.
+///
+/// Anything between frames that no capture claims is skipped, as is a frame
+/// this build does not recognize and one that is malformed. A trailing frame
+/// with no terminator ends the walk, since nothing later in the stream belongs
+/// to a frame that never closed.
+pub fn decode_stream(bytes: &[u8]) -> Vec<Command> {
+    let mut out = Vec::new();
+    let mut scratch = FrameScratch::default();
+    let mut rest = bytes;
+
+    while let Some(span) = frame::apc_span(rest) {
+        let decoded = decode_with(&rest[span.clone()], &mut scratch);
+        rest = &rest[span.end..];
+
+        match decoded {
+            Some(Command::TextRun(mut command)) => {
+                command.text = take_streamed(&mut rest);
+                out.push(Command::TextRun(command));
+            },
+            Some(Command::Popover(mut command)) => {
+                command.content = take_streamed(&mut rest);
+                out.push(Command::Popover(command));
+            },
+            Some(command) => out.push(command),
+            None => {},
+        }
+    }
+
+    out
+}
+
+/// Split the streamed content off the front of `rest`, leaving it at the next
+/// frame.
+///
+/// Lossy because a capture is plain text by contract, so bytes that are not
+/// valid UTF-8 mean the emitter broke that contract. Reading them as
+/// replacement characters still shows the caller what arrived. Dropping the
+/// whole command on a decode failure shows nothing at all.
+fn take_streamed(rest: &mut &[u8]) -> String {
+    let end = frame::apc_span(rest).map_or(rest.len(), |span| span.start);
+    let content = String::from_utf8_lossy(&rest[..end]).into_owned();
+    *rest = &rest[end..];
+    content
+}
+
 /// Encode a [`BorderCommand`] as a full `Gstoatty;border` frame for an emitter.
 pub fn encode_border(command: &BorderCommand) -> Vec<u8> {
     let mut out = Vec::new();
@@ -2074,20 +2133,20 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode, decode_ident_reply, decode_shadow, encode_bar, encode_border, encode_config_reload,
-        encode_fill, encode_fill_end, encode_fill_end_into, encode_fill_into, encode_font_step,
-        encode_hello, encode_icon, encode_ident_reply, encode_into, encode_line_layout,
-        encode_minimap, encode_minimap_drop, encode_minimap_lines, encode_minimap_view,
-        encode_panel, encode_polyline, encode_pool_cursor, encode_pool_drop, encode_pool_region,
-        encode_popover, encode_popover_end, encode_reposition, encode_reset, encode_scale,
-        encode_scroll, encode_scroll_region, encode_text_run_end, encode_window_close,
-        encode_window_focus, encode_window_open, encode_zoom_capture, fill_batch_key, BarCommand,
-        BorderCommand, BorderStyle, Command, FillCommand, HelloCommand, IconCommand, IconKind,
-        IdentReply, LineLayoutCommand, LineSummary, MinimapCommand, MinimapDropCommand,
-        MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand, PanelShadow,
-        PolylineCommand, PoolCursorCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand,
-        RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
-        WindowCloseCommand, WindowFocusCommand, WindowOpenCommand,
+        decode, decode_ident_reply, decode_shadow, decode_stream, encode_bar, encode_border,
+        encode_config_reload, encode_fill, encode_fill_end, encode_fill_end_into, encode_fill_into,
+        encode_font_step, encode_hello, encode_icon, encode_ident_reply, encode_into,
+        encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_lines,
+        encode_minimap_view, encode_panel, encode_polyline, encode_pool_cursor, encode_pool_drop,
+        encode_pool_region, encode_popover, encode_popover_end, encode_reposition, encode_reset,
+        encode_scale, encode_scroll, encode_scroll_region, encode_text_run, encode_text_run_end,
+        encode_window_close, encode_window_focus, encode_window_open, encode_zoom_capture,
+        fill_batch_key, BarCommand, BorderCommand, BorderStyle, Command, FillCommand, HelloCommand,
+        IconCommand, IconKind, IdentReply, LineLayoutCommand, LineSummary, MinimapCommand,
+        MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
+        PanelShadow, PolylineCommand, PoolCursorCommand, PoolDropCommand, PoolRegionCommand,
+        PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
+        TextRunCommand, WindowCloseCommand, WindowFocusCommand, WindowOpenCommand,
     };
     use crate::frame::MAX_APC_PAYLOAD;
 
@@ -2725,6 +2784,133 @@ mod tests {
             let head = &full[..full.len() - encode_popover_end().len()];
             assert_eq!(decode(head), Some(Command::Popover(command)));
         }
+    }
+
+    fn stream_border(top: u16) -> BorderCommand {
+        BorderCommand {
+            top,
+            left: 2,
+            width: 3,
+            height: 4,
+            style: BorderStyle::Light,
+            color: [1, 2, 3],
+        }
+    }
+
+    #[test]
+    fn decode_stream_reads_frames_in_emission_order() {
+        let mut bytes = encode_border(&stream_border(1));
+        bytes.extend(encode_reset());
+        bytes.extend(encode_border(&stream_border(9)));
+
+        assert_eq!(
+            decode_stream(&bytes),
+            vec![
+                Command::Border(stream_border(1)),
+                Command::Reset,
+                Command::Border(stream_border(9)),
+            ]
+        );
+    }
+
+    /// The reason the walk exists. A popover's content rides between its open
+    /// and close markers rather than inside a frame, so decoding the open frame
+    /// alone hands back an empty string.
+    #[test]
+    fn decode_stream_stitches_popover_content() {
+        let command = PopoverCommand {
+            top: 1,
+            left: 2,
+            width: 4,
+            height: 3,
+            fill: [10, 20, 30],
+            border: [40, 50, 60],
+            content_fg: [70, 80, 90],
+            scale: 2,
+            offset: [4, -2],
+            bold: false,
+            content: "two\nlines".to_owned(),
+        };
+
+        assert_eq!(
+            decode_stream(&encode_popover(&command)),
+            vec![Command::Popover(command), Command::PopoverEnd]
+        );
+    }
+
+    #[test]
+    fn decode_stream_stitches_text_run_text() {
+        let command = TextRunCommand {
+            col: -3,
+            row: 8,
+            scale: 160,
+            color: [1, 2, 3],
+            bg: Some([4, 5, 6]),
+            text: "src/main.rs".to_owned(),
+        };
+
+        assert_eq!(
+            decode_stream(&encode_text_run(&command)),
+            vec![Command::TextRun(command), Command::TextRunEnd]
+        );
+    }
+
+    #[test]
+    fn decode_stream_reads_a_bel_terminated_frame() {
+        let mut bytes = encode_border(&stream_border(1));
+        bytes.truncate(bytes.len() - 2);
+        bytes.push(0x07);
+        bytes.extend(encode_reset());
+
+        assert_eq!(
+            decode_stream(&bytes),
+            vec![Command::Border(stream_border(1)), Command::Reset]
+        );
+    }
+
+    /// A page's own escape sequences are not frames. Content cut at the first
+    /// ESC rather than at the next introducer stops the walk inside the page and
+    /// loses every command after it.
+    #[test]
+    fn decode_stream_steps_over_a_filled_page() {
+        let fill = FillCommand { pool: 2, index: 7 };
+        let mut bytes = encode_fill(&fill);
+        bytes.extend_from_slice(b"\x1b[H\x1b[38;2;1;2;3mpage text\x1b[0m");
+        bytes.extend(encode_fill_end());
+        bytes.extend(encode_reset());
+
+        assert_eq!(
+            decode_stream(&bytes),
+            vec![Command::Fill(fill), Command::FillEnd, Command::Reset]
+        );
+    }
+
+    #[test]
+    fn decode_stream_skips_what_it_cannot_read() {
+        let mut bytes = encode_border(&stream_border(1));
+        bytes.extend_from_slice(b"\x1b_Gkitty;border\x1b\\");
+        bytes.extend_from_slice(b"\x1b_Gstoatty;not_a_command\x1b\\");
+        bytes.extend(encode_reset());
+
+        assert_eq!(
+            decode_stream(&bytes),
+            vec![Command::Border(stream_border(1)), Command::Reset],
+            "a foreign or unknown frame drops out without ending the walk"
+        );
+    }
+
+    /// A batch cut mid-frame carries no complete command past the cut. A guess
+    /// at one reports a command the emitter never finished.
+    #[test]
+    fn decode_stream_stops_at_an_unterminated_frame() {
+        let mut bytes = encode_border(&stream_border(1));
+        let truncated = encode_reset();
+        bytes.extend_from_slice(&truncated[..truncated.len() - 2]);
+
+        assert_eq!(
+            decode_stream(&bytes),
+            vec![Command::Border(stream_border(1))]
+        );
     }
 
     #[test]

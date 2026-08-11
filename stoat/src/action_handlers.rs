@@ -3109,10 +3109,11 @@ mod tests {
     /// scan.
     fn hint_box_visible(stoat: &mut Stoat, title: &str) -> bool {
         use crate::test_harness::apc;
+        use stoatty_protocol::command;
 
         let needle = format!(" {title} ");
         let mut buf = stoat.render();
-        let cmds = apc::decode_apc_stream(stoat.apc_scene.bytes());
+        let cmds = command::decode_stream(stoat.apc_scene.bytes());
         apc::composite_scene(&mut buf, &cmds);
         let area = buf.area;
         (area.y..area.y + area.height).any(|y| {

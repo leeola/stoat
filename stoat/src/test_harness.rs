@@ -23,6 +23,7 @@ use std::{
 };
 use stoat_config::Settings;
 use stoat_scheduler::TestScheduler;
+use stoatty_protocol::command;
 use unicode_width::UnicodeWidthStr;
 
 pub struct Frame {
@@ -1120,7 +1121,7 @@ impl TestHarness {
     /// carries the chrome the scene draws off-grid.
     pub(crate) fn render_composited(&mut self) -> Buffer {
         let mut buf = self.stoat.render();
-        let cmds = apc::decode_apc_stream(self.stoat.apc_scene.bytes());
+        let cmds = command::decode_stream(self.stoat.apc_scene.bytes());
         apc::composite_scene(&mut buf, &cmds);
         buf
     }

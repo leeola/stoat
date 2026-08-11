@@ -11928,9 +11928,9 @@ mod tests {
         display_map::highlights::HighlightStyleId,
         input_view::{InputView, SubmitTarget},
         term_session::TermSession,
-        test_harness::apc::decode_apc_stream,
     };
     use std::path::{Path, PathBuf};
+    use stoatty_protocol::command;
 
     fn stoat_with_detached_pane(window: u32) -> (Stoat, PaneId) {
         let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
@@ -12061,7 +12061,7 @@ mod tests {
     fn the_zoom_claim_waits_for_the_socket_and_is_released_with_it() {
         let claim = |on: bool| {
             let mut out = Vec::new();
-            stoatty_protocol::command::encode_zoom_capture_into(&mut out, on);
+            command::encode_zoom_capture_into(&mut out, on);
             out
         };
 
@@ -19928,7 +19928,7 @@ mod tests {
         // The first batch carries the pool geometry and scroll, but no editor fill:
         // plain editor pages are rendered off the run loop, not inline.
         let first = rx.try_recv().expect("region/scroll batch");
-        let first_cmds = decode_apc_stream(&first);
+        let first_cmds = command::decode_stream(&first);
         assert!(
             first_cmds
                 .iter()
@@ -19945,7 +19945,7 @@ mod tests {
         // whose buffered window is pages 0..5.
         let mut filled = Vec::new();
         while let Ok(batch) = rx.try_recv() {
-            for cmd in decode_apc_stream(&batch) {
+            for cmd in command::decode_stream(&batch) {
                 if let Command::Fill(FillCommand { index, .. }) = cmd {
                     filled.push(index);
                 }
@@ -20562,7 +20562,7 @@ mod tests {
         h.stoat.emit_smooth_scroll();
 
         let bytes = rx.try_recv().expect("the review pane emits an APC batch");
-        let cmds = decode_apc_stream(&bytes);
+        let cmds = command::decode_stream(&bytes);
         assert!(
             cmds.iter().any(|cmd| matches!(cmd, Command::PoolRegion(_))),
             "a review split pane declares a smooth-scroll pool, got {cmds:?}"
@@ -21017,7 +21017,7 @@ mod tests {
             .try_recv()
             .expect("the commits overlay emits an APC batch");
         assert!(
-            decode_apc_stream(&bytes).contains(&Command::PoolRegion(expected)),
+            command::decode_stream(&bytes).contains(&Command::PoolRegion(expected)),
             "the commits list declares a pool at its list rect"
         );
 
@@ -21026,7 +21026,7 @@ mod tests {
         h.stoat.emit_smooth_scroll();
         let bytes = rx.try_recv().expect("leaving commits emits a drop");
         assert!(
-            decode_apc_stream(&bytes).contains(&Command::PoolDrop(PoolDropCommand {
+            command::decode_stream(&bytes).contains(&Command::PoolDrop(PoolDropCommand {
                 pool: crate::smooth_scroll::non_pane_pool::COMMITS,
             })),
             "leaving commits mode retires its pool"
@@ -21126,7 +21126,7 @@ mod tests {
         h.stoat.emit_smooth_scroll();
 
         let bytes = rx.try_recv().expect("an APC batch was pushed");
-        let cmds = decode_apc_stream(&bytes);
+        let cmds = command::decode_stream(&bytes);
         assert!(
             matches!(cmds.first(), Some(Command::PoolRegion(_))),
             "first frame should declare the pool region, got {cmds:?}"
@@ -21160,7 +21160,7 @@ mod tests {
         fn drain_fills(rx: &mut UnboundedReceiver<Vec<u8>>) -> Vec<u64> {
             let mut filled = Vec::new();
             while let Ok(batch) = rx.try_recv() {
-                for cmd in decode_apc_stream(&batch) {
+                for cmd in command::decode_stream(&batch) {
                     if let Command::Fill(FillCommand { index, .. }) = cmd {
                         filled.push(index);
                     }
@@ -21238,7 +21238,7 @@ mod tests {
         h.stoat.emit_smooth_scroll();
 
         let bytes = rx.try_recv().expect("an APC batch was pushed");
-        let cmds = decode_apc_stream(&bytes);
+        let cmds = command::decode_stream(&bytes);
         let scroll = cmds
             .iter()
             .find_map(|c| match c {
@@ -21282,7 +21282,7 @@ mod tests {
         h.stoat.emit_smooth_scroll();
         let mut idle = Vec::new();
         while let Ok(bytes) = rx.try_recv() {
-            idle.extend(decode_apc_stream(&bytes));
+            idle.extend(command::decode_stream(&bytes));
         }
         assert!(
             !idle.iter().any(|c| matches!(c, Command::PoolCursor(_))),
@@ -21301,7 +21301,7 @@ mod tests {
         h.stoat.emit_smooth_scroll();
         let mut cmds = Vec::new();
         while let Ok(bytes) = rx.try_recv() {
-            cmds.extend(decode_apc_stream(&bytes));
+            cmds.extend(command::decode_stream(&bytes));
         }
         let anchor = cmds
             .iter()
@@ -21363,7 +21363,7 @@ mod tests {
         h.stoat.emit_smooth_scroll();
         let mut cmds = Vec::new();
         while let Ok(bytes) = rx.try_recv() {
-            cmds.extend(decode_apc_stream(&bytes));
+            cmds.extend(command::decode_stream(&bytes));
         }
         let anchor = cmds
             .iter()
@@ -21522,10 +21522,10 @@ mod tests {
     /// list. A plain editor pane fills its pages asynchronously, so one
     /// `emit_smooth_scroll` pushes the region/scroll batch plus a fill batch per
     /// page. Draining folds them together so a test reads the whole emit at once.
-    fn drain_apc(rx: &mut UnboundedReceiver<Vec<u8>>) -> Vec<stoatty_protocol::command::Command> {
+    fn drain_apc(rx: &mut UnboundedReceiver<Vec<u8>>) -> Vec<command::Command> {
         let mut cmds = Vec::new();
         while let Ok(batch) = rx.try_recv() {
-            cmds.extend(decode_apc_stream(&batch));
+            cmds.extend(command::decode_stream(&batch));
         }
         cmds
     }
@@ -21801,7 +21801,7 @@ mod tests {
             raw.extend(batch);
         }
         let scene = String::from_utf8_lossy(&raw);
-        let cmds = decode_apc_stream(&raw);
+        let cmds = command::decode_stream(&raw);
 
         // A run's text streams between its open and close markers, so it reaches
         // the terminal through the APC scene rather than the cell grid.
