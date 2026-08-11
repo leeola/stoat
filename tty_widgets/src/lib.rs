@@ -153,8 +153,19 @@ impl ApcScene {
         }
     }
 
-    /// The built scene bytes, for a reader that decodes the frame without
-    /// appending to it.
+    /// The decoration lane under construction, for a reader that inspects the
+    /// frame without appending to it.
+    ///
+    /// Valid between [`Self::clear`] and [`Self::flush_to`], where it grows as
+    /// the frame's widgets append. That window is what lets a caller record a
+    /// length before some part of the frame paints and slice out what that part
+    /// emitted afterwards.
+    ///
+    /// After a flush the value is stale, and stale in one of two ways: a lane
+    /// that was written holds the frame before the one just flushed, because the
+    /// flush swaps it with the baseline rather than copying, and a lane that was
+    /// unchanged holds the frame it just compared. Read it before the flush, not
+    /// after.
     pub fn bytes(&self) -> &[u8] {
         &self.current
     }
@@ -183,7 +194,18 @@ impl ApcScene {
     /// puts it after the reset rather than under it.
     ///
     /// Each lane it writes becomes the baseline for the next comparison.
+    ///
+    /// A dead scene writes nothing and records nothing. The lanes are empty
+    /// while dead, so a byte comparison alone reads that as "everything was
+    /// removed" and sends a bare reset at a host that never asked for one. The
+    /// baselines are left standing, so a scene that goes live again still
+    /// describes what the terminal was last told and re-sends only what moved
+    /// since.
     pub fn flush_to(&mut self, out: &mut impl Write) -> io::Result<()> {
+        if !self.live {
+            return Ok(());
+        }
+
         let decorations_changed = self.current != self.previous;
         if decorations_changed {
             out.write_all(&command::encode_reset())?;
@@ -557,6 +579,56 @@ mod tests {
         expected.extend(encode_border(&moved));
         expected.extend(encode_scroll_region(&region()));
         assert_eq!(out, expected, "and the region lands after the reset");
+    }
+
+    /// The verdict arrives after the session has already painted, so a scene
+    /// flushes live and then learns the host is foreign. Its lanes are empty by
+    /// then, which a byte comparison alone reads as a scene to tear down.
+    #[test]
+    fn a_scene_that_goes_dead_after_a_flush_writes_nothing() {
+        let mut scene = ApcScene::new();
+        command::encode_border_into(scene.buffer(), &border());
+        command::encode_scroll_region_into(scene.dynamic_buffer(), &region());
+        scene.flush_to(&mut Vec::new()).expect("vec write");
+
+        scene.set_live(false);
+        scene.clear();
+        let mut out = Vec::new();
+        scene.flush_to(&mut out).expect("vec write");
+
+        assert!(out.is_empty(), "no reset reaches the foreign host");
+    }
+
+    /// What stoat's pane cache reads: a length taken before a pane paints, then
+    /// a slice of what that pane appended.
+    #[test]
+    fn bytes_tracks_the_frame_under_construction() {
+        let mut scene = ApcScene::new();
+        command::encode_border_into(scene.buffer(), &border());
+
+        let mark = scene.bytes().len();
+        let second = BorderCommand { top: 9, ..border() };
+        command::encode_border_into(scene.buffer(), &second);
+
+        assert_eq!(&scene.bytes()[mark..], encode_border(&second).as_slice());
+    }
+
+    /// The flush swaps its lane with the baseline rather than copying it, so
+    /// what a reader finds afterwards is the frame before the flushed one.
+    #[test]
+    fn bytes_goes_stale_at_the_flush() {
+        let mut scene = ApcScene::new();
+        command::encode_border_into(scene.buffer(), &border());
+        scene.flush_to(&mut Vec::new()).expect("vec write");
+
+        scene.clear();
+        let second = BorderCommand { top: 9, ..border() };
+        command::encode_border_into(scene.buffer(), &second);
+        scene.flush_to(&mut Vec::new()).expect("vec write");
+
+        assert_eq!(scene.bytes(), encode_border(&border()), "the prior frame");
+        scene.clear();
+        assert!(scene.bytes().is_empty(), "until the next clear");
     }
 
     #[test]
