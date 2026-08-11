@@ -467,9 +467,9 @@ mod tests {
     fn a_drain_writes_only_the_last_fill_of_each_page() {
         let fill = |pool: u32, index: u64, tag: &str| {
             let mut out = Vec::new();
-            command::encode_fill_into(&mut out, pool, index);
-            out.extend_from_slice(tag.as_bytes());
-            command::encode_fill_end_into(&mut out);
+            command::encode_fill_scope(&mut out, pool, index, |out| {
+                out.extend_from_slice(tag.as_bytes())
+            });
             out
         };
         let other = |tag: &str| {

@@ -849,6 +849,49 @@ pub fn encode_popover_into(
     bold: bool,
     content: &str,
 ) {
+    encode_popover_scope(
+        out,
+        top,
+        left,
+        width,
+        height,
+        fill,
+        border,
+        content_fg,
+        scale,
+        offset,
+        bold,
+        |out| out.extend_from_slice(content.as_bytes()),
+    );
+}
+
+/// Append a whole popover to `out`, being the open marker, whatever `content`
+/// writes, then the close marker.
+///
+/// The streaming form of [`encode_popover_into`], for a caller that formats its
+/// text into the output buffer rather than holding it as one borrowed string.
+/// Both emit the same bytes and neither has a way to leave the close marker
+/// out, which matters because an unclosed popover keeps capturing until the
+/// next marker and swallows whatever the emitter writes next.
+///
+/// The plain-text rule applies here too. The terminal cuts the capture at the
+/// first `ESC`, so `content` must write text and set its colors through the
+/// head fields.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_popover_scope(
+    out: &mut Vec<u8>,
+    top: u16,
+    left: u16,
+    width: u16,
+    height: u16,
+    fill: [u8; 3],
+    border: [u8; 3],
+    content_fg: [u8; 3],
+    scale: u8,
+    offset: [i16; 2],
+    bold: bool,
+    content: impl FnOnce(&mut Vec<u8>),
+) {
     frame::begin(out, "popover");
     frame::push_arg(out, |w| {
         w.write_all(&top.to_be_bytes())?;
@@ -864,7 +907,7 @@ pub fn encode_popover_into(
         w.write_all(&[bold as u8])
     });
     frame::end(out);
-    out.extend_from_slice(content.as_bytes());
+    content(out);
     encode_popover_end_into(out);
 }
 
@@ -1043,6 +1086,32 @@ pub fn encode_text_run_into(
     bg: Option<[u8; 3]>,
     text: &str,
 ) {
+    encode_text_run_scope(out, col, row, scale, color, bg, |out| {
+        out.extend_from_slice(text.as_bytes())
+    });
+}
+
+/// Append a whole text run to `out`, being the open marker, whatever `text`
+/// writes, then the close marker.
+///
+/// The streaming form of [`encode_text_run_into`], for a caller that formats
+/// its text into the output buffer rather than holding it as one borrowed
+/// string. Both emit the same bytes and neither has a way to leave the close
+/// marker out, which matters because an unclosed run keeps capturing until the
+/// next marker and swallows whatever the emitter writes next.
+///
+/// The plain-text rule applies here too. The terminal cuts the capture at the
+/// first `ESC`, so `text` must write text and set its colors through `color`
+/// and `bg`.
+pub fn encode_text_run_scope(
+    out: &mut Vec<u8>,
+    col: i16,
+    row: i16,
+    scale: u16,
+    color: [u8; 3],
+    bg: Option<[u8; 3]>,
+    text: impl FnOnce(&mut Vec<u8>),
+) {
     frame::begin(out, "text_run");
     frame::push_arg(out, |w| {
         w.write_all(&col.to_be_bytes())?;
@@ -1053,7 +1122,7 @@ pub fn encode_text_run_into(
         w.write_all(&[bg.is_some() as u8])
     });
     frame::end(out);
-    out.extend_from_slice(text.as_bytes());
+    text(out);
     encode_text_run_end_into(out);
 }
 
@@ -1204,6 +1273,30 @@ pub fn encode_fill_into(out: &mut Vec<u8>, pool: u32, index: u64) {
         w.write_all(&index.to_be_bytes())
     });
     frame::end(out);
+}
+
+/// Append a whole fill batch for page `index` of pool `pool` to `out`, being
+/// the open marker, whatever `page` writes, then the close marker.
+///
+/// Prefer this to the two markers by hand. An unclosed `fill` redirects every
+/// byte that follows onto the page-painting context instead of the live screen,
+/// and stays redirected until the next `fill` or `reset`, so the screen stops
+/// updating and the symptom surfaces far from the emitter that dropped the
+/// marker. A scope has no way to leave one out.
+///
+/// `page` writes the page's VT bytes straight into `out`, which is what a
+/// serializer painting into the caller's buffer wants. Reach for
+/// [`encode_fill_into`] and [`encode_fill_end_into`] only for content that
+/// arrives across several writes rather than in one call.
+pub fn encode_fill_scope(
+    out: &mut Vec<u8>,
+    pool: u32,
+    index: u64,
+    page: impl FnOnce(&mut Vec<u8>),
+) {
+    encode_fill_into(out, pool, index);
+    page(out);
+    encode_fill_end_into(out);
 }
 
 /// The `(pool, index)` a batch of bytes fills, or `None` when it is not a fill.
@@ -2180,18 +2273,19 @@ mod tests {
     use super::{
         decode, decode_ident_reply, decode_shadow, decode_stream, encode_bar, encode_border,
         encode_config_reload, encode_fill, encode_fill_end, encode_fill_end_into, encode_fill_into,
-        encode_font_step, encode_hello, encode_icon, encode_ident_reply, encode_into,
-        encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_lines,
+        encode_fill_scope, encode_font_step, encode_hello, encode_icon, encode_ident_reply,
+        encode_into, encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_lines,
         encode_minimap_view, encode_panel, encode_polyline, encode_pool_cursor, encode_pool_drop,
-        encode_pool_region, encode_popover, encode_popover_end, encode_reposition, encode_reset,
-        encode_scale, encode_scroll, encode_scroll_region, encode_text_run, encode_text_run_end,
-        encode_window_close, encode_window_focus, encode_window_open, encode_zoom_capture,
-        fill_batch_key, BarCommand, BorderCommand, BorderStyle, Command, FillCommand, HelloCommand,
-        IconCommand, IconKind, IdentReply, LineLayoutCommand, LineSummary, MinimapCommand,
-        MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
-        PanelShadow, PolylineCommand, PoolCursorCommand, PoolDropCommand, PoolRegionCommand,
-        PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
-        TextRunCommand, WindowCloseCommand, WindowFocusCommand, WindowOpenCommand,
+        encode_pool_region, encode_popover, encode_popover_end, encode_popover_scope,
+        encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
+        encode_text_run, encode_text_run_end, encode_text_run_scope, encode_window_close,
+        encode_window_focus, encode_window_open, encode_zoom_capture, fill_batch_key, BarCommand,
+        BorderCommand, BorderStyle, Command, FillCommand, HelloCommand, IconCommand, IconKind,
+        IdentReply, LineLayoutCommand, LineSummary, MinimapCommand, MinimapDropCommand,
+        MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand, PanelShadow,
+        PolylineCommand, PoolCursorCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand,
+        RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
+        WindowCloseCommand, WindowFocusCommand, WindowOpenCommand,
     };
     use crate::frame::{self, MAX_APC_PAYLOAD};
 
@@ -3270,6 +3364,118 @@ mod tests {
     #[test]
     fn fill_end_round_trips() {
         assert_eq!(decode(&encode_fill_end()), Some(Command::FillEnd));
+    }
+
+    /// The scope's whole point. An unclosed fill redirects the screen until the
+    /// next marker, so the close has to be unskippable rather than remembered.
+    #[test]
+    fn a_fill_scope_wraps_its_page_in_both_markers() {
+        let fill = FillCommand { pool: 9, index: 41 };
+        let page = b"\x1b[Hpage";
+        let mut out = Vec::new();
+        encode_fill_scope(&mut out, fill.pool, fill.index, |bytes| {
+            bytes.extend_from_slice(page)
+        });
+
+        let mut expected = encode_fill(&fill);
+        expected.extend_from_slice(page);
+        expected.extend(encode_fill_end());
+        assert_eq!(out, expected, "open marker, page bytes, close marker");
+        assert_eq!(
+            decode_stream(&out),
+            vec![Command::Fill(fill), Command::FillEnd]
+        );
+    }
+
+    #[test]
+    fn a_scope_that_writes_nothing_still_closes() {
+        let mut fill = Vec::new();
+        encode_fill_scope(&mut fill, 1, 0, |_| {});
+        assert_eq!(
+            decode_stream(&fill),
+            vec![
+                Command::Fill(FillCommand { pool: 1, index: 0 }),
+                Command::FillEnd
+            ]
+        );
+
+        let mut run = Vec::new();
+        encode_text_run_scope(&mut run, 0, 0, 16, [1, 2, 3], None, |_| {});
+        assert_eq!(
+            decode_stream(&run),
+            vec![
+                Command::TextRun(TextRunCommand {
+                    col: 0,
+                    row: 0,
+                    scale: 16,
+                    color: [1, 2, 3],
+                    bg: None,
+                    text: String::new(),
+                }),
+                Command::TextRunEnd
+            ]
+        );
+    }
+
+    /// The borrowed-string form is the scope with a one-line closure, so the two
+    /// must stay byte-identical or one of them emits a different frame.
+    #[test]
+    fn the_scope_and_borrowed_forms_emit_the_same_bytes() {
+        let run = TextRunCommand {
+            col: -3,
+            row: 8,
+            scale: 160,
+            color: [1, 2, 3],
+            bg: Some([4, 5, 6]),
+            text: "src/main.rs".to_owned(),
+        };
+        let mut scoped = Vec::new();
+        encode_text_run_scope(
+            &mut scoped,
+            run.col,
+            run.row,
+            run.scale,
+            run.color,
+            run.bg,
+            {
+                let text = run.text.clone();
+                move |out| out.extend_from_slice(text.as_bytes())
+            },
+        );
+        assert_eq!(scoped, encode_text_run(&run), "text_run");
+
+        let popover = PopoverCommand {
+            top: 1,
+            left: 2,
+            width: 4,
+            height: 3,
+            fill: [10, 20, 30],
+            border: [40, 50, 60],
+            content_fg: [70, 80, 90],
+            scale: 2,
+            offset: [4, -2],
+            bold: true,
+            content: "hover text".to_owned(),
+        };
+        let mut scoped = Vec::new();
+        encode_popover_scope(
+            &mut scoped,
+            popover.top,
+            popover.left,
+            popover.width,
+            popover.height,
+            popover.fill,
+            popover.border,
+            popover.content_fg,
+            popover.scale,
+            popover.offset,
+            popover.bold,
+            {
+                let content = popover.content.clone();
+                move |out| out.extend_from_slice(content.as_bytes())
+            },
+        );
+        assert_eq!(scoped, encode_popover(&popover), "popover");
     }
 
     /// The page a batch fills is read from its opening marker alone.

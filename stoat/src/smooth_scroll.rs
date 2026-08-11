@@ -41,7 +41,7 @@ use lsp_types::DiagnosticSeverity;
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use stoat_action::registry::RegistryEntry;
-use stoatty_protocol::command::{encode_fill_end_into, encode_fill_into};
+use stoatty_protocol::command::encode_fill_scope;
 use stoatty_widgets::ApcScene;
 
 /// Pool ids for the non-pane smooth-scroll surfaces (overlays and popups).
@@ -86,9 +86,8 @@ pub(crate) mod non_pane_pool {
 /// returned bytes are a self-contained fill the terminal applies to slot `index`.
 ///
 /// The asynchronous editor-fill path runs this on a blocking worker and delivers
-/// the frame through the APC channel, off the run loop. The bytes are an
-/// `encode_fill_into` marker, the [`render_page_from_snapshot`] page, then an
-/// `encode_fill_end_into` terminator.
+/// the frame through the APC channel, off the run loop. The bytes are one
+/// [`encode_fill_scope`] batch wrapping the [`render_page_from_snapshot`] page.
 #[allow(clippy::too_many_arguments)]
 /// Display row page `index` starts at, for a pool whose regions are
 /// `region_height` rows tall.
@@ -130,9 +129,7 @@ pub(crate) fn render_page_fill(
     );
 
     let mut frame = Vec::with_capacity(bytes.len() + 16);
-    encode_fill_into(&mut frame, pool, index);
-    frame.extend_from_slice(&bytes);
-    encode_fill_end_into(&mut frame);
+    encode_fill_scope(&mut frame, pool, index, |out| out.extend_from_slice(&bytes));
     frame
 }
 
@@ -441,9 +438,7 @@ pub(crate) fn render_review_page_from_parts(
     let bytes = serialize_buffer(&mut buf, theme);
 
     let mut frame = Vec::with_capacity(bytes.len() + 16);
-    encode_fill_into(&mut frame, pool, index);
-    frame.extend_from_slice(&bytes);
-    encode_fill_end_into(&mut frame);
+    encode_fill_scope(&mut frame, pool, index, |out| out.extend_from_slice(&bytes));
     frame
 }
 
@@ -485,9 +480,7 @@ pub(crate) fn render_conflict_page_from_parts(
     let bytes = serialize_buffer(&mut buf, theme);
 
     let mut frame = Vec::with_capacity(bytes.len() + 16);
-    encode_fill_into(&mut frame, pool, index);
-    frame.extend_from_slice(&bytes);
-    encode_fill_end_into(&mut frame);
+    encode_fill_scope(&mut frame, pool, index, |out| out.extend_from_slice(&bytes));
     frame
 }
 

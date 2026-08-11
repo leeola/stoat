@@ -22,9 +22,9 @@ use std::{
     ops::Range,
 };
 use stoatty_protocol::command::{
-    encode_fill_end_into, encode_fill_into, encode_minimap_view_into, encode_pool_drop_into,
-    encode_pool_region_into, encode_reposition_into, encode_scroll_into, MinimapViewCommand,
-    PoolRegionCommand, ScrollCommand,
+    encode_fill_scope, encode_minimap_view_into, encode_pool_drop_into, encode_pool_region_into,
+    encode_reposition_into, encode_scroll_into, MinimapViewCommand, PoolRegionCommand,
+    ScrollCommand,
 };
 
 /// Pages kept buffered around each pool's visible page, the pool's working
@@ -344,9 +344,7 @@ fn refill(
         entered.push(index);
         let bytes = render_page(index);
         if !bytes.is_empty() {
-            encode_fill_into(out, pool, index);
-            out.extend_from_slice(&bytes);
-            encode_fill_end_into(out);
+            encode_fill_scope(out, pool, index, |out| out.extend_from_slice(&bytes));
         }
     }
     entry.requested = Some(window);
