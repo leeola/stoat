@@ -5,11 +5,7 @@ use crate::{
     theme::{scope, Theme},
     workspace::Workspace,
 };
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    widgets::{Clear, Widget},
-};
+use ratatui::{buffer::Buffer, layout::Rect};
 use std::path::Path;
 
 #[allow(clippy::too_many_arguments)]
@@ -39,7 +35,7 @@ pub(crate) fn render_code_search(
     let git_root = ws.git_root.clone();
     let title = code_search_title(finder);
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
-    Clear.render(layout.modal, buf);
+    crate::render::clear_themed(layout.modal, buf, theme);
     crate::render::chrome::modal_frame(
         buf,
         layout.modal,

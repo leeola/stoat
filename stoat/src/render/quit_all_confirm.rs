@@ -2,7 +2,7 @@ use crate::{quit_all_confirm::QuitAllConfirm, render::text::write_str};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Block, Borders},
 };
 
 /// Buffers the modal names at once. A longer list is truncated rather than
@@ -39,7 +39,7 @@ pub(crate) fn render_quit_all_confirm(
     };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
-    Clear.render(modal_area, buf);
+    crate::render::clear_themed(modal_area, buf, theme);
     crate::render::chrome::modal_frame(
         buf,
         modal_area,

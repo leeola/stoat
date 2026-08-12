@@ -66,7 +66,7 @@ pub(crate) fn popout_card_bg(theme: &Theme) -> Color {
             let [r, g, b] = review::dim_rgb(bar_rgb, editor_rgb, 0.35);
             Color::Rgb(r, g, b)
         },
-        _ => bar.unwrap_or(Color::Reset),
+        _ => bar.unwrap_or_else(|| crate::render::themed_bg(theme)),
     }
 }
 

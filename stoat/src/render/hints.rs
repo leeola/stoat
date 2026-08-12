@@ -1,10 +1,5 @@
 use super::TEXT_SCALE_POPUP;
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::Style,
-    widgets::{Clear, Widget},
-};
+use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::collections::HashMap;
 
 /// Columns between a row's key and its action.
@@ -136,7 +131,7 @@ pub(crate) fn render_hints_grouped(
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
     let title = format!(" {mode} ");
-    Clear.render(help_area, buf);
+    crate::render::clear_themed(help_area, buf, theme);
     // Above the pools, because this box is declared after every modal and so sits
     // over the commit picker's list and preview surfaces. Layered with the grid it
     // would vanish under their composites for the length of every glide.

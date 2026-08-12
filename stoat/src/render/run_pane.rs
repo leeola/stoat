@@ -6,7 +6,6 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
-    widgets::{Clear, Widget},
 };
 use std::{ops::Range, path::Path};
 
@@ -251,7 +250,7 @@ pub(crate) fn render_modal_run(
         format!(" {display} ")
     };
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_RUN);
-    Clear.render(modal_area, buf);
+    crate::render::clear_themed(modal_area, buf, theme);
     let inner = crate::render::chrome::modal_frame(
         buf,
         modal_area,

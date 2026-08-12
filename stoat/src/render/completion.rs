@@ -10,7 +10,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Modifier,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Block, Borders},
 };
 use std::ops::Range;
 
@@ -164,7 +164,7 @@ pub(crate) fn render_completion(
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
-    Clear.render(layout.popup_area, buf);
+    crate::render::clear_themed(layout.popup_area, buf, &stoat.theme);
     crate::render::chrome::modal_frame(
         buf,
         layout.popup_area,

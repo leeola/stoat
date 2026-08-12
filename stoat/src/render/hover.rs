@@ -7,7 +7,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
-    widgets::{Block, Borders, Clear, StatefulWidget, Widget},
+    widgets::{Block, Borders, StatefulWidget},
 };
 use stoatty_widgets::{
     text_run::{self, TextRun},
@@ -53,7 +53,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
 
-    Clear.render(popup_area, buf);
+    crate::render::clear_themed(popup_area, buf, &stoat.theme);
     let inner = crate::render::chrome::modal_frame(
         buf,
         popup_area,

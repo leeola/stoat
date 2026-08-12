@@ -2,10 +2,7 @@ use crate::{
     app::Stoat,
     render::{cursor_popup, text::truncate_to_width},
 };
-use ratatui::{
-    buffer::Buffer,
-    widgets::{Clear, Widget},
-};
+use ratatui::buffer::Buffer;
 
 /// Paint the code-action picker, if any, anchored to the focused
 /// editor's primary cursor. Renders a 9-row viewport over the
@@ -73,7 +70,7 @@ pub(crate) fn render_code_action(
     let size = cursor_popup::content_size(&body, footer.as_ref());
     let popup_area = cursor_popup::popup_rect(content_area, cursor_screen, size, true);
 
-    Clear.render(popup_area, buf);
+    crate::render::clear_themed(popup_area, buf, &stoat.theme);
     let inner = crate::render::chrome::modal_frame(
         buf,
         popup_area,

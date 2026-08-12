@@ -2,11 +2,7 @@ use crate::{
     app::Stoat,
     render::{cursor_popup, text::truncate_to_width},
 };
-use ratatui::{
-    buffer::Buffer,
-    style::Modifier,
-    widgets::{Clear, Widget},
-};
+use ratatui::{buffer::Buffer, style::Modifier};
 
 /// Paint the signature-help popup anchored to the focused editor's primary
 /// cursor, emphasizing the active parameter within the signature line and
@@ -63,7 +59,7 @@ pub(crate) fn render_signature_help(
         true,
     );
 
-    Clear.render(popup_area, buf);
+    crate::render::clear_themed(popup_area, buf, &stoat.theme);
     let inner = crate::render::chrome::modal_frame(
         buf,
         popup_area,

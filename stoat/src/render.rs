@@ -57,7 +57,12 @@ use crate::{
     term_session::{TermId, TermSession},
     workspace::{Workspace, WorkspaceId},
 };
-use ratatui::{buffer::Buffer, layout::Rect, style::Color, widgets::StatefulWidget};
+use ratatui::{
+    buffer::{Buffer, Cell},
+    layout::Rect,
+    style::Color,
+    widgets::StatefulWidget,
+};
 use slotmap::SlotMap;
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
@@ -386,6 +391,56 @@ pub(crate) fn zoom_context_modal(stoat: &Stoat) -> bool {
 /// - [`zoom_context_modal`] to tell a zoomless modal apart from no modal.
 pub(crate) fn zoom_target_kind(stoat: &Stoat) -> Option<ModalKind> {
     active_modal(stoat).and_then(ActiveModal::zoom_kind)
+}
+
+/// The blank cell a themed surface starts from.
+///
+/// A cell left at `Color::Reset` is resolved by whatever terminal stoat runs
+/// inside, against *that* terminal's theme rather than stoat's, so a surface
+/// blanked with [`ratatui::buffer::Cell::EMPTY`] ignores `:theme` entirely and
+/// disagrees with the widgets that paint `ui.background` for themselves.
+///
+/// A channel the theme does not define stays at Reset, since there is nothing
+/// truer to put there than the terminal's own default.
+pub(crate) fn themed_blank(theme: &crate::theme::Theme) -> Cell {
+    let mut cell = Cell::EMPTY;
+    cell.fg = themed_fg(theme);
+    cell.bg = themed_bg(theme);
+    cell
+}
+
+/// The foreground the theme gives ordinary text, for a caller that has nothing
+/// more specific to fall back to.
+pub(crate) fn themed_fg(theme: &crate::theme::Theme) -> Color {
+    theme
+        .try_get(crate::theme::scope::UI_TEXT)
+        .and_then(|s| s.fg)
+        .unwrap_or(Color::Reset)
+}
+
+/// The background the theme gives the editor surface, for a caller that has
+/// nothing more specific to fall back to.
+pub(crate) fn themed_bg(theme: &crate::theme::Theme) -> Color {
+    theme
+        .try_get(crate::theme::scope::UI_BACKGROUND)
+        .and_then(|s| s.bg)
+        .unwrap_or(Color::Reset)
+}
+
+/// Blank `area` to the themed cell, wiping whatever was painted under it.
+///
+/// This is what a modal lays down before its frame, in place of ratatui's
+/// [`Clear`](ratatui::widgets::Clear). `modal_frame` draws borders and never
+/// fills, so a modal's blank interior is whatever the clear left, and Reset
+/// there means the terminal's own background shows through a themed screen.
+pub(crate) fn clear_themed(area: Rect, buf: &mut Buffer, theme: &crate::theme::Theme) {
+    let blank = themed_blank(theme);
+    let area = area.intersection(buf.area);
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            buf[(x, y)] = blank.clone();
+        }
+    }
 }
 
 /// Resolve every `Color::Reset` cell in `buf` against `theme`.

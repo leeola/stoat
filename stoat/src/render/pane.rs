@@ -220,7 +220,7 @@ pub(crate) fn render_pane(
             let border = theme
                 .get(crate::theme::scope::UI_BORDER_INACTIVE)
                 .fg
-                .unwrap_or(Color::Reset);
+                .unwrap_or_else(|| crate::render::themed_fg(theme));
             let content = paint_popout_card(buf, area, bg, border, theme, &mut *scene);
 
             let cap = scaled_char_capacity(content.width as usize, TEXT_SCALE_COMPACT);
@@ -268,7 +268,7 @@ pub(crate) fn render_pane(
             let border = theme
                 .get(crate::theme::scope::UI_BORDER_INACTIVE)
                 .fg
-                .unwrap_or(Color::Reset);
+                .unwrap_or_else(|| crate::render::themed_fg(theme));
             let content = paint_popout_card(buf, area, bg, border, theme, &mut *scene);
 
             let style = theme

@@ -6,7 +6,7 @@ use lsp_types::DiagnosticSeverity;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Block, Borders},
 };
 use std::path::Path;
 
@@ -74,7 +74,7 @@ pub(crate) fn render_diagnostics_picker(
         PickerScope::Local => " diagnostics ",
         PickerScope::Workspace => " diagnostics (workspace) ",
     };
-    Clear.render(modal_area, buf);
+    crate::render::clear_themed(modal_area, buf, theme);
     crate::render::chrome::modal_frame(buf, modal_area, Some(title), modal_style, theme, scene);
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);

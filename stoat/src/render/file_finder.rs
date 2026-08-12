@@ -5,7 +5,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Block, Borders},
 };
 use std::path::Path;
 
@@ -101,7 +101,7 @@ pub(crate) fn render_file_finder(
             FinderScope::AllWorkspaces => " file finder (all workspaces) ".to_string(),
         }
     };
-    Clear.render(layout.modal, buf);
+    crate::render::clear_themed(layout.modal, buf, theme);
     crate::render::chrome::modal_frame(
         buf,
         layout.modal,

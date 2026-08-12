@@ -11,7 +11,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Style,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Block, Borders},
 };
 use std::path::Path;
 use stoat_language::LanguageRegistry;
@@ -88,7 +88,7 @@ pub(crate) fn render_symbol_finder(
         SymbolFinderScope::Workspace => " symbols (workspace) ",
     };
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
-    Clear.render(modal, buf);
+    crate::render::clear_themed(modal, buf, theme);
     crate::render::chrome::modal_frame(buf, modal, Some(title), modal_style, theme, &mut *scene);
 
     let separator_style = theme.get(scope::UI_BORDER_INACTIVE);

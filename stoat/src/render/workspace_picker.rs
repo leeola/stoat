@@ -6,7 +6,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Block, Borders},
 };
 use std::path::Path;
 
@@ -45,7 +45,7 @@ pub(crate) fn render_workspace_picker(
     };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
-    Clear.render(picker_area, buf);
+    crate::render::clear_themed(picker_area, buf, theme);
     crate::render::chrome::modal_frame(
         buf,
         picker_area,

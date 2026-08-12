@@ -10,7 +10,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Block, Borders},
 };
 use std::path::Path;
 use stoat_action::registry::RegistryEntry;
@@ -394,7 +394,7 @@ fn render_palette_prelude(
     let layout = palette_filter_layout(area, content_rows, zoom)?;
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
-    Clear.render(layout.modal, buf);
+    crate::render::clear_themed(layout.modal, buf, theme);
     crate::render::chrome::modal_frame(
         buf,
         layout.modal,

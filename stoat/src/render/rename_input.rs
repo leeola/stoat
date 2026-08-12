@@ -2,10 +2,7 @@ use crate::{
     app::Stoat,
     render::{cursor_popup, editor::render_editor},
 };
-use ratatui::{
-    buffer::Buffer,
-    widgets::{Clear, Widget},
-};
+use ratatui::buffer::Buffer;
 
 /// Paint the rename input modal anchored to the focused editor's
 /// cursor. Renders the embedded [`crate::input_view::InputView`]
@@ -45,7 +42,7 @@ pub(crate) fn render_rename_input(
     let popup_area =
         cursor_popup::popup_rect(content_area, cursor_screen, (interior_width, 1), true);
 
-    Clear.render(popup_area, buf);
+    crate::render::clear_themed(popup_area, buf, &stoat.theme);
     let inner = crate::render::chrome::modal_frame(
         buf,
         popup_area,

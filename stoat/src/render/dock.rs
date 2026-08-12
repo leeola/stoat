@@ -2,10 +2,7 @@ use crate::{
     pane::{DockPanel, View},
     render::{editor::render_editor, FrameCtx, PaneCtx},
 };
-use ratatui::{
-    buffer::Buffer,
-    widgets::{Clear, Widget},
-};
+use ratatui::buffer::Buffer;
 
 pub(crate) fn render_dock_minimized(
     dock: &DockPanel,
@@ -45,7 +42,7 @@ pub(crate) fn render_dock_open(
         theme.get(crate::theme::scope::UI_BORDER_INACTIVE)
     };
 
-    Clear.render(area, buf);
+    crate::render::clear_themed(area, buf, theme);
     let inner = crate::render::chrome::modal_frame(buf, area, None, border_style, theme, scene);
 
     let PaneCtx { editors, .. } = ctx;

@@ -10,11 +10,7 @@ use crate::{
     theme::{scope, Theme},
     workspace::Workspace,
 };
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    widgets::{Clear, StatefulWidget, Widget},
-};
+use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 use std::cmp::Ordering;
 use stoatty_widgets::{polyline::Polyline, ApcScene};
 
@@ -179,7 +175,7 @@ pub(crate) fn render_commit_picker(
         },
     };
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
-    Clear.render(layout.modal, buf);
+    crate::render::clear_themed(layout.modal, buf, theme);
     crate::render::chrome::modal_frame(
         buf,
         layout.modal,
