@@ -1,8 +1,5 @@
-use crate::{
-    ContextLessSummary, Dimension, Item, KeyedItem, Locator, SeekTarget, Summary, UndoMap,
-};
+use crate::{ContextLessSummary, Dimension, Item, KeyedItem, Locator, Summary, UndoMap};
 use smallvec::SmallVec;
-use std::cmp::Ordering;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fragment {
@@ -126,26 +123,24 @@ impl<'a> Dimension<'a, FragmentSummary> for usize {
     }
 }
 
-// Dimension: max fragment Locator (for seeking by fragment ID)
-impl<'a> Dimension<'a, FragmentSummary> for Option<Locator> {
+/// The last fragment id folded in, which seeks the tree by fragment id.
+///
+/// The dimension borrows the summary's id rather than owning a copy. A seek
+/// clones its running position once per scanned child and several times per
+/// level, and a [`Locator`] heap-allocates past depth 2. Borrowed, the
+/// dimension is [`Copy`], so those clones become moves.
+///
+/// The blanket [`crate::SeekTarget`] impl over an [`Ord`] dimension serves
+/// this one, so seeking a fragment id needs no impl of its own. That blanket
+/// orders `None` below every `Some`, which is what a fragment tree seek
+/// expects.
+impl<'a> Dimension<'a, FragmentSummary> for Option<&'a Locator> {
     fn zero(_cx: FragmentContext<'_>) -> Self {
         None
     }
 
     fn add_summary(&mut self, summary: &'a FragmentSummary, _cx: FragmentContext<'_>) {
-        *self = Some(summary.max_id.clone());
-    }
-}
-
-// SeekTarget: seek to a specific Locator in the fragment tree
-impl<'a> SeekTarget<'a, FragmentSummary, Option<Locator>> for Option<&Locator> {
-    fn cmp(&self, cursor_location: &Option<Locator>, _cx: FragmentContext<'_>) -> Ordering {
-        match (self, cursor_location) {
-            (Some(target), Some(loc)) => Ord::cmp(*target, loc),
-            (Some(_), None) => Ordering::Greater,
-            (None, Some(_)) => Ordering::Less,
-            (None, None) => Ordering::Equal,
-        }
+        *self = Some(&summary.max_id);
     }
 }
 

@@ -1139,7 +1139,7 @@ impl TextBuffer {
         let mut old_visible = RopeCursor::new(&self.snapshot.visible_text, 0);
         let mut old_deleted = RopeCursor::new(&self.snapshot.deleted_text, 0);
 
-        let mut untouched = old_fragments.cursor::<Option<Locator>>(cx);
+        let mut untouched = old_fragments.cursor::<Option<&Locator>>(cx);
         let mut reachable =
             old_fragments.filter::<_, ()>(cx, |summary| summary.max_version >= oldest_toggled);
         reachable.next();
@@ -1662,13 +1662,11 @@ impl TextBufferSnapshot {
     }
 
     fn find_fragment_for_anchor(&self, anchor: &Anchor) -> (Option<&Fragment>, usize) {
-        let fragment_id = self.insertion_fragment_id(anchor);
-
         let cx = &None;
-        let target = Some(fragment_id.clone());
+        let target = Some(self.insertion_fragment_id(anchor));
         let (start, _end, item) = self
             .fragments
-            .find::<Dimensions<Option<Locator>, usize>, _>(cx, &target, Bias::Left);
+            .find::<Dimensions<Option<&Locator>, usize>, _>(cx, &target, Bias::Left);
 
         (item, start.1)
     }
@@ -1708,7 +1706,7 @@ impl TextBufferSnapshot {
             (a.timestamp, a.offset, a.bias)
         });
 
-        let mut fragment_ids: Vec<(usize, Locator)> = Vec::with_capacity(pending.len());
+        let mut fragment_ids: Vec<(usize, &Locator)> = Vec::with_capacity(pending.len());
         {
             let mut cursor = self.insertions.cursor::<InsertionFragmentKey>(());
             for &i in &pending {
@@ -1729,28 +1727,28 @@ impl TextBufferSnapshot {
                             || (anchor.bias == Bias::Left && ins_key == key && anchor.offset > 0)
                         {
                             match cursor.prev_item() {
-                                Some(p) => p.fragment_id.clone(),
-                                None => Locator::min_ref().clone(),
+                                Some(p) => &p.fragment_id,
+                                None => Locator::min_ref(),
                             }
                         } else {
-                            insertion.fragment_id.clone()
+                            &insertion.fragment_id
                         }
                     },
                     None => match self.insertions.last() {
-                        Some(ins) => ins.fragment_id.clone(),
-                        None => Locator::min_ref().clone(),
+                        Some(ins) => &ins.fragment_id,
+                        None => Locator::min_ref(),
                     },
                 };
                 fragment_ids.push((i, fragment_id));
             }
         }
 
-        fragment_ids.sort_by(|a, b| a.1.cmp(&b.1));
+        fragment_ids.sort_by(|a, b| a.1.cmp(b.1));
 
         let cx = &None;
         let mut cursor = self
             .fragments
-            .cursor::<Dimensions<Option<Locator>, usize>>(cx);
+            .cursor::<Dimensions<Option<&Locator>, usize>>(cx);
         for (i, fragment_id) in fragment_ids {
             let target = Some(fragment_id);
             cursor.seek_forward(&target, Bias::Left);
