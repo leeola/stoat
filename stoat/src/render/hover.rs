@@ -9,7 +9,10 @@ use ratatui::{
     style::{Color, Style},
     widgets::{Block, Borders, Clear, StatefulWidget, Widget},
 };
-use stoatty_widgets::{text_run::TextRun, ApcScene};
+use stoatty_widgets::{
+    text_run::{self, TextRun},
+    ApcScene,
+};
 
 /// Rows that must remain below the cursor for the popup to open there. With
 /// fewer, placement flips above the cursor. Matches Helix's popup bias
@@ -154,7 +157,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
                         if seg_text.is_empty() {
                             continue;
                         }
-                        let col = ((seg_start as u16 * TEXT_SCALE_POPUP + 8) / 16) as i16;
+                        let col = text_run::advance_sixteenths(seg_start, TEXT_SCALE_POPUP) as i16;
                         let bg = if selected {
                             selection.map_or(run_bg, |(_, _, rgb)| rgb)
                         } else {
@@ -430,7 +433,7 @@ pub(crate) fn render_hover_page(
         let line = truncate_line(line, region_width as usize);
         let mut chars_before = 0u16;
         for (text, style) in &line {
-            let col = ((chars_before * TEXT_SCALE_POPUP + 8) / 16) as i16;
+            let col = text_run::advance_sixteenths(chars_before.into(), TEXT_SCALE_POPUP) as i16;
             let color = crate::render::review::style_rgb(style.fg).unwrap_or(modal_fg);
             TextRun {
                 col,

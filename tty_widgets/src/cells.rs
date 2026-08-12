@@ -39,18 +39,6 @@ pub(crate) fn span_sixteenths(cells: u16) -> u16 {
     (u32::from(cells) * 16).min(u32::from(u16::MAX)) as u16
 }
 
-/// Sixteenths a run of `chars` advances at `scale`, the glyph size in 256ths of
-/// a cell.
-///
-/// The product overflows a u16 long before the quotient does, so the widening
-/// matters even for advances that comfortably fit the result. Takes the
-/// character count directly rather than a narrowed one, since a truncated
-/// count corrupts the answer before any arithmetic runs.
-pub(crate) fn advance_sixteenths(chars: usize, scale: u16) -> u16 {
-    let total = (chars as u64).saturating_mul(u64::from(scale)) / 16;
-    total.min(u64::from(u16::MAX)) as u16
-}
-
 /// Set the cell at (`x`, `y`) to `symbol` in `style`, ignoring an out-of-bounds
 /// position so callers need not clip to the buffer themselves.
 pub(crate) fn put(buf: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style) {
@@ -96,7 +84,7 @@ pub(crate) fn fill(buf: &mut Buffer, area: Rect, style: Style) {
 
 #[cfg(test)]
 mod tests {
-    use super::{advance_sixteenths, signed_sixteenths, span_sixteenths, to_sixteenths};
+    use super::{signed_sixteenths, span_sixteenths, to_sixteenths};
 
     #[test]
     fn an_anchor_past_i16_clamps_to_the_edge() {
@@ -117,21 +105,5 @@ mod tests {
     fn a_span_past_u16_clamps_to_the_widest() {
         assert_eq!(span_sixteenths(4095), 65520, "the last exact span");
         assert_eq!(span_sixteenths(4096), u16::MAX, "one cell further");
-    }
-
-    /// The product overflows a u16 well before the quotient does, so a legal
-    /// advance is the interesting case, not a saturating one.
-    #[test]
-    fn a_long_run_advances_without_overflowing_the_product() {
-        assert_eq!(
-            advance_sixteenths(410, 160),
-            4100,
-            "65600 before the divide"
-        );
-        assert_eq!(
-            advance_sixteenths(usize::MAX, 256),
-            u16::MAX,
-            "and saturates"
-        );
     }
 }

@@ -21,7 +21,11 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
 };
 use stoat_text::{cursor_offset, Point};
-use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
+use stoatty_widgets::{
+    bar::Bar,
+    text_run::{self, TextRun},
+    ApcScene,
+};
 
 /// Fraction a changed line's background wash blends toward the editor
 /// background, leaving 10% of the diff color. Light enough that code stays
@@ -1387,10 +1391,10 @@ fn draw_side_num(
     write!(scratch, "{num}").expect("writing to a String is infallible");
     match rich {
         Some(rg) => {
-            let digits = scratch.len() as u16;
+            let advance = text_run::advance_sixteenths(scratch.len(), TEXT_SCALE_COMPACT);
             let right_edge = (num_x - inner.x + 4) * 16;
             TextRun {
-                col: right_edge.saturating_sub(digits * TEXT_SCALE_COMPACT / 16) as i16,
+                col: right_edge.saturating_sub(advance) as i16,
                 row: ((y - inner.y) * 16) as i16,
                 scale: TEXT_SCALE_COMPACT,
                 color: rg.colors.dim,
@@ -1553,10 +1557,10 @@ fn draw_diff_num(
     write!(scratch, "{num}").expect("writing to a String is infallible");
     match rich {
         Some(rg) => {
-            let digits = scratch.len() as u16;
+            let advance = text_run::advance_sixteenths(scratch.len(), TEXT_SCALE_COMPACT);
             let right_edge = (num_x - inner.x + 4) * 16;
             TextRun {
-                col: right_edge.saturating_sub(digits * TEXT_SCALE_COMPACT / 16) as i16,
+                col: right_edge.saturating_sub(advance) as i16,
                 row: ((y - inner.y) * 16) as i16,
                 scale: TEXT_SCALE_COMPACT,
                 color: rg.colors.dim,

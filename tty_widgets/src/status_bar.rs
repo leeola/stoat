@@ -1,4 +1,9 @@
-use crate::{bar::Bar, cells, text_run::TextRun, ApcScene};
+use crate::{
+    bar::Bar,
+    cells,
+    text_run::{self, TextRun},
+    ApcScene,
+};
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 
 /// A status bar composed of left- and right-anchored scaled text segments and a
@@ -154,7 +159,7 @@ impl StatusBar<'_> {
 
     /// Sixteenths a segment's `text` advances at [`Self::scale`].
     fn segment_advance(&self, text: &str) -> u16 {
-        cells::advance_sixteenths(text.chars().count(), self.scale)
+        text_run::advance_sixteenths(text.chars().count(), self.scale)
     }
 
     /// The prefix of `text` that advances no further than `room` sixteenths.

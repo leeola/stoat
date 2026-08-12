@@ -30,6 +30,26 @@ pub struct TextRun<'a> {
     pub text: &'a str,
 }
 
+/// Sixteenths a run of `chars` advances at `scale`, the glyph size in 256ths of
+/// a cell.
+///
+/// Every component that measures scaled text shares this one rounding, so a
+/// gutter number, a status segment, and a popup line placed against each other
+/// agree on where the run ends. Half a sixteenth rounds up, which is the nearer
+/// of the two positions.
+///
+/// The product overflows a u16 long before the quotient does, so the widening
+/// matters even for advances that comfortably fit the result. Takes the
+/// character count directly rather than a narrowed one, since a truncated count
+/// corrupts the answer before any arithmetic runs.
+pub fn advance_sixteenths(chars: usize, scale: u16) -> u16 {
+    let total = (chars as u64)
+        .saturating_mul(u64::from(scale))
+        .saturating_add(8)
+        / 16;
+    total.min(u64::from(u16::MAX)) as u16
+}
+
 impl StatefulWidget for TextRun<'_> {
     type State = ApcScene;
 
@@ -53,7 +73,7 @@ impl StatefulWidget for TextRun<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::TextRun;
+    use super::{advance_sixteenths, TextRun};
     use crate::ApcScene;
     use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
     use stoatty_protocol::command::{encode_text_run, TextRunCommand};
@@ -112,5 +132,28 @@ mod tests {
             expected.as_slice(),
             "the run starts left of and above the area origin"
         );
+    }
+
+    /// The product overflows a u16 well before the quotient does, so a legal
+    /// advance is the interesting case, not a saturating one.
+    #[test]
+    fn a_long_run_advances_without_overflowing_the_product() {
+        assert_eq!(
+            advance_sixteenths(410, 160),
+            4100,
+            "65600 before the divide"
+        );
+        assert_eq!(
+            advance_sixteenths(usize::MAX, 256),
+            u16::MAX,
+            "and saturates"
+        );
+    }
+
+    #[test]
+    fn half_a_sixteenth_rounds_up() {
+        assert_eq!(advance_sixteenths(1, 218), 14, "218/16 is 13.625");
+        assert_eq!(advance_sixteenths(1, 8), 1, "exactly half rounds up");
+        assert_eq!(advance_sixteenths(1, 7), 0, "just under half rounds down");
     }
 }

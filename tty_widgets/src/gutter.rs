@@ -1,4 +1,9 @@
-use crate::{bar::Bar, cells, text_run::TextRun, ApcScene};
+use crate::{
+    bar::Bar,
+    cells,
+    text_run::{self, TextRun},
+    ApcScene,
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -125,7 +130,7 @@ impl Gutter<'_> {
 
     /// Sixteenths a run of `digits` numerals advances at [`Self::number_scale`].
     fn number_advance(&self, digits: usize) -> u16 {
-        cells::advance_sixteenths(digits, self.number_scale)
+        text_run::advance_sixteenths(digits, self.number_scale)
     }
 
     fn number_right_edge(&self) -> u16 {
