@@ -30,6 +30,10 @@ const TEXT_GAP: u16 = 4;
 /// gutter tracks live font zoom. The widget positions every element at an
 /// absolute sixteenth offset to the render area and folds each line's row
 /// `height` in itself, so it declares no surface line layout.
+///
+/// Both halves clip to the area. Lines below its last row draw nothing, and a
+/// line straddling the bottom keeps only the rows that fit, so a caller sizes
+/// the area from its pane and passes however many lines it holds.
 pub struct Gutter<'a> {
     /// The lines to draw, top to bottom.
     pub lines: &'a [GutterLine],
@@ -146,9 +150,15 @@ impl Gutter<'_> {
         let git_x = self.git_x();
         let staged_x = self.staged_x();
 
+        let limit = area.height * 16;
+
         let mut top = 0u16;
         for line in self.lines {
             let y = top * 16;
+            if y >= limit {
+                break;
+            }
+            let remaining = limit - y;
 
             let mut digits = [0u8; 10];
             let text = format_u32(&mut digits, line.number);
@@ -168,7 +178,7 @@ impl Gutter<'_> {
                     x: 0,
                     y,
                     width: self.bar_width,
-                    height: line.height * 16,
+                    height: (line.height * 16).min(remaining),
                     color: diag.color,
                 }
                 .render(area, buf, scene);
@@ -178,7 +188,7 @@ impl Gutter<'_> {
                     x: git_x,
                     y,
                     width: self.bar_width,
-                    height: if git.seam { 6 } else { 16 },
+                    height: (if git.seam { 6 } else { 16 }).min(remaining),
                     color: git.color,
                 }
                 .render(area, buf, scene);
@@ -186,7 +196,7 @@ impl Gutter<'_> {
                     x: staged_x,
                     y,
                     width: self.bar_width,
-                    height: line.height * 16,
+                    height: (line.height * 16).min(remaining),
                     color: git.staged_color,
                 }
                 .render(area, buf, scene);
@@ -199,7 +209,7 @@ impl Gutter<'_> {
             x: self.separator_x(),
             y: 0,
             width: 1,
-            height: self.total_rows() * 16,
+            height: self.total_rows().min(area.height) * 16,
             color: self.separator,
         }
         .render(area, buf, scene);
@@ -216,6 +226,9 @@ impl Gutter<'_> {
 
         let mut top = 0u16;
         for line in self.lines {
+            if top >= area.height {
+                break;
+            }
             let y = area.y + top;
 
             if let Some(diag) = line.diagnostic {
@@ -272,7 +285,7 @@ mod tests {
     use super::{Diagnostic, GitMark, Gutter, GutterLine};
     use crate::ApcScene;
     use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
-    use stoatty_protocol::command::{encode_bar, BarCommand};
+    use stoatty_protocol::command::{encode_bar, encode_text_run, BarCommand, TextRunCommand};
 
     fn config(lines: &[GutterLine]) -> Gutter<'_> {
         Gutter {
@@ -413,6 +426,118 @@ mod tests {
         assert!(
             contains(scene.buffer(), &staged_bar),
             "staged-state bar spans the full line height"
+        );
+    }
+
+    /// A caller sizes the gutter area from its pane, not from its line count,
+    /// so more lines than rows is ordinary. ratatui panics outright on an
+    /// out-of-buffer row, and the components clip nowhere at all.
+    #[test]
+    fn lines_below_the_area_are_dropped() {
+        let lines = [1, 2, 3].map(|number| GutterLine {
+            number,
+            height: 1,
+            git: None,
+            diagnostic: None,
+        });
+        let gutter = config(&lines);
+        let area = Rect::new(0, 0, 10, 2);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+
+        gutter.render(area, &mut buf, &mut scene);
+
+        let third_number = encode_text_run(&TextRunCommand {
+            col: 29,
+            row: 32,
+            scale: 160,
+            color: [99, 109, 131],
+            bg: Some([40, 44, 52]),
+            text: "3".to_owned(),
+        });
+        let second_number = encode_text_run(&TextRunCommand {
+            col: 29,
+            row: 16,
+            scale: 160,
+            color: [99, 109, 131],
+            bg: Some([40, 44, 52]),
+            text: "2".to_owned(),
+        });
+        assert!(
+            contains(scene.buffer(), &second_number),
+            "the last line inside the area still draws"
+        );
+        assert!(
+            !contains(scene.buffer(), &third_number),
+            "the line past the bottom draws nothing"
+        );
+
+        let separator = encode_bar(&BarCommand {
+            x: 59,
+            y: 0,
+            width: 1,
+            height: 32,
+            color: [60, 66, 77],
+        });
+        assert!(
+            contains(scene.buffer(), &separator),
+            "the separator spans the area, not the line total"
+        );
+    }
+
+    /// Dropping only fully-below lines leaves the same overrun one row down. A
+    /// tall line entered at the last row still spans its full height.
+    #[test]
+    fn a_line_straddling_the_bottom_clamps_its_bars() {
+        let lines = [
+            GutterLine {
+                number: 1,
+                height: 1,
+                git: None,
+                diagnostic: None,
+            },
+            GutterLine {
+                number: 2,
+                height: 2,
+                git: Some(GitMark {
+                    color: [152, 195, 121],
+                    staged_color: [80, 90, 100],
+                    seam: false,
+                }),
+                diagnostic: Some(Diagnostic {
+                    color: [224, 108, 117],
+                    mark: 'E',
+                }),
+            },
+        ];
+        let gutter = config(&lines);
+        let area = Rect::new(0, 0, 10, 2);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+
+        gutter.render(area, &mut buf, &mut scene);
+
+        let diag_bar = encode_bar(&BarCommand {
+            x: 0,
+            y: 16,
+            width: 5,
+            height: 16,
+            color: [224, 108, 117],
+        });
+        let staged_bar = encode_bar(&BarCommand {
+            x: 50,
+            y: 16,
+            width: 5,
+            height: 16,
+            color: [80, 90, 100],
+        });
+        assert!(
+            contains(scene.buffer(), &diag_bar),
+            "the diagnostic bar stops at the area bottom"
+        );
+        assert!(
+            contains(scene.buffer(), &staged_bar),
+            "and so does the staged-state bar"
         );
     }
 
