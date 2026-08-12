@@ -7216,7 +7216,7 @@ mod tests {
 
         assert_eq!(grid.minimaps().len(), 1);
         let strip: &Minimap = &grid.minimaps()[0];
-        assert_eq!(strip.command.strip_id, 5);
+        assert_eq!(strip.strip.strip_id, 5);
         assert_eq!(
             strip.view,
             Some(MinimapView {

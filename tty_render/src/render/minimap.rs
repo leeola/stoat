@@ -12,8 +12,7 @@
 
 use crate::render::{CellMetrics, Occluder};
 use bytemuck::{Pod, Zeroable};
-use stoatty_protocol::command::{LineSummary, MinimapCommand};
-use stoatty_term::grid::{Grid, Minimap, MinimapView};
+use stoatty_term::grid::{Grid, LineSummary, Minimap, MinimapStrip, MinimapView, Rgb, Rgba};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
@@ -274,7 +273,7 @@ impl MinimapPass {
         instances.clear();
         self.strips.clear();
         for strip in grid.minimaps() {
-            let content = grid.minimap_content(strip.command.content_id);
+            let content = grid.minimap_content(strip.strip.content_id);
             let (strip_instances, rect) = build_strip(strip, content, self.metrics);
             if strip_instances.is_empty() {
                 continue;
@@ -395,18 +394,18 @@ fn make_bind_group(
     })
 }
 
-/// The pixel geometry of `command`'s strip under `metrics`.
-fn strip_layout(command: &MinimapCommand, metrics: CellMetrics) -> StripLayout {
-    let strip_w = command.width as f32 * metrics.width;
-    let strip_h = command.height as f32 * metrics.height;
-    let line_h = metrics.height / command.lines_per_cell.max(1) as f32;
+/// The pixel geometry of `strip` under `metrics`.
+fn strip_layout(strip: &MinimapStrip, metrics: CellMetrics) -> StripLayout {
+    let strip_w = strip.width as f32 * metrics.width;
+    let strip_h = strip.height as f32 * metrics.height;
+    let line_h = metrics.height / strip.lines_per_cell.max(1) as f32;
     StripLayout {
-        strip_x: command.left as f32 * metrics.width,
-        strip_y: command.top as f32 * metrics.height,
+        strip_x: strip.left as f32 * metrics.width,
+        strip_y: strip.top as f32 * metrics.height,
         strip_w,
         strip_h,
         line_h,
-        col_w: strip_w / command.max_columns.max(1) as f32,
+        col_w: strip_w / strip.max_columns.max(1) as f32,
         visible_lines: strip_h / line_h,
     }
 }
@@ -464,7 +463,7 @@ fn build_strip(
     content: &[LineSummary],
     metrics: CellMetrics,
 ) -> (Vec<MinimapInstance>, [f32; 4]) {
-    let layout = strip_layout(&strip.command, metrics);
+    let layout = strip_layout(&strip.strip, metrics);
     let seq = strip.seq;
     let rect = [
         layout.strip_x,
@@ -476,7 +475,7 @@ fn build_strip(
     let mut instances = vec![MinimapInstance {
         origin: [layout.strip_x, layout.strip_y],
         size: [layout.strip_w, layout.strip_h],
-        color: rgba_f32(strip.command.bg),
+        color: rgba_f32(strip.strip.bg),
         seq,
     }];
 
@@ -494,10 +493,10 @@ fn build_strip(
         let y = layout.strip_y + (line as f32 - top) * layout.line_h;
         for run in runs.iter() {
             let Some(color) = strip
-                .command
+                .strip
                 .palette
                 .get(run.class as usize)
-                .or_else(|| strip.command.palette.first())
+                .or_else(|| strip.strip.palette.first())
             else {
                 continue;
             };
@@ -522,7 +521,7 @@ fn build_strip(
     instances.push(MinimapInstance {
         origin: [layout.strip_x, layout.strip_y + thumb_offset],
         size: [layout.strip_w, thumb_height],
-        color: rgba_f32(strip.command.thumb),
+        color: rgba_f32(strip.strip.thumb),
         seq,
     });
 
@@ -539,20 +538,20 @@ fn clamp_scissor(rect: [f32; 4], resolution: [f32; 2]) -> [u32; 4] {
     [x as u32, y as u32, w.max(0.0) as u32, h.max(0.0) as u32]
 }
 
-fn rgba_f32(color: [u8; 4]) -> [f32; 4] {
+fn rgba_f32(color: Rgba) -> [f32; 4] {
     [
-        color[0] as f32 / 255.0,
-        color[1] as f32 / 255.0,
-        color[2] as f32 / 255.0,
-        color[3] as f32 / 255.0,
+        color.r as f32 / 255.0,
+        color.g as f32 / 255.0,
+        color.b as f32 / 255.0,
+        color.a as f32 / 255.0,
     ]
 }
 
-fn rgb_opaque_f32(color: [u8; 3]) -> [f32; 4] {
+fn rgb_opaque_f32(color: Rgb) -> [f32; 4] {
     [
-        color[0] as f32 / 255.0,
-        color[1] as f32 / 255.0,
-        color[2] as f32 / 255.0,
+        color.r as f32 / 255.0,
+        color.g as f32 / 255.0,
+        color.b as f32 / 255.0,
         1.0,
     ]
 }
@@ -565,8 +564,10 @@ mod tests {
         render::{panel_occluder, CellMetrics, Occluder},
     };
     use std::collections::HashMap;
-    use stoatty_protocol::command::{LineSummary, MinimapCommand, MinimapRun};
-    use stoatty_term::grid::{BorderStyle, Grid, Minimap, MinimapView, Panel, PanelShadow, Rgb};
+    use stoatty_term::grid::{
+        BorderStyle, Grid, LineSummary, Minimap, MinimapRun, MinimapStrip, MinimapView, Panel,
+        PanelShadow, Rgb, Rgba,
+    };
     use wgpu::{
         naga::{
             front::wgsl,
@@ -599,8 +600,8 @@ mod tests {
         }
     }
 
-    fn command() -> MinimapCommand {
-        MinimapCommand {
+    fn command() -> MinimapStrip {
+        MinimapStrip {
             top: 0,
             left: 10,
             width: 8,
@@ -609,16 +610,20 @@ mod tests {
             content_id: 1,
             lines_per_cell: 8,
             max_columns: 120,
-            bg: [0, 0, 0, 0],
-            thumb: [200, 200, 200, 48],
-            thumb_border: [255, 255, 255],
-            palette: vec![[10, 20, 30], [40, 50, 60], [70, 80, 90]],
+            bg: Rgba::new(0, 0, 0, 0),
+            thumb: Rgba::new(200, 200, 200, 48),
+            thumb_border: Rgb::new(255, 255, 255),
+            palette: vec![
+                Rgb::new(10, 20, 30),
+                Rgb::new(40, 50, 60),
+                Rgb::new(70, 80, 90),
+            ],
         }
     }
 
     fn strip(view: Option<MinimapView>) -> Minimap {
         Minimap {
-            command: command(),
+            strip: command(),
             seq: 3,
             view,
         }
@@ -873,8 +878,8 @@ mod tests {
     ///
     /// The thumb is cleared along with the background. It spans the strip's full
     /// width, so a visible one paints over the very runs under measurement.
-    fn red_strip(width: u16, height: u16, lines_per_cell: u8, max_columns: u8) -> MinimapCommand {
-        MinimapCommand {
+    fn red_strip(width: u16, height: u16, lines_per_cell: u8, max_columns: u8) -> MinimapStrip {
+        MinimapStrip {
             top: 0,
             left: 0,
             width,
@@ -883,21 +888,21 @@ mod tests {
             content_id: 1,
             lines_per_cell,
             max_columns,
-            bg: [0, 0, 0, 0],
-            thumb: [0, 0, 0, 0],
-            thumb_border: [0, 0, 0],
-            palette: vec![[255, 0, 0]],
+            bg: Rgba::new(0, 0, 0, 0),
+            thumb: Rgba::new(0, 0, 0, 0),
+            thumb_border: Rgb::new(0, 0, 0),
+            palette: vec![Rgb::new(255, 0, 0)],
         }
     }
 
     fn red_grid(
-        command: MinimapCommand,
+        strip: MinimapStrip,
         content: Vec<Vec<MinimapRun>>,
         view: Option<MinimapView>,
     ) -> Grid {
         let mut grid = Grid::new(12, 24);
         grid.set_minimaps(vec![Minimap {
-            command,
+            strip,
             seq: 0,
             view,
         }]);
@@ -953,7 +958,7 @@ mod tests {
         // A 4x2-cell strip is 24 by 24 pixels under a 6x12 cell, so a radius of
         // 8 rounds well inside its 12-pixel half-extent.
         let mut command = red_strip(4, 2, 1, 12);
-        command.bg = [255, 0, 0, 255];
+        command.bg = Rgba::new(255, 0, 0, 255);
         let grid = red_grid(command, vec![Vec::new()], None);
 
         let panel = Panel {

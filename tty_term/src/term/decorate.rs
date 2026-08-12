@@ -8,8 +8,9 @@
 
 use super::{Damage, StoredTextRun};
 use crate::grid::{
-    Bar, Border, BorderEdge, BorderStyle, Grid, Icon, IconKind, Minimap, MinimapView, Overlay,
-    PagePool, Panel, PanelShadow, Polyline, Rgb, ScrollRegion, TextRun,
+    minimap_strip_from_command, Bar, Border, BorderEdge, BorderStyle, Grid, Icon, IconKind,
+    Minimap, MinimapView, Overlay, PagePool, Panel, PanelShadow, Polyline, Rgb, ScrollRegion,
+    TextRun,
 };
 use std::{collections::HashMap, mem, sync::Arc};
 use stoatty_protocol::command::{
@@ -437,7 +438,7 @@ pub(super) fn apply_minimaps(
     grid.fill_minimaps(commands.len(), |index| {
         let command = &commands[index];
         Minimap {
-            command: command.clone(),
+            strip: minimap_strip_from_command(command.clone()),
             seq: seqs[index],
             view: views.get(&command.strip_id).copied(),
         }

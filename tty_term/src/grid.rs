@@ -11,9 +11,14 @@ use std::{
     ops::{BitOr, BitOrAssign, Range},
     sync::Arc,
 };
-use stoatty_protocol::command::{
-    BarCommand, LineSummary, MinimapCommand, PolylineCommand, TextRunCommand,
-};
+use stoatty_protocol::command::{BarCommand, MinimapCommand, PolylineCommand, TextRunCommand};
+/// A minimap line's run summary, re-exported so a consumer of
+/// [`Grid::minimap_content`] has a name for what it gets back.
+///
+/// Not projected into a grid type like the colors around it, because a run
+/// carries nothing wire-specific to project. It is a start column, a length,
+/// and a palette class, which is what the renderer reads either way.
+pub use stoatty_protocol::command::{LineSummary, MinimapRun};
 
 /// A rectangular grid of [`Cell`]s addressed by row and column.
 ///
@@ -1469,15 +1474,76 @@ fn polyline_from_command(command: PolylineCommand) -> Polyline {
     }
 }
 
+/// A declared minimap strip, in the grid's own colors.
+///
+/// The renderer draws from this rather than from the [`MinimapCommand`] it was
+/// declared by, which is what keeps the wire format out of the render crate.
+/// Geometry and ids pass through unchanged. What the projection does is
+/// resolve the color triples and the palette.
+///
+/// The line summaries a strip renders are not here. They live in the grid's
+/// content store, keyed by [`Self::content_id`], because several strips share
+/// one store and a splice replaces lines without touching the declaration.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MinimapStrip {
+    pub top: u16,
+    pub left: u16,
+    pub width: u16,
+    pub height: u16,
+    pub strip_id: u32,
+    /// The line-summary store this strip renders, read through
+    /// [`Grid::minimap_content`].
+    pub content_id: u32,
+    pub lines_per_cell: u8,
+    pub max_columns: u8,
+    /// The strip's ground, drawn under the runs.
+    pub bg: Rgba,
+    /// The viewport overlay, drawn over them.
+    pub thumb: Rgba,
+    pub thumb_border: Rgb,
+    /// Colors a run's class indexes, up to 64 entries.
+    pub palette: Vec<Rgb>,
+}
+
+/// Project a declared [`MinimapCommand`] into the grid's [`MinimapStrip`],
+/// resolving its wire color triples.
+pub(crate) fn minimap_strip_from_command(command: MinimapCommand) -> MinimapStrip {
+    MinimapStrip {
+        top: command.top,
+        left: command.left,
+        width: command.width,
+        height: command.height,
+        strip_id: command.strip_id,
+        content_id: command.content_id,
+        lines_per_cell: command.lines_per_cell,
+        max_columns: command.max_columns,
+        bg: Rgba::new(command.bg[0], command.bg[1], command.bg[2], command.bg[3]),
+        thumb: Rgba::new(
+            command.thumb[0],
+            command.thumb[1],
+            command.thumb[2],
+            command.thumb[3],
+        ),
+        thumb_border: Rgb::new(
+            command.thumb_border[0],
+            command.thumb_border[1],
+            command.thumb_border[2],
+        ),
+        palette: command
+            .palette
+            .into_iter()
+            .map(|entry| Rgb::new(entry[0], entry[1], entry[2]))
+            .collect(),
+    }
+}
+
 /// A declared minimap strip joined with its viewport thumb.
 ///
-/// [`Self::command`] carries the strip geometry, colors, and palette. The line
-/// summaries it renders live in the grid's content store, found by
-/// [`MinimapCommand::content_id`]. [`Self::view`] is the thumb position, absent
-/// until a viewport update arrives.
+/// [`Self::view`] is the thumb position, absent until a viewport update
+/// arrives.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Minimap {
-    pub command: MinimapCommand,
+    pub strip: MinimapStrip,
     /// Monotonic declaration-order index across all non-cell components. See
     /// [`Panel::seq`].
     pub seq: u32,
@@ -1525,6 +1591,27 @@ pub struct Rgb {
 impl Rgb {
     pub const fn new(r: u8, g: u8, b: u8) -> Rgb {
         Rgb { r, g, b }
+    }
+}
+
+/// A resolved color with an alpha channel, for a decoration drawn over the grid
+/// rather than into it.
+///
+/// [`Rgb`] covers everything painted as a cell, where the grid is the backdrop
+/// and there is nothing to blend against. A minimap strip floats above the
+/// content it summarizes, so its ground and its viewport thumb both carry an
+/// alpha the renderer composites with.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Rgba {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+impl Rgba {
+    pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Rgba {
+        Rgba { r, g, b, a }
     }
 }
 
