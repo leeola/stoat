@@ -56,9 +56,17 @@ pub fn detect_indent_style(rope: &Rope) -> Option<IndentStyle> {
     let mut prev_is_tabs = false;
     let mut prev_count = 0usize;
 
-    let last_row = rope.max_point().row;
-    for row in 0..=last_row.min(SCAN_LINES.saturating_sub(1)) {
-        let line = rope.line_at_row(row);
+    // One cursor and one buffer for the whole scan. Asking the rope for each
+    // row's text costs a descent to find its byte range, a second seek to read
+    // it, and an allocation, over a thousand rows at every file open.
+    let mut line = String::new();
+    let mut walk = rope.line_walk(0..SCAN_LINES);
+    loop {
+        line.clear();
+        if walk.next_into(&mut line).is_none() {
+            break;
+        }
+
         let mut chars = line.chars();
         let is_tabs = match chars.next() {
             Some('\t') => true,
