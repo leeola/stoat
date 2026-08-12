@@ -7702,9 +7702,9 @@ impl Stoat {
     pub(crate) fn newline_continuation(&self, buffer_id: BufferId, cursor_offset: usize) -> String {
         let continued_comment = {
             let buffers = &self.active_workspace().buffers;
-            let token = buffers
+            let tokens = buffers
                 .language_for(buffer_id)
-                .and_then(|lang| lang.line_comment);
+                .map_or(&[][..], |lang| lang.line_comments);
             match buffers.get(buffer_id) {
                 Some(buffer) => {
                     let guard = buffer.read().expect("buffer poisoned");
@@ -7713,15 +7713,12 @@ impl Stoat {
                     let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
                     let line_end =
                         rope.point_to_offset(stoat_text::Point::new(row, rope.line_len(row)));
-                    token
-                        .filter(|&token| {
-                            action_handlers::movement::line_comment_continues(
-                                rope, line_start, line_end, token,
-                            )
-                        })
-                        .map(|token| {
-                            format!("{}{token} ", language::line_leading_whitespace(rope, row))
-                        })
+                    action_handlers::movement::line_comment_continues(
+                        rope, line_start, line_end, tokens,
+                    )
+                    .map(|(_, token)| {
+                        format!("{}{token} ", language::line_leading_whitespace(rope, row))
+                    })
                 },
                 None => None,
             }
@@ -25689,6 +25686,35 @@ mod tests {
         h.type_keys("enter");
         h.type_text("bar");
         assert_eq!(focused_buffer_string(&h), "// foo\n// bar\n");
+    }
+
+    #[test]
+    fn insert_enter_continues_doc_comment_token() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"/// foo\n");
+        h.type_keys("A");
+        h.type_keys("enter");
+        h.type_text("bar");
+        assert_eq!(focused_buffer_string(&h), "/// foo\n/// bar\n");
+    }
+
+    #[test]
+    fn insert_enter_continues_inner_doc_comment_token() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"//! foo\n");
+        h.type_keys("A");
+        h.type_keys("enter");
+        h.type_text("bar");
+        assert_eq!(focused_buffer_string(&h), "//! foo\n//! bar\n");
+    }
+
+    #[test]
+    fn open_below_continues_doc_comment_token() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"/// foo\n");
+        h.type_keys("o");
+        h.type_text("bar");
+        assert_eq!(focused_buffer_string(&h), "/// foo\n/// bar\n");
     }
 
     #[test]

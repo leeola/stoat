@@ -34,11 +34,18 @@ pub struct Language {
     /// milliseconds to compile, so a session that never runs a bracket motion
     /// never pays for `brackets.scm`.
     aux: AuxQueries,
-    /// Line-comment marker for languages that have one (e.g. `"//"`
-    /// for rust, `"#"` for toml). `None` for languages without line
-    /// comments (e.g. JSON, markdown). Used by the `ToggleComments`
-    /// action to insert / remove the prefix on each line.
-    pub line_comment: Option<&'static str>,
+    /// Line-comment markers for languages that have them, ordered with the
+    /// toggle token first (e.g. `["//", "///", "//!"]` for rust, `["#"]` for
+    /// toml). Empty for languages without line comments (e.g. JSON, markdown).
+    ///
+    /// The first entry is the one the `ToggleComments` action inserts and
+    /// removes, so a language whose extra tokens carry meaning (rust doc
+    /// comments) still toggles with the plain marker.
+    ///
+    /// Continuing a comment onto a new line instead picks the longest entry
+    /// matching the line, which is what keeps `/// x` continuing as `///`
+    /// rather than degrading to the `//` that also matches it.
+    pub line_comments: &'static [&'static str],
     /// Languages a fenced code block's info string may resolve to, for a
     /// grammar carrying an [`InjectionInner::Fence`] injection. Late-bound: the
     /// registry fills it after every language exists, since a fence host (e.g.
@@ -367,7 +374,7 @@ struct AuxQuerySources {
     textobjects: Option<&'static str>,
     outline: Option<&'static str>,
     tags: Option<&'static str>,
-    line_comment: Option<&'static str>,
+    line_comments: &'static [&'static str],
 }
 
 fn make_language(
@@ -394,7 +401,7 @@ fn make_language_with_injections(
         textobjects,
         outline,
         tags,
-        line_comment,
+        line_comments,
     } = aux;
 
     // Only these two are read to paint, so only these two are compiled here.
@@ -419,7 +426,7 @@ fn make_language_with_injections(
             outline: LazyQuery::new(outline),
             tags: LazyQuery::new(tags),
         },
-        line_comment,
+        line_comments,
         fence_candidates: OnceLock::new(),
     }
 }
@@ -494,7 +501,7 @@ fn make_rust() -> Language {
                 "../../vendor/zed/crates/languages/src/rust/outline.scm"
             )),
             tags: Some(include_str!("queries/rust/tags.scm")),
-            line_comment: Some("//"),
+            line_comments: &["//", "///", "//!"],
         },
     )
 }
@@ -517,7 +524,7 @@ fn make_json() -> Language {
                 "../../vendor/zed/crates/languages/src/json/outline.scm"
             )),
             tags: None,
-            line_comment: None,
+            line_comments: &[],
         },
     )
 }
@@ -532,7 +539,7 @@ fn make_toml() -> Language {
             textobjects: Some(include_str!(
                 "../../vendor/helix/runtime/queries/toml/textobjects.scm"
             )),
-            line_comment: Some("#"),
+            line_comments: &["#"],
             ..Default::default()
         },
     )
@@ -578,7 +585,7 @@ fn make_markdown() -> Language {
                 "../../vendor/zed/crates/languages/src/markdown/outline.scm"
             )),
             tags: None,
-            line_comment: None,
+            line_comments: &[],
         },
     )
 }

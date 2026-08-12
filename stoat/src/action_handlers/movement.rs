@@ -1138,23 +1138,29 @@ fn first_nonwhitespace(rope: &Rope, line_start: usize, line_end: usize) -> Optio
     None
 }
 
-/// Whether the line's first non-whitespace run begins with `token`, marking it a
-/// comment line whose token a newly opened line continues.
+/// The comment token opening the line, paired with the offset it starts at, or
+/// `None` when the line's first non-whitespace run is not one of `tokens`.
+///
+/// The longest matching token wins, because a language lists tokens that prefix
+/// one another. Rust's `///` also matches `//`, and the shorter one drops a
+/// slash off a doc comment when the line continues with it.
+///
+/// The offset is the caller's means of telling how much of the line precedes the
+/// token, which is what separates a cursor sitting inside the leading whitespace
+/// from one sitting in the comment body.
 pub(crate) fn line_comment_continues(
     rope: &Rope,
     line_start: usize,
     line_end: usize,
-    token: &str,
-) -> bool {
-    let Some(first) = first_nonwhitespace(rope, line_start, line_end) else {
-        return false;
-    };
-    if first + token.len() > line_end {
-        return false;
-    }
-    rope.chars_at(first)
-        .zip(token.chars())
-        .all(|(actual, expected)| actual == expected)
+    tokens: &[&'static str],
+) -> Option<(usize, &'static str)> {
+    let first = first_nonwhitespace(rope, line_start, line_end)?;
+    let token = tokens
+        .iter()
+        .copied()
+        .filter(|token| rope_matches_at(rope, first, line_end, token))
+        .max_by_key(|token| token.len())?;
+    Some((first, token))
 }
 
 pub(super) fn goto_file_start(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
@@ -1338,10 +1344,11 @@ fn join_selections_impl(stoat: &mut Stoat, select_space: bool) -> UpdateEffect {
         _ => return UpdateEffect::None,
     };
     let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
-    let comment_token = ws
+    let comment_tokens = ws
         .buffers
         .language_for(buffer_id)
-        .and_then(|lang| lang.line_comment);
+        .map_or(&[][..], |lang| lang.line_comments);
+    let comment_token = comment_tokens.first().copied();
 
     let mut changes: Vec<(usize, usize, bool)> = {
         let editor = ws.editors.get_mut(editor_id).expect("editor");
@@ -1358,8 +1365,8 @@ fn join_selections_impl(stoat: &mut Stoat, select_space: bool) -> UpdateEffect {
 
             let first_start = rope.point_to_offset(Point::new(start_row, 0));
             let first_end = line_content_end(rope, start_row);
-            let mut in_comment = comment_token
-                .is_some_and(|token| line_comment_continues(rope, first_start, first_end, token));
+            let mut in_comment =
+                line_comment_continues(rope, first_start, first_end, comment_tokens).is_some();
 
             for line in start_row..end_row {
                 let join_start = line_content_end(rope, line);
@@ -2085,12 +2092,15 @@ pub(super) enum OpenDir {
 }
 
 /// One selection's open site, resolved before indentation is computed.
-/// `continues` marks a line whose comment token the opened line carries on.
+///
+/// `continued` holds the comment token the opened line carries on, per site
+/// rather than per buffer, because separate cursors sit on lines opening with
+/// different tokens.
 struct OpenSite {
     id: usize,
     insert_offset: usize,
     row: u32,
-    continues: bool,
+    continued: Option<&'static str>,
 }
 
 /// One selection's opened lines. `text` is a single newline+indent block
@@ -2115,13 +2125,13 @@ pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
         }
     };
 
-    let (buffer_id, comment_token, sites) = {
+    let (buffer_id, sites) = {
         let ws = stoat.active_workspace_mut();
         let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
-        let comment_token = ws
+        let comment_tokens = ws
             .buffers
             .language_for(buffer_id)
-            .and_then(|lang| lang.line_comment);
+            .map_or(&[][..], |lang| lang.line_comments);
         let editor = ws.editors.get_mut(editor_id).expect("editor");
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
@@ -2145,17 +2155,17 @@ pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
                     OpenDir::Above => line_start,
                     OpenDir::Below => line_end,
                 };
-                let continues = comment_token
-                    .is_some_and(|token| line_comment_continues(rope, line_start, line_end, token));
+                let continued = line_comment_continues(rope, line_start, line_end, comment_tokens)
+                    .map(|(_, token)| token);
                 OpenSite {
                     id: sel.id,
                     insert_offset,
                     row,
-                    continues,
+                    continued,
                 }
             })
             .collect();
-        (buffer_id, comment_token, sites)
+        (buffer_id, sites)
     };
 
     if sites.is_empty() {
@@ -2169,7 +2179,7 @@ pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
     let mut units: Vec<OpenUnit> = sites
         .iter()
         .map(|site| {
-            let indent = if site.continues {
+            let indent = if site.continued.is_some() {
                 stoat.line_indent_string(buffer_id, site.row)
             } else {
                 match dir {
@@ -2177,9 +2187,9 @@ pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
                     OpenDir::Above => stoat.line_indent_string(buffer_id, site.row),
                 }
             };
-            let prefix = match (site.continues, comment_token) {
-                (true, Some(token)) => format!("{indent}{token} "),
-                _ => indent,
+            let prefix = match site.continued {
+                Some(token) => format!("{indent}{token} "),
+                None => indent,
             };
             let (block, cursor_within) = match dir {
                 OpenDir::Below => (format!("\n{prefix}"), 1 + prefix.len()),
@@ -2465,7 +2475,7 @@ pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
     let Some(language) = ws.buffers.language_for(buffer_id) else {
         return UpdateEffect::None;
     };
-    let Some(prefix) = language.line_comment else {
+    let Some(prefix) = language.line_comments.first().copied() else {
         return UpdateEffect::None;
     };
 

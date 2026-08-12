@@ -4268,7 +4268,7 @@ mod tests {
         assert_eq!(
             focused_buffer_text(&mut h),
             "{}\n",
-            "json has no line_comment, action no-ops"
+            "json has no line_comments, action no-ops"
         );
     }
 
