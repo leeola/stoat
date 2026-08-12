@@ -27,8 +27,31 @@ const MAX_DIFF_HOPS: usize = 64;
 /// enclosing symbols as a [`NavList`] whose cursor tracks the current position
 /// along it. While only the start is marked, `path` is empty.
 pub(crate) struct TrailState {
-    start: (BufferId, Anchor),
+    /// Where the reader marked the start, or `None` for a path installed
+    /// without marks at all. A trail computed for them rather than by them has
+    /// no anchor to resolve, and never needs one, since its path is already
+    /// built.
+    start: Option<(BufferId, Anchor)>,
     path: NavList<SymbolKey>,
+}
+
+impl TrailState {
+    /// Which stop of how many the trail sits on, one-based, or `None` while it
+    /// carries no path.
+    ///
+    /// One-based because a person reads it. The first stop of five reads
+    /// "1/5", not "0/5".
+    pub(crate) fn progress(&self) -> Option<(usize, usize)> {
+        (!self.is_armed()).then(|| (self.path.cursor() + 1, self.path.len()))
+    }
+
+    /// Whether a start is marked and no path is computed yet.
+    ///
+    /// The half-marked state, which reads differently from a walkable trail:
+    /// there is nothing to step along, only a point waiting for its partner.
+    pub(crate) fn is_armed(&self) -> bool {
+        self.path.entries().is_empty()
+    }
 }
 
 /// Navigate from the symbol under the cursor to one of its callers.
@@ -158,17 +181,19 @@ pub(crate) fn mark_trail_start(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     };
     stoat.active_workspace_mut().trail = Some(TrailState {
-        start,
+        start: Some(start),
         path: NavList::default(),
     });
-    UpdateEffect::None
+    stoat.set_status("trail start marked");
+    UpdateEffect::Redraw
 }
 
-/// Mark the end of a trail, compute the call-graph path between the symbols
+/// Mark the end of a trail, compute the call-graph path relating the symbols
 /// enclosing the two marks, and jump to the start.
 ///
-/// Falls back to a direct two-point path when no call path connects them.
-/// A no-op when no start is marked or either end is on no indexed symbol.
+/// Falls back to a direct two-point path when nothing relates them, reported
+/// as the fallback it is. No start marked, or a mark on no indexed symbol,
+/// each report which one it was rather than doing nothing.
 pub(crate) fn mark_trail_end(stoat: &mut Stoat) -> UpdateEffect {
     let Some(end) = focused_anchor(stoat) else {
         return UpdateEffect::None;
@@ -177,38 +202,50 @@ pub(crate) fn mark_trail_end(stoat: &mut Stoat) -> UpdateEffect {
         .active_workspace()
         .trail
         .as_ref()
-        .map(|trail| trail.start)
+        .and_then(|trail| trail.start)
     else {
-        return UpdateEffect::None;
+        stoat.set_status("no trail start marked");
+        return UpdateEffect::Redraw;
     };
 
-    let path = {
+    // Related rather than merely called. A reader marks two points without
+    // knowing which one calls the other, or whether either does.
+    let (path, related) = {
         let ws = stoat.active_workspace();
         let git_root = ws.git_root.clone();
         let (Some(sym_a), Some(sym_b)) = (
             resolve_to_symbol(ws, &git_root, &start),
             resolve_to_symbol(ws, &git_root, &end),
         ) else {
-            return UpdateEffect::None;
+            stoat.set_status("trail mark is on no indexed symbol");
+            return UpdateEffect::Redraw;
         };
-        ws.code_graph
-            .path_between(sym_a, sym_b, EdgeKind::Calls)
-            .unwrap_or_else(|| vec![sym_a, sym_b])
+        match ws.code_graph.path_relating(sym_a, sym_b, EdgeKind::Calls) {
+            Some(path) => (path, true),
+            None => (vec![sym_a, sym_b], false),
+        }
     };
 
     let first = path.first().copied();
+    let stops = path.len();
     let mut trail_path = NavList::default();
     for &key in &path {
         trail_path.push_tip(key);
     }
     trail_path.set_cursor(0);
     stoat.active_workspace_mut().trail = Some(TrailState {
-        start,
+        start: Some(start),
         path: trail_path,
     });
+
+    if related {
+        stoat.set_status(format!("trail: {stops} stops"));
+    } else {
+        stoat.set_status("no call relation; direct trail");
+    }
     match first {
         Some(key) => jump_to_symbol(stoat, key),
-        None => UpdateEffect::None,
+        None => UpdateEffect::Redraw,
     }
 }
 
@@ -224,15 +261,31 @@ pub(crate) fn trail_prev(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Move `delta` symbols along the trail (clamped) and jump there.
 fn trail_step(stoat: &mut Stoat, delta: isize) -> UpdateEffect {
-    let target = {
+    let (target, at, stops) = {
         let Some(trail) = stoat.active_workspace_mut().trail.as_mut() else {
             return UpdateEffect::None;
         };
         let Some(target) = trail.path.step_clamp(delta).copied() else {
             return UpdateEffect::None;
         };
-        target
+        let Some((at, stops)) = trail.progress() else {
+            return UpdateEffect::None;
+        };
+        (target, at, stops)
     };
+
+    // A key the graph evicted since the trail was computed still has a
+    // position to report, so the name is what goes missing rather than the
+    // whole message.
+    let name = stoat
+        .active_workspace()
+        .code_graph
+        .symbol(target)
+        .map(|symbol| symbol.name.clone());
+    match name {
+        Some(name) => stoat.set_status(format!("trail {at}/{stops}: {name}")),
+        None => stoat.set_status(format!("trail {at}/{stops}")),
+    }
     jump_to_symbol(stoat, target)
 }
 
@@ -636,6 +689,122 @@ mod tests {
             symbol_at_cursor(&mut stoat),
             Some(bar),
             "TrailPrev steps back to bar",
+        );
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("trail 2/3: bar"),
+            "each step says where along the trail it landed and on what",
+        );
+    }
+
+    /// Which end a reader marks first says nothing about which one calls the
+    /// other, so marking the callee first has to find the same code path. It
+    /// reads from the mark they made first, which is the direction they asked
+    /// to walk it in.
+    #[test]
+    fn a_trail_marked_end_first_walks_the_same_path_backward() {
+        let mut stoat = stoat_with_repo();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/src/a.rs", "fn foo() {}\nfn bar() {}\nfn baz() {}\n");
+        stoat.set_fs_host(fs);
+
+        let file = build::file_id("src/a.rs");
+        let (foo, bar, baz) = (
+            SymbolKey([1u8; 16]),
+            SymbolKey([2u8; 16]),
+            SymbolKey([3u8; 16]),
+        );
+        {
+            let ws = stoat.active_workspace_mut();
+            ws.code_graph.insert_shard(FileShard {
+                content_hash: [0u8; 32],
+                symbols: vec![
+                    sym(1, file, "foo", 0..11),
+                    sym(2, file, "bar", 12..23),
+                    sym(3, file, "baz", 24..35),
+                ],
+                edges: vec![call_edge(foo, bar), call_edge(bar, baz)],
+            });
+            ws.file_paths.insert(file, PathBuf::from("src/a.rs"));
+        }
+
+        // baz is the callee, and it is marked first.
+        jump_to_symbol(&mut stoat, baz);
+        mark_trail_start(&mut stoat);
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("trail start marked"),
+            "the start gives a sign it was taken",
+        );
+        assert!(
+            stoat
+                .active_workspace()
+                .trail
+                .as_ref()
+                .is_some_and(|trail| trail.is_armed()),
+            "a start alone arms the trail without anything to walk yet",
+        );
+
+        jump_to_symbol(&mut stoat, foo);
+        mark_trail_end(&mut stoat);
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("trail: 3 stops"),
+            "the reversed pair still relates, and the count says so",
+        );
+        assert_eq!(
+            symbol_at_cursor(&mut stoat),
+            Some(baz),
+            "the trail starts where the reader marked first",
+        );
+
+        trail_next(&mut stoat);
+        assert_eq!(symbol_at_cursor(&mut stoat), Some(bar));
+        trail_next(&mut stoat);
+        assert_eq!(
+            symbol_at_cursor(&mut stoat),
+            Some(foo),
+            "and runs back up the call chain to the end mark",
+        );
+    }
+
+    /// Two ways a trail comes to nothing, which used to look identical from
+    /// the outside. Both were a silent no-op.
+    #[test]
+    fn every_trail_dead_end_says_which_one_it_was() {
+        let mut stoat = stoat_with_repo();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/src/a.rs", "fn foo() {}\nfn bar() {}\n");
+        stoat.set_fs_host(fs);
+
+        let file = build::file_id("src/a.rs");
+        let (foo, bar) = (SymbolKey([1u8; 16]), SymbolKey([2u8; 16]));
+        {
+            let ws = stoat.active_workspace_mut();
+            ws.code_graph.insert_shard(FileShard {
+                content_hash: [0u8; 32],
+                symbols: vec![sym(1, file, "foo", 0..11), sym(2, file, "bar", 12..23)],
+                edges: vec![],
+            });
+            ws.file_paths.insert(file, PathBuf::from("src/a.rs"));
+        }
+
+        jump_to_symbol(&mut stoat, foo);
+        mark_trail_end(&mut stoat);
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("no trail start marked"),
+            "an end with no start says so rather than doing nothing",
+        );
+
+        mark_trail_start(&mut stoat);
+        jump_to_symbol(&mut stoat, bar);
+        mark_trail_end(&mut stoat);
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("no call relation; direct trail"),
+            "two unrelated symbols still give a trail, named as the fallback \
+             it is rather than passing for a two-stop path",
         );
     }
 }
