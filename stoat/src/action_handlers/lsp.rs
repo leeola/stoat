@@ -163,12 +163,17 @@ pub(crate) fn lsp_language_name(buffers: &BufferRegistry, buffer_id: BufferId) -
 /// channel asynchronously, so blocking the open path on it would be
 /// wrong. Errors are swallowed -- a notification failure is not
 /// fatal to the open.
+/// `text` is the buffer's own rope rather than the string it was opened from,
+/// which is what the server reads and what a clone passes for a refcount bump.
+/// Each host's payload string is built inside its own spawned task, so a
+/// language server coming up over many open buffers does not materialize them
+/// all on the run loop.
 pub(crate) fn notify_buffer_opened(
     stoat: &mut Stoat,
     workspace: WorkspaceId,
     buffer_id: BufferId,
     path: &Path,
-    text: &str,
+    text: Rope,
 ) {
     maybe_spawn_language_server(stoat, workspace, buffer_id);
     if !stoat.lsp_opened.insert(buffer_id) {
@@ -190,24 +195,25 @@ pub(crate) fn notify_buffer_opened(
         .lsp_last_delivered_text
         .lock()
         .expect("lsp text mutex")
-        .insert(buffer_id, Rope::from(text));
+        .insert(buffer_id, text.clone());
     stoat
         .lsp_last_delivered_buffer_version
         .lock()
         .expect("lsp version mutex")
         .insert(buffer_id, buffer_version);
     for lsp in stoat.hosts_for_buffer(buffer_id) {
-        let params = DidOpenTextDocumentParams {
-            text_document: TextDocumentItem {
-                uri: uri.clone(),
-                language_id: language_id.clone(),
-                version: 0,
-                text: text.to_string(),
-            },
-        };
+        let (uri, language_id, text) = (uri.clone(), language_id.clone(), text.clone());
         stoat
             .executor
             .spawn(async move {
+                let params = DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem {
+                        uri,
+                        language_id,
+                        version: 0,
+                        text: text.to_string(),
+                    },
+                };
                 if let Err(err) = lsp.did_open(params).await {
                     tracing::warn!(target: "stoat::lsp", ?err, "did_open notification failed");
                 }
@@ -985,9 +991,9 @@ fn review_lsp_source(stoat: &mut Stoat) -> Option<(PathBuf, Rope, usize)> {
         (buffer_id, buffer)
     };
     let workspace = stoat.active_workspace;
-    notify_buffer_opened(stoat, workspace, buffer_id, &path, &content);
-
     let rope = buffer.read().expect("buffer lock").rope().clone();
+    notify_buffer_opened(stoat, workspace, buffer_id, &path, rope.clone());
+
     let offset = rope.point_to_offset(Point::new(line, col));
     Some((path, rope, offset))
 }
@@ -5202,6 +5208,56 @@ mod tests {
         assert!(opens[0].text_document.uri.as_str().ends_with("/a.rs"));
         assert_eq!(opens[0].text_document.text, "fn a() {}\n");
         assert_eq!(opens[0].text_document.language_id, "rust");
+    }
+
+    /// The delivered-text snapshot and the payload the server received have to
+    /// be the same text. The incremental `did_change` path computes its
+    /// positions against the snapshot while the server holds the payload, so
+    /// any drift between them puts every later edit at the wrong offset.
+    ///
+    /// Both now come off the buffer's own rope, one as a clone and one as a
+    /// string built in the dispatch task, which is what keeps them equal
+    /// without materializing the buffer twice on the open path.
+    #[test]
+    fn did_open_records_the_text_it_delivered() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: root.join("a.rs"),
+            },
+        );
+        h.settle();
+
+        let opens = h.fake_lsp().observed_opens();
+        let [open] = &opens[..] else {
+            panic!("one open, got {}", opens.len());
+        };
+        let buffer_id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&root.join("a.rs"))
+            .expect("the opened buffer");
+
+        let delivered = h
+            .stoat
+            .lsp_last_delivered_text
+            .lock()
+            .expect("lsp text mutex")
+            .get(&buffer_id)
+            .map(|rope| rope.to_string());
+        assert_eq!(
+            delivered.as_deref(),
+            Some(open.text_document.text.as_str()),
+            "the snapshot the next did_change diffs against is what the server got",
+        );
+        assert_eq!(
+            delivered.as_deref(),
+            Some("fn a() {}\n"),
+            "and both are the buffer's text rather than something rebuilt",
+        );
     }
 
     #[test]

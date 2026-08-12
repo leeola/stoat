@@ -4604,7 +4604,10 @@ impl Stoat {
             .collect();
         self.lsp_registry.set_selectors(language.clone(), selectors);
 
-        let reopen: Vec<(BufferId, PathBuf, String)> = {
+        // Ropes rather than strings, because this runs over every open buffer
+        // of the language in one turn and a rope clone is a refcount bump where
+        // materializing each buffer is not.
+        let reopen: Vec<(BufferId, PathBuf, Rope)> = {
             let buffers = &self.active_workspace().buffers;
             buffers
                 .open_paths()
@@ -4621,7 +4624,7 @@ impl Stoat {
                         .read()
                         .expect("buffer poisoned")
                         .rope()
-                        .to_string();
+                        .clone();
                     Some((id, path, text))
                 })
                 .collect()
@@ -4632,7 +4635,7 @@ impl Stoat {
             self.lsp_doc_versions.remove(&id);
             self.lsp_buffer_versions.remove(&id);
             let workspace = self.active_workspace;
-            action_handlers::lsp::notify_buffer_opened(self, workspace, id, &path, &text);
+            action_handlers::lsp::notify_buffer_opened(self, workspace, id, &path, text);
         }
     }
 
