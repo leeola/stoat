@@ -881,6 +881,7 @@ on key {
         M -> [MarkTrailEnd(), SetMode(normal)];
         n -> [TrailNext(), SetMode(normal)];
         p -> [TrailPrev(), SetMode(normal)];
+        x -> [TrailClear(), SetMode(normal)];
         D -> [OpenWorkspaceDiagnosticsPicker(), SetMode(normal)];
         l -> [ToggleLspStatus(), SetMode(normal)];
 

@@ -50,9 +50,9 @@ use crate::{
             ShrinkSelection, ShrinkToLineBounds, SmartTab, SplitSelection, SplitSelectionOnNewline,
             SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase,
             SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints,
-            ToggleLspStatus, ToggleSyntaxHighlight, TrailNext, TrailPrev, TriggerCompletion,
-            TrimSelections, Undo, UnindentSelection, WriteQuit, Yank, YankMainToClipboard,
-            YankToClipboard,
+            ToggleLspStatus, ToggleSyntaxHighlight, TrailClear, TrailNext, TrailPrev,
+            TriggerCompletion, TrimSelections, Undo, UnindentSelection, WriteQuit, Yank,
+            YankMainToClipboard, YankToClipboard,
         },
         file::{
             AutoReload, AutoReloadConfig, FontSizeDec, FontSizeInc, ForceReloadAll,
@@ -755,6 +755,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(MarkTrailEnd::DEF, |_| Ok(Box::new(MarkTrailEnd)));
     add(TrailNext::DEF, |_| Ok(Box::new(TrailNext)));
     add(TrailPrev::DEF, |_| Ok(Box::new(TrailPrev)));
+    add(TrailClear::DEF, |_| Ok(Box::new(TrailClear)));
     add(ExtendGotoColumn::DEF, |_| Ok(Box::new(ExtendGotoColumn)));
     add(GotoNextChange::DEF, |_| Ok(Box::new(GotoNextChange)));
     add(GotoPrevChange::DEF, |_| Ok(Box::new(GotoPrevChange)));
@@ -1207,6 +1208,7 @@ mod tests {
         "MarkTrailEnd",
         "TrailNext",
         "TrailPrev",
+        "TrailClear",
         "Hover",
         "CodeAction",
         "RenameSymbol",
@@ -1764,7 +1766,7 @@ mod tests {
         // + 1 GotoReferences.
         // + 1 GotoImplementors.
         // + 2 GotoDiffCallerUp, GotoDiffCalleeDown.
-        // + 4 MarkTrailStart, MarkTrailEnd, TrailNext, TrailPrev.
+        // + 5 MarkTrailStart, MarkTrailEnd, TrailNext, TrailPrev, TrailClear.
         // + 2 FileFinderPageUp, FileFinderPageDown.
         // + 1 FileFinderComplete.
         // + 2 PalettePageUp, PalettePageDown.
@@ -1825,7 +1827,7 @@ mod tests {
         // + 8 Jumplist/Diagnostics/Location/WorkspacePicker PageDown/PageUp.
         // + 2 CommitPickerDrillIn/CommitPickerBack.
         // + 2 CommitPickerNextBranch/CommitPickerPrevBranch.
-        assert_eq!(all().count(), 427);
+        assert_eq!(all().count(), 428);
     }
 
     #[test]

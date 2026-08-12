@@ -249,6 +249,20 @@ pub(crate) fn mark_trail_end(stoat: &mut Stoat) -> UpdateEffect {
     }
 }
 
+/// Forget the active trail.
+///
+/// Marking a new start replaces a trail as well, so this is the way to put one
+/// down without picking another up. A no-op when none is set, since there is
+/// nothing to report having cleared.
+pub(crate) fn trail_clear(stoat: &mut Stoat) -> UpdateEffect {
+    if stoat.active_workspace().trail.is_none() {
+        return UpdateEffect::None;
+    }
+    stoat.active_workspace_mut().trail = None;
+    stoat.set_status("trail cleared");
+    UpdateEffect::Redraw
+}
+
 /// Step forward along the trail toward the end mark.
 pub(crate) fn trail_next(stoat: &mut Stoat) -> UpdateEffect {
     trail_step(stoat, 1)
@@ -414,7 +428,8 @@ fn focused_offset(editor: &mut EditorState) -> usize {
 mod tests {
     use super::{
         build, goto_callee, goto_caller, jump_to_symbol, mark_trail_end, mark_trail_start,
-        nearest_diff_target, present_or_pick, symbol_at_cursor, trail_next, trail_prev,
+        nearest_diff_target, present_or_pick, symbol_at_cursor, trail_clear, trail_next,
+        trail_prev,
     };
     use crate::{
         app::{Stoat, UpdateEffect},
@@ -766,6 +781,45 @@ mod tests {
             Some(foo),
             "and runs back up the call chain to the end mark",
         );
+    }
+
+    /// Marking a new start replaces a trail, so before this the only way to be
+    /// rid of one was to make another. A badge showing the active trail has
+    /// nothing to go dark for until a trail simply ends.
+    #[test]
+    fn clearing_drops_the_trail_and_says_so() {
+        let mut stoat = stoat_with_repo();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/src/a.rs", "fn foo() {}\n");
+        stoat.set_fs_host(fs);
+
+        let file = build::file_id("src/a.rs");
+        {
+            let ws = stoat.active_workspace_mut();
+            ws.code_graph.insert_shard(FileShard {
+                content_hash: [0u8; 32],
+                symbols: vec![sym(1, file, "foo", 0..11)],
+                edges: vec![],
+            });
+            ws.file_paths.insert(file, PathBuf::from("src/a.rs"));
+        }
+
+        assert_eq!(
+            trail_clear(&mut stoat),
+            UpdateEffect::None,
+            "nothing to clear reports nothing",
+        );
+
+        jump_to_symbol(&mut stoat, SymbolKey([1u8; 16]));
+        mark_trail_start(&mut stoat);
+        assert!(stoat.active_workspace().trail.is_some());
+
+        assert_eq!(trail_clear(&mut stoat), UpdateEffect::Redraw);
+        assert!(
+            stoat.active_workspace().trail.is_none(),
+            "the trail is gone rather than replaced by another",
+        );
+        assert_eq!(stoat.pending_message.as_deref(), Some("trail cleared"));
     }
 
     /// Two ways a trail comes to nothing, which used to look identical from

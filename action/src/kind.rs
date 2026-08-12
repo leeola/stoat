@@ -326,6 +326,7 @@ pub enum ActionKind {
     MarkTrailEnd,
     TrailNext,
     TrailPrev,
+    TrailClear,
     Hover,
     CodeAction,
     RenameSymbol,

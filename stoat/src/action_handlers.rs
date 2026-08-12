@@ -785,6 +785,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::MarkTrailEnd => crate::code_index::nav::mark_trail_end(stoat),
         ActionKind::TrailNext => crate::code_index::nav::trail_next(stoat),
         ActionKind::TrailPrev => crate::code_index::nav::trail_prev(stoat),
+        ActionKind::TrailClear => crate::code_index::nav::trail_clear(stoat),
         ActionKind::Hover => lsp::hover(stoat),
         ActionKind::CodeAction => lsp::code_action(stoat),
         ActionKind::RenameSymbol => lsp::rename_symbol(stoat),

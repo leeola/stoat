@@ -1847,6 +1847,18 @@ define_action!(
     ActionPriority::Rare
 );
 
+define_action!(
+    TrailClearDef,
+    TrailClear,
+    "TrailClear",
+    ActionKind::TrailClear,
+    "drop the active call-graph trail",
+    "Forget the marked trail, leaving nothing to step along. Marking a new \
+     start replaces a trail too, so this is for putting one down without \
+     picking another up. No-op when no trail is set.",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
