@@ -3380,6 +3380,15 @@ fn cell_box_rect(row: usize, col: usize, scale: f32, metrics: CellMetrics) -> ([
 /// height, so a run smaller than the grid sits aligned with full-size rows.
 /// `baseline` is the unscaled cell baseline; the run scales it. At `scale ==
 /// 1.0`, glyph 0 lands exactly where [`glyph_origin`] places the same cell.
+///
+/// The pen and the centered top are rounded to whole pixels, which is the same
+/// pair [`glyph_origin`] rounds. The atlas sampler is nearest with no subpixel
+/// variants, so a quad on a fractional pixel samples the bitmap off-center. A
+/// scaled advance is routinely fractional, so without the rounding every other
+/// glyph quantizes the other way and the run reads unevenly spaced.
+///
+/// Each pen is derived from `index` rather than accumulated, so the rounding
+/// never compounds along the run.
 fn text_run_origin(
     col: f32,
     row: f32,
@@ -3389,8 +3398,9 @@ fn text_run_origin(
     baseline: f32,
     metrics: CellMetrics,
 ) -> [f32; 2] {
-    let pen_x = (col + index as f32 * scale) * metrics.width;
-    let centered_top = row * metrics.height + (metrics.height - metrics.height * scale) / 2.0;
+    let pen_x = ((col + index as f32 * scale) * metrics.width).round();
+    let centered_top =
+        (row * metrics.height + (metrics.height - metrics.height * scale) / 2.0).round();
     let baseline_y = centered_top + baseline * scale;
     [
         pen_x + placement[0] as f32,
@@ -3950,6 +3960,36 @@ mod tests {
                 metrics.width,
                 (metrics.height - metrics.height * 0.5) / 2.0 + baseline * 0.5
             ]
+        );
+    }
+
+    /// The atlas sampler is nearest with no subpixel variants, so a quad off a
+    /// whole pixel samples the bitmap off-center and the glyph comes out a
+    /// different shape than the same glyph beside it.
+    #[test]
+    fn a_fractional_run_snaps_every_glyph_to_a_whole_pixel() {
+        let metrics = CellMetrics::from_font_size(30, 1.0);
+        let baseline = 14.0;
+
+        // Three quarters of an 18px cell advances 13.5px, so every other pen
+        // lands mid-pixel before the rounding.
+        let pens: Vec<f32> = (0..5)
+            .map(|index| text_run_origin(0.0, 0.0, index, 0.75, [0, 0], baseline, metrics)[0])
+            .collect();
+
+        assert!(
+            pens.iter().all(|pen| pen.fract() == 0.0),
+            "every glyph starts on a whole pixel: {pens:?}"
+        );
+
+        let gaps: Vec<f32> = pens.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        let (min, max) = gaps.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &gap| {
+            (lo.min(gap), hi.max(gap))
+        });
+        assert!(min >= 0.0, "the run never steps backwards: {gaps:?}");
+        assert!(
+            max - min <= 1.0,
+            "and no two gaps differ by more than a pixel: {gaps:?}"
         );
     }
 
