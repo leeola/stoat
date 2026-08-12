@@ -39,7 +39,21 @@ impl StatefulWidget for Popover<'_> {
 
     fn render(self, area: Rect, buf: &mut Buffer, scene: &mut ApcScene) {
         self.draw_fallback(area, buf);
+        self.draw_components(area, scene);
+    }
+}
 
+impl Popover<'_> {
+    /// Draw only the off-grid popover.
+    ///
+    /// An app that composites rich chrome itself calls this instead of the
+    /// [`StatefulWidget`] render, which also lays down the degraded cell box
+    /// and so doubles under the popover inside a rich terminal. Writes no
+    /// cells.
+    ///
+    /// The content rides outside the APC wrapper, so a host that is not stoatty
+    /// prints it as characters. Emit this only into a live scene.
+    pub fn draw_components(&self, area: Rect, scene: &mut ApcScene) {
         command::encode_popover_into(
             scene.buffer(),
             &PopoverCommand {
@@ -57,10 +71,10 @@ impl StatefulWidget for Popover<'_> {
             },
         );
     }
-}
 
-impl Popover<'_> {
-    fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
+    /// Draw only the degraded cell box and its content, for a terminal without
+    /// the off-grid popover.
+    pub fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
         let fill = rgb(self.fill);
         cells::fill(buf, area, Style::default().bg(fill));
         cells::draw_perimeter(
@@ -156,5 +170,33 @@ mod tests {
         assert_eq!(symbol(&buf, 4, 1), "d");
         assert_eq!(symbol(&buf, 5, 1), "│");
         assert_eq!(symbol(&buf, 1, 2), " ");
+    }
+
+    /// An app compositing its own chrome takes the halves apart. The frame half
+    /// must leave the buffer alone, or the cell box shows through beneath the
+    /// popover.
+    #[test]
+    fn the_two_halves_split_cleanly() {
+        let area = Rect::new(0, 0, 6, 3);
+        let popover = Popover {
+            fill: [1, 2, 3],
+            border: [4, 5, 6],
+            content_fg: [7, 8, 9],
+            scale: 1,
+            offset: [0, 0],
+            bold: false,
+            content: "abc",
+        };
+
+        let mut scene = ApcScene::new();
+        let mut buf = Buffer::empty(area);
+        popover.draw_components(area, &mut scene);
+        assert!(!scene.bytes().is_empty(), "the popover is emitted");
+        assert_eq!(buf, Buffer::empty(area), "and no cell is written");
+
+        let scene = ApcScene::new();
+        popover.draw_fallback(area, &mut buf);
+        assert_eq!(symbol(&buf, 1, 1), "a", "the fallback writes cells");
+        assert!(scene.bytes().is_empty(), "and emits nothing");
     }
 }

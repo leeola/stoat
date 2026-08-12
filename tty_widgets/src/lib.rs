@@ -4,6 +4,11 @@
 //! buffer and its rich APC frame into an [`ApcScene`], the shared emission buffer
 //! a frame's widgets append into and then flush to the terminal.
 //!
+//! A widget that carries both also exposes them separately, as
+//! `draw_components` and `draw_fallback`. An app that composites its own rich
+//! chrome calls one of the two rather than the combined render, which
+//! otherwise leaves the cell form showing beneath the components.
+//!
 //! [`ApcSession`] wraps a scene in the terminal work a program needs around it.
 //! It finds out which terminal answers, takes raw mode or mouse reporting when
 //! the program asks, and gives both back however the program ends.
@@ -62,9 +67,13 @@ pub mod text_run;
 /// persistent one.
 ///
 /// A scene may also be *dead*, which is how a host that is not stoatty is
-/// described to the widgets. [`Self::live`] reports it so each widget picks its
-/// cell form, and a dead scene swallows anything pushed into it, so a fork
-/// nobody remembered to update emits nothing rather than half a frame.
+/// described. No widget reads that itself. [`Self::live`] is for the caller,
+/// which picks between a widget's `draw_components` and its `draw_fallback`,
+/// since only the caller knows whether it composites the chrome or leaves that
+/// to the widget's own render.
+///
+/// A dead scene swallows anything pushed into it regardless, so a caller that
+/// gets the choice wrong emits nothing rather than half a frame.
 ///
 /// Per frame: [`Self::clear`], let widgets append via [`Self::buffer`] or
 /// [`Self::dynamic_buffer`], then [`Self::flush_to`].
@@ -507,8 +516,8 @@ mod tests {
         assert_eq!(out, expected);
     }
 
-    /// Widgets branch on liveness themselves, but one that forgets to must not
-    /// be able to put half a frame on the wire. Both lanes swallow alike.
+    /// The caller branches on liveness, and one that gets it wrong must not be
+    /// able to put half a frame on the wire. Both lanes swallow alike.
     #[test]
     fn a_dead_scene_swallows_what_is_pushed_into_it() {
         let mut scene = ApcScene::new();

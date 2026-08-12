@@ -24,7 +24,17 @@ impl StatefulWidget for Border {
 
     fn render(self, area: Rect, buf: &mut Buffer, scene: &mut ApcScene) {
         self.draw_fallback(area, buf);
+        self.draw_components(area, scene);
+    }
+}
 
+impl Border {
+    /// Draw only the off-grid border frame.
+    ///
+    /// An app that composites rich chrome itself calls this instead of the
+    /// [`StatefulWidget`] render, which also lays down the degraded cell border
+    /// and so doubles under the frame inside a rich terminal. Writes no cells.
+    pub fn draw_components(&self, area: Rect, scene: &mut ApcScene) {
         command::encode_border_into(
             scene.buffer(),
             &BorderCommand {
@@ -37,10 +47,10 @@ impl StatefulWidget for Border {
             },
         );
     }
-}
 
-impl Border {
-    fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
+    /// Draw only the degraded cell perimeter, for a terminal without the
+    /// off-grid frame.
+    pub fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
         let set = match self.style {
             BorderStyle::Light => border::PLAIN,
             BorderStyle::Heavy => border::THICK,
@@ -122,5 +132,27 @@ mod tests {
 
         assert_eq!(symbol(&buf, 0, 0), "╭");
         assert_eq!(symbol(&buf, 2, 2), "╯");
+    }
+
+    /// An app compositing its own chrome takes the halves apart. The frame half
+    /// must leave the buffer alone, or the cell border shows through beneath it.
+    #[test]
+    fn the_two_halves_split_cleanly() {
+        let area = Rect::new(0, 0, 3, 3);
+        let border = Border {
+            style: BorderStyle::Light,
+            color: [1, 2, 3],
+        };
+
+        let mut scene = ApcScene::new();
+        let mut buf = Buffer::empty(area);
+        border.draw_components(area, &mut scene);
+        assert!(!scene.bytes().is_empty(), "the frame is emitted");
+        assert_eq!(buf, Buffer::empty(area), "and no cell is written");
+
+        let scene = ApcScene::new();
+        border.draw_fallback(area, &mut buf);
+        assert_eq!(symbol(&buf, 0, 0), "┌", "the fallback writes cells");
+        assert!(scene.bytes().is_empty(), "and emits nothing");
     }
 }

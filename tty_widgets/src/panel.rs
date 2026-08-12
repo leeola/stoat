@@ -40,7 +40,17 @@ impl StatefulWidget for Panel {
 
     fn render(self, area: Rect, buf: &mut Buffer, scene: &mut ApcScene) {
         self.draw_fallback(area, buf);
+        self.draw_components(area, scene);
+    }
+}
 
+impl Panel {
+    /// Draw only the off-grid panel frame.
+    ///
+    /// An app that composites rich chrome itself calls this instead of the
+    /// [`StatefulWidget`] render, which also lays down the degraded cell border
+    /// and so doubles under the frame inside a rich terminal. Writes no cells.
+    pub fn draw_components(&self, area: Rect, scene: &mut ApcScene) {
         command::encode_panel_into(
             scene.buffer(),
             &PanelCommand {
@@ -58,10 +68,13 @@ impl StatefulWidget for Panel {
             },
         );
     }
-}
 
-impl Panel {
-    fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
+    /// Draw only the degraded cell border, for a terminal without the off-grid
+    /// frame.
+    ///
+    /// Frame-only. [`Self::fill`] and [`Self::shadow`] are APC details with no
+    /// cell equivalent, so the cells keep their own backgrounds.
+    pub fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
         let set = match self.style {
             BorderStyle::Light => border::PLAIN,
             BorderStyle::Heavy => border::THICK,
@@ -163,5 +176,33 @@ mod tests {
 
         assert_eq!(symbol(&buf, 0, 0), "╭");
         assert_eq!(symbol(&buf, 2, 2), "╯");
+    }
+
+    /// An app compositing its own chrome takes the halves apart. The frame half
+    /// must leave the buffer alone, or the cell border shows through beneath
+    /// the panel.
+    #[test]
+    fn the_two_halves_split_cleanly() {
+        let area = Rect::new(0, 0, 3, 3);
+        let panel = Panel {
+            style: BorderStyle::Rounded,
+            border: [1, 2, 3],
+            corner_radius: 6,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+        };
+
+        let mut scene = ApcScene::new();
+        let mut buf = Buffer::empty(area);
+        panel.draw_components(area, &mut scene);
+        assert!(!scene.bytes().is_empty(), "the frame is emitted");
+        assert_eq!(buf, Buffer::empty(area), "and no cell is written");
+
+        let scene = ApcScene::new();
+        panel.draw_fallback(area, &mut buf);
+        assert_eq!(symbol(&buf, 0, 0), "╭", "the fallback writes cells");
+        assert!(scene.bytes().is_empty(), "and emits nothing");
     }
 }

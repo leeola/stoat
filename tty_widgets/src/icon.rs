@@ -27,15 +27,19 @@ impl StatefulWidget for Icon {
     type State = ApcScene;
 
     fn render(self, area: Rect, buf: &mut Buffer, scene: &mut ApcScene) {
-        let [r, g, b] = self.color;
-        cells::put(
-            buf,
-            area.x,
-            area.y,
-            sigil(self.kind),
-            Style::default().fg(Color::Rgb(r, g, b)),
-        );
+        self.draw_fallback(area, buf);
+        self.draw_components(area, scene);
+    }
+}
 
+impl Icon {
+    /// Draw only the off-grid icon.
+    ///
+    /// An app that composites rich chrome itself calls this instead of the
+    /// [`StatefulWidget`] render, which also lays down the degraded severity
+    /// letter and so leaves it showing under the silhouette inside a rich
+    /// terminal. Writes no cells.
+    pub fn draw_components(&self, area: Rect, scene: &mut ApcScene) {
         command::encode_icon_into(
             scene.buffer(),
             &IconCommand {
@@ -46,6 +50,22 @@ impl StatefulWidget for Icon {
                 size: self.size,
                 offset: self.offset,
             },
+        );
+    }
+
+    /// Draw only the degraded severity letter, for a terminal without the
+    /// off-grid icon.
+    ///
+    /// One cell at the area's top-left. [`Self::size`] and [`Self::offset`]
+    /// shape the rich icon alone, so neither reaches the cell.
+    pub fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
+        let [r, g, b] = self.color;
+        cells::put(
+            buf,
+            area.x,
+            area.y,
+            sigil(self.kind),
+            Style::default().fg(Color::Rgb(r, g, b)),
         );
     }
 }
@@ -113,5 +133,34 @@ mod tests {
         assert_eq!(render_kind(IconKind::Error), "E");
         assert_eq!(render_kind(IconKind::Warning), "W");
         assert_eq!(render_kind(IconKind::Info), "I");
+    }
+
+    /// An app compositing its own chrome takes the halves apart. The icon half
+    /// must leave the buffer alone, or the severity letter shows through
+    /// beneath the silhouette.
+    #[test]
+    fn the_two_halves_split_cleanly() {
+        let area = Rect::new(0, 0, 1, 1);
+        let icon = Icon {
+            kind: IconKind::Warning,
+            color: [1, 2, 3],
+            size: 2,
+            offset: [3, 6],
+        };
+
+        let mut scene = ApcScene::new();
+        let mut buf = Buffer::empty(area);
+        icon.draw_components(area, &mut scene);
+        assert!(!scene.bytes().is_empty(), "the icon is emitted");
+        assert_eq!(buf, Buffer::empty(area), "and no cell is written");
+
+        let scene = ApcScene::new();
+        icon.draw_fallback(area, &mut buf);
+        assert_eq!(
+            buf.cell((0u16, 0u16)).expect("cell").symbol(),
+            "W",
+            "the fallback writes cells",
+        );
+        assert!(scene.bytes().is_empty(), "and emits nothing");
     }
 }
