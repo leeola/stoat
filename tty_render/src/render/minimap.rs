@@ -567,8 +567,17 @@ mod tests {
             front::wgsl,
             valid::{Capabilities, ValidationFlags, Validator},
         },
-        TextureFormat,
+        BufferDescriptor, BufferUsages, Color, CommandEncoderDescriptor, Device, Extent3d, LoadOp,
+        MapMode, Operations, Origin3d, PollType, Queue, RenderPassColorAttachment,
+        RenderPassDescriptor, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout,
+        TexelCopyTextureInfo, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
+        TextureUsages, TextureViewDescriptor,
     };
+
+    /// The square readback target's edge, in pixels. Four bytes a texel makes a
+    /// row exactly the 256-byte copy alignment, so the readback needs no
+    /// stride padding.
+    const TARGET: u32 = 64;
 
     /// The shared summaries a content store holds, for stating a fixture.
     fn summaries(lines: Vec<Vec<MinimapRun>>) -> Vec<LineSummary> {
@@ -757,6 +766,214 @@ mod tests {
         assert!(
             pass.strips.is_empty(),
             "a resolution change rebuilds the strips against the current grid"
+        );
+    }
+
+    /// Draw `grid`'s strips alone onto a black [`TARGET`]-square target and read
+    /// the red channel back, one byte a pixel.
+    ///
+    /// Red alone because every fixture paints in pure red over black, so the
+    /// byte at a pixel is the coverage the shader resolved there.
+    fn render_red(device: &Device, queue: &Queue, grid: &Grid, metrics: CellMetrics) -> Vec<u8> {
+        let mut pass = MinimapPass::new(device, TextureFormat::Rgba8Unorm, metrics);
+        pass.prepare(device, queue, grid, &[], [TARGET as f32, TARGET as f32]);
+
+        let size = Extent3d {
+            width: TARGET,
+            height: TARGET,
+            depth_or_array_layers: 1,
+        };
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("minimap coverage target"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&TextureViewDescriptor::default());
+        let readback = device.create_buffer(&BufferDescriptor {
+            label: Some("minimap coverage readback"),
+            size: u64::from(TARGET) * u64::from(TARGET) * 4,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("minimap coverage"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(Color::BLACK),
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.draw(&mut render_pass);
+        }
+        encoder.copy_texture_to_buffer(
+            TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(TARGET * 4),
+                    rows_per_image: None,
+                },
+            },
+            size,
+        );
+        queue.submit(Some(encoder.finish()));
+
+        readback.slice(..).map_async(MapMode::Read, |_| {});
+        device
+            .poll(PollType::wait_indefinitely())
+            .expect("poll readback");
+        let rgba = readback.slice(..).get_mapped_range().to_vec();
+
+        rgba.chunks_exact(4).map(|texel| texel[0]).collect()
+    }
+
+    /// A strip drawn in pure red over nothing, so a readback byte is coverage.
+    ///
+    /// The thumb is cleared along with the background. It spans the strip's full
+    /// width, so a visible one paints over the very runs under measurement.
+    fn red_strip(width: u16, height: u16, lines_per_cell: u8, max_columns: u8) -> MinimapCommand {
+        MinimapCommand {
+            top: 0,
+            left: 0,
+            width,
+            height,
+            strip_id: 1,
+            content_id: 1,
+            lines_per_cell,
+            max_columns,
+            bg: [0, 0, 0, 0],
+            thumb: [0, 0, 0, 0],
+            thumb_border: [0, 0, 0],
+            palette: vec![[255, 0, 0]],
+        }
+    }
+
+    fn red_grid(
+        command: MinimapCommand,
+        content: Vec<Vec<MinimapRun>>,
+        view: Option<MinimapView>,
+    ) -> Grid {
+        let mut grid = Grid::new(12, 24);
+        grid.set_minimaps(vec![Minimap {
+            command,
+            seq: 0,
+            view,
+        }]);
+        grid.set_minimap_contents(HashMap::from([(1, summaries(content))]));
+        grid
+    }
+
+    /// A minimap column is routinely a fraction of a pixel wide. Without
+    /// coverage the run either misses every pixel center and vanishes, or takes
+    /// a whole pixel and reads twice its weight.
+    #[test]
+    fn a_half_pixel_run_covers_half_a_pixel() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("minimap coverage test: no wgpu adapter, skipping");
+            return;
+        };
+
+        // One cell over 12 columns puts a column, and so a one-column run, at
+        // half a pixel. One line a cell keeps the run tall enough that only the
+        // horizontal axis is fractional.
+        let run = MinimapRun {
+            start_col: 0,
+            len: 1,
+            class: 0,
+        };
+        let grid = red_grid(red_strip(1, 1, 1, 12), vec![vec![run]], None);
+
+        let red = render_red(&device, &queue, &grid, metrics());
+        let at = |x: u32, y: u32| red[(y * TARGET + x) as usize];
+
+        assert!(
+            (120..=136).contains(&at(0, 4)),
+            "half a pixel of red reads as half intensity, got {}",
+            at(0, 4)
+        );
+        assert_eq!(
+            at(1, 4),
+            0,
+            "and the run does not smear into the next column"
+        );
+    }
+
+    /// A fractional scroll used to carry every block across pixel centers, so
+    /// blocks popped in and out instead of sliding, which is the sparkle this
+    /// replaces. Coverage hands the intensity from one row to the next and
+    /// conserves the total.
+    #[test]
+    fn a_sub_pixel_scroll_hands_intensity_between_rows() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("minimap scroll test: no wgpu adapter, skipping");
+            return;
+        };
+
+        // Cell 6x12 over 6 lines a cell puts a minimap line at 2px, and a strip
+        // four cells tall shows 24 of them. With the viewport also 24 lines over
+        // 100, minimap_top reduces to the declared top, so top_256 moves the
+        // strip by a known sub-pixel amount.
+        let mut content = vec![Vec::new(); 100];
+        content[4] = vec![MinimapRun {
+            start_col: 0,
+            len: 12,
+            class: 0,
+        }];
+        let strip_at = |top_256: u32| {
+            let view = MinimapView {
+                top_256,
+                visible: 24,
+            };
+            let grid = red_grid(red_strip(1, 4, 6, 12), content.clone(), Some(view));
+            let red = render_red(&device, &queue, &grid, metrics());
+            // Column 2 sits inside the full-width run, so only the vertical
+            // axis is fractional there.
+            [7u32, 8, 9].map(|y| u32::from(red[(y * TARGET + 2) as usize]))
+        };
+
+        // Line 4 spans y 8.0 to 9.5 at rest. A quarter line later it spans 7.5
+        // to 9.0, so row 7 takes the half row 9 gives up.
+        let rest = strip_at(0);
+        let scrolled = strip_at(64);
+
+        assert_eq!(rest[0], 0, "at rest nothing reaches the row above");
+        assert!(
+            (120..=136).contains(&scrolled[0]),
+            "a quarter-line scroll lights it half way, got {}",
+            scrolled[0]
+        );
+        assert!(
+            (120..=136).contains(&rest[2]),
+            "the row below starts half lit, got {}",
+            rest[2]
+        );
+        assert_eq!(scrolled[2], 0, "and gives that up as the run moves off it");
+        assert_eq!(
+            rest.iter().sum::<u32>(),
+            scrolled.iter().sum::<u32>(),
+            "the run carries the same ink either way"
         );
     }
 }
