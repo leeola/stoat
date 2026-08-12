@@ -662,6 +662,53 @@ impl Workspace {
         self.diff_versions.remove(&id);
     }
 
+    /// Drop every piece of per-buffer state this workspace holds for `id`,
+    /// called when the buffer closes.
+    ///
+    /// Nothing else drops these. The parse, diff, and index drivers key their
+    /// caches and in-flight jobs by buffer, and each keeps its entry until
+    /// something replaces it, so a closed buffer's entries otherwise sit there
+    /// for the rest of the session. Four of the collections hold a `Task`, and
+    /// dropping it cancels work whose result nothing reads any more.
+    ///
+    /// `path` releases the file's cached HEAD and index blobs, which are the
+    /// bulk of what a long browsing session accumulates. [`Self::invalidate_diff`]
+    /// keeps them on purpose, since an edit does not move the base, but a close
+    /// leaves nothing to reuse them.
+    pub(crate) fn release_buffer(&mut self, id: BufferId, path: Option<&Path>) {
+        self.parse_jobs.remove(&id);
+        self.partial_token_buffers.remove(&id);
+        self.diff_jobs.remove(&id);
+        self.diff_versions.remove(&id);
+        self.diff_settle.remove(&id);
+        self.diff_settle_timers.remove(&id);
+        self.index_jobs.remove(&id);
+        self.index_debounce.remove(&id);
+
+        if let Some(path) = path {
+            self.diff_base_text.remove(path);
+        }
+    }
+
+    /// Whether any state [`Self::release_buffer`] drops still exists for `id`,
+    /// `path`'s cached diff base included.
+    ///
+    /// The collections are private to this module, so a close test outside it
+    /// has no other way to say that nothing was left behind. Kept beside
+    /// `release_buffer` so the two lists stay the same list.
+    #[cfg(test)]
+    pub(crate) fn holds_buffer_state(&self, id: BufferId, path: Option<&Path>) -> bool {
+        self.parse_jobs.contains_key(&id)
+            || self.partial_token_buffers.contains(&id)
+            || self.diff_jobs.contains_key(&id)
+            || self.diff_versions.contains_key(&id)
+            || self.diff_settle.contains_key(&id)
+            || self.diff_settle_timers.contains_key(&id)
+            || self.index_jobs.contains_key(&id)
+            || self.index_debounce.contains_key(&id)
+            || path.is_some_and(|path| self.diff_base_text.contains_key(path))
+    }
+
     /// Force the next [`Self::drive_diff_jobs`] pass to recompute `id`'s diff
     /// map by dropping its recorded version and any in-flight job.
     ///

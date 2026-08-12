@@ -1123,6 +1123,9 @@ pub(super) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     let path = stoat.active_workspace_mut().buffers.remove(buffer_id);
+    stoat
+        .active_workspace_mut()
+        .release_buffer(buffer_id, path.as_deref());
 
     // Purge the closed buffer from every pane's jumplist so a later walk can
     // never resolve a stale entry into it.
@@ -3799,6 +3802,63 @@ mod tests {
         assert!(h.stoat.active_workspace().buffers.get(buffer_id).is_some());
         assert_eq!(dispatch(&mut h.stoat, &CloseBuffer), UpdateEffect::Redraw);
         assert!(h.stoat.active_workspace().buffers.get(buffer_id).is_none());
+    }
+
+    /// The workspace keys a parse job, a diff job and its recorded version, a
+    /// settle timer, an index job, and a debounce to each buffer, and caches
+    /// each diffed file's HEAD and index blobs by path. Nothing else drops any
+    /// of it, so a session browsing hundreds of files carried hundreds of
+    /// doubled file texts until it exited.
+    #[test]
+    fn close_buffer_releases_its_workspace_state() {
+        // A file that differs from HEAD, so the diff pipeline actually runs and
+        // leaves the entries this is about.
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\nb\n", "a\nc\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        let path = PathBuf::from("/repo/a.txt");
+        h.open_file(&path);
+        h.settle_diff_jobs();
+
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        assert!(
+            h.stoat
+                .active_workspace()
+                .holds_buffer_state(buffer_id, Some(&path)),
+            "the open buffer accumulated state, or this proves nothing",
+        );
+
+        assert_eq!(dispatch(&mut h.stoat, &CloseBuffer), UpdateEffect::Redraw);
+        assert!(
+            !h.stoat
+                .active_workspace()
+                .holds_buffer_state(buffer_id, Some(&path)),
+            "the close took every per-buffer entry and the path's cached base",
+        );
+
+        // The reopen no longer has a cached base to reuse, so it has to diff
+        // again from the repo rather than come back blank.
+        h.open_file(&path);
+        h.settle_diff_jobs();
+        let reopened = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&path)
+            .expect("the file reopened");
+        let ws = h.stoat.active_workspace();
+        assert!(
+            ws.buffers
+                .get(reopened)
+                .expect("the reopened buffer")
+                .read()
+                .expect("buffer poisoned")
+                .diff_map
+                .is_some(),
+            "the reopened file re-derived its diff from the repo",
+        );
     }
 
     #[test]
