@@ -408,28 +408,7 @@ impl SyntaxMap {
         root: Option<&Tree>,
         deadline: Option<(Instant, &Executor)>,
     ) -> Option<Vec<Range<usize>>> {
-        // Expand changed ranges by +/- 1 row when filtering injection
-        // queries. The expansion catches injection boundary flips
-        // (e.g. uncommenting a line whose adjacent line was the start
-        // of a fenced code block).
-        let expanded_ranges: Option<Vec<Range<usize>>> = changed_ranges.map(|ranges| {
-            ranges
-                .iter()
-                .map(|r| {
-                    let start_point = rope.offset_to_point(r.start);
-                    let end_point = rope.offset_to_point(r.end);
-                    let start_row = start_point.row.saturating_sub(1);
-                    let end_row = end_point.row.saturating_add(2);
-                    let start_byte = rope
-                        .point_to_offset(stoat_text::Point::new(start_row, 0))
-                        .min(rope.len());
-                    let end_byte = rope
-                        .point_to_offset(stoat_text::Point::new(end_row, 0))
-                        .min(rope.len());
-                    start_byte..end_byte
-                })
-                .collect()
-        });
+        let expanded_ranges = changed_ranges.map(|ranges| expand_changed_rows(rope, ranges));
         // Continue with the body of the original `reparse`.
         self.reparse_inner(
             rope,
@@ -462,6 +441,7 @@ impl SyntaxMap {
                 start_offset: l.start_offset,
                 end_offset: l.end_offset,
                 language: l.language.clone(),
+                host_ranges: l.tree.included_ranges(),
                 tree: l.tree.clone(),
             })
             .collect();
@@ -777,9 +757,8 @@ impl SyntaxMap {
                         if let Some(prior) = prior {
                             ranges.extend(
                                 prior
-                                    .tree
-                                    .included_ranges()
-                                    .into_iter()
+                                    .host_ranges
+                                    .iter()
                                     .map(|r| r.start_byte..r.end_byte)
                                     .filter(|r| {
                                         !r.is_empty()
@@ -819,13 +798,9 @@ impl SyntaxMap {
 
                         let merged_start = found_start;
                         let merged_end = found_end;
-                        let Some(inner_tree) = parse_rope_combined_ranges(
-                            &inner_lang,
-                            rope,
-                            &sorted,
-                            prior.map(|p| &p.tree),
-                            deadline,
-                        ) else {
+                        let Some(inner_tree) =
+                            parse_rope_combined_ranges(&inner_lang, rope, &sorted, prior, deadline)
+                        else {
                             if out_of_time() {
                                 return None;
                             }
@@ -983,6 +958,19 @@ struct PriorInjection {
     start_offset: u32,
     end_offset: u32,
     language: Arc<Language>,
+    /// The layer's included ranges, read off the tree once here rather than
+    /// once a lookup.
+    ///
+    /// [`Tree::included_ranges`] builds a fresh list a call, and three sites ask
+    /// a prior for these: the combined carry's splice, the walked test in
+    /// [`carry_unvisited_injections`], and the reuse guard in
+    /// [`parse_rope_combined_ranges`]. Each prior is asked once a host range the
+    /// walk rediscovers, so the list is built once a layer instead.
+    ///
+    /// Held as [`tree_sitter::Range`] rather than byte pairs because the reuse
+    /// guard compares against a freshly built list of those, points included. A
+    /// byte-only comparison there accepts a prior whose points have drifted.
+    host_ranges: Vec<tree_sitter::Range>,
     tree: Tree,
 }
 
@@ -1078,6 +1066,38 @@ fn record_layer_change(
         ),
         None => changes.push(span.clone()),
     }
+}
+
+/// The byte ranges a filtered walk queries for injections, given what changed.
+///
+/// Each changed range grows by a row on each side, which catches an injection
+/// boundary flipping. Uncommenting a line whose neighbour opened a fenced block
+/// changes what that neighbour is, and the walk has to see it.
+///
+/// Growing pushes the ranges into each other, so the set comes back merged. Two
+/// edits two rows apart reach the same rows, and the walk runs its injection
+/// query once a filter, so an overlap left in the set is queried twice a layer
+/// for one answer.
+fn expand_changed_rows(rope: &Rope, ranges: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut expanded: Vec<Range<usize>> = ranges
+        .iter()
+        .map(|r| {
+            let start_point = rope.offset_to_point(r.start);
+            let end_point = rope.offset_to_point(r.end);
+            let start_row = start_point.row.saturating_sub(1);
+            let end_row = end_point.row.saturating_add(2);
+            let start_byte = rope
+                .point_to_offset(stoat_text::Point::new(start_row, 0))
+                .min(rope.len());
+            let end_byte = rope
+                .point_to_offset(stoat_text::Point::new(end_row, 0))
+                .min(rope.len());
+            start_byte..end_byte
+        })
+        .collect();
+    expanded.sort_by_key(|r| r.start);
+    merge_ranges(&mut expanded);
+    expanded
 }
 
 /// Collapse a start-sorted range list in place so no two entries overlap or
@@ -1187,9 +1207,8 @@ fn carry_unvisited_injections(
         // walk never queried, so the host ranges themselves are what decide.
         // For a single-range layer they clamp back to the extent.
         let host_ranges: Vec<Range<usize>> = layer
-            .tree
-            .included_ranges()
-            .into_iter()
+            .host_ranges
+            .iter()
             .map(|r| r.start_byte.max(span.start)..r.end_byte.min(span.end))
             .filter(|r| !r.is_empty())
             .collect();
@@ -1250,7 +1269,7 @@ fn parse_rope_combined_ranges(
     language: &Language,
     rope: &Rope,
     ranges: &[Range<usize>],
-    old_tree: Option<&Tree>,
+    prior: Option<&PriorInjection>,
     deadline: Option<(Instant, &Executor)>,
 ) -> Option<Tree> {
     if ranges.is_empty() {
@@ -1290,7 +1309,12 @@ fn parse_rope_combined_ranges(
     // `app::tests::a_carried_parse_tracks_a_fresh_parse_across_doc_comments`
     // catches, and it is the only fixture that does, doc comments being the
     // one combined injection left.
-    let old_tree = old_tree.filter(|t| t.included_ranges() == ts_ranges);
+    //
+    // The prior's own list is read off the record rather than off the tree,
+    // which builds a fresh one a call.
+    let old_tree = prior
+        .filter(|p| p.host_ranges == ts_ranges)
+        .map(|p| &p.tree);
     parse_rope_inner(language, rope, old_tree, Some(&ts_ranges), deadline)
 }
 
@@ -2137,14 +2161,47 @@ mod tests {
         );
     }
 
-    /// Two edits whose filters overlap still leave one layer over the host
-    /// node they share.
+    /// Expanding two edits a couple of rows apart pushes their ranges into each
+    /// other, and the walk runs its injection query once a filter, so an
+    /// overlap left in the set is queried twice a layer for one answer.
     ///
-    /// Each changed range is expanded by a row on either side and the
-    /// expansions are never merged, so edits a few rows apart hand the walk
-    /// overlapping filters. The injection query runs once per filter, which
-    /// means the paragraph reaching into both is matched twice, and a match is
-    /// what a layer is made from.
+    /// Paired with [`Self::two_filters_over_one_paragraph_leave_one_layer`]
+    /// below, which drives the same fixture through the walk and pins the layer
+    /// set against a fresh parse. A merge that swallowed a range shows up
+    /// there.
+    #[test]
+    fn two_edits_two_rows_apart_expand_into_one_filter() {
+        let source = "alpha *a*\nbravo *b*\ncharlie *c*\ndelta *d*\necho *e*\n";
+        let rope = Rope::from(source);
+
+        // Rows 1 and 3. Each expansion reaches row 2 from its own side, so the
+        // two meet there.
+        let changed = vec![
+            source.find("bravo").expect("fixture")..source.find("*b*").expect("fixture"),
+            source.find("delta").expect("fixture")..source.find("*d*").expect("fixture"),
+        ];
+
+        let expanded = expand_changed_rows(&rope, &changed);
+
+        assert_eq!(
+            expanded.len(),
+            1,
+            "the two expansions meet, so the walk queries them once: {expanded:?}"
+        );
+        assert_eq!(
+            expanded[0],
+            0..source.len(),
+            "and the one filter reaches from the row above the first edit to past the last"
+        );
+    }
+
+    /// Two edits whose filters meet still leave one layer over the host node
+    /// they share.
+    ///
+    /// The expansions merge into one filter, and the injection query runs once
+    /// per filter, so the paragraph reaching into both is matched once. It was
+    /// matched twice before the merge, and a match is what a layer is made
+    /// from, which the per-range dedupe is what caught.
     #[test]
     fn two_filters_over_one_paragraph_leave_one_layer() {
         let lang = markdown_lang();
