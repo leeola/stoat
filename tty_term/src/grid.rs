@@ -911,6 +911,7 @@ impl PagePool {
             page.grid.resize(rows, cols);
             page.text_runs.clear();
             page.bars.clear();
+            page.polylines.clear();
         }
     }
 
