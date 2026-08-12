@@ -74,6 +74,10 @@ impl Popover<'_> {
 
     /// Draw only the degraded cell box and its content, for a terminal without
     /// the off-grid popover.
+    ///
+    /// Each line of `content` takes one row. The box never grows to fit, so
+    /// lines past its height and text past its width are dropped. A caller
+    /// sizes the area from its own content to avoid that.
     pub fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
         let fill = rgb(self.fill);
         cells::fill(buf, area, Style::default().bg(fill));
@@ -89,13 +93,12 @@ impl Popover<'_> {
             if self.bold {
                 content_style = content_style.add_modifier(Modifier::BOLD);
             }
-            buf.set_stringn(
-                area.x + 1,
-                area.y + 1,
-                self.content,
-                (area.width - 2) as usize,
-                content_style,
-            );
+            let width = (area.width - 2) as usize;
+            let rows = self.content.lines().take((area.height - 2) as usize);
+            for (row, line) in rows.enumerate() {
+                let y = area.y + 1 + row as u16;
+                buf.set_stringn(area.x + 1, y, line, width, content_style);
+            }
         }
     }
 }
@@ -113,6 +116,12 @@ mod tests {
 
     fn symbol(buf: &Buffer, x: u16, y: u16) -> &str {
         buf.cell((x, y)).expect("cell in bounds").symbol()
+    }
+
+    fn row(buf: &Buffer, y: u16) -> String {
+        (buf.area.x..buf.area.right())
+            .map(|x| symbol(buf, x, y))
+            .collect()
     }
 
     #[test]
@@ -170,6 +179,38 @@ mod tests {
         assert_eq!(symbol(&buf, 4, 1), "d");
         assert_eq!(symbol(&buf, 5, 1), "│");
         assert_eq!(symbol(&buf, 1, 2), " ");
+    }
+
+    /// Every multi-line caller joins its lines with newlines, which ratatui
+    /// drops as control characters if the box writes them as one string.
+    #[test]
+    fn each_content_line_takes_its_own_row() {
+        let mut scene = ApcScene::new();
+        let area = Rect::new(0, 0, 6, 4);
+        let mut buf = Buffer::empty(area);
+
+        Popover {
+            fill: [0, 0, 0],
+            border: [255, 255, 255],
+            content_fg: [255, 255, 255],
+            scale: 1,
+            offset: [0, 0],
+            bold: false,
+            content: "one\ntwo\nthree",
+        }
+        .render(area, &mut buf, &mut scene);
+
+        assert_eq!(
+            row(&buf, 1),
+            "│one │",
+            "the first line sits on the first row"
+        );
+        assert_eq!(row(&buf, 2), "│two │", "and the second on the next");
+        assert_eq!(
+            row(&buf, 3),
+            "└────┘",
+            "the third line does not fit and never overwrites the border"
+        );
     }
 
     /// An app compositing its own chrome takes the halves apart. The frame half
