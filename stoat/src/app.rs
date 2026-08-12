@@ -7695,10 +7695,16 @@ impl Stoat {
     /// The text to insert for a newline at `cursor_offset`, being a line ending
     /// plus the continued indentation.
     ///
-    /// On a line whose first non-whitespace run is the language's line-comment
-    /// token, the new line carries the token forward (indented to the line's own
-    /// leading whitespace) so a comment block continues. Otherwise the indent is
-    /// the syntax-derived one from [`Self::newline_indent_string`].
+    /// On a line whose first non-whitespace run is one of the language's
+    /// line-comment tokens, the new line carries that token forward (indented to
+    /// the line's own leading whitespace) so a comment block continues.
+    /// Otherwise the indent is the syntax-derived one from
+    /// [`Self::newline_indent_string`].
+    ///
+    /// The cursor must sit past the token for the continuation to apply. A
+    /// cursor still inside the leading whitespace has no comment behind it to
+    /// continue, and a token carried there lands ahead of the token already on
+    /// the line.
     pub(crate) fn newline_continuation(&self, buffer_id: BufferId, cursor_offset: usize) -> String {
         let continued_comment = {
             let buffers = &self.active_workspace().buffers;
@@ -7716,6 +7722,7 @@ impl Stoat {
                     action_handlers::movement::line_comment_continues(
                         rope, line_start, line_end, tokens,
                     )
+                    .filter(|&(start, _)| start < cursor_offset)
                     .map(|(_, token)| {
                         format!("{}{token} ", language::line_leading_whitespace(rope, row))
                     })
@@ -25706,6 +25713,28 @@ mod tests {
         h.type_keys("enter");
         h.type_text("bar");
         assert_eq!(focused_buffer_string(&h), "//! foo\n//! bar\n");
+    }
+
+    #[test]
+    fn insert_enter_before_the_comment_token_carries_no_token() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"// foo\n");
+        h.type_keys("i");
+        h.type_keys("enter");
+        assert_eq!(focused_buffer_string(&h), "\n// foo\n");
+    }
+
+    #[test]
+    fn insert_enter_inside_a_comment_indent_carries_no_token() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"    // foo\n");
+        h.type_keys("l l i");
+        h.type_keys("enter");
+        assert_eq!(
+            focused_buffer_string(&h),
+            "  \n      // foo\n",
+            "the split indent takes the plain-indent path, the same as any line",
+        );
     }
 
     #[test]
