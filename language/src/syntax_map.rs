@@ -29,7 +29,7 @@ use crate::{
     highlight::{
         apply_input_edits, input_edits, parse_rope_inner, QueryCursorHandle, RopeTextProvider,
     },
-    language::InjectionInner,
+    language::{InjectionGrouping, InjectionInner},
     language_for_fence_token, parse_rope_range, Language,
 };
 use std::{
@@ -560,6 +560,46 @@ impl SyntaxMap {
                 Some(ranges) if !ranges.is_empty() => ranges,
                 _ => slice::from_ref(&whole_rope),
             };
+            // A block layer is re-queried whole or carried whole, never patched,
+            // so a filter reaching into one has to reach across all of it. This
+            // is what lets the prior-range splice below be skipped for blocks:
+            // the fresh matches already cover every block the edit touched.
+            let mut widened: Vec<Range<usize>> = Vec::new();
+            if injection_filter_ranges.is_some() {
+                for injection in &parent_lang.injections {
+                    if injection.grouping != InjectionGrouping::CombinedBlocks {
+                        continue;
+                    }
+                    let InjectionInner::Fixed { language, .. } = &injection.inner else {
+                        continue;
+                    };
+                    let Some(inner_lang) = language.get() else {
+                        continue;
+                    };
+                    for filter in filter_ranges {
+                        let mut span = filter.clone();
+                        for prior in priors_by_span.overlapping(
+                            parent_depth + 1,
+                            inner_lang.name,
+                            filter.clone(),
+                            prior_key,
+                        ) {
+                            span.start = span.start.min(prior.start_offset as usize);
+                            span.end = span.end.max(prior.end_offset as usize);
+                        }
+                        widened.push(span);
+                    }
+                }
+            }
+            if !widened.is_empty() {
+                widened.sort_by_key(|r| r.start);
+                merge_ranges(&mut widened);
+            }
+            let filter_ranges: &[Range<usize>] = match widened.is_empty() {
+                true => filter_ranges,
+                false => &widened,
+            };
+
             for filter in filter_ranges {
                 cursor.set_byte_range(filter.clone());
                 let provider = RopeTextProvider { rope };
@@ -579,25 +619,35 @@ impl SyntaxMap {
                                 continue;
                             };
                             for capture in m.captures {
+                                // An empty range is kept here and dropped after
+                                // grouping. A bare `///` line captures nothing,
+                                // and dropping it now breaks the row adjacency
+                                // that holds its block together, splitting one
+                                // block in two at every blank doc line.
                                 let inner_start = capture.node.start_byte();
                                 let inner_end = capture.node.end_byte();
-                                if inner_end <= inner_start {
-                                    continue;
-                                }
                                 let group = grouped.entry(inner_lang.name).or_insert_with(|| {
                                     InjectionGroup {
                                         language: inner_lang.clone(),
-                                        combined: injection.combined,
+                                        grouping: injection.grouping,
                                         ranges: Vec::new(),
                                     }
                                 });
                                 debug_assert_eq!(
-                                    group.combined, injection.combined,
-                                    "every injection naming {} must agree on combined-ness, or \
+                                    group.grouping, injection.grouping,
+                                    "every injection naming {} must agree on grouping, or \
                                      its merged layer would overlap its per-node ones",
                                     inner_lang.name,
                                 );
-                                group.ranges.push(inner_start..inner_end);
+                                // The rows come from the node, which is in hand
+                                // only here. Blocks are cut from them after the
+                                // walk, where the order several filter ranges
+                                // delivered matches in no longer matters.
+                                group.ranges.push(HostRange {
+                                    range: inner_start..inner_end,
+                                    start_row: capture.node.start_position().row,
+                                    end_row: capture.node.end_position().row,
+                                });
                             }
                         },
                         InjectionInner::Fence => {
@@ -675,152 +725,174 @@ impl SyntaxMap {
             for (_, group) in grouped {
                 let InjectionGroup {
                     language: inner_lang,
-                    combined,
-                    mut ranges,
+                    grouping,
+                    ranges,
                 } = group;
 
-                // A filtered walk queried only the host nodes near the edit, so
-                // the ranges a combined layer needs are the whole layer only by
-                // accident. The rest are recovered from the prior layer's tree,
-                // whose included ranges `SyntaxMap::interpolate` has already
-                // shifted into current coordinates.
-                //
-                // A per-node language wants none of this. Its untouched ranges
-                // are whole prior layers, which `carry_unvisited_injections`
-                // restores, so splicing them in would reparse exactly the text
-                // the filter exists to skip.
-                //
-                // Anything the filter reached was re-walked and the fresh answer
-                // stands there, so only untouched ranges carry over.
-                if let (true, Some(filter)) = (combined, injection_filter_ranges) {
-                    let found_start = ranges.iter().map(|r| r.start).min().unwrap_or(0);
-                    let found_end = ranges.iter().map(|r| r.end).max().unwrap_or(0);
-                    let prior = priors_by_span
-                        .overlapping(
-                            parent_depth + 1,
-                            inner_lang.name,
-                            found_start..found_end,
-                            prior_key,
-                        )
-                        .next();
-                    if let Some(prior) = prior {
-                        ranges.extend(
-                            prior
-                                .tree
-                                .included_ranges()
-                                .into_iter()
-                                .map(|r| r.start_byte..r.end_byte)
-                                .filter(|r| {
-                                    !r.is_empty()
-                                        && !filter
-                                            .iter()
-                                            .any(|f| r.start < f.end && f.start < r.end)
-                                }),
-                        );
-                        ranges.sort_by_key(|r| r.start);
-                        merge_ranges(&mut ranges);
+                // Blocks are cut before anything below reads the ranges, so the
+                // rest of the loop works in plain byte ranges either way. Every
+                // other grouping is one block holding all of them, which is what
+                // makes the arms below read the same for all three.
+                let mut blocks = match grouping {
+                    InjectionGrouping::CombinedBlocks => block_ranges(ranges),
+                    _ => vec![ranges
+                        .into_iter()
+                        .map(|host| host.range)
+                        .filter(|r| !r.is_empty())
+                        .collect()],
+                };
+                blocks.retain(|block: &Vec<Range<usize>>| !block.is_empty());
+
+                for mut ranges in blocks {
+                    // A filtered walk queried only the host nodes near the edit, so
+                    // the ranges a combined layer needs are the whole layer only by
+                    // accident. The rest are recovered from the prior layer's tree,
+                    // whose included ranges `SyntaxMap::interpolate` has already
+                    // shifted into current coordinates.
+                    //
+                    // A per-node language wants none of this. Its untouched ranges
+                    // are whole prior layers, which `carry_unvisited_injections`
+                    // restores, so splicing them in would reparse exactly the text
+                    // the filter exists to skip.
+                    //
+                    // Blocks want none of it either. The filter was widened to every
+                    // prior block it touched, so a touched block re-queried whole and
+                    // an untouched one carries.
+                    //
+                    // Anything the filter reached was re-walked and the fresh answer
+                    // stands there, so only untouched ranges carry over.
+                    if let (InjectionGrouping::Combined, Some(filter)) =
+                        (grouping, injection_filter_ranges)
+                    {
+                        let found_start = ranges.iter().map(|r| r.start).min().unwrap_or(0);
+                        let found_end = ranges.iter().map(|r| r.end).max().unwrap_or(0);
+                        let prior = priors_by_span
+                            .overlapping(
+                                parent_depth + 1,
+                                inner_lang.name,
+                                found_start..found_end,
+                                prior_key,
+                            )
+                            .next();
+                        if let Some(prior) = prior {
+                            ranges.extend(
+                                prior
+                                    .tree
+                                    .included_ranges()
+                                    .into_iter()
+                                    .map(|r| r.start_byte..r.end_byte)
+                                    .filter(|r| {
+                                        !r.is_empty()
+                                            && !filter
+                                                .iter()
+                                                .any(|f| r.start < f.end && f.start < r.end)
+                                    }),
+                            );
+                            ranges.sort_by_key(|r| r.start);
+                            merge_ranges(&mut ranges);
+                        }
                     }
-                }
 
-                // A combined injection over several host ranges is the one case
-                // that parses them together. Holding a single range it is
-                // indistinguishable from a per-node layer, so it falls through
-                // to the loop below and gets the same exact-bounds prior reuse.
-                if combined && ranges.len() > 1 {
-                    let mut sorted = ranges;
-                    sorted.sort_by_key(|r| r.start);
-                    let found_start = sorted.first().map(|r| r.start).unwrap_or(0);
-                    let found_end = sorted.last().map(|r| r.end).unwrap_or(0);
+                    // A combined injection over several host ranges is the one case
+                    // that parses them together. Holding a single range it is
+                    // indistinguishable from a per-node layer, so it falls through
+                    // to the loop below and gets the same exact-bounds prior reuse.
+                    if grouping.is_combined() && ranges.len() > 1 {
+                        let mut sorted = ranges;
+                        sorted.sort_by_key(|r| r.start);
+                        let found_start = sorted.first().map(|r| r.start).unwrap_or(0);
+                        let found_end = sorted.last().map(|r| r.end).unwrap_or(0);
 
-                    // A combined layer's bounds move whenever a host range is
-                    // added or dropped, so it is matched by overlap rather than
-                    // by the exact bounds a single-range layer is looked up on.
-                    // The layer's own text is what carries across, not its
-                    // extent.
-                    let prior = priors_by_span
-                        .overlapping(
-                            parent_depth + 1,
-                            inner_lang.name,
-                            found_start..found_end,
-                            prior_key,
-                        )
-                        .next();
+                        // A combined layer's bounds move whenever a host range is
+                        // added or dropped, so it is matched by overlap rather than
+                        // by the exact bounds a single-range layer is looked up on.
+                        // The layer's own text is what carries across, not its
+                        // extent.
+                        let prior = priors_by_span
+                            .overlapping(
+                                parent_depth + 1,
+                                inner_lang.name,
+                                found_start..found_end,
+                                prior_key,
+                            )
+                            .next();
 
-                    let merged_start = found_start;
-                    let merged_end = found_end;
-                    let Some(inner_tree) = parse_rope_combined_ranges(
-                        &inner_lang,
-                        rope,
-                        &sorted,
-                        prior.map(|p| &p.tree),
-                        deadline,
-                    ) else {
-                        if out_of_time() {
-                            return None;
-                        }
+                        let merged_start = found_start;
+                        let merged_end = found_end;
+                        let Some(inner_tree) = parse_rope_combined_ranges(
+                            &inner_lang,
+                            rope,
+                            &sorted,
+                            prior.map(|p| &p.tree),
+                            deadline,
+                        ) else {
+                            if out_of_time() {
+                                return None;
+                            }
+                            continue;
+                        };
+                        // Diffing against a prior matched by overlap only names
+                        // where the two trees disagree, which misses text the layer
+                        // no longer covers. The carry step below reports the whole
+                        // span of any prior layer it drops, and a prior reached
+                        // here was dropped there, so that half is already accounted
+                        // for.
+                        record_layer_change(
+                            &mut layer_changes,
+                            &(merged_start..merged_end),
+                            prior.map(|p| &p.tree),
+                            &inner_tree,
+                        );
+                        new_layers.push(SyntaxLayer {
+                            depth: parent_depth + 1,
+                            start_offset: merged_start as u32,
+                            end_offset: merged_end as u32,
+                            language: inner_lang.clone(),
+                            tree: inner_tree,
+                        });
+                        queue.push_back(new_layers.len() - 1);
                         continue;
-                    };
-                    // Diffing against a prior matched by overlap only names
-                    // where the two trees disagree, which misses text the layer
-                    // no longer covers. The carry step below reports the whole
-                    // span of any prior layer it drops, and a prior reached
-                    // here was dropped there, so that half is already accounted
-                    // for.
-                    record_layer_change(
-                        &mut layer_changes,
-                        &(merged_start..merged_end),
-                        prior.map(|p| &p.tree),
-                        &inner_tree,
-                    );
-                    new_layers.push(SyntaxLayer {
-                        depth: parent_depth + 1,
-                        start_offset: merged_start as u32,
-                        end_offset: merged_end as u32,
-                        language: inner_lang,
-                        tree: inner_tree,
-                    });
-                    queue.push_back(new_layers.len() - 1);
-                    continue;
-                }
+                    }
 
-                // The query runs once per filter range, and the filters
-                // themselves may overlap, so a host node near two edits is
-                // matched twice. Two layers over identical bounds is the
-                // overlap [`InjectionIndex`] rules out, so the duplicates go
-                // here rather than into the layer set.
-                ranges.sort_by_key(|r| r.start);
-                ranges.dedup();
+                    // The query runs once per filter range, and the filters
+                    // themselves may overlap, so a host node near two edits is
+                    // matched twice. Two layers over identical bounds is the
+                    // overlap [`InjectionIndex`] rules out, so the duplicates go
+                    // here rather than into the layer set.
+                    ranges.sort_by_key(|r| r.start);
+                    ranges.dedup();
 
-                for r in ranges {
-                    let prior = priors_by_host
-                        .get(&(r.start as u32, r.end as u32, inner_lang.name))
-                        .copied();
-                    let Some(inner_tree) = parse_rope_range(
-                        &inner_lang,
-                        rope,
-                        r.clone(),
-                        prior.map(|p| &p.tree),
-                        deadline,
-                    ) else {
-                        if out_of_time() {
-                            return None;
-                        }
-                        continue;
-                    };
-                    record_layer_change(
-                        &mut layer_changes,
-                        &r,
-                        prior.map(|p| &p.tree),
-                        &inner_tree,
-                    );
-                    new_layers.push(SyntaxLayer {
-                        depth: parent_depth + 1,
-                        start_offset: r.start as u32,
-                        end_offset: r.end as u32,
-                        language: inner_lang.clone(),
-                        tree: inner_tree,
-                    });
-                    queue.push_back(new_layers.len() - 1);
+                    for r in ranges {
+                        let prior = priors_by_host
+                            .get(&(r.start as u32, r.end as u32, inner_lang.name))
+                            .copied();
+                        let Some(inner_tree) = parse_rope_range(
+                            &inner_lang,
+                            rope,
+                            r.clone(),
+                            prior.map(|p| &p.tree),
+                            deadline,
+                        ) else {
+                            if out_of_time() {
+                                return None;
+                            }
+                            continue;
+                        };
+                        record_layer_change(
+                            &mut layer_changes,
+                            &r,
+                            prior.map(|p| &p.tree),
+                            &inner_tree,
+                        );
+                        new_layers.push(SyntaxLayer {
+                            depth: parent_depth + 1,
+                            start_offset: r.start as u32,
+                            end_offset: r.end as u32,
+                            language: inner_lang.clone(),
+                            tree: inner_tree,
+                        });
+                        queue.push_back(new_layers.len() - 1);
+                    }
                 }
             }
         }
@@ -849,10 +921,54 @@ impl SyntaxMap {
 /// is in hand.
 struct InjectionGroup {
     language: Arc<Language>,
-    /// Whether these ranges parse as one document, from
-    /// [`LanguageInjection::combined`].
-    combined: bool,
-    ranges: Vec<Range<usize>>,
+    /// How these ranges divide into documents, from
+    /// [`LanguageInjection::grouping`].
+    grouping: InjectionGrouping,
+    ranges: Vec<HostRange>,
+}
+
+/// One host node's byte range, with the rows it spans.
+///
+/// The rows ride along because [`InjectionGrouping::CombinedBlocks`] cuts its
+/// documents at a break in them, and a node's position is readable only while
+/// the node itself is in hand.
+struct HostRange {
+    range: Range<usize>,
+    start_row: usize,
+    end_row: usize,
+}
+
+/// Cut `ranges` into runs of host nodes on consecutive rows, dropping the empty
+/// ranges within each run.
+///
+/// A run is one document for [`InjectionGrouping::CombinedBlocks`]. Sorting
+/// first is what makes the cut independent of the order several filter ranges
+/// delivered their matches in.
+///
+/// A run whose ranges are all empty yields nothing, since there is no text to
+/// parse. A bare `///` line between two written ones still joins them, because
+/// the empty range drops only after its row has held the run together.
+fn block_ranges(mut ranges: Vec<HostRange>) -> Vec<Vec<Range<usize>>> {
+    ranges.sort_by_key(|host| (host.start_row, host.range.start));
+
+    let mut blocks: Vec<Vec<Range<usize>>> = Vec::new();
+    let mut previous_end_row: Option<usize> = None;
+    for host in ranges {
+        let continues = previous_end_row.is_some_and(|end| host.start_row <= end + 1);
+        if !continues {
+            blocks.push(Vec::new());
+        }
+        previous_end_row = Some(host.end_row);
+        if !host.range.is_empty() {
+            blocks
+                .last_mut()
+                .expect("a block was pushed for the first range")
+                .push(host.range);
+        }
+    }
+
+    blocks.retain(|block| !block.is_empty());
+    blocks
 }
 
 /// Per-host injection layer from the previous parse.
@@ -879,9 +995,11 @@ struct PriorInjection {
 /// scan, and a markdown file's hundreds of fences make that the difference
 /// between a lookup and a walk of the file per lookup.
 ///
-/// The disjointness holds because a language's injection is either combined or
-/// not. Combined gives one layer per group covering every host range;
-/// otherwise each host node gets its own layer, and host nodes do not overlap.
+/// The disjointness holds because a language's injections agree on one
+/// [`InjectionGrouping`]. Per-node gives each host node its own layer, and host
+/// nodes do not overlap. Combined gives one layer covering every host range.
+/// Blocks give one layer per run of host nodes on consecutive rows, and a run
+/// ends where the next starts, so the runs are disjoint and start-ordered too.
 struct InjectionIndex<'a, T> {
     groups: HashMap<(u32, &'static str), Vec<&'a T>>,
 }
@@ -1417,8 +1535,16 @@ mod tests {
     fn a_filtered_reparse_of_a_combined_layer_matches_a_full_parse() {
         use stoat_text::patch::Edit as PatchEdit;
         let lang = rust_lang();
+        // Several doc lines a function, so one block really is several host
+        // ranges. One line each gives one range a block, which is the per-node
+        // case rather than the splice this exercises.
         let original: String = (0..8)
-            .map(|i| format!("/// doc {i} with **bold** text\nfn f{i}() {{ {i} }}\n\n"))
+            .map(|i| {
+                format!(
+                    "/// doc {i} with **bold** text\n/// second line\n/// third line\n\
+                     /// fourth line\n/// fifth line\n/// sixth line\nfn f{i}() {{ {i} }}\n\n"
+                )
+            })
             .collect();
         let old_rope = Rope::from(original.as_str());
 
@@ -1441,8 +1567,9 @@ mod tests {
         let combined_ranges = map
             .snapshot()
             .iter_layers()
-            .find(|l| l.depth == 1 && l.language.name == "markdown")
+            .filter(|l| l.depth == 1 && l.language.name == "markdown")
             .map(|l| l.tree.included_ranges().len())
+            .max()
             .expect("a depth-1 markdown layer");
         assert!(
             combined_ranges > 4,
@@ -1489,19 +1616,28 @@ mod tests {
     fn a_new_host_node_typed_into_a_combined_layer_matches_a_full_parse() {
         use stoat_text::patch::Edit as PatchEdit;
         let lang = rust_lang();
+        // Several doc lines a function, so the block a line joins is already
+        // several host ranges rather than the one a per-node layer holds.
         let original: String = (0..6)
-            .map(|i| format!("/// doc {i} with **bold** text\nfn f{i}() {{ {i} }}\n\n"))
+            .map(|i| {
+                format!(
+                    "/// doc {i} with **bold** text\n/// second line\n/// third line\n\
+                     fn f{i}() {{ {i} }}\n\n"
+                )
+            })
             .collect();
         let old_rope = Rope::from(original.as_str());
 
         let mut map = SyntaxMap::new();
         map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
+        // Summed across the layers, because a doc line joins the block it sits
+        // against and the count the assertion below reads is the file's.
         let ranges_of = |map: &SyntaxMap| -> usize {
             map.snapshot()
                 .iter_layers()
-                .find(|l| l.depth == 1 && l.language.name == "markdown")
+                .filter(|l| l.depth == 1 && l.language.name == "markdown")
                 .map(|l| l.tree.included_ranges().len())
-                .expect("a depth-1 markdown layer")
+                .sum()
         };
         let before = ranges_of(&map);
 
@@ -2712,14 +2848,89 @@ mod tests {
         );
     }
 
+    /// Two doc comments with code between them are two documents, and editing
+    /// one leaves the other's tree where it was.
+    ///
+    /// This is the whole point of cutting blocks at a break in the rows. One
+    /// layer over every doc comment in the file has to reparse whole whenever a
+    /// `///` line is added or dropped, because no incremental parse survives a
+    /// change to its range set.
+    #[test]
+    fn an_edit_in_one_doc_block_leaves_the_other_block_carried() {
+        use stoat_text::patch::Edit as PatchEdit;
+        let lang = rust_lang();
+        let source =
+            "/// one **b**\n/// one more\nfn a() {}\n\n/// two **b**\n/// two more\nfn b() {}\n";
+        let old_rope = Rope::from(source);
+
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
+        let blocks = |map: &SyntaxMap| -> Vec<(u32, u32, usize)> {
+            map.snapshot()
+                .iter_layers()
+                .filter(|l| l.depth == 1 && l.language.name == "markdown")
+                .map(|l| (l.start_offset, l.end_offset, l.tree.included_ranges().len()))
+                .collect()
+        };
+
+        let before = blocks(&map);
+        assert_eq!(
+            before.len(),
+            2,
+            "each run of doc lines is its own document: {before:?}"
+        );
+        assert!(
+            before.iter().all(|(_, _, ranges)| *ranges == 2),
+            "and holds the two lines of its run: {before:?}"
+        );
+
+        // A whole new doc line in the second block, so its range set changes and
+        // it parses fresh rather than carrying. The first block's must not move.
+        let at = source
+            .find("/// two more")
+            .expect("fixture has the second run");
+        let added = "/// two even more\n";
+        let text = format!("{}{}{}", &source[..at], added, &source[at..]);
+        let new_rope = Rope::from(text.as_str());
+
+        map.interpolate(
+            &[PatchEdit {
+                old: at..at,
+                new: at..at + added.len(),
+            }],
+            &old_rope,
+            &new_rope,
+        );
+        #[allow(clippy::single_range_in_vec_init)]
+        let changed = vec![at..at + added.len()];
+        let reported = map
+            .reparse_within_changed_ranges(&new_rope, lang.clone(), 2, Some(&changed), None, None)
+            .expect("the reparse completes");
+
+        // What the reparse reports changed is what it re-parsed or dropped, so a
+        // block it never reports is one it carried whole. One layer over every
+        // doc comment reports the span of all of them for this same edit.
+        let first_block_end = before[0].1 as usize;
+        assert!(
+            reported.iter().all(|r| r.start >= first_block_end),
+            "the untouched block is outside everything the reparse reports: {reported:?}"
+        );
+
+        let mut fresh = SyntaxMap::new();
+        fresh.reparse(&new_rope, lang, 2, None, None).unwrap();
+        assert_eq!(
+            blocks(&map),
+            blocks(&fresh),
+            "and the edited block lands where a fresh parse puts it"
+        );
+    }
+
     #[test]
     fn a_filtered_reparse_keeps_doc_comments_the_edit_sat_between() {
-        // A combined layer spans its first host range through its last, so code
-        // written between two doc comments falls inside the markdown layer while
-        // belonging to none of its ranges. The filter reaches the layer, which
-        // makes it the walk's to re-find, and the walk querying only the edited
-        // body finds no markdown there at all. The layer does not shrink, it
-        // goes away, and both comments stop being highlighted.
+        // Code between two doc comments ends one block and starts another, so
+        // neither layer covers the body the edit lands in. A walk that reaches
+        // toward a layer and re-finds no markdown there drops it, and that
+        // comment stops being highlighted.
         use stoat_text::patch::Edit as PatchEdit;
         let lang = rust_lang();
         let source = "/// one **b**\nfn a() {\n    let x = 1;\n}\n/// two **b**\nfn b() {}\n";
@@ -2728,20 +2939,25 @@ mod tests {
         let mut map = SyntaxMap::new();
         map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
         let comments = |map: &SyntaxMap| -> Vec<Range<usize>> {
-            map.snapshot()
+            let mut ranges: Vec<Range<usize>> = map
+                .snapshot()
                 .iter_layers()
-                .find(|l| l.depth == 1 && l.language.name == "markdown")
-                .expect("a doc-comment layer")
-                .tree
-                .included_ranges()
-                .iter()
-                .map(|r| r.start_byte..r.end_byte)
-                .collect()
+                .filter(|l| l.depth == 1 && l.language.name == "markdown")
+                .flat_map(|l| {
+                    l.tree
+                        .included_ranges()
+                        .into_iter()
+                        .map(|r| r.start_byte..r.end_byte)
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            ranges.sort_by_key(|r| r.start);
+            ranges
         };
         assert_eq!(
             comments(&map).len(),
             2,
-            "the fixture must merge both doc comments into one layer"
+            "the fixture must inject both doc comments"
         );
 
         let at = source.find("let x = 1").expect("fixture") + "let x = ".len();

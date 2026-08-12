@@ -196,25 +196,55 @@ pub enum InjectionInner {
 pub struct LanguageInjection {
     pub host_node_kind: &'static str,
     pub inner: InjectionInner,
-    /// Whether every host node parses as one document rather than one per
-    /// node.
+    /// How the host nodes divide into documents.
     ///
-    /// A language whose constructs run across host nodes has to be combined.
-    /// A rust doc comment's fenced block opens on one `doc_comment` line and
-    /// closes on another, so parsing each line alone would never see a fence.
-    /// The cost is that adding or removing a host node changes the range set,
-    /// which no incremental parse survives, so the whole layer reparses.
-    ///
-    /// A language whose host nodes are each a complete document, like a
-    /// markdown paragraph's inline text, is better off per-node. An edit then
-    /// reparses that node and leaves the rest of the file's layers alone.
-    ///
-    /// Every injection naming one inner language must agree on this, or that
-    /// language would hold a merged layer overlapping its own per-node ones.
+    /// Every injection naming one inner language must agree on this. A
+    /// disagreement puts a merged layer over the same text as that language's
+    /// own per-node ones.
     ///
     /// Ignored for [`InjectionInner::Fence`], where each fence is its own
     /// document by construction.
-    pub combined: bool,
+    pub grouping: InjectionGrouping,
+}
+
+/// How an injection's host nodes divide into documents to parse.
+///
+/// The choice trades a construct's reach against what one keystroke costs. A
+/// document spanning several host nodes sees constructs that cross them, and
+/// pays by reparsing whole whenever a host node is added or dropped, since no
+/// incremental parse survives a change to its range set.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InjectionGrouping {
+    /// Each host node is a complete document.
+    ///
+    /// A markdown paragraph's inline text is one. An edit reparses that node
+    /// and leaves the rest of the file's layers alone.
+    PerRange,
+    /// Every host node in the file is one document.
+    ///
+    /// The general form for a language whose constructs run anywhere across
+    /// its host nodes. One added host node reparses the file's whole layer,
+    /// which is why a language whose documents have boundaries wants
+    /// [`Self::CombinedBlocks`] instead.
+    Combined,
+    /// Each run of host nodes on consecutive rows is a document.
+    ///
+    /// A rust doc comment's fenced block opens on one `doc_comment` line and
+    /// closes on another, so parsing each line alone never sees a fence. The
+    /// run bounds how far those lines reach. Code between two doc comments
+    /// ends one document and starts another, so a fence left open in one
+    /// function's docs stops at the end of them.
+    ///
+    /// Adding a `///` line then reparses its own run rather than the file's
+    /// every doc comment.
+    CombinedBlocks,
+}
+
+impl InjectionGrouping {
+    /// Whether host nodes parse together rather than one document each.
+    pub(crate) fn is_combined(self) -> bool {
+        !matches!(self, InjectionGrouping::PerRange)
+    }
 }
 
 pub struct LanguageRegistry {
@@ -448,7 +478,7 @@ fn make_rust() -> Language {
                 name: "markdown",
                 language: OnceLock::new(),
             },
-            combined: true,
+            grouping: InjectionGrouping::CombinedBlocks,
         }],
         AuxQuerySources {
             brackets: Some(include_str!(
@@ -522,13 +552,13 @@ fn make_markdown() -> Language {
             name: "markdown-inline",
             language: OnceLock::new(),
         },
-        combined: false,
+        grouping: InjectionGrouping::PerRange,
     }];
     // Fenced code blocks parse as the language their info string names.
     injections.push(LanguageInjection {
         host_node_kind: "fenced_code_block",
         inner: InjectionInner::Fence,
-        combined: false,
+        grouping: InjectionGrouping::PerRange,
     });
     make_language_with_injections(
         "markdown",
