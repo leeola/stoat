@@ -98,8 +98,8 @@ enum Command {
         #[command(subcommand)]
         sub: crate::commands::query::QueryCommand,
     },
-    /// Create, list, show, and delete the guided walkthroughs stored in this
-    /// workspace under `.stoat/walkthroughs`.
+    /// Author and check the guided walkthroughs stored in this workspace under
+    /// `.stoat/walkthroughs`.
     Walkthrough {
         #[command(subcommand)]
         sub: crate::commands::walkthrough::WalkthroughCommand,
