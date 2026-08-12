@@ -78,7 +78,11 @@ pub struct CodeSearchFinder {
     /// Parses the AST scan reuses while this modal is open, shared with the
     /// scan task. Held here so closing the finder drops a workspace's worth of
     /// syntax trees rather than leaving them for the process's lifetime.
-    pub(crate) parse_cache: Arc<Mutex<ast::AstParseCache>>,
+    ///
+    /// Sharded because a parse is read through a `&mut` borrow of its cache, so
+    /// one cache hands the whole scan back to a single thread.
+    /// [`ast::parse_cache_shard`] routes a path, always to the same shard.
+    pub(crate) parse_cache: Arc<[Mutex<ast::AstParseCache>; ast::PARSE_CACHE_SHARDS]>,
     /// Every file the workspace walk found, published by the first scan that
     /// completed one and read by every scan after it.
     ///
@@ -123,7 +127,9 @@ impl CodeSearchFinder {
             target_lang,
             invalid_pattern: false,
             viewport_rows: None,
-            parse_cache: Arc::new(Mutex::new(ast::AstParseCache::new(ast::PARSE_CACHE_CAP))),
+            parse_cache: Arc::new(std::array::from_fn(|_| {
+                Mutex::new(ast::AstParseCache::new(ast::PARSE_CACHE_SHARD_CAP))
+            })),
             walked: Arc::new(OnceLock::new()),
         }
     }
@@ -356,6 +362,7 @@ fn line_snippet(text: &str, line_start: usize, offset: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        ast::{self, AstLang},
         line_snippet, line_start_at, offset_to_line_column, scan_file, scan_paths_parallel,
         SearchMatch, SearchMode, MATCH_CAP, WALK_BATCH_SIZE,
     };
@@ -364,6 +371,7 @@ mod tests {
         host::{FakeFs, FsHost},
         test_harness::TestHarness,
     };
+    use ast_grep_core::Pattern;
     use regex::Regex;
     use std::{
         ops::ControlFlow,
@@ -883,6 +891,70 @@ mod tests {
             "only the rust file matches, the .txt is skipped"
         );
         assert!(finder.matches[0].path.ends_with("a.rs"));
+    }
+
+    /// The AST scan spreads the workspace over cores and over parse-cache
+    /// shards, so what it finds must not depend on which thread reached a file
+    /// or on how the paths hashed.
+    ///
+    /// The reference stays serial and unsharded, which is what makes it a
+    /// reference rather than a second copy of the thing under test.
+    #[test]
+    fn a_fanned_ast_scan_finds_what_a_serial_one_does() {
+        // Enough files to fill several shards and outrun one batch, and enough
+        // shapes that a routing mistake drops a distinguishable match.
+        let files: Vec<(String, String)> = (0..40)
+            .map(|index| {
+                (
+                    format!("src/mod{index}/file{index}.rs"),
+                    format!("fn f{index}() {{}}\nstruct S{index};\nfn g{index}() {{}}\n"),
+                )
+            })
+            .collect();
+        let borrowed: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(name, text)| (name.as_str(), text.as_str()))
+            .collect();
+
+        let mut h = open_ast_over(&borrowed, "src/mod0/file0.rs");
+        run_ast_query(&mut h, "fn $NAME() {}");
+
+        let lang = AstLang::new(
+            h.stoat
+                .language_registry
+                .for_path(Path::new("a.rs"))
+                .expect("rust language"),
+        );
+        let pattern = Pattern::try_new("fn $NAME() {}", lang.clone()).expect("pattern compiles");
+        let mut cache = ast::AstParseCache::new(ast::PARSE_CACHE_CAP);
+        let mut expected = Vec::new();
+        for (name, text) in &files {
+            ast::ast_scan_file(
+                text,
+                &lang,
+                &pattern,
+                &PathBuf::from("/repo").join(name),
+                &mut cache,
+                &mut expected,
+            );
+        }
+
+        let key = |m: &SearchMatch| (m.path.to_path_buf(), m.offset);
+        let mut found: Vec<_> = h
+            .stoat
+            .code_search
+            .as_ref()
+            .expect("code search open")
+            .matches
+            .iter()
+            .map(key)
+            .collect();
+        let mut expected: Vec<_> = expected.iter().map(key).collect();
+        found.sort();
+        expected.sort();
+
+        assert!(!expected.is_empty(), "the fixture matches something");
+        assert_eq!(found, expected, "the fan finds the serial scan's matches");
     }
 
     #[test]

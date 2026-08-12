@@ -6,6 +6,7 @@ use ast_grep_core::{
 };
 use std::{
     collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -39,6 +40,33 @@ struct Entry {
 /// A workspace's target-language files usually fit, and a scan that overruns it
 /// degrades to re-parsing rather than to anything worse.
 pub(crate) const PARSE_CACHE_CAP: usize = 256;
+
+/// Caches the AST scan spreads the workspace over.
+///
+/// A parse is read through a `&mut` borrow of the cache holding it, because
+/// [`AstGrep`] wraps a [`tree_sitter::Tree`], which is `Send` and not `Sync`.
+/// One cache therefore serializes the whole scan. Splitting it lets files that
+/// hash apart parse at the same time, and [`parse_cache_shard`] is what keeps a
+/// file landing in the same one every query so the reuse survives.
+pub(crate) const PARSE_CACHE_SHARDS: usize = 8;
+
+/// Entries one shard holds, so the sharded set holds what one cache did.
+pub(crate) const PARSE_CACHE_SHARD_CAP: usize = if PARSE_CACHE_CAP > PARSE_CACHE_SHARDS {
+    PARSE_CACHE_CAP / PARSE_CACHE_SHARDS
+} else {
+    1
+};
+
+/// The shard holding `path`'s parse.
+///
+/// Hashed rather than assigned in walk order, so the same path lands in the
+/// same shard whatever order a walk reaches it in. That is what carries a parse
+/// across a refined query, which is the whole point of holding one.
+pub(crate) fn parse_cache_shard(path: &Path) -> usize {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish() as usize % PARSE_CACHE_SHARDS
+}
 
 impl AstParseCache {
     pub(crate) fn new(cap: usize) -> Self {
@@ -209,6 +237,7 @@ pub(crate) fn ast_scan_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use stoat_language::LanguageRegistry;
 
     fn rust_lang() -> Arc<stoat_language::Language> {
@@ -222,6 +251,32 @@ mod tests {
         let mut cache = AstParseCache::new(PARSE_CACHE_CAP);
         ast_scan_file(text, lang, pattern, Path::new(path), &mut cache, &mut out);
         out
+    }
+
+    /// Reuse across a refined query rests on a path landing where it landed
+    /// last time, and the point of sharding rests on paths not all landing
+    /// together.
+    #[test]
+    fn a_path_lands_in_one_shard_and_the_workspace_spreads() {
+        let paths: Vec<PathBuf> = (0..64)
+            .map(|index| PathBuf::from(format!("/repo/src/file{index}.rs")))
+            .collect();
+
+        for path in &paths {
+            assert_eq!(
+                parse_cache_shard(path),
+                parse_cache_shard(path),
+                "a path routes to one shard, so its parse survives a refinement"
+            );
+            assert!(parse_cache_shard(path) < PARSE_CACHE_SHARDS);
+        }
+
+        let spread: HashSet<usize> = paths.iter().map(|path| parse_cache_shard(path)).collect();
+        assert_eq!(
+            spread.len(),
+            PARSE_CACHE_SHARDS,
+            "and the workspace reaches every shard, or the split buys nothing"
+        );
     }
 
     #[test]
