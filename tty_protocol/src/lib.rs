@@ -5,6 +5,11 @@
 //! Kept dependency-light -- no GPU, windowing, or terminal-state deps --
 //! so a program needs only this crate to emit stoatty bytes.
 //!
+//! `docs/stoatty-protocol.md` in the repository is the prose reference. It
+//! covers the frame grammar, the command table with its
+//! persistent-versus-decoration lanes, and the detection recipes, written for a
+//! reader coming from outside this codebase.
+//!
 //! # What degrades, and what does not
 //!
 //! A frame degrades to an ignorable escape sequence in any other terminal,

@@ -7,6 +7,10 @@
 //! [`ApcSession`] wraps a scene in the terminal work a program needs around it.
 //! It finds out which terminal answers, takes raw mode or mouse reporting when
 //! the program asks, and gives both back however the program ends.
+//!
+//! `docs/stoatty-protocol.md` in the repository is the prose reference for the
+//! wire format these widgets emit, for a program that reaches past the kit and
+//! encodes frames itself.
 
 use ratatui::crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
