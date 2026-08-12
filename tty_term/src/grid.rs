@@ -1236,24 +1236,57 @@ fn copy_translated<T: Clone>(dst: &mut Vec<T>, src: &[T], mut shift: impl FnMut(
     }
 }
 
-/// The set of viewport rows a projection rewrote, so a renderer can rebuild
-/// only the rows that changed.
+/// What one row of a partial [`Damage`] changed over.
 ///
-/// [`Damage::Full`] means every row did, which is what a resize or a
-/// terminal-reported full damage produces. [`Damage::Partial`] carries a flag
-/// per row, indexed by row.
+/// `None` is a clean row. `Some((left, right))` names the inclusive column
+/// bounds, which is what lets a fixed-size instance buffer patch the cells that
+/// moved instead of the row holding them. A cell blinking in place is the case
+/// this exists for.
+pub type RowDamage = Option<(u16, u16)>;
+
+/// The [`RowDamage`] covering a whole row `cols` wide.
+///
+/// Three kinds of damage have no narrower answer. A selection overlay enters or
+/// leaves a whole row, a slide-and-compare compares whole rows, and a
+/// decoration spans the row it sits on.
+pub fn whole_row(cols: usize) -> RowDamage {
+    (cols > 0).then(|| (0, (cols - 1).min(u16::MAX as usize) as u16))
+}
+
+/// The set of viewport rows a projection rewrote, so a renderer rebuilds only
+/// the rows that changed.
+///
+/// [`Damage::Full`] means every row did over its whole width, which is what a
+/// resize or a terminal-reported full damage produces. [`Damage::Partial`]
+/// carries one [`RowDamage`] per row, indexed by row.
 pub enum Damage {
     Full,
-    Partial(Vec<bool>),
+    Partial(Vec<RowDamage>),
 }
 
 impl Damage {
-    /// Whether `row` changed this projection. Rows past the flag vector, and
-    /// every row under [`Damage::Full`], read as dirty.
+    /// Whether `row` changed this projection. Every row under [`Damage::Full`]
+    /// reads as dirty, and a row past a partial vector reads as clean.
     pub fn is_dirty(&self, row: usize) -> bool {
         match self {
             Damage::Full => true,
-            Damage::Partial(rows) => rows.get(row).copied().unwrap_or(false),
+            Damage::Partial(rows) => rows.get(row).copied().flatten().is_some(),
+        }
+    }
+
+    /// The inclusive column bounds `row` changed over, or `None` when it is
+    /// clean.
+    ///
+    /// `cols` is the width a [`Damage::Full`] covers. The damage names rows
+    /// alone, so the caller supplies how wide one is.
+    pub fn columns(&self, row: usize, cols: usize) -> Option<(usize, usize)> {
+        match self {
+            Damage::Full => (cols > 0).then(|| (0, cols - 1)),
+            Damage::Partial(rows) => rows
+                .get(row)
+                .copied()
+                .flatten()
+                .map(|(left, right)| (left as usize, right as usize)),
         }
     }
 }

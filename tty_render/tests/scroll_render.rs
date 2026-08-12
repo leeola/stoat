@@ -104,7 +104,7 @@ fn grid_scroll_moves_glyph_down_without_rebuild() {
 
     // Second frame only scrolls one row, with no damage, so the instances are
     // reused and the scroll comes entirely from the uniform.
-    let idle = Damage::Partial(vec![false; rows]);
+    let idle = Damage::Partial(vec![None; rows]);
     renderer.render_into(&device, &queue, &view, &grid, frame(1.0, &idle));
     let scrolled = read_back(&device, &queue, &target, width, height);
 
@@ -211,7 +211,7 @@ fn document_scroll_shifts_the_grid_like_grid_scroll() {
     renderer.render_into(&device, &queue, &view, &grid, frame(0.0, &Damage::Full));
     let unscrolled = read_back(&device, &queue, &target, width, height);
 
-    let idle = Damage::Partial(vec![false; rows]);
+    let idle = Damage::Partial(vec![None; rows]);
     renderer.render_into(&device, &queue, &view, &grid, frame(1.0, &idle));
     let scrolled = read_back(&device, &queue, &target, width, height);
 

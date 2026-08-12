@@ -19,7 +19,7 @@ use stoatty_render::{
     render::cell_size,
 };
 use stoatty_term::{
-    grid::{Grid, Overlay, Rgb, UnderlineStyle},
+    grid::{whole_row, Grid, Overlay, Rgb, UnderlineStyle},
     term::Damage,
 };
 use wgpu::{
@@ -30,6 +30,8 @@ use wgpu::{
 };
 
 const ROWS: u32 = 6;
+/// Columns the harnesses whose damage vectors name whole rows are built at.
+const COLS: usize = 8;
 
 /// One color per absolute line, so which line a row holds is readable off the
 /// surface.
@@ -110,9 +112,9 @@ fn a_scrolled_screen_keeps_every_row_where_the_shader_looks_for_it() {
 
     for top in 1..=(2 * ROWS + 1) {
         // The exposed row is new, and an interior row is redrawn alongside it.
-        let mut damage = vec![false; ROWS as usize];
-        damage[ROWS as usize - 1] = true;
-        damage[1] = true;
+        let mut damage = vec![None; ROWS as usize];
+        damage[ROWS as usize - 1] = whole_row(COLS);
+        damage[1] = whole_row(COLS);
 
         let pixels = harness.render(
             &device,
@@ -159,8 +161,8 @@ fn a_scroll_that_rebuilds_nothing_still_moves_the_rows_it_kept() {
         harness.render(&device, &queue, &line_screen(0), &Damage::Full, 0);
 
         // Scroll to each rotation in turn, repainting as it goes.
-        let mut last_row = vec![false; ROWS as usize];
-        last_row[ROWS as usize - 1] = true;
+        let mut last_row = vec![None; ROWS as usize];
+        last_row[ROWS as usize - 1] = whole_row(COLS);
         for top in 1..=settled {
             harness.render(
                 &device,
@@ -178,7 +180,7 @@ fn a_scroll_that_rebuilds_nothing_still_moves_the_rows_it_kept() {
             &device,
             &queue,
             &line_screen(top),
-            &Damage::Partial(vec![false; ROWS as usize]),
+            &Damage::Partial(vec![None; ROWS as usize]),
             1,
         );
 

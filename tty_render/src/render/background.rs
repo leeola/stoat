@@ -15,6 +15,7 @@ use crate::render::{
     GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
+use std::ops::RangeInclusive;
 use stoatty_term::{
     grid::{Grid, Rgb},
     term::Damage,
@@ -410,18 +411,23 @@ impl BackgroundPass {
         // content behind them, and damage names those.
         let mut row = 0;
         while row < rows {
-            if !damage.is_dirty(row) {
+            let Some((left, right)) = damage.columns(row, cols) else {
                 row += 1;
                 continue;
-            }
+            };
 
             // Written one row at a time rather than in runs. A run of rows is
             // contiguous on screen but wraps in the buffer, so the slice it
             // would write is not one range once the rotation is past the end.
+            //
+            // Within a row the write is bounded by the damaged columns. The
+            // instance is fixed size, so the column's byte offset into the
+            // row's slice is exact, and a cell blinking in place costs one
+            // instance rather than the row holding it.
             self.scratch.clear();
-            build_row_instances(grid, row, &mut self.scratch);
+            build_row_instances(grid, row, left..=right, &mut self.scratch);
             let slot = row_slot(row, self.row_offset, rows);
-            let offset = (slot * cols * size_of::<BgInstance>()) as u64;
+            let offset = ((slot * cols + left) * size_of::<BgInstance>()) as u64;
             queue.write_buffer(&self.instances, offset, bytemuck::cast_slice(&self.scratch));
             row += 1;
         }
@@ -723,13 +729,21 @@ fn row_slot(row: usize, row_offset: u32, rows: usize) -> usize {
 }
 
 fn build_instances(grid: &Grid, out: &mut Vec<BgInstance>) {
+    let Some(last_col) = grid.cols().checked_sub(1) else {
+        return;
+    };
     for row in 0..grid.rows() {
-        build_row_instances(grid, row, out);
+        build_row_instances(grid, row, 0..=last_col, out);
     }
 }
 
-fn build_row_instances(grid: &Grid, row: usize, out: &mut Vec<BgInstance>) {
-    out.extend((0..grid.cols()).map(|col| {
+fn build_row_instances(
+    grid: &Grid,
+    row: usize,
+    columns: RangeInclusive<usize>,
+    out: &mut Vec<BgInstance>,
+) {
+    out.extend(columns.map(|col| {
         let (_, bg) = grid.get(row, col).draw_colors();
         BgInstance {
             color: [bg.r, bg.g, bg.b, 255],
@@ -909,13 +923,40 @@ mod tests {
         let grid = Grid::new(rows, cols);
 
         let mut instances = Vec::new();
-        build_row_instances(&grid, 2, &mut instances);
+        build_row_instances(&grid, 2, 0..=cols - 1, &mut instances);
 
         let bytes = size_of::<BgInstance>();
         assert_eq!(
             (instances.len() * bytes, 2 * cols * bytes),
             (cols * 4, 40),
             "a row spans 4 bytes per cell, at four times its row-major start",
+        );
+    }
+
+    /// A cell changing in place damages its own columns, and the instance is
+    /// fixed size, so what the patch writes is that column's slice rather than
+    /// the row holding it. A spinner or a clock is the case this is for.
+    #[test]
+    fn a_one_cell_change_patches_only_that_cell() {
+        let (rows, cols) = (4, 5);
+        let mut grid = Grid::new(rows, cols);
+        grid.get_mut(2, 3).bg = Rgb::new(10, 20, 30);
+
+        let mut instances = Vec::new();
+        build_row_instances(&grid, 2, 3..=3, &mut instances);
+
+        assert_eq!(
+            instances.iter().map(|i| i.color).collect::<Vec<_>>(),
+            [[10, 20, 30, 255]],
+            "the bounded build carries the one cell the damage named",
+        );
+
+        let bytes = size_of::<BgInstance>();
+        let slot = row_slot(2, 0, rows);
+        assert_eq!(
+            (slot * cols + 3) * bytes,
+            13 * bytes,
+            "written at the cell's own offset, not its row's start",
         );
     }
 }

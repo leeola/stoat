@@ -10,7 +10,9 @@
 /// from here even though the type belongs to the grid it describes.
 pub use crate::grid::Damage;
 use crate::{
-    grid::{self, Cell, DocumentOffset, Flags, Grid, MinimapView, PagePool, Rgb},
+    grid::{
+        self, whole_row, Cell, DocumentOffset, Flags, Grid, MinimapView, PagePool, Rgb, RowDamage,
+    },
     theme::Theme,
 };
 use alacritty_terminal::{
@@ -30,13 +32,13 @@ use decorate::{
 use parking_lot::Mutex;
 use project::{
     default_palette, detect_shift, indexed, named_color, project_cell, project_cursor,
-    project_term_cells, row_flags, selection_span,
+    project_term_cells, row_bounds, selection_span,
 };
 use scan::{notification_from_osc, EscEvent, EscScanner, ESC, XTVERSION_REPLY};
 use std::{
     collections::{BTreeMap, HashMap},
     mem,
-    ops::Range,
+    ops::{Range, RangeInclusive},
     sync::Arc,
     time::Instant,
 };
@@ -339,7 +341,7 @@ pub struct Terminal {
     ///
     /// A frame carries at most two, the VT damage and the decoration damage, so
     /// this settles at that depth rather than growing.
-    row_flags_spare: Vec<Vec<bool>>,
+    row_flags_spare: Vec<Vec<RowDamage>>,
     /// The byte buffer an open content capture streams into, held here between
     /// captures so a run of them shares one allocation.
     ///
@@ -355,7 +357,7 @@ pub struct Terminal {
     /// drained it via [`Self::take_decoration_damage`]. Distinct from VT
     /// [`Damage`]: it marks rows where an APC border or scale changed, which the
     /// cell-decoration passes gate their per-row rebuilds on.
-    decoration_damage: Vec<bool>,
+    decoration_damage: Vec<RowDamage>,
     /// Scrollback line count at the previous [`Self::project`], so the next one
     /// can report how many rows the content scrolled since.
     last_history: usize,
@@ -1925,7 +1927,7 @@ impl Terminal {
         let diffing = moved_rows.unsigned_abs() < out_rows;
         if diffing {
             out.scroll_by(moved_rows);
-            *damage = Damage::Partial(row_flags(&mut self.row_flags_spare, out_rows));
+            *damage = Damage::Partial(row_bounds(&mut self.row_flags_spare, out_rows));
         }
 
         // Row 0 is the straddle row one line older than the offset's top, so a
@@ -1956,7 +1958,7 @@ impl Terminal {
                 continue;
             }
             if let Damage::Partial(rows_dirty) = damage {
-                rows_dirty[out_row] = true;
+                rows_dirty[out_row] = whole_row(cols);
             }
             out.row_mut(out_row).copy_from_slice(&projected);
         }
@@ -2559,10 +2561,10 @@ impl Terminal {
         {
             // An idle frame carries an empty vec, so grow it before marking the
             // entered rows. A genuinely-damaged frame already sizes it to rows.
-            rows_dirty.resize(rows, false);
+            rows_dirty.resize(rows, None);
             for (lo, hi) in span.into_iter().chain(self.last_selection_span) {
                 for slot in rows_dirty.iter_mut().skip(lo).take(hi - lo + 1) {
-                    *slot = true;
+                    *slot = whole_row(cols);
                 }
             }
         }
@@ -2575,16 +2577,20 @@ impl Terminal {
         let term_grid = self.term.grid();
         let theme = &self.theme;
         let palette = &self.palette;
-        let project_into = |row: usize, out: &mut [Cell]| {
+        // `out` is the whole row either way, so a bounded call indexes it by
+        // column rather than from the range's start.
+        let project_range = |row: usize, columns: RangeInclusive<usize>, out: &mut [Cell]| {
             let line = Line(row as i32 - offset);
             let source = &term_grid[line];
-            for (col, cell) in out.iter_mut().enumerate() {
+            for col in columns {
+                let cell = &mut out[col];
                 *cell = project_cell(&source[Column(col)], content.colors, theme, palette);
                 if selection.is_some_and(|s| s.contains(Point::new(line, Column(col)))) {
                     cell.flags = cell.flags.toggle(Flags::INVERSE);
                 }
             }
         };
+        let project_into = |row: usize, out: &mut [Cell]| project_range(row, 0..=cols - 1, out);
 
         let mut projected = mem::take(&mut self.row_scratch);
 
@@ -2612,15 +2618,17 @@ impl Terminal {
             };
 
             grid.scroll_by(shift as isize);
-            dirty = Damage::Partial(row_flags(&mut self.row_flags_spare, rows));
+            dirty = Damage::Partial(row_bounds(&mut self.row_flags_spare, rows));
         }
 
         for row in 0..rows {
             // Without a slide nothing compares the row before it lands, so it goes
             // straight into the grid rather than through the scratch and out again.
             if !sliding {
-                if dirty.is_dirty(row) {
-                    project_into(row, grid.row_mut(row));
+                // Only the columns the terminal reported. A cell blinking in
+                // place otherwise costs a projection of the row holding it.
+                if let Some((left, right)) = dirty.columns(row, cols) {
+                    project_range(row, left..=right, grid.row_mut(row));
                 }
                 continue;
             }
@@ -2630,7 +2638,7 @@ impl Terminal {
                 continue;
             }
             if let Damage::Partial(rows_dirty) = &mut dirty {
-                rows_dirty[row] = true;
+                rows_dirty[row] = whole_row(cols);
             }
             grid.row_mut(row).copy_from_slice(&projected);
         }
@@ -2649,7 +2657,7 @@ impl Terminal {
         // the layout changed. A `Damage::Partial([])` idle frame re-stamps none.
         let vt_damaged = match &dirty {
             Damage::Full => true,
-            Damage::Partial(rows) => rows.iter().any(|&row| row),
+            Damage::Partial(rows) => rows.iter().any(|row| row.is_some()),
         };
         let layout_changed = self.decorations_dirty.line_layout || resized;
 
@@ -2734,7 +2742,7 @@ impl Terminal {
             self.last_decoration_footprint.resize(rows, false);
         }
         if self.decoration_damage.len() != rows {
-            self.decoration_damage = row_flags(&mut self.row_flags_spare, rows);
+            self.decoration_damage = row_bounds(&mut self.row_flags_spare, rows);
         }
         // The footprint is a pure function of the three decoration lists and the row
         // count, and none of those can move while this is false, so the retained
@@ -2759,7 +2767,7 @@ impl Terminal {
                 .zip(&self.last_decoration_footprint)
             {
                 if now || before {
-                    *damage = true;
+                    *damage = whole_row(cols);
                 }
             }
             mem::swap(
@@ -2786,6 +2794,7 @@ impl Terminal {
             return Damage::Full;
         }
 
+        let cols = self.term.columns();
         match self.term.damage() {
             TermDamage::Full => Damage::Full,
             TermDamage::Partial(lines) => {
@@ -2793,11 +2802,23 @@ impl Terminal {
                 if lines.peek().is_none() {
                     return Damage::Partial(Vec::new());
                 }
-                let mut rows_dirty = row_flags(&mut self.row_flags_spare, rows);
+                let mut rows_dirty = row_bounds(&mut self.row_flags_spare, rows);
                 for bounds in lines {
-                    if let Some(slot) = rows_dirty.get_mut(bounds.line) {
-                        *slot = true;
-                    }
+                    let Some(slot) = rows_dirty.get_mut(bounds.line) else {
+                        continue;
+                    };
+                    // Clamped to the screen because the bounds index the cells a
+                    // renderer patches, and widened when one line is reported
+                    // twice so the union covers both reports.
+                    let last = cols.saturating_sub(1);
+                    let left = bounds.left.min(last) as u16;
+                    let right = bounds.right.min(last) as u16;
+                    *slot = Some(match *slot {
+                        Some((held_left, held_right)) => {
+                            (held_left.min(left), held_right.max(right))
+                        },
+                        None => (left, right),
+                    });
                 }
                 Damage::Partial(rows_dirty)
             },
@@ -2886,8 +2907,8 @@ impl Dimensions for GridSize {
 #[cfg(test)]
 mod tests {
     use super::{
-        insert_room, Arc, Cursor, CursorShape, Damage, MinimapJournal, TermEvent, Terminal, ESC,
-        MAX_CAPTURE_BYTES, MAX_DECORATIONS, MAX_MINIMAP_LINES, MAX_MINIMAP_STORES,
+        insert_room, whole_row, Arc, Cursor, CursorShape, Damage, MinimapJournal, TermEvent,
+        Terminal, ESC, MAX_CAPTURE_BYTES, MAX_DECORATIONS, MAX_MINIMAP_LINES, MAX_MINIMAP_STORES,
         MAX_MINIMAP_VIEWS, MAX_POOLS, XTVERSION_REPLY,
     };
     use crate::{
@@ -2996,7 +3017,7 @@ mod tests {
             panic!("the return to the live bottom slides and compares");
         };
         assert!(
-            rows.iter().any(|&dirty| dirty),
+            rows.iter().any(|dirty| dirty.is_some()),
             "and rewrites the rows the move changed",
         );
     }
@@ -3020,7 +3041,7 @@ mod tests {
             "what the skipped projection did not paint is painted here"
         );
         assert!(
-            matches!(&damage, Damage::Partial(rows) if rows[0]),
+            matches!(&damage, Damage::Partial(rows) if rows[0].is_some()),
             "the row still names itself, the skip having left the damage alone"
         );
     }
@@ -3029,17 +3050,17 @@ mod tests {
     /// what it must not do is hand them to the frame that takes it.
     #[test]
     fn a_reused_row_buffer_is_cleared_and_sized_before_it_is_handed_out() {
-        let mut spare = vec![vec![true, true, true]];
+        let mut spare = vec![vec![whole_row(4), whole_row(4), whole_row(4)]];
 
         assert_eq!(
-            super::row_flags(&mut spare, 2),
-            [false, false],
+            super::row_bounds(&mut spare, 2),
+            [None, None],
             "the marks are gone and the buffer fits the rows asked for"
         );
         assert!(spare.is_empty(), "the buffer handed out left the pool");
         assert_eq!(
-            super::row_flags(&mut spare, 3),
-            [false, false, false],
+            super::row_bounds(&mut spare, 3),
+            [None, None, None],
             "an empty pool still answers, by allocating"
         );
     }
@@ -3054,10 +3075,10 @@ mod tests {
             "a full damage names no rows, so it has no buffer to give back"
         );
 
-        terminal.recycle_damage(Damage::Partial(vec![true; 8]));
+        terminal.recycle_damage(Damage::Partial(vec![whole_row(4); 8]));
         assert_eq!(
-            super::row_flags(&mut terminal.row_flags_spare, 2),
-            [false, false],
+            super::row_bounds(&mut terminal.row_flags_spare, 2),
+            [None, None],
             "the returned buffer serves the next request"
         );
     }
@@ -3195,7 +3216,7 @@ mod tests {
             panic!("decoration damage is always partial");
         };
         assert!(
-            !rows.iter().any(|&row| row),
+            !rows.iter().any(|row| row.is_some()),
             "an unchanged scene damages no row: {rows:?}",
         );
     }
@@ -3238,7 +3259,7 @@ mod tests {
             panic!("decoration damage is always partial");
         };
         assert!(
-            rows.iter().any(|&row| row),
+            rows.iter().any(|row| row.is_some()),
             "the moved border damages the rows it left and arrived on",
         );
     }
@@ -3778,7 +3799,7 @@ mod tests {
         };
         assert_eq!(
             rows,
-            vec![false, false, false, true],
+            vec![None, None, None, whole_row(8)],
             "only the row the scroll exposed is rewritten",
         );
 
@@ -3816,7 +3837,7 @@ mod tests {
         };
         assert_eq!(
             rows,
-            vec![false, false, false, true],
+            vec![None, None, None, whole_row(8)],
             "only the row the scroll exposed is rewritten",
         );
 
@@ -3850,7 +3871,7 @@ mod tests {
         };
         assert_eq!(
             rows,
-            vec![false, true, true, true],
+            vec![None, whole_row(8), whole_row(8), whole_row(8)],
             "the row outside the region is left alone",
         );
 
@@ -3863,6 +3884,47 @@ mod tests {
                 "eee     ".to_string()
             ),
             "the region moved up under an untouched first row",
+        );
+    }
+
+    /// A cell changing in place damages its own columns, and the projection
+    /// carries those through rather than collapsing them to the row.
+    ///
+    /// A spinner, a clock, or a progress cell is the case this is for. Its row
+    /// otherwise costs a projection of every column on every repaint.
+    #[test]
+    fn a_one_cell_change_reports_the_columns_it_touched() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        let mut grid = Grid::new(4, 8);
+
+        terminal.advance(b"aaaaaaaa\r\nbbbbbbbb\r\ncccccccc\r\ndddddddd");
+        terminal.project(&mut grid);
+
+        // Park the cursor on row 2, so the move damages that row and the write
+        // that follows damages one column of it.
+        terminal.advance(b"\x1b[3;5H");
+        terminal.project(&mut grid);
+
+        terminal.advance(b"X");
+        let (_, _, damage) = terminal.project(&mut grid);
+
+        let Damage::Partial(rows) = &damage else {
+            panic!("one written cell must not report the whole screen damaged");
+        };
+        assert_eq!(
+            rows,
+            &vec![None, None, Some((4, 5)), None],
+            "the bounds name the written cell and the column the cursor moved to",
+        );
+        assert_eq!(
+            damage.columns(2, 8),
+            Some((4, 5)),
+            "and read back as those two columns of the eight",
+        );
+        assert_eq!(
+            grid.row(2).iter().map(|cell| cell.ch).collect::<String>(),
+            "ccccXccc",
+            "the bounded projection still lands the cell",
         );
     }
 
@@ -3887,7 +3949,7 @@ mod tests {
         };
         assert_eq!(
             rows,
-            vec![false, false, true, false],
+            vec![None, None, whole_row(8), None],
             "only the row the keystroke landed on is rewritten",
         );
     }
@@ -6543,7 +6605,7 @@ mod tests {
         };
         assert_eq!(
             rows,
-            &vec![true, false, false],
+            &vec![whole_row(4), None, None],
             "only the row the step revealed at the top is rewritten",
         );
         assert_eq!(
@@ -6582,7 +6644,7 @@ mod tests {
         };
         assert_eq!(
             (rows, window(&out)),
-            (&vec![false, false, false], ['c', 'd', 'e']),
+            (&vec![None, None, None], ['c', 'd', 'e']),
             "the window holds the same rows, so none is dirty",
         );
     }
@@ -6633,7 +6695,7 @@ mod tests {
         terminal.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
 
         let mut out = Grid::new(0, 0);
-        let mut damage = Damage::Partial(vec![false; 3]);
+        let mut damage = Damage::Partial(vec![None; 3]);
 
         // Three rows of window, so a move of three has nothing left to keep.
         terminal.project_scrollback(&mut out, 1.0, 3, &mut damage);

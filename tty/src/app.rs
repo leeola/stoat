@@ -1689,7 +1689,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         // Otherwise reuse the cached rows and only re-shift them.
                         let offset = state.scrollback_visual.floor() as i32;
                         let vt_changed = matches!(&damage, Damage::Full)
-                            || matches!(&damage, Damage::Partial(rows) if rows.iter().any(|&d| d));
+                            || matches!(&damage, Damage::Partial(rows) if rows.iter().any(|d| d.is_some()));
                         let rebuild = state.last_scrollback_offset != Some(offset) || vt_changed;
                         // A larger offset reaches further back, which pushes the
                         // window's content down the screen, so the rows the content

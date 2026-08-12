@@ -15,7 +15,7 @@ use stoatty_render::{
     render::cell_size,
 };
 use stoatty_term::{
-    grid::{Border, BorderEdge, BorderStyle, Grid, Rgb, UnderlineStyle},
+    grid::{whole_row, Border, BorderEdge, BorderStyle, Grid, Rgb, UnderlineStyle},
     term::Damage,
 };
 use wgpu::{
@@ -133,13 +133,13 @@ fn patched_rows_match_a_full_rebuild() {
         &mut renderer,
         &grid,
         &Damage::Partial({
-            let mut dirty = vec![false; rows];
-            dirty[1] = true;
+            let mut dirty = vec![None; rows];
+            dirty[1] = whole_row(cols);
             dirty
         }),
         &Damage::Partial({
-            let mut dirty = vec![false; rows];
-            dirty[2] = true;
+            let mut dirty = vec![None; rows];
+            dirty[2] = whole_row(cols);
             dirty
         }),
     );

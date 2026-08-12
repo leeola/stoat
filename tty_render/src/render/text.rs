@@ -3668,7 +3668,7 @@ mod tests {
         render::{row_uploads, CellMetrics, Frame, Scroll},
     };
     use stoatty_term::{
-        grid::{Cell, Grid, Overlay, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle},
+        grid::{whole_row, Cell, Grid, Overlay, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle},
         term::Damage,
     };
     use wgpu::{
@@ -3678,6 +3678,17 @@ mod tests {
         },
         TextureFormat,
     };
+
+    /// A partial damage marking each flagged row over its whole width, for a
+    /// test that has row granularity and no column bounds to express.
+    fn dirty_rows(flags: &[bool], cols: usize) -> Damage {
+        Damage::Partial(
+            flags
+                .iter()
+                .map(|&dirty| if dirty { whole_row(cols) } else { None })
+                .collect(),
+        )
+    }
 
     #[test]
     fn grid_build_rebuilds_all_when_the_atlas_epoch_moves() {
@@ -4587,7 +4598,7 @@ mod tests {
             &queue,
             &grid,
             None,
-            &Damage::Partial(vec![false, true, false]),
+            &dirty_rows(&[false, true, false], grid.cols()),
             &Damage::Partial(Vec::new()),
         );
         let incremental = pass.collect_grid_glyphs();
@@ -4636,8 +4647,8 @@ mod tests {
             &queue,
             &grid,
             None,
-            &Damage::Partial(vec![true, false, false, false]),
-            &Damage::Partial(vec![false, true, false, false]),
+            &dirty_rows(&[true, false, false, false], grid.cols()),
+            &dirty_rows(&[false, true, false, false], grid.cols()),
         );
         assert_eq!(
             rebuilt,
@@ -4748,8 +4759,8 @@ mod tests {
 
         let mut second = build("aaaaaaaaaa");
         fill_row(&mut second, 2, "bbbbbbbbbb");
-        let mut row_two = vec![false; rows];
-        row_two[2] = true;
+        let mut row_two = vec![None; rows];
+        row_two[2] = whole_row(second.cols());
         pass.prepare(
             &device,
             &queue,
@@ -4816,7 +4827,7 @@ mod tests {
             .collect();
 
         let mut rows = Vec::new();
-        let dirty = Damage::Partial(vec![false, true, false, true, false]);
+        let dirty = dirty_rows(&[false, true, false, true, false], 1);
         underline_rows_to_build(&dirty, cache.len(), false, &mut rows);
         assert_eq!(rows, [1, 3], "only the dirty rows, ascending");
 
@@ -5130,8 +5141,8 @@ mod tests {
             &frame(&Damage::Full, 0),
             &[],
         );
-        let mut last_row_only = vec![false; rows];
-        last_row_only[rows - 1] = true;
+        let mut last_row_only = vec![None; rows];
+        last_row_only[rows - 1] = whole_row(20);
         pass.prepare(
             &device,
             &queue,
@@ -5145,7 +5156,7 @@ mod tests {
             &queue,
             &screen(1, after),
             resolution,
-            &frame(&Damage::Partial(vec![false; rows]), 0),
+            &frame(&Damage::Partial(vec![None; rows]), 0),
             &[],
         );
 
@@ -5188,8 +5199,8 @@ mod tests {
                 region: 0.0,
                 popovers: &[],
             },
-            damage: &Damage::Partial(vec![false; 4]),
-            decoration_damage: &Damage::Partial(vec![false; 4]),
+            damage: &Damage::Partial(vec![None; 4]),
+            decoration_damage: &Damage::Partial(vec![None; 4]),
             scrolled_rows: 0,
         };
         let build = |region: ScrollRegion| {
@@ -5293,8 +5304,8 @@ mod tests {
 
         let mut scrolled = Grid::new(rows, 20);
         fill(&mut scrolled, rows, &lines, 1);
-        let mut last_row_only = vec![false; rows];
-        last_row_only[rows - 1] = true;
+        let mut last_row_only = vec![None; rows];
+        last_row_only[rows - 1] = whole_row(20);
         pass.prepare(
             &device,
             &queue,
@@ -5488,7 +5499,7 @@ mod tests {
         grid.set_overlays(vec![overlay(0)]);
 
         let resolution = [640.0, 480.0];
-        let idle = Damage::Partial(vec![false; 6]);
+        let idle = Damage::Partial(vec![None; 6]);
         fn frame<'a>(idle: &'a Damage, popovers: &'a [f32]) -> Frame<'a> {
             Frame {
                 cursor: None,
@@ -5612,7 +5623,7 @@ mod tests {
         };
 
         let resolution = [640.0, 480.0];
-        let idle = Damage::Partial(vec![false; 40]);
+        let idle = Damage::Partial(vec![None; 40]);
         fn frame<'a>(idle: &'a Damage, popovers: &'a [f32]) -> Frame<'a> {
             Frame {
                 cursor: None,
@@ -5708,7 +5719,7 @@ mod tests {
         }]);
 
         let resolution = [640.0, 480.0];
-        let idle = Damage::Partial(vec![false; 6]);
+        let idle = Damage::Partial(vec![None; 6]);
         fn frame<'a>(idle: &'a Damage, popovers: &'a [f32]) -> Frame<'a> {
             Frame {
                 cursor: None,
@@ -5814,8 +5825,8 @@ mod tests {
         );
 
         let one_dirty = {
-            let mut dirty = vec![false; rows];
-            dirty[rows / 2] = true;
+            let mut dirty = vec![None; rows];
+            dirty[rows / 2] = whole_row(cols);
             Damage::Partial(dirty)
         };
 
@@ -5869,7 +5880,7 @@ mod tests {
         }
         let resolution = [1280.0, 800.0];
         let full_damage = Damage::Full;
-        let idle_damage = Damage::Partial(vec![false; rows]);
+        let idle_damage = Damage::Partial(vec![None; rows]);
         let frame = |damage| Frame {
             cursor: None,
             cursor_corners: None,
@@ -5944,7 +5955,7 @@ mod tests {
             fill_row(&mut grid, row, &text);
         }
         let resolution = [1280.0, 800.0];
-        let idle_damage = Damage::Partial(vec![false; rows]);
+        let idle_damage = Damage::Partial(vec![None; rows]);
         let frame = |scroll, damage| Frame {
             cursor: None,
             cursor_corners: None,

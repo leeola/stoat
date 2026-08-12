@@ -7,7 +7,7 @@
 
 use super::{Cursor, CursorShape, ResponseSink, PALETTE_LEN};
 use crate::{
-    grid::{BorderId, Cell, Flags, Grid, Rgb, Scale, UnderlineStyle},
+    grid::{BorderId, Cell, Flags, Grid, Rgb, RowDamage, Scale, UnderlineStyle},
     theme::Theme,
 };
 use alacritty_terminal::{
@@ -70,11 +70,11 @@ pub(super) fn project_term_cells(
 /// Takes the pool rather than the whole terminal so a caller can reach it while
 /// the terminal's own content or damage is borrowed, which every call site is
 /// in the middle of.
-pub(super) fn row_flags(spare: &mut Vec<Vec<bool>>, rows: usize) -> Vec<bool> {
-    let mut flags = spare.pop().unwrap_or_default();
-    flags.clear();
-    flags.resize(rows, false);
-    flags
+pub(super) fn row_bounds(spare: &mut Vec<Vec<RowDamage>>, rows: usize) -> Vec<RowDamage> {
+    let mut bounds = spare.pop().unwrap_or_default();
+    bounds.clear();
+    bounds.resize(rows, None);
+    bounds
 }
 
 /// Rows below the probe that a candidate shift has to match as well.
