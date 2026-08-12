@@ -1,4 +1,4 @@
-use crate::ApcScene;
+use crate::{cells, ApcScene};
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 use stoatty_protocol::command::{self, TextRunCommand};
 
@@ -32,8 +32,8 @@ impl StatefulWidget for TextRun<'_> {
     type State = ApcScene;
 
     fn render(self, area: Rect, _buf: &mut Buffer, scene: &mut ApcScene) {
-        let col = area.x as i16 * 16 + self.col as i16;
-        let row = area.y as i16 * 16 + self.row as i16;
+        let col = cells::to_sixteenths(area.x, self.col);
+        let row = cells::to_sixteenths(area.y, self.row);
 
         command::encode_text_run_into(
             scene.buffer(),

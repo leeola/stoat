@@ -1,4 +1,4 @@
-use crate::ApcScene;
+use crate::{cells, ApcScene};
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 use stoatty_protocol::command::{self, BarCommand};
 
@@ -23,8 +23,8 @@ impl StatefulWidget for Bar {
     type State = ApcScene;
 
     fn render(self, area: Rect, _buf: &mut Buffer, scene: &mut ApcScene) {
-        let x = area.x as i16 * 16 + self.x as i16;
-        let y = area.y as i16 * 16 + self.y as i16;
+        let x = cells::to_sixteenths(area.x, self.x);
+        let y = cells::to_sixteenths(area.y, self.y);
 
         command::encode_bar_into(
             scene.buffer(),

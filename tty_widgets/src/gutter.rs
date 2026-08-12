@@ -106,7 +106,7 @@ impl Gutter<'_> {
     pub fn cell_width(&self) -> u16 {
         (3 * self.bar_width
             + self.pad
-            + self.number_advance(self.width_digits)
+            + self.number_advance(usize::from(self.width_digits))
             + 2 * NUMBER_GAP
             + 1
             + TEXT_GAP)
@@ -124,8 +124,8 @@ impl Gutter<'_> {
     }
 
     /// Sixteenths a run of `digits` numerals advances at [`Self::number_scale`].
-    fn number_advance(&self, digits: u16) -> u16 {
-        digits * self.number_scale / 16
+    fn number_advance(&self, digits: usize) -> u16 {
+        cells::advance_sixteenths(digits, self.number_scale)
     }
 
     fn number_right_edge(&self) -> u16 {
@@ -150,11 +150,11 @@ impl Gutter<'_> {
         let git_x = self.git_x();
         let staged_x = self.staged_x();
 
-        let limit = area.height * 16;
+        let limit = cells::span_sixteenths(area.height);
 
         let mut top = 0u16;
         for line in self.lines {
-            let y = top * 16;
+            let y = cells::span_sixteenths(top);
             if y >= limit {
                 break;
             }
@@ -162,7 +162,7 @@ impl Gutter<'_> {
 
             let mut digits = [0u8; 10];
             let text = format_u32(&mut digits, line.number);
-            let col = number_right.saturating_sub(self.number_advance(text.len() as u16));
+            let col = number_right.saturating_sub(self.number_advance(text.len()));
             TextRun {
                 col,
                 row: y,
@@ -178,7 +178,7 @@ impl Gutter<'_> {
                     x: 0,
                     y,
                     width: self.bar_width,
-                    height: (line.height * 16).min(remaining),
+                    height: cells::span_sixteenths(line.height).min(remaining),
                     color: diag.color,
                 }
                 .render(area, buf, scene);
@@ -196,7 +196,7 @@ impl Gutter<'_> {
                     x: staged_x,
                     y,
                     width: self.bar_width,
-                    height: (line.height * 16).min(remaining),
+                    height: cells::span_sixteenths(line.height).min(remaining),
                     color: git.staged_color,
                 }
                 .render(area, buf, scene);
@@ -209,7 +209,7 @@ impl Gutter<'_> {
             x: self.separator_x(),
             y: 0,
             width: 1,
-            height: self.total_rows().min(area.height) * 16,
+            height: cells::span_sixteenths(self.total_rows().min(area.height)),
             color: self.separator,
         }
         .render(area, buf, scene);

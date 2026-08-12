@@ -1,4 +1,4 @@
-use crate::ApcScene;
+use crate::{cells, ApcScene};
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 use stoatty_protocol::command::{self, PolylineCommand};
 
@@ -27,11 +27,15 @@ impl StatefulWidget for Polyline {
     type State = ApcScene;
 
     fn render(self, area: Rect, _buf: &mut Buffer, scene: &mut ApcScene) {
-        let origin = [area.x as i16 * 16, area.y as i16 * 16];
         let points = self
             .points
             .iter()
-            .map(|p| [origin[0] + p[0], origin[1] + p[1]])
+            .map(|p| {
+                [
+                    cells::to_sixteenths(area.x, p[0]),
+                    cells::to_sixteenths(area.y, p[1]),
+                ]
+            })
             .collect();
 
         command::encode_polyline_into(
