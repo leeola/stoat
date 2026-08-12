@@ -81,18 +81,28 @@ impl ContextLessSummary for TransformSummary {
     }
 }
 
+/// One wrapped line's breaks, or a run of consecutive rows that do not wrap.
+///
+/// Which of the two a transform is shows in `wrap_columns`. A non-empty list
+/// belongs to exactly one line, so `input_rows` is 1 and `output_rows` is the
+/// number of sub-rows. An empty list is a run covering `input_rows` rows one
+/// output row each, and carries no payload at all.
+///
+/// Runs are what keep the tree small. Most lines in a file do not wrap, and
+/// with wrapping off none of them do, so a row-per-transform tree holds tens of
+/// megabytes of empty payload on a large file. A single unwrapped row is a run
+/// of one, which is why the two cases need no separate spelling.
 #[derive(Clone, Debug)]
 struct Transform {
     summary: TransformSummary,
-    /// Tab column each sub-row of this line starts at, or empty for a line
-    /// that occupies one row starting at column 0.
+    /// Tab column each sub-row of this line starts at, or empty for a run.
     ///
-    /// Most lines in a file do not wrap, and `Vec::new` does not allocate,
-    /// so spelling that case as the empty vec rather than `[0]` keeps a
-    /// whole-file rebuild from paying one small allocation per line. Read it
-    /// through [`Transform::wrap_column`] and [`Transform::next_wrap_column`],
-    /// which resolve both encodings.
+    /// Read it through [`Transform::wrap_column`] and
+    /// [`Transform::next_wrap_column`], which answer a run as the single row
+    /// starting at column 0 that it is.
     wrap_columns: Vec<u32>,
+    /// The wrapped line's tab-expanded length. Zero on a run, whose rows are
+    /// measured through the tab layer instead.
     tab_line_len: u32,
     /// Display columns each continuation row is indented by, matching the
     /// line's leading whitespace capped at half the wrap width. Zero on a
@@ -122,6 +132,74 @@ impl Transform {
         self.wrap_columns
             .partition_point(|&c| c <= tab_col)
             .saturating_sub(1)
+    }
+
+    /// Whether this transform covers a run of unwrapped rows.
+    fn is_run(&self) -> bool {
+        self.wrap_columns.is_empty()
+    }
+
+    /// Split an offset from this transform's first output row into the input
+    /// row it lands on and the sub-row within that line.
+    ///
+    /// A run advances the input row and stays on sub-row 0. A wrapped line
+    /// holds one input row and reads the offset as its sub-row.
+    fn split(&self, output_offset: u32) -> (u32, usize) {
+        if self.is_run() {
+            (output_offset, 0)
+        } else {
+            (0, output_offset as usize)
+        }
+    }
+
+    /// The reverse of [`Transform::split`], from an offset into this
+    /// transform's input rows and the tab column asked about.
+    fn locate(&self, input_offset: u32, tab_col: u32) -> (u32, usize) {
+        if self.is_run() {
+            (input_offset, 0)
+        } else {
+            let sub_row = self.sub_row_at(tab_col);
+            (sub_row as u32, sub_row)
+        }
+    }
+}
+
+/// Append `rows` unwrapped rows, merging them into the last transform when it
+/// is a run.
+///
+/// Nothing distinguishes one run of unwrapped rows from the next, so two
+/// adjacent runs grow the tree for no reason. Zero rows push nothing, which is
+/// what lets callers hand over a gap without checking it first.
+fn push_run(transforms: &mut SumTree<Transform>, rows: u32) {
+    if rows == 0 {
+        return;
+    }
+
+    let mut merged = false;
+    transforms.update_last(
+        |last| {
+            if last.is_run() {
+                last.summary.input_rows += rows;
+                last.summary.output_rows += rows;
+                merged = true;
+            }
+        },
+        (),
+    );
+
+    if !merged {
+        transforms.push(
+            Transform {
+                summary: TransformSummary {
+                    input_rows: rows,
+                    output_rows: rows,
+                },
+                wrap_columns: Vec::new(),
+                tab_line_len: 0,
+                indent: 0,
+            },
+            (),
+        );
     }
 }
 
@@ -568,6 +646,10 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
     // resize, and on every wrap-width change.
     let mut chars: Vec<char> = Vec::new();
 
+    // Rows that do not wrap gather here and land as one run, so a file whose
+    // lines mostly fit holds a handful of transforms rather than one per line.
+    let mut run = 0u32;
+
     for tab_row in 0..tab_line_count {
         chars.clear();
         // `FoldLineChars` ends at the row's newline, so this stops there.
@@ -587,13 +669,17 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
             tab_snapshot.max_expansion_column(),
         );
 
-        let output_rows = wrap_columns.len().max(1) as u32;
+        if wrap_columns.is_empty() {
+            run += 1;
+            continue;
+        }
 
+        push_run(&mut transforms, mem::take(&mut run));
         transforms.push(
             Transform {
                 summary: TransformSummary {
                     input_rows: 1,
-                    output_rows,
+                    output_rows: wrap_columns.len() as u32,
                 },
                 wrap_columns,
                 tab_line_len,
@@ -602,6 +688,7 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
             (),
         );
     }
+    push_run(&mut transforms, run);
 
     let total_rows = transforms.summary().output_rows;
 
@@ -618,23 +705,12 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
 /// A snapshot for the unwrapped mode, where one tab row is one wrap row.
 ///
 /// Every query on such a snapshot answers from the tab layer before it reaches
-/// a transform, so the transforms exist only to hold the row count and to keep
-/// the one-per-row shape [`WrapSnapshot::interpolate`] and [`sync_incremental`]
-/// slice against. Their payload is never read, which is what lets this skip the
-/// per-row character decode that placing wrap breaks would need.
+/// a transform, so the whole file is one run holding nothing but the row count.
+/// That is also what lets this skip the per-row character decode that placing
+/// wrap breaks needs.
 fn passthrough_snapshot(tab_snapshot: TabSnapshot, tab_line_count: u32) -> WrapSnapshot {
-    let transforms = SumTree::from_iter(
-        (0..tab_line_count).map(|_| Transform {
-            summary: TransformSummary {
-                input_rows: 1,
-                output_rows: 1,
-            },
-            wrap_columns: Vec::new(),
-            tab_line_len: 0,
-            indent: 0,
-        }),
-        (),
-    );
+    let mut transforms = SumTree::new(());
+    push_run(&mut transforms, tab_line_count);
 
     WrapSnapshot {
         tab_snapshot,
@@ -646,6 +722,64 @@ fn passthrough_snapshot(tab_snapshot: TabSnapshot, tab_line_count: u32) -> WrapS
     }
 }
 
+/// Open the region rebuilt for `edit`, answering the old and new output rows
+/// its start lands on.
+///
+/// The prefix the cursor hands over ends on a transform boundary, so a run
+/// straddling the edit's start gives back the rows before it. That gap is
+/// measured on the new side rather than the old, because a cursor left parked
+/// mid-run by the previous edit otherwise re-counts rows that edit emitted.
+fn open_edit_region(
+    new_transforms: &mut SumTree<Transform>,
+    cursor: &mut Cursor<'_, '_, Transform, Dimensions<InputRow, OutputRow>>,
+    edit: &Edit<u32>,
+) -> (u32, u32) {
+    // Bias::Right so the prefix keeps every input row before the edit,
+    // including the transform ending exactly at edit.old.start. Bias::Left
+    // stops one row short and drops that row from the rebuilt tree.
+    new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Right), ());
+
+    // Only a run spans more than one input row, so only a run straddles the
+    // edit, and inside one the output row advances with the input row.
+    let old_output_start = cursor.start().1 .0 + (edit.old.start - cursor.start().0 .0);
+    push_run(
+        new_transforms,
+        edit.new.start - new_transforms.summary().input_rows,
+    );
+
+    (old_output_start, new_transforms.summary().output_rows)
+}
+
+/// Close the region rebuilt for `edit`, answering the old and new output rows
+/// its end lands on.
+///
+/// A run straddling the edit's end gives back the rows past it, which is what
+/// keeps the reported patch to the rows that actually changed. When the next
+/// edit falls inside that same run the cursor stays on it instead, and the next
+/// region's head hands back the rows between the two.
+fn close_edit_region(
+    new_transforms: &mut SumTree<Transform>,
+    cursor: &mut Cursor<'_, '_, Transform, Dimensions<InputRow, OutputRow>>,
+    edit: &Edit<u32>,
+    next_old_start: Option<u32>,
+) -> (u32, u32) {
+    cursor.seek_forward(&InputRow(edit.old.end), Bias::Right);
+
+    let straddled = edit.old.end - cursor.start().0 .0;
+    let old_output_end = cursor.start().1 .0 + straddled;
+    let new_output_end = new_transforms.summary().output_rows;
+
+    if straddled > 0 {
+        let run_end = cursor.start().0 .0 + cursor.item().map_or(0, |t| t.summary.input_rows);
+        if next_old_start.is_none_or(|start| start >= run_end) {
+            push_run(new_transforms, run_end - edit.old.end);
+            cursor.next();
+        }
+    }
+
+    (old_output_end, new_output_end)
+}
+
 fn sync_incremental(
     old: &WrapSnapshot,
     tab_snapshot: TabSnapshot,
@@ -655,25 +789,19 @@ fn sync_incremental(
     let mut new_transforms = SumTree::new(());
     let mut cursor = old.transforms.cursor::<Dimensions<InputRow, OutputRow>>(());
     let mut wrap_edits = Patch::empty();
+    let mut edits = tab_edits.edits().iter().peekable();
 
-    for edit in tab_edits {
-        // Bias::Right so the prefix keeps every input row before the edit,
-        // including the transform ending exactly at edit.old.start. Bias::Left
-        // stops one row short and drops that row from the rebuilt tree.
-        new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Right), ());
-        let old_output_start = cursor.start().1 .0;
+    while let Some(edit) = edits.next() {
+        let (old_output_start, new_output_start) =
+            open_edit_region(&mut new_transforms, &mut cursor, edit);
 
-        cursor.seek_forward(&InputRow(edit.old.end), Bias::Right);
-        let old_output_end = cursor.start().1 .0;
-
-        let new_output_start: u32 = new_transforms.summary().output_rows;
-
-        for tab_row in edit.new.start..edit.new.end {
-            // Unwrapped rows answer every query from the tab layer, so their
-            // payload stays zero rather than being measured for nobody.
-            let (tab_line_len, wrap_columns, indent) = match wrap_width {
-                None => (0, Vec::new(), 0),
-                Some(width) => {
+        match wrap_width {
+            // Unwrapped rows answer every query from the tab layer, so the
+            // whole span lands as one run carrying nothing.
+            None => push_run(&mut new_transforms, edit.new.end - edit.new.start),
+            Some(width) => {
+                let mut run = 0u32;
+                for tab_row in edit.new.start..edit.new.end {
                     let tab_line_len = tab_snapshot.line_len(tab_row);
                     let chars = tab_snapshot.fold_snapshot().fold_line_chars(tab_row);
                     let (wrap_columns, indent) = compute_wrap_columns(
@@ -683,25 +811,36 @@ fn sync_incremental(
                         tab_snapshot.tab_size(),
                         tab_snapshot.max_expansion_column(),
                     );
-                    (tab_line_len, wrap_columns, indent)
-                },
-            };
-            let output_rows = wrap_columns.len().max(1) as u32;
-            new_transforms.push(
-                Transform {
-                    summary: TransformSummary {
-                        input_rows: 1,
-                        output_rows,
-                    },
-                    wrap_columns,
-                    tab_line_len,
-                    indent,
-                },
-                (),
-            );
+
+                    if wrap_columns.is_empty() {
+                        run += 1;
+                        continue;
+                    }
+
+                    push_run(&mut new_transforms, mem::take(&mut run));
+                    new_transforms.push(
+                        Transform {
+                            summary: TransformSummary {
+                                input_rows: 1,
+                                output_rows: wrap_columns.len() as u32,
+                            },
+                            wrap_columns,
+                            tab_line_len,
+                            indent,
+                        },
+                        (),
+                    );
+                }
+                push_run(&mut new_transforms, run);
+            },
         }
 
-        let new_output_end: u32 = new_transforms.summary().output_rows;
+        let (old_output_end, new_output_end) = close_edit_region(
+            &mut new_transforms,
+            &mut cursor,
+            edit,
+            edits.peek().map(|next| next.old.start),
+        );
 
         wrap_edits.push(Edit {
             old: old_output_start..old_output_end,
@@ -840,43 +979,24 @@ impl WrapSnapshot {
             .transforms
             .cursor::<Dimensions<InputRow, OutputRow>>(());
         let mut wrap_edits = Patch::empty();
+        let mut edits = tab_edits.edits().iter().peekable();
 
-        for edit in tab_edits {
-            // Bias::Right so the prefix keeps every input row before the edit,
-            // including the transform ending exactly at edit.old.start. Bias::Left
-            // stops one row short and drops that row from the rebuilt tree.
-            new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Right), ());
-            let old_output_start = cursor.start().1 .0;
+        while let Some(edit) = edits.next() {
+            let (old_output_start, new_output_start) =
+                open_edit_region(&mut new_transforms, &mut cursor, edit);
 
-            cursor.seek_forward(&InputRow(edit.old.end), Bias::Right);
-            let old_output_end = cursor.start().1 .0;
+            // The approximation is that every edited row occupies one row, which
+            // is a run whatever the wrap width. Its rows measure through the tab
+            // layer, so there is no payload left to fill in.
+            push_run(&mut new_transforms, edit.new.end - edit.new.start);
 
-            let new_output_start: u32 = new_transforms.summary().output_rows;
+            let (old_output_end, new_output_end) = close_edit_region(
+                &mut new_transforms,
+                &mut cursor,
+                edit,
+                edits.peek().map(|next| next.old.start),
+            );
 
-            for tab_row in edit.new.start..edit.new.end {
-                // An interpolated wrapped snapshot still answers `line_len` from
-                // the payload, so it has to be measured. An unwrapped one goes
-                // to the tab layer instead, so measuring it would be for nobody.
-                let tab_line_len = if self.wrap_width.is_some() {
-                    new_tab_snapshot.line_len(tab_row)
-                } else {
-                    0
-                };
-                new_transforms.push(
-                    Transform {
-                        summary: TransformSummary {
-                            input_rows: 1,
-                            output_rows: 1,
-                        },
-                        wrap_columns: Vec::new(),
-                        tab_line_len,
-                        indent: 0,
-                    },
-                    (),
-                );
-            }
-
-            let new_output_end: u32 = new_transforms.summary().output_rows;
             wrap_edits.push(Edit {
                 old: old_output_start..old_output_end,
                 new: new_output_start..new_output_end,
@@ -925,9 +1045,10 @@ impl WrapSnapshot {
         cursor.seek(&target, Bias::Left);
 
         let Dimensions(input_start, output_start, _) = cursor.start();
-        let sub_row = wrap_point.row() - output_start.0;
+        let output_offset = wrap_point.row() - output_start.0;
 
         if let Some(transform) = cursor.item() {
+            let (input_offset, sub_row) = transform.split(output_offset);
             // A continuation row's display columns are shifted right by the
             // indent, and columns inside the synthetic margin resolve to the
             // start of the continuation's text.
@@ -936,8 +1057,8 @@ impl WrapSnapshot {
             } else {
                 wrap_point.column()
             };
-            let tab_col = transform.wrap_column(sub_row as usize) + text_col;
-            TabPoint::new(input_start.0, tab_col)
+            let tab_col = transform.wrap_column(sub_row) + text_col;
+            TabPoint::new(input_start.0 + input_offset, tab_col)
         } else {
             let last_tab_row = input_start.0.saturating_sub(1);
             TabPoint::new(last_tab_row, wrap_point.column())
@@ -955,18 +1076,19 @@ impl WrapSnapshot {
             .cursor::<Dimensions<InputRow, OutputRow>>(());
         cursor.seek(&target, Bias::Left);
 
-        let Dimensions(_input_start, output_start, _) = cursor.start();
+        let Dimensions(input_start, output_start, _) = cursor.start();
 
         if let Some(transform) = cursor.item() {
             let tab_col = tab_point.column();
-            let sub_row = transform.sub_row_at(tab_col);
+            let (output_offset, sub_row) =
+                transform.locate(tab_point.row() - input_start.0, tab_col);
             let text_col = tab_col - transform.wrap_column(sub_row);
             let wrap_col = if sub_row > 0 {
                 text_col + transform.indent
             } else {
                 text_col
             };
-            WrapPoint::new(output_start.0 + sub_row as u32, wrap_col)
+            WrapPoint::new(output_start.0 + output_offset, wrap_col)
         } else {
             WrapPoint::new(output_start.0, tab_point.column())
         }
@@ -983,7 +1105,11 @@ impl WrapSnapshot {
             .cursor::<Dimensions<InputRow, OutputRow>>(());
         cursor.seek(&target, Bias::Left);
 
-        let sub_row = wrap_row - cursor.start().1 .0;
+        let output_offset = wrap_row - cursor.start().1 .0;
+        let sub_row = match cursor.item() {
+            Some(transform) => transform.split(output_offset).1,
+            None => output_offset as usize,
+        };
         if sub_row == 0 {
             WrapRowKind::Primary
         } else {
@@ -1029,14 +1155,18 @@ impl WrapSnapshot {
             .cursor::<Dimensions<InputRow, OutputRow>>(());
         cursor.seek(&target, Bias::Left);
 
-        let Dimensions(_input_start, output_start, _) = cursor.start();
-        let sub_row = wrap_row - output_start.0;
+        let Dimensions(input_start, output_start, _) = cursor.start();
+        let output_offset = wrap_row - output_start.0;
 
-        if let Some(transform) = cursor.item() {
-            transform_sub_row_len(transform, sub_row as usize)
-        } else {
-            0
+        let Some(transform) = cursor.item() else {
+            return 0;
+        };
+        let (input_offset, sub_row) = transform.split(output_offset);
+        // A run carries no measurement, its rows being whole tab rows.
+        if transform.is_run() {
+            return self.tab_snapshot.line_len(input_start.0 + input_offset);
         }
+        transform_sub_row_len(transform, sub_row)
     }
 
     pub fn soft_wrap_indent(&self, wrap_row: u32) -> u32 {
@@ -1050,12 +1180,13 @@ impl WrapSnapshot {
             .cursor::<Dimensions<InputRow, OutputRow>>(());
         cursor.seek(&target, Bias::Left);
 
-        let sub_row = wrap_row - cursor.start().1 .0;
-        if sub_row == 0 {
-            return 0;
-        }
-
-        cursor.item().map_or(0, |transform| transform.indent)
+        let output_offset = wrap_row - cursor.start().1 .0;
+        cursor
+            .item()
+            .map_or(0, |transform| match transform.split(output_offset).1 {
+                0 => 0,
+                _ => transform.indent,
+            })
     }
 
     pub fn write_display_line(&self, buf: &mut String, wrap_row: u32) {
@@ -1071,22 +1202,27 @@ impl WrapSnapshot {
         cursor.seek(&target, Bias::Left);
 
         let Dimensions(input_start, output_start, _) = cursor.start();
-        let sub_row = (wrap_row - output_start.0) as usize;
-        let tab_row = input_start.0;
+        let output_offset = wrap_row - output_start.0;
 
-        if let Some(transform) = cursor.item() {
-            if sub_row > 0 {
-                for _ in 0..transform.indent {
-                    buf.push(' ');
-                }
+        let Some(transform) = cursor.item() else {
+            self.tab_snapshot.write_expand_line(buf, input_start.0);
+            return;
+        };
+
+        let (input_offset, sub_row) = transform.split(output_offset);
+        if sub_row > 0 {
+            for _ in 0..transform.indent {
+                buf.push(' ');
             }
-            let start_col = transform.wrap_column(sub_row);
-            let end_col = transform.next_wrap_column(sub_row);
-            self.tab_snapshot
-                .write_expand_line_range(buf, tab_row, start_col, end_col);
-        } else {
-            self.tab_snapshot.write_expand_line(buf, tab_row);
         }
+        // A run's rows each cover a whole tab row, which the column window a
+        // wrapped line carries spells as the whole line anyway.
+        self.tab_snapshot.write_expand_line_range(
+            buf,
+            input_start.0 + input_offset,
+            transform.wrap_column(sub_row),
+            transform.next_wrap_column(sub_row),
+        );
     }
 
     pub fn display_line(&self, wrap_row: u32) -> String {
@@ -1342,11 +1478,11 @@ impl<'a> WrappedChunksInner<'a> {
         cursor.seek(&target, Bias::Left);
 
         let Dimensions(input_start, output_start, _) = cursor.start();
-        let sub_row = (wrap_row - output_start.0) as usize;
         let transform = cursor.item()?;
+        let (input_offset, sub_row) = transform.split(wrap_row - output_start.0);
 
         Some((
-            input_start.0,
+            input_start.0 + input_offset,
             RowWindow {
                 target_start: transform.wrap_column(sub_row),
                 target_end: transform.next_wrap_column(sub_row),
@@ -1485,24 +1621,28 @@ impl WrapPointCursor<'_> {
             return WrapPoint::new(tab_point.row(), tab_point.column());
         }
 
+        // The row itself has to be at or past where the cursor sits, not just
+        // the seek target. A row one before the cursor's transform seeks
+        // nowhere and then reads that transform, which is a different line.
         let target = InputRow(tab_point.row() + 1);
-        if self.cursor.did_seek() && target >= self.cursor.start().0 {
+        if self.cursor.did_seek() && InputRow(tab_point.row()) >= self.cursor.start().0 {
             self.cursor.seek_forward(&target, Bias::Left);
         } else {
             self.cursor.seek(&target, Bias::Left);
         }
 
-        let Dimensions(_input_start, output_start, _) = self.cursor.start();
+        let Dimensions(input_start, output_start, _) = self.cursor.start();
         if let Some(transform) = self.cursor.item() {
             let tab_col = tab_point.column();
-            let sub_row = transform.sub_row_at(tab_col);
+            let (output_offset, sub_row) =
+                transform.locate(tab_point.row() - input_start.0, tab_col);
             let text_col = tab_col - transform.wrap_column(sub_row);
             let wrap_col = if sub_row > 0 {
                 text_col + transform.indent
             } else {
                 text_col
             };
-            WrapPoint::new(output_start.0 + sub_row as u32, wrap_col)
+            WrapPoint::new(output_start.0 + output_offset, wrap_col)
         } else {
             WrapPoint::new(output_start.0, tab_point.column())
         }
@@ -2142,6 +2282,110 @@ mod tests {
             snapshot.line_len(1),
             5,
             "the tab row expands its tab to the next stop, then its letter",
+        );
+    }
+
+    /// A run covers many input rows at once, so every query keyed by an output
+    /// row has to read the offset as a row inside the run rather than as a
+    /// sub-row of one wrapped line. Reading it the other way answers every row
+    /// of the run for the run's first row.
+    #[test]
+    fn rows_inside_a_run_answer_for_themselves() {
+        // Rows that fit either side of one that wraps, so a run sits on both
+        // sides of a wrapped transform.
+        let snap = make_snapshot("aa\nbbb\ncccc\nd\nabcdefghij\ne\nff\nggg\nhhhh", Some(5));
+        assert_eq!(snap.line_count(), 10, "the long line takes two rows");
+
+        assert_eq!(
+            (0..snap.line_count())
+                .map(|row| snap.display_line(row))
+                .collect::<Vec<_>>(),
+            ["aa", "bbb", "cccc", "d", "abcde", "fghij", "e", "ff", "ggg", "hhhh"],
+        );
+        assert_eq!(
+            (0..snap.line_count())
+                .map(|row| snap.line_len(row))
+                .collect::<Vec<_>>(),
+            [2, 3, 4, 1, 5, 5, 1, 2, 3, 4],
+        );
+        assert_eq!(
+            (0..snap.line_count())
+                .map(|row| snap.classify_row(row))
+                .collect::<Vec<_>>(),
+            [
+                WrapRowKind::Primary,
+                WrapRowKind::Primary,
+                WrapRowKind::Primary,
+                WrapRowKind::Primary,
+                WrapRowKind::Primary,
+                WrapRowKind::Continuation,
+                WrapRowKind::Primary,
+                WrapRowKind::Primary,
+                WrapRowKind::Primary,
+                WrapRowKind::Primary,
+            ],
+        );
+
+        for row in 0..snap.line_count() {
+            let point = WrapPoint::new(row, 0);
+            assert_eq!(
+                snap.to_wrap_point(snap.to_tab_point(point)),
+                point,
+                "row {row} round trips through the tab layer",
+            );
+        }
+    }
+
+    /// An edit lands inside a run, so the run has to give back the rows before
+    /// it, take the edit, and give back the rows after it. Getting either end
+    /// wrong duplicates rows or drops them, and failing to merge back grows the
+    /// tree one transform per edit.
+    #[test]
+    fn an_edit_inside_a_run_splits_and_remerges_it() {
+        let content = "aa\nbbb\ncccc\nd\nabcdefghij\ne\nff\nggg\nhhhh";
+        let (mut wrap_map, snapshot, multi_buffer) = make_wrap_map(content, Some(5));
+        assert_eq!(
+            snapshot.transforms.iter().count(),
+            3,
+            "a run either side of the one wrapped line",
+        );
+
+        // Row 1 sits in the middle of the leading run.
+        multi_buffer
+            .as_singleton()
+            .unwrap()
+            .write()
+            .unwrap()
+            .edit(3..6, "BB");
+        let tab_edits = Patch::new(vec![Edit {
+            old: 1..2,
+            new: 1..2,
+        }]);
+        let synced = resync_with(&multi_buffer, &mut wrap_map, &tab_edits);
+
+        let full = {
+            let buffer_snapshot = multi_buffer.snapshot();
+            let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
+            let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
+            let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+            let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
+            super::build_snapshot(tab_snapshot, Some(5))
+        };
+
+        assert_eq!(synced.line_count(), full.line_count());
+        assert_eq!(
+            (0..full.line_count())
+                .map(|row| synced.display_line(row))
+                .collect::<Vec<_>>(),
+            (0..full.line_count())
+                .map(|row| full.display_line(row))
+                .collect::<Vec<_>>(),
+            "every row reads what a full rebuild gives",
+        );
+        assert_eq!(
+            synced.transforms.iter().count(),
+            3,
+            "the split run merged back rather than leaving three pieces",
         );
     }
 
