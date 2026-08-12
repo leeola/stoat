@@ -1155,12 +1155,27 @@ pub(crate) fn line_comment_continues(
     tokens: &[&'static str],
 ) -> Option<(usize, &'static str)> {
     let first = first_nonwhitespace(rope, line_start, line_end)?;
-    let token = tokens
+    let token = longest_token_at(rope, first, line_end, tokens)?;
+    Some((first, token))
+}
+
+/// The longest of `tokens` the rope spells at `offset`, within `limit`.
+///
+/// Callers reach the offset by different routes, which is why the match is its
+/// own step. A comment's own line finds it past every whitespace character,
+/// while a join walk stops at the first character that is neither a space nor a
+/// tab.
+fn longest_token_at(
+    rope: &Rope,
+    offset: usize,
+    limit: usize,
+    tokens: &[&'static str],
+) -> Option<&'static str> {
+    tokens
         .iter()
         .copied()
-        .filter(|token| rope_matches_at(rope, first, line_end, token))
-        .max_by_key(|token| token.len())?;
-    Some((first, token))
+        .filter(|token| rope_matches_at(rope, offset, limit, token))
+        .max_by_key(|token| token.len())
 }
 
 pub(super) fn goto_file_start(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
@@ -1328,10 +1343,14 @@ pub(super) fn join_selections_space(stoat: &mut Stoat) -> UpdateEffect {
 /// `join_selections_impl`.
 ///
 /// Each newline plus the following indentation is replaced with a single
-/// space, except that a blank joining line contributes no space. When the
-/// selection's first line is a comment line, the leading comment token is
-/// stripped from each subsequent joined line so only the first survives. A
-/// single-line selection joins with the line below.
+/// space, except that a blank joining line contributes no space. A single-line
+/// selection joins with the line below.
+///
+/// A joined line loses its leading comment token only when that token matches
+/// the one the join is already running under, so a comment block collapses to
+/// one leader. A line opening with a different token keeps it and becomes the
+/// running one, which is what stops a `///` doc comment from being shaved down
+/// to `/` under a plain `//` line.
 ///
 /// With `select_space`, the inserted spaces are left selected. Otherwise the
 /// selection is remapped through the edit. No-op when the focused pane is not
@@ -1348,7 +1367,6 @@ fn join_selections_impl(stoat: &mut Stoat, select_space: bool) -> UpdateEffect {
         .buffers
         .language_for(buffer_id)
         .map_or(&[][..], |lang| lang.line_comments);
-    let comment_token = comment_tokens.first().copied();
 
     let mut changes: Vec<(usize, usize, bool)> = {
         let editor = ws.editors.get_mut(editor_id).expect("editor");
@@ -1365,8 +1383,9 @@ fn join_selections_impl(stoat: &mut Stoat, select_space: bool) -> UpdateEffect {
 
             let first_start = rope.point_to_offset(Point::new(start_row, 0));
             let first_end = line_content_end(rope, start_row);
-            let mut in_comment =
-                line_comment_continues(rope, first_start, first_end, comment_tokens).is_some();
+            let mut current_token =
+                line_comment_continues(rope, first_start, first_end, comment_tokens)
+                    .map(|(_, token)| token);
 
             for line in start_row..end_row {
                 let join_start = line_content_end(rope, line);
@@ -1374,13 +1393,11 @@ fn join_selections_impl(stoat: &mut Stoat, select_space: bool) -> UpdateEffect {
                 let next_start = rope.point_to_offset(Point::new(line + 1, 0));
                 let mut join_end = skip_spaces_tabs(rope, next_start, next_end);
 
-                if let Some(token) = comment_token
-                    && rope_matches_at(rope, join_end, next_end, token)
-                {
-                    if in_comment {
+                if let Some(token) = longest_token_at(rope, join_end, next_end, comment_tokens) {
+                    if Some(token) == current_token {
                         join_end = skip_spaces_tabs(rope, join_end + token.len(), next_end);
                     } else {
-                        in_comment = true;
+                        current_token = Some(token);
                     }
                 }
 
@@ -6720,6 +6737,26 @@ mod tests {
         h.type_keys("%");
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
         assert_eq!(buffer_string(&mut h), "// foo bar\n");
+    }
+
+    #[test]
+    fn join_selections_drops_the_second_doc_comment_token_whole() {
+        let mut h = TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "/// foo\n/// bar\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
+        assert_eq!(buffer_string(&mut h), "/// foo bar\n");
+    }
+
+    #[test]
+    fn join_selections_keeps_a_token_the_running_one_does_not_match() {
+        let mut h = TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "// foo\n/// bar\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
+        assert_eq!(buffer_string(&mut h), "// foo /// bar\n");
     }
 
     #[test]
