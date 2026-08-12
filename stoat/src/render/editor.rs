@@ -749,21 +749,23 @@ pub(crate) fn render_editor_with_overlay(
             }
         }
 
-        paint_cursor_line_diagnostic(
-            spans,
-            set,
-            path,
-            rope,
-            &snapshot,
-            cursor,
-            suppress,
-            theme,
-            editor.scroll_row,
-            end_row,
-            inner,
-            right,
-            buf,
-        );
+        if let Some(cache) = editor.diagnostic_span_cache.as_mut() {
+            paint_cursor_line_diagnostic(
+                cache,
+                set,
+                path,
+                rope,
+                &snapshot,
+                cursor,
+                suppress,
+                theme,
+                editor.scroll_row,
+                end_row,
+                inner,
+                right,
+                buf,
+            );
+        }
     }
 
     if let Some(labels) = goto_word_labels {
@@ -895,6 +897,23 @@ pub(crate) struct DiagnosticSpanCache {
     /// construction, and entry `i` at or below an offset proves every span up to
     /// `i` ends at or before it, which is what makes the bound searchable.
     prefix_max_end: Vec<usize>,
+    /// Running maximum of [`Self::spans`]' end rows, one entry per span.
+    ///
+    /// The row counterpart of [`Self::prefix_max_end`], and searchable for the
+    /// same reason. The cursor-line query is line-keyed rather than
+    /// offset-keyed, and the two do not agree at a line's first byte: a
+    /// diagnostic whose range ends at column 0 of a line counts as reaching that
+    /// line, while its end offset is the byte before the line's own span. A
+    /// bound in rows reaches exactly what a filter in rows accepts.
+    prefix_max_end_line: Vec<u32>,
+    /// The cursor line the readout last answered for, and the diagnostic it
+    /// found there.
+    ///
+    /// The readout runs on every frame the cursor sits inside a diagnostic, and
+    /// the answer only moves when the cursor changes line. The two versions
+    /// above are not part of the key, since a change to either replaces this
+    /// whole cache and the memo along with it.
+    cursor_line_diag: Option<(u32, Option<ResolvedDiag>)>,
 }
 
 impl DiagnosticSpanCache {
@@ -905,6 +924,40 @@ impl DiagnosticSpanCache {
     fn overlapping(&self, visible: Range<usize>) -> Range<usize> {
         let lo = self.prefix_max_end.partition_point(|&e| e <= visible.start);
         let hi = self.spans.partition_point(|s| s.start < visible.end);
+        lo..hi.max(lo)
+    }
+
+    /// The worst-severity diagnostic whose rows straddle `line`.
+    ///
+    /// The answer for one line is kept, so a frame whose cursor has not changed
+    /// line reads it back rather than searching again.
+    ///
+    /// Ties go to the earliest span, matching a scan of the whole slice: the
+    /// bound below preserves the order the spans are sorted in.
+    fn cursor_line_diagnostic(&mut self, line: u32) -> Option<ResolvedDiag> {
+        if let Some((cached, found)) = self.cursor_line_diag
+            && cached == line
+        {
+            return found;
+        }
+
+        let found = self.spans[self.straddling_line(line)]
+            .iter()
+            .filter(|s| s.start_line <= line && line <= s.end_line)
+            .min_by_key(|s| severity_rank(s.severity))
+            .copied();
+
+        self.cursor_line_diag = Some((line, found));
+        found
+    }
+
+    /// The index range of [`Self::spans`] with rows that straddle `line`.
+    ///
+    /// Spans outside it end above the line or start below it, so a caller still
+    /// filters the ones inside for real containment.
+    fn straddling_line(&self, line: u32) -> Range<usize> {
+        let lo = self.prefix_max_end_line.partition_point(|&e| e < line);
+        let hi = self.spans.partition_point(|s| s.start_line <= line);
         lo..hi.max(lo)
     }
 }
@@ -1007,6 +1060,8 @@ pub(crate) fn build_diagnostic_span_cache(
             set_version,
             buffer_version,
             prefix_max_end: prefix_max_ends(&spans),
+            prefix_max_end_line: prefix_max_end_lines(&spans),
+            cursor_line_diag: None,
             spans,
         });
     }
@@ -1036,6 +1091,19 @@ fn prefix_max_ends(spans: &[ResolvedDiag]) -> Vec<usize> {
         .iter()
         .map(|span| {
             max_end = max_end.max(span.end);
+            max_end
+        })
+        .collect()
+}
+
+/// The running maximum of `spans`' end rows, for
+/// [`DiagnosticSpanCache::prefix_max_end_line`].
+fn prefix_max_end_lines(spans: &[ResolvedDiag]) -> Vec<u32> {
+    let mut max_end = 0;
+    spans
+        .iter()
+        .map(|span| {
+            max_end = max_end.max(span.end_line);
             max_end
         })
         .collect()
@@ -2041,7 +2109,7 @@ fn paint_diagnostic_spans(
 /// cursor row is scrolled off, no diagnostic covers it, or the message is empty.
 #[allow(clippy::too_many_arguments)]
 fn paint_cursor_line_diagnostic(
-    spans: &[ResolvedDiag],
+    cache: &mut DiagnosticSpanCache,
     set: &crate::diagnostics::DiagnosticSet,
     path: &Path,
     rope: &Rope,
@@ -2061,14 +2129,9 @@ fn paint_cursor_line_diagnostic(
         return;
     }
 
-    // Line-based containment, matching the pre-cache scan: the winning span is
-    // the worst-severity one whose LSP rows straddle the cursor line.
-    let cursor_line = cursor_point.row;
-    let Some(resolved) = spans
-        .iter()
-        .filter(|s| s.start_line <= cursor_line && cursor_line <= s.end_line)
-        .min_by_key(|s| severity_rank(s.severity))
-    else {
+    // Containment is by line rather than by offset, so a diagnostic reaching the
+    // cursor's line from anywhere on it wins the readout.
+    let Some(resolved) = cache.cursor_line_diagnostic(cursor_point.row) else {
         return;
     };
     let index = resolved.index;
@@ -4676,6 +4739,8 @@ mod tests {
             set_version: 0,
             buffer_version: 0,
             prefix_max_end: super::prefix_max_ends(&spans),
+            prefix_max_end_line: super::prefix_max_end_lines(&spans),
+            cursor_line_diag: None,
             spans,
         }
     }
@@ -4715,6 +4780,104 @@ mod tests {
         let cache = span_cache(&[(5, 5)]);
 
         assert!(cache.spans[cache.overlapping(5..5)].is_empty());
+    }
+
+    /// A cache over spans at the given `(start_line, end_line, severity)`, laid
+    /// out one line apart so the byte order matches the row order.
+    fn line_span_cache(rows: &[(u32, u32, DiagnosticSeverity)]) -> super::DiagnosticSpanCache {
+        let spans: Vec<super::ResolvedDiag> = rows
+            .iter()
+            .enumerate()
+            .map(
+                |(index, &(start_line, end_line, severity))| super::ResolvedDiag {
+                    start: start_line as usize * 10,
+                    end: end_line as usize * 10,
+                    severity,
+                    unnecessary: false,
+                    start_line,
+                    end_line,
+                    index,
+                },
+            )
+            .collect();
+
+        super::DiagnosticSpanCache {
+            set_version: 0,
+            buffer_version: 0,
+            prefix_max_end: super::prefix_max_ends(&spans),
+            prefix_max_end_line: super::prefix_max_end_lines(&spans),
+            cursor_line_diag: None,
+            spans,
+        }
+    }
+
+    /// A diagnostic reaching the cursor's line from above still wins the
+    /// readout, and a bound in rows is what keeps it. The end offset of a span
+    /// ending at column 0 is the byte the line starts at, so a bound in offsets
+    /// reads it as settled and drops the span the row filter accepts.
+    #[test]
+    fn the_line_bound_keeps_a_span_ending_at_the_line_start() {
+        let mut cache = line_span_cache(&[
+            (0, 3, DiagnosticSeverity::WARNING),
+            (5, 5, DiagnosticSeverity::ERROR),
+        ]);
+
+        assert_eq!(
+            cache.cursor_line_diagnostic(3).map(|d| d.index),
+            Some(0),
+            "the span reaching line 3 from line 0 wins it",
+        );
+        assert_eq!(
+            cache.cursor_line_diagnostic(4).map(|d| d.index),
+            None,
+            "and the line below it is inside nothing",
+        );
+    }
+
+    /// The worst severity wins a line, and ties go to the earliest span, which
+    /// is what a scan of the whole slice does. The bound preserves the order the
+    /// spans are sorted in, so narrowing it leaves both answers alone.
+    #[test]
+    fn the_worst_severity_wins_the_cursor_line() {
+        let mut cache = line_span_cache(&[
+            (2, 2, DiagnosticSeverity::WARNING),
+            (2, 2, DiagnosticSeverity::ERROR),
+            (2, 2, DiagnosticSeverity::ERROR),
+        ]);
+
+        assert_eq!(
+            cache.cursor_line_diagnostic(2).map(|d| d.index),
+            Some(1),
+            "the first of the two errors wins over the warning",
+        );
+    }
+
+    /// The readout runs on every frame the cursor sits inside a diagnostic, and
+    /// only a cursor that changes line changes the answer. Clearing the spans
+    /// under the cache is what makes the reuse visible. A fresh search over the
+    /// emptied slice finds nothing.
+    #[test]
+    fn a_cursor_that_stays_on_its_line_answers_from_the_memo() {
+        let mut cache = line_span_cache(&[(1, 1, DiagnosticSeverity::ERROR)]);
+
+        assert_eq!(cache.cursor_line_diagnostic(1).map(|d| d.index), Some(0));
+
+        // Emptied together, since the bound indexes the spans through the prefix
+        // maximums and a real cache never holds one without the others.
+        cache.spans.clear();
+        cache.prefix_max_end.clear();
+        cache.prefix_max_end_line.clear();
+
+        assert_eq!(
+            cache.cursor_line_diagnostic(1).map(|d| d.index),
+            Some(0),
+            "the same line answers from the memo rather than searching again",
+        );
+        assert_eq!(
+            cache.cursor_line_diagnostic(2).map(|d| d.index),
+            None,
+            "and a moved cursor searches, over the spans that are there now",
+        );
     }
 
     /// Anchoring at publish is what makes a mark follow its text. The offsets a
