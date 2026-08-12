@@ -1462,469 +1462,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.pending_resize.record(size.width, size.height);
                 state.window.request_redraw();
             },
-            WindowEvent::RedrawRequested => {
-                // Every frame goes through here, so one gate covers the lock, the
-                // projection, the render, and the ease self-request below that
-                // would otherwise keep asking for frames nobody sees.
-                if !state.visibility.admit() {
-                    return;
-                }
-
-                // The first redraw drives the first present, so report the total
-                // cold-start time once, then never again.
-                if let Some(start) = state.first_frame_start.take() {
-                    tracing::info!(elapsed = ?start.elapsed(), "first frame");
-                }
-
-                // Each frame's easing advances by the wall time since the
-                // previous frame, so animation speed stays refresh-rate
-                // independent. The cap bounds the step after an idle gap, when
-                // the elapsed time spans the whole idle period.
-                let dt = {
-                    let now = Instant::now();
-                    let dt = state
-                        .last_redraw
-                        .map(|prev| now.duration_since(prev).min(MAX_EASE_DT))
-                        .unwrap_or(EASE_BASELINE_FRAME);
-                    state.last_redraw = Some(now);
-                    dt
-                };
-
-                let (
-                    cursor,
-                    scroll_delta,
-                    damage,
-                    decoration_damage,
-                    display_offset,
-                    active,
-                    pool_easing,
-                    cursor_anchor,
-                    clear_colors,
-                ) = {
-                    let mut terminal = state.terminal.lock();
-                    // Read under the projection's lock, so the clear color and
-                    // the cells it surrounds come from one view of the terminal.
-                    let clear_colors = (terminal.default_background(), terminal.default_cursor());
-                    // Last frame's row flags, back before anything asks for
-                    // this frame's.
-                    for spare in state.damage_spares.drain(..) {
-                        terminal.recycle_damage(spare);
-                    }
-                    let display_offset = terminal.display_offset();
-                    // Scrolled back, the frame renders the composed history
-                    // window instead of this grid, so projecting into it is a
-                    // full pass nothing draws. The damage the skipped
-                    // projections would have consumed accumulates, so returning
-                    // to the bottom repaints exactly the rows that moved.
-                    //
-                    // Zero scroll is what the projection reports at a non-zero
-                    // offset anyway, the viewport being pinned to its content,
-                    // so standing in for it costs nothing.
-                    let (cursor, scroll_delta, damage) = if display_offset > 0 {
-                        let changed = terminal.take_damage_flag();
-                        let damage = if changed {
-                            Damage::Full
-                        } else {
-                            Damage::Partial(Vec::new())
-                        };
-                        (terminal.cursor(), 0, damage)
-                    } else {
-                        terminal.project(&mut state.grid)
-                    };
-                    let decoration_damage = terminal.take_decoration_damage();
-                    let mut pools = mem::take(&mut state.pools_scratch);
-                    terminal.pools_into(&mut pools);
-
-                    // Drop animation state for pools the app has retired, so a
-                    // closed pane or dismissed modal stops compositing and frees
-                    // its grids.
-                    state
-                        .pool_anims
-                        .retain(|id, _| pools.iter().any(|pool| pool.id == *id));
-
-                    // Step each pool's ease toward its target and project the ones
-                    // still gliding and buffered, in ascending-id (z) order. A pool
-                    // that just settled is left out so the live grid takes over; one
-                    // easing but not yet buffered keeps the loop ticking via
-                    // `pool_easing` until the app fills its window.
-                    let mut active = mem::take(&mut state.active_scratch);
-                    active.clear();
-                    let mut pool_easing = false;
-                    let mut cursor_anchor: Option<AnchoredCursor> = None;
-                    for pool in &pools {
-                        let anim = state
-                            .pool_anims
-                            .entry(pool.id)
-                            .or_insert_with(|| PoolAnim::new(pool.scroll_target.pages()));
-                        let reposition = terminal.take_reposition(pool.id);
-                        let step = advance_pool_glide(anim, pool, &terminal, reposition, dt);
-                        if matches!(step, PoolStep::Settled) {
-                            continue;
-                        }
-                        pool_easing = true;
-
-                        // While the focused pane glides it ships the primary
-                        // cursor's document anchor, so place the cursor riding
-                        // this pool's eased content offset instead of easing it
-                        // toward the VT cell.
-                        if let Some((row, col)) = pool.cursor_anchor {
-                            let (pos, in_region) = anchored_cursor_pos(
-                                pool.region.top as f32,
-                                (pool.region.height as f32).max(1.0),
-                                row as f32,
-                                col as f32,
-                                anim.scroll,
-                            );
-                            cursor_anchor = Some(AnchoredCursor {
-                                pos,
-                                in_region,
-                                region: pool.region,
-                            });
-                        }
-
-                        if let PoolStep::Gliding(tile) = step {
-                            active.push(tile);
-                        }
-                    }
-
-                    state.pools_scratch = pools;
-
-                    (
-                        cursor,
-                        scroll_delta,
-                        damage,
-                        decoration_damage,
-                        display_offset,
-                        active,
-                        pool_easing,
-                        cursor_anchor,
-                        clear_colors,
-                    )
-                };
-
-                // A program that set OSC 11 recolors the cells, but the gutter
-                // past the grid keeps whatever the clear was last set to, so
-                // follow the override here rather than only at config reload.
-                let (clear_bg, clear_cursor) = clear_colors;
-                if state.last_clear_bg != Some(clear_bg) {
-                    state.last_clear_bg = Some(clear_bg);
-                    state.gpu.set_theme_colors(clear_bg, clear_cursor);
-                }
-
-                let mut overflows = mem::take(&mut state.overflows_scratch);
-                refresh_popover_overflows(
-                    state.grid.overlays(),
-                    state.grid.popovers_epoch(),
-                    &mut state.last_popovers_epoch,
-                    &mut overflows,
-                );
-                state.popover_scrolls.resize(overflows.len(), 0.0);
-                state.popover_scroll_downs.resize(overflows.len(), true);
-
-                let mut popover_scrolling = false;
-                for (index, overflow) in overflows.iter().copied().enumerate() {
-                    match overflow {
-                        Some(max) => {
-                            let (next, down) = step_popover_scroll(
-                                state.popover_scrolls[index],
-                                state.popover_scroll_downs[index],
-                                max,
-                                dt,
-                            );
-                            state.popover_scrolls[index] = next;
-                            state.popover_scroll_downs[index] = down;
-                            popover_scrolling = true;
-                        },
-                        None => state.popover_scrolls[index] = 0.0,
-                    }
-                }
-                state.overflows_scratch = overflows;
-
-                let (grid_scroll, grid_scrolling) =
-                    step_grid_scroll(state.grid_scroll, scroll_delta, dt);
-                state.grid_scroll = grid_scroll;
-
-                // Fold any auto-pin the terminal applied as live output grew into
-                // both the target and the eased position, so growing history drags
-                // neither -- only a wheel move, which advances the target alone,
-                // starts an ease. Comparing against the target's integer part
-                // folds whole-row pins while leaving any sub-cell offset intact.
-                let pin = display_offset as f32 - state.scrollback_target.floor();
-                state.scrollback_target += pin;
-                state.scrollback_visual += pin;
-
-                let (scrollback_visual, scrollback_scrolling) =
-                    step_scrollback_scroll(state.scrollback_visual, state.scrollback_target, dt);
-                state.scrollback_visual = scrollback_visual;
-
-                let (region_scroll, region_scrolling) = match state.grid.scroll_region() {
-                    Some(region) => {
-                        let offset = region.offset as f32;
-                        let delta = offset - state.last_region_offset;
-                        state.last_region_offset = offset;
-                        step_region_scroll(state.region_scroll, delta, dt)
-                    },
-                    None => {
-                        state.last_region_offset = 0.0;
-                        (0.0, false)
-                    },
-                };
-                state.region_scroll = region_scroll;
-
-                let cursor_easing = if active.is_empty() {
-                    // With no pool mid-glide, fall to the scrollback window when
-                    // the view is scrolled back, else the live grid.
-                    let in_scrollback = state.scrollback_visual > 0.0 && state.grid.rows() > 0;
-
-                    if in_scrollback {
-                        // The view is scrolled back, so render the composed history
-                        // window, gliding it by the sub-cell fraction. The integer
-                        // offset selects which rows fill the window. Re-compose on an
-                        // offset change or when live output redamaged the grid.
-                        // Otherwise reuse the cached rows and only re-shift them.
-                        let offset = state.scrollback_visual.floor() as i32;
-                        let vt_changed = matches!(&damage, Damage::Full)
-                            || matches!(&damage, Damage::Partial(rows) if rows.iter().any(|d| d.is_some()));
-                        let rebuild = state.last_scrollback_offset != Some(offset) || vt_changed;
-                        // A larger offset reaches further back, which pushes the
-                        // window's content down the screen, so the rows the content
-                        // moved is the previous offset less this one.
-                        //
-                        // Growing history raises the offset too, through the pin
-                        // above, but that only keeps the window on the content it
-                        // already showed. Adding the pin back leaves the movement a
-                        // wheel actually made, which is zero while the window holds
-                        // still under output.
-                        let moved_rows = match state.last_scrollback_offset {
-                            Some(last) => (last - offset) as isize + pin as isize,
-                            None => 0,
-                        };
-                        state.last_scrollback_offset = Some(offset);
-
-                        let mut sb_damage = Damage::Partial(Vec::new());
-                        if rebuild {
-                            let mut terminal = state.terminal.lock();
-                            terminal.project_scrollback(
-                                &mut state.scrollback_grid,
-                                state.scrollback_visual,
-                                moved_rows,
-                                &mut sb_damage,
-                            );
-                        }
-
-                        // The sub-cell shift project_scrollback returns, recomputed
-                        // locally so a fraction-only frame needs no lock or compose.
-                        let scroll_offset =
-                            (state.scrollback_visual - state.scrollback_visual.floor()) - 1.0;
-
-                        state.gpu.render(
-                            &state.scrollback_grid,
-                            Frame {
-                                cursor: None,
-                                cursor_corners: None,
-                                scroll: Scroll {
-                                    grid: 0.0,
-                                    document: 0.0,
-                                    scrollback: scroll_offset,
-                                    region: 0.0,
-                                    popovers: &[],
-                                },
-                                damage: &sb_damage,
-                                decoration_damage: &sb_damage,
-                                scrolled_rows: moved_rows,
-                            },
-                        );
-                        // Read now, so the row flags go back for the next
-                        // projection to fill rather than being dropped and
-                        // allocated again a frame later.
-                        state.damage_spares.push(sb_damage);
-                        false
-                    } else {
-                        // At the live bottom, render the projected live grid (cursor
-                        // and decorations), cursor easing as usual. No lock or compose
-                        // here, so the cached scrollback rows are left untouched.
-                        state.last_scrollback_offset = None;
-                        seed_settle_flight(
-                            &mut state.cursor_was_anchored,
-                            &mut state.cursor_anim,
-                            &mut state.cursor_corner_anim,
-                            state.grid.rows(),
-                        );
-                        let (cursor, cursor_corners, easing) = step_cursor(
-                            state.cursor_animation,
-                            &mut state.cursor_anim,
-                            &mut state.cursor_corner_anim,
-                            cursor_position(cursor),
-                            dt,
-                        );
-                        state.gpu.render(
-                            &state.grid,
-                            Frame {
-                                cursor,
-                                cursor_corners,
-                                scroll: Scroll {
-                                    grid: state.grid_scroll,
-                                    document: 0.0,
-                                    scrollback: 0.0,
-                                    region: state.region_scroll,
-                                    popovers: &state.popover_scrolls,
-                                },
-                                damage: &damage,
-                                decoration_damage: &decoration_damage,
-                                // The projection slid the grid by this much and
-                                // reported damage naming only the rows that
-                                // really changed, so the row caches have to
-                                // rotate to match or the clean ones redraw from
-                                // their pre-slide instances.
-                                scrolled_rows: scroll_delta as isize,
-                            },
-                        );
-                        easing
-                    }
-                } else {
-                    // One or more pools are mid-glide and buffered: render the live
-                    // grid as the static chrome base (cursor and all), then
-                    // composite each pool's eased rows over its region in
-                    // ascending-id z-order, gliding by the sub-cell fraction and
-                    // clipping to the region. The live grid -- which the app keeps
-                    // painted at each pool's rested position -- shows again the
-                    // instant every pool settles, so an edit, a modal, or the shell
-                    // after the app exits appears at once instead of under a frozen
-                    // pool.
-                    let [cw, ch] = render::cell_size(state.font_size, state.scale_factor as f32);
-
-                    // Floor each edge to the grid-row boundary the renderer lays
-                    // cells on, then take the span, so each scissor covers exactly
-                    // its region's rows. Flooring width and height on their own
-                    // would round the far edge to a different pixel than the
-                    // adjacent row, leaking a sliver of one surface into the next.
-                    //
-                    // Unlike the pool, active, and overflow buffers, this one holds
-                    // borrows into pool_anims, so it cannot be a reused state field
-                    // without a self-referential borrow and stays freshly allocated.
-                    let composites = active
-                        .iter()
-                        .map(|pool| {
-                            let region = pool.region;
-                            let x0 = (region.left as f32 * cw) as u32;
-                            let y0 = (region.top as f32 * ch) as u32;
-                            let x1 = ((region.left as f32 + region.width as f32) * cw) as u32;
-                            let y1 = ((region.top as f32 + region.height as f32) * ch) as u32;
-                            PoolComposite {
-                                id: pool.id,
-                                grid: &state.pool_anims[&pool.id].document_grid,
-                                origin_cells: [region.left as f32, region.top as f32],
-                                scissor: [x0, y0, x1 - x0, y1 - y0],
-                                shift_rows: -pool.frac,
-                                content_changed: pool.content_changed,
-                                scrolled_rows: pool.scrolled_rows,
-                                occludable: pool.id < NON_PANE_POOL_BASE,
-                            }
-                        })
-                        .collect::<Vec<_>>();
-
-                    let (base_cursor, base_corners, cursor_easing) = match cursor_anchor {
-                        Some(anchor) => {
-                            // The anchor is frame-locked to the pool's eased
-                            // content offset, so the cursor is placed directly
-                            // rather than eased toward the VT cell. Once its line
-                            // has scrolled off the pool it leaves the region and
-                            // hides. Keep the anim in sync for a clean settle.
-                            state.cursor_anim = anchor.pos;
-                            state.cursor_corner_anim = block_corners(anchor.pos);
-                            state.cursor_was_anchored = true;
-                            if anchor.in_region {
-                                (Some(anchor.pos), Some(block_corners(anchor.pos)), false)
-                            } else {
-                                (None, None, false)
-                            }
-                        },
-                        None => {
-                            seed_settle_flight(
-                                &mut state.cursor_was_anchored,
-                                &mut state.cursor_anim,
-                                &mut state.cursor_corner_anim,
-                                state.grid.rows(),
-                            );
-                            step_cursor(
-                                state.cursor_animation,
-                                &mut state.cursor_anim,
-                                &mut state.cursor_corner_anim,
-                                cursor_position(cursor),
-                                dt,
-                            )
-                        },
-                    };
-
-                    // The pool composites paint over the cursor's cell, so the
-                    // cursor draws on top of them, clipped to the pool it sits in
-                    // (topmost when they stack) so its block does not bleed past
-                    // that pane. An anchored cursor rides a known pool, so clip to
-                    // that region rather than the stale VT cell.
-                    let cursor_scissor = match cursor_anchor {
-                        Some(anchor) => Some(region_scissor(anchor.region, cw, ch)),
-                        None => active
-                            .iter()
-                            .rev()
-                            .find(|pool| cursor_in_region(cursor, pool.region))
-                            .map(|pool| region_scissor(pool.region, cw, ch)),
-                    };
-
-                    if state.gpu.render_with_pools(
-                        &state.grid,
-                        Frame {
-                            cursor: base_cursor,
-                            cursor_corners: base_corners,
-                            scroll: Scroll {
-                                grid: state.grid_scroll,
-                                document: 0.0,
-                                scrollback: 0.0,
-                                region: state.region_scroll,
-                                popovers: &state.popover_scrolls,
-                            },
-                            damage: &damage,
-                            decoration_damage: &decoration_damage,
-                            scrolled_rows: scroll_delta as isize,
-                        },
-                        &composites,
-                        cursor_scissor,
-                    ) {
-                        // A pool composite grew or evicted from the atlas after
-                        // the live grid was drawn, so the live buffers now hold
-                        // stale UVs. Schedule the heal frame an idle screen would
-                        // otherwise skip. The next prepare rebuilds them.
-                        state.window.request_redraw();
-                    }
-                    cursor_easing
-                };
-
-                state.active_scratch = active;
-                // Held for the next frame, which hands them back before it asks
-                // the terminal for its damage.
-                state.damage_spares.push(damage);
-                state.damage_spares.push(decoration_damage);
-
-                // Keep the vsync-paced loop running while the cursor eases, a
-                // popover scrolls, or the grid, scrollback, a region, or a pool
-                // scrolls. When all settle the loop idles until the next PTY
-                // output or resize.
-                // The perf HUD updates every frame while shown, so it keeps the
-                // loop alive like an easing animation does.
-                #[cfg(feature = "perf")]
-                let hud_streaming = state.show_perf_hud;
-                #[cfg(not(feature = "perf"))]
-                let hud_streaming = false;
-                if cursor_easing
-                    || popover_scrolling
-                    || grid_scrolling
-                    || scrollback_scrolling
-                    || region_scrolling
-                    || pool_easing
-                    || hud_streaming
-                {
-                    state.window.request_redraw();
-                }
-            },
+            WindowEvent::RedrawRequested => redraw(state),
             WindowEvent::ModifiersChanged(modifiers) => {
                 state.modifiers = modifiers.state();
             },
@@ -2908,6 +2446,480 @@ fn open_aux_window(
     if let Err(error) = spawn {
         tracing::warn!(window = window_id, %error, "failed to spawn aux gpu thread");
         state.aux.retain(|aux| aux.id != window_id);
+    }
+}
+
+/// Assemble and present one primary-window frame.
+///
+/// Steps the frame's easing by the wall time since the last one, projects the
+/// terminal under the lock, and draws the pools, the cursor, and the
+/// decorations.
+///
+/// Returns without drawing when the window is not visible. That one gate
+/// covers the terminal lock, the projection, the render, and the ease
+/// self-request together, so a hidden window stops asking for frames.
+///
+/// See also:
+/// - [`redraw_aux`] for the aux windows' counterpart.
+fn redraw(state: &mut State) {
+    // Every frame goes through here, so one gate covers the lock, the
+    // projection, the render, and the ease self-request below that
+    // would otherwise keep asking for frames nobody sees.
+    if !state.visibility.admit() {
+        return;
+    }
+
+    // The first redraw drives the first present, so report the total
+    // cold-start time once, then never again.
+    if let Some(start) = state.first_frame_start.take() {
+        tracing::info!(elapsed = ?start.elapsed(), "first frame");
+    }
+
+    // Each frame's easing advances by the wall time since the
+    // previous frame, so animation speed stays refresh-rate
+    // independent. The cap bounds the step after an idle gap, when
+    // the elapsed time spans the whole idle period.
+    let dt = {
+        let now = Instant::now();
+        let dt = state
+            .last_redraw
+            .map(|prev| now.duration_since(prev).min(MAX_EASE_DT))
+            .unwrap_or(EASE_BASELINE_FRAME);
+        state.last_redraw = Some(now);
+        dt
+    };
+
+    let (
+        cursor,
+        scroll_delta,
+        damage,
+        decoration_damage,
+        display_offset,
+        active,
+        pool_easing,
+        cursor_anchor,
+        clear_colors,
+    ) = {
+        let mut terminal = state.terminal.lock();
+        // Read under the projection's lock, so the clear color and
+        // the cells it surrounds come from one view of the terminal.
+        let clear_colors = (terminal.default_background(), terminal.default_cursor());
+        // Last frame's row flags, back before anything asks for
+        // this frame's.
+        for spare in state.damage_spares.drain(..) {
+            terminal.recycle_damage(spare);
+        }
+        let display_offset = terminal.display_offset();
+        // Scrolled back, the frame renders the composed history
+        // window instead of this grid, so projecting into it is a
+        // full pass nothing draws. The damage the skipped
+        // projections would have consumed accumulates, so returning
+        // to the bottom repaints exactly the rows that moved.
+        //
+        // Zero scroll is what the projection reports at a non-zero
+        // offset anyway, the viewport being pinned to its content,
+        // so standing in for it costs nothing.
+        let (cursor, scroll_delta, damage) = if display_offset > 0 {
+            let changed = terminal.take_damage_flag();
+            let damage = if changed {
+                Damage::Full
+            } else {
+                Damage::Partial(Vec::new())
+            };
+            (terminal.cursor(), 0, damage)
+        } else {
+            terminal.project(&mut state.grid)
+        };
+        let decoration_damage = terminal.take_decoration_damage();
+        let mut pools = mem::take(&mut state.pools_scratch);
+        terminal.pools_into(&mut pools);
+
+        // Drop animation state for pools the app has retired, so a
+        // closed pane or dismissed modal stops compositing and frees
+        // its grids.
+        state
+            .pool_anims
+            .retain(|id, _| pools.iter().any(|pool| pool.id == *id));
+
+        // Step each pool's ease toward its target and project the ones
+        // still gliding and buffered, in ascending-id (z) order. A pool
+        // that just settled is left out so the live grid takes over; one
+        // easing but not yet buffered keeps the loop ticking via
+        // `pool_easing` until the app fills its window.
+        let mut active = mem::take(&mut state.active_scratch);
+        active.clear();
+        let mut pool_easing = false;
+        let mut cursor_anchor: Option<AnchoredCursor> = None;
+        for pool in &pools {
+            let anim = state
+                .pool_anims
+                .entry(pool.id)
+                .or_insert_with(|| PoolAnim::new(pool.scroll_target.pages()));
+            let reposition = terminal.take_reposition(pool.id);
+            let step = advance_pool_glide(anim, pool, &terminal, reposition, dt);
+            if matches!(step, PoolStep::Settled) {
+                continue;
+            }
+            pool_easing = true;
+
+            // While the focused pane glides it ships the primary
+            // cursor's document anchor, so place the cursor riding
+            // this pool's eased content offset instead of easing it
+            // toward the VT cell.
+            if let Some((row, col)) = pool.cursor_anchor {
+                let (pos, in_region) = anchored_cursor_pos(
+                    pool.region.top as f32,
+                    (pool.region.height as f32).max(1.0),
+                    row as f32,
+                    col as f32,
+                    anim.scroll,
+                );
+                cursor_anchor = Some(AnchoredCursor {
+                    pos,
+                    in_region,
+                    region: pool.region,
+                });
+            }
+
+            if let PoolStep::Gliding(tile) = step {
+                active.push(tile);
+            }
+        }
+
+        state.pools_scratch = pools;
+
+        (
+            cursor,
+            scroll_delta,
+            damage,
+            decoration_damage,
+            display_offset,
+            active,
+            pool_easing,
+            cursor_anchor,
+            clear_colors,
+        )
+    };
+
+    // A program that set OSC 11 recolors the cells, but the gutter
+    // past the grid keeps whatever the clear was last set to, so
+    // follow the override here rather than only at config reload.
+    let (clear_bg, clear_cursor) = clear_colors;
+    if state.last_clear_bg != Some(clear_bg) {
+        state.last_clear_bg = Some(clear_bg);
+        state.gpu.set_theme_colors(clear_bg, clear_cursor);
+    }
+
+    let mut overflows = mem::take(&mut state.overflows_scratch);
+    refresh_popover_overflows(
+        state.grid.overlays(),
+        state.grid.popovers_epoch(),
+        &mut state.last_popovers_epoch,
+        &mut overflows,
+    );
+    state.popover_scrolls.resize(overflows.len(), 0.0);
+    state.popover_scroll_downs.resize(overflows.len(), true);
+
+    let mut popover_scrolling = false;
+    for (index, overflow) in overflows.iter().copied().enumerate() {
+        match overflow {
+            Some(max) => {
+                let (next, down) = step_popover_scroll(
+                    state.popover_scrolls[index],
+                    state.popover_scroll_downs[index],
+                    max,
+                    dt,
+                );
+                state.popover_scrolls[index] = next;
+                state.popover_scroll_downs[index] = down;
+                popover_scrolling = true;
+            },
+            None => state.popover_scrolls[index] = 0.0,
+        }
+    }
+    state.overflows_scratch = overflows;
+
+    let (grid_scroll, grid_scrolling) = step_grid_scroll(state.grid_scroll, scroll_delta, dt);
+    state.grid_scroll = grid_scroll;
+
+    // Fold any auto-pin the terminal applied as live output grew into
+    // both the target and the eased position, so growing history drags
+    // neither -- only a wheel move, which advances the target alone,
+    // starts an ease. Comparing against the target's integer part
+    // folds whole-row pins while leaving any sub-cell offset intact.
+    let pin = display_offset as f32 - state.scrollback_target.floor();
+    state.scrollback_target += pin;
+    state.scrollback_visual += pin;
+
+    let (scrollback_visual, scrollback_scrolling) =
+        step_scrollback_scroll(state.scrollback_visual, state.scrollback_target, dt);
+    state.scrollback_visual = scrollback_visual;
+
+    let (region_scroll, region_scrolling) = match state.grid.scroll_region() {
+        Some(region) => {
+            let offset = region.offset as f32;
+            let delta = offset - state.last_region_offset;
+            state.last_region_offset = offset;
+            step_region_scroll(state.region_scroll, delta, dt)
+        },
+        None => {
+            state.last_region_offset = 0.0;
+            (0.0, false)
+        },
+    };
+    state.region_scroll = region_scroll;
+
+    let cursor_easing = if active.is_empty() {
+        // With no pool mid-glide, fall to the scrollback window when
+        // the view is scrolled back, else the live grid.
+        let in_scrollback = state.scrollback_visual > 0.0 && state.grid.rows() > 0;
+
+        if in_scrollback {
+            // The view is scrolled back, so render the composed history
+            // window, gliding it by the sub-cell fraction. The integer
+            // offset selects which rows fill the window. Re-compose on an
+            // offset change or when live output redamaged the grid.
+            // Otherwise reuse the cached rows and only re-shift them.
+            let offset = state.scrollback_visual.floor() as i32;
+            let vt_changed = matches!(&damage, Damage::Full)
+                || matches!(&damage, Damage::Partial(rows) if rows.iter().any(|d| d.is_some()));
+            let rebuild = state.last_scrollback_offset != Some(offset) || vt_changed;
+            // A larger offset reaches further back, which pushes the
+            // window's content down the screen, so the rows the content
+            // moved is the previous offset less this one.
+            //
+            // Growing history raises the offset too, through the pin
+            // above, but that only keeps the window on the content it
+            // already showed. Adding the pin back leaves the movement a
+            // wheel actually made, which is zero while the window holds
+            // still under output.
+            let moved_rows = match state.last_scrollback_offset {
+                Some(last) => (last - offset) as isize + pin as isize,
+                None => 0,
+            };
+            state.last_scrollback_offset = Some(offset);
+
+            let mut sb_damage = Damage::Partial(Vec::new());
+            if rebuild {
+                let mut terminal = state.terminal.lock();
+                terminal.project_scrollback(
+                    &mut state.scrollback_grid,
+                    state.scrollback_visual,
+                    moved_rows,
+                    &mut sb_damage,
+                );
+            }
+
+            // The sub-cell shift project_scrollback returns, recomputed
+            // locally so a fraction-only frame needs no lock or compose.
+            let scroll_offset = (state.scrollback_visual - state.scrollback_visual.floor()) - 1.0;
+
+            state.gpu.render(
+                &state.scrollback_grid,
+                Frame {
+                    cursor: None,
+                    cursor_corners: None,
+                    scroll: Scroll {
+                        grid: 0.0,
+                        document: 0.0,
+                        scrollback: scroll_offset,
+                        region: 0.0,
+                        popovers: &[],
+                    },
+                    damage: &sb_damage,
+                    decoration_damage: &sb_damage,
+                    scrolled_rows: moved_rows,
+                },
+            );
+            // Read now, so the row flags go back for the next
+            // projection to fill rather than being dropped and
+            // allocated again a frame later.
+            state.damage_spares.push(sb_damage);
+            false
+        } else {
+            // At the live bottom, render the projected live grid (cursor
+            // and decorations), cursor easing as usual. No lock or compose
+            // here, so the cached scrollback rows are left untouched.
+            state.last_scrollback_offset = None;
+            seed_settle_flight(
+                &mut state.cursor_was_anchored,
+                &mut state.cursor_anim,
+                &mut state.cursor_corner_anim,
+                state.grid.rows(),
+            );
+            let (cursor, cursor_corners, easing) = step_cursor(
+                state.cursor_animation,
+                &mut state.cursor_anim,
+                &mut state.cursor_corner_anim,
+                cursor_position(cursor),
+                dt,
+            );
+            state.gpu.render(
+                &state.grid,
+                Frame {
+                    cursor,
+                    cursor_corners,
+                    scroll: Scroll {
+                        grid: state.grid_scroll,
+                        document: 0.0,
+                        scrollback: 0.0,
+                        region: state.region_scroll,
+                        popovers: &state.popover_scrolls,
+                    },
+                    damage: &damage,
+                    decoration_damage: &decoration_damage,
+                    // The projection slid the grid by this much and
+                    // reported damage naming only the rows that
+                    // really changed, so the row caches have to
+                    // rotate to match or the clean ones redraw from
+                    // their pre-slide instances.
+                    scrolled_rows: scroll_delta as isize,
+                },
+            );
+            easing
+        }
+    } else {
+        // One or more pools are mid-glide and buffered: render the live
+        // grid as the static chrome base (cursor and all), then
+        // composite each pool's eased rows over its region in
+        // ascending-id z-order, gliding by the sub-cell fraction and
+        // clipping to the region. The live grid -- which the app keeps
+        // painted at each pool's rested position -- shows again the
+        // instant every pool settles, so an edit, a modal, or the shell
+        // after the app exits appears at once instead of under a frozen
+        // pool.
+        let [cw, ch] = render::cell_size(state.font_size, state.scale_factor as f32);
+
+        // Floor each edge to the grid-row boundary the renderer lays
+        // cells on, then take the span, so each scissor covers exactly
+        // its region's rows. Flooring width and height on their own
+        // would round the far edge to a different pixel than the
+        // adjacent row, leaking a sliver of one surface into the next.
+        //
+        // Unlike the pool, active, and overflow buffers, this one holds
+        // borrows into pool_anims, so it cannot be a reused state field
+        // without a self-referential borrow and stays freshly allocated.
+        let composites = active
+            .iter()
+            .map(|pool| {
+                let region = pool.region;
+                let x0 = (region.left as f32 * cw) as u32;
+                let y0 = (region.top as f32 * ch) as u32;
+                let x1 = ((region.left as f32 + region.width as f32) * cw) as u32;
+                let y1 = ((region.top as f32 + region.height as f32) * ch) as u32;
+                PoolComposite {
+                    id: pool.id,
+                    grid: &state.pool_anims[&pool.id].document_grid,
+                    origin_cells: [region.left as f32, region.top as f32],
+                    scissor: [x0, y0, x1 - x0, y1 - y0],
+                    shift_rows: -pool.frac,
+                    content_changed: pool.content_changed,
+                    scrolled_rows: pool.scrolled_rows,
+                    occludable: pool.id < NON_PANE_POOL_BASE,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let (base_cursor, base_corners, cursor_easing) = match cursor_anchor {
+            Some(anchor) => {
+                // The anchor is frame-locked to the pool's eased
+                // content offset, so the cursor is placed directly
+                // rather than eased toward the VT cell. Once its line
+                // has scrolled off the pool it leaves the region and
+                // hides. Keep the anim in sync for a clean settle.
+                state.cursor_anim = anchor.pos;
+                state.cursor_corner_anim = block_corners(anchor.pos);
+                state.cursor_was_anchored = true;
+                if anchor.in_region {
+                    (Some(anchor.pos), Some(block_corners(anchor.pos)), false)
+                } else {
+                    (None, None, false)
+                }
+            },
+            None => {
+                seed_settle_flight(
+                    &mut state.cursor_was_anchored,
+                    &mut state.cursor_anim,
+                    &mut state.cursor_corner_anim,
+                    state.grid.rows(),
+                );
+                step_cursor(
+                    state.cursor_animation,
+                    &mut state.cursor_anim,
+                    &mut state.cursor_corner_anim,
+                    cursor_position(cursor),
+                    dt,
+                )
+            },
+        };
+
+        // The pool composites paint over the cursor's cell, so the
+        // cursor draws on top of them, clipped to the pool it sits in
+        // (topmost when they stack) so its block does not bleed past
+        // that pane. An anchored cursor rides a known pool, so clip to
+        // that region rather than the stale VT cell.
+        let cursor_scissor = match cursor_anchor {
+            Some(anchor) => Some(region_scissor(anchor.region, cw, ch)),
+            None => active
+                .iter()
+                .rev()
+                .find(|pool| cursor_in_region(cursor, pool.region))
+                .map(|pool| region_scissor(pool.region, cw, ch)),
+        };
+
+        if state.gpu.render_with_pools(
+            &state.grid,
+            Frame {
+                cursor: base_cursor,
+                cursor_corners: base_corners,
+                scroll: Scroll {
+                    grid: state.grid_scroll,
+                    document: 0.0,
+                    scrollback: 0.0,
+                    region: state.region_scroll,
+                    popovers: &state.popover_scrolls,
+                },
+                damage: &damage,
+                decoration_damage: &decoration_damage,
+                scrolled_rows: scroll_delta as isize,
+            },
+            &composites,
+            cursor_scissor,
+        ) {
+            // A pool composite grew or evicted from the atlas after
+            // the live grid was drawn, so the live buffers now hold
+            // stale UVs. Schedule the heal frame an idle screen would
+            // otherwise skip. The next prepare rebuilds them.
+            state.window.request_redraw();
+        }
+        cursor_easing
+    };
+
+    state.active_scratch = active;
+    // Held for the next frame, which hands them back before it asks
+    // the terminal for its damage.
+    state.damage_spares.push(damage);
+    state.damage_spares.push(decoration_damage);
+
+    // Keep the vsync-paced loop running while the cursor eases, a
+    // popover scrolls, or the grid, scrollback, a region, or a pool
+    // scrolls. When all settle the loop idles until the next PTY
+    // output or resize.
+    // The perf HUD updates every frame while shown, so it keeps the
+    // loop alive like an easing animation does.
+    #[cfg(feature = "perf")]
+    let hud_streaming = state.show_perf_hud;
+    #[cfg(not(feature = "perf"))]
+    let hud_streaming = false;
+    if cursor_easing
+        || popover_scrolling
+        || grid_scrolling
+        || scrollback_scrolling
+        || region_scrolling
+        || pool_easing
+        || hud_streaming
+    {
+        state.window.request_redraw();
     }
 }
 
