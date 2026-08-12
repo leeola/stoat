@@ -122,6 +122,14 @@ pub(crate) const REVIEW_EXTERNAL_EDIT_DEBOUNCE: std::time::Duration =
 /// reads the symbol index between keystrokes.
 pub(crate) const INDEX_EDIT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// External-change paths [`Stoat::drain_pending_index_edits`] hands to the
+/// blocking pool in one pass.
+///
+/// Each costs only a spawn on the run loop, the read and the parse having moved
+/// into the job. What the cap paces is the pool: a checkout naming thousands of
+/// files queues them over several windows rather than in one turn.
+const INDEX_EXTERNAL_DRAIN_CAP: usize = 256;
+
 /// Directory verdicts [`Stoat::ignored_dir_cache`] holds before dropping the
 /// lot. Far above the directory count of any one build, so the bound is a
 /// backstop against a pathological tree rather than a working limit.
@@ -1219,10 +1227,22 @@ pub struct Stoat {
     /// [`Self::drive_background`]. Holding the task here keeps the read alive;
     /// dropping it (on quit) cancels it.
     pub(crate) pending_file_opens: Vec<action_handlers::file::PendingFileOpen>,
-    /// Per-path debounce tasks for reindexing files changed outside the
-    /// editor, mirroring [`Self::review_pending_external_edits`] but
-    /// feeding the code graph instead of the review session.
-    index_pending_external_edits: std::collections::HashMap<PathBuf, stoat_scheduler::Task<()>>,
+    /// Files changed outside the editor, waiting on the shared debounce window
+    /// to be reindexed into the code graph.
+    ///
+    /// A set covered by one timer rather than a task per path, unlike
+    /// [`Self::review_pending_external_edits`]. A checkout or a formatter run
+    /// names thousands of files at once, and the burst is what this has to
+    /// survive.
+    index_pending_external_edits: std::collections::HashSet<PathBuf>,
+    /// The one debounce timer covering whatever
+    /// [`Self::index_pending_external_edits`] holds.
+    ///
+    /// Armed when the set goes from empty to occupied, so the window closes a
+    /// fixed [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`] after a burst starts. Under a
+    /// reset-per-event timer, a build emitting events faster than that window
+    /// holds the index off for as long as it runs.
+    index_external_edit_timer: Option<stoat_scheduler::Task<()>>,
     /// Memoized [`GitRepo::is_path_ignored`] verdicts, keyed by the directory
     /// asked about rather than the file, so an fs-event storm out of a build
     /// directory costs one libgit2 query instead of one per file.
@@ -1230,10 +1250,14 @@ pub struct Stoat {
     /// Cleared on any `.git` write or `.gitignore` edit, the two events that can
     /// change an answer already in here.
     ignored_dir_cache: std::collections::HashMap<PathBuf, bool>,
-    /// Channel the index debounce tasks push onto when their timer fires,
-    /// drained by [`Self::drain_pending_index_edits`].
-    pub(crate) index_external_edit_tx: Sender<PathBuf>,
-    index_external_edit_rx: Receiver<PathBuf>,
+    /// Channel [`Self::index_external_edit_timer`] signals when its window
+    /// closes, waking [`Self::drain_pending_index_edits`].
+    ///
+    /// Carries no path. The window covers whichever paths
+    /// [`Self::index_pending_external_edits`] has collected by the time it
+    /// fires, so the signal only has to say that it fired.
+    pub(crate) index_external_edit_tx: Sender<()>,
+    index_external_edit_rx: Receiver<()>,
     /// Git operations flow through this trait so tests can use
     /// [`crate::host::FakeGit`] without a real repository.
     pub(crate) git_host: Arc<dyn GitHost>,
@@ -2044,7 +2068,8 @@ impl Stoat {
             diff_warm_file_rx,
             diff_warm_files: Vec::new(),
             pending_file_opens: Vec::new(),
-            index_pending_external_edits: std::collections::HashMap::new(),
+            index_pending_external_edits: std::collections::HashSet::new(),
+            index_external_edit_timer: None,
             ignored_dir_cache: std::collections::HashMap::new(),
             index_external_edit_tx,
             index_external_edit_rx,
@@ -4224,36 +4249,63 @@ impl Stoat {
         progressed
     }
 
-    /// Schedule a debounced reindex of `path` after an external change.
+    /// Collect `path` for a debounced reindex after an external change.
     ///
-    /// Mirrors [`Self::arm_review_external_edit_debounce`]. A new event for
-    /// the same path replaces the prior task, so only the latest of a burst
-    /// proceeds once the [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`] window elapses.
+    /// Unlike [`Self::arm_review_external_edit_debounce`], a burst shares one
+    /// window rather than getting a timer each. The window opens on the first
+    /// path and covers every path that arrives before it closes, so a checkout
+    /// costs one task however many files it touches.
     fn arm_index_external_edit_debounce(&mut self, path: PathBuf) {
+        let opening = self.index_pending_external_edits.is_empty();
+        self.index_pending_external_edits.insert(path);
+        if opening {
+            self.arm_index_external_edit_timer();
+        }
+    }
+
+    /// Start the shared debounce window, replacing any timer already held.
+    fn arm_index_external_edit_timer(&mut self) {
         let executor = self.executor.clone();
         let tx = self.index_external_edit_tx.clone();
         let redraw = self.redraw_notify.clone();
-        let path_for_send = path.clone();
-        let task = self.executor.spawn_with_redraw(redraw, async move {
-            executor.timer(REVIEW_EXTERNAL_EDIT_DEBOUNCE).await;
-            let _ = tx.send(path_for_send).await;
-        });
-        self.index_pending_external_edits.insert(path, task);
+        self.index_external_edit_timer =
+            Some(self.executor.spawn_with_redraw(redraw, async move {
+                executor.timer(REVIEW_EXTERNAL_EDIT_DEBOUNCE).await;
+                let _ = tx.send(()).await;
+            }));
     }
 
-    /// Drain the debounced external-change paths and reindex each. Returns
-    /// `true` if any path was handled so the harness settle loop re-iterates.
+    /// Reindex the external-change paths whose debounce window has closed.
+    /// Returns `true` if any path was handled so the harness settle loop
+    /// re-iterates.
+    ///
+    /// Takes at most [`INDEX_EXTERNAL_DRAIN_CAP`] paths per pass and re-arms
+    /// the window on whatever is left, so a checkout's worth of files reaches
+    /// the blocking pool in paced batches rather than all in one turn.
     pub(crate) fn drain_pending_index_edits(&mut self) -> bool {
-        let mut progressed = false;
-        for _ in 0..256 {
-            let Ok(path) = self.index_external_edit_rx.try_recv() else {
-                break;
-            };
-            self.index_pending_external_edits.remove(&path);
-            self.reindex_external_path(path);
-            progressed = true;
+        if self.index_external_edit_rx.try_recv().is_err() {
+            return false;
         }
-        progressed
+
+        let mut pending = std::mem::take(&mut self.index_pending_external_edits);
+        let batch: Vec<PathBuf> = pending
+            .iter()
+            .take(INDEX_EXTERNAL_DRAIN_CAP)
+            .cloned()
+            .collect();
+        for path in &batch {
+            pending.remove(path);
+        }
+        self.index_pending_external_edits = pending;
+
+        for path in batch {
+            self.reindex_external_path(path);
+        }
+
+        if !self.index_pending_external_edits.is_empty() {
+            self.arm_index_external_edit_timer();
+        }
+        true
     }
 
     /// Reindex a file changed outside the editor.
@@ -4262,6 +4314,10 @@ impl Stoat {
     /// recorded hash is skipped, since the editor's own save already
     /// indexed it. A changed file is re-extracted from disk. A file that no
     /// longer exists is removed from the graph.
+    ///
+    /// All three decisions are the job's, because telling them apart means
+    /// reading the file. What stays here is the graph lookup naming what the
+    /// job expects to find, which costs one map read.
     fn reindex_external_path(&mut self, path: PathBuf) {
         let workspace = self.active_workspace;
         let git_root = self.active_workspace().git_root.clone();
@@ -4270,29 +4326,21 @@ impl Stoat {
         };
         let file = crate::code_index::build::file_id(&rel_path);
 
-        let Some(hash) =
-            crate::code_index::build::current_fingerprint(self.fs_host.as_ref(), &path)
-        else {
-            let _ = self.index_update_tx.send(IndexUpdate::Remove {
-                workspace,
-                file,
-                rel_path,
-            });
-            self.redraw_notify.notify_one();
-            return;
-        };
-        if self.active_workspace().code_graph.content_hash(file) == Some(hash) {
-            return;
-        }
-
         let handles = crate::code_index::build::IndexBuild {
             fs: self.fs_host.clone(),
             languages: self.language_registry.clone(),
             tx: self.index_update_tx.clone(),
             redraw: self.redraw_notify.clone(),
         };
-        crate::code_index::build::reindex_path(&self.executor, handles, git_root, workspace, path)
-            .detach();
+        let target = crate::code_index::build::ExternalReindex {
+            git_root,
+            workspace,
+            path,
+            rel_path,
+            file,
+            expected: self.active_workspace().code_graph.content_hash(file),
+        };
+        crate::code_index::build::reindex_path(&self.executor, handles, target).detach();
     }
 
     /// Drains every notification currently buffered on
@@ -13661,6 +13709,163 @@ mod tests {
             stoat.active_workspace().code_graph.symbol_at(file, 4),
             None,
             "an external remove evicts the file",
+        );
+    }
+
+    /// One external change reads the file once. Deciding whether the change is
+    /// stale means reading it, and extracting means reading it, so a gate
+    /// standing outside the job read every changed file twice. A checkout or a
+    /// formatter run pays that per file.
+    ///
+    /// The gate moving into the job is also what takes the read off the run
+    /// loop, but the test scheduler runs blocking work inline, so the count is
+    /// what is observable here rather than which thread it happened on.
+    #[test]
+    fn an_external_change_reads_the_file_once() {
+        use crate::host::{FakeFs, FakeFsWatcher, FsEventKind};
+
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+        stoat.persistence_disabled = true;
+
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/src/a.rs", "fn foo() {}\n");
+        stoat.set_fs_host(fs.clone());
+        let watcher = Arc::new(FakeFsWatcher::new());
+        stoat.set_fs_watch_host(watcher.clone());
+
+        let path = PathBuf::from("/repo/src/a.rs");
+        let reads = || {
+            fs.ops()
+                .iter()
+                .filter(|op| matches!(op, crate::host::FakeFsOp::Read { path: p } if *p == path))
+                .count()
+        };
+        let drive = |stoat: &mut Stoat| {
+            watcher.inject(&path, FsEventKind::Modified);
+            stoat.drain_fs_watch_events();
+            scheduler.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+            stoat.drain_pending_index_edits();
+            scheduler.run_until_parked();
+            stoat.drain_index_updates();
+        };
+
+        // Index it once, so the rounds below have a recorded hash to differ
+        // from and to match.
+        drive(&mut stoat);
+        let file = crate::code_index::build::file_id("src/a.rs");
+        assert!(
+            stoat
+                .active_workspace()
+                .code_graph
+                .content_hash(file)
+                .is_some(),
+            "the first round indexed the file",
+        );
+
+        let before = reads();
+        fs.insert_file("/repo/src/a.rs", "fn foo() {}\nfn bar() {}\n");
+        drive(&mut stoat);
+        assert_eq!(
+            reads(),
+            before + 1,
+            "a changed file is fingerprinted and extracted from one read",
+        );
+        assert!(
+            stoat
+                .active_workspace()
+                .code_graph
+                .symbol_at(file, 17)
+                .is_some(),
+            "and the change reached the graph, so the single read did both jobs",
+        );
+
+        // An event for a file nothing touched, which is what the watch echo of
+        // the editor's own save looks like.
+        let before = reads();
+        let generation = stoat.active_workspace().index_generation;
+        drive(&mut stoat);
+        assert_eq!(
+            reads(),
+            before + 1,
+            "an unchanged file is read once to find that out",
+        );
+        assert_eq!(
+            stoat.active_workspace().index_generation,
+            generation,
+            "and the matching fingerprint stops it before it reindexes",
+        );
+    }
+
+    /// One window covers a burst. A checkout naming thousands of files must not
+    /// allocate a timer for each, so the second path here joins the window the
+    /// first opened rather than starting its own.
+    ///
+    /// The clock is what shows it. Both paths drain one window after the burst
+    /// started, a point at which a timer per path leaves the later path's own
+    /// window still open.
+    #[test]
+    fn a_burst_of_external_changes_shares_one_debounce_window() {
+        use crate::host::{FakeFs, FakeFsWatcher, FsEventKind};
+
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+        stoat.persistence_disabled = true;
+
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/src/a.rs", "fn foo() {}\n");
+        fs.insert_file("/repo/src/b.rs", "fn bar() {}\n");
+        stoat.set_fs_host(fs);
+        let watcher = Arc::new(FakeFsWatcher::new());
+        stoat.set_fs_watch_host(watcher.clone());
+
+        let (a, b) = (
+            PathBuf::from("/repo/src/a.rs"),
+            PathBuf::from("/repo/src/b.rs"),
+        );
+
+        watcher.inject(&a, FsEventKind::Modified);
+        stoat.drain_fs_watch_events();
+
+        // Most of the window elapses, then the second path arrives inside it.
+        scheduler.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE / 2);
+        watcher.inject(&b, FsEventKind::Modified);
+        stoat.drain_fs_watch_events();
+        assert_eq!(
+            stoat.index_pending_external_edits.len(),
+            2,
+            "both paths wait on the same window",
+        );
+
+        scheduler.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+        assert!(
+            stoat.drain_pending_index_edits(),
+            "the window the first path opened closed and carried both",
+        );
+        assert!(
+            stoat.index_pending_external_edits.is_empty(),
+            "one drain took the whole burst",
+        );
+
+        scheduler.run_until_parked();
+        stoat.drain_index_updates();
+        let graph = &stoat.active_workspace().code_graph;
+        assert!(
+            graph
+                .content_hash(crate::code_index::build::file_id("src/a.rs"))
+                .is_some()
+                && graph
+                    .content_hash(crate::code_index::build::file_id("src/b.rs"))
+                    .is_some(),
+            "both files of the burst reached the graph",
         );
     }
 

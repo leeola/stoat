@@ -273,18 +273,36 @@ pub(crate) fn reindex_buffer(
     })
 }
 
+/// Inputs for re-indexing one file from disk after a change outside the editor.
+pub(crate) struct ExternalReindex {
+    pub(crate) git_root: PathBuf,
+    pub(crate) workspace: WorkspaceId,
+    pub(crate) path: PathBuf,
+    /// `path` relative to `git_root`, and the id derived from it. Both are
+    /// resolved by the caller, which needs them anyway to look up `expected`.
+    pub(crate) rel_path: String,
+    pub(crate) file: FileId,
+    /// The content hash the graph already holds for this file, when it holds
+    /// one. The editor's own save indexes what it wrote, so the watch event it
+    /// then produces names a file the graph is already current on.
+    pub(crate) expected: Option<[u8; 32]>,
+}
+
 /// Spawn a job re-indexing one file from disk, delivering a persisting
 /// [`IndexUpdate::Reindex`].
 ///
 /// Mirrors [`reindex_buffer`] but reads the file's current bytes from
 /// disk, for a change that arrived outside the editor. The returned
 /// [`Task`] must be kept alive until the job runs.
+///
+/// The staleness gate runs here rather than at the call site, so the run loop
+/// never reads the file. One read serves the fingerprint and the extraction
+/// both. A file that no longer reads as UTF-8 text, whether it vanished or
+/// turned binary, sends [`IndexUpdate::Remove`] instead.
 pub(crate) fn reindex_path(
     executor: &Executor,
     handles: IndexBuild,
-    git_root: PathBuf,
-    workspace: WorkspaceId,
-    path: PathBuf,
+    target: ExternalReindex,
 ) -> Task<()> {
     let IndexBuild {
         fs,
@@ -293,8 +311,32 @@ pub(crate) fn reindex_path(
         redraw,
     } = handles;
     executor.spawn_blocking(move || {
-        if let Some((rel_path, shard)) = index_file(fs.as_ref(), &languages, &git_root, &path) {
-            let file = file_id(&rel_path);
+        let ExternalReindex {
+            git_root,
+            workspace,
+            path,
+            rel_path,
+            file,
+            expected,
+        } = target;
+
+        let Some(text) = read_utf8(fs.as_ref(), &path) else {
+            let _ = tx.send(IndexUpdate::Remove {
+                workspace,
+                file,
+                rel_path,
+            });
+            redraw.notify_one();
+            return;
+        };
+        if expected == Some(fingerprint_bytes(&text)) {
+            return;
+        }
+
+        // The caller's rel_path and the one extraction derives are the same
+        // string from the same pair of paths, so the caller's is kept and the
+        // second is dropped rather than allocated into the update.
+        if let Some((_, shard)) = index_text(&languages, &git_root, &path, &text) {
             let _ = tx.send(IndexUpdate::Reindex {
                 workspace,
                 file,
@@ -366,10 +408,18 @@ pub(crate) fn file_id(rel_path: &str) -> FileId {
 
 /// The content fingerprint of a readable UTF-8 file, or `None` otherwise.
 pub(crate) fn current_fingerprint(fs: &dyn FsHost, path: &Path) -> Option<[u8; 32]> {
+    Some(fingerprint_bytes(&read_utf8(fs, path)?))
+}
+
+/// A file's contents, or `None` when the read fails or the bytes are not UTF-8.
+///
+/// The two failures are deliberately one answer. A caller deciding whether a
+/// file is still indexable treats a binary file exactly as it treats a missing
+/// one.
+fn read_utf8(fs: &dyn FsHost, path: &Path) -> Option<String> {
     let mut bytes = Vec::new();
     fs.read(path, &mut bytes).ok()?;
-    let text = String::from_utf8(bytes).ok()?;
-    Some(fingerprint_bytes(&text))
+    String::from_utf8(bytes).ok()
 }
 
 /// Extract one file's shard, or `None` when the file is not an indexable
@@ -383,11 +433,23 @@ fn index_file(
     git_root: &Path,
     path: &Path,
 ) -> Option<(String, FileShard)> {
+    index_text(languages, git_root, path, &read_utf8(fs, path)?)
+}
+
+/// Extract one file's shard from source already in hand, or `None` when the
+/// file is not an indexable language or sits outside `git_root`.
+///
+/// Split from [`index_file`] so a caller that has read the file for its own
+/// reasons, such as fingerprinting it, extracts from those bytes rather than
+/// reading the file a second time.
+fn index_text(
+    languages: &LanguageRegistry,
+    git_root: &Path,
+    path: &Path,
+    text: &str,
+) -> Option<(String, FileShard)> {
     let language = languages.for_path(path)?;
-    let mut bytes = Vec::new();
-    fs.read(path, &mut bytes).ok()?;
-    let text = String::from_utf8(bytes).ok()?;
-    extract_shard(&language, git_root, path, &Rope::from(text.as_str()), None)
+    extract_shard(&language, git_root, path, &Rope::from(text), None)
 }
 
 /// Parse `text` as `language` and build the file's shard, or `None` when
