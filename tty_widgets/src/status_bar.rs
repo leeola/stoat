@@ -21,9 +21,14 @@ use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 /// (256 = grid size), and every position is in sixteenths of a cell (16 = one
 /// cell), so the bar tracks live font zoom.
 ///
-/// Left segments pack rightward from the left edge. Right segments pack leftward
-/// from the right edge and are dropped when they would overlap the left run, so
-/// the two runs never collide.
+/// Left segments pack rightward from the left edge, and the bar cuts the last
+/// one to the glyphs that fit before the right edge. Right segments pack
+/// leftward from the right edge, and a segment that overlaps the left run is
+/// dropped. Neither run draws past the bar.
+///
+/// The left run is cut rather than dropped because the segments that outgrow a
+/// bar are the informative ones, paths and branch names, and a caller's cell
+/// fallback clips them the same way.
 pub struct StatusBar<'a> {
     /// Segments packed left-to-right from the left edge.
     pub left: &'a [StatusSegment<'a>],
@@ -60,10 +65,12 @@ impl StatusBar<'_> {
     /// The caller passes the on-screen status [`Rect`]. [`TextRun`] and [`Bar`]
     /// offset by the area, so positions here are area-relative sixteenths.
     pub fn draw_components(&self, area: Rect, buf: &mut Buffer, scene: &mut ApcScene) {
+        let limit = cells::span_sixteenths(area.width);
+
         Bar {
             x: 0,
             y: 0,
-            width: cells::span_sixteenths(area.width),
+            width: limit,
             height: 1,
             color: self.separator,
         }
@@ -71,12 +78,26 @@ impl StatusBar<'_> {
 
         let mut cursor = 0u16;
         for seg in self.left {
-            let advance = self.segment_advance(seg.text);
-            self.draw_segment(cursor, advance, seg, area, buf, scene);
+            let text = self.clip_to_room(seg.text, limit - cursor);
+            if text.is_empty() && !seg.text.is_empty() {
+                break;
+            }
+
+            let advance = self.segment_advance(text);
+            let fitted = StatusSegment {
+                text,
+                fg: seg.fg,
+                bg: seg.bg,
+            };
+            self.draw_segment(cursor, advance, &fitted, area, buf, scene);
             cursor += advance;
+
+            if text.len() < seg.text.len() {
+                break;
+            }
         }
 
-        let mut anchor = cells::span_sixteenths(area.width);
+        let mut anchor = limit;
         for seg in self.right {
             let advance = self.segment_advance(seg.text);
             let start = anchor.saturating_sub(advance);
@@ -132,6 +153,23 @@ impl StatusBar<'_> {
     /// Sixteenths a segment's `text` advances at [`Self::scale`].
     fn segment_advance(&self, text: &str) -> u16 {
         cells::advance_sixteenths(text.chars().count(), self.scale)
+    }
+
+    /// The prefix of `text` that advances no further than `room` sixteenths.
+    ///
+    /// Inverts [`Self::segment_advance`], so the prefix ends on the last glyph
+    /// that starts and finishes inside the room rather than one past it. A zero
+    /// scale advances nothing, so every segment fits.
+    fn clip_to_room<'t>(&self, text: &'t str, room: u16) -> &'t str {
+        if self.scale == 0 {
+            return text;
+        }
+
+        let fits = (u32::from(room) * 16 / u32::from(self.scale)) as usize;
+        match text.char_indices().nth(fits) {
+            Some((byte, _)) => &text[..byte],
+            None => text,
+        }
     }
 }
 
@@ -271,6 +309,98 @@ mod tests {
         assert!(
             contains(scene.buffer(), &run),
             "right box-less run at width*16 - advance"
+        );
+    }
+
+    /// Paths and branch names grow without bound, so a left run outgrowing a
+    /// narrow bar is ordinary. Past the edge it draws over the neighboring
+    /// pane, not over its own right segments.
+    #[test]
+    fn the_left_run_stops_at_the_right_edge() {
+        let left = [
+            StatusSegment {
+                text: "ab",
+                fg: [1, 2, 3],
+                bg: [4, 5, 6],
+            },
+            StatusSegment {
+                text: "LONGISH",
+                fg: [7, 8, 9],
+                bg: [10, 11, 12],
+            },
+        ];
+        let status = StatusBar {
+            left: &left,
+            right: &[],
+            scale: 160,
+            separator: [60, 66, 77],
+            bg: [0, 0, 0],
+        };
+        let area = Rect::new(0, 0, 3, 1);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+
+        status.draw_components(area, &mut buf, &mut scene);
+
+        // width*16 = 48; advance("ab") = 20 leaves 28 sixteenths, which fits
+        // two more glyphs at 10 each. The whole of "LONGISH" advances 70.
+        let fits = encode_text_run(&TextRunCommand {
+            col: 0,
+            row: 0,
+            scale: 160,
+            color: [1, 2, 3],
+            bg: None,
+            text: "ab".to_owned(),
+        });
+        let cut = encode_text_run(&TextRunCommand {
+            col: 20,
+            row: 0,
+            scale: 160,
+            color: [7, 8, 9],
+            bg: None,
+            text: "LO".to_owned(),
+        });
+        let cut_bar = encode_bar(&BarCommand {
+            x: 20,
+            y: 0,
+            width: 20,
+            height: 16,
+            color: [10, 11, 12],
+        });
+        let overruns = encode_text_run(&TextRunCommand {
+            col: 20,
+            row: 0,
+            scale: 160,
+            color: [7, 8, 9],
+            bg: None,
+            text: "LONGISH".to_owned(),
+        });
+        let overrun_bar = encode_bar(&BarCommand {
+            x: 20,
+            y: 0,
+            width: 70,
+            height: 16,
+            color: [10, 11, 12],
+        });
+        assert!(
+            contains(scene.buffer(), &fits),
+            "the segment that fits draws"
+        );
+        assert!(
+            contains(scene.buffer(), &cut),
+            "the overrunning segment keeps the glyphs that fit"
+        );
+        assert!(
+            contains(scene.buffer(), &cut_bar),
+            "and its background bar stops with them"
+        );
+        assert!(
+            !contains(scene.buffer(), &overruns),
+            "the segment past the edge emits no whole run"
+        );
+        assert!(
+            !contains(scene.buffer(), &overrun_bar),
+            "and no background bar"
         );
     }
 
