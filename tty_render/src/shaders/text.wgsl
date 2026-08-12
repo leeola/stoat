@@ -51,6 +51,13 @@ var<storage, read> occluders: array<Occluder>;
 const KIND_MASK: u32 = 0u;
 const KIND_COLOR: u32 = 1u;
 
+// Fractions of a physical pixel a glyph instance's quad size is stored in. A
+// cell-fill glyph draws its bitmap scaled to the cell box, so the quad is
+// routinely fractional. A 16-bit fixed point at this step carries that in half
+// the bytes a pair of floats costs, which a frame rewriting the whole grid
+// pays once per visible glyph.
+const DIM_UNITS: f32 = 8.0;
+
 // True when the fragment at `frag` (physical px) lies inside a box that should
 // hide it. Under the seq test that is a box declared later (higher seq) than
 // `seq`, so a text run beneath an upper box is hidden by it. Text-run glyphs and
@@ -106,10 +113,16 @@ struct VsOut {
 fn vs_main(
     @builtin(vertex_index) vertex_index: u32,
     @location(0) pos: vec2<f32>,
-    @location(1) dim: vec2<f32>,
-    @location(2) uv: vec4<f32>,
-    @location(3) fg: vec3<f32>,
-    @location(4) kind: u32,
+    // Quad size in DIM_UNITS of a pixel, and the glyph's atlas rect in texels
+    // as an origin and a size. The rect is carried apart from the quad because
+    // the two diverge. A cell-fill glyph draws its bitmap scaled to the cell
+    // box, and a procedural one draws at the pixel-snapped cell rect.
+    @location(1) dim: vec2<u32>,
+    @location(2) texel_origin: vec2<u32>,
+    @location(3) texel_size: vec2<u32>,
+    // Color in the low three bytes, sRGB, and the atlas selector in the top
+    // one.
+    @location(4) fg: u32,
     @location(5) seq: u32,
     // Buffer slot holding the grid row `pos` is measured from. Zero for the
     // draws whose positions are already absolute, which leaves the term below
@@ -126,24 +139,29 @@ fn vs_main(
     );
     let corner = corners[vertex_index];
 
+    let quad = vec2<f32>(dim) / DIM_UNITS;
     let row_y = f32(slot_row(slot)) * globals.cell_size.y;
-    let pixel = pos + corner * dim + globals.origin_cells * globals.cell_size
+    let pixel = pos + corner * quad + globals.origin_cells * globals.cell_size
         + vec2<f32>(0.0, row_y + globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0
     );
 
+    let kind = fg >> 24u;
+
     // The instance's rectangle is in texels, which is what keeps it valid when
     // the atlas doubles under it. Normalizing here rather than in the fragment
     // costs one divide per vertex instead of one per covered pixel, and hands
     // the sampler the coordinate it wants either way.
     let atlas_size = globals.atlas_size[kind];
+    let uv_min = vec2<f32>(texel_origin);
+    let uv_max = uv_min + vec2<f32>(texel_size);
 
     var out: VsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
-    out.uv = mix(uv.xy, uv.zw, corner) / atlas_size;
-    out.fg = fg;
+    out.uv = mix(uv_min, uv_max, corner) / atlas_size;
+    out.fg = unpack4x8unorm(fg).rgb;
     out.kind = kind;
     out.seq = seq;
     return out;

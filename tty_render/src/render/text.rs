@@ -61,7 +61,19 @@ const STYLE_CURLY: u32 = 2;
 const STYLE_DOTTED: u32 = 3;
 const STYLE_DASHED: u32 = 4;
 
+/// Fraction of a physical pixel [`TextInstance::dim`] is stored in, as a shift.
+///
+/// Three bits put the quad's ceiling at 8191.875 px and its step at 0.125 px.
+/// A cell-fill glyph's quad is its bitmap scaled to the cell box, so it is
+/// routinely fractional. The atlas sampler is nearest with no subpixel
+/// variants, which leaves a step this small below what the quad resolves.
+const DIM_FRACTION_BITS: u32 = 3;
+
 /// Per-glyph instance: where to draw it, where to sample it, and how to color it.
+///
+/// Every field is packed down to what it needs, because a frame that rewrites
+/// the whole grid uploads one of these per visible glyph and the stream is the
+/// pass's dominant bandwidth cost.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct TextInstance {
@@ -70,16 +82,40 @@ struct TextInstance {
     ///
     /// Split that way so a row that moves up or down the screen leaves every
     /// glyph it holds untouched, only the row index moving with it.
+    ///
+    /// The one field left at full width. It reaches across the surface, so it
+    /// outgrows a 16-bit fixed point at the sub-pixel step the glyph placement
+    /// needs.
     pos: [f32; 2],
-    /// Glyph bitmap size in physical pixels.
-    dim: [f32; 2],
-    /// Atlas sub-rect as `[u_min, v_min, u_max, v_max]`, normalized.
-    uv: [f32; 4],
-    /// Foreground color, normalized sRGB. The glyph is emitted premultiplied by
-    /// its coverage and alpha-blends over whatever the framebuffer already holds.
-    fg: [f32; 3],
-    /// Atlas to sample: [`KIND_MASK`] or [`KIND_COLOR`].
-    kind: u32,
+    /// Quad size in [`DIM_FRACTION_BITS`]ths of a physical pixel.
+    ///
+    /// Carried apart from [`Self::texel_size`] because the two diverge. A
+    /// cell-fill glyph draws its bitmap scaled to the cell box, and a
+    /// procedural one draws at the pixel-snapped cell rect its bitmap only
+    /// approximates.
+    dim: [u16; 2],
+    /// Top-left of the glyph's atlas sub-rect, in texels.
+    ///
+    /// Texels rather than normalized coordinates so the instance survives the
+    /// atlas doubling under it. The vertex stage divides by the size the
+    /// globals carry.
+    texel_origin: [u16; 2],
+    /// Size of the glyph's atlas sub-rect, in texels, which the vertex stage
+    /// adds to [`Self::texel_origin`] to recover the far corner.
+    texel_size: [u16; 2],
+    /// Foreground color and atlas selector, packed as `0xKKBBGGRR`.
+    ///
+    /// The color occupies the low three bytes, sRGB, and the top byte holds
+    /// [`KIND_MASK`] or [`KIND_COLOR`]. The glyph is emitted premultiplied by
+    /// its coverage and alpha-blends over whatever the framebuffer already
+    /// holds, so the color never needs an alpha of its own and the byte is
+    /// free.
+    ///
+    /// The selector rides here rather than in [`Self::seq`]'s high bit to keep
+    /// `seq` a whole u32. The terminal stamps `seq` from a monotonic counter it
+    /// resets only on a reset frame, and a reserved top bit aliases the real
+    /// values a long session reaches.
+    fg: u32,
     /// Declaration-order seq the fragment shader occludes by. Text-run glyphs
     /// carry their run's seq, and every other glyph carries [`UNOCCLUDED_SEQ`].
     seq: u32,
@@ -640,9 +676,9 @@ impl TextPass {
                     step_mode: VertexStepMode::Instance,
                     attributes: &vertex_attr_array![
                         0 => Float32x2,
-                        1 => Float32x2,
-                        2 => Float32x4,
-                        3 => Float32x3,
+                        1 => Uint16x2,
+                        2 => Uint16x2,
+                        3 => Uint16x2,
                         4 => Uint32,
                         5 => Uint32,
                         6 => Uint32,
@@ -1673,12 +1709,13 @@ impl TextPass {
                 },
             };
 
+            let (texel_origin, texel_size) = pack_atlas_rect(info);
             out.push(TextInstance {
                 pos: [pos[0], pos[1] - glyph.row as f32 * self.metrics.height],
-                dim,
-                uv: info.uv,
-                fg: rgb_f32(glyph.fg),
-                kind: kind_flag(info.kind),
+                dim: pack_dim(dim),
+                texel_origin,
+                texel_size,
+                fg: pack_fg(glyph.fg, info.kind),
                 seq: UNOCCLUDED_SEQ,
                 row: rotation.slot(glyph.row) as u32,
             });
@@ -1767,6 +1804,7 @@ impl TextPass {
                     continue;
                 };
 
+                let (texel_origin, texel_size) = pack_atlas_rect(info);
                 out.push(TextInstance {
                     pos: text_run_origin(
                         col,
@@ -1777,10 +1815,10 @@ impl TextPass {
                         self.baseline,
                         self.metrics,
                     ),
-                    dim: [info.size[0] as f32, info.size[1] as f32],
-                    uv: info.uv,
-                    fg: rgb_f32(run.color),
-                    kind: kind_flag(info.kind),
+                    dim: pack_dim([info.size[0] as f32, info.size[1] as f32]),
+                    texel_origin,
+                    texel_size,
+                    fg: pack_fg(run.color, info.kind),
                     seq: run.seq,
                     // A text run is placed absolutely rather than per grid row.
                     row: 0,
@@ -2065,7 +2103,7 @@ impl TextPass {
         scale: f32,
         lines: &[String],
     ) {
-        const READOUT_FG: [f32; 3] = [0.85, 0.85, 0.9];
+        const READOUT_FG: Rgb = Rgb::new(217, 217, 230);
 
         let mut instances = Vec::new();
         for (line, text) in lines.iter().enumerate() {
@@ -2088,15 +2126,16 @@ impl TextPass {
                     continue;
                 };
                 let pen_x = anchor[0] + index as f32 * scale * self.metrics.width;
+                let (texel_origin, texel_size) = pack_atlas_rect(info);
                 instances.push(TextInstance {
                     pos: [
                         pen_x + info.placement[0] as f32,
                         baseline_y - info.placement[1] as f32,
                     ],
-                    dim: [info.size[0] as f32, info.size[1] as f32],
-                    uv: info.uv,
-                    fg: READOUT_FG,
-                    kind: kind_flag(info.kind),
+                    dim: pack_dim([info.size[0] as f32, info.size[1] as f32]),
+                    texel_origin,
+                    texel_size,
+                    fg: pack_fg(READOUT_FG, info.kind),
                     seq: UNOCCLUDED_SEQ,
                     // A readout is placed absolutely rather than per grid row.
                     row: 0,
@@ -3422,6 +3461,20 @@ fn text_run_origin(
     ]
 }
 
+/// Pack a quad size in physical pixels into [`TextInstance::dim`]'s fixed
+/// point, saturating at the 8191.875 px the field holds.
+///
+/// A quad that large covers most of a display in one glyph, so the saturation
+/// is a floor under a nonsense input rather than a limit real content meets.
+fn pack_dim(dim: [f32; 2]) -> [u16; 2] {
+    let quantize = |value: f32| {
+        (value * (1 << DIM_FRACTION_BITS) as f32)
+            .round()
+            .clamp(0.0, u16::MAX as f32) as u16
+    };
+    [quantize(dim[0]), quantize(dim[1])]
+}
+
 fn rgb_f32(color: Rgb) -> [f32; 3] {
     [
         color.r as f32 / 255.0,
@@ -3430,11 +3483,23 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
     ]
 }
 
-fn kind_flag(kind: AtlasKind) -> u32 {
-    match kind {
+/// Pack a glyph's color and the atlas it samples into [`TextInstance::fg`], as
+/// `0xKKBBGGRR`.
+fn pack_fg(color: Rgb, kind: AtlasKind) -> u32 {
+    let kind = match kind {
         AtlasKind::Mask => KIND_MASK,
         AtlasKind::Color => KIND_COLOR,
-    }
+    };
+    u32::from(color.r) | u32::from(color.g) << 8 | u32::from(color.b) << 16 | kind << 24
+}
+
+/// Pack a [`GlyphInfo`]'s atlas rect into [`TextInstance::texel_origin`] and
+/// [`TextInstance::texel_size`].
+fn pack_atlas_rect(info: GlyphInfo) -> ([u16; 2], [u16; 2]) {
+    (
+        [info.uv[0] as u16, info.uv[1] as u16],
+        [info.size[0] as u16, info.size[1] as u16],
+    )
 }
 
 /// The integer scale to rasterize a cell's glyph at, or `None` to draw no glyph.
@@ -3669,11 +3734,12 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_underline_row, cell_glyph_scale, cell_rect_scissor, cursor_cell, exposed_rows,
-        fill_cell_box, font, glyph_origin, grid_build, is_cell_fill, overlay_content_cells,
-        region_split, row_len, row_slot, slots_of_rows, text_run_origin, underline_rows_to_build,
-        visible_lines, GlyphSource, GridBuild, OverlayContent, PendingGlyph, RectInstance,
-        RowRotation, RowShaping, TextGlobals, TextInstance, TextPass, UnderlineInstance,
+        build_underline_row, cell_box_rect, cell_glyph_scale, cell_rect_scissor, cursor_cell,
+        exposed_rows, fill_cell_box, font, glyph_origin, grid_build, is_cell_fill,
+        overlay_content_cells, pack_dim, pack_fg, region_split, row_len, row_slot, slots_of_rows,
+        text_run_origin, underline_rows_to_build, visible_lines, GlyphSource, GridBuild,
+        OverlayContent, PendingGlyph, RectInstance, RowRotation, RowShaping, TextGlobals,
+        TextInstance, TextPass, UnderlineInstance, DIM_FRACTION_BITS, KIND_COLOR, KIND_MASK,
         STYLE_DOTTED,
     };
     use crate::{
@@ -3956,6 +4022,69 @@ mod tests {
         let (pos, dim) = fill_cell_box([0.0, 10.0], [8.0, 60.0], 0, 2.0, baseline, metrics);
         assert!(approx(pos, [0.0, 0.0]), "{pos:?}");
         assert!(approx(dim, [8.0, 72.0]), "fills two cells: {dim:?}");
+    }
+
+    /// The instance is uploaded once per visible glyph, so a frame that
+    /// rewrites the whole grid pays its size thousands of times over. Pinning
+    /// the size states that budget rather than leaving a field widened back
+    /// out of it unnoticed.
+    #[test]
+    fn a_glyph_instance_packs_to_thirty_two_bytes() {
+        assert_eq!(size_of::<TextInstance>(), 32);
+    }
+
+    /// A quad size travels in eighths of a pixel, which is finer than a
+    /// nearest-sampled quad resolves but coarser than the f32 it replaced.
+    /// What it must not do is wrap. An absurd size saturates at the field's
+    /// ceiling and still draws something.
+    #[test]
+    fn a_quad_size_round_trips_through_its_fixed_point() {
+        let pixels = |dim: [u16; 2]| {
+            let unit = (1 << DIM_FRACTION_BITS) as f32;
+            [f32::from(dim[0]) / unit, f32::from(dim[1]) / unit]
+        };
+
+        assert_eq!(
+            pixels(pack_dim([12.0, 36.0])),
+            [12.0, 36.0],
+            "whole pixels survive exactly"
+        );
+        assert_eq!(
+            pixels(pack_dim([8.0, 36.25])),
+            [8.0, 36.25],
+            "so does an eighth, which is what a cell-fill quad lands on"
+        );
+
+        let [_, height] = pixels(pack_dim([8.0, 36.1]));
+        assert!(
+            (height - 36.1).abs() <= 0.0625,
+            "a finer fraction lands within half a step: {height}"
+        );
+
+        assert_eq!(
+            pack_dim([1.0e9, -4.0]),
+            [u16::MAX, 0],
+            "a size past either end saturates"
+        );
+    }
+
+    /// One vertex stage reads the color word two ways. `unpack4x8unorm` takes
+    /// the channels off the low bytes, and a shift takes the atlas selector off
+    /// the top one. Both readings have to find what was packed.
+    #[test]
+    fn the_color_word_carries_the_channels_and_the_atlas_selector() {
+        let packed = pack_fg(Rgb::new(10, 20, 30), AtlasKind::Color);
+
+        assert_eq!(
+            packed.to_le_bytes(),
+            [10, 20, 30, KIND_COLOR as u8],
+            "channels in the order the unpack reads them, selector above"
+        );
+        assert_eq!(
+            pack_fg(Rgb::new(255, 255, 255), AtlasKind::Mask) >> 24,
+            KIND_MASK,
+            "a fully white glyph leaves the selector byte alone"
+        );
     }
 
     #[test]
@@ -4373,6 +4502,82 @@ mod tests {
             bytes(&refused),
             bytes(&from_stored),
             "a moved epoch means it is looked up again instead"
+        );
+    }
+
+    /// The instance hands the vertex stage an atlas origin and a size, and the
+    /// stage adds them back into the rect the atlas cut. This is that agreement,
+    /// stated on the CPU side where a change to either half is visible.
+    ///
+    /// It also pins why the size is carried at all. A procedural glyph draws at
+    /// the pixel-snapped cell rect, not at its bitmap's extent, so a quad
+    /// derived from the atlas rect takes the wrong shape for it.
+    #[test]
+    fn a_built_glyph_decodes_to_its_atlas_rect_and_color() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            eprintln!("packed instance test: no wgpu adapter available, skipping");
+            return;
+        };
+
+        let info = GlyphInfo {
+            kind: AtlasKind::Color,
+            uv: [64.0, 32.0, 80.0, 40.0],
+            size: [16, 8],
+            placement: [0, 0],
+        };
+        let pending = [PendingGlyph {
+            row: 0,
+            col: 0,
+            source: GlyphSource::Procedural {
+                cp: 0,
+                width: 16,
+                height: 8,
+            },
+            fg: Rgb::new(10, 20, 30),
+            scale: 1.0,
+            cell_fill: false,
+            info,
+            resolved_epoch: pass.atlas.content_epoch(),
+        }];
+
+        let mut built = Vec::new();
+        pass.build_text_instances_into(
+            &device,
+            &queue,
+            &pending,
+            RowRotation::unrotated(),
+            &mut built,
+        );
+        let [instance] = built[..] else {
+            panic!("one pending glyph builds one instance, got {}", built.len());
+        };
+
+        let origin = instance.texel_origin.map(f32::from);
+        let far = [
+            origin[0] + f32::from(instance.texel_size[0]),
+            origin[1] + f32::from(instance.texel_size[1]),
+        ];
+        assert_eq!(
+            [origin[0], origin[1], far[0], far[1]],
+            info.uv,
+            "origin plus size rebuilds the rect the atlas cut"
+        );
+        assert_eq!(
+            instance.fg.to_le_bytes(),
+            [10, 20, 30, KIND_COLOR as u8],
+            "the glyph's color and the atlas it samples share one word"
+        );
+
+        let (_, cell) = cell_box_rect(0, 0, 1.0, CellMetrics::from_font_size(16, 1.0));
+        assert_eq!(
+            instance.dim,
+            pack_dim(cell),
+            "a procedural glyph's quad is the snapped cell rect"
+        );
+        assert_ne!(
+            instance.dim,
+            pack_dim([16.0, 8.0]),
+            "and not its bitmap's extent, which is why the two travel apart"
         );
     }
 
