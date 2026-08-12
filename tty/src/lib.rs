@@ -5,6 +5,7 @@
 //! IO lives here -- the window, the reader thread, the event loop --
 //! keeping the renderer and terminal-core crates pure.
 
+mod anim;
 pub mod app;
 pub mod cli;
 pub mod config;
