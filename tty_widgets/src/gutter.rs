@@ -4,12 +4,7 @@ use crate::{
     text_run::{self, TextRun},
     ApcScene,
 };
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Color, Style},
-    widgets::StatefulWidget,
-};
+use ratatui::{buffer::Buffer, layout::Rect, style::Style, widgets::StatefulWidget};
 
 /// Sixteenths between the line number's right edge and the separator hairline.
 ///
@@ -266,7 +261,7 @@ impl Gutter<'_> {
                     area.x,
                     y,
                     diag.mark.encode_utf8(&mut mark),
-                    Style::default().fg(rgb(diag.color)),
+                    Style::default().fg(cells::rgb(diag.color)),
                 );
             }
 
@@ -281,7 +276,9 @@ impl Gutter<'_> {
                 y,
                 text,
                 max,
-                Style::default().fg(rgb(self.number_fg)).bg(rgb(self.bg)),
+                Style::default()
+                    .fg(cells::rgb(self.number_fg))
+                    .bg(cells::rgb(self.bg)),
             );
 
             top += line.height;
@@ -302,10 +299,6 @@ fn format_u32(buf: &mut [u8; 10], mut n: u32) -> &str {
         }
     }
     std::str::from_utf8(&buf[start..]).expect("ascii digits are valid utf-8")
-}
-
-fn rgb([r, g, b]: [u8; 3]) -> Color {
-    Color::Rgb(r, g, b)
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@ use crate::{cells, ApcScene};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     symbols::border,
     widgets::StatefulWidget,
 };
@@ -79,17 +79,17 @@ impl Popover<'_> {
     /// lines past its height and text past its width are dropped. A caller
     /// sizes the area from its own content to avoid that.
     pub fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
-        let fill = rgb(self.fill);
+        let fill = cells::rgb(self.fill);
         cells::fill(buf, area, Style::default().bg(fill));
         cells::draw_perimeter(
             buf,
             area,
             border::PLAIN,
-            Style::default().fg(rgb(self.border)).bg(fill),
+            Style::default().fg(cells::rgb(self.border)).bg(fill),
         );
 
         if area.width > 2 && area.height > 2 {
-            let mut content_style = Style::default().fg(rgb(self.content_fg)).bg(fill);
+            let mut content_style = Style::default().fg(cells::rgb(self.content_fg)).bg(fill);
             if self.bold {
                 content_style = content_style.add_modifier(Modifier::BOLD);
             }
@@ -101,10 +101,6 @@ impl Popover<'_> {
             }
         }
     }
-}
-
-fn rgb([r, g, b]: [u8; 3]) -> Color {
-    Color::Rgb(r, g, b)
 }
 
 #[cfg(test)]

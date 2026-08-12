@@ -1,10 +1,6 @@
 use crate::{cells, ApcScene};
 use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Color, Style},
-    symbols::border,
-    widgets::StatefulWidget,
+    buffer::Buffer, layout::Rect, style::Style, symbols::border, widgets::StatefulWidget,
 };
 use stoatty_protocol::command::{self, BorderStyle, PanelCommand, PanelShadow};
 
@@ -81,8 +77,7 @@ impl Panel {
             BorderStyle::Double => border::DOUBLE,
             BorderStyle::Rounded => border::ROUNDED,
         };
-        let [r, g, b] = self.border;
-        let style = Style::default().fg(Color::Rgb(r, g, b));
+        let style = Style::default().fg(cells::rgb(self.border));
 
         cells::draw_perimeter(buf, area, set, style);
     }

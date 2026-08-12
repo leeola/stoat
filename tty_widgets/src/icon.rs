@@ -1,10 +1,5 @@
 use crate::{cells, ApcScene};
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Color, Style},
-    widgets::StatefulWidget,
-};
+use ratatui::{buffer::Buffer, layout::Rect, style::Style, widgets::StatefulWidget};
 use stoatty_protocol::command::{self, IconCommand, IconKind};
 
 /// A status icon composited at a grid cell.
@@ -59,13 +54,12 @@ impl Icon {
     /// One cell at the area's top-left. [`Self::size`] and [`Self::offset`]
     /// shape the rich icon alone, so neither reaches the cell.
     pub fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
-        let [r, g, b] = self.color;
         cells::put(
             buf,
             area.x,
             area.y,
             sigil(self.kind),
-            Style::default().fg(Color::Rgb(r, g, b)),
+            Style::default().fg(cells::rgb(self.color)),
         );
     }
 }

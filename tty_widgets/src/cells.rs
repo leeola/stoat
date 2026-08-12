@@ -6,7 +6,12 @@
 //! coordinates into the sixteenths the wire commands carry, which is the other
 //! half of this module.
 
-use ratatui::{buffer::Buffer, layout::Rect, style::Style, symbols::border};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Style},
+    symbols::border,
+};
 
 /// Convert a cell coordinate plus a sub-cell `offset` into absolute sixteenths.
 ///
@@ -37,6 +42,14 @@ pub(crate) fn signed_sixteenths(offset: u16) -> i16 {
 /// span that covers everything instead of a short one that covers nothing.
 pub(crate) fn span_sixteenths(cells: u16) -> u16 {
     (u32::from(cells) * 16).min(u32::from(u16::MAX)) as u16
+}
+
+/// Convert a wire color into the ratatui [`Color`] a cell paints with.
+///
+/// The commands carry raw RGB triples, so every widget's degraded half crosses
+/// this boundary.
+pub(crate) fn rgb([r, g, b]: [u8; 3]) -> Color {
+    Color::Rgb(r, g, b)
 }
 
 /// Set the cell at (`x`, `y`) to `symbol` in `style`, ignoring an out-of-bounds
