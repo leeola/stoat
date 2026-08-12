@@ -14,7 +14,7 @@
 //! Neither thread does any of the editor's work, so terminal IO latency is
 //! independent of main-thread workload as well.
 
-use crate::vt_input;
+use crate::{render::undercurl::UndercurlStamp, vt_input};
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
@@ -189,6 +189,11 @@ async fn run(
         move || forward_input(&event_tx, crossterm::event::read)
     });
 
+    // What the terminal carries, so a frame whose squiggle is already on screen
+    // writes nothing. Lives here rather than beside the paint because only this
+    // thread knows which frames reached the terminal.
+    let mut stamp = UndercurlStamp::default();
+
     // UI-thread-local input-to-flush latency, logged periodically. The main
     // thread keeps its own PerfStats, so this needs no cross-thread channel.
     #[cfg(feature = "perf")]
@@ -225,7 +230,10 @@ async fn run(
                         {
                             input_time = src.input_time;
                         }
-                        (src.buffer.clone(), src.cursor, src.undercurl.clone())
+                        // Compared here rather than after the draw so an
+                        // unchanged squiggle never leaves the watch at all.
+                        let restamp = stamp.advance(src.buffer.area, &src.undercurl);
+                        (src.buffer.clone(), src.cursor, restamp)
                     })
                 };
                 let undercurl = match framed {
@@ -247,13 +255,15 @@ async fn run(
                         drop(buffer);
                         undercurl
                     },
-                    None => Vec::new(),
+                    None => None,
                 };
                 // Re-stamp diagnostic curly underlines over the grid just drawn,
                 // before the APC batches composite over the same stdout.
-                if !undercurl.is_empty() {
+                if let Some(bytes) = undercurl
+                    && !bytes.is_empty()
+                {
                     let mut stdout = io::stdout();
-                    stdout.write_all(&undercurl)?;
+                    stdout.write_all(bytes)?;
                     stdout.flush()?;
                 }
                 // Write any stoatty APC byte batches the app pushed for this

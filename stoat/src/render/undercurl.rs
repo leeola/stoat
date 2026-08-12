@@ -1,4 +1,4 @@
-use ratatui::{buffer::Buffer, style::Color};
+use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 use std::fmt::{self, Display, Formatter, Write};
 
 /// A run of cells to re-stamp with a severity-colored curly underline.
@@ -72,6 +72,47 @@ impl UndercurlBatch {
 
     pub(crate) fn spans_mut(&mut self) -> &mut [UndercurlSpan] {
         &mut self.spans[..self.live]
+    }
+}
+
+/// The undercurl blob the terminal already carries, so a frame that repeats a
+/// squiggle stamps nothing.
+///
+/// The squiggle is an overlay the cell diff knows nothing about, so it needs a
+/// re-stamp exactly when the diff rewrites the cells under it. Byte equality
+/// answers that question, because [`build`] encodes each stamped cell's
+/// position, colors, and symbol. Two equal blobs describe cells the diff found
+/// unchanged and left alone, and the squiggle over them survived with them.
+///
+/// This belongs to the thread that writes to the terminal, not the one that
+/// paints frames. Frames reach the writer through a watch, which drops the
+/// frames replaced before it reads, so the painting thread has no way to know
+/// which blob the terminal received. The writer compares against what it wrote.
+#[derive(Default)]
+pub(crate) struct UndercurlStamp {
+    written: Vec<u8>,
+    area: Rect,
+}
+
+impl UndercurlStamp {
+    /// The blob to write over the frame just drawn, or `None` when the terminal
+    /// already carries it.
+    ///
+    /// `area` is the drawn frame's, which joins the bytes in the comparison
+    /// because a resize drops the cell diff's baseline and repaints every cell,
+    /// taking the squiggle with it while leaving the bytes that draw it alone.
+    ///
+    /// Copies `next` only when it differs, so an unchanged frame costs the
+    /// comparison and nothing else.
+    pub(crate) fn advance(&mut self, area: Rect, next: &[u8]) -> Option<&[u8]> {
+        if self.area == area && self.written == next {
+            return None;
+        }
+
+        self.area = area;
+        self.written.clear();
+        self.written.extend_from_slice(next);
+        Some(&self.written)
     }
 }
 
@@ -200,7 +241,7 @@ impl Display for SgrBg {
 
 #[cfg(test)]
 mod tests {
-    use super::{build, snapshot_cells, UndercurlBatch, UndercurlSpan};
+    use super::{build, snapshot_cells, UndercurlBatch, UndercurlSpan, UndercurlStamp};
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
@@ -264,6 +305,82 @@ mod tests {
         snapshot_cells(&buf, &mut spans);
 
         assert_eq!(spans[0].cells.len(), 3, "one cell per column of the run");
+    }
+
+    /// One span over `abc` at the row's left edge, recorded against `buf`.
+    fn one_span(buf: &Buffer) -> [UndercurlSpan; 1] {
+        let mut spans = [UndercurlSpan {
+            x: 0,
+            y: 0,
+            len: 3,
+            color: [9, 9, 9],
+            cells: Vec::new(),
+        }];
+        snapshot_cells(buf, &mut spans);
+        spans
+    }
+
+    /// The squiggle rides over the grid rather than in it, so the cell diff
+    /// neither knows about it nor clears it. A frame whose stamped cells the
+    /// diff left alone still carries the squiggle drawn for the frame before,
+    /// and re-stamping it writes bytes the terminal already has.
+    ///
+    /// A repainted cell is the other half. The diff rewrote it and took the
+    /// squiggle with it, and the blob changed along with the cell.
+    #[test]
+    fn only_a_frame_that_lost_its_squiggle_re_stamps() {
+        let area = Rect::new(0, 0, 8, 1);
+        let mut buf = Buffer::empty(area);
+        paint(&mut buf, 0, "abc", Color::Rgb(1, 1, 1), Color::Rgb(0, 0, 0));
+        let spans = one_span(&buf);
+
+        let mut stamp = UndercurlStamp::default();
+        let first = build(&buf, &spans);
+
+        assert!(!first.is_empty(), "the span stamps a squiggle");
+        assert_eq!(
+            stamp.advance(area, &first).map(<[u8]>::to_vec),
+            Some(first.clone()),
+            "the first frame's squiggle is not on the terminal yet",
+        );
+        assert_eq!(
+            stamp.advance(area, &first),
+            None,
+            "an unchanged frame leaves the squiggle the terminal already carries",
+        );
+
+        paint(&mut buf, 1, "X", Color::Rgb(2, 2, 2), Color::Rgb(0, 0, 0));
+        let repainted = build(&buf, &one_span(&buf));
+
+        assert_ne!(repainted, first, "the repainted cell changes the blob");
+        assert_eq!(
+            stamp.advance(area, &repainted).map(<[u8]>::to_vec),
+            Some(repainted),
+            "a cell the diff rewrote lost its squiggle and needs it back",
+        );
+    }
+
+    /// A resize drops the cell diff's baseline and repaints every cell, so the
+    /// squiggle goes even though the bytes that draw it are unchanged. Nothing
+    /// in the blob records the size it was drawn against, which is why the area
+    /// is compared beside it.
+    #[test]
+    fn a_resize_re_stamps_the_same_bytes() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 1));
+        paint(&mut buf, 0, "abc", Color::Rgb(1, 1, 1), Color::Rgb(0, 0, 0));
+        let spans = one_span(&buf);
+        let bytes = build(&buf, &spans);
+
+        let mut stamp = UndercurlStamp::default();
+        stamp.advance(Rect::new(0, 0, 8, 1), &bytes);
+
+        assert_eq!(
+            stamp
+                .advance(Rect::new(0, 0, 8, 2), &bytes)
+                .map(<[u8]>::to_vec),
+            Some(bytes),
+            "the taller frame repainted every cell, squiggle included",
+        );
     }
 
     #[test]
