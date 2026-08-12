@@ -6,8 +6,8 @@ use ratatui::{
     style::{Color, Style},
     widgets::{Block, Borders, StatefulWidget, Widget},
 };
-use stoatty_protocol::command::{self, BorderStyle, PanelCommand, PanelShadow};
-use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
+use stoatty_protocol::command::{BorderStyle, PanelShadow};
+use stoatty_widgets::{bar::Bar, panel::Panel, text_run::TextRun, ApcScene};
 
 /// Cells left bare between a modal box and the edge of the area it floats over,
 /// split evenly across the two opposing edges.
@@ -163,22 +163,16 @@ fn modal_frame_inner(
 
     match style_rgb(style.fg).filter(|_| scene.live()) {
         Some(border) => {
-            command::encode_panel_into(
-                scene.buffer(),
-                &PanelCommand {
-                    top: area.y,
-                    left: area.x,
-                    width: area.width,
-                    height: area.height,
-                    style: BorderStyle::Rounded,
-                    border,
-                    corner_radius: 6,
-                    fill: None,
-                    shadow: PanelShadow::Drop,
-                    inset_x: 0,
-                    above_pools,
-                },
-            );
+            Panel {
+                style: BorderStyle::Rounded,
+                border,
+                corner_radius: 6,
+                fill: None,
+                shadow: PanelShadow::Drop,
+                inset_x: 0,
+                above_pools,
+            }
+            .draw_components(area, scene);
             if let Some(title) = title {
                 TextRun {
                     col: 16,
@@ -236,22 +230,16 @@ pub(crate) fn popout_frame(
         .filter(|_| scene.live())
     {
         Some((bg, border)) => {
-            command::encode_panel_into(
-                scene.buffer(),
-                &PanelCommand {
-                    top: area.y,
-                    left: area.x,
-                    width: area.width,
-                    height: area.height,
-                    style: BorderStyle::Light,
-                    border,
-                    corner_radius: 0,
-                    fill: Some(bg),
-                    shadow: PanelShadow::Overhang,
-                    inset_x: POPOUT_INSET_PX,
-                    above_pools: false,
-                },
-            );
+            Panel {
+                style: BorderStyle::Light,
+                border,
+                corner_radius: 0,
+                fill: Some(bg),
+                shadow: PanelShadow::Overhang,
+                inset_x: POPOUT_INSET_PX,
+                above_pools: false,
+            }
+            .draw_components(area, scene);
         },
         None => {
             if area.height >= 2 {

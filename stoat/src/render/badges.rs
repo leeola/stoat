@@ -7,8 +7,8 @@ use crate::{
     },
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
-use stoatty_protocol::command::{self, BorderStyle, PanelCommand, PanelShadow};
-use stoatty_widgets::ApcScene;
+use stoatty_protocol::command::{BorderStyle, PanelShadow};
+use stoatty_widgets::{panel::Panel, ApcScene};
 
 pub(crate) fn render_badges(
     workspace: &BadgeTray,
@@ -131,22 +131,16 @@ fn render_single_badge(
         // rect, so a rich status bar's scaled text no longer draws through the
         // badge's bottom row where the two overlap. That is accepted.
         Some(border) => {
-            command::encode_panel_into(
-                scene.buffer(),
-                &PanelCommand {
-                    top: y,
-                    left: x,
-                    width: w,
-                    height: h,
-                    style: BorderStyle::Rounded,
-                    border,
-                    corner_radius: 6,
-                    fill: None,
-                    shadow: PanelShadow::None_,
-                    inset_x: 0,
-                    above_pools: false,
-                },
-            );
+            Panel {
+                style: BorderStyle::Rounded,
+                border,
+                corner_radius: 6,
+                fill: None,
+                shadow: PanelShadow::None_,
+                inset_x: 0,
+                above_pools: false,
+            }
+            .draw_components(Rect::new(x, y, w, h), scene);
         },
         None => {
             for col in x..x + w {
@@ -290,7 +284,7 @@ fn badge_border_style(state: BadgeState, theme: &crate::theme::Theme) -> Style {
 mod tests {
     use super::*;
     use crate::{agent_status::AgentHookEvent, Stoat};
-    use stoatty_protocol::command::encode_panel;
+    use stoatty_protocol::command::{encode_panel, PanelCommand};
 
     #[test]
     fn snapshot_agent_badge_active() {
