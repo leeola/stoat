@@ -117,7 +117,9 @@ impl PolylinePass {
     ) -> PolylinePass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("polyline"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/polyline.wgsl").into()),
+            source: ShaderSource::Wgsl(
+                crate::render::with_occlusion(include_str!("../shaders/polyline.wgsl")).into(),
+            ),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -563,8 +565,10 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module =
-            wgsl::parse_str(include_str!("../shaders/polyline.wgsl")).expect("parse polyline");
+        let module = wgsl::parse_str(&crate::render::with_occlusion(include_str!(
+            "../shaders/polyline.wgsl"
+        )))
+        .expect("parse polyline");
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate polyline");

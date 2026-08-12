@@ -33,18 +33,9 @@ struct Globals {
 @group(0) @binding(0)
 var<uniform> globals: Globals;
 
-// One rect per live modal box, in whole-cell units, plus its declaration-order
-// seq. Only the static globals bound for the text-run draws carry a non-zero
-// panel_count, so grid, region, overlay, and pool draws never loop here.
-struct Occluder {
-    cell: vec2<f32>,
-    size: vec2<f32>,
-    seq: u32,
-    pad0: u32,
-    pad1: u32,
-    pad2: u32,
-}
-
+// The live modal boxes. Only the static globals bound for the text-run draws
+// carry a non-zero panel_count, so grid, region, overlay, and pool draws never
+// loop here.
 @group(0) @binding(1)
 var<storage, read> occluders: array<Occluder>;
 
@@ -66,10 +57,15 @@ fn occluded(frag: vec2<f32>, seq: u32) -> bool {
     for (var j = 0u; j < globals.panel_count; j = j + 1u) {
         let o = occluders[j];
         if globals.occlude_all == 1u || o.seq > seq {
-            let box_min = o.cell * globals.cell_size;
-            let box_max = (o.cell + o.size) * globals.cell_size;
-            if frag.x >= box_min.x && frag.x < box_max.x && frag.y >= box_min.y
-                && frag.y < box_max.y {
+            let sdf = occluder_sdf(
+                frag,
+                o.cell,
+                o.size,
+                globals.cell_size,
+                o.corner_radius,
+                o.inset_x
+            );
+            if sdf < -0.5 {
                 return true;
             }
         }

@@ -124,13 +124,19 @@ impl CellMetrics {
 /// hides the lower chrome beneath its body while a box's own runs and bars
 /// (seq above their panel) survive. Padded to 32 bytes so the storage-array
 /// stride matches the 8-byte-aligned `vec2` layout WGSL computes.
+///
+/// The radius and inset ride along because a panel does not fill the rect it
+/// declares. Occluding by the bare rect notches a square hole out of the chrome
+/// beneath each rounded corner.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, PartialEq)]
 pub(crate) struct Occluder {
     cell: [f32; 2],
     size: [f32; 2],
     seq: u32,
-    _pad: [u32; 3],
+    corner_radius: f32,
+    inset_x: f32,
+    _pad: u32,
 }
 
 /// One pool's instances for a composite draw.
@@ -463,9 +469,24 @@ fn panel_occluder(panel: &Panel) -> Occluder {
         cell: [panel.left as f32, panel.top as f32],
         size: [panel.width as f32, panel.height as f32],
         seq: panel.seq,
-        _pad: [0; 3],
+        corner_radius: panel.corner_radius as f32,
+        inset_x: panel.inset_x as f32,
+        _pad: 0,
     }
 }
+
+/// Prepend the shared occlusion geometry to a pass's own WGSL.
+///
+/// WGSL has no include, and every pass that hides fragments under a modal box
+/// needs the same occluder layout and the same rounded-box distance function.
+/// One definition keeps the passes from drifting apart on the shape they
+/// occlude by, which is the drift that leaves square notches at a rounded
+/// corner.
+pub(crate) fn with_occlusion(body: &str) -> String {
+    format!("{OCCLUSION_WGSL}\n{body}")
+}
+
+const OCCLUSION_WGSL: &str = include_str!("shaders/occlusion.wgsl");
 
 /// The `[width, height]` of one cell, in pixels, for `font_size` at
 /// `scale_factor`.

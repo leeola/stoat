@@ -124,13 +124,6 @@ fn vs_main(
     return out;
 }
 
-// Signed distance to a rounded rectangle of half-size `half` and corner radius
-// `r` centered at the origin, negative inside.
-fn rounded_box_sdf(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
-    let q = abs(p) - half + vec2<f32>(r, r);
-    return min(max(q.x, q.y), 0.0) + length(max(q, vec2<f32>(0.0, 0.0))) - r;
-}
-
 // Anti-aliased coverage of a stroke `d` pixels from its centerline, weighted by
 // the border style: a heavy line is thicker, a double line is two parallel
 // hairlines, and light and rounded are a single hairline.
@@ -157,11 +150,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let base = j * INSTANCE_STRIDE;
         let cell_j = vec2<f32>(instances[base], instances[base + 1u]);
         let size_j = vec2<f32>(instances[base + 2u], instances[base + 3u]);
-        let inset_j = instances[base + 16u];
-        let box_min = cell_j * globals.cell_size + vec2<f32>(inset_j, 0.0);
-        let box_max = (cell_j + size_j) * globals.cell_size - vec2<f32>(inset_j, 0.0);
-        if frag.x >= box_min.x && frag.x < box_max.x && frag.y >= box_min.y
-            && frag.y < box_max.y {
+        let sdf = occluder_sdf(
+            frag,
+            cell_j,
+            size_j,
+            globals.cell_size,
+            instances[base + 13u],
+            instances[base + 16u]
+        );
+        if sdf < -0.5 {
             discard;
         }
     }

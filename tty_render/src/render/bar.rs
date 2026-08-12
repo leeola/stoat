@@ -110,7 +110,9 @@ impl BarPass {
     pub(crate) fn new(device: &Device, format: TextureFormat, metrics: CellMetrics) -> BarPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("bar"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/bar.wgsl").into()),
+            source: ShaderSource::Wgsl(
+                crate::render::with_occlusion(include_str!("../shaders/bar.wgsl")).into(),
+            ),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -531,7 +533,10 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(include_str!("../shaders/bar.wgsl")).expect("parse bar");
+        let module = wgsl::parse_str(&crate::render::with_occlusion(include_str!(
+            "../shaders/bar.wgsl"
+        )))
+        .expect("parse bar");
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate bar");

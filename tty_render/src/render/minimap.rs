@@ -111,7 +111,9 @@ impl MinimapPass {
     pub(crate) fn new(device: &Device, format: TextureFormat, metrics: CellMetrics) -> MinimapPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("minimap"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/minimap.wgsl").into()),
+            source: ShaderSource::Wgsl(
+                crate::render::with_occlusion(include_str!("../shaders/minimap.wgsl")).into(),
+            ),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -558,10 +560,13 @@ fn rgb_opaque_f32(color: [u8; 3]) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::{build_strip, minimap_top, thumb_geometry, MinimapPass, MIN_THUMB_PX};
-    use crate::{gpu::headless_device, render::CellMetrics};
+    use crate::{
+        gpu::headless_device,
+        render::{panel_occluder, CellMetrics, Occluder},
+    };
     use std::collections::HashMap;
     use stoatty_protocol::command::{LineSummary, MinimapCommand, MinimapRun};
-    use stoatty_term::grid::{Grid, Minimap, MinimapView};
+    use stoatty_term::grid::{BorderStyle, Grid, Minimap, MinimapView, Panel, PanelShadow, Rgb};
     use wgpu::{
         naga::{
             front::wgsl,
@@ -620,8 +625,10 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module =
-            wgsl::parse_str(include_str!("../shaders/minimap.wgsl")).expect("parse minimap");
+        let module = wgsl::parse_str(&crate::render::with_occlusion(include_str!(
+            "../shaders/minimap.wgsl"
+        )))
+        .expect("parse minimap");
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate minimap");
@@ -774,9 +781,21 @@ mod tests {
     ///
     /// Red alone because every fixture paints in pure red over black, so the
     /// byte at a pixel is the coverage the shader resolved there.
-    fn render_red(device: &Device, queue: &Queue, grid: &Grid, metrics: CellMetrics) -> Vec<u8> {
+    fn render_red(
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        occluders: &[Occluder],
+        metrics: CellMetrics,
+    ) -> Vec<u8> {
         let mut pass = MinimapPass::new(device, TextureFormat::Rgba8Unorm, metrics);
-        pass.prepare(device, queue, grid, &[], [TARGET as f32, TARGET as f32]);
+        pass.prepare(
+            device,
+            queue,
+            grid,
+            occluders,
+            [TARGET as f32, TARGET as f32],
+        );
 
         let size = Extent3d {
             width: TARGET,
@@ -905,7 +924,7 @@ mod tests {
         };
         let grid = red_grid(red_strip(1, 1, 1, 12), vec![vec![run]], None);
 
-        let red = render_red(&device, &queue, &grid, metrics());
+        let red = render_red(&device, &queue, &grid, &[], metrics());
         let at = |x: u32, y: u32| red[(y * TARGET + x) as usize];
 
         assert!(
@@ -918,6 +937,53 @@ mod tests {
             0,
             "and the run does not smear into the next column"
         );
+    }
+
+    /// A panel draws rounded corners, so the chrome beneath a corner is outside
+    /// the body even while it sits inside the declared rect. Occluding by the
+    /// rect notches a square hole out of that chrome.
+    #[test]
+    fn a_rounded_corner_keeps_the_chrome_beneath_it() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("minimap occlusion test: no wgpu adapter, skipping");
+            return;
+        };
+
+        // A 4x2-cell strip is 24 by 24 pixels under a 6x12 cell, so a radius of
+        // 8 rounds well inside its 12-pixel half-extent.
+        let mut command = red_strip(4, 2, 1, 12);
+        command.bg = [255, 0, 0, 255];
+        let grid = red_grid(command, vec![Vec::new()], None);
+
+        let panel = Panel {
+            top: 0,
+            left: 0,
+            width: 4,
+            height: 2,
+            style: BorderStyle::Rounded,
+            border: Rgb::new(0, 0, 0),
+            corner_radius: 8,
+            fill: None,
+            shadow: PanelShadow::Drop,
+            inset_x: 0,
+            above_pools: false,
+            // Above the strip's own seq, which is what makes it occlude.
+            seq: 1,
+        };
+        let occluders: [Occluder; 1] = [panel_occluder(&panel)];
+
+        let red = render_red(&device, &queue, &grid, &occluders, metrics());
+        let at = |x: u32, y: u32| red[(y * TARGET + x) as usize];
+
+        // A pixel a cell and a half in from the corner sits a clear pixel and a
+        // half inside the declared rect, and a clear pixel outside the rounded
+        // body. The half-pixel ring the threshold spares reaches neither.
+        assert_eq!(
+            at(1, 1),
+            255,
+            "the corner is rounded away, so the strip survives under it"
+        );
+        assert_eq!(at(12, 12), 0, "and the body itself still hides the strip");
     }
 
     /// A fractional scroll used to carry every block across pixel centers, so
@@ -947,7 +1013,7 @@ mod tests {
                 visible: 24,
             };
             let grid = red_grid(red_strip(1, 4, 6, 12), content.clone(), Some(view));
-            let red = render_red(&device, &queue, &grid, metrics());
+            let red = render_red(&device, &queue, &grid, &[], metrics());
             // Column 2 sits inside the full-width run, so only the vertical
             // axis is fractional there.
             [7u32, 8, 9].map(|y| u32::from(red[(y * TARGET + 2) as usize]))
