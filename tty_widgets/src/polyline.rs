@@ -26,22 +26,18 @@ pub struct Polyline {
 impl StatefulWidget for Polyline {
     type State = ApcScene;
 
-    fn render(self, area: Rect, _buf: &mut Buffer, scene: &mut ApcScene) {
-        let points = self
-            .points
-            .iter()
-            .map(|p| {
-                [
-                    cells::to_sixteenths(area.x, p[0]),
-                    cells::to_sixteenths(area.y, p[1]),
-                ]
-            })
-            .collect();
+    fn render(mut self, area: Rect, _buf: &mut Buffer, scene: &mut ApcScene) {
+        for point in &mut self.points {
+            *point = [
+                cells::to_sixteenths(area.x, point[0]),
+                cells::to_sixteenths(area.y, point[1]),
+            ];
+        }
 
         command::encode_polyline_into(
             scene.buffer(),
             &PolylineCommand {
-                points,
+                points: self.points,
                 width: self.width,
                 color: self.color,
             },
