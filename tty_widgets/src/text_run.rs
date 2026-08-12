@@ -15,10 +15,12 @@ use stoatty_protocol::command::{self, TextRunCommand};
 /// `text` is borrowed so a caller can pass a slice of a reused buffer (a gutter
 /// formats line numbers into a stack buffer) rather than own a string per frame.
 pub struct TextRun<'a> {
-    /// Left anchor in sixteenths, from the area's left.
-    pub col: u16,
-    /// Row anchor in sixteenths, from the area's top.
-    pub row: u16,
+    /// Left anchor in sixteenths, from the area's left. A negative value
+    /// starts the run left of the area.
+    pub col: i16,
+    /// Row anchor in sixteenths, from the area's top. A negative value lifts
+    /// the run above the area.
+    pub row: i16,
     /// Glyph size in 256ths of the cell size.
     pub scale: u16,
     pub color: [u8; 3],
@@ -80,5 +82,35 @@ mod tests {
             text: "42".to_owned(),
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn a_negative_anchor_overhangs_the_area() {
+        let mut scene = ApcScene::new();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
+
+        TextRun {
+            col: -8,
+            row: -16,
+            scale: 160,
+            color: [99, 109, 131],
+            bg: Some([40, 44, 52]),
+            text: "42",
+        }
+        .render(Rect::new(3, 5, 2, 1), &mut buf, &mut scene);
+
+        let expected = encode_text_run(&TextRunCommand {
+            col: 3 * 16 - 8,
+            row: 5 * 16 - 16,
+            scale: 160,
+            color: [99, 109, 131],
+            bg: Some([40, 44, 52]),
+            text: "42".to_owned(),
+        });
+        assert_eq!(
+            scene.buffer().as_slice(),
+            expected.as_slice(),
+            "the run starts left of and above the area origin"
+        );
     }
 }

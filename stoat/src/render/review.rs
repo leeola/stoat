@@ -610,7 +610,7 @@ pub(crate) fn paint_diff_rows(
         {
             if sep < inner.x + inner.width {
                 Bar {
-                    x: (sep - inner.x) * 16 + 8,
+                    x: ((sep - inner.x) * 16 + 8) as i16,
                     y: 0,
                     width: 1,
                     height,
@@ -1327,7 +1327,7 @@ pub(crate) fn render_review_rows(
     if let Some(rg) = rich.as_mut() {
         let sep_x = inner.x + half_w as u16;
         Bar {
-            x: (sep_x - inner.x) * 16 + 8,
+            x: ((sep_x - inner.x) * 16 + 8) as i16,
             y: 0,
             width: 1,
             height: (end_row - scroll_row) as u16 * 16,
@@ -1357,8 +1357,8 @@ fn draw_status_gutter(
         Some(rg) => {
             if let Some(color) = status_bar_color(status, is_current, &rg.colors) {
                 Bar {
-                    x: (col - inner.x) * 16,
-                    y: (y - inner.y) * 16,
+                    x: ((col - inner.x) * 16) as i16,
+                    y: ((y - inner.y) * 16) as i16,
                     width: 6,
                     height: 16,
                     color,
@@ -1390,8 +1390,8 @@ fn draw_side_num(
             let digits = scratch.len() as u16;
             let right_edge = (num_x - inner.x + 4) * 16;
             TextRun {
-                col: right_edge.saturating_sub(digits * TEXT_SCALE_COMPACT / 16),
-                row: (y - inner.y) * 16,
+                col: right_edge.saturating_sub(digits * TEXT_SCALE_COMPACT / 16) as i16,
+                row: ((y - inner.y) * 16) as i16,
                 scale: TEXT_SCALE_COMPACT,
                 color: rg.colors.dim,
                 bg: Some(rg.colors.bg),
@@ -1556,8 +1556,8 @@ fn draw_diff_num(
             let digits = scratch.len() as u16;
             let right_edge = (num_x - inner.x + 4) * 16;
             TextRun {
-                col: right_edge.saturating_sub(digits * TEXT_SCALE_COMPACT / 16),
-                row: (y - inner.y) * 16,
+                col: right_edge.saturating_sub(digits * TEXT_SCALE_COMPACT / 16) as i16,
+                row: ((y - inner.y) * 16) as i16,
                 scale: TEXT_SCALE_COMPACT,
                 color: rg.colors.dim,
                 bg: Some(rg.colors.bg),
@@ -1594,8 +1594,8 @@ fn draw_diff_status(
             } else {
                 rg.colors.unstaged
             };
-            let x0 = (status_x - inner.x) * 16;
-            let y0 = (y - inner.y) * 16;
+            let x0 = ((status_x - inner.x) * 16) as i16;
+            let y0 = ((y - inner.y) * 16) as i16;
             Bar {
                 x: x0,
                 y: y0,

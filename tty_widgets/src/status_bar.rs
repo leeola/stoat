@@ -129,6 +129,8 @@ impl StatusBar<'_> {
         buf: &mut Buffer,
         scene: &mut ApcScene,
     ) {
+        let x = cells::signed_sixteenths(x);
+
         if seg.bg != self.bg {
             Bar {
                 x,

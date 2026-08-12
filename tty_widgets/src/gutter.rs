@@ -147,8 +147,8 @@ impl Gutter<'_> {
     /// and would double under the components inside a rich terminal.
     pub fn draw_components(&self, area: Rect, buf: &mut Buffer, scene: &mut ApcScene) {
         let number_right = self.number_right_edge();
-        let git_x = self.git_x();
-        let staged_x = self.staged_x();
+        let git_x = cells::signed_sixteenths(self.git_x());
+        let staged_x = cells::signed_sixteenths(self.staged_x());
 
         let limit = cells::span_sixteenths(area.height);
 
@@ -159,13 +159,16 @@ impl Gutter<'_> {
                 break;
             }
             let remaining = limit - y;
+            let row = cells::signed_sixteenths(y);
 
             let mut digits = [0u8; 10];
             let text = format_u32(&mut digits, line.number);
-            let col = number_right.saturating_sub(self.number_advance(text.len()));
+            let col = cells::signed_sixteenths(
+                number_right.saturating_sub(self.number_advance(text.len())),
+            );
             TextRun {
                 col,
-                row: y,
+                row,
                 scale: self.number_scale,
                 color: self.number_fg,
                 bg: Some(self.bg),
@@ -176,7 +179,7 @@ impl Gutter<'_> {
             if let Some(diag) = line.diagnostic {
                 Bar {
                     x: 0,
-                    y,
+                    y: row,
                     width: self.bar_width,
                     height: cells::span_sixteenths(line.height).min(remaining),
                     color: diag.color,
@@ -186,7 +189,7 @@ impl Gutter<'_> {
             if let Some(git) = line.git {
                 Bar {
                     x: git_x,
-                    y,
+                    y: row,
                     width: self.bar_width,
                     height: (if git.seam { 6 } else { 16 }).min(remaining),
                     color: git.color,
@@ -194,7 +197,7 @@ impl Gutter<'_> {
                 .render(area, buf, scene);
                 Bar {
                     x: staged_x,
-                    y,
+                    y: row,
                     width: self.bar_width,
                     height: cells::span_sixteenths(line.height).min(remaining),
                     color: git.staged_color,
@@ -206,7 +209,7 @@ impl Gutter<'_> {
         }
 
         Bar {
-            x: self.separator_x(),
+            x: cells::signed_sixteenths(self.separator_x()),
             y: 0,
             width: 1,
             height: cells::span_sixteenths(self.total_rows().min(area.height)),

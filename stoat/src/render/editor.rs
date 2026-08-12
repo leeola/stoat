@@ -298,7 +298,7 @@ pub(crate) fn render_editor_with_overlay(
                     };
                     Bar {
                         x: 0,
-                        y: row_offset * 16,
+                        y: (row_offset * 16) as i16,
                         width: 6,
                         height: 16,
                         color,

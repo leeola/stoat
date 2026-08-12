@@ -11,9 +11,11 @@ use stoatty_protocol::command::{self, BarCommand};
 /// live font zoom. There is no cell fallback: a bar is inherently sub-cell.
 pub struct Bar {
     /// Left edge in sixteenths, along the cell width, from the area's left.
-    pub x: u16,
+    /// A negative value overhangs the area to the left.
+    pub x: i16,
     /// Top edge in sixteenths, along the cell height, from the area's top.
-    pub y: u16,
+    /// A negative value overhangs the area above.
+    pub y: i16,
     pub width: u16,
     pub height: u16,
     pub color: [u8; 3],
@@ -68,5 +70,33 @@ mod tests {
             color: [10, 20, 30],
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn a_negative_anchor_overhangs_the_area() {
+        let mut scene = ApcScene::new();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
+
+        Bar {
+            x: -4,
+            y: -16,
+            width: 5,
+            height: 16,
+            color: [10, 20, 30],
+        }
+        .render(Rect::new(2, 4, 1, 1), &mut buf, &mut scene);
+
+        let expected = encode_bar(&BarCommand {
+            x: 2 * 16 - 4,
+            y: 4 * 16 - 16,
+            width: 5,
+            height: 16,
+            color: [10, 20, 30],
+        });
+        assert_eq!(
+            scene.buffer().as_slice(),
+            expected.as_slice(),
+            "the bar sits left of and above the area origin"
+        );
     }
 }

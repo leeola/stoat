@@ -22,6 +22,15 @@ pub(crate) fn to_sixteenths(cell: u16, offset: impl Into<i32>) -> i16 {
     total.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
 
+/// Narrow a sixteenths offset computed in u16 to the signed anchor the wire
+/// commands carry.
+///
+/// Saturates rather than wrapping, because a wrapped offset reads as a large
+/// negative one and throws the element to the far side of the surface.
+pub(crate) fn signed_sixteenths(offset: u16) -> i16 {
+    offset.min(i16::MAX as u16) as i16
+}
+
 /// Convert a whole-cell width or height into sixteenths.
 ///
 /// Saturates rather than wrapping, so an implausibly tall surface yields a
@@ -87,7 +96,7 @@ pub(crate) fn fill(buf: &mut Buffer, area: Rect, style: Style) {
 
 #[cfg(test)]
 mod tests {
-    use super::{advance_sixteenths, span_sixteenths, to_sixteenths};
+    use super::{advance_sixteenths, signed_sixteenths, span_sixteenths, to_sixteenths};
 
     #[test]
     fn an_anchor_past_i16_clamps_to_the_edge() {
@@ -95,6 +104,13 @@ mod tests {
         assert_eq!(to_sixteenths(2048, 0u16), i16::MAX, "one cell further");
         assert_eq!(to_sixteenths(u16::MAX, u16::MAX), i16::MAX, "and far past");
         assert_eq!(to_sixteenths(0, i16::MIN), i16::MIN, "a nudge off the left");
+    }
+
+    #[test]
+    fn an_offset_past_i16_clamps_to_the_edge() {
+        assert_eq!(signed_sixteenths(32767), i16::MAX, "the last exact offset");
+        assert_eq!(signed_sixteenths(32768), i16::MAX, "one sixteenth further");
+        assert_eq!(signed_sixteenths(u16::MAX), i16::MAX, "and a saturated one");
     }
 
     #[test]
