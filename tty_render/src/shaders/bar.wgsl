@@ -49,14 +49,20 @@ fn vs_main(
     let corner = corners[vertex_index];
 
     // Snap both edges to whole pixels so a bar shares exact integer boundaries
-    // with the cell grid beneath it, which bg.wgsl snaps the same way. Cell size
-    // is fractional at most font sizes, so an unsnapped bar drifts up to a pixel
-    // off its row. Each edge is floored a pixel apart so a sub-pixel bar (the
-    // hairline separator is 1/16 of a cell) never rounds away to nothing.
-    let shifted = origin + vec2<f32>(0.0, globals.shift_rows);
-    let min_px = round(shifted * globals.cell_size);
+    // with the cell grid beneath it. Cell size is fractional at most font sizes,
+    // so an unsnapped bar drifts up to a pixel off its row. Each edge is floored
+    // a pixel apart so a sub-pixel bar (the hairline separator is 1/16 of a
+    // cell) never rounds away to nothing.
+    //
+    // The glide is added after the snap, which is the ordering bg.wgsl uses for
+    // its own scroll. Rounding the shifted origin instead crosses pixel
+    // boundaries at a different phase than the rows the bars annotate, so a
+    // gliding pool's hairlines wobble a pixel against their content and settle
+    // only once it stops.
+    let shift_px = vec2<f32>(0.0, globals.shift_rows * globals.cell_size.y);
+    let min_px = round(origin * globals.cell_size) + shift_px;
     let max_px = max(
-        round((shifted + size) * globals.cell_size),
+        round((origin + size) * globals.cell_size) + shift_px,
         min_px + vec2<f32>(1.0, 1.0)
     );
     let pixel = min_px + corner * (max_px - min_px);

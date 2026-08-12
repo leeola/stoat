@@ -507,15 +507,181 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::{build_bar_instances_into, BarInstance, BarPass};
-    use crate::{gpu::headless_device, render::CellMetrics};
-    use stoatty_term::grid::{Bar, Rgb};
+    use crate::{
+        gpu::headless_device,
+        render::{background::BackgroundPass, CellMetrics},
+    };
+    use stoatty_term::grid::{Bar, Grid, Rgb};
     use wgpu::{
         naga::{
             front::wgsl,
             valid::{Capabilities, ValidationFlags, Validator},
         },
-        TextureFormat,
+        BufferDescriptor, BufferUsages, Color, CommandEncoderDescriptor, Device, Extent3d, LoadOp,
+        MapMode, Operations, Origin3d, PollType, Queue, RenderPass, RenderPassColorAttachment,
+        RenderPassDescriptor, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout,
+        TexelCopyTextureInfo, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
+        TextureUsages, TextureViewDescriptor,
     };
+
+    /// The square readback target's edge, in pixels. Four bytes a texel makes a
+    /// row exactly the 256-byte copy alignment, so the readback needs no stride
+    /// padding.
+    const TARGET: u32 = 64;
+
+    /// Draw whatever `record` records onto a black [`TARGET`]-square target, and
+    /// report the topmost row painting any red.
+    ///
+    /// Both fixtures paint pure red over black, so that row is the top edge the
+    /// pass resolved.
+    fn first_red_row(
+        device: &Device,
+        queue: &Queue,
+        record: impl FnOnce(&mut RenderPass<'_>),
+    ) -> Option<u32> {
+        let size = Extent3d {
+            width: TARGET,
+            height: TARGET,
+            depth_or_array_layers: 1,
+        };
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("bar glide target"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&TextureViewDescriptor::default());
+        let readback = device.create_buffer(&BufferDescriptor {
+            label: Some("bar glide readback"),
+            size: u64::from(TARGET) * u64::from(TARGET) * 4,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("bar glide"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(Color::BLACK),
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            record(&mut render_pass);
+        }
+        encoder.copy_texture_to_buffer(
+            TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(TARGET * 4),
+                    rows_per_image: None,
+                },
+            },
+            size,
+        );
+        queue.submit(Some(encoder.finish()));
+
+        readback.slice(..).map_async(MapMode::Read, |_| {});
+        device
+            .poll(PollType::wait_indefinitely())
+            .expect("poll readback");
+        let rgba = readback.slice(..).get_mapped_range().to_vec();
+
+        (0..TARGET).find(|row| (0..TARGET).any(|col| rgba[((row * TARGET + col) * 4) as usize] > 0))
+    }
+
+    /// A gliding pool moves its cells and its bars by the same shift, so a bar
+    /// that rounds the shifted origin crosses pixel boundaries at a different
+    /// phase than the row it annotates and wobbles a pixel against it.
+    #[test]
+    fn a_gliding_bar_lands_on_the_row_it_annotates() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("bar glide test: no wgpu adapter, skipping");
+            return;
+        };
+
+        // The cell height must be fractional, or rounding is the identity and
+        // either ordering agrees. Row 1 sits at 12.5 and the shift is a further
+        // 1.25 pixels, which is enough that snapping before and after the shift
+        // land the top edge on different pixel rows.
+        //
+        // Which row is not asserted. The two passes rounding alike is the
+        // property, and a pinned row pins the shader language's rounding mode
+        // along with it.
+        let metrics = CellMetrics {
+            font_size: 10.0,
+            width: 12.0,
+            height: 12.5,
+            scale_factor: 1.0,
+        };
+        let shift_rows = 1.25 / 12.5;
+        let resolution = [TARGET as f32, TARGET as f32];
+        let red = Rgb::new(255, 0, 0);
+
+        let mut grid = Grid::new(4, 4);
+        grid.get_mut(1, 0).bg = red;
+        let mut cells = BackgroundPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
+        cells.prepare_composite(
+            &device,
+            &queue,
+            &grid,
+            &[],
+            resolution,
+            shift_rows,
+            true,
+            0,
+            0,
+        );
+        let cell_row = first_red_row(&device, &queue, |pass| cells.draw_composite(pass, 0, 0));
+
+        let bar = Bar {
+            x: 0,
+            y: 16,
+            width: 16,
+            height: 16,
+            color: red,
+            seq: 0,
+        };
+        let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
+        bars.prepare_composite(
+            &device,
+            &queue,
+            &[bar],
+            &[],
+            resolution,
+            shift_rows,
+            true,
+            0,
+            0,
+        );
+        let bar_row = first_red_row(&device, &queue, |pass| bars.draw_composite(pass, 0, 0));
+
+        assert!(cell_row.is_some(), "the shifted cell row paints something");
+        assert_eq!(
+            bar_row, cell_row,
+            "and the bar on that row starts from the same pixel"
+        );
+    }
 
     /// The vertex stage's shift, mirrored here so a test can check the origins it
     /// builds still land where the baked-in shift used to put them.
