@@ -1,7 +1,9 @@
 use crate::multi_buffer::MultiBufferSnapshot;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use stoat_text::{next_char_boundary, prev_char_boundary, Anchor, Bias, Selection, SelectionGoal};
+use stoat_text::{
+    next_char_boundaries_batch, prev_char_boundary, Anchor, Bias, Selection, SelectionGoal,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SelectionsCollection {
@@ -490,12 +492,19 @@ impl SelectionsCollection {
         // without asking. An endpoint already on a boundary keeps the anchor it
         // came with rather than being rebuilt into an equivalent one.
         let rope = snapshot.rope();
+        let snapped = {
+            let requests: Vec<(usize, Bias)> = offsets
+                .chunks_exact(2)
+                .flat_map(|span| [(span[0], Bias::Left), (span[1], Bias::Right)])
+                .collect();
+            rope.clip_to_grapheme_boundaries_batch(&requests)
+        };
+
         let mut indexed: Vec<Resolved> = new_disjoint
             .into_iter()
-            .zip(offsets.chunks_exact(2))
-            .map(|(mut selection, span)| {
-                let start = rope.clip_to_grapheme_boundary(span[0], Bias::Left);
-                let end = rope.clip_to_grapheme_boundary(span[1], Bias::Right);
+            .zip(offsets.chunks_exact(2).zip(snapped.chunks_exact(2)))
+            .map(|(mut selection, (span, snapped))| {
+                let (start, end) = (snapped[0], snapped[1]);
                 if start != span[0] {
                     selection.start = snapshot.anchor_at(start, Bias::Left);
                 }
@@ -607,12 +616,17 @@ impl SelectionsCollection {
         snapshot: &MultiBufferSnapshot,
     ) {
         let rope = snapshot.rope();
+        let forwards = {
+            let starts: Vec<usize> = landings.iter().map(|&(_, start, _)| start).collect();
+            next_char_boundaries_batch(rope, &starts)
+        };
+
         self.land_from_offsets(snapshot, |sel| {
             let found = landings
                 .binary_search_by_key(&sel.id, |(id, _, _)| *id)
                 .ok()?;
             let (_, start, goal) = landings[found];
-            let forward = next_char_boundary(rope, start);
+            let forward = forwards[found];
             // Nothing after the landing means it is on the end of the rope,
             // where `end_cell` decides between the character before it and no
             // character at all.
@@ -717,10 +731,16 @@ impl SelectionsCollection {
             })
             .collect();
 
-        let rope = snapshot.rope();
-        for entry in &mut entries {
-            let start = rope.clip_to_grapheme_boundary(entry.start, Bias::Left);
-            let end = rope.clip_to_grapheme_boundary(entry.end, Bias::Right);
+        let snapped = {
+            let requests: Vec<(usize, Bias)> = entries
+                .iter()
+                .flat_map(|entry| [(entry.start, Bias::Left), (entry.end, Bias::Right)])
+                .collect();
+            snapshot.rope().clip_to_grapheme_boundaries_batch(&requests)
+        };
+
+        for (entry, snapped) in entries.iter_mut().zip(snapped.chunks_exact(2)) {
+            let (start, end) = (snapped[0], snapped[1]);
             // A clipped endpoint is not where its anchor said, so it gets a new
             // one. An unclipped one keeps whatever it arrived with.
             entry.keep = entry
@@ -956,7 +976,7 @@ mod tests {
         multi_buffer::MultiBuffer,
     };
     use std::sync::{Arc, RwLock};
-    use stoat_text::Bias;
+    use stoat_text::{next_char_boundary, Bias};
 
     /// The recorded primary is only right while every path that changes the set
     /// goes through the one place that records it. A mutator that assigned the

@@ -1143,6 +1143,136 @@ impl Rope {
         results
     }
 
+    /// [`Self::next_grapheme_boundary`] for every offset, in one forward walk
+    /// of the tree.
+    ///
+    /// Forward mirror of [`Self::prev_grapheme_boundaries_batch`], with the
+    /// same equivalence to the scalar call and the same fallback to it for an
+    /// offset the chunk in hand leaves unsettled.
+    pub fn next_grapheme_boundaries_batch(&self, offsets: &[usize]) -> Vec<usize> {
+        let ascending_order: Option<Vec<usize>> = (!offsets.is_sorted()).then(|| {
+            let mut order: Vec<usize> = (0..offsets.len()).collect();
+            order.sort_unstable_by_key(|&i| offsets[i]);
+            order
+        });
+
+        let mut results = vec![0usize; offsets.len()];
+        let mut cursor = self.chunks.cursor::<usize>(());
+        let len = self.len();
+
+        for step in 0..offsets.len() {
+            let original_idx = match &ascending_order {
+                Some(order) => order[step],
+                None => step,
+            };
+            let offset = offsets[original_idx];
+
+            cursor.seek_forward(&offset, Bias::Right);
+            let chunk_start = *cursor.start();
+            let settled = cursor.item().and_then(|chunk| {
+                let text = chunk.text.as_str();
+                let local = offset.checked_sub(chunk_start)?;
+                if local > text.len() || !text.is_char_boundary(local) {
+                    return None;
+                }
+                if ascii_pair_breaks(text.as_bytes(), local + 1) {
+                    return Some(offset + 1);
+                }
+                match GraphemeCursor::new(offset, len, true).next_boundary(text, chunk_start) {
+                    Ok(Some(boundary)) => Some(boundary),
+                    _ => None,
+                }
+            });
+
+            results[original_idx] = match settled {
+                Some(boundary) => boundary,
+                None => self.next_grapheme_boundary(offset),
+            };
+        }
+        results
+    }
+
+    /// [`Self::clip_to_grapheme_boundary`] for every request, in one forward
+    /// walk of the tree.
+    ///
+    /// Answers exactly what the scalar call answers, request for request. A
+    /// caller snapping both endpoints of a few hundred selections otherwise
+    /// descends from the root twice per selection.
+    ///
+    /// One walk serves both biases. The clip's own pre-step is always
+    /// [`Bias::Left`], and the bias picks only which way an offset that has
+    /// landed inside a cluster escapes it. So the walk decides on-boundary for
+    /// every request, and only the offsets inside a cluster are split by bias
+    /// and stepped through the two directional batches.
+    ///
+    /// The walk only goes forward, so the requests are visited in ascending
+    /// offset order and only input that is actually out of order pays for a
+    /// permutation. A request the chunk in hand leaves unsettled falls back to
+    /// the scalar call.
+    pub fn clip_to_grapheme_boundaries_batch(&self, requests: &[(usize, Bias)]) -> Vec<usize> {
+        let ascending_order: Option<Vec<usize>> =
+            (!requests.is_sorted_by_key(|&(offset, _)| offset)).then(|| {
+                let mut order: Vec<usize> = (0..requests.len()).collect();
+                order.sort_unstable_by_key(|&i| requests[i].0);
+                order
+            });
+
+        let mut results = vec![0usize; requests.len()];
+        let mut left_escapes: Vec<usize> = Vec::new();
+        let mut right_escapes: Vec<usize> = Vec::new();
+        let mut cursor = self.chunks.cursor::<usize>(());
+        let len = self.len();
+
+        for step in 0..requests.len() {
+            let original_idx = match &ascending_order {
+                Some(order) => order[step],
+                None => step,
+            };
+            let (offset, bias) = requests[original_idx];
+
+            cursor.seek_forward(&offset, Bias::Right);
+            let chunk_start = *cursor.start();
+            let on_boundary = cursor.item().and_then(|chunk| {
+                let text = chunk.text.as_str();
+                let local = offset.checked_sub(chunk_start)?;
+                if local > text.len() || !text.is_char_boundary(local) {
+                    return None;
+                }
+                if offset == 0 || offset >= len || ascii_pair_breaks(text.as_bytes(), local) {
+                    return Some(true);
+                }
+                GraphemeCursor::new(offset, len, true)
+                    .is_boundary(text, chunk_start)
+                    .ok()
+            });
+
+            match on_boundary {
+                Some(true) => results[original_idx] = offset,
+                Some(false) => match bias {
+                    Bias::Left => left_escapes.push(original_idx),
+                    Bias::Right => right_escapes.push(original_idx),
+                },
+                None => results[original_idx] = self.clip_to_grapheme_boundary(offset, bias),
+            }
+        }
+
+        for (escapes, boundaries) in [
+            (
+                &left_escapes,
+                self.prev_grapheme_boundaries_batch(&escaped_offsets(requests, &left_escapes)),
+            ),
+            (
+                &right_escapes,
+                self.next_grapheme_boundaries_batch(&escaped_offsets(requests, &right_escapes)),
+            ),
+        ] {
+            for (&original_idx, boundary) in escapes.iter().zip(boundaries) {
+                results[original_idx] = boundary;
+            }
+        }
+        results
+    }
+
     /// The character at every offset, in one forward walk of the tree.
     ///
     /// For an offset on a char boundary, each answer is what
@@ -2259,6 +2389,12 @@ impl<'a> Dimension<'a, TextSummary> for usize {
 /// finds out that the answer lies across a seam. Reaching over it would cost
 /// the descent this exists to skip, and every caller has a slower path that
 /// answers a seam correctly.
+/// The offsets `indices` names in `requests`, for a directional sub-pass of
+/// [`Rope::clip_to_grapheme_boundaries_batch`].
+fn escaped_offsets(requests: &[(usize, Bias)], indices: &[usize]) -> Vec<usize> {
+    indices.iter().map(|&i| requests[i].0).collect()
+}
+
 fn ascii_pair_breaks(bytes: &[u8], local: usize) -> bool {
     if local == 0 || local >= bytes.len() {
         return false;
@@ -4048,10 +4184,35 @@ mod tests {
         let expected_reads: Vec<Option<char>> =
             reads.iter().map(|&o| rope.chars_at(o).next()).collect();
 
+        let expected_forward: Vec<usize> = steps
+            .iter()
+            .map(|&o| rope.next_grapheme_boundary(o))
+            .collect();
+        // Both biases at every offset, so the two escape sub-passes and the
+        // walk that feeds them are all exercised over the same input.
+        let clips: Vec<(usize, Bias)> = steps
+            .iter()
+            .flat_map(|&o| [(o, Bias::Left), (o, Bias::Right)])
+            .collect();
+        let expected_clips: Vec<usize> = clips
+            .iter()
+            .map(|&(o, bias)| rope.clip_to_grapheme_boundary(o, bias))
+            .collect();
+
         assert_eq!(
             rope.prev_grapheme_boundaries_batch(&steps),
             expected_steps,
             "every batched cluster step matches the scalar one",
+        );
+        assert_eq!(
+            rope.next_grapheme_boundaries_batch(&steps),
+            expected_forward,
+            "every batched forward step matches the scalar one",
+        );
+        assert_eq!(
+            rope.clip_to_grapheme_boundaries_batch(&clips),
+            expected_clips,
+            "every batched clip matches the scalar one, either bias",
         );
         assert_eq!(
             rope.chars_at_batch(&reads),
@@ -4063,6 +4224,18 @@ mod tests {
         assert_eq!(
             rope.prev_grapheme_boundaries_batch(&reverse(&steps)),
             reverse(&expected_steps),
+            "descending input is permuted rather than mis-answered",
+        );
+        assert_eq!(
+            rope.next_grapheme_boundaries_batch(&reverse(&steps)),
+            reverse(&expected_forward),
+            "descending input is permuted rather than mis-answered",
+        );
+        assert_eq!(
+            rope.clip_to_grapheme_boundaries_batch(
+                &clips.iter().rev().copied().collect::<Vec<_>>()
+            ),
+            reverse(&expected_clips),
             "descending input is permuted rather than mis-answered",
         );
         assert_eq!(

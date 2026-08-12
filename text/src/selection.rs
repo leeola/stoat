@@ -251,6 +251,16 @@ pub fn next_char_boundary(rope: &Rope, offset: usize) -> usize {
     rope.next_grapheme_boundary(offset)
 }
 
+/// [`next_char_boundary`] for a whole set of offsets.
+///
+/// Answers offset for offset, in the order given, taking the steps in one walk
+/// of the rope rather than a descent from the root apiece. For a caller landing
+/// a block cursor per selection, which needs the cell one step past each
+/// landing.
+pub fn next_char_boundaries_batch(rope: &Rope, offsets: &[usize]) -> Vec<usize> {
+    rope.next_grapheme_boundaries_batch(offsets)
+}
+
 /// Offset one grapheme cluster before `offset`, or `offset` itself at the rope
 /// start.
 ///
