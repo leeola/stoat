@@ -1190,10 +1190,16 @@ pub struct Panel {
     /// paint over its rect. `false` layers the panel with the grid, where a pool
     /// composite covering the same cells draws over it.
     pub above_pools: bool,
-    /// Monotonic declaration-order index across all non-cell components. A later
-    /// component (higher `seq`) draws on top, so a box's own runs and bars carry
-    /// a higher `seq` than its panel while a lower box's components carry a lower
-    /// one, letting the renderer occlude what a box covers.
+    /// Monotonic declaration-order index across all non-cell components.
+    ///
+    /// It orders nothing. Draw order is fixed by the renderer's pass chain, one
+    /// pass per kind, so a bar declared after a path still draws beneath it.
+    /// What `seq` decides is occlusion. A fragment is discarded where a panel
+    /// declared later than its own component covers it.
+    ///
+    /// A box's own runs and bars are declared after its panel and so carry a
+    /// higher `seq`, which is what lets them survive over a body that hides the
+    /// lower chrome beneath it.
     pub seq: u32,
 }
 

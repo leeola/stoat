@@ -144,24 +144,30 @@ declared per the protocol above and bound per (3).
   extension of the background instance -- carrying pixel-precise x / width / y /
   height within a cell column.
 
-In the `render_into` pass chain (background, decoration, grid text, region text,
-cursor, overlays, overlay text, icons), the component primitives compose as a
-group after the grid text and alongside the existing off-grid layer (overlays
-and icons), each scissored to its surface. A gutter draws over columns the editor
-leaves blank, so its bars and numbers sit over the cleared gutter region rather
-than over body text. Exact z-order among components follows declaration order,
-as the overlay and icon lists already do.
+The component primitives compose as a group after the grid text and alongside
+the existing off-grid layer, each scissored to its surface. A gutter draws over
+columns the editor leaves blank, so its bars and numbers sit over the cleared
+gutter region rather than over body text.
 
-Fragment occlusion now enforces that order among the off-grid primitives. Each
-panel, bar, text run, and icon carries a monotonic declaration-order `seq`, and
-the panel, bar, run, and icon fragment shaders discard any fragment that falls
-inside a panel declared later (higher `seq`) than the fragment's own. A box's
-body therefore reads as opaque over the lower chrome beneath it -- a lower box's
-border and shadow, gutter hairlines and line numbers, and status icons no longer
-show through an upper box -- while a box's own runs and bars (declared after its
-panel, so higher `seq`) survive. Pool-composited page content carries `seq` 0
-and its draws leave the panel count at zero, so the occlusion is confined to the
-live main-pass decorations.
+**Z-order is fixed by the pass chain, not by declaration order.** The frame
+records one pass per kind, in this order: background, panels, cell borders, grid
+text, region text, bars, polylines, the minimap, text runs, the cursor,
+overlays, overlay text, icons. Declaration order decides the order *within* a
+kind, so one bar draws over another it was declared before. It has no say
+*across* kinds: a bar declared after a polyline still draws beneath it, because
+the bar pass runs first. Interleaving draws across kinds is deferred until a
+consumer needs it.
+
+`seq` therefore orders nothing. Each panel, bar, text run, path, and icon
+carries a monotonic declaration-order `seq`, and every occluding fragment shader
+asks one question of it: does a panel declared later than this component cover
+this fragment? Where the answer is yes it discards. A box's body reads as opaque
+over the lower chrome beneath it -- a lower box's border and shadow, gutter
+hairlines and line numbers, and status icons no longer show through an upper box
+-- while a box's own runs and bars, declared after its panel and so higher
+`seq`, survive. Pool-composited page content carries `seq` 0 and its draws leave
+the panel count at zero, so the occlusion is confined to the live main-pass
+decorations.
 
 ### (5) Staging toward multi-surface compositing
 
