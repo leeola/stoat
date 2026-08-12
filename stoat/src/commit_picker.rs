@@ -1557,7 +1557,7 @@ mod tests {
                 preview.height,
             );
 
-            let mut live = ratatui::buffer::Buffer::empty(area);
+            let mut live = crate::smooth_scroll::page_buffer(area, &h.stoat.theme);
             let mut scene = stoatty_widgets::ApcScene::new();
             crate::render::commits::render_commit_preview(
                 session,
@@ -1567,7 +1567,7 @@ mod tests {
                 &mut live,
                 &mut scene,
             );
-            let mut expected = crate::smooth_scroll::serialize_buffer(&mut live, &h.stoat.theme);
+            let mut expected = crate::smooth_scroll::serialize_buffer(&live);
             expected.extend_from_slice(scene.buffer());
 
             assert_eq!(pooled, expected, "page {page} matches the live skip");
@@ -1625,12 +1625,10 @@ mod tests {
             body.height,
         );
 
-        let mut live = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(
-            0,
-            0,
-            body.width,
-            body.height,
-        ));
+        let mut live = crate::smooth_scroll::page_buffer(
+            ratatui::layout::Rect::new(0, 0, body.width, body.height),
+            &h.stoat.theme,
+        );
         let graph_cells = lanes
             .map(crate::render::commit_picker::graph_width)
             .unwrap_or(0);
@@ -1644,7 +1642,7 @@ mod tests {
             &h.stoat.theme,
             &mut live,
         );
-        let live_bytes = crate::smooth_scroll::serialize_buffer(&mut live, &h.stoat.theme);
+        let live_bytes = crate::smooth_scroll::serialize_buffer(&live);
 
         assert!(
             pooled.starts_with(&live_bytes),

@@ -8384,14 +8384,18 @@ impl Stoat {
 
     /// Paint the current state into `buf`, reusing its allocation.
     ///
-    /// Resizes `buf` to the current screen and resets it to blank before
-    /// drawing, so a recycled buffer paints byte-identically to a fresh one.
-    /// The event loop recycles the prior frame's buffer this way once the render
-    /// thread releases it, avoiding a per-frame screen allocation.
+    /// Resizes `buf` to the current screen and blanks it to the theme's own
+    /// colors before drawing, so a recycled buffer paints byte-identically to a
+    /// fresh one. The event loop recycles the prior frame's buffer this way once
+    /// the render thread releases it, avoiding a per-frame screen allocation.
+    ///
+    /// Blanking to the theme rather than to Reset is what keeps the ambient
+    /// screen following `:theme`. The terminal resolves a cell that reaches it
+    /// at Reset against its own theme instead.
     fn paint_into(&mut self, buf: &mut Buffer) {
         self.render_tick += 1;
         buf.resize(self.size);
-        buf.reset();
+        buf.content.fill(crate::render::themed_blank(&self.theme));
 
         // Keep every editor's syntax coloring in step with the session toggle
         // before painting, so a newly opened editor inherits the current
@@ -8415,10 +8419,6 @@ impl Stoat {
         crate::render::frame(self, buf, &mut scene, &mut undercurls);
         self.apc_scene = scene;
         self.pending_undercurls = undercurls;
-
-        // Last, so cells a widget left blank via Clear resolve to the theme too
-        // rather than to whatever the hosting terminal would pick.
-        crate::render::normalize_reset_colors(buf, &self.theme);
     }
 
     /// Flush the frame's APC decoration scene to the channel, when it changed.
@@ -8716,7 +8716,7 @@ impl Stoat {
                 && content.height > 0
                 && !unchanged
             {
-                let mut buf = Buffer::empty(area);
+                let mut buf = crate::smooth_scroll::page_buffer(area, &self.theme);
                 {
                     let mut scene = ApcScene::new();
                     let mut undercurls = UndercurlBatch::default();
@@ -8746,7 +8746,7 @@ impl Stoat {
                     }
                 }
 
-                let bytes = crate::smooth_scroll::serialize_buffer(&mut content_buf, &self.theme);
+                let bytes = crate::smooth_scroll::serialize_buffer(&content_buf);
                 // A view with no tracked inputs falls back to hashing what it
                 // painted, which still suppresses the fill even though it could
                 // not suppress the paint.
@@ -8823,9 +8823,9 @@ impl Stoat {
                 continue;
             }
 
-            let mut buf = Buffer::empty(row);
+            let mut buf = crate::smooth_scroll::page_buffer(row, &self.theme);
             crate::render::pane::paint_pane_status_cells(&cells, row, &mut buf);
-            let bytes = crate::smooth_scroll::serialize_buffer(&mut buf, &self.theme);
+            let bytes = crate::smooth_scroll::serialize_buffer(&buf);
             pool::emit_into(
                 out,
                 &mut self.smooth_scroll,
@@ -21099,7 +21099,7 @@ mod tests {
     #[test]
     fn a_conflict_pane_fills_with_the_three_column_body() {
         use crate::render::conflict_view::render_conflict_rows;
-        use ratatui::{buffer::Buffer, layout::Rect};
+        use ratatui::layout::Rect;
 
         let mut h = crate::test_harness::TestHarness::with_size(150, 24);
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
@@ -21138,7 +21138,7 @@ mod tests {
         };
 
         let area = Rect::new(0, 0, region.width, region.height);
-        let mut expected = Buffer::empty(area);
+        let mut expected = crate::smooth_scroll::page_buffer(area, &theme);
         render_conflict_rows(
             &snapshot,
             &mut state,
@@ -21150,7 +21150,7 @@ mod tests {
             None,
             None,
         );
-        let expected = crate::smooth_scroll::serialize_buffer(&mut expected, &theme);
+        let expected = crate::smooth_scroll::serialize_buffer(&expected);
 
         let mut fills = Vec::new();
         while let Ok(bytes) = rx.try_recv() {

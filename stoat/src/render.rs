@@ -443,48 +443,6 @@ pub(crate) fn clear_themed(area: Rect, buf: &mut Buffer, theme: &crate::theme::T
     }
 }
 
-/// Resolve every `Color::Reset` cell in `buf` against `theme`.
-///
-/// A cell left at Reset is resolved by whatever terminal stoat is running
-/// inside, against *that* terminal's theme rather than stoat's, so the ambient
-/// background ignores `:theme` entirely and disagrees with the widgets that do
-/// paint `ui.background` for themselves. Stamping the theme's own colors in
-/// before the cells leave stoat makes the whole screen follow the active theme
-/// and match those widgets.
-///
-/// A channel the theme does not define is left at Reset, since there is nothing
-/// truer to put there than the terminal's own default.
-pub(crate) fn normalize_reset_colors(buf: &mut Buffer, theme: &crate::theme::Theme) {
-    use crate::theme::scope;
-
-    replace_reset_colors(
-        buf,
-        theme.try_get(scope::UI_BACKGROUND).and_then(|s| s.bg),
-        theme.try_get(scope::UI_TEXT).and_then(|s| s.fg),
-    );
-}
-
-/// Stamp `bg` and `fg` over the cells still carrying `Color::Reset`, skipping
-/// either channel that is `None`.
-fn replace_reset_colors(buf: &mut Buffer, bg: Option<Color>, fg: Option<Color>) {
-    if bg.is_none() && fg.is_none() {
-        return;
-    }
-
-    for cell in &mut buf.content {
-        if let Some(bg) = bg
-            && cell.bg == Color::Reset
-        {
-            cell.bg = bg;
-        }
-        if let Some(fg) = fg
-            && cell.fg == Color::Reset
-        {
-            cell.fg = fg;
-        }
-    }
-}
-
 /// Paint one full frame of the TUI into `buf`. Called once per [`Stoat::render`]
 /// tick after the parse pipeline and commits pump have run.
 ///
@@ -1478,59 +1436,79 @@ mod perf_tests {
 }
 
 #[cfg(test)]
-mod normalize_tests {
-    use super::replace_reset_colors;
-    use crate::app::Stoat;
+mod themed_blank_tests {
+    use super::{clear_themed, themed_blank};
+    use crate::{app::Stoat, theme::Theme};
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
-    fn one_cell(fg: Color, bg: Color) -> Buffer {
-        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
-        buf[(0u16, 0u16)].set_fg(fg).set_bg(bg);
-        buf
-    }
-
-    #[test]
-    fn reset_channels_take_the_theme_colors() {
-        let mut buf = one_cell(Color::Reset, Color::Reset);
-        replace_reset_colors(&mut buf, Some(Color::Blue), Some(Color::Red));
-
-        assert_eq!(buf[(0u16, 0u16)].bg, Color::Blue);
-        assert_eq!(buf[(0u16, 0u16)].fg, Color::Red);
-    }
-
-    #[test]
-    fn explicit_colors_survive_normalization() {
-        let mut buf = one_cell(Color::Green, Color::Yellow);
-        replace_reset_colors(&mut buf, Some(Color::Blue), Some(Color::Red));
-
-        assert_eq!(
-            (buf[(0u16, 0u16)].fg, buf[(0u16, 0u16)].bg),
-            (Color::Green, Color::Yellow),
-            "a cell that chose its own colors is left alone",
-        );
-    }
-
+    /// A theme with nothing to say about a channel leaves it at Reset, since the
+    /// terminal's own default is the only answer left. That is the whole reason
+    /// the blank is built from the theme rather than asserted to be opaque.
     #[test]
     fn a_channel_the_theme_omits_stays_reset() {
-        let mut buf = one_cell(Color::Reset, Color::Reset);
-        replace_reset_colors(&mut buf, Some(Color::Blue), None);
+        let blank = themed_blank(&Theme::empty());
 
-        assert_eq!(buf[(0u16, 0u16)].bg, Color::Blue);
         assert_eq!(
-            buf[(0u16, 0u16)].fg,
-            Color::Reset,
-            "with no ui.text fg there is nothing truer than the terminal default",
+            (blank.fg, blank.bg),
+            (Color::Reset, Color::Reset),
+            "an empty theme has nothing truer than the terminal default",
         );
     }
 
+    /// A modal blanks its area before drawing a frame that fills nothing, so
+    /// what the blank carries is what shows through the modal's empty rows.
     #[test]
-    fn a_painted_frame_leaves_no_reset_background() {
-        let mut h = Stoat::test();
-        let buf = h.render_composited();
+    fn a_themed_clear_blanks_to_the_theme() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 2));
+        buf[(1u16, 1u16)].set_char('x').set_fg(Color::Green);
 
+        let theme = {
+            let src = r##"theme t { ui.background.bg = "#102030"; ui.text.fg = "#405060"; }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        clear_themed(Rect::new(1, 1, 2, 1), &mut buf, &theme);
+
+        assert_eq!(
+            (buf[(1u16, 1u16)].symbol(), buf[(1u16, 1u16)].fg),
+            (" ", Color::Rgb(0x40, 0x50, 0x60)),
+            "the cleared cell lost its content and took the theme's text color",
+        );
+        assert_eq!(
+            buf[(1u16, 1u16)].bg,
+            Color::Rgb(0x10, 0x20, 0x30),
+            "and the theme's background",
+        );
+        assert_eq!(
+            buf[(0u16, 1u16)].bg,
+            Color::Reset,
+            "a cell outside the cleared rect is left alone",
+        );
+    }
+
+    /// A cell that reaches the terminal at Reset is resolved against the
+    /// hosting terminal's theme rather than stoat's, so the ambient screen
+    /// stops tracking `:theme`. The modal case is checked separately because a
+    /// modal's blank rows come from its own clear, not from the frame fill.
+    #[test]
+    fn a_painted_frame_leaves_no_reset_cell() {
+        let mut h = Stoat::test();
+
+        let buf = h.render_composited();
         assert!(
-            buf.content.iter().all(|cell| cell.bg != Color::Reset),
-            "every cell carries the theme's background, so the screen tracks :theme",
+            buf.content
+                .iter()
+                .all(|cell| cell.bg != Color::Reset && cell.fg != Color::Reset),
+            "every cell of a plain frame carries the theme's colors",
+        );
+
+        h.stoat.key_hints_visible = true;
+        let buf = h.render_composited();
+        assert!(
+            buf.content
+                .iter()
+                .all(|cell| cell.bg != Color::Reset && cell.fg != Color::Reset),
+            "and every cell of a frame with a box open over it",
         );
     }
 }

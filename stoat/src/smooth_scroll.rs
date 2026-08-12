@@ -171,7 +171,7 @@ pub(crate) fn render_page_from_snapshot(
     live: Option<&crate::diff_map::LiveHunks<'_>>,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = Buffer::empty(area);
+    let mut buf = page_buffer(area, gutter.theme());
 
     // A diff-view page paints the two columns itself, including both line-number
     // gutters, so it bypasses the single-column page gutter. Inside stoatty its
@@ -192,7 +192,7 @@ pub(crate) fn render_page_from_snapshot(
             None,
         );
         dim_page(&mut buf, area, gutter.theme(), dim);
-        let mut bytes = serialize_buffer(&mut buf, gutter.theme());
+        let mut bytes = serialize_buffer(&buf);
         if let Some(mut scene) = scene {
             bytes.extend_from_slice(scene.buffer());
         }
@@ -267,7 +267,7 @@ pub(crate) fn render_page_from_snapshot(
     }
 
     dim_page(&mut buf, area, gutter.theme(), dim);
-    let mut bytes = serialize_buffer(&mut buf, gutter.theme());
+    let mut bytes = serialize_buffer(&buf);
     bytes.extend_from_slice(&apc);
     bytes
 }
@@ -424,7 +424,7 @@ pub(crate) fn render_review_page_from_parts(
         .saturating_mul(region_height as u64)
         .min(u32::MAX as u64) as u32;
     let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = Buffer::empty(area);
+    let mut buf = page_buffer(area, theme);
     render_review_rows(
         snapshot,
         view,
@@ -435,7 +435,7 @@ pub(crate) fn render_review_page_from_parts(
         &mut buf,
         None,
     );
-    let bytes = serialize_buffer(&mut buf, theme);
+    let bytes = serialize_buffer(&buf);
 
     let mut frame = Vec::with_capacity(bytes.len() + 16);
     encode_fill_scope(&mut frame, pool, index, |out| out.extend_from_slice(&bytes));
@@ -465,7 +465,7 @@ pub(crate) fn render_conflict_page_from_parts(
         .saturating_mul(region_height as u64)
         .min(u32::MAX as u64) as u32;
     let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = Buffer::empty(area);
+    let mut buf = page_buffer(area, theme);
     render_conflict_rows(
         snapshot,
         state,
@@ -477,7 +477,7 @@ pub(crate) fn render_conflict_page_from_parts(
         None,
         None,
     );
-    let bytes = serialize_buffer(&mut buf, theme);
+    let bytes = serialize_buffer(&buf);
 
     let mut frame = Vec::with_capacity(bytes.len() + 16);
     encode_fill_scope(&mut frame, pool, index, |out| out.extend_from_slice(&bytes));
@@ -500,14 +500,14 @@ pub(crate) fn render_finder_page(
     region_height: u16,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = Buffer::empty(area);
+    let mut buf = page_buffer(area, theme);
 
     let start_row = page
         .saturating_mul(region_height as u64)
         .min(usize::MAX as u64) as usize;
     paint_finder_rows(finder, home, area, start_row, theme, &mut buf);
 
-    serialize_buffer(&mut buf, theme)
+    serialize_buffer(&buf)
 }
 
 /// Render `region_height` rows of the command-palette result list starting at
@@ -526,7 +526,7 @@ pub(crate) fn render_palette_page(
     region_height: u16,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = Buffer::empty(area);
+    let mut buf = page_buffer(area, theme);
 
     let start_row = page
         .saturating_mul(region_height as u64)
@@ -541,7 +541,7 @@ pub(crate) fn render_palette_page(
         &mut buf,
     );
 
-    serialize_buffer(&mut buf, theme)
+    serialize_buffer(&buf)
 }
 
 /// Render `region_height` rows of the palette's inline argument-picker list
@@ -560,7 +560,7 @@ pub(crate) fn render_arg_page(
     region_height: u16,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = Buffer::empty(area);
+    let mut buf = page_buffer(area, theme);
 
     let start_row = page
         .saturating_mul(region_height as u64)
@@ -582,7 +582,7 @@ pub(crate) fn render_arg_page(
         &mut buf,
     );
 
-    serialize_buffer(&mut buf, theme)
+    serialize_buffer(&buf)
 }
 
 /// Render `region_height` rows of the completion popup list starting at row
@@ -601,7 +601,7 @@ pub(crate) fn render_completion_page(
     region_height: u16,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = Buffer::empty(area);
+    let mut buf = page_buffer(area, theme);
 
     let start_row = page
         .saturating_mul(region_height as u64)
@@ -616,7 +616,7 @@ pub(crate) fn render_completion_page(
         &mut buf,
     );
 
-    serialize_buffer(&mut buf, theme)
+    serialize_buffer(&buf)
 }
 
 /// Render `region_height` rows of the help entry list starting at row
@@ -633,14 +633,14 @@ pub(crate) fn render_help_list_page(
     region_height: u16,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = Buffer::empty(area);
+    let mut buf = page_buffer(area, theme);
 
     let start_row = page
         .saturating_mul(region_height as u64)
         .min(usize::MAX as u64) as usize;
     paint_help_list_rows(help, area, start_row, theme, &mut buf);
 
-    serialize_buffer(&mut buf, theme)
+    serialize_buffer(&buf)
 }
 
 /// Render `region_height` lines of the selected help entry's detail starting at
@@ -657,14 +657,14 @@ pub(crate) fn render_help_detail_page(
     region_height: u16,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = Buffer::empty(area);
+    let mut buf = page_buffer(area, theme);
 
     let start_row = page
         .saturating_mul(region_height as u64)
         .min(usize::MAX as u64) as usize;
     paint_help_detail_rows(help, area, start_row, theme, &mut buf);
 
-    serialize_buffer(&mut buf, theme)
+    serialize_buffer(&buf)
 }
 
 /// Render `region_height` rows of the commit list starting at row
@@ -681,14 +681,14 @@ pub(crate) fn render_commits_page(
     region_height: u16,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = Buffer::empty(area);
+    let mut buf = page_buffer(area, theme);
 
     let start_row = page
         .saturating_mul(region_height as u64)
         .min(usize::MAX as u64) as usize;
     paint_commit_rows(state, area, start_row, theme, &mut buf);
 
-    serialize_buffer(&mut buf, theme)
+    serialize_buffer(&buf)
 }
 
 /// Render `region_height` rows of the commit picker's table, graph column
@@ -715,7 +715,7 @@ pub(crate) fn render_commit_picker_list_page(
     use crate::render::commit_picker::{graph_width, paint_commit_graph, paint_commit_picker_rows};
 
     let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = Buffer::empty(area);
+    let mut buf = page_buffer(area, theme);
 
     let start_row = page
         .saturating_mul(region_height as u64)
@@ -739,7 +739,7 @@ pub(crate) fn render_commit_picker_list_page(
         paint_commit_graph(picker, start_row, graph, theme, &mut buf, scene);
     }
 
-    let mut bytes = serialize_buffer(&mut buf, theme);
+    let mut bytes = serialize_buffer(&buf);
     if let Some(mut scene) = scene {
         bytes.extend_from_slice(scene.buffer());
     }
@@ -762,7 +762,7 @@ pub(crate) fn render_commit_picker_preview_page(
     region_height: u16,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = Buffer::empty(area);
+    let mut buf = page_buffer(area, theme);
     let mut scene = ApcScene::new();
 
     let skip_rows = page
@@ -772,10 +772,19 @@ pub(crate) fn render_commit_picker_preview_page(
         session, theme, area, skip_rows, &mut buf, &mut scene,
     );
 
-    let mut bytes = serialize_buffer(&mut buf, theme);
+    let mut bytes = serialize_buffer(&buf);
     bytes.extend_from_slice(scene.buffer());
 
     bytes
+}
+
+/// A page-sized buffer blanked to the theme's own colors.
+///
+/// A page is composited beside the live grid, which starts from the same blank.
+/// A page left at Reset paints the hosting terminal's background next to
+/// stoat's, and the two disagree for as long as the glide runs.
+pub(crate) fn page_buffer(area: Rect, theme: &crate::theme::Theme) -> Buffer {
+    Buffer::filled(area, crate::render::themed_blank(theme))
 }
 
 /// Serialize every cell of `buf` to a self-contained VT byte stream via a
@@ -786,13 +795,8 @@ pub(crate) fn render_commit_picker_preview_page(
 /// regardless of what that slot held before. Cursor moves are absolute, so the
 /// stream is positioned for the page's top-left independent of the live grid
 /// cursor.
-///
-/// `buf` is normalized against `theme` first, so a pooled page carries the same
-/// resolved colors the live grid does and a glide shows no shift.
-pub(crate) fn serialize_buffer(buf: &mut Buffer, theme: &crate::theme::Theme) -> Vec<u8> {
+pub(crate) fn serialize_buffer(buf: &Buffer) -> Vec<u8> {
     use ratatui::backend::{Backend, CrosstermBackend};
-
-    crate::render::normalize_reset_colors(buf, theme);
 
     let mut bytes = Vec::new();
     {
@@ -832,7 +836,7 @@ mod tests {
     /// exercising the page offset and the bottom/right clipping.
     #[test]
     fn page_from_snapshot_matches_unfocused_render_editor() {
-        use super::{render_page_from_snapshot, serialize_buffer, Buffer, PageGutter, Rect};
+        use super::{page_buffer, render_page_from_snapshot, serialize_buffer, PageGutter, Rect};
         use crate::{
             action_handlers::{self, dispatch},
             render::editor::render_editor_with_overlay,
@@ -871,7 +875,7 @@ mod tests {
 
         for top_row in [0u32, 4, 8, 40] {
             let area = Rect::new(0, 0, 12, 4);
-            let mut expected = Buffer::empty(area);
+            let mut expected = page_buffer(area, &theme);
             let saved = editor.scroll_row;
             editor.scroll_row = top_row;
             render_editor_with_overlay(
@@ -896,7 +900,7 @@ mod tests {
                 80,
             );
             editor.scroll_row = saved;
-            let expected = serialize_buffer(&mut expected, &theme);
+            let expected = serialize_buffer(&expected);
 
             let snapshot = editor.display_map.snapshot();
             let got = render_page_from_snapshot(
@@ -918,7 +922,7 @@ mod tests {
 
     #[test]
     fn pooled_page_places_wide_chars_like_the_live_grid() {
-        use super::{render_page_from_snapshot, serialize_buffer, Buffer, PageGutter, Rect};
+        use super::{page_buffer, render_page_from_snapshot, serialize_buffer, PageGutter, Rect};
         use crate::{
             action_handlers::{self, dispatch},
             render::editor::render_editor_with_overlay,
@@ -951,7 +955,7 @@ mod tests {
         );
 
         let area = Rect::new(0, 0, 12, 2);
-        let mut expected = Buffer::empty(area);
+        let mut expected = page_buffer(area, &theme);
         render_editor_with_overlay(
             editor,
             area,
@@ -973,7 +977,7 @@ mod tests {
             WrapMode::None,
             80,
         );
-        let expected = serialize_buffer(&mut expected, &theme);
+        let expected = serialize_buffer(&expected);
 
         let snapshot = editor.display_map.snapshot();
         let got = render_page_from_snapshot(
@@ -1000,7 +1004,7 @@ mod tests {
     /// must land on a char boundary and still reset the column for the next row.
     #[test]
     fn a_pooled_page_clips_an_over_wide_line_like_the_live_grid() {
-        use super::{render_page_from_snapshot, serialize_buffer, Buffer, PageGutter, Rect};
+        use super::{page_buffer, render_page_from_snapshot, serialize_buffer, PageGutter, Rect};
         use crate::{
             action_handlers::{self, dispatch},
             render::editor::render_editor_with_overlay,
@@ -1039,7 +1043,7 @@ mod tests {
         );
 
         let area = Rect::new(0, 0, 20, 3);
-        let mut expected = Buffer::empty(area);
+        let mut expected = page_buffer(area, &theme);
         render_editor_with_overlay(
             editor,
             area,
@@ -1061,7 +1065,7 @@ mod tests {
             WrapMode::None,
             80,
         );
-        let expected = serialize_buffer(&mut expected, &theme);
+        let expected = serialize_buffer(&expected);
 
         let snapshot = editor.display_map.snapshot();
         let got = render_page_from_snapshot(
@@ -1161,7 +1165,8 @@ mod tests {
     #[test]
     fn diff_view_page_paints_the_two_column_body() {
         use super::{
-            paint_diff_rows, render_page_from_snapshot, serialize_buffer, Buffer, PageGutter, Rect,
+            page_buffer, paint_diff_rows, render_page_from_snapshot, serialize_buffer, PageGutter,
+            Rect,
         };
         use crate::{
             buffer::{BufferId, TextBuffer},
@@ -1200,7 +1205,7 @@ mod tests {
         );
         let area = Rect::new(0, 0, 40, 8);
 
-        let mut expected = Buffer::empty(area);
+        let mut expected = page_buffer(area, &theme);
         paint_diff_rows(
             &snapshot,
             0,
@@ -1213,7 +1218,7 @@ mod tests {
             None,
             None,
         );
-        let expected = serialize_buffer(&mut expected, &theme);
+        let expected = serialize_buffer(&expected);
 
         let got = render_page_from_snapshot(
             &snapshot,
@@ -1239,7 +1244,8 @@ mod tests {
     #[test]
     fn conflict_view_page_paints_the_three_column_body() {
         use super::{
-            render_conflict_page_from_parts, render_conflict_rows, serialize_buffer, Buffer, Rect,
+            page_buffer, render_conflict_page_from_parts, render_conflict_rows, serialize_buffer,
+            Rect,
         };
         use crate::{test_harness::TestHarness, theme::scope};
         use std::path::PathBuf;
@@ -1270,7 +1276,7 @@ mod tests {
         };
 
         let area = Rect::new(0, 0, 150, 8);
-        let mut expected = Buffer::empty(area);
+        let mut expected = page_buffer(area, &theme);
         render_conflict_rows(
             &snapshot,
             &mut state,
@@ -1282,7 +1288,7 @@ mod tests {
             None,
             None,
         );
-        let expected = serialize_buffer(&mut expected, &theme);
+        let expected = serialize_buffer(&expected);
 
         let got =
             render_conflict_page_from_parts(&snapshot, &mut state, &theme, 7, 0, fallback, 150, 8);
@@ -1752,7 +1758,7 @@ mod tests {
             None,
         );
         assert!(
-            find(&frame, &serialize_buffer(&mut rows_only, &theme)).is_some(),
+            find(&frame, &serialize_buffer(&rows_only)).is_some(),
             "the page's row bytes ride between the fill markers"
         );
 
