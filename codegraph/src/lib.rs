@@ -700,6 +700,55 @@ impl CodeGraph {
         b: SymbolKey,
         kind: EdgeKind,
     ) -> Option<Vec<SymbolKey>> {
+        self.search(a, Dir::Down, b, Dir::Up, kind)
+    }
+
+    /// The shortest path relating `a` and `b` over edges of `kind`, whichever
+    /// way round they are related, or `None` when nothing relates them.
+    ///
+    /// Where [`Self::path_between`] answers only "does `a` call `b`", this
+    /// answers "how are these two connected at all". Four searches, in order:
+    /// `a` calls `b`, `b` calls `a`, both are called by something (a V through
+    /// a shared dispatcher), and both call something (a shared helper). The
+    /// first hit wins, so a direct call is never passed over for a detour
+    /// through a common neighbour.
+    ///
+    /// The result reads `[a, ..., b]` in every shape, so a reader walks it from
+    /// the end they named first whichever relation was found.
+    pub fn path_relating(
+        &self,
+        a: SymbolKey,
+        b: SymbolKey,
+        kind: EdgeKind,
+    ) -> Option<Vec<SymbolKey>> {
+        [
+            (Dir::Down, Dir::Up),
+            (Dir::Up, Dir::Down),
+            (Dir::Up, Dir::Up),
+            (Dir::Down, Dir::Down),
+        ]
+        .into_iter()
+        .find_map(|(dir_a, dir_b)| self.search(a, dir_a, b, dir_b, kind))
+    }
+
+    /// The shortest path joining `a` and `b` where the frontier out of `a`
+    /// follows `dir_a` and the one out of `b` follows `dir_b`.
+    ///
+    /// The pair of directions is what selects the relation being looked for.
+    /// The searches meet at a node reachable from `a` one way and from `b` the
+    /// other, so `(Down, Up)` finds a caller chain while `(Up, Up)` finds a
+    /// shared ancestor.
+    ///
+    /// See also:
+    /// - [`Self::path_relating`] for the four combinations and what each means.
+    fn search(
+        &self,
+        a: SymbolKey,
+        dir_a: Dir,
+        b: SymbolKey,
+        dir_b: Dir,
+        kind: EdgeKind,
+    ) -> Option<Vec<SymbolKey>> {
         if a == b {
             return Some(vec![a]);
         }
@@ -709,10 +758,10 @@ impl CodeGraph {
         let mut bq: VecDeque<SymbolKey> = VecDeque::from([b]);
 
         while !fq.is_empty() && !bq.is_empty() {
-            if let Some(meet) = self.expand_frontier(&mut fq, &mut fwd, &bwd, kind, Dir::Down) {
+            if let Some(meet) = self.expand_frontier(&mut fq, &mut fwd, &bwd, kind, dir_a) {
                 return Some(stitch_path(&fwd, &bwd, meet));
             }
-            if let Some(meet) = self.expand_frontier(&mut bq, &mut bwd, &fwd, kind, Dir::Up) {
+            if let Some(meet) = self.expand_frontier(&mut bq, &mut bwd, &fwd, kind, dir_b) {
                 return Some(stitch_path(&fwd, &bwd, meet));
             }
         }
@@ -1067,14 +1116,19 @@ mod tests {
         assert!(graph.symbol(SymbolKey([9u8; 16])).is_none());
     }
 
-    fn call_chain(n: usize) -> (CodeGraph, Vec<SymbolKey>) {
-        let keys: Vec<SymbolKey> = (0..n)
+    /// `n` distinct symbol keys, numbered so a test names one by its index.
+    fn symbol_keys(n: usize) -> Vec<SymbolKey> {
+        (0..n)
             .map(|i| {
                 let mut bytes = [0u8; 16];
                 bytes[..8].copy_from_slice(&(i as u64).to_le_bytes());
                 SymbolKey(bytes)
             })
-            .collect();
+            .collect()
+    }
+
+    fn call_chain(n: usize) -> (CodeGraph, Vec<SymbolKey>) {
+        let keys = symbol_keys(n);
         let symbols = keys
             .iter()
             .enumerate()
@@ -1140,5 +1194,109 @@ mod tests {
         assert_eq!(full.len(), 10_000);
 
         assert_eq!(graph.path_between(k[8], k[3], EdgeKind::Calls), None);
+    }
+
+    /// Build a graph over `n` symbols wired by the given `(caller, callee)`
+    /// pairs, for the shapes a straight chain leaves unreachable.
+    fn call_graph(n: usize, calls: &[(usize, usize)]) -> (CodeGraph, Vec<SymbolKey>) {
+        let (mut graph, keys) = (CodeGraph::new(), symbol_keys(n));
+        let symbols = keys
+            .iter()
+            .enumerate()
+            .map(|(i, &key)| Symbol {
+                key,
+                file: FileId(0),
+                name: format!("n{i}"),
+                kind: SymbolKind::Function,
+                container: vec![],
+                def_range: i * 10..i * 10 + 5,
+                name_range: i * 10..i * 10 + 2,
+                body_hash: [0u8; 32],
+            })
+            .collect();
+        let edges = calls
+            .iter()
+            .map(|&(from, to)| Edge {
+                from: keys[from],
+                to: Target::Sym(keys[to]),
+                kind: EdgeKind::Calls,
+                site_range: 0..1,
+                confidence: Confidence::Resolved,
+            })
+            .collect();
+
+        graph.insert_shard(FileShard {
+            content_hash: [0u8; 32],
+            symbols,
+            edges,
+        });
+        (graph, keys)
+    }
+
+    /// A trail is two points a reader marked, and the order they marked them in
+    /// says nothing about which one calls the other. Marking the callee first
+    /// is as natural as marking the caller, and both find the same code
+    /// path.
+    #[test]
+    fn a_reversed_pair_relates_where_a_forward_search_finds_nothing() {
+        let (graph, k) = call_chain(6);
+
+        assert_eq!(
+            graph.path_between(k[4], k[1], EdgeKind::Calls),
+            None,
+            "the forward search only walks callees, so it never reaches back",
+        );
+        assert_eq!(
+            graph.path_relating(k[4], k[1], EdgeKind::Calls).unwrap(),
+            vec![k[4], k[3], k[2], k[1]],
+            "and the relation reads from the point marked first, whichever way \
+             the calls run",
+        );
+    }
+
+    /// Two functions with no call between them are still related when something
+    /// calls both, which is the shape a dispatcher makes. Reading the V through
+    /// it is how someone finds what connects two handlers.
+    #[test]
+    fn two_callees_of_one_dispatcher_relate_through_it() {
+        // 0 dispatches to 1 and 2.
+        let (graph, k) = call_graph(3, &[(0, 1), (0, 2)]);
+
+        assert_eq!(graph.path_between(k[1], k[2], EdgeKind::Calls), None);
+        assert_eq!(
+            graph.path_relating(k[1], k[2], EdgeKind::Calls).unwrap(),
+            vec![k[1], k[0], k[2]],
+            "up to the shared caller and back down to the other",
+        );
+    }
+
+    /// The mirror shape. Nothing calls either one, but both call the same
+    /// helper.
+    #[test]
+    fn two_callers_of_one_helper_relate_through_it() {
+        // 0 and 1 both call 2.
+        let (graph, k) = call_graph(3, &[(0, 2), (1, 2)]);
+
+        assert_eq!(graph.path_between(k[0], k[1], EdgeKind::Calls), None);
+        assert_eq!(
+            graph.path_relating(k[0], k[1], EdgeKind::Calls).unwrap(),
+            vec![k[0], k[2], k[1]],
+            "down to the shared callee and back up to the other",
+        );
+    }
+
+    /// Four searches that each come back empty must report no relation rather
+    /// than some path through the rest of the graph.
+    #[test]
+    fn unrelated_symbols_relate_through_nothing() {
+        // Two disjoint pairs, 0 calling 1 and 2 calling 3.
+        let (graph, k) = call_graph(4, &[(0, 1), (2, 3)]);
+
+        assert_eq!(graph.path_relating(k[0], k[3], EdgeKind::Calls), None);
+        assert_eq!(
+            graph.path_relating(k[0], k[0], EdgeKind::Calls).unwrap(),
+            vec![k[0]],
+            "a symbol relates to itself as the one-step path",
+        );
     }
 }
