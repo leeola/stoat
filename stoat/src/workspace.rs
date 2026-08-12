@@ -1316,55 +1316,59 @@ impl Workspace {
         }
 
         for buffer_id in fired {
-            self.index_debounce.remove(&buffer_id);
-            let snapshot = self.buffers.get(buffer_id).map(|shared| {
-                let guard = shared.read().expect("buffer poisoned");
-                (guard.snapshot.visible_text.clone(), guard.snapshot.version)
-            });
-            let Some((text, version)) = snapshot else {
-                continue;
-            };
-
-            // The debounce fires after the parse for this version landed, so the
-            // stored tree normally describes exactly this text and extraction can
-            // skip re-parsing the file. An edit inside the window leaves the
-            // versions apart, and a tree built from other text would put every
-            // symbol range somewhere else, so that case parses as before.
-            let tree = self
-                .buffers
-                .syntax(buffer_id)
-                .filter(|syntax| syntax.version == version)
-                .map(|syntax| syntax.tree.clone());
-
-            self.enqueue_reindex(
-                executor,
-                index_update_tx,
-                redraw_notify,
-                buffer_id,
-                text,
-                tree,
-            );
+            self.enqueue_reindex(executor, index_update_tx, redraw_notify, buffer_id, false);
         }
     }
 
-    /// Spawn a live re-index of `buffer_id` from its current `text`.
+    /// The buffer's current text paired with the parse tree describing it, or
+    /// `None` once the buffer is gone.
     ///
-    /// Skips buffers with no file path or no resolved language. The spawned
-    /// job is stored so it is not cancelled, replacing any prior one for the
-    /// buffer.
-    fn enqueue_reindex(
+    /// The tree comes back only when its version matches the text's. That is
+    /// the common case, since a reindex is asked for after the parse for this
+    /// version landed, and extraction then skips re-parsing the file. An edit
+    /// since that parse leaves the versions apart, and a tree built from other
+    /// text puts every symbol range somewhere else, so that case parses again.
+    fn reindex_inputs(&self, buffer_id: BufferId) -> Option<(Rope, Option<Tree>)> {
+        let (text, version) = self.buffers.get(buffer_id).map(|shared| {
+            let guard = shared.read().expect("buffer poisoned");
+            (guard.snapshot.visible_text.clone(), guard.snapshot.version)
+        })?;
+
+        let tree = self
+            .buffers
+            .syntax(buffer_id)
+            .filter(|syntax| syntax.version == version)
+            .map(|syntax| syntax.tree.clone());
+
+        Some((text, tree))
+    }
+
+    /// Spawn a live re-index of `buffer_id` from its current text.
+    ///
+    /// `persist` writes the shard and manifest entry when the update lands,
+    /// which a save asks for and an edit does not. Skips buffers with no file
+    /// path, no resolved language, or no text left to read. The spawned job is
+    /// stored so it is not cancelled, replacing any prior one for the buffer.
+    ///
+    /// Drops the buffer's pending edit debounce, since this extract covers the
+    /// same text that timer fires to extract.
+    pub(crate) fn enqueue_reindex(
         &mut self,
         executor: &Executor,
         index_update_tx: &UnboundedSender<IndexUpdate>,
         redraw_notify: &Arc<Notify>,
         buffer_id: BufferId,
-        text: Rope,
-        tree: Option<Tree>,
+        persist: bool,
     ) {
+        self.index_debounce.remove(&buffer_id);
+
         let Some(path) = self.buffers.path_for(buffer_id).map(|p| p.to_path_buf()) else {
             return;
         };
         let Some(language) = self.buffers.language_for(buffer_id) else {
+            return;
+        };
+        let Some((text, tree)) = self.reindex_inputs(buffer_id) else {
             return;
         };
         let target = ReindexTarget {
@@ -1374,6 +1378,7 @@ impl Workspace {
             path,
             text,
             tree,
+            persist,
         };
         let task = reindex_buffer(
             executor,

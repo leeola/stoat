@@ -3538,48 +3538,6 @@ impl Stoat {
         }
     }
 
-    /// Persist a saved buffer's shard and manifest entry so a later open
-    /// warm-loads it instead of re-extracting.
-    ///
-    /// No-op when persistence is disabled or the buffer has no indexable
-    /// language. Re-extracts from the saved text on the calling thread,
-    /// which is acceptable on the infrequent save path.
-    pub(crate) fn persist_saved_shard(&self, buffer_id: BufferId, path: &Path, text: &str) {
-        if self.persistence_disabled {
-            return;
-        }
-        let ws = self.active_workspace();
-        let Some(language) = ws.buffers.language_for(buffer_id) else {
-            return;
-        };
-        let git_root = ws.git_root.clone();
-        let Some((rel_path, shard)) = crate::code_index::build::extract_shard(
-            &language,
-            &git_root,
-            path,
-            &Rope::from(text),
-            None,
-        ) else {
-            return;
-        };
-        let Ok(dir) = crate::code_index::store::index_dir_for(&git_root, self.fs_host.as_ref())
-        else {
-            return;
-        };
-        let _ = crate::code_index::store::write_shard(
-            &dir,
-            &rel_path,
-            &codegraph::encode_shard(&shard),
-            self.fs_host.as_ref(),
-        );
-        let _ = crate::code_index::store::update_manifest_entry(
-            &dir,
-            &rel_path,
-            shard.content_hash,
-            self.fs_host.as_ref(),
-        );
-    }
-
     /// Rehydrate the active workspace from its most-recently-modified
     /// persisted file under `$XDG_STATE_HOME/stoat/workspaces/<hash>/`. The
     /// binary only invokes this when the user passes `--continue`; a bare
@@ -13774,6 +13732,87 @@ mod tests {
                 .step(caller, codegraph::EdgeKind::Calls, codegraph::Dir::Down),
             vec![callee],
             "the edit's new call appears as a Calls edge in the graph",
+        );
+    }
+
+    /// A save is the moment the file on disk matches the buffer, so it is the
+    /// save's reindex that writes the shard a later open warm-loads. An edit's
+    /// reindex must not write one, since the disk still disagrees with the
+    /// buffer it extracted from.
+    ///
+    /// Read off the update channel rather than off the index directory. The
+    /// drain resolves that directory through the XDG state dir, and a test
+    /// whose result turns on the environment resolving one is not repeatable.
+    #[test]
+    fn a_save_reindexes_with_persist_where_an_edit_does_not() {
+        use crate::host::FakeFs;
+        use stoat_action::SaveBuffer;
+
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/src/a.rs", "fn caller() {}\n");
+        stoat.set_fs_host(fs);
+
+        let pane = stoat.active_workspace().panes.focus();
+        let buffer_id =
+            action_handlers::file::open_file_in_pane(&mut stoat, pane, Path::new("/repo/src/a.rs"))
+                .expect("open the buffer");
+
+        // Nothing drains here, so the updates queue up and each phase reads the
+        // ones it produced. A drain resolves the index directory, which is the
+        // environment dependency this test exists without.
+        let persists = |stoat: &mut Stoat| {
+            let mut seen = Vec::new();
+            while let Ok(update) = stoat.index_update_rx.try_recv() {
+                if let IndexUpdate::Reindex { persist, .. } = update {
+                    seen.push(persist);
+                }
+            }
+            seen
+        };
+        let settle = |stoat: &mut Stoat| {
+            stoat.drive_parse_jobs();
+            scheduler.run_until_parked();
+            stoat.drive_parse_jobs();
+            scheduler.run_until_parked();
+            scheduler.advance_clock(INDEX_EDIT_DEBOUNCE);
+            scheduler.run_until_parked();
+            stoat.drive_parse_jobs();
+            scheduler.run_until_parked();
+        };
+
+        {
+            let ws = stoat.active_workspace();
+            let buffer = ws.buffers.get(buffer_id).expect("buffer");
+            buffer
+                .write()
+                .expect("poisoned")
+                .edit(14..14, "\nfn one() {}");
+        }
+        settle(&mut stoat);
+        assert_eq!(
+            persists(&mut stoat),
+            [false],
+            "the edit's reindex updates the graph and writes nothing"
+        );
+
+        assert_eq!(
+            action_handlers::dispatch(&mut stoat, &SaveBuffer),
+            UpdateEffect::Redraw,
+            "the save reached a handler rather than falling through"
+        );
+        scheduler.run_until_parked();
+        // A refused or failed write returns before the enqueue, so a reindex
+        // arriving at all is what says the bytes reached disk first.
+        assert_eq!(
+            persists(&mut stoat),
+            [true],
+            "the save's reindex carries the shard and manifest entry to disk"
         );
     }
 

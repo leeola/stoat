@@ -329,7 +329,21 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, for
             .buffers
             .set_disk_mtime(buffer_id, mtime);
     }
-    stoat.persist_saved_shard(buffer_id, path, &text);
+    // The file on disk now matches the buffer, so this is the moment the shard
+    // a later open warm-loads becomes worth writing. Extraction and both writes
+    // ride the reindex pipeline off the run loop.
+    if !stoat.persistence_disabled {
+        let executor = stoat.executor.clone();
+        let index_update_tx = stoat.index_update_tx.clone();
+        let redraw_notify = stoat.redraw_notify.clone();
+        stoat.active_workspace_mut().enqueue_reindex(
+            &executor,
+            &index_update_tx,
+            &redraw_notify,
+            buffer_id,
+            true,
+        );
+    }
     maybe_apply_config_save(
         stoat,
         path,

@@ -96,6 +96,12 @@ pub(crate) fn read_manifest(index_dir: &Path, fs: &dyn FsHost) -> io::Result<Man
 /// Reads the current manifest, replaces any entry for `rel_path` with one
 /// carrying `content_hash`, and writes it back. Starts from an empty
 /// manifest when none exists yet, and re-stamps the current schema version.
+///
+/// Kept only as the reference a batched [`ManifestEdit::Set`] is measured
+/// against, as [`remove_manifest_entry`] is for its counterpart. Every writer
+/// now batches, a save included, and the comparison is only worth making
+/// against the straightforward version.
+#[cfg(test)]
 pub(crate) fn update_manifest_entry(
     index_dir: &Path,
     rel_path: &str,

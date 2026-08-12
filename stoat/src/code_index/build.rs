@@ -226,6 +226,13 @@ pub(crate) struct ReindexTarget {
     /// dominant cost of a reindex. `None` means the caller could not vouch that a
     /// stored tree describes this text.
     pub(crate) tree: Option<Tree>,
+    /// Whether the resulting [`IndexUpdate::Reindex`] writes the shard and
+    /// manifest entry as well as updating the graph.
+    ///
+    /// A save sets it, because the file on disk now matches the buffer and a
+    /// later open warm-loads what is written. A plain edit leaves it clear and
+    /// defers to whichever save follows.
+    pub(crate) persist: bool,
 }
 
 /// Spawn a job to re-extract one edited buffer and deliver its
@@ -248,6 +255,7 @@ pub(crate) fn reindex_buffer(
             path,
             text,
             tree,
+            persist,
         } = target;
         if let Some((rel_path, shard)) =
             extract_shard(&language, &git_root, &path, &text, tree.as_ref())
@@ -258,7 +266,7 @@ pub(crate) fn reindex_buffer(
                 file,
                 rel_path,
                 shard,
-                persist: false,
+                persist,
             });
             redraw.notify_one();
         }
