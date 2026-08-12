@@ -112,6 +112,17 @@ pub trait FsHost: Send + Sync {
     /// own state via [`manual_walk`]. Output is sorted lexicographically.
     fn walk_workspace_files(&self, root: &Path) -> Vec<PathBuf>;
 
+    /// Enumerates `root` and every non-ignored directory beneath it, sorted.
+    ///
+    /// The directory counterpart to [`Self::walk_workspace_files`], honouring
+    /// the same ignore stack through the same machinery, so the two agree on
+    /// which trees the workspace contains. An ignored directory is skipped
+    /// whole rather than descended into.
+    ///
+    /// Exists for callers that act per directory rather than per file, the
+    /// filesystem watch being the one that does.
+    fn walk_workspace_dirs(&self, root: &Path) -> Vec<PathBuf>;
+
     /// Streaming counterpart to [`Self::walk_workspace_files`]. Calls
     /// `on_batch` repeatedly with chunks of paths as the walker discovers
     /// them, ending when the walk is exhausted. Lets long-running walks
@@ -201,6 +212,20 @@ pub fn manual_walk(fs: &dyn FsHost, root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Directory counterpart to [`manual_walk`], yielding `root` and every
+/// non-ignored directory beneath it, sorted.
+///
+/// An ignored directory is skipped whole rather than descended into, which is
+/// the property a caller registering one watch per directory depends on.
+pub fn manual_walk_dirs(fs: &dyn FsHost, root: &Path) -> Vec<PathBuf> {
+    let defaults = build_default_ignore(root);
+    let mut stack: Vec<Gitignore> = Vec::new();
+    let mut out = vec![root.to_path_buf()];
+    walk_dirs(fs, root, &defaults, &mut stack, &mut out);
+    out.sort();
+    out
+}
+
 /// Streaming counterpart to [`manual_walk`]. Calls `on_batch` whenever
 /// the in-flight buffer reaches [`WALK_BATCH_SIZE`] paths and once more
 /// for any remainder. Does not sort; batches arrive in walker order.
@@ -258,6 +283,40 @@ fn walk_dir(
         } else {
             out.push(path);
         }
+    }
+
+    stack.truncate(stack.len() - pushed);
+}
+
+/// Collect the non-ignored directories under `dir`, `dir` itself excluded so
+/// the caller decides whether the root belongs in the result.
+fn walk_dirs(
+    fs: &dyn FsHost,
+    dir: &Path,
+    defaults: &Gitignore,
+    stack: &mut Vec<Gitignore>,
+    out: &mut Vec<PathBuf>,
+) {
+    let pushed = push_dir_ignores(fs, dir, stack);
+
+    let entries = match fs.list_dir(dir) {
+        Ok(e) => e,
+        Err(_) => {
+            stack.truncate(stack.len() - pushed);
+            return;
+        },
+    };
+
+    for entry in entries {
+        if !entry.is_dir {
+            continue;
+        }
+        let path = dir.join(entry.name.as_str());
+        if path_is_ignored(defaults, stack, &path, true) {
+            continue;
+        }
+        walk_dirs(fs, &path, defaults, stack, out);
+        out.push(path);
     }
 
     stack.truncate(stack.len() - pushed);
@@ -463,6 +522,28 @@ impl FsHost for LocalFs {
         let mut out = Vec::new();
         for entry in walker.flatten() {
             if entry.file_type().is_some_and(|t| t.is_file()) {
+                out.push(entry.into_path());
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn walk_workspace_dirs(&self, root: &Path) -> Vec<PathBuf> {
+        let defaults = build_default_ignore(root);
+        let walker = WalkBuilder::new(root)
+            .hidden(false)
+            .require_git(false)
+            .add_custom_ignore_filename(".stoatignore")
+            .filter_entry(move |entry| {
+                let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+                !defaults.matched(entry.path(), is_dir).is_ignore()
+            })
+            .build();
+
+        let mut out = Vec::new();
+        for entry in walker.flatten() {
+            if entry.file_type().is_some_and(|t| t.is_dir()) {
                 out.push(entry.into_path());
             }
         }
@@ -877,6 +958,31 @@ mod tests {
                 .file_type()
                 .is_symlink(),
             "the intermediate link must not be clobbered"
+        );
+    }
+
+    /// The production walker excludes the same trees the in-memory one does.
+    /// The two run through different machinery, `ignore::WalkBuilder` here and
+    /// a hand-rolled descent there, so agreement is worth stating on both
+    /// sides rather than assumed from the shared default ignore file.
+    #[test]
+    fn walk_workspace_dirs_excludes_the_built_trees() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        for dir in ["src/deep", "target/debug", "node_modules/pkg", ".git/refs"] {
+            fs::create_dir_all(root.join(dir)).expect("seed tree");
+        }
+
+        let dirs = LocalFs.walk_workspace_dirs(root);
+        let relative: Vec<&Path> = dirs
+            .iter()
+            .map(|dir| dir.strip_prefix(root).expect("under the root"))
+            .collect();
+
+        assert_eq!(
+            relative,
+            [Path::new(""), Path::new("src"), Path::new("src/deep")],
+            "the root and its source directories only",
         );
     }
 }

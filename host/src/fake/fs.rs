@@ -659,6 +659,10 @@ impl FsHost for FakeFs {
         crate::fs::manual_walk(self, root)
     }
 
+    fn walk_workspace_dirs(&self, root: &Path) -> Vec<PathBuf> {
+        crate::fs::manual_walk_dirs(self, root)
+    }
+
     fn walk_workspace_files_streaming(
         &self,
         root: &Path,
@@ -1187,6 +1191,39 @@ mod tests {
             [FakeFsOp::Read {
                 path: PathBuf::from("/x"),
             }]
+        );
+    }
+
+    /// The dirs walk answers "which trees does this workspace have", and the
+    /// fs watch registers one watch per answer. An ignored tree slipping in
+    /// costs a watch per directory under it, which on a built repo is what
+    /// exhausts the platform's watch limit.
+    ///
+    /// So the walk has to skip an ignored directory whole rather than descend
+    /// it, and has to read a nested `.gitignore` the way the files walk does.
+    #[test]
+    fn walk_workspace_dirs_skips_ignored_trees_whole() {
+        let fs = FakeFs::new();
+        let root = PathBuf::from("/repo");
+        fs.insert_files([
+            ("/repo/src/a.rs", "fn a() {}".as_bytes()),
+            ("/repo/src/deep/b.rs", "fn b() {}".as_bytes()),
+            ("/repo/target/debug/build/x.rs", "gen".as_bytes()),
+            ("/repo/node_modules/pkg/i.js", "js".as_bytes()),
+            ("/repo/.git/refs/heads/main", "sha".as_bytes()),
+            ("/repo/vendor/dep/c.rs", "fn c() {}".as_bytes()),
+            ("/repo/.gitignore", "vendor/\n".as_bytes()),
+        ]);
+
+        assert_eq!(
+            fs.walk_workspace_dirs(&root),
+            [
+                PathBuf::from("/repo"),
+                PathBuf::from("/repo/src"),
+                PathBuf::from("/repo/src/deep"),
+            ],
+            "the root and its source directories, and nothing from a tree the \
+             defaults or the repo's own .gitignore exclude",
         );
     }
 

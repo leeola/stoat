@@ -301,6 +301,49 @@ fn install_highlight_maps(registry: &LanguageRegistry, styles: &SyntaxStyles) {
     }
 }
 
+/// Register one non-recursive watch per directory of the workspace at `root`.
+///
+/// One recursive watch on the root instead covers `target/`, `node_modules/`,
+/// and `.git/`, which the file walker excludes and nothing else in the editor
+/// reads. On a repo that has been built, those trees hold most of the
+/// directories, enough to exhaust the platform's watch limit and so leave the
+/// workspace unwatched entirely.
+///
+/// The three `.git` directories are added back on purpose. `HEAD`, `index`,
+/// `packed-refs`, and branch-tip writes all land in them, and those are what
+/// stale every diff base. Deeper `.git` paths going unwatched is the accepted
+/// tradeoff for not walking an object store.
+///
+/// Reads the tree, so it belongs on the blocking pool rather than the run loop.
+/// Failures are counted rather than reported one by one, since a watch limit
+/// reached partway through fails for every remaining directory.
+fn watch_workspace_dirs(fs: &dyn FsHost, watcher: &dyn FsWatchHost, root: &Path) {
+    let git_dir = root.join(".git");
+    let dirs = fs.walk_workspace_dirs(root).into_iter().chain([
+        git_dir.clone(),
+        git_dir.join("refs"),
+        git_dir.join("refs").join("heads"),
+    ]);
+
+    let (mut watched, mut failed) = (0usize, 0usize);
+    for dir in dirs {
+        match watcher.watch(&dir) {
+            Ok(_) => watched += 1,
+            Err(_) => failed += 1,
+        }
+    }
+
+    if failed > 0 {
+        tracing::warn!(
+            target: "stoat::app",
+            watched,
+            failed,
+            root = %root.display(),
+            "some workspace directories could not be watched; external edits under them go untracked",
+        );
+    }
+}
+
 /// Index into [`SPINNER_FRAMES`] for a spinner that has animated for `clock`
 /// seconds, wrapping once per full cycle.
 pub(crate) fn spinner_phase(clock: f32) -> u8 {
@@ -3337,23 +3380,14 @@ impl Stoat {
         }
         let index_dir = self.index_dir_for_build(&git_root);
         if !self.persistence_disabled {
-            // notify's inotify backend registers a recursive watch by walking
-            // every directory under the root synchronously, which blocks the
-            // runtime thread before the first frame on a large repo. Run it on
-            // the blocking pool so startup stays interactive.
-            let host = self.fs_watch_host.clone();
+            // The walk reads the tree, which is what blocks the runtime thread
+            // before the first frame on a large repo. Run it on the blocking
+            // pool so startup stays interactive.
+            let watcher = self.fs_watch_host.clone();
+            let fs = self.fs_host.clone();
             let root = git_root.clone();
             self.executor
-                .spawn_blocking(move || {
-                    if let Err(err) = host.watch_recursive(&root) {
-                        tracing::warn!(
-                            target: "stoat::app",
-                            %err,
-                            root = %root.display(),
-                            "recursive fs-watch failed; external-edit tracking disabled for this workspace",
-                        );
-                    }
-                })
+                .spawn_blocking(move || watch_workspace_dirs(fs.as_ref(), watcher.as_ref(), &root))
                 .detach();
         }
         let handles = crate::code_index::build::IndexBuild {
@@ -3916,6 +3950,22 @@ impl Stoat {
                 )
             {
                 self.finder_path_epoch += 1;
+
+                // Watches are per directory, so one created after startup is
+                // invisible until it gets its own. The stat is affordable here
+                // because the ignored-directory filter above already dropped
+                // build churn, leaving creates in the source tree, which are
+                // rare.
+                if kind == FsEventKind::Created
+                    && self
+                        .fs_host
+                        .metadata(&path)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|meta| meta.is_dir)
+                {
+                    let _ = self.fs_watch_host.watch(&path);
+                }
             }
 
             if in_git_dir {
@@ -13709,6 +13759,86 @@ mod tests {
             stoat.active_workspace().code_graph.symbol_at(file, 4),
             None,
             "an external remove evicts the file",
+        );
+    }
+
+    /// Watches are registered per directory, so which directories get one is
+    /// the whole question. A recursive watch on the root covered `target/`,
+    /// `node_modules/`, and the object store, which on a built repo is most of
+    /// the tree and enough to exhaust the platform's watch limit.
+    ///
+    /// Stated as the watch set rather than as events, since whether a write
+    /// under an unwatched directory reports anything is the platform's
+    /// behavior rather than this code's.
+    #[test]
+    fn workspace_watches_cover_the_source_tree_and_the_git_refs() {
+        use crate::host::{FakeFs, FakeFsWatcher};
+
+        let fs = FakeFs::new();
+        fs.insert_files([
+            ("/repo/src/a.rs", "fn a() {}".as_bytes()),
+            ("/repo/src/deep/b.rs", "fn b() {}".as_bytes()),
+            ("/repo/target/debug/gen.rs", "gen".as_bytes()),
+            ("/repo/node_modules/pkg/i.js", "js".as_bytes()),
+            ("/repo/.git/refs/heads/main", "sha".as_bytes()),
+            ("/repo/.git/objects/ab/cdef", "obj".as_bytes()),
+        ]);
+        let watcher = FakeFsWatcher::new();
+
+        watch_workspace_dirs(&fs, &watcher, Path::new("/repo"));
+
+        assert_eq!(
+            watcher.watched_paths(),
+            [
+                PathBuf::from("/repo"),
+                PathBuf::from("/repo/.git"),
+                PathBuf::from("/repo/.git/refs"),
+                PathBuf::from("/repo/.git/refs/heads"),
+                PathBuf::from("/repo/src"),
+                PathBuf::from("/repo/src/deep"),
+            ],
+            "the source tree plus the three .git directories that carry HEAD, \
+             the index, and the branch tips, and nothing from a built tree or \
+             the object store",
+        );
+    }
+
+    /// A directory created after startup has no watch of its own, which leaves
+    /// files written into it untracked for the rest of the session. Its create
+    /// event is the only notice the editor gets.
+    #[test]
+    fn a_directory_created_after_startup_gets_its_own_watch() {
+        use crate::host::{FakeFs, FakeFsWatcher, FsEventKind};
+
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+        stoat.persistence_disabled = true;
+
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/src/a.rs", "fn a() {}\n");
+        stoat.set_fs_host(fs.clone());
+        let watcher = Arc::new(FakeFsWatcher::new());
+        stoat.set_fs_watch_host(watcher.clone());
+
+        let fresh = PathBuf::from("/repo/src/fresh");
+        fs.insert_dir(&fresh);
+        watcher.inject(&fresh, FsEventKind::Created);
+        stoat.drain_fs_watch_events();
+        assert!(
+            watcher.is_watching(&fresh),
+            "the new directory is watched from its create event",
+        );
+
+        let file = PathBuf::from("/repo/src/a.rs");
+        watcher.inject(&file, FsEventKind::Created);
+        stoat.drain_fs_watch_events();
+        assert!(
+            !watcher.is_watching(&file),
+            "a created file needs no watch of its own, its directory has one",
         );
     }
 
