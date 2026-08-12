@@ -476,7 +476,8 @@ pub struct TextPass {
     ///
     /// Keyed on text alone because runs only group same-scale primary-covered
     /// cells in the constant primary family, matching [`Self::shape_cache`]'s
-    /// family-blind invariant. Flushed whole past [`RUN_SHAPE_CACHE_CAP`].
+    /// family-blind invariant. Bounded, evicting the runs nothing has asked for
+    /// lately once it is full.
     run_shape_cache: font::RunShapeCache,
     /// The shaped glyphs of each grid row from the previous frame, indexed by
     /// row, so an unchanged row reuses them instead of re-shaping. Rebuilt for

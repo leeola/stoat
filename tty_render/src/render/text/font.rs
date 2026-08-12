@@ -97,20 +97,22 @@ pub(super) fn shape_run(
         .collect()
 }
 
-/// The largest the run-shape cache grows before it is flushed whole.
+/// The number of shaped runs the cache holds before it evicts to make room.
 ///
-/// Terminal content repeats, so a flushed cache repopulates within a frame. The
-/// bound keeps a pathological stream of unique runs from growing it unbounded.
-const RUN_SHAPE_CACHE_CAP: usize = 65_536;
+/// A screenful of distinct ligature runs is a few hundred, so this holds
+/// several screens of scrolled-past content and still bounds the cache at a
+/// couple of megabytes of run text and glyph vectors. A stream of unique runs,
+/// which is what log, hex, and UUID output is, settles here and evicts rather
+/// than growing.
+const RUN_SHAPE_CACHE_CAP: usize = 4096;
 
 /// Shape `text` as one run, reusing an identical run's glyphs from `cache`.
 ///
 /// [`shape_run`] rebuilds a cosmic-text buffer and reshapes from scratch, the
 /// dominant per-frame cost when a ligature row is repainted. The run text alone
 /// keys the result, since runs group only same-scale primary-covered cells in
-/// the constant `family`. On a miss the run is shaped and stored. The cache is
-/// flushed whole once it reaches [`RUN_SHAPE_CACHE_CAP`], before the new entry
-/// lands so the current run survives.
+/// the constant `family`. On a miss the run is shaped and stored, evicting a
+/// run nothing has asked for lately once the cache is full.
 pub(super) fn shape_run_cached<'a>(
     cache: &'a mut RunShapeCache,
     font_system: &mut FontSystem,
@@ -118,20 +120,27 @@ pub(super) fn shape_run_cached<'a>(
     metrics: CellMetrics,
     family: Family<'_>,
 ) -> &'a [(usize, CacheKey)] {
-    // The position copies out, so the lookup's borrow ends before the miss path
+    // The slot copies out, so the lookup's borrow ends before the miss path
     // needs the cache mutably. A map holding the glyphs themselves cannot do that,
     // and pays a second hash to read what the first already found.
-    if let Some(&at) = cache.at.get(text) {
-        return &cache.runs[at];
+    if let Some(&slot) = cache.at.get(text) {
+        cache.runs[slot].asked_for = true;
+        return &cache.runs[slot].glyphs;
     }
 
     let shaped = shape_run(font_system, text, metrics, family);
-    if cache.at.len() >= RUN_SHAPE_CACHE_CAP {
-        cache.clear();
-    }
-    cache.at.insert(text.to_string(), cache.runs.len());
-    cache.runs.push(shaped);
-    cache.runs.last().expect("just pushed")
+    let slot = cache.store(text, shaped);
+    &cache.runs[slot].glyphs
+}
+
+/// One cached run, holding the text it was shaped from, its glyphs, and
+/// whether anyone has asked for it since the eviction hand last passed it.
+struct CachedRun {
+    /// Shares its allocation with the key [`RunShapeCache::at`] holds, so the
+    /// slot unmaps itself on eviction without storing the text twice.
+    key: Arc<str>,
+    glyphs: Vec<(usize, CacheKey)>,
+    asked_for: bool,
 }
 
 /// Shaped glyphs of each ligature run, found by the run's text.
@@ -139,10 +148,20 @@ pub(super) fn shape_run_cached<'a>(
 /// The glyphs live in a Vec and the map holds positions into it, so a hit costs one
 /// hash and an index. Holding the glyphs in the map instead would cost a second hash
 /// on every hit, to read what the first lookup already proved was there.
+///
+/// Past [`RUN_SHAPE_CACHE_CAP`] runs the Vec stops growing and becomes the ring
+/// a second-chance sweep evicts around. Terminal content repeats, so a
+/// flush-everything bound throws away precisely the rows still on screen.
+/// Evicting only runs nothing asked for keeps those and drops the stream of
+/// one-off runs that pushed the cache to its bound.
 #[derive(Default)]
 pub(super) struct RunShapeCache {
-    at: FxHashMap<String, usize>,
-    runs: Vec<Vec<(usize, CacheKey)>>,
+    at: FxHashMap<Arc<str>, usize>,
+    runs: Vec<CachedRun>,
+    /// Slot the next eviction sweep starts at, which trails the most recent
+    /// insert so a fresh run gets a full pass around the ring before it is
+    /// considered.
+    hand: usize,
 }
 
 impl RunShapeCache {
@@ -150,6 +169,58 @@ impl RunShapeCache {
     pub(super) fn clear(&mut self) {
         self.at.clear();
         self.runs.clear();
+        self.hand = 0;
+    }
+
+    /// Store `glyphs` under `text` and return the slot holding them.
+    ///
+    /// Below the cap this appends. At the cap it evicts through [`Self::sweep`]
+    /// and reuses the slot that comes back.
+    ///
+    /// `text` must not already be cached. Storing it twice leaves the earlier
+    /// slot holding the same key with nothing mapped to it, and evicting that
+    /// slot then unmaps the later one. The only caller is
+    /// [`shape_run_cached`]'s miss path, which has just proved the key absent.
+    fn store(&mut self, text: &str, glyphs: Vec<(usize, CacheKey)>) -> usize {
+        let key: Arc<str> = Arc::from(text);
+        let run = CachedRun {
+            key: Arc::clone(&key),
+            glyphs,
+            asked_for: false,
+        };
+
+        let slot = if self.runs.len() < RUN_SHAPE_CACHE_CAP {
+            self.runs.push(run);
+            self.runs.len() - 1
+        } else {
+            let slot = self.sweep();
+            self.runs[slot] = run;
+            slot
+        };
+
+        self.at.insert(key, slot);
+        slot
+    }
+
+    /// Evict one run and return its now-free slot.
+    ///
+    /// The hand walks the ring and clears the mark on every run it finds asked
+    /// for, which is the second chance those runs get. The first unmarked run it
+    /// reaches is evicted. One full pass clears every mark, so the walk ends
+    /// within two laps however hot the cache is.
+    fn sweep(&mut self) -> usize {
+        loop {
+            let slot = self.hand;
+            self.hand = (self.hand + 1) % self.runs.len();
+
+            if self.runs[slot].asked_for {
+                self.runs[slot].asked_for = false;
+                continue;
+            }
+
+            self.at.remove(&self.runs[slot].key);
+            return slot;
+        }
     }
 }
 
@@ -317,7 +388,7 @@ mod tests {
     use super::{
         build_font_system, font_covers, glyph_family, load_bundled_fonts, resolve_primary_family,
         resolve_primary_font, run_text_and_columns_into, shape_char, shape_family, shape_run,
-        shape_run_cached, RunShapeCache, SYMBOLS_FAMILY,
+        shape_run_cached, RunShapeCache, RUN_SHAPE_CACHE_CAP, SYMBOLS_FAMILY,
     };
     use crate::render::CellMetrics;
     use cosmic_text::{
@@ -462,7 +533,7 @@ mod tests {
         // Poison the stored glyphs with another run's. A reshape would overwrite
         // them, so getting the poisoned glyphs back proves the hit read the cache.
         let poison = shape_run(&mut font_system, "ab", metrics, jbm);
-        cache.runs[cache.at["=="]] = poison.clone();
+        cache.runs[cache.at["=="]].glyphs = poison.clone();
         let hit = shape_run_cached(&mut cache, &mut font_system, "==", metrics, jbm);
         assert_eq!(
             hit,
@@ -473,6 +544,80 @@ mod tests {
             (cache.at.len(), cache.runs.len()),
             (1, 1),
             "a hit adds no entry"
+        );
+    }
+
+    /// A full cache evicts what nothing has asked for and keeps what something
+    /// has, which is the whole point of bounding it this way rather than
+    /// flushing it. A repainted row's runs are exactly the hit ones, so a bound
+    /// that drops them hands the next frame a re-shape storm.
+    ///
+    /// The sweep runs against a filled cache built by hand, since driving
+    /// [`RUN_SHAPE_CACHE_CAP`] real runs through the shaper costs seconds to
+    /// prove a rule that is about bookkeeping.
+    #[test]
+    fn a_full_cache_evicts_the_runs_nothing_asked_for() {
+        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
+        load_bundled_fonts(&mut font_system);
+        let metrics = CellMetrics::from_font_size(16, 1.0);
+        let jbm = Family::Name("JetBrains Mono");
+
+        let mut cache = RunShapeCache::default();
+        for index in 0..RUN_SHAPE_CACHE_CAP {
+            cache.store(&format!("run{index}"), Vec::new());
+        }
+        assert_eq!(cache.runs.len(), RUN_SHAPE_CACHE_CAP, "the cache filled");
+
+        // Ask for one run near the hand's start and leave its neighbour alone,
+        // so the next sweep meets both and has to choose between them.
+        shape_run_cached(&mut cache, &mut font_system, "run0", metrics, jbm);
+
+        cache.store("first new run", Vec::new());
+        assert!(
+            cache.at.contains_key("run0"),
+            "the run asked for since the hand last passed survives its sweep"
+        );
+        assert!(
+            !cache.at.contains_key("run1"),
+            "the untouched run behind it is the one evicted"
+        );
+        assert_eq!(
+            (cache.at.len(), cache.runs.len()),
+            (RUN_SHAPE_CACHE_CAP, RUN_SHAPE_CACHE_CAP),
+            "an insert past the cap replaces rather than grows"
+        );
+
+        // The survivor's second chance is spent, so the next sweep reaching it
+        // takes it. Every later insert keeps the cache at its bound.
+        for index in 0..RUN_SHAPE_CACHE_CAP {
+            cache.store(&format!("later{index}"), Vec::new());
+        }
+        assert_eq!(
+            (cache.at.len(), cache.runs.len()),
+            (RUN_SHAPE_CACHE_CAP, RUN_SHAPE_CACHE_CAP),
+            "a stream of unique runs settles at the bound instead of growing"
+        );
+        assert!(
+            !cache.at.contains_key("run0"),
+            "a run nobody asks for again is evicted on a later lap"
+        );
+    }
+
+    /// `clear` has to reset the hand with the two halves. A hand left past the
+    /// end of a refilled ring indexes a slot that is no longer there.
+    #[test]
+    fn clearing_resets_the_eviction_hand() {
+        let mut cache = RunShapeCache::default();
+        for index in 0..RUN_SHAPE_CACHE_CAP + 1 {
+            cache.store(&format!("run{index}"), Vec::new());
+        }
+        assert_ne!(cache.hand, 0, "the overflowing insert moved the hand");
+
+        cache.clear();
+        assert_eq!(
+            (cache.at.len(), cache.runs.len(), cache.hand),
+            (0, 0, 0),
+            "clear empties both halves and takes the hand back to the start"
         );
     }
 
