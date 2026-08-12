@@ -29,20 +29,43 @@ const INITIAL_CAPACITY: usize = 16;
 /// Sixteenths of a cell per whole cell, the unit a [`Polyline`] is declared in.
 const SIXTEENTHS: f32 = 16.0;
 
-/// The per-segment instance data.
+/// Points one instance carries, which is the longest path drawn in a single
+/// blend.
 ///
-/// One instance covers one segment rather than one whole path, which keeps the
-/// vertex stage to a fixed six-vertex quad. A path of N points expands to N-1
-/// instances, and a single point expands to one zero-length instance that the
-/// capsule SDF resolves as a dot.
+/// The commit graph is the sizing case. A bending edge runs a stub, eight curve
+/// steps, and a stub, so eleven points, and a straight edge two. Twelve covers
+/// every path it draws without a split.
+const MAX_PATH_POINTS: usize = 12;
+
+/// The per-path instance data.
+///
+/// One instance covers a whole path rather than one segment, because two
+/// capsules meeting at a shared endpoint overlap and composite their
+/// anti-aliased fringes twice, which beads every joint. The fragment stage takes
+/// the minimum distance over [`Self::point_count`] points instead, so a path
+/// blends once.
+///
+/// The points ride in the instance rather than a storage buffer the instance
+/// indexes, because the pass binds one bind group across the live grid and every
+/// composited pool while each keeps its own instance buffer. A shared arena has
+/// no frame boundary to reset against, and a per-slot arena needs a bind group
+/// per slot.
+///
+/// Slots past the count repeat the last point, so the loop bound is the only
+/// thing that decides how much of the array is read.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct PolylineInstance {
-    p0: [f32; 2],
-    p1: [f32; 2],
-    half_width: f32,
+    points: [[f32; 2]; MAX_PATH_POINTS],
+    /// The path's bounding box in cell fractions, as `[min_x, min_y, max_x,
+    /// max_y]`, which the vertex stage grows by the stroke reach to size the
+    /// quad. A per-path quad has no single segment to orient along, unlike the
+    /// one capsule's it replaces.
+    bounds: [f32; 4],
     color: [f32; 3],
+    half_width: f32,
     seq: u32,
+    point_count: u32,
 }
 
 /// The uniform shared by every instance. Carries the surface resolution and
@@ -166,12 +189,19 @@ impl PolylinePass {
                 buffers: &[VertexBufferLayout {
                     array_stride: size_of::<PolylineInstance>() as u64,
                     step_mode: VertexStepMode::Instance,
+                    // Six vec4s carry the twelve points, then the bounds, the
+                    // color paired with the half width, and the seq paired with
+                    // the point count.
                     attributes: &vertex_attr_array![
-                        0 => Float32x2,
-                        1 => Float32x2,
-                        2 => Float32,
-                        3 => Float32x3,
-                        4 => Uint32,
+                        0 => Float32x4,
+                        1 => Float32x4,
+                        2 => Float32x4,
+                        3 => Float32x4,
+                        4 => Float32x4,
+                        5 => Float32x4,
+                        6 => Float32x4,
+                        7 => Float32x4,
+                        8 => Uint32x2,
                     ],
                 }],
             },
@@ -495,27 +525,67 @@ fn make_bind_group(
 fn build_polyline_instances_into(polylines: &[Polyline], out: &mut Vec<PolylineInstance>) {
     out.clear();
     for polyline in polylines {
-        let point = |[x, y]: [i16; 2]| [f32::from(x) / SIXTEENTHS, f32::from(y) / SIXTEENTHS];
         let half_width = f32::from(polyline.width) / SIXTEENTHS / 2.0;
         let color = rgb_f32(polyline.color);
+        let points: Vec<[f32; 2]> = polyline
+            .points
+            .iter()
+            .map(|&[x, y]| [f32::from(x) / SIXTEENTHS, f32::from(y) / SIXTEENTHS])
+            .collect();
 
-        match polyline.points.as_slice() {
+        match points.as_slice() {
             [] => {},
-            [only] => out.push(PolylineInstance {
-                p0: point(*only),
-                p1: point(*only),
+            // A dot is the degenerate segment the capsule distance already
+            // resolves to a disc, so it needs no case of its own downstream.
+            [only] => out.push(path_instance(
+                &[*only, *only],
                 half_width,
                 color,
-                seq: polyline.seq,
-            }),
-            points => out.extend(points.windows(2).map(|pair| PolylineInstance {
-                p0: point(pair[0]),
-                p1: point(pair[1]),
-                half_width,
-                color,
-                seq: polyline.seq,
-            })),
+                polyline.seq,
+            )),
+            // Chunks overlap by their joint point, so the split path stays
+            // continuous and only that one joint blends twice.
+            points => out.extend(
+                points
+                    .chunks(MAX_PATH_POINTS - 1)
+                    .enumerate()
+                    .map(|(index, chunk)| {
+                        let start = index * (MAX_PATH_POINTS - 1);
+                        let end = (start + chunk.len() + 1).min(points.len());
+                        path_instance(&points[start..end], half_width, color, polyline.seq)
+                    })
+                    .filter(|instance| instance.point_count > 1),
+            ),
         }
+    }
+}
+
+/// One instance covering `points`, which must hold at least two and at most
+/// [`MAX_PATH_POINTS`] of them.
+fn path_instance(
+    points: &[[f32; 2]],
+    half_width: f32,
+    color: [f32; 3],
+    seq: u32,
+) -> PolylineInstance {
+    let last = *points.last().expect("a path instance holds a point");
+    let mut slots = [last; MAX_PATH_POINTS];
+    slots[..points.len()].copy_from_slice(points);
+
+    let bounds = points.iter().fold(
+        [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
+        |[min_x, min_y, max_x, max_y], &[x, y]| {
+            [min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y)]
+        },
+    );
+
+    PolylineInstance {
+        points: slots,
+        bounds,
+        color,
+        half_width,
+        seq,
+        point_count: points.len() as u32,
     }
 }
 
@@ -537,8 +607,17 @@ mod tests {
             front::wgsl,
             valid::{Capabilities, ValidationFlags, Validator},
         },
-        TextureFormat,
+        BufferDescriptor, BufferUsages, Color, CommandEncoderDescriptor, Device, Extent3d, LoadOp,
+        MapMode, Operations, Origin3d, PollType, Queue, RenderPassColorAttachment,
+        RenderPassDescriptor, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout,
+        TexelCopyTextureInfo, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
+        TextureUsages, TextureViewDescriptor,
     };
+
+    /// The square readback target's edge, in pixels. Four bytes a texel makes a
+    /// row exactly the 256-byte copy alignment, so the readback needs no stride
+    /// padding.
+    const TARGET: u32 = 64;
 
     fn path(points: &[[i16; 2]]) -> Polyline {
         Polyline {
@@ -594,8 +673,7 @@ mod tests {
         let instances = build_polyline_instances(&[path(&[[8, 16], [24, 32]])]);
 
         assert_eq!(instances.len(), 1);
-        assert_eq!(instances[0].p0, [0.5, 1.0]);
-        assert_eq!(instances[0].p1, [1.5, 2.0]);
+        assert_eq!(instances[0].points[..2], [[0.5, 1.0], [1.5, 2.0]]);
         assert_eq!(instances[0].half_width, 0.25, "8/16 of a cell, halved");
         assert_eq!(
             instances[0].color,
@@ -605,17 +683,40 @@ mod tests {
     }
 
     #[test]
-    fn a_path_becomes_one_instance_per_segment() {
+    fn a_path_becomes_one_instance() {
         let instances = build_polyline_instances(&[path(&[[0, 0], [0, 16], [16, 32]])]);
 
-        assert_eq!(instances.len(), 2, "three points span two segments");
-        assert_eq!(instances[0].p0, [0.0, 0.0]);
-        assert_eq!(instances[0].p1, [0.0, 1.0]);
+        assert_eq!(instances.len(), 1, "every segment blends together or beads");
+        assert_eq!(instances[0].point_count, 3);
         assert_eq!(
-            instances[1].p0, instances[0].p1,
-            "segments chain end to start"
+            instances[0].points[..3],
+            [[0.0, 0.0], [0.0, 1.0], [1.0, 2.0]]
         );
-        assert_eq!(instances[1].p1, [1.0, 2.0]);
+        assert_eq!(
+            instances[0].bounds,
+            [0.0, 0.0, 1.0, 2.0],
+            "the quad bounds every point"
+        );
+        assert!(
+            instances[0].points[3..].iter().all(|&p| p == [1.0, 2.0]),
+            "the slots past the count repeat the last point"
+        );
+    }
+
+    /// A path past the cap splits, and the chunks share the point they meet at
+    /// so the stroke stays continuous across the split.
+    #[test]
+    fn a_path_past_the_cap_splits_on_a_shared_point() {
+        let points: Vec<[i16; 2]> = (0..16).map(|step| [0, step * 16]).collect();
+        let instances = build_polyline_instances(&[path(&points)]);
+
+        assert_eq!(instances.len(), 2, "sixteen points need a second instance");
+        assert_eq!(instances[0].point_count, 12);
+        assert_eq!(instances[1].point_count, 5);
+        assert_eq!(
+            instances[1].points[0], instances[0].points[11],
+            "the chunks meet on one shared point"
+        );
     }
 
     #[test]
@@ -623,8 +724,9 @@ mod tests {
         let instances = build_polyline_instances(&[path(&[[8, 8]])]);
 
         assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].point_count, 2);
         assert_eq!(
-            instances[0].p0, instances[0].p1,
+            instances[0].points[0], instances[0].points[1],
             "a dot is a capsule with no length"
         );
     }
@@ -639,17 +741,159 @@ mod tests {
         let instances = build_polyline_instances(&[path(&[[0, 16], [0, 32]])]);
 
         assert_eq!(
-            (instances[0].p0, instances[0].p1),
-            ([0.0, 1.0], [0.0, 2.0]),
+            instances[0].points[..2],
+            [[0.0, 1.0], [0.0, 2.0]],
             "the built endpoints are where the path was declared, shift or no shift",
         );
         assert_eq!(
             (
-                shader_point(instances[0].p0, -0.5),
-                shader_point(instances[0].p1, -0.5),
+                shader_point(instances[0].points[0], -0.5),
+                shader_point(instances[0].points[1], -0.5),
             ),
             ([0.0, 0.5], [0.0, 1.5]),
             "both ends shift equally once the shader applies it",
+        );
+    }
+
+    /// Draw `paths` alone onto a black [`TARGET`]-square target and read the red
+    /// channel back, one byte a pixel.
+    ///
+    /// Red alone because the fixture strokes in pure red over black, so the byte
+    /// at a pixel is the coverage the path resolved there.
+    fn render_red(device: &Device, queue: &Queue, paths: &[Polyline]) -> Vec<u8> {
+        let mut pass = PolylinePass::new(
+            device,
+            TextureFormat::Rgba8Unorm,
+            CellMetrics {
+                font_size: 10.0,
+                width: 12.0,
+                height: 12.0,
+                scale_factor: 1.0,
+            },
+        );
+        pass.prepare_composite(
+            device,
+            queue,
+            paths,
+            &[],
+            [TARGET as f32, TARGET as f32],
+            0.0,
+            true,
+            0,
+            0,
+        );
+
+        let size = Extent3d {
+            width: TARGET,
+            height: TARGET,
+            depth_or_array_layers: 1,
+        };
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("polyline joint target"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&TextureViewDescriptor::default());
+        let readback = device.create_buffer(&BufferDescriptor {
+            label: Some("polyline joint readback"),
+            size: u64::from(TARGET) * u64::from(TARGET) * 4,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("polyline joint"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(Color::BLACK),
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.draw_composite(&mut render_pass, 0, 0);
+        }
+        encoder.copy_texture_to_buffer(
+            TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(TARGET * 4),
+                    rows_per_image: None,
+                },
+            },
+            size,
+        );
+        queue.submit(Some(encoder.finish()));
+
+        readback.slice(..).map_async(MapMode::Read, |_| {});
+        device
+            .poll(PollType::wait_indefinitely())
+            .expect("poll readback");
+        let rgba = readback.slice(..).get_mapped_range().to_vec();
+
+        rgba.chunks_exact(4).map(|texel| texel[0]).collect()
+    }
+
+    /// Two capsules meeting at a joint overlap, so drawing them apart composites
+    /// their anti-aliased fringes twice and beads the joint.
+    ///
+    /// Splitting a straight run at its midpoint covers exactly the same shape as
+    /// the unsplit run, so the two render identically or the joint beads.
+    #[test]
+    fn a_joint_blends_no_heavier_than_the_run_it_splits() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("polyline joint test: no wgpu adapter, skipping");
+            return;
+        };
+
+        // An odd width puts the fringe on fractional coverage, where a second
+        // blend shows. An even one saturates it and hides the bead.
+        let run = |points: &[[i16; 2]]| Polyline {
+            points: points.to_vec(),
+            width: 7,
+            color: Rgb::new(255, 0, 0),
+            seq: 0,
+        };
+
+        let unsplit = render_red(&device, &queue, &[run(&[[32, 32], [32, 64]])]);
+        let split = render_red(&device, &queue, &[run(&[[32, 32], [32, 48], [32, 64]])]);
+
+        assert!(
+            unsplit.iter().any(|&byte| byte > 0 && byte < 255),
+            "the fixture paints a partly covered fringe to compare"
+        );
+
+        let bead = split
+            .iter()
+            .zip(&unsplit)
+            .position(|(split, unsplit)| split != unsplit)
+            .map(|at| {
+                let index = at as u32;
+                (index % TARGET, index / TARGET, split[at], unsplit[at])
+            });
+        assert_eq!(
+            bead, None,
+            "the joint adds no coverage of its own, at (x, y, split, unsplit)"
         );
     }
 

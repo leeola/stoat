@@ -1,8 +1,13 @@
-// Stroked-path pass. One instance per segment expands to an oriented quad and
+// Stroked-path pass. One instance per path expands to the quad bounding it and
 // the fragment stage resolves a capsule SDF, so a diagonal reads smooth at cell
 // scale and a zero-length segment reads as a round dot. Endpoints are given in
 // cell-fraction units and scaled by the live cell size, so a path tracks font
 // zoom like a bar does.
+//
+// The whole path resolves in one fragment, taking the nearest of its segments,
+// because two capsules meeting at a shared endpoint overlap and composite their
+// anti-aliased fringes twice. Half coverage over half coverage reads three
+// quarters, which beads every joint.
 //
 // The half-width arrives in the same cell-fraction units and is scaled here
 // too, or every stroke would collapse to a sub-pixel hairline. It scales by the
@@ -39,58 +44,70 @@ var<storage, read> occluders: array<Occluder>;
 // coverage to zero instead of clipping the edge at the quad boundary.
 const AA_MARGIN: f32 = 1.0;
 
+// Points one instance carries, matching MAX_PATH_POINTS on the Rust side. Slots
+// past the count repeat the last point, so the count alone decides how much of
+// the array the fragment stage reads.
+const MAX_PATH_POINTS: u32 = 12u;
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) @interpolate(flat) color: vec3<f32>,
     @location(1) @interpolate(flat) seq: u32,
-    // The segment in pixels, carried to the fragment stage so it can measure
-    // its own distance to the capsule's spine.
-    @location(2) @interpolate(flat) p0: vec2<f32>,
-    @location(3) @interpolate(flat) p1: vec2<f32>,
-    // Also in pixels, so the fragment stage can use it as the capsule radius
-    // directly.
-    @location(4) @interpolate(flat) half_width: f32,
+    // In pixels, so the fragment stage uses it as the capsule radius directly.
+    @location(2) @interpolate(flat) half_width: f32,
+    @location(3) @interpolate(flat) point_count: u32,
+    // The path's points in pixels, converted once a vertex rather than once a
+    // fragment.
+    @location(4) @interpolate(flat) p01: vec4<f32>,
+    @location(5) @interpolate(flat) p23: vec4<f32>,
+    @location(6) @interpolate(flat) p45: vec4<f32>,
+    @location(7) @interpolate(flat) p67: vec4<f32>,
+    @location(8) @interpolate(flat) p89: vec4<f32>,
+    @location(9) @interpolate(flat) p1011: vec4<f32>,
+}
+
+// A point pair moved to pixels, which is how each packed vec4 of the instance
+// reaches the fragment stage.
+fn pair_px(pair: vec4<f32>, shift: vec2<f32>) -> vec4<f32> {
+    return vec4<f32>(
+        (pair.xy + shift) * globals.cell_size,
+        (pair.zw + shift) * globals.cell_size
+    );
 }
 
 @vertex
 fn vs_main(
     @builtin(vertex_index) vertex_index: u32,
-    @location(0) p0_cells: vec2<f32>,
-    @location(1) p1_cells: vec2<f32>,
-    @location(2) half_width: f32,
-    @location(3) color: vec3<f32>,
-    @location(4) seq: u32,
+    @location(0) p01_cells: vec4<f32>,
+    @location(1) p23_cells: vec4<f32>,
+    @location(2) p45_cells: vec4<f32>,
+    @location(3) p67_cells: vec4<f32>,
+    @location(4) p89_cells: vec4<f32>,
+    @location(5) p1011_cells: vec4<f32>,
+    @location(6) bounds: vec4<f32>,
+    @location(7) color_width: vec4<f32>,
+    @location(8) seq_count: vec2<u32>,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, -1.0),
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(1.0, -1.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0),
         vec2<f32>(1.0, 1.0)
     );
     let corner = corners[vertex_index];
 
     let shift = vec2<f32>(0.0, globals.shift_rows);
-    let p0 = (p0_cells + shift) * globals.cell_size;
-    let p1 = (p1_cells + shift) * globals.cell_size;
-    let half_width_px = half_width * globals.cell_size.x;
+    let half_width_px = color_width.w * globals.cell_size.x;
 
-    // A zero-length segment has no direction to orient by, so it falls back to
-    // the axis-aligned square that bounds its cap. The SDF still resolves that
-    // to a disc, which is how a single-point path draws a dot.
-    let span = p1 - p0;
-    let length = max(length(span), 0.0001);
-    var along = vec2<f32>(1.0, 0.0);
-    if length > 0.0001 {
-        along = span / length;
-    }
-    let across = vec2<f32>(-along.y, along.x);
-
-    let reach = half_width_px + AA_MARGIN;
-    let center = (p0 + p1) * 0.5;
-    let half_span = length * 0.5 + reach;
-    let pixel = center + along * (corner.x * half_span) + across * (corner.y * reach);
+    // The quad bounds the whole path rather than one segment, so it is axis
+    // aligned. A path of several segments has no single direction to orient to,
+    // and the SDF clips the corners the box adds anyway.
+    let reach = vec2<f32>(half_width_px + AA_MARGIN, half_width_px + AA_MARGIN);
+    let min_px = (bounds.xy + shift) * globals.cell_size - reach;
+    let max_px = (bounds.zw + shift) * globals.cell_size + reach;
+    let pixel = mix(min_px, max_px, corner);
 
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
@@ -99,11 +116,16 @@ fn vs_main(
 
     var out: VsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
-    out.color = color;
-    out.seq = seq;
-    out.p0 = p0;
-    out.p1 = p1;
+    out.color = color_width.xyz;
+    out.seq = seq_count.x;
     out.half_width = half_width_px;
+    out.point_count = min(seq_count.y, MAX_PATH_POINTS);
+    out.p01 = pair_px(p01_cells, shift);
+    out.p23 = pair_px(p23_cells, shift);
+    out.p45 = pair_px(p45_cells, shift);
+    out.p67 = pair_px(p67_cells, shift);
+    out.p89 = pair_px(p89_cells, shift);
+    out.p1011 = pair_px(p1011_cells, shift);
     return out;
 }
 
@@ -144,7 +166,26 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    let alpha = coverage(capsule_sdf(frag, in.p0, in.p1, in.half_width));
+    // The nearest segment decides the coverage, so the path blends once no
+    // matter how many segments meet at the fragment.
+    var points = array<vec2<f32>, MAX_PATH_POINTS>(
+        in.p01.xy, in.p01.zw,
+        in.p23.xy, in.p23.zw,
+        in.p45.xy, in.p45.zw,
+        in.p67.xy, in.p67.zw,
+        in.p89.xy, in.p89.zw,
+        in.p1011.xy, in.p1011.zw
+    );
+
+    var sdf = capsule_sdf(frag, points[0], points[1], in.half_width);
+    for (var i = 1u; i + 1u < in.point_count; i = i + 1u) {
+        sdf = min(
+            sdf,
+            capsule_sdf(frag, points[i], points[i + 1u], in.half_width)
+        );
+    }
+
+    let alpha = coverage(sdf);
     if alpha <= 0.0 {
         discard;
     }
