@@ -30,6 +30,11 @@ struct Globals {
     // its paths without rebuilding them. Zero for the live grid.
     shift_rows: f32,
     pad0: u32,
+    // Cell the grid's own (0, 0) is drawn at, which vs_main adds before the
+    // pixel conversion. A pool composite is positioned within its region, so
+    // this is what puts it on the screen. Zero for the live grid.
+    origin_cells: vec2<f32>,
+    pad1: vec2<u32>,
 }
 
 @group(0) @binding(0)
@@ -98,7 +103,7 @@ fn vs_main(
     );
     let corner = corners[vertex_index];
 
-    let shift = vec2<f32>(0.0, globals.shift_rows);
+    let shift = vec2<f32>(0.0, globals.shift_rows) + globals.origin_cells;
     let half_width_px = color_width.w * globals.cell_size.x;
 
     // The quad bounds the whole path rather than one segment, so it is axis

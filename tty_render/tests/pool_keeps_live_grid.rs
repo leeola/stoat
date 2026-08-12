@@ -120,6 +120,7 @@ fn pool_composite_keeps_live_instances() {
         &[],
         [0, 0, width, height],
         0.0,
+        [0.0; 2],
         true,
         true,
         0,
@@ -255,6 +256,7 @@ fn shift_only_composite_reuses_prior_rows() {
         &[],
         full_surface,
         0.0,
+        [0.0; 2],
         true,
         true,
         0,
@@ -273,6 +275,7 @@ fn shift_only_composite_reuses_prior_rows() {
         &[],
         full_surface,
         0.0,
+        [0.0; 2],
         false,
         true,
         0,
@@ -404,6 +407,7 @@ fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
             &[],
             scissor,
             0.0,
+            [0.0; 2],
             changed,
             true,
             pool,
@@ -612,6 +616,7 @@ fn pool_grow_heals_live_instances() {
         &[],
         [0, 0, width, height],
         0.0,
+        [0.0; 2],
         true,
         true,
         0,
@@ -722,6 +727,7 @@ fn composite_pool_leaves_the_content_epoch_alone_across_a_grow() {
         &[],
         full,
         0.0,
+        [0.0; 2],
         true,
         true,
         0,
@@ -741,6 +747,7 @@ fn composite_pool_leaves_the_content_epoch_alone_across_a_grow() {
         &[],
         full,
         0.0,
+        [0.0; 2],
         true,
         true,
         0,
@@ -750,5 +757,126 @@ fn composite_pool_leaves_the_content_epoch_alone_across_a_grow() {
     assert_eq!(
         after_repeat, after_new,
         "recompositing the same resident glyphs must not bump the epoch"
+    );
+}
+
+/// A pool grid sized to its region draws at the region's screen cells.
+///
+/// The grid the composite is handed covers the region alone, so its own (0, 0)
+/// is not the screen's. The origin the passes carry in their globals is what
+/// places it, and without that the pool would draw at the screen's top-left and
+/// the scissor would clip all of it away, leaving the live grid showing.
+#[test]
+fn a_region_sized_pool_draws_at_the_region_origin() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("pool_keeps_live_grid: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let format = TextureFormat::Rgba8Unorm;
+    let font_size = 30;
+    let [cell_w, cell_h] = cell_size(font_size, 1.0);
+    let (cell_w, cell_h) = (cell_w.round() as u32, cell_h.round() as u32);
+    let (width, height) = (128u32, cell_h * 4);
+
+    let black = Rgb::new(0, 0, 0);
+    let white = Rgb::new(255, 255, 255);
+    let gray = Rgb::new(80, 80, 80);
+
+    let target = device.create_texture(&TextureDescriptor {
+        label: Some("region origin target"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&TextureViewDescriptor::default());
+
+    let mut renderer = Renderer::new(
+        &device,
+        format,
+        [width, height],
+        build_font_system(),
+        FontConfig {
+            size: font_size,
+            scale_factor: 1.0,
+            family: &["JetBrains Mono".to_owned()],
+            ligatures: true,
+        },
+        black,
+        white,
+    );
+
+    let (rows, cols) = renderer.grid_size();
+    assert!(rows >= 3 && cols >= 2, "grid too small: {rows}x{cols}");
+
+    let live = Grid::new(rows, cols);
+
+    // One row tall and one column wide, placed away from both origins so a
+    // composite that ignored the origin would land somewhere else entirely.
+    let (top, left) = (2u32, 1u32);
+    let mut pool = Grid::new(1, 1);
+    pool.get_mut(0, 0).bg = gray;
+
+    let no_decoration = Damage::Partial(Vec::new());
+    renderer.render_into(
+        &device,
+        &queue,
+        &view,
+        &live,
+        Frame {
+            cursor: None,
+            cursor_corners: None,
+            scroll: Scroll {
+                grid: 0.0,
+                document: 0.0,
+                scrollback: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage: &Damage::Full,
+            decoration_damage: &no_decoration,
+            scrolled_rows: 0,
+        },
+    );
+
+    renderer.composite_pool(
+        &device,
+        &queue,
+        &view,
+        &pool,
+        &[],
+        [left * cell_w, top * cell_h, cell_w, cell_h],
+        0.0,
+        [left as f32, top as f32],
+        true,
+        true,
+        0,
+        0,
+    );
+    let pixels = read_back(&device, &queue, &target, width, height);
+
+    let at = |row: u32, col: u32| {
+        let (x, y) = (col * cell_w + cell_w / 2, row * cell_h + cell_h / 2);
+        let i = ((y * width + x) * 4) as usize;
+        (pixels[i], pixels[i + 1], pixels[i + 2])
+    };
+
+    assert_eq!(
+        at(top, left),
+        (gray.r, gray.g, gray.b),
+        "the region's own cell holds the pool's fill",
+    );
+    assert_eq!(
+        at(0, 0),
+        (black.r, black.g, black.b),
+        "the screen origin keeps the live grid, which is where an unplaced pool would draw",
     );
 }

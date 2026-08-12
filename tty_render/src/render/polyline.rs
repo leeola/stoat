@@ -72,7 +72,7 @@ struct PolylineInstance {
 /// cell size the vertex shader maps cell-fraction coordinates through, the
 /// panel-occluder count the fragment shader loops over, and the `occlude_all`
 /// flag that bypasses the seq test for a pool composite beneath every box.
-/// Padded to 32 bytes to match the WGSL uniform layout.
+/// Padded to 48 bytes to match the WGSL uniform layout.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
@@ -87,7 +87,16 @@ struct Globals {
     /// reuse the segments it built when its content last changed. A glide moves
     /// every endpoint by the same amount, so nothing per-instance has to change.
     shift_rows: f32,
-    _pad: u32,
+    _pad0: u32,
+    /// Cell the grid's own (0, 0) is drawn at, which the vertex stage adds to
+    /// each endpoint.
+    ///
+    /// A pool composite hands over paths positioned within its region rather
+    /// than the viewport, so the region's origin is what puts them on the
+    /// screen. Zero for the live grid.
+    origin_cells: [f32; 2],
+    /// Rounds the struct to the 48 bytes a uniform's 16-byte alignment wants.
+    _pad1: [u32; 2],
 }
 
 /// The instanced stroked-path pipeline and its per-frame buffers.
@@ -292,7 +301,9 @@ impl PolylinePass {
             occlude_all: 0,
             // The live grid does not glide, so its paths sit where they are given.
             shift_rows: 0.0,
-            _pad: 0,
+            _pad0: 0,
+            origin_cells: [0.0; 2],
+            _pad1: [0; 2],
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
@@ -369,6 +380,7 @@ impl PolylinePass {
         occluders: &[Occluder],
         resolution: [f32; 2],
         shift_rows: f32,
+        origin_cells: [f32; 2],
         content_changed: bool,
         pool: u32,
         slot: usize,
@@ -382,7 +394,9 @@ impl PolylinePass {
             panel_count,
             occlude_all,
             shift_rows,
-            _pad: 0,
+            _pad0: 0,
+            origin_cells,
+            _pad1: [0; 2],
         };
         queue.write_buffer(
             &self.globals,
@@ -778,6 +792,7 @@ mod tests {
             &[],
             [TARGET as f32, TARGET as f32],
             0.0,
+            [0.0; 2],
             true,
             0,
             0,
@@ -918,7 +933,18 @@ mod tests {
         );
 
         let first = [path(&[[0, 16], [0, 32]])];
-        pass.prepare_composite(&device, &queue, &first, &[], [64.0, 64.0], 0.0, true, 0, 0);
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &first,
+            &[],
+            [64.0, 64.0],
+            0.0,
+            [0.0; 2],
+            true,
+            0,
+            0,
+        );
         let built = pass.composite_built.clone();
 
         // A different path on purpose. A rebuild that ran anyway would put its
@@ -932,6 +958,7 @@ mod tests {
             &[],
             [64.0, 64.0],
             -0.5,
+            [0.0; 2],
             false,
             0,
             0,

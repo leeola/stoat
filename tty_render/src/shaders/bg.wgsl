@@ -21,9 +21,11 @@ struct Globals {
     // scrolled frame moves this number rather than re-uploading every cell.
     row_offset: u32,
     rows: u32,
-    // Pads the pair above to a whole slot, keeping cursor_color 16-byte aligned.
-    pad0: u32,
-    pad1: u32,
+    // Cell the grid's own (0, 0) is drawn at, which vs_main adds to every cell
+    // coordinate. A pool composite hands over a grid sized to its region, so this
+    // is what puts its cells on the screen. Zero for the live grid. Also keeps
+    // cursor_color 16-byte aligned.
+    origin_cells: vec2<f32>,
     cursor_color: vec4<f32>,
 }
 
@@ -95,7 +97,7 @@ fn vs_main(
     // integer boundary and each spans whole pixels, leaving no fractional sliver
     // (the dark seam) between same-color cells. Scroll is added after the snap so
     // smooth scrolling stays fractional and the grid only snaps once it settles.
-    let pixel = round((cell + corners[vertex_index]) * globals.cell_size)
+    let pixel = round((cell + globals.origin_cells + corners[vertex_index]) * globals.cell_size)
         + vec2<f32>(0.0, globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,

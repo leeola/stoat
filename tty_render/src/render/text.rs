@@ -171,8 +171,17 @@ struct TextGlobals {
     /// overlay taller than the screen names rows past the bottom on purpose,
     /// which a wrap would fold back over the box.
     rows: u32,
-    /// Pads the struct to the 48-byte (16-aligned) size a uniform requires.
-    _pad: u32,
+    _pad0: u32,
+    /// Cell the grid's own (0, 0) is drawn at, which the vertex stage scales to
+    /// pixels and adds to every glyph position.
+    ///
+    /// A pool composite hands over a grid sized to its region rather than to
+    /// the viewport, so the region's origin is what puts its glyphs on the
+    /// screen. Zero for every other draw, whose positions already start at the
+    /// screen's own origin.
+    origin_cells: [f32; 2],
+    /// Pads the struct to the 64-byte (16-aligned) size a uniform requires.
+    _pad1: [u32; 2],
 }
 
 /// How far one set of instances is rotated in the buffer holding it.
@@ -1305,7 +1314,9 @@ impl TextPass {
             occlude_all: 0,
             row_offset: rotation.offset,
             rows: rotation.rows as u32,
-            _pad: 0,
+            _pad0: 0,
+            origin_cells: [0.0; 2],
+            _pad1: [0; 2],
         };
         crate::render::upload_globals(
             queue,
@@ -1360,6 +1371,7 @@ impl TextPass {
         occluders: &[Occluder],
         resolution: [f32; 2],
         shift_rows: f32,
+        origin_cells: [f32; 2],
         content_changed: bool,
         scrolled_rows: Option<isize>,
         pool: u32,
@@ -1576,7 +1588,9 @@ impl TextPass {
                 occlude_all,
                 row_offset: self.row_offset,
                 rows: grid.rows() as u32,
-                _pad: 0,
+                _pad0: 0,
+                origin_cells,
+                _pad1: [0; 2],
             }),
         );
 
@@ -4491,6 +4505,7 @@ mod tests {
             &[],
             [640.0, 480.0],
             0.0,
+            [0.0; 2],
             true,
             None,
             0,
@@ -4513,6 +4528,7 @@ mod tests {
             &[],
             [640.0, 480.0],
             0.0,
+            [0.0; 2],
             false,
             None,
             0,
@@ -4559,6 +4575,7 @@ mod tests {
             &[],
             [640.0, 480.0],
             0.0,
+            [0.0; 2],
             true,
             None,
             0,
@@ -5415,6 +5432,7 @@ mod tests {
             &[],
             resolution,
             0.0,
+            [0.0; 2],
             true,
             None,
             0,
@@ -5431,6 +5449,7 @@ mod tests {
             &[],
             resolution,
             0.0,
+            [0.0; 2],
             true,
             Some(1),
             0,
@@ -5449,6 +5468,7 @@ mod tests {
             &[],
             resolution,
             0.0,
+            [0.0; 2],
             true,
             None,
             0,

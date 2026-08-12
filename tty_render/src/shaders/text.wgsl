@@ -28,6 +28,11 @@ struct Globals {
     row_offset: u32,
     rows: u32,
     pad2: u32,
+    // Cell the grid's own (0, 0) is drawn at, scaled to pixels and added to
+    // every glyph position. A pool composite is sized to its region, so this is
+    // what puts its glyphs on the screen. Zero for every other draw.
+    origin_cells: vec2<f32>,
+    pad3: vec2<u32>,
 }
 
 @group(0) @binding(0)
@@ -122,7 +127,8 @@ fn vs_main(
     let corner = corners[vertex_index];
 
     let row_y = f32(slot_row(slot)) * globals.cell_size.y;
-    let pixel = pos + corner * dim + vec2<f32>(0.0, row_y + globals.scroll_y);
+    let pixel = pos + corner * dim + globals.origin_cells * globals.cell_size
+        + vec2<f32>(0.0, row_y + globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0
@@ -206,6 +212,7 @@ fn vs_underline(
 
     let row_y = f32(slot_row(slot)) * globals.cell_size.y;
     let pixel = cell_pos + corner * globals.cell_size
+        + globals.origin_cells * globals.cell_size
         + vec2<f32>(0.0, row_y + globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
@@ -289,7 +296,8 @@ fn vs_rect(
     );
     let corner = corners[vertex_index];
 
-    let pixel = pos + corner * dim + vec2<f32>(0.0, globals.scroll_y);
+    let pixel = pos + corner * dim + globals.origin_cells * globals.cell_size
+        + vec2<f32>(0.0, globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0

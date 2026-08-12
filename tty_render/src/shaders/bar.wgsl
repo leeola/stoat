@@ -14,6 +14,11 @@ struct Globals {
     // its bars without rebuilding them. Zero for the live grid.
     shift_rows: f32,
     pad0: u32,
+    // Cell the grid's own (0, 0) is drawn at, which vs_main adds before the
+    // pixel conversion. A pool composite is positioned within its region, so
+    // this is what puts it on the screen. Zero for the live grid.
+    origin_cells: vec2<f32>,
+    pad1: vec2<u32>,
 }
 
 @group(0) @binding(0)
@@ -60,9 +65,9 @@ fn vs_main(
     // gliding pool's hairlines wobble a pixel against their content and settle
     // only once it stops.
     let shift_px = vec2<f32>(0.0, globals.shift_rows * globals.cell_size.y);
-    let min_px = round(origin * globals.cell_size) + shift_px;
+    let min_px = round((origin + globals.origin_cells) * globals.cell_size) + shift_px;
     let max_px = max(
-        round((origin + size) * globals.cell_size) + shift_px,
+        round((origin + globals.origin_cells + size) * globals.cell_size) + shift_px,
         min_px + vec2<f32>(1.0, 1.0)
     );
     let pixel = min_px + corner * (max_px - min_px);

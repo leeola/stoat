@@ -643,6 +643,7 @@ impl Renderer {
         panels: &[Panel],
         scissor: [u32; 4],
         shift_rows: f32,
+        origin_cells: [f32; 2],
         content_changed: bool,
         occludable: bool,
         pool: u32,
@@ -658,6 +659,7 @@ impl Renderer {
             pool_grid,
             panels,
             shift_rows,
+            origin_cells,
             content_changed,
             // A single draw with no frame before it to carry rows from, so the
             // composite shapes every row.
@@ -705,6 +707,7 @@ impl Renderer {
         pool_grid: &Grid,
         panels: &[Panel],
         shift_rows: f32,
+        origin_cells: [f32; 2],
         content_changed: bool,
         scrolled_rows: Option<isize>,
         occludable: bool,
@@ -726,6 +729,7 @@ impl Renderer {
             &self.pool_occluders,
             resolution,
             shift_rows,
+            origin_cells,
             content_changed,
             pool,
             slot,
@@ -737,6 +741,7 @@ impl Renderer {
             &self.pool_occluders,
             resolution,
             shift_rows,
+            origin_cells,
             content_changed,
             scrolled_rows,
             pool,
@@ -749,6 +754,7 @@ impl Renderer {
             &self.pool_occluders,
             resolution,
             shift_rows,
+            origin_cells,
             content_changed,
             pool,
             slot,
@@ -760,6 +766,7 @@ impl Renderer {
             &self.pool_occluders,
             resolution,
             shift_rows,
+            origin_cells,
             content_changed,
             pool,
             slot,
@@ -967,11 +974,15 @@ pub struct PoolComposite<'a> {
     /// pool's composite buffers across frames, whose set of gliding pools changes
     /// shape as pools settle and start.
     pub id: u32,
-    /// The viewport-sized grid whose region cells hold the pool's composed page
-    /// rows; only the [`Self::scissor`] rectangle is drawn.
+    /// The grid holding the pool's composed page rows, sized to its region
+    /// rather than to the viewport.
     pub grid: &'a Grid,
-    /// The clip rectangle `[x, y, width, height]` in physical pixels: the pool's
-    /// region in screen space.
+    /// The screen cell [`Self::grid`]'s own (0, 0) draws at, which is the
+    /// region's top-left. The passes add it in their vertex stages, so the grid
+    /// never has to be copied into a viewport-sized one to be placed.
+    pub origin_cells: [f32; 2],
+    /// The pool's region in screen space, as the clip rectangle
+    /// `[x, y, width, height]` in physical pixels.
     pub scissor: [u32; 4],
     /// The sub-cell document scroll, in rows; a negative value shifts the rows
     /// up.
@@ -1537,6 +1548,7 @@ impl GpuContext {
                 pool.grid,
                 panels,
                 pool.shift_rows,
+                pool.origin_cells,
                 pool.content_changed,
                 pool.scrolled_rows,
                 pool.occludable,
@@ -1753,6 +1765,7 @@ mod tests {
             PoolComposite {
                 id: 7,
                 grid: &gray_pool,
+                origin_cells: [0.0; 2],
                 scissor: [0, band, width, band],
                 shift_rows: 0.0,
                 content_changed: true,
@@ -1762,6 +1775,7 @@ mod tests {
             PoolComposite {
                 id: 4,
                 grid: &white_pool,
+                origin_cells: [0.0; 2],
                 scissor: [0, band * 2, width, band],
                 shift_rows: 0.0,
                 content_changed: true,
@@ -1778,6 +1792,7 @@ mod tests {
                 pool.grid,
                 &[],
                 pool.shift_rows,
+                pool.origin_cells,
                 pool.content_changed,
                 pool.scrolled_rows,
                 pool.occludable,

@@ -692,10 +692,6 @@ struct PoolAnim {
     /// The region's pooled rows composed at [`Self::scroll`], sized to the
     /// region plus one straddle row. Reused across frames.
     document_grid: Grid,
-    /// The viewport-sized grid the pool composites from: the region's pooled
-    /// rows copied into the declared sub-rectangle, the rest blank since the
-    /// scissor clips the composite to that rectangle over the live grid.
-    pool_grid: Grid,
     /// The integer document top row [`Self::document_grid`] was last composed
     /// at. With [`Self::last_version`] and [`Self::last_region_dims`] unchanged,
     /// the composed rows are identical this frame and only the sub-cell fraction
@@ -729,7 +725,6 @@ impl PoolAnim {
             last_scroll_target: scroll,
             target_stable_for: HANDOFF_STABLE_TIME,
             document_grid: Grid::new(0, 0),
-            pool_grid: Grid::new(0, 0),
             last_top: None,
             last_version: None,
             last_region_dims: None,
@@ -1798,25 +1793,6 @@ impl ApplicationHandler<PtyEvent> for App {
                     // pool.
                     let [cw, ch] = render::cell_size(state.font_size, state.scale_factor as f32);
 
-                    for pool in &active {
-                        // A shift-only frame reuses the pool grid copied on the
-                        // last content-changed frame, so only recopy when the
-                        // composed rows actually changed.
-                        if !pool.content_changed {
-                            continue;
-                        }
-                        let anim = state
-                            .pool_anims
-                            .get_mut(&pool.id)
-                            .expect("active pool has anim state");
-                        copy_pool_region(
-                            &mut anim.pool_grid,
-                            &anim.document_grid,
-                            &state.grid,
-                            pool.region,
-                        );
-                    }
-
                     // Floor each edge to the grid-row boundary the renderer lays
                     // cells on, then take the span, so each scissor covers exactly
                     // its region's rows. Flooring width and height on their own
@@ -1836,7 +1812,8 @@ impl ApplicationHandler<PtyEvent> for App {
                             let y1 = ((region.top as f32 + region.height as f32) * ch) as u32;
                             PoolComposite {
                                 id: pool.id,
-                                grid: &state.pool_anims[&pool.id].pool_grid,
+                                grid: &state.pool_anims[&pool.id].document_grid,
+                                origin_cells: [region.left as f32, region.top as f32],
                                 scissor: [x0, y0, x1 - x0, y1 - y0],
                                 shift_rows: -pool.frac,
                                 content_changed: pool.content_changed,
@@ -2182,45 +2159,6 @@ impl ApplicationHandler<PtyEvent> for App {
             _ => {},
         }
     }
-}
-
-/// Build the full-viewport `pool_grid` for a region composite, sized to
-/// `live_grid`, with `document_grid`'s composed rows copied into the `region`
-/// sub-rectangle.
-///
-/// `document_grid` holds the pooled `region.height + 1` rows by `region.width`
-/// columns (one straddle row past the region, covering the sliver a sub-cell
-/// glide reveals at the bottom edge) the term composed; they land at
-/// (`region.top`, `region.left`). Cells of `document_grid` that would fall
-/// outside `pool_grid` are skipped, so a region declared past the viewport
-/// clips rather than panicking.
-///
-/// The scissor the renderer applies clips the composite to the region, so the
-/// surround outside it is never drawn and is left as it was rather than
-/// recleared each frame. Only a size change reblanks, via `Grid::resize`.
-///
-/// `document_grid`'s off-grid decorations (the pooled gutter's text runs and
-/// bars) are region-local sixteenths, so they are translated by the region
-/// origin and set on `pool_grid`, replacing any prior list. A decoration-free
-/// `document_grid` therefore clears stale decorations rather than leaving them.
-fn copy_pool_region(
-    pool_grid: &mut Grid,
-    document_grid: &Grid,
-    live_grid: &Grid,
-    region: PoolRegionCommand,
-) {
-    if pool_grid.rows() != live_grid.rows() || pool_grid.cols() != live_grid.cols() {
-        pool_grid.resize(live_grid.rows(), live_grid.cols());
-    }
-
-    // Every row the term composed, the straddle one included, since a sub-cell
-    // glide reveals it at the region's bottom edge.
-    pool_grid.blit_region(
-        document_grid,
-        region.top as usize,
-        region.left as usize,
-        document_grid.rows(),
-    );
 }
 
 /// The cursor's cell position for the renderer, or `None` when it is hidden.
@@ -3058,28 +2996,14 @@ fn redraw_aux(
         aux.pool_scratch = pools;
     }
 
-    // Copy each gliding pool's composed rows over the base, then composite them
-    // scissored to their regions and shifted by the sub-cell fraction.
-    for pool in &active {
-        if !pool.content_changed {
-            continue;
-        }
-        let anim = aux
-            .pool_anims
-            .get_mut(&pool.id)
-            .expect("active pool has anim state");
-        copy_pool_region(
-            &mut anim.pool_grid,
-            &anim.document_grid,
-            &aux.grid,
-            pool.region,
-        );
-    }
+    // Composite each gliding pool from its region-sized grid, placed at the
+    // region origin, scissored to it and shifted by the sub-cell fraction.
     let composites = active
         .iter()
         .map(|pool| PoolComposite {
             id: pool.id,
-            grid: &aux.pool_anims[&pool.id].pool_grid,
+            grid: &aux.pool_anims[&pool.id].document_grid,
+            origin_cells: [pool.region.left as f32, pool.region.top as f32],
             scissor: region_scissor(pool.region, cw, ch),
             shift_rows: -pool.frac,
             content_changed: pool.content_changed,
@@ -3798,15 +3722,14 @@ fn reposition_scroll(current: f32, target: u64) -> f32 {
 mod tests {
     use super::{
         alternate_scroll_bytes, anchored_cursor_pos, app_has_focus, aux_drag_event,
-        bell_should_ring, block_corners, cell_at, classify_window_open, copy_pool_region,
-        cursor_in_region, ease, ease_corners, encode_key, font_step, forwards_zoom, ipc_button,
-        modifier_bits, paste_bytes, popover_overflow, refresh_popover_overflows, reposition_scroll,
-        seed_settle_flight, selection_copy_text, sgr_button_bytes, sgr_motion_bytes,
-        sgr_wheel_bytes, step_cursor, step_document_scroll, step_grid_scroll, step_popover_scroll,
-        step_region_scroll, step_scrollback_scroll, stepped_font_size, swallow_super_combo,
-        wheel_lines, CursorAnimation, Input, PendingResize, PtyWrite, Visibility,
-        WindowOpenVerdict, EASE_BASELINE_FRAME, FONT_SIZE_CEIL, FONT_SIZE_FLOOR, MAX_AUX_WINDOWS,
-        SCROLLBACK_MIN_STEP,
+        bell_should_ring, block_corners, cell_at, classify_window_open, cursor_in_region, ease,
+        ease_corners, encode_key, font_step, forwards_zoom, ipc_button, modifier_bits, paste_bytes,
+        popover_overflow, refresh_popover_overflows, reposition_scroll, seed_settle_flight,
+        selection_copy_text, sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes, step_cursor,
+        step_document_scroll, step_grid_scroll, step_popover_scroll, step_region_scroll,
+        step_scrollback_scroll, stepped_font_size, swallow_super_combo, wheel_lines,
+        CursorAnimation, Input, PendingResize, PtyWrite, Visibility, WindowOpenVerdict,
+        EASE_BASELINE_FRAME, FONT_SIZE_CEIL, FONT_SIZE_FLOOR, MAX_AUX_WINDOWS, SCROLLBACK_MIN_STEP,
     };
     #[cfg(unix)]
     use super::{
@@ -3818,7 +3741,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use stoatty_protocol::command::PoolRegionCommand;
     use stoatty_term::{
-        grid::{Bar, Grid, Overlay, Rgb, TextRun},
+        grid::{Overlay, Rgb},
         term::{Cursor, CursorShape, Terminal},
         theme::Theme,
     };
@@ -4109,236 +4032,6 @@ mod tests {
         assert!(!at(2, 2), "a column left of the region is outside");
         assert!(!at(7, 2), "the right edge is exclusive");
         assert!(!at(3, 7), "the bottom edge is exclusive");
-    }
-
-    #[test]
-    fn copy_pool_region_fills_region_and_leaves_surround() {
-        let region = PoolRegionCommand {
-            pool: 0,
-            top: 1,
-            left: 1,
-            width: 2,
-            height: 2,
-            window: 0,
-        };
-
-        // The term composes region.height + 1 rows (one straddle row) by width.
-        let mut document = Grid::new(region.height as usize + 1, region.width as usize);
-        for r in 0..document.rows() {
-            for c in 0..document.cols() {
-                document.get_mut(r, c).ch = 'd';
-            }
-        }
-
-        let live = Grid::new(5, 5);
-
-        // A sentinel in every cell distinguishes copied cells from untouched ones.
-        let mut pool = Grid::new(5, 5);
-        for r in 0..pool.rows() {
-            for c in 0..pool.cols() {
-                pool.get_mut(r, c).ch = 's';
-            }
-        }
-
-        copy_pool_region(&mut pool, &document, &live, region);
-
-        for r in 1..4 {
-            for c in 1..3 {
-                assert_eq!(
-                    pool.get(r, c).ch,
-                    'd',
-                    "region cell ({r}, {c}) holds the document"
-                );
-            }
-        }
-        assert_eq!(
-            pool.get(0, 0).ch,
-            's',
-            "the surround is left untouched, not blanked"
-        );
-        assert_eq!(
-            pool.get(4, 4).ch,
-            's',
-            "the surround is left untouched, not blanked"
-        );
-    }
-
-    #[test]
-    fn copy_pool_region_translates_decorations_and_clears_stale() {
-        let region = PoolRegionCommand {
-            pool: 0,
-            top: 1,
-            left: 1,
-            width: 2,
-            height: 2,
-            window: 0,
-        };
-        let live = Grid::new(5, 5);
-
-        let mut document = Grid::new(region.height as usize + 1, region.width as usize);
-        document.set_text_runs(vec![TextRun {
-            col: 5,
-            row: 3,
-            scale: 160,
-            color: Rgb::new(1, 2, 3),
-            bg: Some(Rgb::new(4, 5, 6)),
-            text: "42".into(),
-            seq: 0,
-        }]);
-        document.set_bars(vec![Bar {
-            x: 2,
-            y: 4,
-            width: 8,
-            height: 1,
-            color: Rgb::new(7, 8, 9),
-            seq: 0,
-        }]);
-
-        let mut pool = Grid::new(5, 5);
-        copy_pool_region(&mut pool, &document, &live, region);
-
-        assert_eq!(
-            pool.text_runs(),
-            [TextRun {
-                col: 21,
-                row: 19,
-                scale: 160,
-                color: Rgb::new(1, 2, 3),
-                bg: Some(Rgb::new(4, 5, 6)),
-                text: "42".into(),
-                seq: 0,
-            }],
-            "the text run shifts by the region origin (left*16, top*16)"
-        );
-        assert_eq!(
-            pool.bars(),
-            [Bar {
-                x: 18,
-                y: 20,
-                width: 8,
-                height: 1,
-                color: Rgb::new(7, 8, 9),
-                seq: 0,
-            }],
-            "the bar shifts by the region origin (left*16, top*16)"
-        );
-
-        let bare = Grid::new(region.height as usize + 1, region.width as usize);
-        copy_pool_region(&mut pool, &bare, &live, region);
-        assert!(
-            pool.text_runs().is_empty(),
-            "a decoration-free document clears stale text runs"
-        );
-        assert!(
-            pool.bars().is_empty(),
-            "a decoration-free document clears stale bars"
-        );
-    }
-
-    /// The pool grid composites over the live one, so it has to match its size
-    /// before anything is copied into it. A pool that outlived a resize would
-    /// otherwise clip its region against the old dimensions.
-    #[test]
-    fn copy_pool_region_sizes_the_pool_grid_to_the_live_one() {
-        let region = PoolRegionCommand {
-            pool: 0,
-            top: 3,
-            left: 0,
-            width: 2,
-            height: 1,
-            window: 0,
-        };
-        let mut document = Grid::new(1, 2);
-        document.get_mut(0, 0).ch = 'd';
-
-        let live = Grid::new(5, 5);
-        // Left over from before the window grew, too short for the region.
-        let mut pool = Grid::new(2, 2);
-
-        copy_pool_region(&mut pool, &document, &live, region);
-
-        assert_eq!(
-            (pool.rows(), pool.cols()),
-            (5, 5),
-            "the pool grid takes the live grid's size"
-        );
-        assert_eq!(
-            pool.get(3, 0).ch,
-            'd',
-            "a region the old size could not hold now lands"
-        );
-    }
-
-    #[test]
-    fn copy_pool_region_clips_past_the_viewport() {
-        let document = {
-            let mut g = Grid::new(5, 4);
-            for r in 0..g.rows() {
-                for c in 0..g.cols() {
-                    g.get_mut(r, c).ch = 'd';
-                }
-            }
-            g
-        };
-        let live = Grid::new(5, 5);
-        let sentinel = || {
-            let mut g = Grid::new(5, 5);
-            for r in 0..g.rows() {
-                for c in 0..g.cols() {
-                    g.get_mut(r, c).ch = 's';
-                }
-            }
-            g
-        };
-
-        let mut pool = sentinel();
-        copy_pool_region(
-            &mut pool,
-            &document,
-            &live,
-            PoolRegionCommand {
-                pool: 0,
-                top: 3,
-                left: 3,
-                width: 4,
-                height: 4,
-                window: 0,
-            },
-        );
-        for r in 0..5 {
-            for c in 0..5 {
-                let want = if (3..5).contains(&r) && (3..5).contains(&c) {
-                    'd'
-                } else {
-                    's'
-                };
-                assert_eq!(pool.get(r, c).ch, want, "clipped copy cell ({r}, {c})");
-            }
-        }
-
-        let mut past = sentinel();
-        copy_pool_region(
-            &mut past,
-            &document,
-            &live,
-            PoolRegionCommand {
-                pool: 0,
-                top: 9,
-                left: 9,
-                width: 4,
-                height: 4,
-                window: 0,
-            },
-        );
-        for r in 0..5 {
-            for c in 0..5 {
-                assert_eq!(
-                    past.get(r, c).ch,
-                    's',
-                    "region past the viewport no-op ({r}, {c})"
-                );
-            }
-        }
     }
 
     #[test]

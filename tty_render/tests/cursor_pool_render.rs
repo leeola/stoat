@@ -114,6 +114,7 @@ fn cursor_draws_over_pool_and_obeys_its_scissor() {
             &[],
             full,
             0.0,
+            [0.0; 2],
             true,
             true,
             0,

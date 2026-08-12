@@ -281,6 +281,7 @@ impl Harness {
             &[],
             full,
             shift,
+            [0.0; 2],
             true,
             true,
             0,

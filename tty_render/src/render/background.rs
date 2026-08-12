@@ -99,9 +99,15 @@ struct Globals {
     /// wraps at. Display row `r` lives at slot `(r + row_offset) % rows`.
     row_offset: u32,
     rows: u32,
-    /// Pads the pair above to a whole slot, keeping `cursor_color` 16-byte
-    /// aligned the way the shader declares it.
-    pad: [u32; 2],
+    /// Cell the grid's own (0, 0) is drawn at, which the vertex stage adds to
+    /// every cell coordinate.
+    ///
+    /// A pool composite hands over a grid sized to its region rather than to
+    /// the viewport, so the region's origin is what puts its cells on the
+    /// screen. Carried here rather than baked into the instances, because every
+    /// cell shares it and the instances outlive a frame that only glides. Zero
+    /// for the live grid, which starts at the screen's own origin.
+    origin_cells: [f32; 2],
     cursor_color: [f32; 4],
 }
 
@@ -370,7 +376,7 @@ impl BackgroundPass {
             cols: cols as u32,
             row_offset: self.row_offset,
             rows: grid.rows() as u32,
-            pad: [0; 2],
+            origin_cells: [0.0; 2],
             cursor_color: [
                 cursor.color.r as f32 / 255.0,
                 cursor.color.g as f32 / 255.0,
@@ -468,6 +474,7 @@ impl BackgroundPass {
         occluders: &[Occluder],
         resolution: [f32; 2],
         grid_scroll: f32,
+        origin_cells: [f32; 2],
         content_changed: bool,
         pool: u32,
         slot: usize,
@@ -488,7 +495,7 @@ impl BackgroundPass {
             // they are never rotated.
             row_offset: 0,
             rows: grid.rows() as u32,
-            pad: [0; 2],
+            origin_cells,
             cursor_color: [0.0; 4],
         };
         queue.write_buffer(
@@ -546,7 +553,7 @@ impl BackgroundPass {
             cols: 0,
             row_offset: 0,
             rows: 0,
-            pad: [0; 2],
+            origin_cells: [0.0; 2],
             cursor_color: [
                 cursor.color.r as f32 / 255.0,
                 cursor.color.g as f32 / 255.0,
