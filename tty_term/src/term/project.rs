@@ -77,6 +77,61 @@ pub(super) fn row_flags(spare: &mut Vec<Vec<bool>>, rows: usize) -> Vec<bool> {
     flags
 }
 
+/// Rows below the probe that a candidate shift has to match as well.
+const CONFIRM_ROWS: usize = 4;
+
+/// How far the screen's content moved up since the last projection, found by
+/// locating the row of `grid` the new top row now holds.
+///
+/// A scroll that grows scrollback reports how far it moved. This is for the
+/// ones that do not, being an alt-screen scroll and a scroll region below the
+/// top line, and for INSERT mode, which damages the whole screen without moving
+/// anything. Zero is the answer for that last case and the fallback for any
+/// screen the probe fails to place.
+///
+/// One row of text repeats often enough to match in the wrong place, so a
+/// candidate is confirmed against the rows below it. Nothing rests on the
+/// answer either way. Every row is still projected and compared, so a wrong
+/// shift only marks rows dirty, which is what a full frame did anyway.
+///
+/// The scan runs ascending, which is what makes a screen of repeated blank rows
+/// answer zero rather than wherever the probe happens to match first.
+pub(super) fn detect_shift(
+    grid: &Grid,
+    rows: usize,
+    scratch: &mut [Cell],
+    project_into: impl Fn(usize, &mut [Cell]),
+) -> usize {
+    project_into(0, scratch);
+
+    for shift in 0..rows {
+        if grid.row(shift) != &scratch[..] {
+            continue;
+        }
+
+        let mut confirmed = true;
+        for probe in 1..=CONFIRM_ROWS {
+            if probe >= rows || shift + probe >= rows {
+                break;
+            }
+            project_into(probe, scratch);
+            if grid.row(shift + probe) != &scratch[..] {
+                confirmed = false;
+                break;
+            }
+        }
+        if confirmed {
+            return shift;
+        }
+
+        // The confirm overwrote the scratch, so the probe row goes back into it
+        // before the scan tries the next candidate.
+        project_into(0, scratch);
+    }
+
+    0
+}
+
 pub(super) fn selection_span(
     range: &SelectionRange,
     offset: i32,

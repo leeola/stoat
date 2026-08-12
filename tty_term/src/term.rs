@@ -29,8 +29,8 @@ use decorate::{
 };
 use parking_lot::Mutex;
 use project::{
-    default_palette, indexed, named_color, project_cell, project_cursor, project_term_cells,
-    row_flags, selection_span,
+    default_palette, detect_shift, indexed, named_color, project_cell, project_cursor,
+    project_term_cells, row_flags, selection_span,
 };
 use scan::{notification_from_osc, EscEvent, EscScanner, ESC, XTVERSION_REPLY};
 use std::{
@@ -2568,58 +2568,64 @@ impl Terminal {
         }
         self.last_selection_span = span;
 
-        // A scroll damages the whole terminal even though the content only moved
-        // up. Sliding the grid by the same amount and then keeping the rows that
-        // come out identical turns that into damage naming the few rows that
-        // really changed, which is what lets the render passes reuse the rest.
-        //
-        // The slide is only a guess at how far the content moved, and nothing
-        // rests on it. Every row is still projected and compared, so a wrong
-        // guess marks every row dirty, which is what a full frame did anyway.
-        let sliding =
-            matches!(dirty, Damage::Full) && !resized && offset == 0 && grew > 0 && grew < rows;
-        if sliding {
-            grid.scroll_by(grew as isize);
-            dirty = Damage::Partial(row_flags(&mut self.row_flags_spare, rows));
-        }
-
-        // Visit only the rows damage marked, and read their cells straight from
-        // the terminal grid rather than filtering the whole viewport per cell.
-        // `display_iter` maps grid `line + offset` to viewport `row`. Inverting
-        // it as `line = row - offset` yields the same cells and points.
+        // Read the cells straight from the terminal grid rather than filtering
+        // the whole viewport per cell. `display_iter` maps grid `line + offset`
+        // to viewport `row`. Inverting it as `line = row - offset` yields the
+        // same cells and points.
         let term_grid = self.term.grid();
-        let mut projected = mem::take(&mut self.row_scratch);
-        for row in 0..rows {
-            if !sliding && !dirty.is_dirty(row) {
-                continue;
-            }
+        let theme = &self.theme;
+        let palette = &self.palette;
+        let project_into = |row: usize, out: &mut [Cell]| {
             let line = Line(row as i32 - offset);
             let source = &term_grid[line];
-            let project = |col: usize| {
-                let mut cell = project_cell(
-                    &source[Column(col)],
-                    content.colors,
-                    &self.theme,
-                    &self.palette,
-                );
+            for (col, cell) in out.iter_mut().enumerate() {
+                *cell = project_cell(&source[Column(col)], content.colors, theme, palette);
                 if selection.is_some_and(|s| s.contains(Point::new(line, Column(col)))) {
                     cell.flags = cell.flags.toggle(Flags::INVERSE);
                 }
-                cell
+            }
+        };
+
+        let mut projected = mem::take(&mut self.row_scratch);
+
+        // A whole-screen damage rarely means the whole screen changed. A scroll
+        // moves the content up, and INSERT mode raises full damage for a single
+        // typed cell. Sliding the grid to where the content now sits and then
+        // keeping the rows that come out identical turns either into damage
+        // naming the few rows that really changed, which is what lets the render
+        // passes reuse the rest.
+        //
+        // The slide is only a guess, and nothing rests on it. Every row is still
+        // projected and compared, so a wrong guess marks every row dirty, which
+        // is what a full frame did anyway.
+        let sliding = matches!(dirty, Damage::Full) && !resized && offset == 0;
+        if sliding {
+            projected.clear();
+            projected.resize(cols, Cell::default());
+
+            // Growth in scrollback says how far the content moved. An alt-screen
+            // scroll, a scroll region below the top line, and INSERT mode all
+            // damage the screen without growing it, so those are found by probe.
+            let shift = match grew {
+                grown if grown > 0 && grown < rows => grown,
+                _ => detect_shift(grid, rows, &mut projected, project_into),
             };
 
+            grid.scroll_by(shift as isize);
+            dirty = Damage::Partial(row_flags(&mut self.row_flags_spare, rows));
+        }
+
+        for row in 0..rows {
             // Without a slide nothing compares the row before it lands, so it goes
             // straight into the grid rather than through the scratch and out again.
             if !sliding {
-                for (col, out) in grid.row_mut(row).iter_mut().enumerate() {
-                    *out = project(col);
+                if dirty.is_dirty(row) {
+                    project_into(row, grid.row_mut(row));
                 }
                 continue;
             }
 
-            projected.clear();
-            projected.extend((0..cols).map(project));
-
+            project_into(row, &mut projected);
             if grid.row(row) == projected.as_slice() {
                 continue;
             }
@@ -2966,7 +2972,12 @@ mod tests {
     }
 
     /// A scrollback move damages the whole screen without any output arriving,
-    /// so the flag cannot be set from the parse alone.
+    /// so the flag is not set from the parse alone.
+    ///
+    /// A move away from the bottom reports that damage whole, the pinned
+    /// viewport having no slide to make. The return runs the slide and compare,
+    /// so what it must show is rows rewritten rather than the empty set an
+    /// uncollected frame comes back with.
     #[test]
     fn a_scrollback_move_still_collects_damage() {
         let mut terminal = Terminal::new(2, 4, Theme::default());
@@ -2981,9 +2992,12 @@ mod tests {
 
         terminal.scroll_to_bottom();
         let (_cursor, _scroll, damage) = terminal.project(&mut grid);
+        let Damage::Partial(rows) = &damage else {
+            panic!("the return to the live bottom slides and compares");
+        };
         assert!(
-            matches!(damage, Damage::Full),
-            "and so does the return to the live bottom",
+            rows.iter().any(|&dirty| dirty),
+            "and rewrites the rows the move changed",
         );
     }
 
@@ -3775,6 +3789,107 @@ mod tests {
             "the slide moved row one to row zero"
         );
         assert_eq!(row_text(3), "eee     ", "the new row holds the new output");
+    }
+
+    /// The alternate screen has no scrollback to grow, so a scroll there
+    /// reports no movement at all and the shift has to be found by probe.
+    ///
+    /// This is what vim, less, and tmux scroll through, and without the probe
+    /// every one of their scrolls re-uploads the whole screen.
+    #[test]
+    fn an_alt_screen_scroll_reports_only_the_rows_that_changed() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        let mut grid = Grid::new(4, 8);
+
+        // Enter the alternate screen, then fill it.
+        terminal.advance(b"\x1b[?1049h");
+        terminal.advance(b"aaa\r\nbbb\r\nccc\r\nddd");
+        let (_, _, damage) = terminal.project(&mut grid);
+        assert!(matches!(damage, Damage::Partial(_)), "the fill lands first");
+
+        terminal.advance(b"\r\neee");
+        let (_, scrolled, damage) = terminal.project(&mut grid);
+
+        assert_eq!(scrolled, 0, "the alternate screen grows no history");
+        let Damage::Partial(rows) = damage else {
+            panic!("an alt-screen scroll must not report the whole screen damaged");
+        };
+        assert_eq!(
+            rows,
+            vec![false, false, false, true],
+            "only the row the scroll exposed is rewritten",
+        );
+
+        let row_text = |row: usize| grid.row(row).iter().map(|cell| cell.ch).collect::<String>();
+        assert_eq!(
+            row_text(0),
+            "bbb     ",
+            "the probe slid row one to row zero"
+        );
+        assert_eq!(row_text(3), "eee     ", "the new row holds the new output");
+    }
+
+    /// A scroll region starting below the top line grows no scrollback either,
+    /// and it moves only the rows inside the region.
+    #[test]
+    fn a_region_scroll_below_the_top_reports_only_its_rows() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        let mut grid = Grid::new(4, 8);
+
+        terminal.advance(b"aaa\r\nbbb\r\nccc\r\nddd");
+        terminal.project(&mut grid);
+
+        // Lines two to four scroll among themselves. A newline at the region's
+        // bottom moves them up and leaves line one alone.
+        terminal.advance(b"\x1b[2;4r\x1b[4;1H\r\neee");
+        let (_, scrolled, damage) = terminal.project(&mut grid);
+
+        assert_eq!(scrolled, 0, "a region below the top grows no history");
+        let Damage::Partial(rows) = damage else {
+            panic!("a region scroll must not report the whole screen damaged");
+        };
+        assert_eq!(
+            rows,
+            vec![false, true, true, true],
+            "the row outside the region is left alone",
+        );
+
+        let row_text = |row: usize| grid.row(row).iter().map(|cell| cell.ch).collect::<String>();
+        assert_eq!(
+            (row_text(0), row_text(1), row_text(3)),
+            (
+                "aaa     ".to_string(),
+                "ccc     ".to_string(),
+                "eee     ".to_string()
+            ),
+            "the region moved up under an untouched first row",
+        );
+    }
+
+    /// INSERT mode keeps damage permanently full, so a single typed cell used to
+    /// re-project and re-upload the whole screen on every keystroke.
+    #[test]
+    fn an_insert_mode_keystroke_reports_only_its_row() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        let mut grid = Grid::new(4, 8);
+
+        // IRM on, then fill the screen and settle it into the grid.
+        terminal.advance(b"\x1b[4h");
+        terminal.advance(b"aaa\r\nbbb\r\nccc\r\nddd");
+        terminal.project(&mut grid);
+
+        // One character onto row two, which is all that changes.
+        terminal.advance(b"\x1b[3;4HX");
+        let (_, _, damage) = terminal.project(&mut grid);
+
+        let Damage::Partial(rows) = damage else {
+            panic!("a typed cell must not report the whole screen damaged");
+        };
+        assert_eq!(
+            rows,
+            vec![false, false, true, false],
+            "only the row the keystroke landed on is rewritten",
+        );
     }
 
     /// While scrolled back the viewport is pinned to its content as history
