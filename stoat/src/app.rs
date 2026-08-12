@@ -915,6 +915,11 @@ pub struct Stoat {
     /// unchanged tick does not re-request.
     pub(crate) last_folding_range_key: Option<(BufferId, u64)>,
     pub(crate) render_tick: u64,
+    /// The completion popup's geometry for the frame being painted, so the
+    /// paint and the pool emit compute it once between them. Stamped with the
+    /// [`Self::render_tick`] it was built for, which is what makes a memo left
+    /// by an earlier frame recognizable. Transient render state, not persisted.
+    pub(crate) completion_layout: Option<crate::render::completion::CompletionLayoutMemo>,
     /// Transient one-line message painted in a reserved bottom row,
     /// such as a failed-save error. Set through [`Self::set_status`],
     /// which stamps [`Self::pending_message_deadline`]. The message
@@ -1629,6 +1634,13 @@ pub struct Stoat {
     /// rather than once each.
     #[cfg(test)]
     pub(crate) focused_mode_reads: std::cell::Cell<u64>,
+    /// How many times the completion popup's geometry was computed.
+    ///
+    /// Computing it locks the focused buffer to read the match prefix and
+    /// measures every visible label, and the frame has two consumers, so a test
+    /// needs the count to say the frame lays out once rather than once each.
+    #[cfg(test)]
+    pub(crate) completion_layouts: std::cell::Cell<u64>,
     /// The editor chrome resolved from [`Self::theme`], rebuilt by
     /// [`Self::refresh_chrome`] when the theme has been replaced.
     ///
@@ -1968,6 +1980,7 @@ impl Stoat {
             pending_folding_ranges: None,
             last_folding_range_key: None,
             render_tick: 0,
+            completion_layout: None,
             pending_message: None,
             pending_message_deadline: None,
             pending_message_expiry: None,
@@ -2103,6 +2116,8 @@ impl Stoat {
             selection_snapshots: std::cell::Cell::new(0),
             #[cfg(test)]
             focused_mode_reads: std::cell::Cell::new(0),
+            #[cfg(test)]
+            completion_layouts: std::cell::Cell::new(0),
             chrome: None,
             dimmed_minimap_palette: None,
             smooth_scroll: SmoothScrollState::default(),
@@ -9190,8 +9205,8 @@ impl Stoat {
         // and moves with the cursor each frame (emit_into re-emits the region on
         // a move). The layout reads the focused editor, so it borrows self.
         let completion = (!overlay)
-            .then(|| crate::render::completion::completion_popup_layout(self))
-            .flatten();
+            .then(|| crate::render::completion::frame_layout(self))
+            .and_then(|memo| memo.layout);
 
         // The help view is a fixed centered modal over the editor like the
         // finder; its list and detail panes pool as two non-pane surfaces.

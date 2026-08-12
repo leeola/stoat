@@ -3,7 +3,7 @@ use crate::{
     completion::CompletionItem,
     fuzzy,
     pane::{FocusTarget, View},
-    render::{cursor_popup, text::truncate_to_width},
+    render::{cursor_popup, text::clip_to_width},
 };
 use nucleo::Utf32Str;
 use ratatui::{
@@ -38,6 +38,76 @@ pub(crate) struct CompletionLayout {
     pub(crate) detail: Option<String>,
 }
 
+/// What a computed completion geometry is only valid for.
+///
+/// The frame tick carries the cursor and the pane rects, which move once a
+/// frame at most. The rest is the popup itself, because a caller that changes
+/// the popup and emits again without a repaint asks for geometry the paint
+/// never produced, and the tick alone hands it the previous answer.
+///
+/// The labels are not hashed. A re-query is what replaces them, and it bumps
+/// the generation.
+#[derive(PartialEq)]
+struct LayoutKey {
+    tick: u64,
+    generation: u64,
+    /// The popup's own geometry inputs, or `None` when no popup is open.
+    popup: Option<(usize, usize, Range<usize>, usize)>,
+}
+
+/// One frame's completion geometry, so the frame's two consumers compute it
+/// once between them.
+///
+/// The paint and the pool emit both need the same rects, and both run inside a
+/// single Redraw. Producing them locks the focused buffer for the match prefix
+/// and measures every visible label, which is what makes computing them twice
+/// worth avoiding.
+///
+/// `layout` is `None` when no popup shows that frame. That answer is kept
+/// rather than treated as an empty memo, since establishing it costs the second
+/// consumer the same work all over again.
+pub(crate) struct CompletionLayoutMemo {
+    key: LayoutKey,
+    pub(crate) layout: Option<(String, CompletionLayout)>,
+}
+
+/// This frame's completion geometry, computed here or handed back from the memo
+/// the frame's other consumer parked.
+///
+/// Handed over by value rather than borrowed, because the pool emit holds `&mut`
+/// to the pool state while it reads the rects. Park it back with
+/// [`park_layout`] when a later consumer of the same frame still needs it.
+pub(crate) fn frame_layout(stoat: &mut Stoat) -> CompletionLayoutMemo {
+    let key = layout_key(stoat);
+    match stoat.completion_layout.take() {
+        Some(memo) if memo.key == key => memo,
+        _ => CompletionLayoutMemo {
+            key,
+            layout: completion_popup_layout(stoat),
+        },
+    }
+}
+
+/// Leave `memo` for the rest of the frame to read.
+pub(crate) fn park_layout(stoat: &mut Stoat, memo: CompletionLayoutMemo) {
+    stoat.completion_layout = Some(memo);
+}
+
+fn layout_key(stoat: &Stoat) -> LayoutKey {
+    LayoutKey {
+        tick: stoat.render_tick,
+        generation: stoat.completion_generation,
+        popup: stoat.pending_completion.as_ref().map(|p| {
+            (
+                p.anchor_offset,
+                p.selected_idx,
+                p.prefix_range.clone(),
+                p.items.len(),
+            )
+        }),
+    }
+}
+
 /// Compute the anchored completion popup geometry, returning its match prefix
 /// and the [`CompletionLayout`], or `None` when no popup should show.
 ///
@@ -47,6 +117,11 @@ pub(crate) struct CompletionLayout {
 /// or empty items, the focused pane is not an editor, the cursor is off-screen,
 /// or the interior width collapses to zero.
 pub(crate) fn completion_popup_layout(stoat: &mut Stoat) -> Option<(String, CompletionLayout)> {
+    #[cfg(test)]
+    stoat
+        .completion_layouts
+        .set(stoat.completion_layouts.get() + 1);
+
     // Read the scalars the geometry needs and drop the popup borrow before the
     // mutable workspace access below. The item list is re-borrowed for the width
     // scan once that work is done, so the popup is never cloned.
@@ -70,27 +145,20 @@ pub(crate) fn completion_popup_layout(stoat: &mut Stoat) -> Option<(String, Comp
     let viewport_top = viewport_top_for(selected_idx, total, MAX_VISIBLE_ROWS);
     let visible_count = total.saturating_sub(viewport_top).min(MAX_VISIBLE_ROWS);
 
+    // Counted rather than truncated, since the width is all these want and a
+    // truncation allocates a string per visible row to hand it over.
+    let clipped_width = |text: &str| text.chars().take(interior_width as usize).count();
+
     let max_line_width = popup
         .items
         .iter()
         .skip(viewport_top)
         .take(visible_count)
-        .map(|item| {
-            truncate_to_width(&item.label, interior_width as usize)
-                .chars()
-                .count()
-        })
+        .map(|item| clipped_width(&item.label))
         .max()
         .unwrap_or(0) as u16;
     let detail = popup.items.get(selected_idx).and_then(detail_footer);
-    let detail_width = detail
-        .as_deref()
-        .map(|d| {
-            truncate_to_width(d, interior_width as usize)
-                .chars()
-                .count()
-        })
-        .unwrap_or(0) as u16;
+    let detail_width = detail.as_deref().map(clipped_width).unwrap_or(0) as u16;
     let footer_rows: u16 = if detail.is_some() { 1 } else { 0 };
 
     // Completion prefers below, unlike the other cursor popups. It appears
@@ -154,12 +222,17 @@ pub(crate) fn render_completion(
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
-    let Some((prefix, layout)) = completion_popup_layout(stoat) else {
+    // Parked back before every return, since the pool emit runs after this and
+    // reads what the frame's first consumer left rather than laying out again.
+    let memo = frame_layout(stoat);
+    let Some((prefix, layout)) = &memo.layout else {
+        park_layout(stoat, memo);
         return;
     };
     // The layout confirmed a non-empty popup. Re-borrow it for the rows instead
     // of cloning the item list through the layout call.
     let Some(popup) = stoat.pending_completion.as_ref() else {
+        park_layout(stoat, memo);
         return;
     };
 
@@ -177,7 +250,7 @@ pub(crate) fn render_completion(
     paint_completion_rows(
         &popup.items,
         popup.selected_idx,
-        &prefix,
+        prefix,
         layout.viewport_top,
         layout.inner,
         &stoat.theme,
@@ -187,7 +260,7 @@ pub(crate) fn render_completion(
     if let Some(detail) = &layout.detail {
         let footer_y = layout.inner.y + layout.inner.height;
         let footer_style = modal_style.add_modifier(Modifier::DIM);
-        let text = truncate_to_width(detail, layout.inner.width as usize);
+        let text = clip_to_width(detail, layout.inner.width as usize);
         for (col_idx, ch) in text.chars().enumerate() {
             let col = layout.inner.x + col_idx as u16;
             if col >= layout.inner.x + layout.inner.width {
@@ -196,6 +269,8 @@ pub(crate) fn render_completion(
             buf[(col, footer_y)].set_char(ch).set_style(footer_style);
         }
     }
+
+    park_layout(stoat, memo);
 }
 
 /// Paint completion rows into `area` starting at item `start_row`, one row per
@@ -232,7 +307,7 @@ pub(crate) fn paint_completion_rows(
                 break;
             };
             let row = area.y + row_idx;
-            let label = truncate_to_width(&item.label, width);
+            let label = clip_to_width(&item.label, width);
             let row_style = if item_idx == selected_idx {
                 selected_style
             } else {
@@ -241,7 +316,7 @@ pub(crate) fn paint_completion_rows(
 
             indices_buf.clear();
             if let Some(p) = &pattern {
-                let hay = Utf32Str::new(&label, &mut hay_buf);
+                let hay = Utf32Str::new(label, &mut hay_buf);
                 p.indices(hay, matcher, &mut indices_buf);
             }
 
@@ -335,6 +410,50 @@ mod tests {
             lsp_item: None,
             server: None,
         }
+    }
+
+    /// The paint and the pool emit both need the popup's rects, and producing
+    /// them locks the focused buffer to read the match prefix and measures
+    /// every visible label. Both run inside one Redraw, so the second reads
+    /// what the first left rather than repeating that work.
+    #[test]
+    fn a_frame_lays_the_popup_out_once() {
+        let mut h = TestHarness::with_size(40, 24);
+        let _path = open_scratch(&mut h, "");
+        h.type_keys("i");
+        h.stoat.pending_completion = Some(CompletionPopup {
+            items: vec![make_item("alpha"), make_item("beta")],
+            selected_idx: 0,
+            anchor_offset: 0,
+            prefix_range: 0..0,
+            prefix: String::new(),
+            incomplete: Vec::new(),
+        });
+
+        // The pool emit is the second consumer, and it ships nothing without a
+        // stoatty listening, so without these it never asks for a layout at all.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.stoatty = true;
+
+        h.stoat.completion_layouts.set(0);
+        h.stoat.render();
+        h.stoat.emit_smooth_scroll();
+
+        assert_eq!(
+            h.stoat.completion_layouts.get(),
+            1,
+            "the paint and the emit share one layout",
+        );
+
+        h.stoat.render();
+        h.stoat.emit_smooth_scroll();
+
+        assert_eq!(
+            h.stoat.completion_layouts.get(),
+            2,
+            "and the next frame lays out again rather than reusing a stale one",
+        );
     }
 
     /// Every other cursor popup prefers the space above the cursor, and
