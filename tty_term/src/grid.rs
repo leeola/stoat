@@ -1162,7 +1162,7 @@ pub struct Overlay {
 ///
 /// Like an [`Overlay`], the panel is grid-level rather than a cell attribute: a
 /// hairline frame in [`Self::border`] at [`Self::style`] weight with
-/// [`Self::corner_radius`] device-pixel rounded corners and a [`Self::shadow`] in
+/// [`Self::corner_radius`] logical-pixel rounded corners and a [`Self::shadow`] in
 /// the selected [`PanelShadow`] style, composited around the `width` by `height`
 /// cell rectangle at
 /// (`top`, `left`). The framed cells keep rendering their own content, so unlike
@@ -1182,7 +1182,7 @@ pub struct Panel {
     pub corner_radius: u8,
     pub fill: Option<Rgb>,
     pub shadow: PanelShadow,
-    /// Device pixels shaved off each horizontal edge, so the box draws narrower
+    /// Logical pixels shaved off each horizontal edge, so the box draws narrower
     /// than its cell rect. Carried from the panel command and applied by the
     /// renderer to the frame, fill, corners, and shadow.
     pub inset_x: u8,

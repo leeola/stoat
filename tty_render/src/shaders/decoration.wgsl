@@ -8,9 +8,12 @@ struct Globals {
     resolution: vec2<f32>,
     cell_size: vec2<f32>,
     scroll_y: f32,
+    // Physical pixels per logical pixel. The stroke weights below are stated in
+    // logical pixels, so a 2x display draws them twice as wide and the border
+    // keeps its weight against the cell it edges.
+    scale_factor: f32,
     pad0: f32,
     pad1: f32,
-    pad2: f32,
 }
 
 @group(0) @binding(0)
@@ -82,15 +85,22 @@ fn edge_style(styles: u32, shift: u32) -> u32 {
 }
 
 // Coverage of a straight line `d` pixels in from its edge, by weight. Light and
-// Rounded draw a single line hugging the edge; Heavy widens it; Double adds a
+// Rounded draw a single line hugging the edge. Heavy widens it. Double adds a
 // second line one pixel further in.
+//
+// The heavy width and the double line's separation are logical pixels, scaled
+// to the display, so a heavy edge stays visibly heavier than a light one at any
+// density. The light and rounded hairline is one physical pixel on purpose: it
+// is the thinnest line the display draws, so a denser screen renders it finer
+// rather than fatter.
 fn line_coverage(style: u32, d: f32) -> f32 {
+    let s = globals.scale_factor;
     if style == STYLE_HEAVY {
-        return clamp(2.5 - d + 0.5, 0.0, 1.0);
+        return clamp(2.5 * s - d + 0.5, 0.0, 1.0);
     }
     if style == STYLE_DOUBLE {
-        let inner = clamp(1.0 - d + 0.5, 0.0, 1.0);
-        let outer = clamp(min(d - 2.0, 3.0 - d) + 0.5, 0.0, 1.0);
+        let inner = clamp(1.0 * s - d + 0.5, 0.0, 1.0);
+        let outer = clamp(min(d - 2.0 * s, 3.0 * s - d) + 0.5, 0.0, 1.0);
         return max(inner, outer);
     }
     return clamp(1.0 - d + 0.5, 0.0, 1.0);

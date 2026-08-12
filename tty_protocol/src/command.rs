@@ -226,7 +226,7 @@ pub enum PanelShadow {
 ///
 /// A `width` by `height` cell region at (`top`, `left`) in absolute grid
 /// coordinates gets a hairline frame in `border` at `style` weight, with
-/// `corner_radius` device-pixel rounded corners (0 = square) and a `shadow`
+/// `corner_radius` logical-pixel rounded corners (0 = square) and a `shadow`
 /// drawn in the selected [`PanelShadow`] style. Unlike a per-cell
 /// [`BorderCommand`], the frame is a floating component drawn under the grid
 /// text, so the framed cells keep rendering their own content.
@@ -244,7 +244,7 @@ pub struct PanelCommand {
     pub corner_radius: u8,
     pub fill: Option<[u8; 3]>,
     pub shadow: PanelShadow,
-    /// Device pixels shaved off each horizontal edge, so the box draws narrower
+    /// Logical pixels shaved off each horizontal edge, so the box draws narrower
     /// than its cell rect. `0` is cell-exact. The border, fill, corner rounding,
     /// and shadow all follow the inset rect, leaving the strip outside it showing
     /// the cells behind.

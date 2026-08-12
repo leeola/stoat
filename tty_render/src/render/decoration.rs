@@ -71,7 +71,9 @@ struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
     scroll_y: f32,
-    pad: [f32; 3],
+    /// Physical pixels per logical pixel, which the stroke weights scale by.
+    scale_factor: f32,
+    pad: [f32; 2],
 }
 
 /// The instanced cell-edge border pipeline and its per-frame buffers.
@@ -237,7 +239,8 @@ impl DecorationPass {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
             scroll_y: grid_scroll * self.metrics.height,
-            pad: [0.0, 0.0, 0.0],
+            scale_factor: self.metrics.scale_factor,
+            pad: [0.0, 0.0],
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 

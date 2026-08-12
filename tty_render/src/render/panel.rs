@@ -24,19 +24,19 @@ use wgpu::{
 /// when a frame exceeds it.
 const INITIAL_CAPACITY: usize = 16;
 
-/// Drop-shadow blur radius in physical pixels. The shadow's alpha fades to zero
+/// Drop-shadow blur radius in logical pixels. The shadow's alpha fades to zero
 /// across this distance past the shadow rectangle.
 const SHADOW_MARGIN: f32 = 16.0;
 
-/// Drop-shadow displacement in physical pixels, down and to the right, so a
+/// Drop-shadow displacement in logical pixels, down and to the right, so a
 /// panel reads as floating above the grid rather than pasted onto it.
 const SHADOW_OFFSET: [f32; 2] = [5.0, 7.0];
 
-/// Blur radius in physical pixels for a tucked shadow. Tighter than
+/// Blur radius in logical pixels for a tucked shadow. Tighter than
 /// [`SHADOW_MARGIN`] so the undisplaced halo reads as a seam rather than a float.
 const SHADOW_MARGIN_TUCKED: f32 = 6.0;
 
-/// Height in physical pixels of an overhang shadow's interior bottom band. Small,
+/// Height in logical pixels of an overhang shadow's interior bottom band. Small,
 /// so it reads as a faint shadow cast onto the panel by whatever overhangs it.
 const SHADOW_MARGIN_OVERHANG: f32 = 5.0;
 
@@ -70,7 +70,9 @@ struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
     count: u32,
-    _pad: [u32; 3],
+    /// Physical pixels per logical pixel, which the stroke weights scale by.
+    scale_factor: f32,
+    _pad: [u32; 2],
 }
 
 /// The instanced panel pipeline and its per-frame buffers.
@@ -221,14 +223,15 @@ impl PanelPass {
             return;
         }
 
-        build_panel_instances_into(grid.panels(), &mut self.built);
+        build_panel_instances_into(grid.panels(), self.metrics.scale_factor, &mut self.built);
         self.count = self.built.len() as u32;
 
         let globals = Globals {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
             count: self.count,
-            _pad: [0; 3],
+            scale_factor: self.metrics.scale_factor,
+            _pad: [0; 2],
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
@@ -310,7 +313,7 @@ fn make_bind_group(
 #[cfg(test)]
 fn build_panel_instances(panels: &[Panel]) -> Vec<PanelInstance> {
     let mut instances = Vec::new();
-    build_panel_instances_into(panels, &mut instances);
+    build_panel_instances_into(panels, 1.0, &mut instances);
     instances
 }
 
@@ -319,9 +322,14 @@ fn build_panel_instances(panels: &[Panel]) -> Vec<PanelInstance> {
 /// A panel with no fill leaves the interior transparent. A panel with no shadow
 /// zeroes the shadow, so the pass draws only the stroke.
 ///
+/// The shadow geometry, the corner radius, and the inset are all stated in
+/// logical pixels and multiplied by `scale_factor` here. Left physical, they
+/// hold their pixel count against a box that doubled, so the chrome reads half
+/// weight on a 2x display.
+///
 /// `out` is cleared first, so a reused scratch buffer holds only this frame's
 /// panels.
-fn build_panel_instances_into(panels: &[Panel], out: &mut Vec<PanelInstance>) {
+fn build_panel_instances_into(panels: &[Panel], scale_factor: f32, out: &mut Vec<PanelInstance>) {
     out.clear();
     out.extend(panels.iter().map(|panel| {
         let (shadow_offset, shadow_margin, shadow_mode) = match panel.shadow {
@@ -335,12 +343,15 @@ fn build_panel_instances_into(panels: &[Panel], out: &mut Vec<PanelInstance>) {
             size: [panel.width as f32, panel.height as f32],
             fill: panel.fill.map(rgb_f32).unwrap_or([0.0, 0.0, 0.0]),
             border: rgb_f32(panel.border),
-            shadow_offset,
-            shadow_margin,
-            corner_radius: panel.corner_radius as f32,
+            shadow_offset: [
+                shadow_offset[0] * scale_factor,
+                shadow_offset[1] * scale_factor,
+            ],
+            shadow_margin: shadow_margin * scale_factor,
+            corner_radius: panel.corner_radius as f32 * scale_factor,
             fill_flag: if panel.fill.is_some() { 1.0 } else { 0.0 },
             style: style_code(panel.style),
-            inset_x: panel.inset_x as f32,
+            inset_x: panel.inset_x as f32 * scale_factor,
             shadow_mode,
         }
     }));
@@ -365,12 +376,27 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_panel_instances, build_panel_instances_into, style_code, PanelInstance};
-    use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
-    use wgpu::naga::{
-        front::wgsl,
-        valid::{Capabilities, ValidationFlags, Validator},
+    use super::{
+        build_panel_instances, build_panel_instances_into, style_code, PanelInstance, PanelPass,
     };
+    use crate::{gpu::headless_device, render::CellMetrics};
+    use stoatty_term::grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb};
+    use wgpu::{
+        naga::{
+            front::wgsl,
+            valid::{Capabilities, ValidationFlags, Validator},
+        },
+        BufferDescriptor, BufferUsages, Color, CommandEncoderDescriptor, Device, Extent3d, LoadOp,
+        MapMode, Operations, Origin3d, PollType, Queue, RenderPassColorAttachment,
+        RenderPassDescriptor, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout,
+        TexelCopyTextureInfo, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
+        TextureUsages, TextureViewDescriptor,
+    };
+
+    /// The square readback target's edge, in pixels. Four bytes a texel makes a
+    /// row exactly the 256-byte copy alignment, so the readback needs no stride
+    /// padding.
+    const TARGET: u32 = 64;
 
     #[test]
     fn shader_is_valid_wgsl() {
@@ -381,6 +407,138 @@ mod tests {
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate panel");
+    }
+
+    /// Draw `grid`'s panels alone onto a black [`TARGET`]-square target at
+    /// `metrics`, and read the red channel back, one byte a pixel.
+    ///
+    /// Red alone because the fixture strokes in pure red over black, so the byte
+    /// at a pixel is the stroke coverage the shader resolved there.
+    fn render_red(device: &Device, queue: &Queue, grid: &Grid, metrics: CellMetrics) -> Vec<u8> {
+        let mut pass = PanelPass::new(device, TextureFormat::Rgba8Unorm, metrics);
+        pass.prepare(device, queue, grid, [TARGET as f32, TARGET as f32]);
+
+        let size = Extent3d {
+            width: TARGET,
+            height: TARGET,
+            depth_or_array_layers: 1,
+        };
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("panel weight target"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&TextureViewDescriptor::default());
+        let readback = device.create_buffer(&BufferDescriptor {
+            label: Some("panel weight readback"),
+            size: u64::from(TARGET) * u64::from(TARGET) * 4,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("panel weight"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(Color::BLACK),
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.draw(&mut render_pass);
+        }
+        encoder.copy_texture_to_buffer(
+            TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(TARGET * 4),
+                    rows_per_image: None,
+                },
+            },
+            size,
+        );
+        queue.submit(Some(encoder.finish()));
+
+        readback.slice(..).map_async(MapMode::Read, |_| {});
+        device
+            .poll(PollType::wait_indefinitely())
+            .expect("poll readback");
+        let rgba = readback.slice(..).get_mapped_range().to_vec();
+
+        rgba.chunks_exact(4).map(|texel| texel[0]).collect()
+    }
+
+    /// A chrome weight left in physical pixels holds its pixel count while the
+    /// box it frames doubles, so the frame reads half as heavy on a 2x display.
+    #[test]
+    fn a_heavy_stroke_doubles_its_width_at_twice_the_density() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("panel weight test: no wgpu adapter, skipping");
+            return;
+        };
+
+        let mut grid = Grid::new(4, 4);
+        grid.set_panels(vec![Panel {
+            top: 1,
+            left: 1,
+            width: 2,
+            height: 2,
+            style: BorderStyle::Heavy,
+            border: Rgb::new(255, 0, 0),
+            corner_radius: 0,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+            seq: 0,
+        }]);
+
+        // One cell rectangle, two densities. The box lands on the same pixels
+        // either way, so the only thing that moves is the stroke weight.
+        let metrics = |scale_factor| CellMetrics {
+            font_size: 10.0,
+            width: 12.0,
+            height: 12.0,
+            scale_factor,
+        };
+        // The row through the box's vertical middle crosses the left and right
+        // strokes and nothing else.
+        let lit = |scale_factor| {
+            let red = render_red(&device, &queue, &grid, metrics(scale_factor));
+            (0..TARGET)
+                .filter(|x| red[(24 * TARGET + x) as usize] > 0)
+                .count()
+        };
+
+        let single = lit(1.0);
+        let double = lit(2.0);
+
+        assert!(single > 0, "the heavy stroke paints something at 1x");
+        assert!(
+            double.abs_diff(single * 2) <= 2,
+            "and about twice as much at 2x: {single} then {double}"
+        );
     }
 
     #[test]
@@ -402,7 +560,7 @@ mod tests {
 
         let mut scratch = build_panel_instances(&panels);
         scratch.extend(build_panel_instances(&panels));
-        build_panel_instances_into(&panels, &mut scratch);
+        build_panel_instances_into(&panels, 1.0, &mut scratch);
 
         assert_eq!(
             bytemuck::cast_slice::<PanelInstance, u8>(&scratch),

@@ -3847,6 +3847,7 @@ mod tests {
             font_size: 10.0,
             width: 6.0,
             height: 12.5,
+            scale_factor: 1.0,
         };
 
         for row in 0..5usize {

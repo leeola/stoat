@@ -98,6 +98,14 @@ pub(crate) struct CellMetrics {
     pub(crate) font_size: f32,
     pub(crate) width: f32,
     pub(crate) height: f32,
+    /// Physical pixels per logical pixel on this display.
+    ///
+    /// The cell rectangle already has it folded in, so the passes that only lay
+    /// out cells never read it. Chrome drawn around a cell does: a stroke
+    /// weight, a shadow, or a corner radius stated in logical pixels needs it to
+    /// reach the display, and one left in physical pixels reads half weight on a
+    /// 2x screen.
+    pub(crate) scale_factor: f32,
 }
 
 impl CellMetrics {
@@ -105,11 +113,12 @@ impl CellMetrics {
     /// display `scale_factor`, so a given font size keeps the same apparent size
     /// across display densities and rasterizes crisply on each.
     pub(crate) fn from_font_size(font_size: u32, scale_factor: f32) -> CellMetrics {
-        let font_size = font_size as f32 * scale_factor;
+        let physical = font_size as f32 * scale_factor;
         CellMetrics {
-            font_size,
-            width: font_size * 0.6,
-            height: font_size * 1.2,
+            font_size: physical,
+            width: physical * 0.6,
+            height: physical * 1.2,
+            scale_factor,
         }
     }
 }

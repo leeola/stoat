@@ -896,6 +896,7 @@ mod tests {
                 font_size: 10.0,
                 width: 6.0,
                 height: 12.0,
+                scale_factor: 1.0,
             },
         );
     }
