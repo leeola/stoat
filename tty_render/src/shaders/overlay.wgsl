@@ -115,7 +115,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Composite the rounded box over the shadow: its bulk is opaque, the rounded
     // corners fade to the shadow, and beyond the box only the shadow remains.
-    let color = mix(SHADOW_COLOR, box_color, box_coverage);
-    let alpha = max(box_coverage, shadow_alpha);
-    return vec4<f32>(color, alpha);
+    //
+    // The corners are why this composites rather than taking the larger of the
+    // two alphas. Two partly covered layers cover more together than either
+    // does alone, and because the pipeline blends unpremultiplied, an
+    // understated alpha also weakens the box's own color and lets the ground
+    // behind show through: a ring around every corner.
+    let premultiplied = box_color * box_coverage
+        + SHADOW_COLOR * shadow_alpha * (1.0 - box_coverage);
+    let alpha = box_coverage + shadow_alpha * (1.0 - box_coverage);
+
+    // The pipeline blends unpremultiplied source alpha, so hand the coverage
+    // back out of the color. A zero-coverage fragment paints nothing, so what
+    // the guard returns for it does not matter.
+    return vec4<f32>(premultiplied / max(alpha, 1.0e-5), alpha);
 }

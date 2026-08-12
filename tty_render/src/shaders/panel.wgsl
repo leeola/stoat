@@ -127,6 +127,21 @@ fn vs_main(
     return out;
 }
 
+// Lay a layer of `color` at `alpha` over the premultiplied `under`, returning
+// the accumulated color in rgb and the coverage in a.
+//
+// Two partly covered layers cover more together than either does alone. Taking
+// the larger of the two alphas instead understates that, and because the
+// pipeline blends unpremultiplied, an understated alpha also weakens the
+// layer's own color and lets the ground behind show through: a ring wherever
+// the ramps overlap.
+fn over(under: vec4<f32>, color: vec3<f32>, alpha: f32) -> vec4<f32> {
+    return vec4<f32>(
+        color * alpha + under.rgb * (1.0 - alpha),
+        alpha + under.a * (1.0 - alpha)
+    );
+}
+
 // Anti-aliased coverage of a stroke `d` pixels from its centerline, weighted by
 // the border style: a heavy line is thicker, a double line is two parallel
 // hairlines, and light and rounded are a single hairline.
@@ -214,13 +229,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Composite bottom-up: the exterior shadow, the optional fill, the overhang
     // band cast onto that fill, then the stroke.
-    var color = SHADOW_COLOR;
-    var alpha = shadow_base;
-    color = mix(color, in.fill, fill_alpha);
-    alpha = max(alpha, fill_alpha);
-    color = mix(color, SHADOW_COLOR, overhang);
-    alpha = max(alpha, overhang);
-    color = mix(color, in.border, stroke);
-    alpha = max(alpha, stroke);
-    return vec4<f32>(color, alpha);
+    var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    acc = over(acc, SHADOW_COLOR, shadow_base);
+    acc = over(acc, in.fill, fill_alpha);
+    acc = over(acc, SHADOW_COLOR, overhang);
+    acc = over(acc, in.border, stroke);
+
+    // The pipeline blends unpremultiplied source alpha, so hand the coverage
+    // back out of the color. A zero-coverage fragment paints nothing, so what
+    // the guard returns for it does not matter.
+    return vec4<f32>(acc.rgb / max(acc.a, 1.0e-5), acc.a);
 }

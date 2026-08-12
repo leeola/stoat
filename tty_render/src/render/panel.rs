@@ -409,12 +409,15 @@ mod tests {
             .expect("validate panel");
     }
 
-    /// Draw `grid`'s panels alone onto a black [`TARGET`]-square target at
-    /// `metrics`, and read the red channel back, one byte a pixel.
-    ///
-    /// Red alone because the fixture strokes in pure red over black, so the byte
-    /// at a pixel is the stroke coverage the shader resolved there.
-    fn render_red(device: &Device, queue: &Queue, grid: &Grid, metrics: CellMetrics) -> Vec<u8> {
+    /// Draw `grid`'s panels alone onto a [`TARGET`]-square target cleared to
+    /// `clear`, and read the whole surface back.
+    fn render_rgba(
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        metrics: CellMetrics,
+        clear: Color,
+    ) -> Vec<u8> {
         let mut pass = PanelPass::new(device, TextureFormat::Rgba8Unorm, metrics);
         pass.prepare(device, queue, grid, [TARGET as f32, TARGET as f32]);
 
@@ -450,7 +453,7 @@ mod tests {
                     depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Clear(Color::BLACK),
+                        load: LoadOp::Clear(clear),
                         store: StoreOp::Store,
                     },
                 })],
@@ -484,9 +487,96 @@ mod tests {
         device
             .poll(PollType::wait_indefinitely())
             .expect("poll readback");
-        let rgba = readback.slice(..).get_mapped_range().to_vec();
+        readback.slice(..).get_mapped_range().to_vec()
+    }
 
-        rgba.chunks_exact(4).map(|texel| texel[0]).collect()
+    /// The red the panels painted over black, one byte a pixel.
+    ///
+    /// The fixtures stroke in pure red, so the byte at a pixel is what reached
+    /// the target there.
+    fn render_red(device: &Device, queue: &Queue, grid: &Grid, metrics: CellMetrics) -> Vec<u8> {
+        render_rgba(device, queue, grid, metrics, Color::BLACK)
+            .chunks_exact(4)
+            .map(|texel| texel[0])
+            .collect()
+    }
+
+    /// The coverage the panels resolved, one byte a pixel.
+    ///
+    /// A panel's layers are red and black, so none of them writes green. Over a
+    /// white ground the green channel reads back as the ground that survived,
+    /// and the coverage is what is left of it.
+    fn render_coverage(
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        metrics: CellMetrics,
+    ) -> Vec<u8> {
+        render_rgba(device, queue, grid, metrics, Color::WHITE)
+            .chunks_exact(4)
+            .map(|texel| 255 - texel[1])
+            .collect()
+    }
+
+    /// Two partly covered layers cover more together than either does alone.
+    /// Taking the larger of their alphas understates that, and because the
+    /// pipeline blends unpremultiplied, the understatement weakens the stroke's
+    /// own color and lets the ground behind show through.
+    #[test]
+    fn a_stroke_over_a_shadow_covers_more_than_either() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("panel composite test: no wgpu adapter, skipping");
+            return;
+        };
+
+        let metrics = CellMetrics {
+            font_size: 10.0,
+            width: 12.0,
+            height: 12.0,
+            scale_factor: 1.0,
+        };
+        let panel = |shadow| Panel {
+            top: 1,
+            left: 1,
+            width: 2,
+            height: 2,
+            style: BorderStyle::Light,
+            border: Rgb::new(255, 0, 0),
+            corner_radius: 0,
+            // Unfilled, so the stroke's fringe meets the shadow with nothing
+            // opaque between them.
+            fill: None,
+            shadow,
+            inset_x: 0,
+            above_pools: false,
+            seq: 0,
+        };
+        let coverage = |shadow| {
+            let mut grid = Grid::new(4, 4);
+            grid.set_panels(vec![panel(shadow)]);
+            render_coverage(&device, &queue, &grid, metrics)
+        };
+
+        // A tucked shadow paints nothing below the box's bottom edge while a
+        // drop shadow is at full strength there, so the pair isolates the
+        // stroke's outer fringe from the shadow under it. A shadowless panel
+        // serves no better. Its quad carries no shadow padding, so it never
+        // rasterizes the fringe outside the box at all.
+        let tucked = coverage(PanelShadow::Tucked);
+        let dropped = coverage(PanelShadow::Drop);
+
+        // A shadow alone never reaches past SHADOW_ALPHA. So a coverage above
+        // that which also exceeds the tucked panel's is neither of the two
+        // inputs, and only compositing them produces it.
+        let ceiling = (0.22 * 255.0) as u8;
+        let composited = dropped.iter().zip(&tucked).position(|(dropped, tucked)| {
+            (1..255).contains(tucked) && dropped > tucked && *dropped > ceiling
+        });
+
+        assert!(
+            composited.is_some(),
+            "the stroke's fringe and the shadow beneath it compose"
+        );
     }
 
     /// A chrome weight left in physical pixels holds its pixel count while the
