@@ -28,7 +28,10 @@ use ratatui::{
     widgets::{Paragraph, StatefulWidget, Widget},
 };
 use slotmap::SlotMap;
-use std::path::Path;
+use std::{
+    hash::{DefaultHasher, Hash, Hasher},
+    path::Path,
+};
 use stoatty_widgets::{
     minimap::Minimap,
     status_bar::{StatusBar, StatusSegment},
@@ -393,7 +396,7 @@ pub(crate) fn render_overlay_status(
             status_message_style(base_style, frame.theme),
         ));
     }
-    render_status_segments(area, base_style, frame, &left, &right, buf, scene);
+    render_status_segments(area, base_style, frame, &left, &right, buf, scene, None);
 }
 
 /// Build the overlay status bar's left segments in paint order.
@@ -505,7 +508,12 @@ fn render_pane_status(
 
     let (left, right) =
         status_segments(view, is_focused, area, frame, editors, buffers, badge_rect);
-    render_status_segments(area, base_style, frame, &left, &right, buf, scene);
+
+    let cache = match view {
+        View::Editor(id) => editors.get_mut(*id).map(|e| &mut e.status_scene_cache),
+        _ => None,
+    };
+    render_status_segments(area, base_style, frame, &left, &right, buf, scene, cache);
 }
 
 /// Everything a detached pane's status bar draws, assembled but not yet
@@ -577,12 +585,37 @@ pub(crate) fn paint_pane_status_cells(cells: &PaneStatusCells, area: Rect, buf: 
     paint_status_fallback(buf, area, &cells.left, &cells.right);
 }
 
+/// The APC frame a status bar last emitted, held so an unchanged repaint
+/// splices it instead of encoding it again.
+///
+/// The bar is re-encoded every frame and then discarded unchanged by the
+/// scene's own flush comparison, so a pane that repaints for a reason the bar
+/// does not share pays a text run per segment for nothing.
+///
+/// `key` is `None` while nothing is recorded, which covers a bar that has only
+/// ever taken the cell fallback. A frame is recorded only under a live scene,
+/// since a dead one drops the appends and records nothing.
+///
+/// Only the editor pane's bar has somewhere to keep one. The overlay bar and
+/// the tab bar are drawn from state no editor owns, so they encode every frame.
+#[derive(Default)]
+pub(crate) struct StatusSceneCache {
+    key: Option<u64>,
+    bytes: Vec<u8>,
+}
+
 /// Render the built status segments as rich APC components inside stoatty, or
 /// into cells otherwise.
 ///
 /// Rich mode needs a live scene and every segment color as RGB. A dead scene or
 /// any color outside RGB drops the whole bar to the cell fallback, so a foreign
 /// terminal and a theme without RGB status colors both keep the cell rendering.
+///
+/// With a `cache`, a repaint whose segments, rect, and colors all hold splices
+/// the recorded frame. Splicing is only sound because
+/// [`StatusBar::draw_components`] reads nothing outside those, and writes
+/// nothing but the scene, so a skipped encode leaves no cell unpainted.
+#[allow(clippy::too_many_arguments)]
 fn render_status_segments(
     area: Rect,
     base_style: Style,
@@ -591,29 +624,74 @@ fn render_status_segments(
     right: &[StatusSeg],
     buf: &mut Buffer,
     scene: &mut ApcScene,
+    cache: Option<&mut StatusSceneCache>,
 ) {
-    let rich = (|| {
+    let colors = (|| {
         scene.live().then_some(())?;
         let separator = style_rgb(frame.theme.get(crate::theme::scope::UI_BORDER_INACTIVE).fg)?;
         let base_bg = style_rgb(base_style.bg)?;
-        let left_rich = resolve_rich_segments(left, base_style)?;
-        let right_rich = resolve_rich_segments(right, base_style)?;
-        Some((separator, base_bg, left_rich, right_rich))
+        Some((separator, base_bg))
     })();
 
-    match rich {
-        Some((separator, base_bg, left_rich, right_rich)) => {
-            StatusBar {
-                left: &left_rich,
-                right: &right_rich,
-                scale: TEXT_SCALE_COMPACT,
-                separator,
-                bg: base_bg,
-            }
-            .draw_components(area, buf, scene);
-        },
-        None => paint_status_fallback(buf, area, left, right),
+    let Some((separator, base_bg)) = colors else {
+        paint_status_fallback(buf, area, left, right);
+        return;
+    };
+
+    let key = status_scene_key(area, base_style, left, right, (separator, base_bg));
+
+    if let Some(cache) = &cache
+        && cache.key == Some(key)
+    {
+        scene.buffer().extend_from_slice(&cache.bytes);
+        return;
     }
+
+    let rich =
+        resolve_rich_segments(left, base_style).zip(resolve_rich_segments(right, base_style));
+
+    let Some((left_rich, right_rich)) = rich else {
+        paint_status_fallback(buf, area, left, right);
+        return;
+    };
+
+    let start = scene.bytes().len();
+    StatusBar {
+        left: &left_rich,
+        right: &right_rich,
+        scale: TEXT_SCALE_COMPACT,
+        separator,
+        bg: base_bg,
+    }
+    .draw_components(area, buf, scene);
+
+    if let Some(cache) = cache {
+        cache.bytes.clear();
+        cache.bytes.extend_from_slice(&scene.bytes()[start..]);
+        cache.key = Some(key);
+    }
+}
+
+/// Hash everything the status bar's APC frame is encoded from into a cache key.
+///
+/// The segments go in as their pre-resolution text and style, which is what
+/// they are compared as on the windowed path too. Resolving them to RGB is
+/// itself part of the work the cache exists to skip, and the resolution is a
+/// function of the pair hashed here.
+fn status_scene_key(
+    area: Rect,
+    base_style: Style,
+    left: &[StatusSeg],
+    right: &[StatusSeg],
+    colors: ([u8; 3], [u8; 3]),
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (area.x, area.y, area.width, area.height).hash(&mut hasher);
+    base_style.hash(&mut hasher);
+    left.hash(&mut hasher);
+    right.hash(&mut hasher);
+    colors.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Paint the tab bar across `area`, one segment per tab.
@@ -651,7 +729,7 @@ pub(crate) fn render_tab_bar(
         })
         .collect();
 
-    render_status_segments(area, inactive, frame, &left, &[], buf, scene);
+    render_status_segments(area, inactive, frame, &left, &[], buf, scene, None);
 }
 
 /// One built status-bar segment pairing painted text with its cell style.

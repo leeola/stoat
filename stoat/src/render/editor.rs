@@ -803,7 +803,7 @@ pub(crate) struct GutterSeverityCache {
     pub(crate) map: Arc<BTreeMap<u32, DiagnosticSeverity>>,
 }
 
-/// Cached gutter geometry for one set of drawn-gutter inputs, in two layers.
+/// Cached gutter geometry for one set of drawn-gutter inputs, in three layers.
 ///
 /// The geometry layer holds the folded gutter lines, digit width, and per-row
 /// diff marks. Rebuilding it is the expensive half, costing a block-tree query
@@ -819,8 +819,17 @@ pub(crate) struct GutterSeverityCache {
 /// every vertical cursor move changes the line inputs while leaving the
 /// geometry identical, and the cheap layer rebuilds alone.
 ///
+/// The scene layer is the APC frame those lines encode to, guarded by
+/// [`Self::scene_key`] over the lines key plus the rect and colors the encoding
+/// reads. It exists because the frame is rebuilt every repaint and then thrown
+/// away unchanged by the scene's own flush comparison, so a pane that repaints
+/// for a reason the gutter does not share re-encodes four commands a row for
+/// nothing.
+///
 /// `lines_key` is `None` while the lines are unbuilt, which is both a fresh
 /// geometry and the whole of fallback mode, where nothing paints from them.
+/// `scene_key` is `None` under the same conditions, and on a dead scene, which
+/// drops every append and so records an empty frame.
 pub(crate) struct GutterGeometryCache {
     geometry_key: u64,
     folded: Vec<(u32, u16)>,
@@ -828,6 +837,8 @@ pub(crate) struct GutterGeometryCache {
     marks: BTreeMap<u32, (DiffHunkStatus, bool)>,
     lines_key: Option<u64>,
     lines: Vec<GutterLine>,
+    scene_key: Option<u64>,
+    scene_bytes: Vec<u8>,
 }
 
 /// Build a per-buffer-row map from resolved diagnostic spans, picking the worst
@@ -1624,6 +1635,24 @@ fn gutter_lines_key(
     hasher.finish()
 }
 
+/// Hash everything the rich gutter's APC frame is encoded from into a cache key.
+///
+/// The frame is positioned against the pane rect in absolute cells, so the rect
+/// belongs here whole rather than as the width and height the geometry key
+/// already covers. The three colors are the ones the encoding reads directly,
+/// as opposed to those the lines key covers by having baked them into the lines.
+fn gutter_scene_key(
+    lines_key: Option<u64>,
+    inner: Rect,
+    colors: ([u8; 3], [u8; 3], [u8; 3]),
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    lines_key.hash(&mut hasher);
+    (inner.x, inner.y, inner.width, inner.height).hash(&mut hasher);
+    colors.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Draw the absolute-line-number gutter and return the cell columns it reserves.
 ///
 /// With a scene and every gutter color resolved to RGB, draws the rich
@@ -1689,6 +1718,8 @@ fn draw_line_number_gutter(
             marks,
             lines_key: None,
             lines: Vec::new(),
+            scene_key: None,
+            scene_bytes: Vec::new(),
         });
     }
     let geometry = cache.as_mut().expect("set above");
@@ -1712,15 +1743,7 @@ fn draw_line_number_gutter(
 
     match rich {
         Some((scene, (_colors, number_fg, separator, bg))) => {
-            let gutter = rich_gutter(
-                &geometry.lines,
-                geometry.width_digits,
-                number_fg,
-                separator,
-                bg,
-            );
-            gutter.draw_components(inner, buf, scene);
-            gutter.cell_width()
+            draw_rich_gutter(geometry, inner, (number_fg, separator, bg), buf, scene)
         },
         None => draw_fallback_line_numbers(
             &geometry.folded,
@@ -1733,6 +1756,53 @@ fn draw_line_number_gutter(
             buf,
         ),
     }
+}
+
+/// Emit the rich gutter's APC frame, and return the cell columns it reserves.
+///
+/// The frame is spliced from [`GutterGeometryCache::scene_bytes`] whenever the
+/// cached run encodes the same frame, rather than re-encoded a command at a
+/// time. Splicing is only sound because [`Gutter::draw_components`] reads
+/// nothing outside what [`gutter_scene_key`] covers, and writes nothing but the
+/// scene, so a skipped emit leaves no cell unpainted.
+fn draw_rich_gutter(
+    geometry: &mut GutterGeometryCache,
+    inner: Rect,
+    colors: ([u8; 3], [u8; 3], [u8; 3]),
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) -> u16 {
+    let (number_fg, separator, bg) = colors;
+    let scene_key = gutter_scene_key(geometry.lines_key, inner, colors);
+
+    let gutter = rich_gutter(
+        &geometry.lines,
+        geometry.width_digits,
+        number_fg,
+        separator,
+        bg,
+    );
+    let cell_width = gutter.cell_width();
+
+    if geometry.scene_key == Some(scene_key) {
+        scene.buffer().extend_from_slice(&geometry.scene_bytes);
+        return cell_width;
+    }
+
+    let start = scene.bytes().len();
+    gutter.draw_components(inner, buf, scene);
+
+    // A dead scene routes the appends to a scratch it clears per handout, so the
+    // slice below is empty and records a frame that paints nothing.
+    if scene.live() {
+        geometry.scene_bytes.clear();
+        geometry
+            .scene_bytes
+            .extend_from_slice(&scene.bytes()[start..]);
+        geometry.scene_key = Some(scene_key);
+    }
+
+    cell_width
 }
 
 /// Paint right-aligned cell line numbers, a one-column severity mark left of the
@@ -4024,6 +4094,102 @@ mod tests {
             cached_folded(&mut h.stoat).as_ptr(),
             geometry,
             "renumbering reuses the cached geometry instead of resolving the hunks again",
+        );
+    }
+
+    /// Paint the focused editor into `area` and return the APC frame it emits.
+    ///
+    /// Read before any flush, so the decoration lane still holds the frame the
+    /// paint just built. Handed back as text because the frame is ASCII
+    /// throughout, and a mismatch between two of them reads as commands rather
+    /// than as a pair of byte arrays.
+    fn gutter_scene_frame(stoat: &mut Stoat, area: Rect) -> String {
+        let theme = stoat.theme.clone();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
+        let mut scene = super::ApcScene::new();
+        let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
+        let mut buf = Buffer::empty(area);
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &chrome,
+            &mut buf,
+            true,
+            false,
+            LineNumbers::Relative,
+            false,
+            None,
+            None,
+            None,
+            None,
+            Some(&mut scene),
+            None,
+            0.0,
+            WrapMode::None,
+            80,
+        );
+        String::from_utf8_lossy(scene.bytes()).into_owned()
+    }
+
+    /// The same paint from an empty cache, which is the frame a full encode
+    /// writes with nothing to splice.
+    fn cold_gutter_scene_frame(stoat: &mut Stoat, area: Rect) -> String {
+        action_handlers::focused_editor_mut(stoat)
+            .expect("focused editor")
+            .gutter_geometry_cache = None;
+        gutter_scene_frame(stoat, area)
+    }
+
+    /// The memoized gutter frame is spliced whole, so it is only correct while
+    /// it matches what a full encode writes. Each input the splice is keyed on
+    /// is moved in turn, since a key that misses one paints the previous frame
+    /// at the new state.
+    #[test]
+    fn a_spliced_gutter_frame_matches_a_freshly_encoded_one() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/gutter-scene-memo");
+        let path = root.join("a.txt");
+        h.fake_fs()
+            .insert_file(&path, b"one\ntwo\nthree\nfour\nfive");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let area = Rect::new(0, 0, 12, 5);
+        gutter_scene_frame(&mut h.stoat, area);
+        let spliced = gutter_scene_frame(&mut h.stoat, area);
+
+        assert!(!spliced.is_empty(), "the rich gutter emits an APC frame");
+        assert_eq!(
+            spliced,
+            cold_gutter_scene_frame(&mut h.stoat, area),
+            "an unchanged repaint splices the frame a full encode writes",
+        );
+
+        dispatch(&mut h.stoat, &MoveDown);
+        let moved = gutter_scene_frame(&mut h.stoat, area);
+
+        assert_ne!(moved, spliced, "the moved cursor renumbers the gutter");
+        assert_eq!(
+            moved,
+            cold_gutter_scene_frame(&mut h.stoat, area),
+            "a cursor move re-encodes instead of splicing the numbers it cached",
+        );
+
+        let shifted = Rect::new(3, 1, 12, 5);
+        let at_shifted = gutter_scene_frame(&mut h.stoat, shifted);
+
+        assert_ne!(
+            at_shifted, moved,
+            "the frame is positioned against the rect"
+        );
+        assert_eq!(
+            at_shifted,
+            cold_gutter_scene_frame(&mut h.stoat, shifted),
+            "a moved pane re-encodes instead of splicing the frame from its old rect",
         );
     }
 

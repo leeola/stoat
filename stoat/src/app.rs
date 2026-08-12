@@ -14459,6 +14459,65 @@ mod tests {
         );
     }
 
+    /// Paint a whole frame and return the APC scene it built.
+    ///
+    /// Read before any flush, so the decoration lane still holds this frame
+    /// rather than the one before it. Handed back as text because the scene is
+    /// ASCII throughout, and a mismatch between two of them reads as commands
+    /// rather than as a pair of byte arrays.
+    fn frame_scene(stoat: &mut Stoat) -> String {
+        let mut buf = Buffer::empty(stoat.size());
+        stoat.paint_into(&mut buf);
+        String::from_utf8_lossy(stoat.apc_scene.bytes()).into_owned()
+    }
+
+    /// The same paint with every spliceable frame dropped, which is the scene a
+    /// full encode writes with nothing to splice.
+    fn cold_frame_scene(stoat: &mut Stoat) -> String {
+        for editor in stoat.active_workspace_mut().editors.values_mut() {
+            editor.gutter_geometry_cache = None;
+            editor.status_scene_cache = Default::default();
+        }
+        frame_scene(stoat)
+    }
+
+    /// The gutter and the status bar each splice the APC frame they last
+    /// emitted, so a repaint is only correct while the spliced bytes are the
+    /// bytes a full encode writes. Checked at rest, where every frame splices,
+    /// and after a cursor move, which re-encodes both.
+    #[test]
+    fn a_repaint_splices_the_scene_a_full_encode_writes() {
+        let mut h = Stoat::test();
+        h.stoat.stoatty = true;
+
+        let root = std::path::PathBuf::from("/scene-memo");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        frame_scene(&mut h.stoat);
+        let spliced = frame_scene(&mut h.stoat);
+
+        assert!(!spliced.is_empty(), "a live scene carries the frame");
+        assert_eq!(
+            spliced,
+            cold_frame_scene(&mut h.stoat),
+            "an unchanged repaint splices the scene a full encode writes",
+        );
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::MoveDown);
+        let moved = frame_scene(&mut h.stoat);
+
+        assert_ne!(moved, spliced, "the moved cursor changes the frame");
+        assert_eq!(
+            moved,
+            cold_frame_scene(&mut h.stoat),
+            "a cursor move re-encodes instead of splicing the frame it cached",
+        );
+    }
+
     #[test]
     fn workspace_picker_binding_is_rebindable() {
         let mut h = Stoat::test();
