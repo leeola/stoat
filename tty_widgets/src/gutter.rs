@@ -33,8 +33,7 @@ const TEXT_GAP: u16 = 4;
 ///
 /// The geometry knobs are in **sixteenths of a cell** (16 = one cell), so the
 /// gutter tracks live font zoom. The widget positions every element at an
-/// absolute sixteenth offset to the render area and folds each line's row
-/// `height` in itself, so it declares no surface line layout.
+/// absolute sixteenth offset to the render area.
 ///
 /// Both halves clip to the area. Lines below its last row draw nothing, and a
 /// line straddling the bottom keeps only the rows that fit, so a caller sizes
@@ -54,6 +53,19 @@ pub struct Gutter<'a> {
     pub separator: [u8; 3],
     /// Background the sub-cell runs composite over; must match the editor body.
     pub bg: [u8; 3],
+    /// Whether the surface declares a line layout that binds the components.
+    ///
+    /// The protocol carries two ways to place a component under an inline
+    /// expansion, and the surface picks one for every component on it. With a
+    /// layout declared through [`crate::ApcScene::set_line_layout`], the widget
+    /// emits each line at its logical row and the terminal folds in the
+    /// expansions above it. Without one, the widget folds the heights itself
+    /// and emits physical rows.
+    ///
+    /// [`Self::lines`] carries the heights either way. A bar's height is never
+    /// resolved through the layout, so a diagnostic spanning an expanded line
+    /// needs the emitter to measure it.
+    pub bound_to_line_layout: bool,
 }
 
 /// A line's git-diff marks: the change-kind bar color, the staged-state bar
@@ -158,13 +170,20 @@ impl Gutter<'_> {
         let limit = cells::span_sixteenths(area.height);
 
         let mut top = 0u16;
+        let mut logical = 0u16;
         for line in self.lines {
-            let y = cells::span_sixteenths(top);
-            if y >= limit {
+            // Clipping is physical in both models, because the area holds the
+            // rows the expansions actually consume.
+            let physical = cells::span_sixteenths(top);
+            if physical >= limit {
                 break;
             }
-            let remaining = limit - y;
-            let row = cells::signed_sixteenths(y);
+            let remaining = limit - physical;
+
+            let row = cells::signed_sixteenths(match self.bound_to_line_layout {
+                true => cells::span_sixteenths(logical),
+                false => physical,
+            });
 
             let mut digits = [0u8; 10];
             let text = format_u32(&mut digits, line.number);
@@ -211,6 +230,7 @@ impl Gutter<'_> {
             }
 
             top += line.height;
+            logical = logical.saturating_add(1);
         }
 
         Bar {
@@ -305,6 +325,7 @@ mod tests {
             number_fg: [99, 109, 131],
             separator: [60, 66, 77],
             bg: [40, 44, 52],
+            bound_to_line_layout: false,
         }
     }
 
@@ -434,6 +455,58 @@ mod tests {
         assert!(
             contains(scene.buffer(), &staged_bar),
             "staged-state bar spans the full line height"
+        );
+    }
+
+    /// The surface picks one placement model for every component on it, so the
+    /// two models must not both fold the same expansion.
+    #[test]
+    fn a_bound_gutter_emits_logical_rows() {
+        let lines = [
+            GutterLine {
+                number: 1,
+                height: 2,
+                git: None,
+                diagnostic: None,
+            },
+            GutterLine {
+                number: 2,
+                height: 1,
+                git: None,
+                diagnostic: Some(Diagnostic {
+                    color: [224, 108, 117],
+                    mark: 'E',
+                }),
+            },
+        ];
+        let area = Rect::new(0, 0, 10, 3);
+
+        let bar_at = |y| {
+            encode_bar(&BarCommand {
+                x: 0,
+                y,
+                width: 5,
+                height: 16,
+                color: [224, 108, 117],
+            })
+        };
+        let emit = |bound| {
+            let mut gutter = config(&lines);
+            gutter.bound_to_line_layout = bound;
+            let mut buf = Buffer::empty(area);
+            let mut scene = ApcScene::new();
+
+            gutter.draw_components(area, &mut buf, &mut scene);
+            scene.buffer().to_vec()
+        };
+
+        assert!(
+            contains(&emit(false), &bar_at(32)),
+            "unbound, the widget folds the expansion into a physical row"
+        );
+        assert!(
+            contains(&emit(true), &bar_at(16)),
+            "bound, the terminal folds it, so the widget emits the logical row"
         );
     }
 

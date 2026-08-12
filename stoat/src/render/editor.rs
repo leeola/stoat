@@ -1575,6 +1575,7 @@ pub(crate) fn rich_gutter(
         number_fg,
         separator,
         bg,
+        bound_to_line_layout: false,
     }
 }
 

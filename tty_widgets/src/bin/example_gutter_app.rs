@@ -9,11 +9,13 @@
 //! on the uniform grid. One line carries an integer-cell inline expansion (an
 //! inline diagnostic) that pushes the lines below it down.
 //!
-//! A single per-surface line layout cannot bind independent side-by-side panes
-//! (that is deferred multi-surface work), so each [`Gutter`] positions its
-//! components relative to its pane's area and folds the expansion shift in
-//! itself rather than declaring a line layout. The components ride in sixteenths
-//! of a cell, so they track live font zoom.
+//! The panes declare that expansion once, as a surface line layout, and every
+//! [`Gutter`] binds to it: each emits its lines at their logical rows and the
+//! terminal shifts the ones below the expansion down. One layout serves all
+//! three panes because they are aligned clones of the same buffer, so a surface
+//! line is the same buffer line in each. Independent panes with layouts of their
+//! own are deferred multi-surface work. The components ride in sixteenths of a
+//! cell, so they track live font zoom.
 //!
 //! Cells flow through a ratatui [`Terminal`] (the editor background, the body
 //! code, and the widgets' graceful-degradation fallback) and decoration through
@@ -32,7 +34,6 @@ use stoatty_protocol::command::BorderStyle;
 use stoatty_widgets::{
     border::Border,
     gutter::{Diagnostic, GitMark, Gutter, GutterLine},
-    text_run::TextRun,
     ApcScene, ApcSession, SessionOptions,
 };
 
@@ -54,10 +55,6 @@ const SEPARATOR_COLOR: [u8; 3] = [60, 66, 77];
 /// Line-number glyph size in 256ths of a cell (160 = 0.625x), so the number is
 /// smaller than the body text.
 const NUMBER_SCALE: u16 = 160;
-
-/// Inline-expansion glyph size in 256ths of a cell (200 = 0.78x), so the inline
-/// diagnostic reads smaller than the full-cell body code.
-const EXPANSION_SCALE: u16 = 200;
 
 /// Git status flagged by a gutter bar.
 #[derive(Clone, Copy)]
@@ -235,6 +232,8 @@ fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene, lines: &[GutterLine])
     let area = frame.area();
     frame.buffer_mut().set_style(area, editor_style());
 
+    scene.set_line_layout(&surface_line_heights());
+
     for pane in &PANES {
         draw_pane(frame, scene, pane, lines);
     }
@@ -263,13 +262,16 @@ fn draw_pane(frame: &mut Frame<'_>, scene: &mut ApcScene, pane: &Pane, lines: &[
         scene,
     );
 
-    draw_body(frame, scene, pane, cell_width);
+    draw_body(frame, pane, cell_width);
 }
 
 /// Write each line's code at its physical row inside the pane, then any
-/// inline-expansion rows just beneath it as smaller, error-colored [`TextRun`]s,
-/// so the inline diagnostic reads at a different size and color from the code.
-fn draw_body(frame: &mut Frame<'_>, scene: &mut ApcScene, pane: &Pane, cell_width: u16) {
+/// inline-expansion rows just beneath it in the error color.
+///
+/// All of it is cells. An expansion is whole extra rows the layout allocates to
+/// one logical line, and the binding reaches a line's start row only, so nothing
+/// off-grid names the row inside an expansion.
+fn draw_body(frame: &mut Frame<'_>, pane: &Pane, cell_width: u16) {
     let body_col = pane.left + 1 + cell_width;
     let body_width = pane.width.saturating_sub(cell_width + 2);
 
@@ -283,18 +285,13 @@ fn draw_body(frame: &mut Frame<'_>, scene: &mut ApcScene, pane: &Pane, cell_widt
             editor_style(),
         );
 
-        for (offset, run) in line.expand.iter().enumerate() {
-            frame.render_stateful_widget(
-                TextRun {
-                    col: 0,
-                    row: 0,
-                    scale: EXPANSION_SCALE,
-                    color: diag_color(Diag::Error),
-                    bg: Some(EDITOR_BG),
-                    text: run,
-                },
-                Rect::new(body_col, row + 1 + offset as u16, body_width, 1),
-                scene,
+        for (offset, text) in line.expand.iter().enumerate() {
+            frame.buffer_mut().set_stringn(
+                body_col,
+                row + 1 + offset as u16,
+                text,
+                body_width as usize,
+                expansion_style(),
             );
         }
     }
@@ -311,6 +308,7 @@ fn pane_gutter<'a>(pane: &Pane, lines: &'a [GutterLine]) -> Gutter<'a> {
         number_fg: NUMBER_FG,
         separator: SEPARATOR_COLOR,
         bg: EDITOR_BG,
+        bound_to_line_layout: true,
     }
 }
 
@@ -333,6 +331,22 @@ fn gutter_lines() -> Vec<GutterLine> {
                 mark: diag_mark(diag),
             }),
         })
+        .collect()
+}
+
+/// The surface's row height per logical line, which is the layout every pane's
+/// gutter binds to.
+///
+/// Indexed from the surface's own first row, so the rows above a pane's interior
+/// lead, each one row tall, and one entry per [`BUFFER`] line follows. The panes
+/// are aligned clones of the same buffer, so surface line `first_body_row + i`
+/// is buffer line `i` in all three and one layout serves them all.
+fn surface_line_heights() -> Vec<u16> {
+    let first_body_row = PANES[0].top + 1;
+
+    (0..first_body_row)
+        .map(|_| 1)
+        .chain(BUFFER.iter().map(line_height))
         .collect()
 }
 
@@ -386,6 +400,14 @@ fn git_color(git: Git) -> [u8; 3] {
 /// body text so the gutter components composite over a known color.
 fn editor_style() -> Style {
     Style::default().fg(rgb(EDITOR_FG)).bg(rgb(EDITOR_BG))
+}
+
+/// The inline diagnostic's cell style, the error color over the editor
+/// background, so the expansion rows read apart from the code above them.
+fn expansion_style() -> Style {
+    Style::default()
+        .fg(rgb(diag_color(Diag::Error)))
+        .bg(rgb(EDITOR_BG))
 }
 
 fn rgb([r, g, b]: [u8; 3]) -> Color {
