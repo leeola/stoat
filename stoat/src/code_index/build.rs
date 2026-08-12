@@ -19,7 +19,10 @@ use std::{
     collections::{HashMap, HashSet},
     ops::ControlFlow,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::Instant,
 };
 use stoat_language::{
@@ -126,15 +129,18 @@ pub(crate) fn build_index(
             "index build starting",
         );
 
-        let mut entries = Vec::new();
-        let mut seen = HashSet::new();
-        let mut cancelled = false;
-        fs.walk_workspace_files_streaming(&git_root, &mut |batch| {
+        // Extraction is a read, a tree-sitter parse, two query walks, and an
+        // encode per file, none of which touch shared state. Fanning the walk
+        // across cores is what keeps a cold build of a large repo from being
+        // one core's worth of work.
+        let entries: Mutex<Vec<FileEntry>> = Mutex::new(Vec::new());
+        let cancelled = AtomicBool::new(false);
+        fs.walk_workspace_files_parallel(&git_root, &|batch| {
             for path in batch {
                 // The receiver drops on quit. Stop the walk instead of scanning
                 // the rest of the tree while the runtime blocks on shutdown.
                 if tx.is_closed() {
-                    cancelled = true;
+                    cancelled.store(true, Ordering::Relaxed);
                     return ControlFlow::Break(());
                 }
                 let Some((rel_path, shard, source)) = load_or_extract(
@@ -147,11 +153,6 @@ pub(crate) fn build_index(
                 ) else {
                     continue;
                 };
-                seen.insert(rel_path.clone());
-                entries.push(FileEntry {
-                    rel_path: rel_path.clone(),
-                    content_hash: shard.content_hash,
-                });
                 // Written here rather than by the drain, so a build streaming
                 // hundreds of files does not hand the loop hundreds of
                 // temp-file-and-rename pairs to perform between frames.
@@ -165,6 +166,13 @@ pub(crate) fn build_index(
                         fs.as_ref(),
                     );
                 }
+                entries
+                    .lock()
+                    .expect("index entries poisoned")
+                    .push(FileEntry {
+                        rel_path: rel_path.clone(),
+                        content_hash: shard.content_hash,
+                    });
                 if tx
                     .send(IndexUpdate::Shard {
                         workspace,
@@ -173,7 +181,7 @@ pub(crate) fn build_index(
                     })
                     .is_err()
                 {
-                    cancelled = true;
+                    cancelled.store(true, Ordering::Relaxed);
                     return ControlFlow::Break(());
                 }
                 redraw.notify_one();
@@ -182,14 +190,21 @@ pub(crate) fn build_index(
         });
 
         // A cancelled build must not prune shards or send Complete. Its receiver
-        // is gone, and its partial `seen` set would delete live shards.
-        if cancelled {
+        // is gone, and pruning against its partial entries deletes live shards.
+        if cancelled.load(Ordering::Relaxed) {
             return;
         }
 
+        // Sorted because the walk hands files back in whatever order its
+        // threads finish them, and a manifest that reorders itself between
+        // builds of an unchanged tree defeats every comparison made against it.
+        let mut entries = entries.into_inner().expect("index entries poisoned");
+        entries.sort_unstable_by(|a, b| a.rel_path.cmp(&b.rel_path));
+
         if let Some(dir) = &index_dir {
+            let seen: HashSet<&str> = entries.iter().map(|e| e.rel_path.as_str()).collect();
             for rel_path in known.keys() {
-                if !seen.contains(rel_path) {
+                if !seen.contains(rel_path.as_str()) {
                     let _ = store::delete_shard(dir, rel_path, fs.as_ref());
                 }
             }
@@ -569,6 +584,43 @@ mod tests {
             codegraph::decode_shard(&stored).unwrap().content_hash,
             fingerprint_bytes("fn helper() {}\n"),
             "and wrote the bytes for the text it indexed",
+        );
+    }
+
+    /// The walk hands files back in whatever order its threads finish them, so
+    /// the manifest is sorted rather than accumulated in arrival order. A
+    /// manifest that reshuffles between builds of an unchanged tree defeats the
+    /// warm-build comparison and every diff taken against the file.
+    ///
+    /// Shard updates carry no such promise. They stream as they are extracted,
+    /// which is the whole point of streaming them.
+    #[test]
+    fn the_completed_manifest_lists_every_file_in_sorted_order() {
+        let fs = Arc::new(FakeFs::new());
+        for name in ["z.rs", "a.rs", "m.rs", "nested/b.rs"] {
+            fs.write(&PathBuf::from("/repo").join(name), b"fn helper() {}\n")
+                .unwrap();
+        }
+
+        let updates = run_build(fs, Some(PathBuf::from("/idx")));
+
+        let manifest = updates
+            .iter()
+            .find_map(|u| match u {
+                IndexUpdate::Complete { manifest, .. } => Some(manifest),
+                _ => None,
+            })
+            .expect("the build completed");
+        let listed: Vec<&str> = manifest
+            .files
+            .iter()
+            .map(|entry| entry.rel_path.as_str())
+            .collect();
+
+        assert_eq!(
+            listed,
+            ["a.rs", "m.rs", "nested/b.rs", "z.rs"],
+            "every indexed file, in an order that does not depend on the walk",
         );
     }
 
