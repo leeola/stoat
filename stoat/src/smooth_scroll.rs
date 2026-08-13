@@ -83,13 +83,6 @@ pub(crate) mod non_pane_pool {
     pub(crate) const WINDOW_STATUS: u32 = BASE + 0x100;
 }
 
-/// Render page `index` from `snapshot` and wrap it in the pool fill frames, so the
-/// returned bytes are a self-contained fill the terminal applies to slot `index`.
-///
-/// The asynchronous editor-fill path runs this on a blocking worker and delivers
-/// the frame through the APC channel, off the run loop. The bytes are one
-/// [`encode_fill_scope`] batch wrapping the [`render_page_from_snapshot`] page.
-#[allow(clippy::too_many_arguments)]
 /// Display row page `index` starts at, for a pool whose regions are
 /// `region_height` rows tall.
 ///
@@ -101,6 +94,12 @@ pub(crate) fn page_top_row(index: u64, region_height: u16) -> u32 {
         .min(u32::MAX as u64) as u32
 }
 
+/// Render page `index` from `snapshot` and wrap it in the pool fill frames, so the
+/// returned bytes are a self-contained fill the terminal applies to slot `index`.
+///
+/// The asynchronous editor-fill path runs this on a blocking worker and delivers
+/// the frame through the APC channel, off the run loop. The bytes are one
+/// [`encode_fill_scope`] batch wrapping the [`render_page_from_snapshot`] page.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_page_fill(
     snapshot: &DisplaySnapshot,
