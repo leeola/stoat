@@ -4864,7 +4864,10 @@ mod tests {
             ChangeKind as DmChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail,
         },
         pane::View,
-        test_harness::TestHarness,
+        test_harness::{
+            editor::{focused_cursor_point, place_cursor},
+            TestHarness,
+        },
     };
     use std::sync::Arc;
     use stoat_language::structural_diff::{MoveMetadata, MoveSource, Side};
@@ -5587,34 +5590,10 @@ mod tests {
             "display row 11 maps to an earlier buffer row past the block",
         );
         assert_eq!(
-            focused_cursor_point(&mut h).row,
+            focused_cursor_point(&mut h.stoat).row,
             expected_row,
             "goto Top lands on the buffer line rendered at the viewport top",
         );
-    }
-
-    /// Insert a single collapsed cursor at the buffer point `(row, col)`.
-    fn place_cursor(editor: &mut EditorState, row: u32, col: u32) {
-        let snapshot = editor.display_map.snapshot();
-        let buffer_snapshot = snapshot.buffer_snapshot();
-        let offset = buffer_snapshot.rope().point_to_offset(Point::new(row, col));
-        let anchor = buffer_snapshot.anchor_at(offset, Bias::Left);
-        editor.selections = SelectionsCollection::new();
-        editor
-            .selections
-            .insert_cursor(anchor, SelectionGoal::None, buffer_snapshot);
-    }
-
-    /// The buffer point of the focused editor's block cursor.
-    fn focused_cursor_point(h: &mut TestHarness) -> Point {
-        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
-        let snapshot = editor.display_map.snapshot();
-        let buffer_snapshot = snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor();
-        let tail = buffer_snapshot.resolve_anchor(&sel.tail());
-        let head = buffer_snapshot.resolve_anchor(&sel.head());
-        let cursor = cursor_offset(buffer_snapshot.rope(), tail, head);
-        buffer_snapshot.rope().offset_to_point(cursor)
     }
 
     fn open_hundred_lines(h: &mut TestHarness) {
@@ -5640,7 +5619,7 @@ mod tests {
             assert_eq!(editor.scroll_row, 40, "the view is left untouched");
         }
         assert_eq!(
-            focused_cursor_point(&mut h),
+            focused_cursor_point(&mut h.stoat),
             Point::new(43, 5),
             "the cursor lands on the band top with its column preserved",
         );
@@ -5662,7 +5641,7 @@ mod tests {
             assert_eq!(editor.scroll_row, 40);
         }
         assert_eq!(
-            focused_cursor_point(&mut h),
+            focused_cursor_point(&mut h.stoat),
             Point::new(45, 5),
             "the cursor is left where it was"
         );
@@ -5717,7 +5696,7 @@ mod tests {
         h.open_file(&path);
 
         let visual_column = |h: &mut TestHarness| {
-            let point = focused_cursor_point(h);
+            let point = focused_cursor_point(&mut h.stoat);
             let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.display_map.snapshot().visual_column(point)
         };
@@ -5766,7 +5745,7 @@ mod tests {
         // The band-top row 43 is "ab" (length 2), so the goal column 6 clamps
         // onto the line's end rather than overrunning it.
         assert_eq!(
-            focused_cursor_point(&mut h),
+            focused_cursor_point(&mut h.stoat),
             Point::new(43, 2),
             "the goal column clamps to the short line's length",
         );
@@ -5796,7 +5775,7 @@ mod tests {
                 editor.scroll_row = 40;
                 assert!(clamp_cursor_to_view(editor, 3), "the clamp fires");
             }
-            focused_cursor_point(&mut h)
+            focused_cursor_point(&mut h.stoat)
         };
 
         assert_eq!(
@@ -5834,7 +5813,7 @@ mod tests {
         move_vertical(&mut h.stoat, 1, false);
 
         assert_eq!(
-            focused_cursor_point(&mut h),
+            focused_cursor_point(&mut h.stoat),
             Point::new(1, 4),
             "j holds the visual column, which is a different byte column",
         );
@@ -5855,7 +5834,7 @@ mod tests {
         move_vertical(&mut h.stoat, 1, false);
 
         assert_eq!(
-            focused_cursor_point(&mut h),
+            focused_cursor_point(&mut h.stoat),
             Point::new(1, 4),
             "the cells the tab occupies count toward the column",
         );
@@ -5876,7 +5855,7 @@ mod tests {
 
         move_vertical(&mut h.stoat, 1, false);
 
-        assert_eq!(focused_cursor_point(&mut h), Point::new(1, 6));
+        assert_eq!(focused_cursor_point(&mut h.stoat), Point::new(1, 6));
     }
 
     #[test]
@@ -5893,7 +5872,7 @@ mod tests {
 
         move_vertical(&mut h.stoat, 1, false);
 
-        assert_eq!(focused_cursor_point(&mut h), Point::new(1, 1));
+        assert_eq!(focused_cursor_point(&mut h.stoat), Point::new(1, 1));
     }
 
     #[test]
@@ -5913,14 +5892,14 @@ mod tests {
 
         move_vertical(&mut h.stoat, 1, false);
         assert_eq!(
-            focused_cursor_point(&mut h),
+            focused_cursor_point(&mut h.stoat),
             Point::new(1, 2),
             "the short line clamps to its end",
         );
 
         move_vertical(&mut h.stoat, 1, false);
         assert_eq!(
-            focused_cursor_point(&mut h),
+            focused_cursor_point(&mut h.stoat),
             Point::new(2, 4),
             "and the column comes back on the line that can hold it",
         );
@@ -5944,7 +5923,7 @@ mod tests {
                 place_cursor(editor, 0, 5);
             }
             move_vertical(&mut h.stoat, 1, extend);
-            focused_cursor_point(&mut h)
+            focused_cursor_point(&mut h.stoat)
         };
 
         assert_eq!(
@@ -5979,7 +5958,7 @@ mod tests {
                 place_cursor(editor, 1, 6);
             }
             move_vertical(&mut h.stoat, -1, extend);
-            focused_cursor_point(&mut h)
+            focused_cursor_point(&mut h.stoat)
         };
 
         assert_eq!(
@@ -6037,7 +6016,7 @@ mod tests {
         let mut h = wrapped_pane_cursor_on_short_line();
         move_vertical(&mut h.stoat, -1, false);
         assert_eq!(
-            focused_cursor_point(&mut h),
+            focused_cursor_point(&mut h.stoat),
             Point::new(0, 0),
             "k moves up one buffer line to column 0, not into the wrapped tail",
         );
@@ -6048,13 +6027,13 @@ mod tests {
         let mut h = wrapped_pane_cursor_on_short_line();
         move_vertical(&mut h.stoat, -1, false);
         assert_eq!(
-            focused_cursor_point(&mut h),
+            focused_cursor_point(&mut h.stoat),
             Point::new(0, 0),
             "k reaches the long line",
         );
         move_vertical(&mut h.stoat, 1, false);
         assert_eq!(
-            focused_cursor_point(&mut h),
+            focused_cursor_point(&mut h.stoat),
             Point::new(1, 0),
             "j returns to the short line",
         );
@@ -6066,7 +6045,7 @@ mod tests {
         h.stoat.pending_count = Some(1);
         move_vertical(&mut h.stoat, -1, false);
         assert_eq!(
-            focused_cursor_point(&mut h),
+            focused_cursor_point(&mut h.stoat),
             Point::new(0, 0),
             "1k crosses the entire wrapped line as one buffer-line step",
         );

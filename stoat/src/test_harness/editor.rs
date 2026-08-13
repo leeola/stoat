@@ -1,5 +1,12 @@
-use crate::{app::Stoat, editor_state::EditorId, pane::PaneId, View};
-use stoat_text::cursor_offset;
+use crate::{
+    action_handlers,
+    app::Stoat,
+    editor_state::{EditorId, EditorState},
+    pane::PaneId,
+    selection::SelectionsCollection,
+    View,
+};
+use stoat_text::{cursor_offset, Bias, Point, SelectionGoal};
 
 /// Append `text` at offset 0 in the focused editor's buffer, then re-seed the
 /// cursor as a fresh 1-wide block over the first character. Panics if the
@@ -207,4 +214,35 @@ pub(crate) fn cursor_buffer_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
             (point.row, point.column)
         })
         .collect()
+}
+
+/// Replace `editor`'s selections with one collapsed cursor at the buffer point
+/// `(row, col)`.
+///
+/// Drives view tests that need the cursor at a known buffer position without
+/// typing motions to get it there.
+pub(crate) fn place_cursor(editor: &mut EditorState, row: u32, col: u32) {
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let offset = buffer_snapshot.rope().point_to_offset(Point::new(row, col));
+    let anchor = buffer_snapshot.anchor_at(offset, Bias::Left);
+    editor.selections = SelectionsCollection::new();
+    editor
+        .selections
+        .insert_cursor(anchor, SelectionGoal::None, buffer_snapshot);
+}
+
+/// Buffer point of the focused editor's block cursor.
+///
+/// The single-cursor counterpart to [`cursor_buffer_positions`], for the common
+/// case of asserting where one cursor landed.
+pub(crate) fn focused_cursor_point(stoat: &mut Stoat) -> Point {
+    let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let sel = editor.selections.newest_anchor();
+    let tail = buffer_snapshot.resolve_anchor(&sel.tail());
+    let head = buffer_snapshot.resolve_anchor(&sel.head());
+    let cursor = cursor_offset(buffer_snapshot.rope(), tail, head);
+    buffer_snapshot.rope().offset_to_point(cursor)
 }
