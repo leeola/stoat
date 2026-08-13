@@ -8,6 +8,7 @@ pub(crate) mod progress;
 pub(crate) mod pull_diagnostics;
 pub(crate) mod registry;
 pub(crate) mod servers;
+pub(crate) mod signature_help;
 pub(crate) mod stamp;
 pub mod stcfg;
 pub mod util;
@@ -67,7 +68,7 @@ pub(crate) fn focused_buffer_version(stoat: &mut Stoat) -> Option<u64> {
 pub(crate) fn pump_all(stoat: &mut Stoat) -> bool {
     let jumps = action_handlers::lsp::pump_lsp_jumps(stoat);
     let hover = action_handlers::lsp::pump_lsp_hover(stoat);
-    let signature_help = action_handlers::lsp::pump_lsp_signature_help(stoat);
+    let signature_help = signature_help::pump_lsp_signature_help(stoat);
 
     let inlay_hints = action_handlers::lsp::pump_lsp_inlay_hints(stoat);
     let document_highlight = document_highlight::pump_lsp_document_highlight(stoat);

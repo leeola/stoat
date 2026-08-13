@@ -1370,14 +1370,15 @@ pub struct Stoat {
     pub(crate) pending_hover: Option<action_handlers::lsp::HoverPopup>,
 
     /// In-flight `textDocument/signatureHelp` request, armed by
-    /// [`action_handlers::lsp::signature_help_trigger`] on a trigger character
-    /// and polled by [`action_handlers::lsp::pump_lsp_signature_help`].
+    /// [`crate::lsp::signature_help::signature_help_trigger`] on a trigger
+    /// character and polled by
+    /// [`crate::lsp::signature_help::pump_lsp_signature_help`].
     pub(crate) pending_signature_help_request:
-        Option<stoat_scheduler::Task<Option<action_handlers::lsp::SignatureHelpPopup>>>,
+        Option<stoat_scheduler::Task<Option<crate::lsp::signature_help::SignatureHelpPopup>>>,
 
     /// Signature-help popup content waiting to be painted. Cleared when the
     /// editor leaves insert mode or the completion popup opens.
-    pub(crate) pending_signature_help: Option<action_handlers::lsp::SignatureHelpPopup>,
+    pub(crate) pending_signature_help: Option<crate::lsp::signature_help::SignatureHelpPopup>,
 
     /// `(buffer, version)` the signature-help trigger last acted on, so a
     /// cursor-only tick does not re-request. Mirrors [`Self::last_completion_signature`].
@@ -3770,7 +3771,7 @@ impl Stoat {
         };
         action_handlers::lsp::notify_buffer_changes_pending(self);
         crate::completion::request::trigger(self);
-        action_handlers::lsp::signature_help_trigger(self);
+        crate::lsp::signature_help::signature_help_trigger(self);
         action_handlers::lsp::inlay_hints_trigger(self);
         crate::lsp::document_highlight::document_highlight_trigger(self);
         crate::lsp::pull_diagnostics::pull_diagnostics_trigger(self);
