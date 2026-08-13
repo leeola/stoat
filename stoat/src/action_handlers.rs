@@ -1444,9 +1444,8 @@ pub(crate) fn read_string_via_host(fs: &dyn FsHost, path: &Path) -> std::io::Res
 mod tests {
     use super::*;
     use crate::{
-        editor_state::ScrollGlide,
         pane::{DockPanel, DockVisibility},
-        test_harness::{editor, keys},
+        test_harness::{editor, keys, stoat},
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use std::{sync::Arc, time::Duration};
@@ -1454,24 +1453,13 @@ mod tests {
         AddSelectionBelow, CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd,
         ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
         ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
-        FlipSelections, FocusPane, HalfPageDown, MoveDown, MoveLeft, MoveNextWordEnd,
-        MoveNextWordStart, MovePaneLeft, MovePaneNext, MovePaneRight, MovePrevWordEnd,
-        MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Quit, QuitAll, RenameWorkspace,
-        SaveSelection, SelectAll, SetTheme, SplitNewRight, SplitRight,
+        FlipSelections, FocusPane, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
+        MovePaneLeft, MovePaneNext, MovePaneRight, MovePrevWordEnd, MovePrevWordStart, MoveRight,
+        MoveUp, Quit, QuitAll, RenameWorkspace, SaveSelection, SelectAll, SetTheme, SplitNewRight,
+        SplitRight,
     };
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, SelectionGoal};
-
-    fn stoat() -> Stoat {
-        let scheduler = Arc::new(TestScheduler::new());
-        let mut stoat = Stoat::new(
-            scheduler.executor(),
-            stoat_config::Settings::default(),
-            std::path::PathBuf::new(),
-        );
-        stoat.update(Event::Resize(80, 24));
-        stoat
-    }
 
     fn stoat_with_config(user: Option<String>) -> Stoat {
         let scheduler = Arc::new(TestScheduler::new());
@@ -3529,162 +3517,6 @@ mod tests {
             },
         );
         assert_eq!(stoat.active_workspace().name, "");
-    }
-
-    fn set_focused_viewport_rows(stoat: &mut Stoat, rows: Option<u32>) {
-        let ws = stoat.active_workspace_mut();
-        let focused = ws.panes.focus();
-        let editor_id = match ws.panes.pane(focused).view {
-            View::Editor(id) => id,
-            _ => panic!("focused pane is not an editor"),
-        };
-        ws.editors[editor_id].viewport_rows = rows;
-    }
-
-    #[test]
-    fn page_down_with_unrendered_editor_uses_default_viewport() {
-        let mut stoat = stoat();
-        let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
-        editor::seed_focused_buffer(&mut stoat, &text);
-        set_focused_viewport_rows(&mut stoat, None);
-        dispatch(&mut stoat, &PageDown);
-        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(20, 0)]);
-    }
-
-    #[test]
-    fn half_page_down_rounds_up_for_one_row_viewport() {
-        let mut stoat = stoat();
-        editor::seed_focused_buffer(&mut stoat, "a\nb\nc\n");
-        set_focused_viewport_rows(&mut stoat, Some(1));
-        dispatch(&mut stoat, &HalfPageDown);
-        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(1, 0)]);
-    }
-
-    #[test]
-    fn half_page_down_extends_the_selection_in_select_mode() {
-        let mut stoat = stoat();
-        editor::seed_focused_buffer(&mut stoat, "a\nb\nc\nd\ne\nf\n");
-        set_focused_viewport_rows(&mut stoat, Some(4));
-        stoat.set_focused_mode("select".into());
-        dispatch(&mut stoat, &HalfPageDown);
-        // Half of viewport 4 is two rows, so the anchor holds at the top and
-        // the head extends down to row 2 rather than collapsing there.
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 5, false)]);
-        assert_eq!(
-            editor::cursor_display_positions(&mut stoat),
-            vec![(2, 0)],
-            "the block cursor covers row 2's cell, not the newline before it",
-        );
-    }
-
-    #[test]
-    fn page_down_collapses_multi_cursors_to_one() {
-        let mut stoat = stoat();
-        let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
-        editor::seed_focused_buffer(&mut stoat, &text);
-        set_focused_viewport_rows(&mut stoat, Some(10));
-        dispatch(&mut stoat, &AddSelectionBelow);
-        assert_eq!(editor::head_offsets(&mut stoat).len(), 2);
-        dispatch(&mut stoat, &PageDown);
-        // AddSelectionBelow makes row 1 the primary cursor; PageDown from
-        // row 1 with viewport=10 lands on row 11. Both cursors collapse to
-        // the same target via the transform dedupe.
-        assert_eq!(editor::head_offsets(&mut stoat).len(), 1);
-        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(11, 0)]);
-    }
-
-    #[test]
-    fn count_prefix_page_down_moves_n_pages() {
-        let mut stoat = stoat();
-        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
-        editor::seed_focused_buffer(&mut stoat, &text);
-        set_focused_viewport_rows(&mut stoat, Some(10));
-        stoat.pending_count = Some(3);
-        dispatch(&mut stoat, &PageDown);
-        assert_eq!(
-            editor::cursor_display_positions(&mut stoat),
-            vec![(30, 0)],
-            "3 Ctrl-f with viewport=10 should land at row 30"
-        );
-    }
-
-    #[test]
-    fn page_down_arms_a_scroll_glide() {
-        let mut stoat = stoat();
-        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
-        editor::seed_focused_buffer(&mut stoat, &text);
-        set_focused_viewport_rows(&mut stoat, Some(10));
-
-        dispatch(&mut stoat, &PageDown);
-
-        let editor = focused_editor_mut(&mut stoat).expect("focused editor");
-        assert_eq!(
-            editor.scroll_row, 10,
-            "PageDown jumps scroll_row a full viewport"
-        );
-        assert_eq!(
-            editor.scroll_offset, 0.0,
-            "scroll_offset lags at the pre-jump row so the pool eases up to it"
-        );
-        assert_eq!(
-            editor.scroll_glide,
-            ScrollGlide::Page,
-            "a page glide is armed"
-        );
-    }
-
-    #[test]
-    fn count_prefix_half_page_down_moves_n_half_pages() {
-        let mut stoat = stoat();
-        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
-        editor::seed_focused_buffer(&mut stoat, &text);
-        set_focused_viewport_rows(&mut stoat, Some(10));
-        stoat.pending_count = Some(3);
-        dispatch(&mut stoat, &HalfPageDown);
-        assert_eq!(
-            editor::cursor_display_positions(&mut stoat),
-            vec![(15, 0)],
-            "3 Ctrl-d with viewport=10 (half-page=5) should land at row 15"
-        );
-    }
-
-    #[test]
-    fn count_prefix_page_up_moves_n_pages() {
-        let mut stoat = stoat();
-        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
-        editor::seed_focused_buffer(&mut stoat, &text);
-        set_focused_viewport_rows(&mut stoat, Some(10));
-        dispatch(&mut stoat, &PageDown);
-        dispatch(&mut stoat, &PageDown);
-        dispatch(&mut stoat, &PageDown);
-        dispatch(&mut stoat, &PageDown);
-        assert_eq!(
-            editor::cursor_display_positions(&mut stoat),
-            vec![(40, 0)],
-            "test setup: cursor at row 40 after four page-downs"
-        );
-        stoat.pending_count = Some(3);
-        dispatch(&mut stoat, &PageUp);
-        assert_eq!(
-            editor::cursor_display_positions(&mut stoat),
-            vec![(10, 0)],
-            "3 Ctrl-b from row 40 with viewport=10 should land at row 10"
-        );
-    }
-
-    #[test]
-    fn count_prefix_page_down_clamps_at_buffer_end() {
-        let mut stoat = stoat();
-        let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
-        editor::seed_focused_buffer(&mut stoat, &text);
-        set_focused_viewport_rows(&mut stoat, Some(10));
-        stoat.pending_count = Some(99);
-        dispatch(&mut stoat, &PageDown);
-        assert_eq!(
-            editor::cursor_display_positions(&mut stoat),
-            vec![(29, 6)],
-            "huge count clamps the 1-wide cursor onto the last real cell, not the empty final row"
-        );
     }
 
     #[test]

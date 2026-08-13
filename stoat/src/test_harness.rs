@@ -67,6 +67,22 @@ pub struct TestHarness {
     host_swap_allowed: std::cell::Cell<bool>,
 }
 
+/// A bare 80x24 [`Stoat`] with no fake hosts installed.
+///
+/// The lighter counterpart to [`TestHarness`], for tests that only dispatch
+/// actions and read editor state, with no file, git, or LSP interaction to
+/// fake. The resize is what gives the panes an area to lay out in.
+pub(crate) fn stoat() -> Stoat {
+    let scheduler = Arc::new(TestScheduler::new());
+    let mut stoat = Stoat::new(
+        scheduler.executor(),
+        Settings::default(),
+        std::path::PathBuf::new(),
+    );
+    stoat.update(Event::Resize(80, 24));
+    stoat
+}
+
 impl TestHarness {
     fn new(width: u16, height: u16) -> Self {
         Self::new_with_settings(width, height, Settings::default())

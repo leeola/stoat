@@ -479,14 +479,16 @@ pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign, extend: bool) -
 mod tests {
     use super::*;
     use crate::{
+        action_handlers::dispatch,
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap},
         pane::View,
         test_harness::{
-            editor::{focused_cursor_point, focused_head_row, place_cursor},
-            TestHarness,
+            editor::{self, focused_cursor_point, focused_head_row, place_cursor},
+            stoat, TestHarness,
         },
     };
     use std::sync::Arc;
+    use stoat_action::{AddSelectionBelow, HalfPageDown, PageDown, PageUp};
 
     #[test]
     fn ensure_cursor_in_view_follows_cursor_and_noops_when_visible() {
@@ -993,7 +995,7 @@ mod tests {
             "the clamp moves the cursor down its rows, not across its columns",
         );
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::MoveDown);
+        dispatch(&mut h.stoat, &stoat_action::MoveDown);
         assert_eq!(
             visual_column(&mut h),
             40,
@@ -1202,6 +1204,448 @@ mod tests {
         assert_eq!(
             editor.scroll_offset as u32, editor.scroll_row,
             "offset syncs to the integer row"
+        );
+    }
+
+    fn set_focused_viewport_rows(stoat: &mut Stoat, rows: Option<u32>) {
+        let ws = stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        ws.editors[editor_id].viewport_rows = rows;
+    }
+
+    #[test]
+    fn page_down_with_unrendered_editor_uses_default_viewport() {
+        let mut stoat = stoat();
+        let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, None);
+        dispatch(&mut stoat, &PageDown);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(20, 0)]);
+    }
+
+    #[test]
+    fn half_page_down_rounds_up_for_one_row_viewport() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "a\nb\nc\n");
+        set_focused_viewport_rows(&mut stoat, Some(1));
+        dispatch(&mut stoat, &HalfPageDown);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(1, 0)]);
+    }
+
+    #[test]
+    fn half_page_down_extends_the_selection_in_select_mode() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "a\nb\nc\nd\ne\nf\n");
+        set_focused_viewport_rows(&mut stoat, Some(4));
+        stoat.set_focused_mode("select".into());
+        dispatch(&mut stoat, &HalfPageDown);
+        // Half of viewport 4 is two rows, so the anchor holds at the top and
+        // the head extends down to row 2 rather than collapsing there.
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 5, false)]);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(2, 0)],
+            "the block cursor covers row 2's cell, not the newline before it",
+        );
+    }
+
+    #[test]
+    fn page_down_collapses_multi_cursors_to_one() {
+        let mut stoat = stoat();
+        let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+        dispatch(&mut stoat, &AddSelectionBelow);
+        assert_eq!(editor::head_offsets(&mut stoat).len(), 2);
+        dispatch(&mut stoat, &PageDown);
+        // AddSelectionBelow makes row 1 the primary cursor; PageDown from
+        // row 1 with viewport=10 lands on row 11. Both cursors collapse to
+        // the same target via the transform dedupe.
+        assert_eq!(editor::head_offsets(&mut stoat).len(), 1);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(11, 0)]);
+    }
+
+    #[test]
+    fn count_prefix_page_down_moves_n_pages() {
+        let mut stoat = stoat();
+        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+        stoat.pending_count = Some(3);
+        dispatch(&mut stoat, &PageDown);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(30, 0)],
+            "3 Ctrl-f with viewport=10 should land at row 30"
+        );
+    }
+
+    #[test]
+    fn page_down_arms_a_scroll_glide() {
+        let mut stoat = stoat();
+        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+
+        dispatch(&mut stoat, &PageDown);
+
+        let editor = focused_editor_mut(&mut stoat).expect("focused editor");
+        assert_eq!(
+            editor.scroll_row, 10,
+            "PageDown jumps scroll_row a full viewport"
+        );
+        assert_eq!(
+            editor.scroll_offset, 0.0,
+            "scroll_offset lags at the pre-jump row so the pool eases up to it"
+        );
+        assert_eq!(
+            editor.scroll_glide,
+            ScrollGlide::Page,
+            "a page glide is armed"
+        );
+    }
+
+    #[test]
+    fn count_prefix_half_page_down_moves_n_half_pages() {
+        let mut stoat = stoat();
+        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+        stoat.pending_count = Some(3);
+        dispatch(&mut stoat, &HalfPageDown);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(15, 0)],
+            "3 Ctrl-d with viewport=10 (half-page=5) should land at row 15"
+        );
+    }
+
+    #[test]
+    fn count_prefix_page_up_moves_n_pages() {
+        let mut stoat = stoat();
+        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+        dispatch(&mut stoat, &PageDown);
+        dispatch(&mut stoat, &PageDown);
+        dispatch(&mut stoat, &PageDown);
+        dispatch(&mut stoat, &PageDown);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(40, 0)],
+            "test setup: cursor at row 40 after four page-downs"
+        );
+        stoat.pending_count = Some(3);
+        dispatch(&mut stoat, &PageUp);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(10, 0)],
+            "3 Ctrl-b from row 40 with viewport=10 should land at row 10"
+        );
+    }
+
+    #[test]
+    fn count_prefix_page_down_clamps_at_buffer_end() {
+        let mut stoat = stoat();
+        let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+        stoat.pending_count = Some(99);
+        dispatch(&mut stoat, &PageDown);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(29, 6)],
+            "huge count clamps the 1-wide cursor onto the last real cell, not the empty final row"
+        );
+    }
+
+    fn page_scratch_content() -> String {
+        (0..30).map(|i| format!("line{i:02}\n")).collect()
+    }
+
+    #[test]
+    fn snapshot_page_down_scrolls_and_moves_cursor() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        h.assert_snapshot("snapshot_page_down_scrolls_and_moves_cursor");
+    }
+
+    #[test]
+    fn snapshot_page_up_after_page_down_returns_to_top() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f ctrl-b");
+        h.assert_snapshot("snapshot_page_up_after_page_down_returns_to_top");
+    }
+
+    #[test]
+    fn snapshot_half_page_down() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-d");
+        h.assert_snapshot("snapshot_half_page_down");
+    }
+
+    #[test]
+    fn snapshot_half_page_up_from_bottom() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f ctrl-f ctrl-u");
+        h.assert_snapshot("snapshot_half_page_up_from_bottom");
+    }
+
+    #[test]
+    fn snapshot_page_down_clamps_at_last_line() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\n");
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        h.assert_snapshot("snapshot_page_down_clamps_at_last_line");
+    }
+
+    #[test]
+    fn snapshot_page_up_at_top_is_noop() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-b");
+        h.assert_snapshot("snapshot_page_up_at_top_is_noop");
+    }
+
+    #[test]
+    fn goto_window_top_after_scroll_lands_at_scroll_row() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        let scroll_before = h.editor_scroll_rows();
+        let scroll_row = scroll_before[0];
+        dispatch(&mut h.stoat, &stoat_action::GotoWindowTop);
+        let positions = h.cursor_display_positions();
+        assert_eq!(positions, vec![(scroll_row, 0)]);
+        assert_eq!(h.editor_scroll_rows(), scroll_before);
+    }
+
+    #[test]
+    fn goto_window_center_lands_at_viewport_midpoint() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        let scroll_before = h.editor_scroll_rows();
+        let scroll_row = scroll_before[0];
+        dispatch(&mut h.stoat, &stoat_action::GotoWindowCenter);
+        let positions = h.cursor_display_positions();
+        assert!(positions[0].0 > scroll_row);
+        assert_eq!(h.editor_scroll_rows(), scroll_before);
+    }
+
+    #[test]
+    fn goto_window_bottom_lands_at_last_visible_row() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        let scroll_before = h.editor_scroll_rows();
+        let scroll_row = scroll_before[0];
+        dispatch(&mut h.stoat, &stoat_action::GotoWindowBottom);
+        let positions = h.cursor_display_positions();
+        assert!(
+            positions[0].0 > scroll_row,
+            "bottom row {} must be below scroll_row {}",
+            positions[0].0,
+            scroll_row
+        );
+        assert_eq!(h.editor_scroll_rows(), scroll_before);
+    }
+
+    #[test]
+    fn goto_window_clamps_to_buffer_end() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\n");
+        h.open_file(&path);
+        dispatch(&mut h.stoat, &stoat_action::GotoWindowBottom);
+        let positions = h.cursor_display_positions();
+        assert!(
+            positions[0].0 <= 3,
+            "cursor must clamp to last buffer row, got {}",
+            positions[0].0
+        );
+    }
+
+    #[test]
+    fn align_view_top_scrolls_so_cursor_at_top() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        let head_before = h.cursor_display_positions();
+        dispatch(&mut h.stoat, &stoat_action::AlignViewTop);
+        let scroll = h.editor_scroll_rows()[0];
+        let head_after = h.cursor_display_positions();
+        assert_eq!(
+            scroll, head_before[0].0,
+            "scroll_row should equal cursor row"
+        );
+        assert_eq!(head_after, head_before, "cursor row must not move");
+    }
+
+    #[test]
+    fn align_view_center_puts_cursor_at_midpoint() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        let head_before = h.cursor_display_positions();
+        let cursor_row = head_before[0].0;
+        dispatch(&mut h.stoat, &stoat_action::AlignViewCenter);
+        let scroll = h.editor_scroll_rows()[0];
+        let head_after = h.cursor_display_positions();
+        assert!(
+            scroll < cursor_row,
+            "scroll {scroll} should be above cursor {cursor_row}"
+        );
+        assert!(
+            cursor_row - scroll <= 5,
+            "cursor at row {cursor_row}, scroll {scroll}: viewport midpoint should be roughly half a viewport up"
+        );
+        assert_eq!(head_after, head_before, "cursor row must not move");
+    }
+
+    #[test]
+    fn align_view_bottom_puts_cursor_at_last_visible_row() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        let head_before = h.cursor_display_positions();
+        let cursor_row = head_before[0].0;
+        dispatch(&mut h.stoat, &stoat_action::AlignViewBottom);
+        let scroll = h.editor_scroll_rows()[0];
+        let head_after = h.cursor_display_positions();
+        assert!(
+            scroll <= cursor_row,
+            "scroll {scroll} should be at or above cursor {cursor_row}"
+        );
+        assert_eq!(head_after, head_before, "cursor row must not move");
+    }
+
+    #[test]
+    fn align_view_clamps_to_max_scroll() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\n");
+        h.open_file(&path);
+        dispatch(&mut h.stoat, &stoat_action::AlignViewBottom);
+        let scroll = h.editor_scroll_rows()[0];
+        assert_eq!(
+            scroll, 0,
+            "buffer shorter than viewport must clamp scroll_row to 0"
+        );
+    }
+
+    #[test]
+    fn scroll_down_increments_scroll_row() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        let head_before = h.cursor_display_positions();
+        let scroll_before = h.editor_scroll_rows()[0];
+        dispatch(&mut h.stoat, &stoat_action::ScrollDown);
+        assert_eq!(h.editor_scroll_rows()[0], scroll_before + 1);
+        assert_eq!(
+            h.cursor_display_positions(),
+            head_before,
+            "cursor must not move"
+        );
+    }
+
+    #[test]
+    fn scroll_up_decrements_scroll_row() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        let scroll_before = h.editor_scroll_rows()[0];
+        assert!(scroll_before > 0);
+        let head_before = h.cursor_display_positions();
+        dispatch(&mut h.stoat, &stoat_action::ScrollUp);
+        assert_eq!(h.editor_scroll_rows()[0], scroll_before - 1);
+        assert_eq!(
+            h.cursor_display_positions(),
+            head_before,
+            "cursor must not move"
+        );
+    }
+
+    #[test]
+    fn scroll_up_at_top_is_noop() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        dispatch(&mut h.stoat, &stoat_action::ScrollUp);
+        assert_eq!(h.editor_scroll_rows()[0], 0);
+    }
+
+    #[test]
+    fn scroll_down_clamps_at_max_scroll() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\n");
+        h.open_file(&path);
+        for _ in 0..5 {
+            dispatch(&mut h.stoat, &stoat_action::ScrollDown);
+        }
+        assert_eq!(
+            h.editor_scroll_rows()[0],
+            0,
+            "buffer shorter than viewport keeps scroll_row at 0"
+        );
+    }
+
+    #[test]
+    fn count_prefix_scroll_down_advances_n_rows() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        let scroll_before = h.editor_scroll_rows()[0];
+        h.type_keys("3 z j");
+        assert_eq!(h.editor_scroll_rows()[0], scroll_before + 3);
+    }
+
+    #[test]
+    fn count_prefix_scroll_up_walks_back_n_rows() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("3 z j");
+        let scroll_before = h.editor_scroll_rows()[0];
+        assert!(scroll_before >= 3);
+        h.type_keys("3 z k");
+        assert_eq!(h.editor_scroll_rows()[0], scroll_before - 3);
+    }
+
+    #[test]
+    fn count_prefix_scroll_down_clamps_at_max_scroll() {
+        let mut h = TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("9 9 z j");
+        let scroll = h.editor_scroll_rows()[0];
+        let saturating = h.editor_scroll_rows()[0];
+        h.type_keys("z j");
+        assert_eq!(
+            h.editor_scroll_rows()[0],
+            saturating,
+            "scroll_row should be at max_scroll after huge count; further scroll-down is a no-op (got {scroll} -> {})",
+            h.editor_scroll_rows()[0]
         );
     }
 }
