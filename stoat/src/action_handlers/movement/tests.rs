@@ -1,10 +1,19 @@
 use super::*;
 use crate::{
+    action_handlers::dispatch,
     pane::View,
     test_harness::{
+        editor,
         editor::{focused_buffer_path, focused_cursor_point, focused_head_row, place_cursor},
-        TestHarness,
+        stoat, TestHarness,
     },
+};
+use stoat_action::{
+    AddSelectionBelow, CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd,
+    ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight, ExtendToFileStart,
+    ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections, MoveDown,
+    MoveLeft, MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight,
+    MoveUp, SelectAll,
 };
 
 /// Seed a repo with two changed files, each carrying one hunk at line 1.
@@ -530,7 +539,7 @@ fn extend_to_line_bounds_covers_full_lines() {
     h.open_file(&path);
     // "bc\nd" spans the middle of line 0 through the middle of line 1.
     set_range(&mut h, 1, 5);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendToLineBounds);
+    dispatch(&mut h.stoat, &stoat_action::ExtendToLineBounds);
     assert_eq!(h.selection_spans(), vec![(0, 8, false)]);
 }
 
@@ -541,7 +550,7 @@ fn shrink_to_line_bounds_trims_partial_lines() {
     h.open_file(&path);
     // Line 0 from its middle through line 2's middle: only line 1 is whole.
     set_range(&mut h, 1, 9);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ShrinkToLineBounds);
+    dispatch(&mut h.stoat, &stoat_action::ShrinkToLineBounds);
     assert_eq!(h.selection_spans(), vec![(4, 8, false)]);
 }
 
@@ -551,7 +560,7 @@ fn shrink_to_line_bounds_within_one_line_is_noop() {
     let path = h.write_file("s.txt", "abcdef\n");
     h.open_file(&path);
     set_range(&mut h, 1, 4);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ShrinkToLineBounds);
+    dispatch(&mut h.stoat, &stoat_action::ShrinkToLineBounds);
     assert_eq!(h.selection_spans(), vec![(1, 4, false)]);
 }
 
@@ -583,7 +592,7 @@ fn ensure_selections_forward_orients_every_selection() {
         editor.selections.extend_with_fresh_ids(vec![reversed], buf);
     }
     assert_eq!(h.selection_spans(), vec![(0, 2, false), (3, 5, true)]);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::EnsureSelectionsForward);
+    dispatch(&mut h.stoat, &stoat_action::EnsureSelectionsForward);
     assert_eq!(h.selection_spans(), vec![(0, 2, false), (3, 5, false)]);
 }
 
@@ -634,7 +643,7 @@ fn incrementing_several_cursors_leaves_each_over_its_own_number() {
     h.open_file(&path);
     set_selections(&mut h, &[(0, 1), (2, 3), (4, 5)]);
 
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Increment);
+    dispatch(&mut h.stoat, &stoat_action::Increment);
 
     assert_eq!(buffer_string(&mut h), "10 10 10\n");
     assert_eq!(
@@ -675,7 +684,7 @@ fn uppercasing_several_cursors_leaves_each_over_its_own_word() {
     h.open_file(&path);
     set_selections(&mut h, &[(0, 3), (4, 7)]);
 
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchToUppercase);
+    dispatch(&mut h.stoat, &stoat_action::SwitchToUppercase);
 
     assert_eq!(buffer_string(&mut h), "FI FI\n");
     assert_eq!(h.selection_spans(), vec![(0, 2, false), (3, 5, false)]);
@@ -687,9 +696,9 @@ fn rotate_selection_contents_forward_and_back() {
     let path = h.write_file("s.txt", "abc\n");
     h.open_file(&path);
     set_three_single_char_selections(&mut h);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsForward);
+    dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsForward);
     assert_eq!(buffer_string(&mut h), "cab\n");
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsBackward);
+    dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsBackward);
     assert_eq!(buffer_string(&mut h), "abc\n");
 }
 
@@ -699,7 +708,7 @@ fn rotate_selection_contents_backward_shifts_left() {
     let path = h.write_file("s.txt", "abc\n");
     h.open_file(&path);
     set_three_single_char_selections(&mut h);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsBackward);
+    dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsBackward);
     assert_eq!(buffer_string(&mut h), "bca\n");
 }
 
@@ -718,7 +727,7 @@ fn rotating_contents_by_a_count_moves_each_fragment_that_far() {
     set_three_single_char_selections(&mut h);
 
     h.stoat.pending_count = Some(2);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsForward);
+    dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsForward);
     assert_eq!(buffer_string(&mut h), "bca\n");
     assert_eq!(
         h.selection_spans(),
@@ -726,7 +735,7 @@ fn rotating_contents_by_a_count_moves_each_fragment_that_far() {
     );
 
     h.stoat.pending_count = Some(3);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsForward);
+    dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsForward);
     assert_eq!(
         buffer_string(&mut h),
         "bca\n",
@@ -740,7 +749,7 @@ fn join_selections_space_joins_two_lines_and_selects_space() {
     let path = h.write_file("s.txt", "ab\ncd\n");
     h.open_file(&path);
     set_range(&mut h, 0, 5);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
+    dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
     assert_eq!(buffer_string(&mut h), "ab cd\n");
     assert_eq!(h.selection_spans(), vec![(2, 3, false)]);
 }
@@ -759,7 +768,7 @@ fn joined_spaces_survive_removing_the_primary_selection() {
     let path = h.write_file("s.txt", "a\nb\nc\nd\n");
     h.open_file(&path);
     set_range(&mut h, 0, 7);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
+    dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
     assert_eq!(buffer_string(&mut h), "a b c d\n");
     assert_eq!(
         h.selection_spans().len(),
@@ -767,7 +776,7 @@ fn joined_spaces_survive_removing_the_primary_selection() {
         "each joined space is its own selection",
     );
 
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RemovePrimarySelection);
+    dispatch(&mut h.stoat, &stoat_action::RemovePrimarySelection);
     assert_eq!(
         h.selection_spans().len(),
         2,
@@ -781,7 +790,7 @@ fn join_selections_space_single_line_joins_with_next() {
     let path = h.write_file("s.txt", "ab\ncd\n");
     h.open_file(&path);
     set_range(&mut h, 0, 1);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
+    dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
     assert_eq!(buffer_string(&mut h), "ab cd\n");
     assert_eq!(h.selection_spans(), vec![(2, 3, false)]);
 }
@@ -792,7 +801,7 @@ fn join_selections_drops_second_comment_token() {
     let path = h.write_file("s.rs", "// foo\n// bar\n");
     h.open_file(&path);
     h.type_keys("%");
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
+    dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
     assert_eq!(buffer_string(&mut h), "// foo bar\n");
 }
 
@@ -802,7 +811,7 @@ fn join_selections_drops_the_second_doc_comment_token_whole() {
     let path = h.write_file("s.rs", "/// foo\n/// bar\n");
     h.open_file(&path);
     h.type_keys("%");
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
+    dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
     assert_eq!(buffer_string(&mut h), "/// foo bar\n");
 }
 
@@ -812,7 +821,7 @@ fn join_selections_keeps_a_token_the_running_one_does_not_match() {
     let path = h.write_file("s.rs", "// foo\n/// bar\n");
     h.open_file(&path);
     h.type_keys("%");
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
+    dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
     assert_eq!(buffer_string(&mut h), "// foo /// bar\n");
 }
 
@@ -822,7 +831,7 @@ fn join_selections_joins_without_selecting_the_space() {
     let path = h.write_file("s.txt", "ab\ncd\n");
     h.open_file(&path);
     set_range(&mut h, 0, 5);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelections);
+    dispatch(&mut h.stoat, &stoat_action::JoinSelections);
     assert_eq!(buffer_string(&mut h), "ab cd\n");
     assert_ne!(h.selection_spans(), vec![(2, 3, false)]);
 }
@@ -907,8 +916,8 @@ fn switch_case_over_three_selections_records_what_three_edits_would() {
     let mut h = TestHarness::with_size(20, 6);
     let path = h.write_file("s.txt", "ab\ncd\nef\n");
     h.open_file(&path);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AddSelectionBelow);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AddSelectionBelow);
+    dispatch(&mut h.stoat, &AddSelectionBelow);
+    dispatch(&mut h.stoat, &AddSelectionBelow);
     assert_eq!(
         h.selection_spans(),
         vec![(0, 1, false), (3, 4, false), (6, 7, false)],
@@ -916,7 +925,7 @@ fn switch_case_over_three_selections_records_what_three_edits_would() {
     );
 
     let before = focused_buffer_ops(&h).len();
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+    dispatch(&mut h.stoat, &stoat_action::SwitchCase);
 
     let ops = focused_buffer_ops(&h);
     assert_eq!(
@@ -936,4 +945,744 @@ fn switch_case_over_three_selections_records_what_three_edits_would() {
             },
         ],
     );
+}
+
+#[test]
+fn move_left_at_start_is_noop() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "hello");
+    dispatch(&mut stoat, &MoveLeft);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![0]);
+}
+
+#[test]
+fn move_right_advances_one_grapheme() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc");
+    dispatch(&mut stoat, &MoveRight);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![1]);
+    dispatch(&mut stoat, &MoveRight);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
+}
+
+#[test]
+fn move_right_at_end_is_noop() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc");
+    dispatch(&mut stoat, &MoveRight);
+    dispatch(&mut stoat, &MoveRight);
+    dispatch(&mut stoat, &MoveRight);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
+    dispatch(&mut stoat, &MoveRight);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
+}
+
+#[test]
+fn move_right_across_newline() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "ab\ncd");
+    dispatch(&mut stoat, &MoveRight);
+    dispatch(&mut stoat, &MoveRight);
+    dispatch(&mut stoat, &MoveRight);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
+}
+
+#[test]
+fn move_right_multibyte() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "héllo");
+    dispatch(&mut stoat, &MoveRight);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![1]);
+    dispatch(&mut stoat, &MoveRight);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
+}
+
+#[test]
+fn move_down_advances_one_row() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc\ndef\n");
+    dispatch(&mut stoat, &MoveDown);
+    assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(1, 0)]);
+}
+
+#[test]
+fn move_up_at_first_row_is_noop() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc\ndef");
+    dispatch(&mut stoat, &MoveUp);
+    assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 0)]);
+}
+
+#[test]
+fn move_down_at_last_row_is_noop() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc");
+    dispatch(&mut stoat, &MoveDown);
+    assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 0)]);
+}
+
+#[test]
+fn move_down_preserves_goal_column() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "long line\nxx\nlong line\n");
+    for _ in 0..7 {
+        dispatch(&mut stoat, &MoveRight);
+    }
+    assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 7)]);
+    dispatch(&mut stoat, &MoveDown);
+    assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(1, 2)]);
+    dispatch(&mut stoat, &MoveDown);
+    assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(2, 7)]);
+}
+
+#[test]
+fn move_next_word_start_creates_selection() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    dispatch(&mut stoat, &MoveNextWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, false)]);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
+}
+
+#[test]
+fn extend_right_crosses_the_newline() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "ab\ncd");
+    stoat.set_focused_mode("select".into());
+    // From 'a', three extend-rights walk over the line's last char, across
+    // the newline, and onto 'c' on the next line rather than clamping.
+    dispatch(&mut stoat, &ExtendRight);
+    dispatch(&mut stoat, &ExtendRight);
+    dispatch(&mut stoat, &ExtendRight);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, false)]);
+}
+
+#[test]
+fn move_next_word_start_repeated_snaps_tail() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar baz");
+    dispatch(&mut stoat, &MoveNextWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, false)]);
+    dispatch(&mut stoat, &MoveNextWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 8, false)]);
+}
+
+#[test]
+fn move_next_word_start_from_whitespace_advances_anchor() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, " foo bar");
+    dispatch(&mut stoat, &MoveNextWordStart);
+    // The anchor advances past the leading space onto the word start, so the
+    // selection excludes the space and `dw` here would not eat it.
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 5, false)]);
+}
+
+#[test]
+fn move_next_word_start_from_blank_line_runs_through_word() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "\nfoo");
+    dispatch(&mut stoat, &MoveNextWordStart);
+    // Starting on the blank line, the anchor skips the newline and the head
+    // runs through the following word to its end.
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 4, false)]);
+}
+
+#[test]
+fn move_next_word_end_creates_selection() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    dispatch(&mut stoat, &MoveNextWordEnd);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
+}
+
+#[test]
+fn move_next_word_end_at_eof_is_noop() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo");
+    for _ in 0..3 {
+        dispatch(&mut stoat, &MoveRight);
+    }
+    assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
+    dispatch(&mut stoat, &MoveNextWordEnd);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 3, false)]);
+}
+
+#[test]
+fn move_prev_word_start_creates_reversed_selection() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    for _ in 0..6 {
+        dispatch(&mut stoat, &MoveRight);
+    }
+    assert_eq!(editor::head_offsets(&mut stoat), vec![6]);
+    dispatch(&mut stoat, &MovePrevWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 7, true)]);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![4]);
+}
+
+#[test]
+fn move_prev_word_start_from_word_boundary_retreats_anchor() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    for _ in 0..4 {
+        dispatch(&mut stoat, &MoveRight);
+    }
+    assert_eq!(editor::head_offsets(&mut stoat), vec![4]);
+    dispatch(&mut stoat, &MovePrevWordStart);
+    // On the word start 'b', the tail retreats past it, so the selection
+    // ends at the word start rather than one cell past it.
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, true)]);
+}
+
+#[test]
+fn move_prev_word_start_over_forward_selection_keeps_trailing_char() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    // `e` makes a forward selection whose block cursor sits on the last
+    // word char, one cell back from the head. `b` must scan from there
+    // rather than the head, or it swallows the char after the cursor.
+    dispatch(&mut stoat, &MoveNextWordEnd);
+    dispatch(&mut stoat, &MovePrevWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, true)]);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![0]);
+}
+
+#[test]
+fn move_prev_word_end_over_forward_selection_keeps_trailing_char() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar baz");
+    for _ in 0..4 {
+        dispatch(&mut stoat, &MoveRight);
+    }
+    dispatch(&mut stoat, &MoveNextWordEnd);
+    dispatch(&mut stoat, &MovePrevWordEnd);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 7, true)]);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
+}
+
+#[test]
+fn move_prev_word_start_at_start_is_noop() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    dispatch(&mut stoat, &MovePrevWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 1, false)]);
+}
+
+#[test]
+fn move_prev_word_end_lands_on_last_char_of_prev_word() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    for _ in 0..6 {
+        dispatch(&mut stoat, &MoveRight);
+    }
+    assert_eq!(editor::head_offsets(&mut stoat), vec![6]);
+    dispatch(&mut stoat, &MovePrevWordEnd);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 7, true)]);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
+}
+
+#[test]
+fn move_prev_word_end_at_start_is_noop() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    dispatch(&mut stoat, &MovePrevWordEnd);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 1, false)]);
+}
+
+#[test]
+fn count_next_word_start_selects_only_final_span() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc def ghi jkl");
+    stoat.pending_count = Some(3);
+    dispatch(&mut stoat, &MoveNextWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(8, 12, false)]);
+}
+
+#[test]
+fn count_next_word_start_overshoot_selects_last_word() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(
+        &mut stoat,
+        "one two three\nfour five six\nseven eight nine ten",
+    );
+    stoat.pending_count = Some(20);
+    dispatch(&mut stoat, &MoveNextWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(45, 48, false)]);
+}
+
+/// A word motion that cannot advance still leaves a selection a block cursor
+/// can sit on.
+///
+/// The raw range returns an empty span at the buffer end, since there is
+/// nothing left to scan. Every other landing path repairs that to one cell
+/// wide, and the anchoring here has to as well, or the cursor renders with no
+/// width at all.
+#[test]
+fn a_word_motion_at_the_buffer_end_keeps_a_one_cell_cursor() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo\n");
+    dispatch(&mut stoat, &MoveNextWordStart);
+    dispatch(&mut stoat, &MoveNextWordStart);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(3, 4, false)],
+        "the cursor stays on the trailing newline rather than collapsing",
+    );
+}
+
+#[test]
+fn count_next_word_start_crosses_newlines() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(
+        &mut stoat,
+        "one two three\nfour five six\nseven eight nine ten",
+    );
+    stoat.pending_count = Some(5);
+    dispatch(&mut stoat, &MoveNextWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(19, 24, false)]);
+}
+
+#[test]
+fn count_next_word_end_selects_only_final_span() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar baz");
+    stoat.pending_count = Some(2);
+    dispatch(&mut stoat, &MoveNextWordEnd);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(3, 7, false)]);
+}
+
+#[test]
+fn next_word_start_after_word_end_scans_from_cursor_cell() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    // `e` lands a forward selection whose block cursor sits one cell back
+    // from the head. The following `w` scans from that cursor cell, so it
+    // selects the char after the cursor and the gap rather than the whole
+    // next word.
+    dispatch(&mut stoat, &MoveNextWordEnd);
+    dispatch(&mut stoat, &MoveNextWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 4, false)]);
+}
+
+#[test]
+fn count_prev_word_start_excludes_a_cursor_newline() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc def\nghi");
+    stoat.pending_count = Some(7);
+    dispatch(&mut stoat, &MoveRight);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![7]);
+    dispatch(&mut stoat, &MovePrevWordStart);
+    // `b` from the newline retreats onto the word start, excluding the
+    // newline from the selection.
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 7, true)]);
+}
+
+#[test]
+fn move_right_with_multiple_cursors_advances_each() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
+    dispatch(&mut stoat, &AddSelectionBelow);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![0, 4]);
+    dispatch(&mut stoat, &MoveRight);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![1, 5]);
+}
+
+#[test]
+fn move_next_word_start_multi_cursor_independent() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar\nbaz qux\n");
+    dispatch(&mut stoat, &AddSelectionBelow);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![0, 8]);
+    dispatch(&mut stoat, &MoveNextWordStart);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(0, 4, false), (8, 12, false)]
+    );
+}
+
+#[test]
+fn add_selection_below_with_no_editor_focus_is_noop() {
+    let mut stoat = stoat();
+    {
+        let ws = stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        ws.panes.pane_mut(focused).view = View::Label("nothing".into());
+    }
+    assert_eq!(dispatch(&mut stoat, &AddSelectionBelow), UpdateEffect::None);
+}
+
+#[test]
+fn add_selection_below_adds_cursor_on_next_display_row() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
+
+    assert_eq!(
+        dispatch(&mut stoat, &AddSelectionBelow),
+        UpdateEffect::Redraw
+    );
+
+    let positions = editor::cursor_display_positions(&mut stoat);
+    assert_eq!(positions, vec![(0, 0), (1, 0)]);
+}
+
+#[test]
+fn add_selection_below_at_last_row_is_noop() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc");
+
+    assert_eq!(dispatch(&mut stoat, &AddSelectionBelow), UpdateEffect::None);
+    assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 0)]);
+}
+
+#[test]
+fn add_selection_below_copies_each_selection_skipping_short_lines() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "long line\nxx\nlong line\n");
+
+    {
+        let ws = stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
+            View::Editor(id) => id,
+            _ => unreachable!(),
+        };
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buffer = snapshot.buffer_snapshot();
+        let offset = buffer.rope().point_to_offset(Point::new(0, 7));
+        let anchor = buffer.anchor_at(offset, Bias::Right);
+        editor
+            .selections
+            .insert_cursor(anchor, SelectionGoal::Column(7), buffer);
+    }
+
+    assert_eq!(
+        dispatch(&mut stoat, &AddSelectionBelow),
+        UpdateEffect::Redraw
+    );
+    // The column-0 cursor copies onto row 1. The column-7 cursor cannot fit
+    // on the short row 1, so it skips to row 2 rather than clamping.
+    let positions = editor::cursor_display_positions(&mut stoat);
+    assert_eq!(positions, vec![(0, 0), (0, 7), (1, 0), (2, 7)]);
+}
+
+#[test]
+fn add_selection_below_under_wrap_lands_on_the_next_buffer_line() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, &format!("{}\nshort\n", "a".repeat(30)));
+
+    {
+        let ws = stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
+            View::Editor(id) => id,
+            _ => unreachable!(),
+        };
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        editor.viewport_rows = Some(10);
+        editor.display_map.set_wrap_width(Some(10));
+    }
+
+    assert_eq!(
+        dispatch(&mut stoat, &AddSelectionBelow),
+        UpdateEffect::Redraw
+    );
+    assert_eq!(
+        editor::cursor_buffer_positions(&mut stoat),
+        vec![(0, 0), (1, 0)],
+        "the copy lands on the next buffer line, not the long line's wrapped tail",
+    );
+}
+
+#[test]
+fn extend_right_grows_selection_from_cursor() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc");
+    dispatch(&mut stoat, &ExtendRight);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 2, false)]);
+}
+
+#[test]
+fn extend_right_further_keeps_tail() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abcdef");
+    dispatch(&mut stoat, &ExtendRight);
+    dispatch(&mut stoat, &ExtendRight);
+    dispatch(&mut stoat, &ExtendRight);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, false)]);
+}
+
+#[test]
+fn extend_right_at_end_is_noop() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "ab");
+    dispatch(&mut stoat, &MoveRight);
+    dispatch(&mut stoat, &MoveRight);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 2, false)]);
+    dispatch(&mut stoat, &ExtendRight);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 2, false)]);
+}
+
+#[test]
+fn extend_left_across_tail_flips_reversed() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abcdef");
+    dispatch(&mut stoat, &MoveRight);
+    dispatch(&mut stoat, &MoveRight);
+    dispatch(&mut stoat, &ExtendRight);
+    dispatch(&mut stoat, &ExtendRight);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 5, false)]);
+    dispatch(&mut stoat, &ExtendLeft);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 4, false)]);
+    dispatch(&mut stoat, &ExtendLeft);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 3, false)]);
+    // Crossing the 1-wide tail flips the range and steps the tail forward
+    // so the anchor's cell stays covered (Helix shrink-then-flip).
+    dispatch(&mut stoat, &ExtendLeft);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 3, true)]);
+    dispatch(&mut stoat, &ExtendLeft);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, true)]);
+}
+
+#[test]
+fn extend_down_preserves_goal_column() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "long line\nxx\nlong line\n");
+    for _ in 0..7 {
+        dispatch(&mut stoat, &MoveRight);
+    }
+    assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 7)]);
+    dispatch(&mut stoat, &ExtendDown);
+    assert_eq!(
+        editor::cursor_display_positions(&mut stoat),
+        vec![(1, 2)],
+        "the goal overruns \"xx\", so the cell is its line break, as for a move",
+    );
+    dispatch(&mut stoat, &ExtendDown);
+    assert_eq!(
+        editor::cursor_display_positions(&mut stoat),
+        vec![(2, 7)],
+        "and the goal survives the short line rather than the cell it sat on",
+    );
+}
+
+#[test]
+fn extend_down_at_last_row_is_noop() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc");
+    dispatch(&mut stoat, &ExtendDown);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 1, false)]);
+}
+
+#[test]
+fn extend_up_from_second_line_grows_backward() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc\ndef\n");
+    dispatch(&mut stoat, &MoveDown);
+    dispatch(&mut stoat, &MoveRight);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(5, 6, false)]);
+    dispatch(&mut stoat, &ExtendUp);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(1, 6, true)],
+        "crossing the tail keeps the cell the cursor was on covered",
+    );
+}
+
+#[test]
+fn extend_next_word_start_grows_selection_from_cursor() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    dispatch(&mut stoat, &ExtendNextWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, false)]);
+}
+
+#[test]
+fn extend_next_word_start_repeated_keeps_tail() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar baz");
+    dispatch(&mut stoat, &ExtendNextWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, false)]);
+    dispatch(&mut stoat, &ExtendNextWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 8, false)]);
+}
+
+#[test]
+fn extend_next_word_end_grows_selection_from_cursor() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    dispatch(&mut stoat, &ExtendNextWordEnd);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
+}
+
+#[test]
+fn extend_prev_word_start_keeps_tail_at_cursor() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    for _ in 0..6 {
+        dispatch(&mut stoat, &MoveRight);
+    }
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(6, 7, false)]);
+    dispatch(&mut stoat, &ExtendPrevWordStart);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(4, 7, true)],
+        "crossing the tail keeps the r the cursor was on covered"
+    );
+}
+
+#[test]
+fn extend_prev_word_end_keeps_tail_at_cursor() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    for _ in 0..6 {
+        dispatch(&mut stoat, &MoveRight);
+    }
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(6, 7, false)]);
+    dispatch(&mut stoat, &ExtendPrevWordEnd);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(2, 7, true)],
+        "crossing the tail keeps the r the cursor was on covered"
+    );
+}
+
+#[test]
+fn extend_right_with_multiple_cursors_grows_each() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
+    dispatch(&mut stoat, &AddSelectionBelow);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![0, 4]);
+    dispatch(&mut stoat, &ExtendRight);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(0, 2, false), (4, 6, false)]
+    );
+}
+
+#[test]
+fn extend_to_line_end_grows_forward() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    dispatch(&mut stoat, &ExtendToLineEnd);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 7, false)]);
+}
+
+#[test]
+fn extend_to_line_start_from_mid_reverses() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    dispatch(&mut stoat, &MoveRight);
+    dispatch(&mut stoat, &MoveRight);
+    dispatch(&mut stoat, &MoveRight);
+    dispatch(&mut stoat, &ExtendToLineStart);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(0, 4, true)],
+        "crossing the tail keeps the cell the cursor was on covered"
+    );
+}
+
+#[test]
+fn extend_to_last_line_grows_forward() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
+    dispatch(&mut stoat, &ExtendToLastLine);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 9, false)]);
+}
+
+#[test]
+fn extend_to_file_start_reverses_from_end() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abcdef");
+    dispatch(&mut stoat, &MoveRight);
+    dispatch(&mut stoat, &MoveRight);
+    dispatch(&mut stoat, &MoveRight);
+    dispatch(&mut stoat, &ExtendToFileStart);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(0, 4, true)],
+        "crossing the tail keeps the cell the cursor was on covered"
+    );
+}
+
+#[test]
+fn collapse_selection_shrinks_to_head() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abcdef");
+    dispatch(&mut stoat, &ExtendRight);
+    dispatch(&mut stoat, &ExtendRight);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
+    dispatch(&mut stoat, &CollapseSelection);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 3, false)]);
+}
+
+#[test]
+fn collapse_selection_preserves_reversed_head() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo bar");
+    for _ in 0..6 {
+        dispatch(&mut stoat, &MoveRight);
+    }
+    dispatch(&mut stoat, &MovePrevWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 7, true)]);
+    dispatch(&mut stoat, &CollapseSelection);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 5, false)]);
+}
+
+#[test]
+fn collapse_selection_multi_cursor_collapses_each() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
+    dispatch(&mut stoat, &AddSelectionBelow);
+    dispatch(&mut stoat, &ExtendRight);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(0, 2, false), (4, 6, false)]
+    );
+    dispatch(&mut stoat, &CollapseSelection);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(1, 2, false), (5, 6, false)]
+    );
+}
+
+#[test]
+fn flip_selections_toggles_reversed() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abcdef");
+    dispatch(&mut stoat, &ExtendRight);
+    dispatch(&mut stoat, &ExtendRight);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
+    dispatch(&mut stoat, &FlipSelections);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, true)]);
+    dispatch(&mut stoat, &FlipSelections);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
+}
+
+#[test]
+fn flip_selections_on_bare_cursor_toggles_reversed() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc");
+    dispatch(&mut stoat, &MoveRight);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 2, false)]);
+    dispatch(&mut stoat, &FlipSelections);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 2, true)]);
+}
+
+#[test]
+fn select_all_replaces_all_selections() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc\ndef\n");
+    dispatch(&mut stoat, &AddSelectionBelow);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![0, 4]);
+    dispatch(&mut stoat, &SelectAll);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 8, false)]);
+}
+
+#[test]
+fn select_all_on_empty_buffer() {
+    let mut stoat = stoat();
+    dispatch(&mut stoat, &SelectAll);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 1, false)]);
 }
