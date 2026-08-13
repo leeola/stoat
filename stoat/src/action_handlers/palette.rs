@@ -4,6 +4,7 @@ use crate::{
     file_finder::Browse,
     host::FsHost,
     picker::{PathPicker, Scan},
+    walkthrough,
 };
 use std::path::{Path, PathBuf};
 use stoat_action::ValueSource;
@@ -60,6 +61,15 @@ pub(super) fn arg_candidates(stoat: &Stoat, source: ValueSource) -> Option<ArgCa
                 .map(PathBuf::from)
                 .collect();
             Some(ArgCandidates::Paths(names))
+        },
+        ValueSource::Walkthroughs => {
+            let ws = stoat.active_workspace();
+            let slugs = walkthrough::store::list(&*stoat.fs_host, &ws.git_root)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|summary| PathBuf::from(summary.slug))
+                .collect();
+            Some(ArgCandidates::Paths(slugs))
         },
         ValueSource::Values(values) => Some(ArgCandidates::Paths(
             values.iter().map(PathBuf::from).collect(),

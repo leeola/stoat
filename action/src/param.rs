@@ -37,6 +37,8 @@ pub enum ValueSource {
     Directories,
     /// Names of the configured theme blocks, for the theme switcher.
     Themes,
+    /// Slugs of the walkthroughs stored in the workspace, for the player.
+    Walkthroughs,
     /// A closed set of accepted values, listed verbatim. Arguments that read
     /// as an enum (`on`, `off`, `follow`) carry their spellings here so the
     /// picker can offer them instead of leaving the user to recall them.

@@ -290,9 +290,10 @@ impl ArgPicker {
     ) {
         let policy = match self.source {
             ValueSource::Buffers => PreviewPolicy::LiveBufferThenFile,
-            ValueSource::Directories | ValueSource::Themes | ValueSource::Values(_) => {
-                PreviewPolicy::NoPreview
-            },
+            ValueSource::Directories
+            | ValueSource::Themes
+            | ValueSource::Walkthroughs
+            | ValueSource::Values(_) => PreviewPolicy::NoPreview,
             _ => PreviewPolicy::File,
         };
         self.active_core()
@@ -347,6 +348,9 @@ pub struct Availability {
     /// `workspace.review_walk.is_some()`: a commit-by-commit review walk is
     /// running, whether or not one of its diffs is currently open.
     pub review_walk_open: bool,
+    /// `workspace.walkthrough.is_some()`: a walkthrough plays, so its stepping
+    /// actions have a tour to step.
+    pub walkthrough_open: bool,
     /// Focused pane hosts a [`View::Run`], or a modal run is active.
     pub run_focused: bool,
 }
@@ -382,6 +386,7 @@ impl Availability {
             review_open: ws.review.is_some(),
             commits_open: ws.commits.is_some(),
             review_walk_open: ws.review_walk.is_some(),
+            walkthrough_open: ws.walkthrough.is_some(),
             run_focused,
         }
     }
@@ -431,6 +436,15 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         | CommitsFirst | CommitsLast | CommitsRefresh | CommitsOpenReview => ctx.commits_open,
 
         ReviewNextCommit | ReviewPrevCommit | ReviewDone => ctx.review_walk_open,
+
+        // WalkthroughOpen is absent on purpose. A reader opens a tour when none
+        // plays, so a gate on one hides it exactly when it is wanted.
+        WalkthroughNext
+        | WalkthroughPrev
+        | WalkthroughNextAnnotation
+        | WalkthroughPrevAnnotation
+        | WalkthroughShowNarration
+        | WalkthroughDone => ctx.walkthrough_open,
 
         RunSubmit | RunInterrupt | RunHistoryPrev | RunHistoryNext => ctx.run_focused,
 
@@ -767,9 +781,18 @@ impl CommandPalette {
 /// alias table, so an active context beats a 1:1 command name, and falls
 /// through to [`registry::lookup_alias`] when no candidate applies.
 const CONDITIONAL_COMMANDS: &[(&str, &[ActionKind])] = &[
-    ("next", &[ActionKind::ReviewNextCommit]),
-    ("prev", &[ActionKind::ReviewPrevCommit]),
-    ("done", &[ActionKind::ReviewDone]),
+    (
+        "next",
+        &[ActionKind::ReviewNextCommit, ActionKind::WalkthroughNext],
+    ),
+    (
+        "prev",
+        &[ActionKind::ReviewPrevCommit, ActionKind::WalkthroughPrev],
+    ),
+    (
+        "done",
+        &[ActionKind::ReviewDone, ActionKind::WalkthroughDone],
+    ),
 ];
 
 /// Resolve `token` to the first [`CONDITIONAL_COMMANDS`] candidate whose
@@ -1371,6 +1394,7 @@ mod tests {
             review_open: true,
             commits_open: true,
             review_walk_open: true,
+            walkthrough_open: true,
             run_focused: true,
         };
         for entry in registry::all() {
@@ -2422,6 +2446,81 @@ mod tests {
         }
     }
 
+    /// A harness whose workspace stores two walkthroughs, neither playing.
+    fn harness_with_walkthroughs() -> TestHarness {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/repo");
+        h.stoat.active_workspace_mut().git_root = root.clone();
+
+        for slug in ["startup", "rendering"] {
+            let walkthrough =
+                crate::walkthrough::Walkthrough::new(slug.to_owned(), slug.to_owned(), None);
+            h.fake_fs().insert_file(
+                root.join(".stoat/walkthroughs")
+                    .join(format!("{slug}.json")),
+                serde_json::to_string(&walkthrough).expect("serialize"),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn walkthrough_arg_picker_lists_stored_slugs() {
+        let mut h = harness_with_walkthroughs();
+
+        h.type_text(":walkthrough ");
+        h.snapshot();
+        assert_eq!(
+            arg_rows(&h),
+            ["rendering", "startup"],
+            "the picker offers what the workspace stores, so no slug is recalled",
+        );
+    }
+
+    #[test]
+    fn tab_completes_a_walkthrough_slug() {
+        let mut h = harness_with_walkthroughs();
+
+        h.type_text(":walkthrough start");
+        h.snapshot();
+        h.type_keys("tab");
+        h.snapshot();
+
+        assert_eq!(palette_arg_tail(&h).as_deref(), Some("startup"));
+    }
+
+    /// A walkthrough with one stop, enough for a run to exist.
+    fn one_stop_walkthrough() -> crate::walkthrough::Walkthrough {
+        use crate::walkthrough::{Location, Point, Range};
+
+        let mut walkthrough =
+            crate::walkthrough::Walkthrough::new("tour".to_owned(), "Tour".to_owned(), None);
+        walkthrough
+            .add_stop(
+                None,
+                String::new(),
+                Location {
+                    path: PathBuf::from("a.rs"),
+                    range: Range {
+                        start: Point { line: 1, col: 1 },
+                        end: Point { line: 1, col: 1 },
+                    },
+                    snippet: "x".to_owned(),
+                },
+                None,
+            )
+            .expect("append");
+        walkthrough
+    }
+
+    /// A harness with a walkthrough playing and no review walk.
+    fn playing_harness() -> TestHarness {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().walkthrough =
+            crate::walkthrough::run::WalkthroughRun::new(one_stop_walkthrough());
+        h
+    }
+
     /// A harness sitting mid-walk over a two-commit `/repo`.
     fn walking_harness() -> TestHarness {
         let mut h = Stoat::test();
@@ -2465,6 +2564,38 @@ mod tests {
                 "{token} resolves to {action} during a walk"
             );
         }
+    }
+
+    /// The walkthrough is the second claimant on these tokens, so it takes them
+    /// only where no review walk does.
+    #[test]
+    fn conditional_tokens_reach_the_walkthrough_without_a_review_walk() {
+        for (token, action) in [
+            ("next", "WalkthroughNext"),
+            ("prev", "WalkthroughPrev"),
+            ("done", "WalkthroughDone"),
+        ] {
+            let mut h = playing_harness();
+            assert_eq!(
+                palette_dispatch_name(&mut h, &format!(":{token}")),
+                Some(action),
+                "{token} resolves to {action} while a walkthrough plays"
+            );
+        }
+    }
+
+    /// The review walk claimed the tokens first, so it keeps them when both
+    /// contexts are live rather than the two fighting over the name.
+    #[test]
+    fn a_review_walk_keeps_the_tokens_from_a_walkthrough() {
+        let mut h = walking_harness();
+        h.stoat.active_workspace_mut().walkthrough =
+            crate::walkthrough::run::WalkthroughRun::new(one_stop_walkthrough());
+
+        assert_eq!(
+            palette_dispatch_name(&mut h, ":next"),
+            Some("ReviewNextCommit"),
+        );
     }
 
     /// Outside a walk the tokens are ordinary filter text, so Enter takes

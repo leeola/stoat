@@ -7,7 +7,7 @@ use std::any::Any;
 const WALKTHROUGH_OPEN_PARAMS: &[ParamDef] = &[ParamDef {
     name: "slug",
     kind: ParamKind::String,
-    value_source: ValueSource::None,
+    value_source: ValueSource::Walkthroughs,
     required: true,
     description: "Slug of the stored walkthrough to play.",
 }];
