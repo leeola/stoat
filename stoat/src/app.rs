@@ -21,7 +21,7 @@ use crate::{
     },
     keymap::{Keymap, ResolvedAction, StateValue},
     keymap_state::{
-        active_modal, debug_assert_modal_exclusivity, modal_predicate, normalize_shift_event,
+        self, active_modal, debug_assert_modal_exclusivity, modal_predicate, normalize_shift_event,
         resolve_action, ActiveModal, StoatKeymapState,
     },
     minimap::emit::{self, minimap_view_window},
@@ -5450,85 +5450,6 @@ impl Stoat {
         }
     }
 
-    /// Dismiss the modal that currently owns key input, reporting whether one was
-    /// open.
-    ///
-    /// Matching on [`active_modal`] is what keeps the close order and the key
-    /// order from drifting apart, so the modal dismissed is always the one the
-    /// user is typing into. A modal owning a scratch editor is disposed rather
-    /// than dropped, or its input stays in the workspace for the rest of the
-    /// session.
-    ///
-    /// A run pane is the one arm that does not close. It owns the whole pane
-    /// rather than floating over it, so it interrupts its shell and stays open.
-    fn close_topmost_modal(&mut self) -> bool {
-        let Some(modal) = active_modal(self) else {
-            return false;
-        };
-
-        match modal {
-            ActiveModal::Run => {
-                let run_id = self.modal_run.expect("the run modal is open");
-                let ws = self.active_workspace_mut();
-                if let Some(run_state) = ws.runs.get_mut(run_id) {
-                    if let Some(handle) = &mut run_state.shell_handle {
-                        handle.kill();
-                    }
-                    if let Some(block) = run_state.active_block_mut() {
-                        block.finished = true;
-                    }
-                }
-            },
-            ActiveModal::QuitConfirm => self.quit_all_confirm = None,
-            ActiveModal::WorkspacePicker => {
-                if let Some(picker) = self.workspace_picker.take() {
-                    picker.dispose(self.active_workspace_mut());
-                }
-            },
-            ActiveModal::Jumplist => {
-                self.jumplist_picker = None;
-            },
-            ActiveModal::Diagnostics => {
-                self.diagnostics_picker = None;
-            },
-            ActiveModal::CommitPicker => {
-                action_handlers::review_walk::commit_picker_close(self);
-            },
-            ActiveModal::Location => {
-                self.location_picker = None;
-            },
-            ActiveModal::FileFinder => action_handlers::close_file_finder(self),
-            ActiveModal::SymbolFinder => action_handlers::lsp::close_symbol_finder(self),
-            ActiveModal::CodeSearch => {
-                action_handlers::code_search::close_code_search(self);
-            },
-            ActiveModal::Palette => {
-                if let Some(palette) = self.command_palette.take() {
-                    let active_idx = self.active_workspace;
-                    palette.dispose(&mut self.workspaces[active_idx]);
-                }
-            },
-            ActiveModal::Help => action_handlers::close_help(self),
-            ActiveModal::Rename => {
-                action_handlers::lsp::rename_input_cancel(self);
-            },
-            ActiveModal::Search => {
-                action_handlers::search::search_cancel(self);
-            },
-            ActiveModal::SplitSelection => {
-                action_handlers::split_selection::cancel(self);
-            },
-            ActiveModal::FilterSelections => {
-                action_handlers::filter_selections::cancel(self);
-            },
-            ActiveModal::ShellInput => {
-                action_handlers::shell::cancel(self);
-            },
-        }
-
-        true
-    }
-
     /// The binding `key` resolves to, deriving it on the first reader and
     /// answering the rest from `memo`.
     ///
@@ -5595,7 +5516,7 @@ impl Stoat {
         );
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if self.close_topmost_modal() {
+            if keymap_state::close_topmost_modal(self) {
                 return UpdateEffect::Redraw;
             }
             if self.pending_hover.is_some() {
@@ -6016,7 +5937,7 @@ impl Stoat {
         let mut dispatched_symbol_picker = false;
         for ra in actions.iter() {
             if ra.name == "SetMode" {
-                if let Some(mode_name) = ra.args.first().and_then(crate::keymap_state::arg_as_str) {
+                if let Some(mode_name) = ra.args.first().and_then(keymap_state::arg_as_str) {
                     self.transition_mode(mode_name);
                     effect = UpdateEffect::Redraw;
                 }
@@ -6622,7 +6543,7 @@ impl Stoat {
     /// reword/conflict) are derived from session state rather than the mode.
     #[cfg(test)]
     pub(crate) fn current_view(&self) -> Option<&'static str> {
-        crate::keymap_state::view_predicate(self.active_workspace())
+        keymap_state::view_predicate(self.active_workspace())
     }
 
     /// The focused terminal or agent pane's [`TermId`], if the focused pane is
@@ -6954,14 +6875,10 @@ impl Stoat {
     /// predicate can compare against, warns and is dropped, so a config typo
     /// cannot shadow a built-in or store an uncomparable value.
     fn set_user_var(&mut self, action: &ResolvedAction) {
-        let Some(name) = action
-            .args
-            .first()
-            .and_then(crate::keymap_state::arg_as_str)
-        else {
+        let Some(name) = action.args.first().and_then(keymap_state::arg_as_str) else {
             return;
         };
-        if crate::keymap_state::BUILTIN_FIELDS.contains(&name.as_str()) {
+        if keymap_state::BUILTIN_FIELDS.contains(&name.as_str()) {
             tracing::warn!(
                 target: "stoat::keymap",
                 "SetVar name `{name}` shadows a built-in field and was ignored"
@@ -6971,7 +6888,7 @@ impl Stoat {
         let Some(value) = action
             .args
             .get(1)
-            .and_then(crate::keymap_state::arg_to_state_value)
+            .and_then(keymap_state::arg_to_state_value)
         else {
             tracing::warn!(
                 target: "stoat::keymap",

@@ -1,4 +1,5 @@
 use crate::{
+    action_handlers,
     app::{ModalKind, Stoat},
     buffer::BufferId,
     diagnostics::DiagnosticSet,
@@ -254,7 +255,7 @@ pub(crate) fn focus_flags(
         .buffers
         .language_for(buffer_id)
         .map(|l| l.name.to_string());
-    let lsp = crate::action_handlers::lsp::lsp_language_name(&ws.buffers, buffer_id)
+    let lsp = action_handlers::lsp::lsp_language_name(&ws.buffers, buffer_id)
         .is_some_and(|name| registry.has_host_for_language(&name));
     let diags = ws
         .buffers
@@ -495,6 +496,85 @@ impl ActiveModal {
 ///
 /// This resolver stays pure so a caller can ask what the canonical pick would be
 /// over any state, including one with two modals open.
+/// Dismiss the modal that currently owns key input, reporting whether one was
+/// open.
+///
+/// Matching on [`active_modal`] is what keeps the close order and the key
+/// order from drifting apart, so the modal dismissed is always the one the
+/// user is typing into. A modal owning a scratch editor is disposed rather
+/// than dropped, or its input stays in the workspace for the rest of the
+/// session.
+///
+/// A run pane is the one arm that does not close. It owns the whole pane
+/// rather than floating over it, so it interrupts its shell and stays open.
+pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
+    let Some(modal) = active_modal(stoat) else {
+        return false;
+    };
+
+    match modal {
+        ActiveModal::Run => {
+            let run_id = stoat.modal_run.expect("the run modal is open");
+            let ws = stoat.active_workspace_mut();
+            if let Some(run_state) = ws.runs.get_mut(run_id) {
+                if let Some(handle) = &mut run_state.shell_handle {
+                    handle.kill();
+                }
+                if let Some(block) = run_state.active_block_mut() {
+                    block.finished = true;
+                }
+            }
+        },
+        ActiveModal::QuitConfirm => stoat.quit_all_confirm = None,
+        ActiveModal::WorkspacePicker => {
+            if let Some(picker) = stoat.workspace_picker.take() {
+                picker.dispose(stoat.active_workspace_mut());
+            }
+        },
+        ActiveModal::Jumplist => {
+            stoat.jumplist_picker = None;
+        },
+        ActiveModal::Diagnostics => {
+            stoat.diagnostics_picker = None;
+        },
+        ActiveModal::CommitPicker => {
+            action_handlers::review_walk::commit_picker_close(stoat);
+        },
+        ActiveModal::Location => {
+            stoat.location_picker = None;
+        },
+        ActiveModal::FileFinder => action_handlers::close_file_finder(stoat),
+        ActiveModal::SymbolFinder => action_handlers::lsp::close_symbol_finder(stoat),
+        ActiveModal::CodeSearch => {
+            action_handlers::code_search::close_code_search(stoat);
+        },
+        ActiveModal::Palette => {
+            if let Some(palette) = stoat.command_palette.take() {
+                let active_idx = stoat.active_workspace;
+                palette.dispose(&mut stoat.workspaces[active_idx]);
+            }
+        },
+        ActiveModal::Help => action_handlers::close_help(stoat),
+        ActiveModal::Rename => {
+            action_handlers::lsp::rename_input_cancel(stoat);
+        },
+        ActiveModal::Search => {
+            action_handlers::search::search_cancel(stoat);
+        },
+        ActiveModal::SplitSelection => {
+            action_handlers::split_selection::cancel(stoat);
+        },
+        ActiveModal::FilterSelections => {
+            action_handlers::filter_selections::cancel(stoat);
+        },
+        ActiveModal::ShellInput => {
+            action_handlers::shell::cancel(stoat);
+        },
+    }
+
+    true
+}
+
 pub(crate) fn active_modal(stoat: &Stoat) -> Option<ActiveModal> {
     if stoat.modal_run.is_some() {
         Some(ActiveModal::Run)
@@ -755,7 +835,7 @@ mod tests {
         let path = root.join("a.rs");
         h.fake_fs().insert_file(&path, b"Foo bar");
         h.stoat.active_workspace_mut().git_root = root;
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFile { path });
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFile { path });
         h.settle();
         let ws = h.stoat.active_workspace();
         match ws.panes.pane(ws.panes.focus()).view {
@@ -799,7 +879,7 @@ mod tests {
         let mut h = Stoat::test();
         let id = open_foo_bar(&mut h);
         seed_foo_bar_kinds(&mut h, id);
-        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 3);
+        action_handlers::movement::jump_to_offset(&mut h.stoat, 3);
         let state = StoatKeymapState::from_stoat(&h.stoat);
         assert_eq!(state.get("token_known"), Some(&StateValue::Bool(true)));
         assert_eq!(
@@ -814,7 +894,7 @@ mod tests {
         let mut h = Stoat::test();
         let id = open_foo_bar(&mut h);
         seed_foo_bar_kinds(&mut h, id);
-        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 4);
+        action_handlers::movement::jump_to_offset(&mut h.stoat, 4);
         let state = StoatKeymapState::from_stoat(&h.stoat);
         assert_eq!(state.get("token_known"), Some(&StateValue::Bool(true)));
         assert_eq!(field(&state, "token"), Some("function".to_string()));
@@ -893,13 +973,13 @@ mod tests {
             Some("file"),
             "a plain editor starts outside the diff view"
         );
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
         assert_eq!(
             h.stoat.current_view(),
             Some("diff"),
             "Diff turns the diff view on"
         );
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
         assert_eq!(
             h.stoat.current_view(),
             Some("file"),
@@ -910,7 +990,7 @@ mod tests {
     #[test]
     fn escape_in_the_diff_view_stays_in_the_view() {
         let mut h = Stoat::test();
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
         assert_eq!(h.stoat.current_view(), Some("diff"));
 
         h.type_keys("Escape");
@@ -955,7 +1035,7 @@ mod tests {
     #[test]
     fn from_stoat_modal_covers_text_inputs() {
         let mut h = Stoat::test();
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSearchInput);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSearchInput);
         let state = StoatKeymapState::from_stoat(&h.stoat);
         assert_eq!(field(&state, "modal"), Some("isearch".to_string()));
     }
@@ -1073,7 +1153,7 @@ mod tests {
     #[test]
     fn a_quit_prompt_outranks_a_finder_opened_under_it() {
         let mut h = Stoat::test();
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
         assert_eq!(
             active_modal(&h.stoat),
             Some(ActiveModal::FileFinder),
