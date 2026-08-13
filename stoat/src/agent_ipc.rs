@@ -7,9 +7,12 @@
 //! [`AgentEvent`]s, which it applies to the owning workspace's
 //! [`AgentStatus`](crate::agent_status::AgentStatus).
 
-use crate::{agent_status::AgentHookEvent, workspace::WorkspaceUid};
+use crate::{
+    agent_status::AgentHookEvent, app::Stoat, host::LanguageServerFeature, workspace::WorkspaceUid,
+};
+use lsp_types::{HoverParams, Position, TextDocumentIdentifier, TextDocumentPositionParams};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
@@ -235,9 +238,207 @@ fn parse_hook_line(line: &str) -> Result<AgentHookEvent, serde_json::Error> {
     serde_json::from_str(line)
 }
 
+/// Answer a runtime [`AgentQuery`] from live session state, firing `reply` with
+/// the JSON result.
+///
+/// `lsp-status` and `diagnostics` reply synchronously. `hover` requires the path
+/// to be open in the `uid` session (otherwise `{"error":"not open"}`) and runs
+/// the request on a detached task so the event loop never blocks on the server.
+pub(crate) fn answer_agent_query(
+    stoat: &mut Stoat,
+    uid: WorkspaceUid,
+    request: AgentQuery,
+    reply: oneshot::Sender<Value>,
+) {
+    match request {
+        AgentQuery::LspStatus => {
+            let servers: Vec<Value> = stoat
+                .lsp_registry
+                .named_hosts()
+                .into_iter()
+                .filter(|(_, host)| !host.is_noop())
+                .map(|(name, host)| {
+                    let capabilities =
+                        serde_json::to_value(&*host.capabilities()).unwrap_or(Value::Null);
+                    json!({ "name": name, "capabilities": capabilities })
+                })
+                .collect();
+            let _ = reply.send(json!({
+                "active": !servers.is_empty(),
+                "spawn_attempted": stoat.lsp_registry.spawn_attempted_any(),
+                "servers": servers,
+            }));
+        },
+        AgentQuery::Diagnostics { path } => {
+            let value = match path {
+                Some(path) => {
+                    serde_json::to_value(stoat.diagnostics.get(&path)).unwrap_or(Value::Null)
+                },
+                None => Value::Array(
+                    stoat
+                        .diagnostics
+                        .iter()
+                        .map(|(path, diagnostics)| json!({ "path": path, "diagnostics": diagnostics }))
+                        .collect(),
+                ),
+            };
+            let _ = reply.send(value);
+        },
+        AgentQuery::Hover { path, line, col } => {
+            let buffer_id = stoat
+                .workspaces
+                .iter()
+                .find(|(_, ws)| ws.uid == uid)
+                .and_then(|(_, ws)| ws.buffers.id_for_path(&path));
+            let Some(buffer_id) = buffer_id.filter(|id| stoat.lsp_opened.contains(id)) else {
+                let _ = reply.send(json!({ "error": "not open" }));
+                return;
+            };
+            let Some(uri) = crate::action_handlers::lsp::path_to_uri(&path) else {
+                let _ = reply.send(json!({ "error": "invalid path" }));
+                return;
+            };
+
+            let params = HoverParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: Position {
+                        line,
+                        character: col,
+                    },
+                },
+                work_done_progress_params: Default::default(),
+            };
+            let lsp =
+                crate::lsp::hosts::lsp_for_feature(stoat, buffer_id, LanguageServerFeature::Hover);
+            stoat
+                .executor
+                .spawn(async move {
+                    let value = match lsp.hover(params).await {
+                        Ok(Some(hover)) => serde_json::to_value(&hover).unwrap_or(Value::Null),
+                        Ok(None) => Value::Null,
+                        Err(err) => json!({ "error": err.to_string() }),
+                    };
+                    let _ = reply.send(value);
+                })
+                .detach();
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        test_fixture::{install_two_servers, open_buffer, seed},
+        test_harness::TestHarness,
+    };
+
+    #[test]
+    fn lsp_status_lists_each_running_server() {
+        use lsp_types::{HoverProviderCapability, ServerCapabilities};
+        let mut h = TestHarness::with_size(80, 24);
+        let _ = install_two_servers(
+            &mut h,
+            ServerCapabilities {
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                ..ServerCapabilities::default()
+            },
+        );
+
+        let uid = h.stoat.active_workspace().uid();
+        let (tx, mut rx) = oneshot::channel();
+        answer_agent_query(&mut h.stoat, uid, AgentQuery::LspStatus, tx);
+        let value = rx.try_recv().expect("lsp-status reply");
+
+        assert_eq!(value["active"], serde_json::json!(true));
+        let names: Vec<&str> = value["servers"]
+            .as_array()
+            .expect("servers array")
+            .iter()
+            .map(|s| s["name"].as_str().expect("server name"))
+            .collect();
+        assert!(
+            names.contains(&"primary") && names.contains(&"secondary"),
+            "servers listed: {names:?}",
+        );
+    }
+
+    #[test]
+    fn query_diagnostics_returns_seeded_set() {
+        use lsp_types::Diagnostic;
+
+        let mut h = TestHarness::with_size(40, 10);
+        let path = PathBuf::from("/proj/a.rs");
+        let diagnostic = Diagnostic {
+            message: "boom".into(),
+            ..Default::default()
+        };
+        h.seed_diagnostics(path.clone(), vec![diagnostic.clone()]);
+
+        let uid = h.stoat.active_workspace().uid();
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        h.stoat.handle_agent_control(AgentControl::Query {
+            uid,
+            request: AgentQuery::Diagnostics { path: Some(path) },
+            reply: reply_tx,
+        });
+
+        let value = reply_rx.try_recv().expect("synchronous diagnostics reply");
+        let got: Vec<Diagnostic> = serde_json::from_value(value).unwrap();
+        assert_eq!(got, vec![diagnostic]);
+    }
+
+    #[test]
+    fn query_hover_returns_fake_hover() {
+        use lsp_types::{Hover, HoverContents};
+
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_hover(path.to_str().unwrap(), 0, 1, "hover text");
+
+        let uid = h.stoat.active_workspace().uid();
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        h.stoat.handle_agent_control(AgentControl::Query {
+            uid,
+            request: AgentQuery::Hover {
+                path: path.clone(),
+                line: 0,
+                col: 1,
+            },
+            reply: reply_tx,
+        });
+        h.settle();
+
+        let value = reply_rx.try_recv().expect("hover reply");
+        let hover: Hover = serde_json::from_value(value).unwrap();
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup hover contents");
+        };
+        assert_eq!(markup.value, "hover text");
+    }
+
+    #[test]
+    fn query_hover_on_unopened_path_replies_error() {
+        let mut h = TestHarness::with_size(40, 10);
+        let uid = h.stoat.active_workspace().uid();
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        h.stoat.handle_agent_control(AgentControl::Query {
+            uid,
+            request: AgentQuery::Hover {
+                path: PathBuf::from("/nope.rs"),
+                line: 0,
+                col: 0,
+            },
+            reply: reply_tx,
+        });
+
+        let value = reply_rx.try_recv().expect("synchronous error reply");
+        assert_eq!(value, serde_json::json!({ "error": "not open" }));
+    }
 
     #[test]
     fn wire_form_round_trips() {

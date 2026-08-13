@@ -18,9 +18,12 @@ use crate::{
     test_harness::TestHarness,
 };
 use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
-use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, SymbolInformation, SymbolKind};
+use lsp_types::{
+    Diagnostic, DiagnosticSeverity, Position, Range, ServerCapabilities, SymbolInformation,
+    SymbolKind,
+};
 use ratatui::layout::Rect;
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 use stoat_action::OpenFile;
 use stoat_config::MinimapMode;
 use stoatty_protocol::command;
@@ -252,4 +255,31 @@ pub(crate) fn flat_symbol(name: &str, file: &str, line: u32, col: u32) -> Symbol
         },
         container_name: None,
     }
+}
+
+/// Two fake servers registered under one language, both advertising `caps`, for
+/// a test whose subject is what happens when a buffer has more than one.
+pub(crate) fn install_two_servers(
+    h: &mut TestHarness,
+    caps: ServerCapabilities,
+) -> (Arc<crate::host::FakeLsp>, Arc<crate::host::FakeLsp>) {
+    use crate::lsp::registry::ServerSelector;
+    let primary = Arc::new(crate::host::FakeLsp::new());
+    primary.set_capabilities(caps.clone());
+    let secondary = Arc::new(crate::host::FakeLsp::new());
+    secondary.set_capabilities(caps);
+    h.stoat
+        .lsp_registry
+        .insert("primary".into(), primary.clone());
+    h.stoat
+        .lsp_registry
+        .insert("secondary".into(), secondary.clone());
+    h.stoat.lsp_registry.set_selectors(
+        "rust".into(),
+        vec![
+            ServerSelector::all("primary".into()),
+            ServerSelector::all("secondary".into()),
+        ],
+    );
+    (primary, secondary)
 }

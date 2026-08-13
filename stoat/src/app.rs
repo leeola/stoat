@@ -5766,7 +5766,7 @@ impl Stoat {
                 request,
                 reply,
             } => {
-                action_handlers::lsp::answer_agent_query(self, uid, request, reply);
+                crate::agent_ipc::answer_agent_query(self, uid, request, reply);
                 UpdateEffect::None
             },
         }
