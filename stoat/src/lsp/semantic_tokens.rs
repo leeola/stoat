@@ -556,6 +556,7 @@ fn apply_semantic_tokens(
 mod tests {
     use super::*;
     use crate::{
+        lsp::sync,
         test_fixture::{open_buffer, open_stcfg_with_server, seed},
         test_harness::TestHarness,
     };
@@ -1280,7 +1281,7 @@ mod tests {
 
         // did_change (50ms) syncs the buffer to the server before the semantic
         // tokens request (500ms debounce) reads it.
-        h.advance_clock(action_handlers::lsp::LSP_DID_CHANGE_DEBOUNCE);
+        h.advance_clock(sync::LSP_DID_CHANGE_DEBOUNCE);
         h.advance_clock(Duration::from_millis(550));
 
         assert!(

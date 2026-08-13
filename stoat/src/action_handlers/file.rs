@@ -648,7 +648,7 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
     }
 
     if changed {
-        super::lsp::notify_buffer_changes_pending(stoat);
+        crate::lsp::sync::notify_buffer_changes_pending(stoat);
     }
     changed || status_set
 }
@@ -693,7 +693,7 @@ pub(super) fn reload_focused(stoat: &mut Stoat, force: bool) -> UpdateEffect {
         ReloadOutcome::Unchanged => stoat.set_status("already up to date"),
         ReloadOutcome::Reloaded => {
             stoat.set_status(format!("reloaded {}", display_name(&path)));
-            super::lsp::notify_buffer_changes_pending(stoat);
+            crate::lsp::sync::notify_buffer_changes_pending(stoat);
         },
     }
     UpdateEffect::Redraw
@@ -741,7 +741,7 @@ pub(super) fn reload_all(stoat: &mut Stoat, force: bool) -> UpdateEffect {
     }
 
     if reloaded > 0 {
-        super::lsp::notify_buffer_changes_pending(stoat);
+        crate::lsp::sync::notify_buffer_changes_pending(stoat);
     }
 
     let mut parts: Vec<String> = Vec::new();

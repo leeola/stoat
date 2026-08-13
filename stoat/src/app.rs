@@ -3648,7 +3648,7 @@ impl Stoat {
             Event::Paste(text) => self.handle_paste(&text),
             _ => UpdateEffect::None,
         };
-        action_handlers::lsp::notify_buffer_changes_pending(self);
+        crate::lsp::sync::notify_buffer_changes_pending(self);
         crate::completion::request::trigger(self);
         crate::lsp::signature_help::signature_help_trigger(self);
         action_handlers::lsp::inlay_hints_trigger(self);

@@ -295,7 +295,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
     // request waits long enough that the change has already gone out, and
     // forcing it there would only defeat the quiet window.
     let pending_change = is_trigger_char
-        .then(|| crate::action_handlers::lsp::flush_pending_did_change(stoat, snapshot.buffer_id))
+        .then(|| crate::lsp::sync::flush_pending_did_change(stoat, snapshot.buffer_id))
         .flatten();
 
     let task = stoat.spawn_woken(run_request(

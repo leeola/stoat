@@ -14,6 +14,7 @@ pub(crate) mod servers;
 pub(crate) mod signature_help;
 pub(crate) mod stamp;
 pub mod stcfg;
+pub(crate) mod sync;
 pub mod util;
 
 /// The kind of symbol an LSP semantic token names, retained past highlight

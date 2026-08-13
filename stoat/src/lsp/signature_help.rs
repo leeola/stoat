@@ -184,7 +184,7 @@ fn request_signature_help(stoat: &mut Stoat) {
     // The position was measured after edits whose change may still be sitting in
     // its debounce, and a server cannot place a position in text it has not been
     // sent.
-    let pending_change = action_handlers::lsp::flush_pending_did_change(stoat, buffer_id);
+    let pending_change = crate::lsp::sync::flush_pending_did_change(stoat, buffer_id);
     let task = stoat.spawn_woken(async move {
         if let Some(pending_change) = pending_change {
             pending_change.await;

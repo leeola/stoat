@@ -26,7 +26,7 @@ use stoat_action::{ReviewExternalEdit, ReviewRefresh};
 
 /// Quiet window after the last filesystem-watch event for a path
 /// before [`ReviewExternalEdit`] dispatches. Mirrors
-/// [`crate::action_handlers::lsp::LSP_DID_CHANGE_DEBOUNCE`] so a
+/// [`crate::lsp::sync::LSP_DID_CHANGE_DEBOUNCE`] so a
 /// formatter-on-save burst (or an agent edit chain) collapses
 /// into one diff rebuild rather than three.
 pub(crate) const REVIEW_EXTERNAL_EDIT_DEBOUNCE: std::time::Duration =
