@@ -190,8 +190,19 @@ pub(crate) const GLOBALS_SLOTS: usize = MAX_COMPOSITE_POOLS + 1;
 /// the cap shares the last one, which stays correct only while each pool draws
 /// before the next writes.
 pub(crate) fn globals_offset(slot: usize) -> u32 {
-    let slot = 1 + slot.min(MAX_COMPOSITE_POOLS - 1);
+    let slot = 1 + globals_slot_index(slot);
     (slot as u64 * GLOBALS_SLOT_STRIDE) as u32
+}
+
+/// The composite slot `slot` resolves to, with everything past the cap folded
+/// onto the last one.
+///
+/// A pass caching what it wrote per slot indexes that cache by this rather than
+/// by the raw slot. Two overflow slots share one window of the buffer, and a
+/// cache keyed on the raw slot reports the second one's bytes as already present
+/// and leaves the window holding the first one's.
+pub(crate) fn globals_slot_index(slot: usize) -> usize {
+    slot.min(MAX_COMPOSITE_POOLS - 1)
 }
 
 /// A pass's per-pool composite state, keyed by pool id.

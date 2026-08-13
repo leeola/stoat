@@ -11,8 +11,9 @@
 use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
     render::{
-        globals_offset, occlusion_globals, row_len, row_uploads, CellMetrics, CompositeSlot,
-        CompositeSlots, Frame, Occluder, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+        globals_offset, globals_slot_index, occlusion_globals, row_len, row_uploads, CellMetrics,
+        CompositeSlot, CompositeSlots, Frame, Occluder, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+        MAX_COMPOSITE_POOLS,
     },
 };
 use bytemuck::{Pod, Zeroable};
@@ -321,6 +322,15 @@ pub struct TextPass {
     last_globals: Option<TextGlobals>,
     last_region_globals: Option<TextGlobals>,
     last_static_globals: Option<TextGlobals>,
+    /// The value last written to each composited pool's window of
+    /// [`Self::globals`], so a pool whose globals held skips its write.
+    ///
+    /// Keyed by the pool's slot in the frame, which is what
+    /// [`globals_offset`] addresses the buffer by, and not by pool id the way
+    /// [`Self::composite_slots`] is. Pools enter a frame only while they glide,
+    /// so which pool holds a slot changes between frames and a cache keyed by
+    /// id answers for the wrong window.
+    composite_globals: [Option<TextGlobals>; MAX_COMPOSITE_POOLS],
     /// How far the instance buffers are rotated, in rows.
     ///
     /// Held at zero, where the slot map is the identity and every instance
@@ -806,6 +816,7 @@ impl TextPass {
             last_globals: None,
             last_region_globals: None,
             last_static_globals: None,
+            composite_globals: [None; MAX_COMPOSITE_POOLS],
             row_offset: 0,
             grid_rows: 0,
             last_region_rect: None,
@@ -1426,12 +1437,37 @@ impl TextPass {
         // alone.
         self.upload_occluders(device, queue, occluders);
         let (panel_count, occlude_all) = occlusion_globals(occluders);
-        // Held before the composite slot below takes the name, since the
-        // globals are not written until after the packing.
+        // Held before the composite slot below takes the name.
         let globals_slot = slot;
 
+        let metrics = self.metrics;
+        let rows = grid.rows();
+        let row_offset = self.row_offset;
+        let globals_over = |atlas: (u32, u32)| TextGlobals {
+            resolution,
+            cell_size: [metrics.width, metrics.height],
+            atlas_size: [atlas.0 as f32, atlas.1 as f32],
+            scroll_y: shift_rows * metrics.height,
+            panel_count,
+            occlude_all,
+            row_offset,
+            rows: rows as u32,
+            _pad0: 0,
+            origin_cells,
+            _pad1: [0; 2],
+        };
+
+        // Ahead of the reuse return below, because a slot is the pool's position
+        // in the frame rather than its id and pools enter a frame only while they
+        // glide. A frame that writes nothing here leaves this pool drawing
+        // against whatever pool last held the slot. A reusing frame packs
+        // nothing, so the atlas sizes it names are already final. A building one
+        // writes again below once the packing has settled them.
+        let atlas_dims_before = self.atlas.texture_dims();
+        self.upload_composite_globals(queue, slot, globals_over(atlas_dims_before));
+
         // During a pure sub-cell glide the composed rows are identical and only
-        // the shift moved, which the globals write above already carried. Reuse
+        // the shift moved, which the globals write above just carried. Reuse
         // the instances built for these rows on an earlier frame, unless the
         // atlas has since relocated their UVs or the region has moved out from
         // under the pixel snap they were built with.
@@ -1442,9 +1478,6 @@ impl TextPass {
         {
             return;
         }
-
-        let metrics = self.metrics;
-        let rows = grid.rows();
 
         // A glide moves the rows without changing them, so the shaping done for
         // them last frame still describes them. Carrying it needs a cache of
@@ -1631,27 +1664,13 @@ impl TextPass {
             );
         }
 
-        // After the packing above, which is what can grow an atlas. The sizes
-        // here are what the instances just built are normalized by, so naming a
-        // pre-grow one would draw this pool at the wrong scale for a frame.
-        let (mask_size, color_size) = self.atlas.texture_dims();
-        queue.write_buffer(
-            &self.globals,
-            u64::from(globals_offset(globals_slot)),
-            bytemuck::bytes_of(&TextGlobals {
-                resolution,
-                cell_size: [self.metrics.width, self.metrics.height],
-                atlas_size: [mask_size as f32, color_size as f32],
-                scroll_y: shift_rows * self.metrics.height,
-                panel_count,
-                occlude_all,
-                row_offset: self.row_offset,
-                rows: grid.rows() as u32,
-                _pad0: 0,
-                origin_cells,
-                _pad1: [0; 2],
-            }),
-        );
+        // Again after the packing above, which is the one thing that grows an
+        // atlas. The sizes here are what the instances just built are normalized
+        // by, so a pre-grow one draws this pool at the wrong scale for a frame.
+        // A frame that grew nothing writes nothing, since the cache already
+        // holds these bytes from the write before the reuse return.
+        let atlas_dims = self.atlas.texture_dims();
+        self.upload_composite_globals(queue, globals_slot, globals_over(atlas_dims));
 
         // Record the atlas state and the origin these instances resolved
         // against, so a later shift-only frame tells whether their UVs and their
@@ -1662,6 +1681,18 @@ impl TextPass {
         target.baked_origin = origin_cells;
         target.glyph_rows = glyph_rows;
         target.underline_rows = underline_rows;
+    }
+
+    /// Write `globals` into composited slot `slot`'s window of the shared
+    /// globals buffer, skipping the upload when the window already holds them.
+    fn upload_composite_globals(&mut self, queue: &Queue, slot: usize, globals: TextGlobals) {
+        crate::render::upload_globals(
+            queue,
+            &self.globals,
+            u64::from(globals_offset(slot)),
+            globals,
+            &mut self.composite_globals[globals_slot_index(slot)],
+        );
     }
 
     /// The rotation the live grid's row draws are built and bound under.
@@ -5943,6 +5974,101 @@ mod tests {
             bytemuck::cast_slice::<TextInstance, u8>(&runs_moved),
             bytemuck::cast_slice::<TextInstance, u8>(&runs_rebuilt),
             "and the run glyphs a rebuild at its new origin holds"
+        );
+    }
+
+    /// A pool that reuses its instances still writes its own globals.
+    ///
+    /// A globals slot is the pool's position in the frame rather than its id,
+    /// and pools enter a frame only while they glide, so which pool holds a slot
+    /// changes between frames. A reuse frame that wrote nothing leaves this pool
+    /// drawing against the rows, origin, and shift of whichever pool held the
+    /// slot before it.
+    #[test]
+    fn a_reusing_composite_still_writes_its_own_globals() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+        let resolution = [640.0, 480.0];
+
+        let mut mine = Grid::new(3, 8);
+        fill_row(&mut mine, 0, "alpha");
+
+        // The other pool's glyphs are a subset of this one's, so preparing it
+        // packs nothing and leaves the atlas epoch the reuse gate reads.
+        let mut theirs = Grid::new(5, 8);
+        fill_row(&mut theirs, 0, "alpha");
+
+        let composite = |pass: &mut TextPass, grid: &Grid, shift, origin, changed, pool| {
+            pass.prepare_composite(
+                &device,
+                &queue,
+                grid,
+                &[],
+                resolution,
+                shift,
+                origin,
+                changed,
+                None,
+                pool,
+                0,
+            );
+        };
+
+        composite(&mut pass, &mine, 0.0, [0.0; 2], true, 1);
+        composite(&mut pass, &theirs, 0.25, [2.0, 4.0], true, 2);
+        composite(&mut pass, &mine, -0.5, [0.0; 2], false, 1);
+
+        let globals = pass.composite_globals[0].expect("slot 0 carries globals");
+        assert_eq!(globals.rows, 3, "the reusing pool's own row count");
+        assert_eq!(globals.origin_cells, [0.0; 2], "and its own region origin");
+        assert_eq!(
+            globals.scroll_y,
+            -0.5 * pass.metrics.height,
+            "and this frame's shift, which is the whole point of the frame",
+        );
+    }
+
+    /// A pack that grows the atlas leaves the globals naming the grown size.
+    ///
+    /// The instances built here are normalized by the atlas they resolved
+    /// against, so globals frozen at the pre-grow size draw the whole pool at
+    /// the wrong scale. The write before the reuse return cannot know this, so
+    /// the one after the pack is what corrects it.
+    #[test]
+    fn composite_globals_name_the_atlas_the_pack_grew_to() {
+        let Some((device, queue, mut pass)) = headless_text_pass_font(60) else {
+            return;
+        };
+        let mut grid = Grid::new(2, 4);
+        grid.set_text_runs(vec![ascii_burst_run()]);
+
+        let (before, _) = pass.atlas.texture_dims();
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &grid,
+            &[],
+            [640.0, 480.0],
+            0.0,
+            [0.0; 2],
+            true,
+            None,
+            0,
+            0,
+        );
+
+        let (mask, color) = pass.atlas.texture_dims();
+        assert!(
+            mask > before,
+            "the burst has to grow the atlas mid-pack: {before} -> {mask}"
+        );
+        assert_eq!(
+            pass.composite_globals[0]
+                .expect("slot 0 carries globals")
+                .atlas_size,
+            [mask as f32, color as f32],
+            "the globals must name the atlas the instances resolved against"
         );
     }
 
