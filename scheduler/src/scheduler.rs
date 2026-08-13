@@ -11,6 +11,7 @@ mod tokio_scheduler;
 pub use clock::TestClock;
 pub use clock::{Clock, LocalClock};
 pub use executor::{Executor, Task};
+#[cfg(any(test, feature = "test-support"))]
 use futures::channel::oneshot;
 pub use local_scheduler::LocalScheduler;
 use std::{
@@ -48,6 +49,7 @@ pub struct Timer(TimerInner);
 enum TimerInner {
     /// Resolves when the scheduler drops the paired sender, which is how a
     /// scheduler running its own clock expires a timer on demand.
+    #[cfg(any(test, feature = "test-support"))]
     Signalled(oneshot::Receiver<()>),
     /// Resolves when the scheduler's own wait completes. Dropping it drops
     /// that wait, which is what makes cancellation free.
@@ -57,6 +59,7 @@ enum TimerInner {
 impl Timer {
     /// A timer the scheduler fires by dropping or sending on the paired
     /// sender.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn signalled(receiver: oneshot::Receiver<()>) -> Self {
         Self(TimerInner::Signalled(receiver))
     }
@@ -75,6 +78,7 @@ impl Future for Timer {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         match &mut self.0 {
+            #[cfg(any(test, feature = "test-support"))]
             TimerInner::Signalled(receiver) => match Pin::new(receiver).poll(cx) {
                 Poll::Ready(_) => Poll::Ready(()),
                 Poll::Pending => Poll::Pending,
