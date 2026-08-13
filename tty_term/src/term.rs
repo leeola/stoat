@@ -1347,7 +1347,8 @@ impl Terminal {
                 // Clamped on arrival rather than at the allocation, so the
                 // stored region the renderer places and sizes by is the same
                 // one the pages were built for.
-                let region = grid::pool_region_from_command(self.clamp_region(region));
+                let region =
+                    grid::from_command::pool_region_from_command(self.clamp_region(region));
                 let window = region.window;
                 // Whether the declare left the pool's pages newly built or
                 // rebuilt, so a page painting into them lost the slot it started

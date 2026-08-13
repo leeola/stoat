@@ -5,15 +5,17 @@
 //! renderer reads this grid to draw and the terminal driver writes it; colors
 //! are stored fully resolved, so the renderer needs no palette of its own.
 
+use from_command::{bar_from_command, polyline_from_command, text_run_from_command};
 use std::{
     collections::HashMap,
     mem,
     ops::{BitOr, BitOrAssign, Range},
     sync::Arc,
 };
-use stoatty_protocol::command::{
-    BarCommand, MinimapCommand, PolylineCommand, PoolRegionCommand, TextRunCommand,
-};
+use stoatty_protocol::command::{BarCommand, PolylineCommand, TextRunCommand};
+
+pub(crate) mod from_command;
+
 /// A minimap line's run summary, re-exported so a consumer of
 /// [`Grid::minimap_content`] has a name for what it gets back.
 ///
@@ -1452,48 +1454,6 @@ fn fill_owned<T>(list: &mut Vec<T>, count: usize, mut item: impl FnMut(usize) ->
     list.extend((0..count).map(&mut item));
 }
 
-/// Convert a page-local [`TextRunCommand`] to its grid [`TextRun`] at capture
-/// time, so the pool projection re-stamps it without re-decoding per frame.
-///
-/// The declared row passes through unresolved because a pool page carries no
-/// line layout, so its logical-to-physical row resolution is the identity. The
-/// run is the base layer of a pool composite, so it takes `seq` 0.
-fn text_run_from_command(command: TextRunCommand) -> TextRun {
-    TextRun {
-        col: command.col,
-        row: command.row,
-        scale: command.scale,
-        color: Rgb::new(command.color[0], command.color[1], command.color[2]),
-        bg: command.bg.map(|bg| Rgb::new(bg[0], bg[1], bg[2])),
-        text: command.text.into(),
-        seq: 0,
-    }
-}
-
-/// Convert a page-local [`BarCommand`] to its grid [`Bar`]. See
-/// [`text_run_from_command`] for the identity-row and `seq` 0 rationale.
-fn bar_from_command(command: BarCommand) -> Bar {
-    Bar {
-        x: command.x,
-        y: command.y,
-        width: command.width,
-        height: command.height,
-        color: Rgb::new(command.color[0], command.color[1], command.color[2]),
-        seq: 0,
-    }
-}
-
-/// Convert a page-local [`PolylineCommand`] to its grid [`Polyline`]. See
-/// [`text_run_from_command`] for the identity-row and `seq` 0 rationale.
-fn polyline_from_command(command: PolylineCommand) -> Polyline {
-    Polyline {
-        points: command.points,
-        width: command.width,
-        color: Rgb::new(command.color[0], command.color[1], command.color[2]),
-        seq: 0,
-    }
-}
-
 /// A declared minimap strip, in the grid's own colors.
 ///
 /// The renderer draws from this rather than from the [`MinimapCommand`] it was
@@ -1523,50 +1483,6 @@ pub struct MinimapStrip {
     pub thumb_border: Rgb,
     /// Colors a run's class indexes, up to 64 entries.
     pub palette: Vec<Rgb>,
-}
-
-/// Project a declared [`PoolRegionCommand`] into the grid's [`PoolRegion`].
-pub(crate) fn pool_region_from_command(command: PoolRegionCommand) -> PoolRegion {
-    PoolRegion {
-        pool: command.pool,
-        window: command.window,
-        top: command.top,
-        left: command.left,
-        width: command.width,
-        height: command.height,
-    }
-}
-
-/// Project a declared [`MinimapCommand`] into the grid's [`MinimapStrip`],
-/// resolving its wire color triples.
-pub(crate) fn minimap_strip_from_command(command: MinimapCommand) -> MinimapStrip {
-    MinimapStrip {
-        top: command.top,
-        left: command.left,
-        width: command.width,
-        height: command.height,
-        strip_id: command.strip_id,
-        content_id: command.content_id,
-        lines_per_cell: command.lines_per_cell,
-        max_columns: command.max_columns,
-        bg: Rgba::new(command.bg[0], command.bg[1], command.bg[2], command.bg[3]),
-        thumb: Rgba::new(
-            command.thumb[0],
-            command.thumb[1],
-            command.thumb[2],
-            command.thumb[3],
-        ),
-        thumb_border: Rgb::new(
-            command.thumb_border[0],
-            command.thumb_border[1],
-            command.thumb_border[2],
-        ),
-        palette: command
-            .palette
-            .into_iter()
-            .map(|entry| Rgb::new(entry[0], entry[1], entry[2]))
-            .collect(),
-    }
 }
 
 /// A declared minimap strip joined with its viewport thumb.

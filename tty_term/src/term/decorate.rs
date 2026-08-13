@@ -8,9 +8,9 @@
 
 use super::{Damage, StoredTextRun};
 use crate::grid::{
-    minimap_strip_from_command, Bar, Border, BorderEdge, BorderStyle, Grid, Icon, IconKind,
-    Minimap, MinimapView, Overlay, PagePool, Panel, PanelShadow, Polyline, Rgb, ScrollRegion,
-    TextRun,
+    from_command::{grid_border_style, minimap_strip_from_command, panel_grid, popover_overlay},
+    Bar, Border, BorderEdge, Grid, Icon, IconKind, Minimap, MinimapView, PagePool, Polyline, Rgb,
+    ScrollRegion, TextRun,
 };
 use std::{collections::HashMap, mem, sync::Arc};
 use stoatty_protocol::command::{
@@ -131,24 +131,6 @@ fn frame_region(grid: &mut Grid, command: &BorderCommand, rows_dirty: &Damage) {
         }
         grid.set_border_edge(row, left..left + 1, BorderEdge::Left, border);
         grid.set_border_edge(row, right..right + 1, BorderEdge::Right, border);
-    }
-}
-
-fn grid_border_style(style: command::BorderStyle) -> BorderStyle {
-    match style {
-        command::BorderStyle::Light => BorderStyle::Light,
-        command::BorderStyle::Heavy => BorderStyle::Heavy,
-        command::BorderStyle::Double => BorderStyle::Double,
-        command::BorderStyle::Rounded => BorderStyle::Rounded,
-    }
-}
-
-fn grid_panel_shadow(shadow: command::PanelShadow) -> PanelShadow {
-    match shadow {
-        command::PanelShadow::None_ => PanelShadow::None_,
-        command::PanelShadow::Drop => PanelShadow::Drop,
-        command::PanelShadow::Tucked => PanelShadow::Tucked,
-        command::PanelShadow::Overhang => PanelShadow::Overhang,
     }
 }
 
@@ -460,41 +442,4 @@ fn resolve_logical_row(grid: &Grid, row: i16) -> i16 {
         .saturating_sub(logical_line);
     let shift = i16::try_from(expansion.saturating_mul(16)).unwrap_or(i16::MAX);
     row.saturating_add(shift)
-}
-
-fn popover_overlay(command: &PopoverCommand) -> Overlay {
-    Overlay {
-        top: command.top,
-        left: command.left,
-        width: command.width,
-        height: command.height,
-        fill: Rgb::new(command.fill[0], command.fill[1], command.fill[2]),
-        border: Rgb::new(command.border[0], command.border[1], command.border[2]),
-        content_fg: Rgb::new(
-            command.content_fg[0],
-            command.content_fg[1],
-            command.content_fg[2],
-        ),
-        scale: command.scale,
-        offset: command.offset,
-        bold: command.bold,
-        content: command.content.clone(),
-    }
-}
-
-fn panel_grid(command: &PanelCommand, seq: u32) -> Panel {
-    Panel {
-        top: command.top,
-        left: command.left,
-        width: command.width,
-        height: command.height,
-        style: grid_border_style(command.style),
-        border: Rgb::new(command.border[0], command.border[1], command.border[2]),
-        corner_radius: command.corner_radius,
-        fill: command.fill.map(|[r, g, b]| Rgb::new(r, g, b)),
-        shadow: grid_panel_shadow(command.shadow),
-        inset_x: command.inset_x,
-        above_pools: command.above_pools,
-        seq,
-    }
 }
