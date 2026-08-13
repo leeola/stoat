@@ -503,6 +503,15 @@ fn convert_minimap_runs(runs: Vec<crate::minimap::Run>) -> stoatty_protocol::com
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        action_handlers, apc_emit,
+        display_map::highlights::{HighlightStyleId, HighlightStyleInterner},
+        test_fixture::{drain_apc, focused_editor_pane_area},
+    };
+    use ratatui::layout::Rect;
+    use std::{path::PathBuf, sync::Arc};
+    use stoat_action::OpenFile;
+    use tokio::sync::mpsc::UnboundedReceiver;
 
     #[test]
     fn minimap_syntax_version_separates_unparsed_from_parsed_at_zero() {
@@ -536,6 +545,1293 @@ mod tests {
             base,
             minimap_syntax_version(false, None, None),
             "toggling syntax highlighting recolors the strip"
+        );
+    }
+    /// The rows a parse reports have to reach the strip that paints them.
+    ///
+    /// Splices cannot show this. A sweep queues nothing for a row whose
+    /// summary is unchanged, so a scoped sweep and a full one emit the same
+    /// frames and differ only in how many rows they re-summarize. What the
+    /// scope does change is whether the sweep finishes inside one sync. Past
+    /// one chunk's worth of rows a full sweep has to span several, which the
+    /// strip reports as still pending.
+    #[test]
+    fn an_edit_sweeps_without_spilling_past_one_sync() {
+        let mut h = Stoat::test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        // More rows than one recolor chunk, so a full sweep cannot finish in
+        // the single sync that follows the edit.
+        let total = crate::minimap::RESYNC_CHUNK as usize + 500;
+        let body: String = vec!["fn a() {}"; total].join("\n");
+        let root = PathBuf::from("/minimap");
+        let path = root.join("big.rs");
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.resize(80, 24);
+
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        for _ in 0..100 {
+            emit_minimap(&mut h.stoat);
+            if !h.stoat.minimap_build_pending {
+                break;
+            }
+        }
+        assert!(
+            !h.stoat.minimap_build_pending,
+            "the fixture must settle its build and first full sweep",
+        );
+
+        // Insert a `let` on the second line, restaining that row alone.
+        let (_, buffer_id) = h.stoat.focused_editor_ids().expect("a focused editor");
+        {
+            let buffer = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer");
+            buffer.write().expect("poisoned").edit(10..10, "let z = 1;");
+        }
+
+        // One settle only spawns the parse. Installing its result takes another
+        // trip through the background drive.
+        let target = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .snapshot
+            .version;
+        for _ in 0..10 {
+            h.stoat.drive_background();
+            h.settle();
+            if h.stoat.active_workspace().buffers.syntax_version(buffer_id) == Some(target) {
+                break;
+            }
+        }
+        assert_eq!(
+            h.stoat.active_workspace().buffers.syntax_version(buffer_id),
+            Some(target),
+            "the edit's reparse must land before the strip can sweep for it",
+        );
+
+        emit_minimap(&mut h.stoat);
+        assert!(
+            !h.stoat.minimap_build_pending,
+            "a one-row recolor must not leave a multi-sync sweep outstanding",
+        );
+    }
+
+    #[test]
+    fn minimap_emits_declare_and_line_summaries() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/minimap");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.resize(120, 24);
+
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        emit_minimap(&mut h.stoat);
+        let first = drain_apc(&mut rx);
+        assert!(
+            first.iter().any(|cmd| matches!(cmd, Command::Minimap(_))),
+            "the first frame declares the strip, got {first:?}"
+        );
+        assert!(
+            first
+                .iter()
+                .any(|cmd| matches!(cmd, Command::MinimapLines(_))),
+            "the first frame sends the initial line summaries, got {first:?}"
+        );
+
+        h.type_keys("i z");
+        h.settle();
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        emit_minimap(&mut h.stoat);
+        let edited = drain_apc(&mut rx);
+        assert!(
+            edited
+                .iter()
+                .any(|cmd| matches!(cmd, Command::MinimapLines(_))),
+            "an edit splices the changed line, got {edited:?}"
+        );
+    }
+
+    #[test]
+    fn a_multi_chunk_minimap_build_completes_over_idle_emits() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        // A file larger than one build chunk fills over several syncs.
+        let total = 6000usize;
+        let body: String = vec!["ln"; total].join("\n");
+        let root = PathBuf::from("/minimap");
+        let path = root.join("big.txt");
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.resize(80, 24);
+
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        emit_minimap(&mut h.stoat);
+        assert!(
+            h.stoat.minimap_build_pending,
+            "a multi-chunk file leaves the build pending after the first emit",
+        );
+
+        // Drive the build the way an idle frame tick does, gathering the lines
+        // every emitted splice covers.
+        let mut covered: Vec<u32> = Vec::new();
+        for _ in 0..100 {
+            for cmd in drain_apc(&mut rx) {
+                if let Command::MinimapLines(lines) = cmd {
+                    covered.extend(lines.start..lines.start + lines.lines.len() as u32);
+                }
+            }
+            if !h.stoat.minimap_build_pending {
+                break;
+            }
+            emit_minimap(&mut h.stoat);
+        }
+
+        assert!(
+            !h.stoat.minimap_build_pending,
+            "the build completes over successive emits",
+        );
+        covered.sort_unstable();
+        assert_eq!(
+            covered,
+            (0..total as u32).collect::<Vec<_>>(),
+            "the emitted splices cover every line exactly once",
+        );
+    }
+
+    #[test]
+    fn unfocused_pane_dims_its_minimap_declaration() {
+        use crate::render::review::{dim_rgb, style_rgb};
+        use stoatty_protocol::command::{Command, MinimapCommand};
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
+        // Wide enough that each vertical split clears the minimap min-width gate.
+        h.resize(260, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
+        let b = h.write_file("b.txt", "delta\necho\nfoxtrot\n");
+        h.open_file(&a);
+        h.type_action("SplitRight()");
+        h.open_file(&b);
+        h.settle();
+
+        // 0.25 is the default ui.inactive_dim the test harness resolves.
+        let dim = 0.25_f32;
+        let bg = style_rgb(
+            h.stoat
+                .theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|s| s.bg),
+        )
+        .expect("test theme has an rgb background");
+        let raw: Vec<[u8; 3]> = h.stoat.minimap_class_table.palette().to_vec();
+        let dimmed: Vec<[u8; 3]> = raw.iter().map(|&c| dim_rgb(c, bg, dim)).collect();
+        assert_ne!(raw, dimmed, "dim must actually change the palette");
+
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        let minimaps: Vec<MinimapCommand> = drain_apc(&mut rx)
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::Minimap(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+
+        let focused = minimaps
+            .iter()
+            .find(|m| m.palette == raw)
+            .expect("the focused pane keeps the raw palette");
+        let unfocused = minimaps
+            .iter()
+            .find(|m| m.palette == dimmed)
+            .expect("the unfocused pane dims the palette");
+
+        let [tr, tg, tb, ta] = focused.thumb;
+        let [dr, dg, db] = dim_rgb([tr, tg, tb], bg, dim);
+        assert_eq!(
+            unfocused.thumb,
+            [dr, dg, db, ta],
+            "the unfocused thumb dims its rgb and keeps its alpha"
+        );
+        assert_eq!(
+            unfocused.thumb_border,
+            [dr, dg, db],
+            "the unfocused thumb border dims"
+        );
+
+        // The blend is held across frames rather than redone on each one, so a
+        // change to the dim has to reach the next frame instead of the first
+        // blend standing for the rest of the session.
+        let widened = 0.6_f32;
+        h.stoat.settings.ui_inactive_dim = Some(widened.into());
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        let rewidened: Vec<[u8; 3]> = raw.iter().map(|&c| dim_rgb(c, bg, widened)).collect();
+        assert!(
+            drain_apc(&mut rx)
+                .into_iter()
+                .any(|c| matches!(c, Command::Minimap(m) if m.palette == rewidened)),
+            "a changed dim re-blends the held palette",
+        );
+    }
+
+    #[test]
+    fn single_minimap_mode_reserves_a_right_edge_band() {
+        use stoat_config::MinimapMode;
+
+        let mut h = Stoat::test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\n");
+        let b = h.write_file("b.txt", "delta\necho\n");
+        h.open_file(&a);
+        h.type_action("SplitRight()");
+        h.open_file(&b);
+        h.settle();
+        let _ = h.stoat.render();
+
+        let full = h.stoat.size();
+        let band = h
+            .stoat
+            .single_minimap_rect
+            .expect("single mode reserves a band");
+        assert_eq!(
+            band.x + band.width,
+            full.width,
+            "the band ends at the window right edge"
+        );
+        assert_eq!(band.y, full.y);
+        assert_eq!(
+            band.height,
+            full.height - 1,
+            "the band stops one row above the bottom status row"
+        );
+        assert!(band.width > 0, "the band has a real width");
+
+        let focused_area = focused_editor_pane_area(&h);
+        assert!(
+            focused_area.x + focused_area.width <= band.x,
+            "the focused pane stays left of the reserved band"
+        );
+        assert!(
+            h.stoat
+                .active_workspace()
+                .editors
+                .values()
+                .all(|e| e.minimap_rect.is_none()),
+            "single mode reserves no per-pane strips"
+        );
+    }
+
+    #[test]
+    fn single_minimap_band_leaves_the_bottom_status_row_full_width() {
+        use stoat_config::MinimapMode;
+
+        let mut h = Stoat::test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\n");
+        h.open_file(&a);
+        h.settle();
+
+        let size = h.stoat.size();
+        let status_bg = h
+            .stoat
+            .theme
+            .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+            .bg
+            .expect("theme has a focused status background");
+
+        let buf = h.stoat.render();
+
+        let band = h
+            .stoat
+            .single_minimap_rect
+            .expect("single mode reserves a band");
+        assert_eq!(
+            band.height,
+            size.height - 1,
+            "the band stops one row above the bottom status row"
+        );
+
+        let bottom = size.height - 1;
+        assert_eq!(
+            buf[(size.width - 1, bottom)].bg,
+            status_bg,
+            "the focused status bar reaches the window's last column"
+        );
+    }
+
+    #[test]
+    fn single_minimap_mode_declares_one_strip_following_focus() {
+        use stoat_config::MinimapMode;
+        use stoatty_protocol::command::Command;
+
+        let content_id = |h: &Stoat| -> u32 {
+            let (editor_id, _) = h.focused_editor_ids().expect("focused editor");
+            let buffer_id = h
+                .active_workspace()
+                .editors
+                .get(editor_id)
+                .expect("editor")
+                .buffer_id;
+            h.minimap_content
+                .get(&(h.active_workspace, buffer_id))
+                .expect("minimap content for the focused buffer")
+                .content_id()
+        };
+        let single_strips = |cmds: &[Command]| -> Vec<u32> {
+            cmds.iter()
+                .filter_map(|c| match c {
+                    Command::Minimap(m) if m.strip_id == u32::MAX => Some(m.content_id),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
+        let b = h.write_file("b.txt", "delta\necho\nfoxtrot\n");
+        h.open_file(&a);
+        h.type_action("SplitRight()");
+        h.open_file(&b);
+        h.settle();
+
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter()
+                .all(|c| !matches!(c, Command::Minimap(m) if m.strip_id != u32::MAX)),
+            "single mode declares no per-pane strips, got {cmds:?}"
+        );
+        let b_content = content_id(&h.stoat);
+        assert_eq!(
+            single_strips(&cmds).last().copied(),
+            Some(b_content),
+            "the single strip shows the focused buffer"
+        );
+
+        h.type_action("FocusNext()");
+        h.settle();
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        let cmds = drain_apc(&mut rx);
+        let a_content = content_id(&h.stoat);
+        assert_ne!(a_content, b_content, "the two panes show different buffers");
+        assert_eq!(
+            single_strips(&cmds).last().copied(),
+            Some(a_content),
+            "the strip redeclares for the newly focused buffer"
+        );
+    }
+
+    #[test]
+    fn minimap_drops_content_when_the_buffer_closes() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/minimap-drop");
+        let a = root.join("a.txt");
+        let b = root.join("b.txt");
+        h.fake_fs().insert_file(&a, b"alpha\nbravo\n");
+        h.fake_fs().insert_file(&b, b"charlie\ndelta\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: a });
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: b });
+        h.settle();
+        h.resize(80, 24);
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        emit_minimap(&mut h.stoat);
+        let _ = drain_apc(&mut rx);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseBuffer);
+        h.settle();
+        let _ = h.stoat.render();
+        emit_minimap(&mut h.stoat);
+        let closed = drain_apc(&mut rx);
+        assert!(
+            closed
+                .iter()
+                .any(|cmd| matches!(cmd, Command::MinimapDrop(_))),
+            "closing a buffer drops its minimap content, got {closed:?}"
+        );
+    }
+
+    #[test]
+    fn minimap_view_tracks_the_scroll_position() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/minimap-view");
+        let path = root.join("a.txt");
+        let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.resize(120, 24);
+
+        let _ = h.stoat.render();
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
+        let first = drain_apc(&mut rx);
+        let top_at_origin = first.iter().find_map(|cmd| match cmd {
+            Command::MinimapView(v) => Some(v.top_256),
+            _ => None,
+        });
+        assert_eq!(
+            top_at_origin,
+            Some(0),
+            "the origin thumb sits at line 0, got {first:?}"
+        );
+
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
+        {
+            let editor = h
+                .stoat
+                .active_workspace_mut()
+                .editors
+                .get_mut(editor_id)
+                .expect("editor");
+            editor.scroll_row = 50;
+            editor.scroll_offset = 50.0;
+        }
+        let _ = h.stoat.render();
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
+        let scrolled = drain_apc(&mut rx);
+        let top_after_scroll = scrolled.iter().find_map(|cmd| match cmd {
+            Command::MinimapView(v) => Some(v.top_256),
+            _ => None,
+        });
+        assert_eq!(
+            top_after_scroll,
+            Some(50 * 256),
+            "the thumb tracks the scrolled top row, got {scrolled:?}"
+        );
+    }
+
+    /// Several soft-wrapped display rows share one buffer line, and the strip
+    /// draws one row per buffer line. An unconverted display top therefore
+    /// overruns the strip's scrollable span near the bottom of the file, which
+    /// pushes the thumb past the strip's bottom edge entirely.
+    #[test]
+    fn minimap_view_maps_wrapped_rows_to_buffer_lines() {
+        use stoatty_protocol::command::Command;
+
+        fn view_after_scroll(
+            h: &mut crate::test_harness::TestHarness,
+            rx: &mut UnboundedReceiver<Vec<u8>>,
+            editor_id: EditorId,
+            display_row: u32,
+        ) -> (u32, u16) {
+            let _ = drain_apc(rx);
+            {
+                let editor = h
+                    .stoat
+                    .active_workspace_mut()
+                    .editors
+                    .get_mut(editor_id)
+                    .expect("editor");
+                editor.scroll_row = display_row;
+                editor.scroll_offset = display_row as f32;
+            }
+            let _ = h.stoat.render();
+            apc_emit::emit_smooth_scroll(&mut h.stoat);
+            let cmds = drain_apc(rx);
+            cmds.iter()
+                .rev()
+                .find_map(|cmd| match cmd {
+                    Command::MinimapView(v) => Some((v.top_256, v.visible_lines)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("a minimap view emit, got {cmds:?}"))
+        }
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/minimap-wrap");
+        let path = root.join("wide.txt");
+        // No trailing newline, so every buffer line is a long one and the wrap
+        // ratio stays uniform across the file.
+        let body = (0..60)
+            .map(|i| format!("{i}{}", "w".repeat(150)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        // Wide enough for the minimap strip to render at all, so the wrap comes
+        // from the line length rather than a cramped pane.
+        h.resize(120, 24);
+        let _ = h.stoat.render();
+
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
+        // The emit measures the window against the pool region, so the expected
+        // spans below must be derived from that same height.
+        let pool_rows = {
+            let panes = apc_emit::editor_pool_panes(&h.stoat);
+            let (_, _, region) = panes[0];
+            region.height as u32
+        };
+        let (display_rows, buffer_lines, mid, bottom) = {
+            let editor = h
+                .stoat
+                .active_workspace_mut()
+                .editors
+                .get_mut(editor_id)
+                .expect("editor");
+            let snapshot = editor.display_map.snapshot();
+            let display_rows = snapshot.line_count();
+            let line_at = |row: u32| {
+                snapshot
+                    .display_to_buffer(DisplayPoint::new(row, 0))
+                    .expect("a text row")
+                    .row
+            };
+            // The top display row, its buffer line, and the buffer lines the
+            // pooled viewport covers from there.
+            let window = |top_row: u32| {
+                let last = (top_row + pool_rows - 1).min(display_rows - 1);
+                (
+                    top_row,
+                    line_at(top_row),
+                    line_at(last) - line_at(top_row) + 1,
+                )
+            };
+            let max_scroll = display_rows
+                .saturating_sub(1)
+                .saturating_sub(pool_rows.saturating_sub(1));
+            (
+                display_rows,
+                snapshot.buffer_line_count(),
+                window(display_rows / 2),
+                window(max_scroll),
+            )
+        };
+        assert_eq!(
+            display_rows,
+            buffer_lines * 2,
+            "the fixture must soft-wrap every line into exactly two display rows"
+        );
+
+        let (mid_row, mid_line, mid_visible) = mid;
+        let emitted = view_after_scroll(&mut h, &mut rx, editor_id, mid_row);
+        assert_eq!(
+            emitted,
+            (mid_line * 256, mid_visible as u16),
+            "display row {mid_row} maps to buffer line {mid_line} over {mid_visible} lines"
+        );
+
+        let (max_row, max_line, max_visible) = bottom;
+        let (top_256, visible) = view_after_scroll(&mut h, &mut rx, editor_id, max_row);
+        assert_eq!(
+            (top_256, visible),
+            (max_line * 256, max_visible as u16),
+            "the bottom-scrolled top maps to buffer line {max_line} over {max_visible} lines"
+        );
+        assert_eq!(
+            top_256 / 256 + visible as u32,
+            buffer_lines,
+            "the bottom-scrolled window ends exactly at the last buffer line, so the thumb \
+             stays on the strip"
+        );
+    }
+
+    #[test]
+    fn single_minimap_mode_syncs_content_for_every_visible_buffer() {
+        use stoat_config::MinimapMode;
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
+        let b = h.write_file("b.txt", "delta\necho\nfoxtrot\n");
+        h.open_file(&a);
+        h.type_action("SplitRight()");
+        h.open_file(&b);
+        h.settle();
+        let _ = h.stoat.render();
+
+        let buffer_ids: Vec<BufferId> = {
+            let ws = h.stoat.active_workspace();
+            ws.panes
+                .split_panes()
+                .filter_map(|(_, pane)| match pane.view {
+                    View::Editor(editor_id) => Some(ws.editors.get(editor_id)?.buffer_id),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(buffer_ids.len(), 2, "two visible editor buffers");
+        let content_ids: Vec<u32> = buffer_ids
+            .iter()
+            .map(|&buffer_id| {
+                h.stoat
+                    .minimap_content
+                    .get(&(h.stoat.active_workspace, buffer_id))
+                    .expect("content for a visible buffer")
+                    .content_id()
+            })
+            .collect();
+
+        emit_minimap(&mut h.stoat);
+        let synced: std::collections::HashSet<u32> = drain_apc(&mut rx)
+            .iter()
+            .filter_map(|c| match c {
+                Command::MinimapLines(l) => Some(l.content_id),
+                _ => None,
+            })
+            .collect();
+        for id in content_ids {
+            assert!(
+                synced.contains(&id),
+                "single mode syncs minimap_lines for every visible buffer; missing {id}, got {synced:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_minimap_view_follows_focus_and_rekeys_by_strip() {
+        use stoat_config::MinimapMode;
+        use stoatty_protocol::command::Command;
+
+        let single_views = |cmds: &[Command]| -> Vec<u32> {
+            cmds.iter()
+                .filter_map(|c| match c {
+                    Command::MinimapView(v) if v.strip_id == u32::MAX => Some(v.top_256),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
+        let b = h.write_file("b.txt", "delta\necho\nfoxtrot\n");
+        h.open_file(&a);
+        h.type_action("SplitRight()");
+        h.open_file(&b);
+        h.settle();
+
+        let _ = h.stoat.render();
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
+        let cmds = drain_apc(&mut rx);
+        assert_eq!(
+            single_views(&cmds).last().copied(),
+            Some(0),
+            "single mode emits a view frame for strip u32::MAX at the origin"
+        );
+        assert!(
+            cmds.iter()
+                .all(|c| !matches!(c, Command::MinimapView(v) if v.strip_id != u32::MAX)),
+            "single mode emits no per-pane view frames, got {cmds:?}"
+        );
+
+        // Focus the other pane, also at offset 0. Without keying the dedup by
+        // strip and storing the pool, the shared strip would skip this frame as
+        // an unmoved viewport. The pool change forces the re-emit.
+        h.type_action("FocusNext()");
+        h.settle();
+        let _ = h.stoat.render();
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
+        let cmds = drain_apc(&mut rx);
+        assert_eq!(
+            single_views(&cmds).last().copied(),
+            Some(0),
+            "focusing another pane at the same offset re-emits the strip view"
+        );
+    }
+
+    #[test]
+    fn a_centered_modal_undeclares_the_single_strip() {
+        use stoat_action::OpenFileFinder;
+        use stoat_config::MinimapMode;
+        use stoatty_protocol::command::Command;
+
+        let strip_declared = |cmds: &[Command]| -> bool {
+            cmds.iter()
+                .any(|c| matches!(c, Command::Minimap(m) if m.strip_id == u32::MAX))
+        };
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
+        h.open_file(&a);
+        h.settle();
+
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        assert!(
+            strip_declared(&drain_apc(&mut rx)),
+            "single mode declares the strip while no modal is open"
+        );
+
+        action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        assert!(
+            !strip_declared(&drain_apc(&mut rx)),
+            "opening the finder undeclares the strip so the modal owns the right edge"
+        );
+
+        h.stoat.file_finder = None;
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        assert!(
+            strip_declared(&drain_apc(&mut rx)),
+            "closing the finder redeclares the strip"
+        );
+    }
+
+    /// The palette is the one centered modal that does not hide the strip.
+    ///
+    /// Its box is capped at 80 columns and centered, so it cannot reach a band
+    /// that only exists from 108 columns up. Hiding the strip for it would
+    /// cost the minimap on every palette open for no overlap.
+    #[test]
+    fn the_palette_leaves_the_single_strip_declared() {
+        use stoat_action::OpenCommandPalette;
+        use stoat_config::MinimapMode;
+        use stoatty_protocol::command::Command;
+
+        let strip_declared = |cmds: &[Command]| -> bool {
+            cmds.iter()
+                .any(|c| matches!(c, Command::Minimap(m) if m.strip_id == u32::MAX))
+        };
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
+        h.open_file(&a);
+        h.settle();
+
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        assert!(strip_declared(&drain_apc(&mut rx)));
+
+        action_handlers::dispatch(&mut h.stoat, &OpenCommandPalette);
+        h.settle();
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        assert!(
+            h.stoat.command_palette.is_some(),
+            "the palette must actually be open for this to mean anything"
+        );
+        assert!(
+            strip_declared(&drain_apc(&mut rx)),
+            "the strip survives the palette rather than vanishing under it"
+        );
+
+        h.stoat.command_palette = None;
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        assert!(
+            strip_declared(&drain_apc(&mut rx)),
+            "and stays declared once the palette closes"
+        );
+    }
+
+    #[test]
+    fn the_hints_box_draws_over_the_single_strip() {
+        use stoat_config::MinimapMode;
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
+        h.open_file(&a);
+        h.settle();
+
+        // The which-key box is standing hints, not a centered modal, so the strip
+        // stays declared and the box draws on top of it.
+        h.type_keys("space");
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+
+        let cmds = drain_apc(&mut rx);
+        let strip_idx = cmds
+            .iter()
+            .position(|c| matches!(c, Command::Minimap(m) if m.strip_id == u32::MAX))
+            .expect("the single strip stays declared under the hints box");
+        let panel_idx = cmds
+            .iter()
+            .position(|c| matches!(c, Command::Panel(_)))
+            .expect("the hints box emits a panel");
+        assert!(
+            strip_idx < panel_idx,
+            "the strip declares before the hints panel so the panel occludes their overlap"
+        );
+    }
+
+    #[test]
+    fn minimap_marks_diff_and_diagnostic_lines() {
+        use crate::minimap::EdgeClass;
+        use lsp_types::DiagnosticSeverity;
+        use stoatty_protocol::command::{Command, MinimapRun};
+
+        fn diag(line: u32, severity: DiagnosticSeverity) -> lsp_types::Diagnostic {
+            lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: lsp_types::Position { line, character: 0 },
+                    end: lsp_types::Position { line, character: 1 },
+                },
+                severity: Some(severity),
+                ..Default::default()
+            }
+        }
+
+        // The leading run of buffer line `n` in the most recent emit.
+        fn line_lead(cmds: &[Command], n: u32) -> Option<MinimapRun> {
+            cmds.iter().rev().find_map(|cmd| match cmd {
+                Command::MinimapLines(l) => {
+                    let idx = n.checked_sub(l.start)? as usize;
+                    l.lines.get(idx).and_then(|runs| runs.first().copied())
+                },
+                _ => None,
+            })
+        }
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/minimap-marks");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"keep\nnew\ntail\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        {
+            let base = "keep\nold\ntail\n";
+            let text = "keep\nnew\ntail\n";
+            let dm = crate::diff_map::DiffMap::from_structural_changes(
+                stoat_language::structural_diff::diff(base, text),
+                Arc::new(base.to_string()),
+                text,
+            );
+            h.stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer")
+                .write()
+                .expect("poisoned")
+                .diff_map = Some(dm);
+        }
+        h.stoat
+            .active_workspace_mut()
+            .panes
+            .resize(Rect::new(0, 0, 80, 24));
+
+        let modified = h.stoat.minimap_class_table.edge_class(EdgeClass::Modified);
+        let error = h.stoat.minimap_class_table.edge_class(EdgeClass::Error);
+
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        emit_minimap(&mut h.stoat);
+        let first = drain_apc(&mut rx);
+        assert_eq!(
+            line_lead(&first, 1).map(|r| r.class),
+            Some(modified),
+            "the modified line leads with the modified edge class, got {first:?}"
+        );
+
+        h.seed_diagnostics(path.clone(), vec![diag(1, DiagnosticSeverity::ERROR)]);
+        let _ = h.stoat.render();
+        emit_minimap(&mut h.stoat);
+        let errored = drain_apc(&mut rx);
+        assert_eq!(
+            line_lead(&errored, 1).map(|r| r.class),
+            Some(error),
+            "an error overrides the diff mark, got {errored:?}"
+        );
+
+        h.seed_diagnostics(path.clone(), vec![]);
+        let _ = h.stoat.render();
+        emit_minimap(&mut h.stoat);
+        let cleared = drain_apc(&mut rx);
+        assert_eq!(
+            line_lead(&cleared, 1).map(|r| r.class),
+            Some(modified),
+            "clearing the diagnostic reverts to the modified mark, got {cleared:?}"
+        );
+        let touched: Vec<u32> = cleared
+            .iter()
+            .filter_map(|c| match c {
+                Command::MinimapLines(l) => Some(l.start),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(touched, vec![1], "only the formerly-marked line re-splices");
+
+        // A recomputed diff moves the hunk to line 2 with the buffer untouched,
+        // so line 2 has to pick up a mark it has never carried before.
+        {
+            let base = "keep\nnew\nold\n";
+            let text = "keep\nnew\ntail\n";
+            let dm = crate::diff_map::DiffMap::from_structural_changes(
+                stoat_language::structural_diff::diff(base, text),
+                Arc::new(base.to_string()),
+                text,
+            );
+            h.stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer")
+                .write()
+                .expect("poisoned")
+                .diff_map = Some(dm);
+        }
+        let _ = h.stoat.render();
+        emit_minimap(&mut h.stoat);
+        let moved = drain_apc(&mut rx);
+        assert_eq!(
+            line_lead(&moved, 2).map(|r| r.class),
+            Some(modified),
+            "the newly-differing line takes the modified mark, got {moved:?}"
+        );
+        assert_eq!(
+            line_lead(&moved, 1).map(|r| r.start_col),
+            Some(2),
+            "line 1 matches the base again, so its lane is empty, got {moved:?}"
+        );
+
+        h.seed_diagnostics(path, vec![diag(0, DiagnosticSeverity::ERROR)]);
+        let _ = h.stoat.render();
+        emit_minimap(&mut h.stoat);
+        let on_clean = drain_apc(&mut rx);
+        assert_eq!(
+            line_lead(&on_clean, 0).map(|r| r.class),
+            Some(error),
+            "a diagnostic marks a line no hunk covers, got {on_clean:?}"
+        );
+    }
+
+    /// The style id and interner for the first `THEME_KEYS` scope, as the
+    /// production paths hand them to a token channel.
+    ///
+    /// Tokens must intern through the shared table, since that is what the
+    /// minimap's class lookup is keyed by.
+    fn first_scope_style(stoat: &Stoat) -> (HighlightStyleId, Arc<HighlightStyleInterner>) {
+        let style = stoat
+            .syntax_styles
+            .id_for_highlight(stoat_language::HighlightId(0))
+            .expect("the first theme key resolves");
+        (style, stoat.syntax_styles.interner.clone())
+    }
+
+    #[test]
+    fn minimap_colors_align_past_a_leading_tab() {
+        use crate::display_map::highlights::SemanticTokenHighlight;
+        use std::sync::Arc;
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/minimap-tab");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"\tfoo\nbar\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let (editor_id, buffer_id) = {
+            let ids = h.stoat.focused_editor_ids().expect("editor");
+            (ids.0, ids.1)
+        };
+
+        // Give the token a real syntax scope so it maps to a class.
+        let (style, interner) = first_scope_style(&h.stoat);
+        let expected_class = h.stoat.minimap_class_table.class_of(style);
+        assert_ne!(
+            expected_class, 0,
+            "the test style must map to a syntax class"
+        );
+
+        let range = {
+            let shared = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer");
+            let snap = shared.read().expect("poisoned").snapshot.clone();
+            snap.anchor_at(1, Bias::Right)..snap.anchor_at(4, Bias::Left)
+        };
+        let tokens: Arc<[SemanticTokenHighlight]> =
+            Arc::from(vec![SemanticTokenHighlight { range, style }]);
+        h.stoat.active_workspace_mut().editors[editor_id]
+            .display_map
+            .set_semantic_token_highlights(buffer_id, tokens, interner);
+
+        h.stoat
+            .active_workspace_mut()
+            .panes
+            .resize(Rect::new(0, 0, 80, 24));
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        emit_minimap(&mut h.stoat);
+        let cmds = drain_apc(&mut rx);
+
+        let line0 = cmds
+            .iter()
+            .rev()
+            .find_map(|cmd| match cmd {
+                Command::MinimapLines(l) if l.start == 0 => l.lines.first().cloned(),
+                _ => None,
+            })
+            .expect("line 0 summary");
+
+        // The tab expands content to column 4, where the token's colored run
+        // begins. The old display-chunk mapping placed the token past the raw
+        // line's bytes, dropping the color.
+        assert_eq!(
+            line0.first().map(|run| (run.start_col, run.class)),
+            Some((4, expected_class)),
+            "the run starts at the tab-expanded column in the syntax class, got {line0:?}"
+        );
+    }
+
+    #[test]
+    fn minimap_recolors_on_syntax_toggle() {
+        use crate::display_map::highlights::SemanticTokenHighlight;
+        use std::sync::Arc;
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/minimap-toggle");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"foo\nbar\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let (editor_id, buffer_id) = {
+            let ids = h.stoat.focused_editor_ids().expect("editor");
+            (ids.0, ids.1)
+        };
+
+        let (style, interner) = first_scope_style(&h.stoat);
+        let colored_class = h.stoat.minimap_class_table.class_of(style);
+        assert_ne!(
+            colored_class, 0,
+            "the test style must map to a syntax class"
+        );
+
+        let range = {
+            let shared = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer");
+            let snap = shared.read().expect("poisoned").snapshot.clone();
+            snap.anchor_at(0, Bias::Right)..snap.anchor_at(3, Bias::Left)
+        };
+        let tokens: Arc<[SemanticTokenHighlight]> =
+            Arc::from(vec![SemanticTokenHighlight { range, style }]);
+        h.stoat.active_workspace_mut().editors[editor_id]
+            .display_map
+            .set_semantic_token_highlights(buffer_id, tokens, interner);
+        h.stoat
+            .active_workspace_mut()
+            .panes
+            .resize(Rect::new(0, 0, 80, 24));
+
+        let line0_class = |cmds: &[Command]| {
+            cmds.iter().rev().find_map(|cmd| match cmd {
+                Command::MinimapLines(l) if l.start == 0 => l
+                    .lines
+                    .first()
+                    .and_then(|runs| runs.first())
+                    .map(|r| r.class),
+                _ => None,
+            })
+        };
+
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        emit_minimap(&mut h.stoat);
+        let colored = drain_apc(&mut rx);
+        assert_eq!(
+            line0_class(&colored),
+            Some(colored_class),
+            "line 0 is colored under syntax highlighting, got {colored:?}"
+        );
+
+        // Toggling syntax off re-summarizes the built lines monochrome, with no
+        // buffer edit.
+        h.stoat.syntax_highlight = false;
+        let _ = h.stoat.render();
+        emit_minimap(&mut h.stoat);
+        let mono = drain_apc(&mut rx);
+        assert_eq!(
+            line0_class(&mono),
+            Some(0),
+            "the toggle recolors line 0 monochrome, got {mono:?}"
+        );
+    }
+
+    /// A theme switch keeps the minimap's syntax highlighting.
+    ///
+    /// Classifying by resolved color meant a switch left the token's stale
+    /// foreground matching nothing in the new table, so it classified 0 and the
+    /// token vanished from the strip. Classifying by style id is immune,
+    /// because the id names the scope rather than a color.
+    #[test]
+    fn minimap_keeps_its_classes_across_a_theme_switch() {
+        use crate::display_map::highlights::SemanticTokenHighlight;
+        use std::sync::Arc;
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/minimap-theme");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"foo\nbar\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let (editor_id, buffer_id) = {
+            let ids = h.stoat.focused_editor_ids().expect("editor");
+            (ids.0, ids.1)
+        };
+
+        let (style, interner) = first_scope_style(&h.stoat);
+        let expected = h.stoat.minimap_class_table.class_of(style);
+        assert_ne!(expected, 0, "the test style must map to a syntax class");
+
+        let range = {
+            let shared = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer");
+            let snap = shared.read().expect("poisoned").snapshot.clone();
+            snap.anchor_at(0, Bias::Right)..snap.anchor_at(3, Bias::Left)
+        };
+        let tokens: Arc<[SemanticTokenHighlight]> =
+            Arc::from(vec![SemanticTokenHighlight { range, style }]);
+        h.stoat.active_workspace_mut().editors[editor_id]
+            .display_map
+            .set_semantic_token_highlights(buffer_id, tokens, interner);
+
+        let row0_classes = |stoat: &mut Stoat| {
+            let snapshot = stoat.active_workspace_mut().editors[editor_id]
+                .display_map
+                .snapshot();
+            minimap_line_tokens(
+                &snapshot,
+                buffer_id,
+                stoat.syntax_highlight,
+                &stoat.minimap_class_table,
+                0..1,
+            )
+            .remove(&0)
+            .unwrap_or_default()
+            .iter()
+            .map(|token| token.class)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(row0_classes(&mut h.stoat), vec![expected]);
+
+        action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::SetTheme {
+                name: "gruvbox-light".to_string(),
+            },
+        );
+
+        let after = h.stoat.minimap_class_table.class_of(style);
+        assert_ne!(after, 0, "the scope still has a class under the new theme");
+        assert_eq!(
+            row0_classes(&mut h.stoat),
+            vec![after],
+            "the token keeps its class instead of dropping off the strip"
         );
     }
 }
