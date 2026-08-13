@@ -96,7 +96,7 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
     } else {
         let new_offset = edit_range.start + inserted_text.len();
         editor.selections.transform(new_buf, |s| {
-            crate::action_handlers::movement::forward_block_cursor(
+            crate::selection::forward_block_cursor(
                 s.id,
                 new_offset,
                 stoat_text::SelectionGoal::None,

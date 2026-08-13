@@ -1015,7 +1015,7 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
             .rope()
             .point_to_offset(Point::new(target_row, 0));
         editor.selections.transform(buffer_snapshot, |sel| {
-            super::movement::land_block_cursor(
+            crate::selection::land_block_cursor(
                 sel.id,
                 target_offset,
                 SelectionGoal::None,

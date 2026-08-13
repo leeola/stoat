@@ -6190,7 +6190,7 @@ impl Stoat {
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
         editor.selections.transform(buf_snap, |s| {
-            action_handlers::movement::land_block_cursor(
+            crate::selection::land_block_cursor(
                 s.id,
                 offset,
                 SelectionGoal::None,
@@ -6216,7 +6216,7 @@ impl Stoat {
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
         editor.selections.transform(buf_snap, |s| {
-            action_handlers::movement::land_block_cursor(
+            crate::selection::land_block_cursor(
                 s.id,
                 offset,
                 SelectionGoal::None,

@@ -10,7 +10,8 @@ use crate::{
     multi_buffer::MultiBufferSnapshot,
     pane::View,
     selection::{
-        merge_overlapping_spans, EndCell, ResolvedRead, SelectionsCollection, SpanLanding,
+        anchor_selection, forward_block_cursor, land_block_cursor, merge_overlapping_spans,
+        EndCell, ResolvedRead, SelectionsCollection, SpanLanding,
     },
 };
 use std::{
@@ -567,65 +568,6 @@ where
         .collect();
     landings.sort_unstable_by_key(|(id, _, _)| *id);
     landings
-}
-
-/// Re-anchor an offset-based selection produced by the block-cursor helpers.
-fn anchor_selection(landed: Selection<usize>, buffer: &MultiBufferSnapshot) -> Selection<Anchor> {
-    Selection {
-        id: landed.id,
-        start: buffer.anchor_at(landed.start, Bias::Right),
-        end: buffer.anchor_at(landed.end, Bias::Right),
-        reversed: landed.reversed,
-        goal: landed.goal,
-    }
-}
-
-/// Land a forward 1-wide block cursor on the cell at `target`, preserving
-/// `goal` (widening backward at the rope end where there is no next character).
-///
-/// This is the min-width-1 replacement for a bare `collapse_to`. The block
-/// cursor sits on `target` and the selection covers that one cell rather than
-/// collapsing to a zero-width point.
-pub(crate) fn land_block_cursor(
-    id: usize,
-    target: usize,
-    goal: SelectionGoal,
-    rope: &Rope,
-    buffer: &MultiBufferSnapshot,
-) -> Selection<Anchor> {
-    let widened = Selection {
-        id,
-        start: target,
-        end: target,
-        reversed: false,
-        goal,
-    }
-    .min_width_1(rope);
-    anchor_selection(widened, buffer)
-}
-
-/// Land a forward 1-wide block cursor covering the character after `target`,
-/// or a zero-width cursor at the rope end.
-///
-/// This is the insert-mode counterpart to [`land_block_cursor`]. An insert
-/// cursor sits at the insertion point, so it widens forward and never steps
-/// back at the buffer end -- a backward step there would move the insertion
-/// point before the last inserted character and corrupt further typing.
-pub(crate) fn forward_block_cursor(
-    id: usize,
-    target: usize,
-    goal: SelectionGoal,
-    rope: &Rope,
-    buffer: &MultiBufferSnapshot,
-) -> Selection<Anchor> {
-    let end = next_char_boundary(rope, target);
-    Selection {
-        id,
-        start: buffer.anchor_at(target, Bias::Right),
-        end: buffer.anchor_at(end, Bias::Right),
-        reversed: false,
-        goal,
-    }
 }
 
 /// Reorient each selection so its head sits at its start, keeping the span,

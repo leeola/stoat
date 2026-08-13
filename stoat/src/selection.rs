@@ -2,7 +2,8 @@ use crate::multi_buffer::MultiBufferSnapshot;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use stoat_text::{
-    next_char_boundaries_batch, prev_char_boundary, Anchor, Bias, Selection, SelectionGoal,
+    next_char_boundaries_batch, next_char_boundary, prev_char_boundary, Anchor, Bias, Rope,
+    Selection, SelectionGoal,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -154,10 +155,11 @@ impl SelectionsCollection {
     /// like Helix, rather than the zero-width placeholder [`Self::new`] holds
     /// before a rope is available. An empty buffer leaves a zero-width cursor.
     pub(crate) fn seed_cursor(&mut self, snapshot: &MultiBufferSnapshot) {
-        self.install(Arc::from([block_cursor_at(
+        self.install(Arc::from([land_block_cursor(
+            0,
             0,
             SelectionGoal::None,
-            0,
+            snapshot.rope(),
             snapshot,
         )]));
         self.next_selection_id = 1;
@@ -184,10 +186,11 @@ impl SelectionsCollection {
     pub(crate) fn set_block_cursor(&mut self, offset: usize, snapshot: &MultiBufferSnapshot) {
         let id = self.next_selection_id;
         self.next_selection_id += 1;
-        self.install(Arc::from([block_cursor_at(
+        self.install(Arc::from([land_block_cursor(
+            id,
             offset,
             SelectionGoal::None,
-            id,
+            snapshot.rope(),
             snapshot,
         )]));
     }
@@ -483,8 +486,8 @@ impl SelectionsCollection {
         // themselves. [`Self::insert_cursor`] widens through
         // `Selection::min_width_1`, which lands on whole clusters.
         // [`Self::set_block_cursor`] and [`Self::seed_cursor`] go through
-        // [`block_cursor_at`], which clamps down before widening because
-        // widening alone would start from wherever a click landed.
+        // [`land_block_cursor`], which clamps down before widening because
+        // widening alone starts from wherever a click landed.
         // [`Self::restore`] replays anchors an earlier pass already clipped.
         //
         // Starts clamp down and ends clamp up, so a selection only ever grows
@@ -938,33 +941,76 @@ fn insert_at(
     rebuilt.into()
 }
 
-fn block_cursor_at(
-    offset: usize,
-    goal: SelectionGoal,
+/// Land a forward 1-wide block cursor on the cell at `target`, preserving
+/// `goal`.
+///
+/// This is the min-width-1 replacement for a bare `collapse_to`. The block
+/// cursor sits on `target` and the selection covers that one cell rather than
+/// collapsing to a zero-width point. At the rope end, where no next character
+/// exists to widen over, it widens backward instead.
+///
+/// `target` is a position rather than a boundary. An offset inside a grapheme
+/// cluster lands on the whole cluster.
+pub(crate) fn land_block_cursor(
     id: usize,
-    snapshot: &MultiBufferSnapshot,
+    target: usize,
+    goal: SelectionGoal,
+    rope: &Rope,
+    buffer: &MultiBufferSnapshot,
 ) -> Selection<Anchor> {
     // A mouse click resolves through a display clip that walks codepoints, so
-    // it can name an offset inside a cluster. Widening from there would jump to
-    // the cluster's end and cover only its tail. Clamping down first is
+    // it names an offset inside a cluster. Widening from there jumps to the
+    // cluster's end and covers only its tail. Clamping down first is
     // `replace_with`'s start rule, and it is what a click means: the cell
-    // belongs to the cluster it is drawn inside.
-    let rope = snapshot.rope();
-    let offset = rope.clip_to_grapheme_boundary(offset, Bias::Left);
+    // belongs to the cluster it is drawn inside. A caller landing a motion
+    // result is already on a boundary, so the clamp costs it nothing.
+    let target = rope.clip_to_grapheme_boundary(target, Bias::Left);
     let widened = Selection {
         id,
-        start: offset,
-        end: offset,
+        start: target,
+        end: target,
         reversed: false,
         goal,
     }
     .min_width_1(rope);
+    anchor_selection(widened, buffer)
+}
+
+/// Land a forward 1-wide block cursor covering the character after `target`,
+/// or a zero-width cursor at the rope end.
+///
+/// This is the insert-mode counterpart to [`land_block_cursor`]. An insert
+/// cursor sits at the insertion point, so it widens forward and never steps
+/// back at the buffer end. A backward step there moves the insertion point
+/// before the last inserted character and corrupts further typing.
+pub(crate) fn forward_block_cursor(
+    id: usize,
+    target: usize,
+    goal: SelectionGoal,
+    rope: &Rope,
+    buffer: &MultiBufferSnapshot,
+) -> Selection<Anchor> {
+    let end = next_char_boundary(rope, target);
     Selection {
         id,
-        start: snapshot.anchor_at(widened.start, Bias::Right),
-        end: snapshot.anchor_at(widened.end, Bias::Right),
+        start: buffer.anchor_at(target, Bias::Right),
+        end: buffer.anchor_at(end, Bias::Right),
         reversed: false,
         goal,
+    }
+}
+
+/// Re-anchor an offset-based selection produced by the block-cursor helpers.
+pub(crate) fn anchor_selection(
+    landed: Selection<usize>,
+    buffer: &MultiBufferSnapshot,
+) -> Selection<Anchor> {
+    Selection {
+        id: landed.id,
+        start: buffer.anchor_at(landed.start, Bias::Right),
+        end: buffer.anchor_at(landed.end, Bias::Right),
+        reversed: landed.reversed,
+        goal: landed.goal,
     }
 }
 

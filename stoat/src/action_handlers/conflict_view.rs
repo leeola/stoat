@@ -937,7 +937,7 @@ fn land_cursor(stoat: &mut Stoat, editor_id: EditorId, offset: usize) {
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     editor.selections.transform(buffer_snapshot, |sel| {
-        super::movement::land_block_cursor(
+        crate::selection::land_block_cursor(
             sel.id,
             offset,
             SelectionGoal::None,
@@ -991,7 +991,7 @@ fn land_first_chunk(stoat: &mut Stoat, offset: Option<usize>, origin: Option<Jum
         let snapshot = editor.display_map.snapshot();
         let buffer_snapshot = snapshot.buffer_snapshot();
         editor.selections.transform(buffer_snapshot, |sel| {
-            super::movement::land_block_cursor(
+            crate::selection::land_block_cursor(
                 sel.id,
                 offset,
                 SelectionGoal::None,
