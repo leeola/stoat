@@ -93,6 +93,33 @@ define_action!(
 );
 
 define_action!(
+    WalkthroughNextAnnotationDef,
+    WalkthroughNextAnnotation,
+    "WalkthroughNextAnnotation",
+    ActionKind::WalkthroughNextAnnotation,
+    "go to the next annotation of this stop",
+    "Move to the next labeled annotation of the stop the walkthrough is on, \
+     opening the file it names when that differs from the stop's own. The \
+     stop's focus heads the walk, so the first step leaves it and the last \
+     annotation ends it.",
+    ActionPriority::Normal,
+    command_name = "walkthrough-next-annotation"
+);
+
+define_action!(
+    WalkthroughPrevAnnotationDef,
+    WalkthroughPrevAnnotation,
+    "WalkthroughPrevAnnotation",
+    ActionKind::WalkthroughPrevAnnotation,
+    "go to the previous annotation of this stop",
+    "Move back through the annotations of the stop the walkthrough is on. A \
+     step back off the first annotation returns to the stop's own focus, which \
+     heads the walk.",
+    ActionPriority::Normal,
+    command_name = "walkthrough-prev-annotation"
+);
+
+define_action!(
     WalkthroughShowNarrationDef,
     WalkthroughShowNarration,
     "WalkthroughShowNarration",

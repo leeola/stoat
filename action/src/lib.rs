@@ -106,8 +106,8 @@ pub use defs::{
     tab::{CloseTab, GotoTab, NewTab, NextTab, PrevTab, RenameTab, ToggleTab, ToggleTabBar},
     terminal::Terminal,
     walkthrough::{
-        WalkthroughDone, WalkthroughNext, WalkthroughOpen, WalkthroughPrev,
-        WalkthroughShowNarration,
+        WalkthroughDone, WalkthroughNext, WalkthroughNextAnnotation, WalkthroughOpen,
+        WalkthroughPrev, WalkthroughPrevAnnotation, WalkthroughShowNarration,
     },
     workspace::{
         CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd, ShowCwd,

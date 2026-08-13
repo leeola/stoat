@@ -123,8 +123,8 @@ use crate::{
         tab::{CloseTab, GotoTab, NewTab, NextTab, PrevTab, RenameTab, ToggleTab, ToggleTabBar},
         terminal::Terminal,
         walkthrough::{
-            WalkthroughDone, WalkthroughNext, WalkthroughOpen, WalkthroughPrev,
-            WalkthroughShowNarration,
+            WalkthroughDone, WalkthroughNext, WalkthroughNextAnnotation, WalkthroughOpen,
+            WalkthroughPrev, WalkthroughPrevAnnotation, WalkthroughShowNarration,
         },
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
@@ -775,6 +775,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(WalkthroughNext::DEF, |_| Ok(Box::new(WalkthroughNext)));
     add(WalkthroughPrev::DEF, |_| Ok(Box::new(WalkthroughPrev)));
+    add(WalkthroughNextAnnotation::DEF, |_| {
+        Ok(Box::new(WalkthroughNextAnnotation))
+    });
+    add(WalkthroughPrevAnnotation::DEF, |_| {
+        Ok(Box::new(WalkthroughPrevAnnotation))
+    });
     add(WalkthroughShowNarration::DEF, |_| {
         Ok(Box::new(WalkthroughShowNarration))
     });
@@ -1234,6 +1240,8 @@ mod tests {
         "TrailClear",
         "WalkthroughNext",
         "WalkthroughPrev",
+        "WalkthroughNextAnnotation",
+        "WalkthroughPrevAnnotation",
         "WalkthroughShowNarration",
         "WalkthroughDone",
         "Hover",
@@ -1794,7 +1802,7 @@ mod tests {
         // + 1 GotoImplementors.
         // + 2 GotoDiffCallerUp, GotoDiffCalleeDown.
         // + 5 MarkTrailStart, MarkTrailEnd, TrailNext, TrailPrev, TrailClear.
-        // + 5 WalkthroughOpen/Next/Prev/ShowNarration/Done.
+        // + 7 WalkthroughOpen/Next/Prev/NextAnnotation/PrevAnnotation/ShowNarration/Done.
         // + 2 FileFinderPageUp, FileFinderPageDown.
         // + 1 FileFinderComplete.
         // + 2 PalettePageUp, PalettePageDown.
@@ -1855,7 +1863,7 @@ mod tests {
         // + 8 Jumplist/Diagnostics/Location/WorkspacePicker PageDown/PageUp.
         // + 2 CommitPickerDrillIn/CommitPickerBack.
         // + 2 CommitPickerNextBranch/CommitPickerPrevBranch.
-        assert_eq!(all().count(), 433);
+        assert_eq!(all().count(), 435);
     }
 
     #[test]
