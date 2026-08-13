@@ -170,8 +170,8 @@ impl LspServerList {
             self.generation = generation;
             self.servers.clear();
 
-            let language = buffer
-                .and_then(|buffer| crate::action_handlers::lsp::lsp_language_name(buffers, buffer));
+            let language =
+                buffer.and_then(|buffer| crate::lsp::session::lsp_language_name(buffers, buffer));
             if let Some(language) = language {
                 self.servers
                     .extend(

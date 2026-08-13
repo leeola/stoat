@@ -14,7 +14,7 @@
 //! Both drains take a per-pass cap. A server that floods would otherwise starve
 //! the event loop, and whatever is left drains on the next pass.
 
-use crate::{action_handlers, app::Stoat, buffer::BufferId, host::LspHost, lsp::util};
+use crate::{app::Stoat, buffer::BufferId, host::LspHost, lsp::util};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -191,7 +191,7 @@ fn drain_incoming_requests_from(stoat: &mut Stoat, host: &Arc<dyn LspHost>) {
 /// tick.
 ///
 /// The lazy-spawn tasks armed by
-/// [`action_handlers::lsp::notify_buffer_opened`] park ready
+/// [`crate::lsp::session::notify_buffer_opened`] park ready
 /// [`crate::host::LocalLsp`] hosts in [`pending_lsp_host`]. This
 /// drains the queue. Each ready host is registered via
 /// [`install_ready_server`], and a failed spawn surfaces in the
@@ -250,7 +250,7 @@ fn install_ready_server(
             .into_iter()
             .filter_map(|path| {
                 let id = buffers.id_for_path(&path)?;
-                if action_handlers::lsp::lsp_language_name(buffers, id).as_deref()
+                if crate::lsp::session::lsp_language_name(buffers, id).as_deref()
                     != Some(language.as_str())
                 {
                     return None;
@@ -271,7 +271,7 @@ fn install_ready_server(
         stoat.lsp_doc_versions.remove(&id);
         stoat.lsp_buffer_versions.remove(&id);
         let workspace = stoat.active_workspace;
-        action_handlers::lsp::notify_buffer_opened(stoat, workspace, id, &path, text);
+        crate::lsp::session::notify_buffer_opened(stoat, workspace, id, &path, text);
     }
 }
 
@@ -504,7 +504,7 @@ mod tests {
             .buffers
             .open(&path, "abcde\n");
 
-        let uri = action_handlers::lsp::path_to_uri(&path).expect("uri");
+        let uri = crate::action_handlers::lsp::path_to_uri(&path).expect("uri");
         let edit = WorkspaceEdit {
             changes: None,
             document_changes: Some(DocumentChanges::Edits(vec![TextDocumentEdit {

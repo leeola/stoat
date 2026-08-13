@@ -255,7 +255,7 @@ pub(crate) fn focus_flags(
         .buffers
         .language_for(buffer_id)
         .map(|l| l.name.to_string());
-    let lsp = action_handlers::lsp::lsp_language_name(&ws.buffers, buffer_id)
+    let lsp = crate::lsp::session::lsp_language_name(&ws.buffers, buffer_id)
         .is_some_and(|name| registry.has_host_for_language(&name));
     let diags = ws
         .buffers

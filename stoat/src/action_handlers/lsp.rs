@@ -11,30 +11,29 @@
 
 use crate::{
     agent_ipc::AgentQuery,
-    app::{PendingSpawn, Stoat, UpdateEffect},
+    app::{Stoat, UpdateEffect},
     buffer::BufferId,
-    buffer_registry::BufferRegistry,
     display_map::{DisplayPoint, DisplaySnapshot, InlayKind},
     editor_state::{EditorId, ScrollGlide},
-    host::{LanguageServerFeature, LocalLsp, LspHost, LspTranscript, OffsetEncoding},
+    host::{LanguageServerFeature, LspHost, OffsetEncoding},
     location_picker::{LocationEntry, LocationPicker},
-    lsp::{servers::ServerSource, stamp::DocumentStamp},
+    lsp::stamp::DocumentStamp,
     picker::PreviewSource,
     render::hover,
     symbol_finder::{SymbolFinder, SymbolFinderEntry, SymbolFinderScope, SymbolTarget},
-    workspace::{WorkspaceId, WorkspaceUid},
+    workspace::WorkspaceUid,
 };
 use codegraph::SymbolKey;
 pub(crate) use lsp_types::Uri;
 use lsp_types::{
-    CodeActionContext, CodeActionOrCommand, CodeActionParams, DidOpenTextDocumentParams,
-    DocumentFormattingParams, DocumentRangeFormattingParams, DocumentSymbol, DocumentSymbolParams,
-    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, HoverContents,
-    HoverParams, InlayHint, InlayHintLabel, InlayHintParams, MarkedString, MarkupKind, OneOf,
-    Position, PrepareRenameResponse, Range, ReferenceContext, ReferenceParams, RenameParams,
-    ServerInfo, SymbolInformation, SymbolKind, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextEdit, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    CodeActionContext, CodeActionOrCommand, CodeActionParams, DocumentFormattingParams,
+    DocumentRangeFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
+    GotoDefinitionParams, GotoDefinitionResponse, HoverContents, HoverParams, InlayHint,
+    InlayHintLabel, InlayHintParams, MarkedString, MarkupKind, OneOf, Position,
+    PrepareRenameResponse, Range, ReferenceContext, ReferenceParams, RenameParams,
+    SymbolInformation, SymbolKind, TextDocumentIdentifier, TextDocumentPositionParams, TextEdit,
+    WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use ratatui::{layout::Rect, style::Style};
 use serde_json::{json, Value};
@@ -114,319 +113,6 @@ pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection)
     };
 
     crate::action_handlers::movement::jump_to_offset(stoat, target)
-}
-
-/// The language name used to route LSP traffic for `buffer_id`.
-///
-/// A grammar-backed buffer uses its tree-sitter language's name. A buffer with
-/// no grammar (e.g. `.stcfg`) falls back to an extension-keyed LSP identity via
-/// [`crate::lsp::servers::lsp_language_for_extension`], so an in-process server
-/// can still serve it. `None` when neither resolves, leaving the buffer without
-/// a language server.
-pub(crate) fn lsp_language_name(buffers: &BufferRegistry, buffer_id: BufferId) -> Option<String> {
-    if let Some(language) = buffers.language_for(buffer_id) {
-        return Some(language.name.to_string());
-    }
-    let extension = buffers.path_for(buffer_id)?.extension()?.to_str()?;
-    crate::lsp::servers::lsp_language_for_extension(extension).map(str::to_string)
-}
-
-/// Notify the workspace's LSP host that `buffer_id` was just opened.
-/// No-op when `buffer_id` is already in [`Stoat::lsp_opened`]; that
-/// dedupes the second `OpenFile` of an already-loaded buffer (which
-/// is idempotent in [`crate::buffer_registry::BufferRegistry::open`]
-/// but must fire `did_open` exactly once over the buffer's lifetime).
-///
-/// The dispatch is detached on the workspace's `Executor` because
-/// `did_open` is a fire-and-forget notification; production
-/// [`crate::host::LspHost`] implementations may write to a JSON-RPC
-/// channel asynchronously, so blocking the open path on it would be
-/// wrong. Errors are swallowed -- a notification failure is not
-/// fatal to the open.
-/// `text` is the buffer's own rope rather than the string it was opened from,
-/// which is what the server reads and what a clone passes for a refcount bump.
-/// Each host's payload string is built inside its own spawned task, so a
-/// language server coming up over many open buffers does not materialize them
-/// all on the run loop.
-pub(crate) fn notify_buffer_opened(
-    stoat: &mut Stoat,
-    workspace: WorkspaceId,
-    buffer_id: BufferId,
-    path: &Path,
-    text: Rope,
-) {
-    maybe_spawn_language_server(stoat, workspace, buffer_id);
-    if !stoat.lsp_opened.insert(buffer_id) {
-        return;
-    }
-    let Some(uri) = path_to_uri(path) else {
-        return;
-    };
-    let language_id = lsp_language_name(&stoat.workspaces[workspace].buffers, buffer_id)
-        .unwrap_or_else(|| "plaintext".to_string());
-    let buffer_version = stoat.workspaces[workspace]
-        .buffers
-        .get(buffer_id)
-        .map(|b| b.read().expect("buffer lock").version())
-        .unwrap_or(0);
-    stoat.lsp_buffer_versions.insert(buffer_id, buffer_version);
-    stoat.lsp_doc_versions.insert(buffer_id, 0);
-    stoat
-        .lsp_last_delivered_text
-        .lock()
-        .expect("lsp text mutex")
-        .insert(buffer_id, text.clone());
-    stoat
-        .lsp_last_delivered_buffer_version
-        .lock()
-        .expect("lsp version mutex")
-        .insert(buffer_id, buffer_version);
-    for lsp in crate::lsp::hosts::hosts_for_buffer(stoat, buffer_id) {
-        let (uri, language_id, text) = (uri.clone(), language_id.clone(), text.clone());
-        stoat
-            .executor
-            .spawn(async move {
-                let params = DidOpenTextDocumentParams {
-                    text_document: TextDocumentItem {
-                        uri,
-                        language_id,
-                        version: 0,
-                        text: text.to_string(),
-                    },
-                };
-                if let Err(err) = lsp.did_open(params).await {
-                    tracing::warn!(target: "stoat::lsp", ?err, "did_open notification failed");
-                }
-            })
-            .detach();
-    }
-}
-
-/// Launch the language servers for `buffer_id`'s language the first time a
-/// buffer of that language opens, registering each in [`Stoat::lsp_registry`]
-/// once it is ready.
-///
-/// No-op unless auto-spawn is enabled and the language has known servers
-/// ([`crate::lsp::servers::resolve_servers`]). Each of the language's servers
-/// spawns at most once. A server already up or already spawn-attempted is
-/// skipped, and a real injected sole host (tests, legacy) suppresses spawning
-/// entirely. The binary opts into auto-spawn via [`Stoat::set_lsp_auto_spawn`].
-/// Tests leave it off, so no server IO happens.
-///
-/// Each spawn plus `initialize` handshake runs detached on the workspace
-/// [`Stoat::executor`] via [`spawn_server`]. The ready host, or the failure, is
-/// parked in [`Stoat::pending_lsp_host`] for [`Stoat::update`] to install.
-pub(crate) fn maybe_spawn_language_server(
-    stoat: &mut Stoat,
-    workspace: WorkspaceId,
-    buffer_id: BufferId,
-) {
-    if !stoat.lsp_auto_spawn {
-        return;
-    }
-    // A real injected sole host (tests, legacy) already serves every language.
-    if stoat.lsp_registry.has_real_sole_client() {
-        return;
-    }
-    let Some(language_name) = lsp_language_name(&stoat.workspaces[workspace].buffers, buffer_id)
-    else {
-        return;
-    };
-
-    // Only the language's servers not already up and not already tried this
-    // session. A failed spawn is never retried.
-    let to_spawn: Vec<crate::lsp::servers::ResolvedServer> =
-        crate::lsp::servers::resolve_servers(&stoat.settings, &language_name)
-            .into_iter()
-            .filter(|server| {
-                !stoat.lsp_registry.contains_client(&server.name)
-                    && !stoat.lsp_registry.spawn_attempted(&server.name)
-            })
-            .collect();
-    if to_spawn.is_empty() {
-        return;
-    }
-
-    // A subprocess server started before the direnv environment lands would run
-    // under the wrong PATH, so defer those until install_pending re-fires them.
-    // An in-process server has no process and no environment, so it starts now
-    // regardless.
-    let env_loading =
-        stoat.active_workspace().env.state == crate::project_env::EnvLoadState::Loading;
-    let mut deferred = false;
-    for server in to_spawn {
-        if env_loading && matches!(server.source, ServerSource::Command(_)) {
-            deferred = true;
-            continue;
-        }
-        stoat.lsp_registry.mark_spawn_attempted(server.name.clone());
-        spawn_server(stoat, server, language_name.clone());
-    }
-    if deferred {
-        stoat.lsp_spawn_deferred = Some(buffer_id);
-    }
-}
-
-/// Spawn one resolved `server` for `language` detached on the workspace
-/// executor, parking the ready host or the failure in
-/// [`Stoat::pending_lsp_host`].
-fn spawn_server(stoat: &mut Stoat, server: crate::lsp::servers::ResolvedServer, language: String) {
-    let crate::lsp::servers::ResolvedServer { name, source, .. } = server;
-    match source {
-        ServerSource::Command(argv) => spawn_command_server(stoat, name, argv, language),
-        ServerSource::InProcess(construct) => {
-            spawn_in_process_server(stoat, name, construct, language)
-        },
-    }
-}
-
-/// Spawn a subprocess language server `command` with `argv`, initialize it under
-/// the workspace environment, and park the result.
-fn spawn_command_server(stoat: &mut Stoat, command: String, argv: Vec<String>, language: String) {
-    let git_root = stoat.active_workspace().git_root.clone();
-    let env = stoat.active_workspace().env.diff.clone();
-    let root_uri = path_to_uri(&git_root);
-    let slot = stoat.pending_lsp_host.clone();
-    let wake = stoat.redraw_notify.clone();
-    let transcript = if stoat.settings.text_proto_log == Some(true) {
-        match LspTranscript::create(&command) {
-            Ok(transcript) => Some(transcript),
-            Err(err) => {
-                tracing::warn!(target: "stoat::lsp", ?err, "text_proto_log transcript disabled");
-                None
-            },
-        }
-    } else {
-        None
-    };
-
-    let args: Vec<String> = argv.into_iter().skip(1).collect();
-
-    stoat
-        .executor
-        .spawn(async move {
-            let host: Arc<dyn LspHost> =
-                match LocalLsp::spawn(&command, &args, &env, &git_root, transcript, wake) {
-                    Ok(host) => Arc::new(host),
-                    Err(err) => {
-                        tracing::warn!(target: "stoat::lsp", ?err, %command, "language server spawn failed");
-                        slot.lock().expect("pending lsp host mutex").push(PendingSpawn {
-                            server: command.clone(),
-                            language: language.clone(),
-                            result: Err(format!("{command}: {err}")),
-                        });
-                        return;
-                    },
-                };
-            match host.initialize(root_uri).await {
-                Ok(result) => {
-                    tracing::info!(
-                        target: "stoat::lsp",
-                        %command,
-                        server = %server_label(result.server_info.as_ref()),
-                        "language server initialized",
-                    );
-                },
-                Err(err) => {
-                    tracing::warn!(target: "stoat::lsp", ?err, %command, "language server initialize failed");
-                    slot.lock().expect("pending lsp host mutex").push(PendingSpawn {
-                        server: command.clone(),
-                        language: language.clone(),
-                        result: Err(format!("{command}: {err}")),
-                    });
-                    return;
-                },
-            }
-            slot.lock().expect("pending lsp host mutex").push(PendingSpawn {
-                server: command,
-                language,
-                result: Ok(host),
-            });
-        })
-        .detach();
-}
-
-/// Build an in-process language server `name` for `language` on the workspace
-/// executor and park the result.
-///
-/// There is no subprocess and no environment overlay. An in-process host emits
-/// no server-initiated traffic, so once parked it wakes the redraw loop itself;
-/// otherwise nothing would drive [`Stoat::install_pending_lsp_host`].
-fn spawn_in_process_server(
-    stoat: &mut Stoat,
-    name: String,
-    construct: fn() -> Arc<dyn LspHost>,
-    language: String,
-) {
-    let slot = stoat.pending_lsp_host.clone();
-    let wake = stoat.redraw_notify.clone();
-
-    stoat
-        .executor
-        .spawn(async move {
-            let host = construct();
-            let result = match host.initialize(None).await {
-                Ok(_) => {
-                    tracing::info!(target: "stoat::lsp", %name, "in-process language server initialized");
-                    Ok(host)
-                },
-                Err(err) => {
-                    tracing::warn!(target: "stoat::lsp", ?err, %name, "in-process language server initialize failed");
-                    Err(format!("{name}: {err}"))
-                },
-            };
-            slot.lock().expect("pending lsp host mutex").push(PendingSpawn {
-                server: name,
-                language,
-                result,
-            });
-            wake.notify_one();
-        })
-        .detach();
-}
-
-/// A language server's `name@version` identity from its
-/// `InitializeResult`, for logging. The version is omitted when the
-/// server reported a name but no version, and the whole label is
-/// "unknown" when the server reported no `serverInfo` at all.
-fn server_label(info: Option<&ServerInfo>) -> String {
-    let Some(info) = info else {
-        return "unknown".to_string();
-    };
-    match &info.version {
-        Some(version) => format!("{}@{}", info.name, version),
-        None => info.name.clone(),
-    }
-}
-
-/// Deliver `msg` as the transient status message.
-fn set_lsp_status(stoat: &mut Stoat, msg: String) {
-    stoat.set_status(msg);
-}
-
-/// Report why a user-launched LSP action for `what` cannot be served, then
-/// return [`UpdateEffect::Redraw`] so the frame repaints with the message.
-///
-/// Walks the language-server state in priority order and reports the first
-/// reason that applies. An installed host that simply lacks the capability
-/// comes first, then each reason the [`NoopLsp`] placeholder is still in place,
-/// namely that the spawn failed, is deferred until the project environment
-/// loads, is still starting, or was never attempted.
-fn report_lsp_unavailable(stoat: &mut Stoat, what: &str) -> UpdateEffect {
-    let msg = if stoat.lsp_registry.has_active_host() {
-        format!("lsp: server does not support {what}")
-    } else if let Some(err) = &stoat.lsp_spawn_failed {
-        format!("lsp: {err}")
-    } else if stoat.lsp_spawn_deferred.is_some() {
-        "lsp: server start waiting on the project environment".to_string()
-    } else if stoat.lsp_registry.spawn_attempted_any() {
-        "lsp: server still starting".to_string()
-    } else {
-        "lsp: no language server running".to_string()
-    };
-
-    set_lsp_status(stoat, msg);
-    UpdateEffect::Redraw
 }
 
 /// Discriminator for the goto-style LSP requests that all return
@@ -605,7 +291,7 @@ pub(crate) fn review_lsp_source(stoat: &mut Stoat) -> Option<(PathBuf, Rope, usi
     };
     let workspace = stoat.active_workspace;
     let rope = buffer.read().expect("buffer lock").rope().clone();
-    notify_buffer_opened(stoat, workspace, buffer_id, &path, rope.clone());
+    crate::lsp::session::notify_buffer_opened(stoat, workspace, buffer_id, &path, rope.clone());
 
     let offset = rope.point_to_offset(Point::new(line, col));
     Some((path, rope, offset))
@@ -690,7 +376,10 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
     };
     let hosts = crate::lsp::hosts::feature_hosts(stoat, site.buffer_id, kind.feature());
     if hosts.is_empty() {
-        return report_lsp_unavailable(stoat, &format!("goto {}", kind.status_label()));
+        return crate::lsp::session::report_lsp_unavailable(
+            stoat,
+            &format!("goto {}", kind.status_label()),
+        );
     }
     let Some(source_uri) = path_to_uri(&site.path) else {
         return UpdateEffect::None;
@@ -1021,7 +710,7 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
 
     let hosts = crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::Hover);
     if hosts.is_empty() {
-        return report_lsp_unavailable(stoat, "hover");
+        return crate::lsp::session::report_lsp_unavailable(stoat, "hover");
     }
 
     // A review cursor requests against the real working-tree file, but the
@@ -1309,12 +998,12 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
                 },
                 None => "lsp: no hover info".to_string(),
             };
-            set_lsp_status(stoat, status);
+            crate::lsp::session::set_lsp_status(stoat, status);
             stoat.pending_hover = None;
             true
         },
         Poll::Ready(HoverOutcome::Failed) => {
-            set_lsp_status(stoat, "lsp: hover request failed".to_string());
+            crate::lsp::session::set_lsp_status(stoat, "lsp: hover request failed".to_string());
             stoat.pending_hover = None;
             true
         },
@@ -1460,9 +1149,9 @@ fn request_inlay_hints(stoat: &mut Stoat, debounce: Duration) -> bool {
 /// it once viable. Reports the [`report_lsp_unavailable`] reason otherwise.
 pub(crate) fn enable_inlay_hints_now(stoat: &mut Stoat) {
     if request_inlay_hints(stoat, Duration::ZERO) {
-        set_lsp_status(stoat, "inlay hints on".to_string());
+        crate::lsp::session::set_lsp_status(stoat, "inlay hints on".to_string());
     } else {
-        report_lsp_unavailable(stoat, "inlay hints");
+        crate::lsp::session::report_lsp_unavailable(stoat, "inlay hints");
     }
 }
 
@@ -1703,7 +1392,7 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
             .into_iter()
             .next()
     else {
-        return report_lsp_unavailable(stoat, "code actions");
+        return crate::lsp::session::report_lsp_unavailable(stoat, "code actions");
     };
     let encoding = host.offset_encoding();
 
@@ -1811,7 +1500,10 @@ pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
                 })
                 .collect();
             if entries.is_empty() {
-                set_lsp_status(stoat, "lsp: no code actions available".to_string());
+                crate::lsp::session::set_lsp_status(
+                    stoat,
+                    "lsp: no code actions available".to_string(),
+                );
                 stoat.pending_code_action_picker = None;
             } else if let Some(picker) = stoat.pending_code_action_picker.as_mut() {
                 picker.entries = entries;
@@ -1819,7 +1511,10 @@ pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
             true
         },
         Poll::Ready(None) => {
-            set_lsp_status(stoat, "lsp: no code actions available".to_string());
+            crate::lsp::session::set_lsp_status(
+                stoat,
+                "lsp: no code actions available".to_string(),
+            );
             stoat.pending_code_action_picker = None;
             true
         },
@@ -1858,7 +1553,7 @@ fn skipped_as_stale(stoat: &mut Stoat, stamp: &DocumentStamp, what: &str) -> boo
     if stamp.is_current(stoat) {
         return false;
     }
-    set_lsp_status(stoat, format!("lsp: {what} skipped, buffer changed"));
+    crate::lsp::session::set_lsp_status(stoat, format!("lsp: {what} skipped, buffer changed"));
     true
 }
 
@@ -2043,7 +1738,7 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
             .into_iter()
             .next()
     else {
-        return report_lsp_unavailable(stoat, "rename");
+        return crate::lsp::session::report_lsp_unavailable(stoat, "rename");
     };
     let server = Some(server);
     let encoding = host.offset_encoding();
@@ -2282,7 +1977,7 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     let hosts =
         crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::DocumentSymbols);
     if hosts.is_empty() {
-        return report_lsp_unavailable(stoat, "document symbols");
+        return crate::lsp::session::report_lsp_unavailable(stoat, "document symbols");
     }
 
     let Some(source_path) = stoat
@@ -2859,7 +2554,7 @@ pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
             .map(|(name, _)| name)
             .collect();
     if servers.is_empty() {
-        return report_lsp_unavailable(stoat, "workspace symbols");
+        return crate::lsp::session::report_lsp_unavailable(stoat, "workspace symbols");
     }
 
     let task = spawn_workspace_symbol_request(stoat, &servers, buffer_id, String::new());
@@ -3096,7 +2791,7 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
             .into_iter()
             .next()
     else {
-        return report_lsp_unavailable(stoat, "format");
+        return crate::lsp::session::report_lsp_unavailable(stoat, "format");
     };
     let encoding = host.offset_encoding();
 
@@ -3165,7 +2860,7 @@ pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
             .into_iter()
             .next()
     else {
-        return report_lsp_unavailable(stoat, "format");
+        return crate::lsp::session::report_lsp_unavailable(stoat, "format");
     };
     let encoding = host.offset_encoding();
 
@@ -3255,7 +2950,7 @@ pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(mut entries) => {
             match entries.len() {
-                0 => set_lsp_status(stoat, format!("lsp: no {label} found")),
+                0 => crate::lsp::session::set_lsp_status(stoat, format!("lsp: no {label} found")),
                 1 => {
                     let entry = entries.remove(0);
                     apply_jump(stoat, &entry.path, entry.offset);
@@ -3324,7 +3019,7 @@ pub(crate) fn path_to_uri(path: &Path) -> Option<Uri> {
 mod tests {
     use crate::{
         agent_ipc::{AgentControl, AgentQuery},
-        test_fixture::{diag, open_buffer, open_stcfg_with_server, seed},
+        test_fixture::{diag, open_buffer, seed},
         test_harness::TestHarness,
     };
     use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
@@ -3369,260 +3064,6 @@ mod tests {
             0,
             "an empty body measures zero rather than panicking"
         );
-    }
-
-    #[test]
-    fn did_open_dispatched_on_first_open() {
-        let mut h = TestHarness::with_size(80, 24);
-        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
-        crate::action_handlers::dispatch(
-            &mut h.stoat,
-            &OpenFile {
-                path: root.join("a.rs"),
-            },
-        );
-        h.settle();
-        let opens = h.fake_lsp().observed_opens();
-        assert_eq!(opens.len(), 1, "expected exactly one did_open");
-        assert!(opens[0].text_document.uri.as_str().ends_with("/a.rs"));
-        assert_eq!(opens[0].text_document.text, "fn a() {}\n");
-        assert_eq!(opens[0].text_document.language_id, "rust");
-    }
-
-    /// The delivered-text snapshot and the payload the server received have to
-    /// be the same text. The incremental `did_change` path computes its
-    /// positions against the snapshot while the server holds the payload, so
-    /// any drift between them puts every later edit at the wrong offset.
-    ///
-    /// Both now come off the buffer's own rope, one as a clone and one as a
-    /// string built in the dispatch task, which is what keeps them equal
-    /// without materializing the buffer twice on the open path.
-    #[test]
-    fn did_open_records_the_text_it_delivered() {
-        let mut h = TestHarness::with_size(80, 24);
-        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
-        crate::action_handlers::dispatch(
-            &mut h.stoat,
-            &OpenFile {
-                path: root.join("a.rs"),
-            },
-        );
-        h.settle();
-
-        let opens = h.fake_lsp().observed_opens();
-        let [open] = &opens[..] else {
-            panic!("one open, got {}", opens.len());
-        };
-        let buffer_id = h
-            .stoat
-            .active_workspace()
-            .buffers
-            .id_for_path(&root.join("a.rs"))
-            .expect("the opened buffer");
-
-        let delivered = h
-            .stoat
-            .lsp_last_delivered_text
-            .lock()
-            .expect("lsp text mutex")
-            .get(&buffer_id)
-            .map(|rope| rope.to_string());
-        assert_eq!(
-            delivered.as_deref(),
-            Some(open.text_document.text.as_str()),
-            "the snapshot the next did_change diffs against is what the server got",
-        );
-        assert_eq!(
-            delivered.as_deref(),
-            Some("fn a() {}\n"),
-            "and both are the buffer's text rather than something rebuilt",
-        );
-    }
-
-    #[test]
-    fn did_open_not_redispatched_on_reopen() {
-        let mut h = TestHarness::with_size(80, 24);
-        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
-        for _ in 0..3 {
-            crate::action_handlers::dispatch(
-                &mut h.stoat,
-                &OpenFile {
-                    path: root.join("a.rs"),
-                },
-            );
-            h.settle();
-        }
-        let opens = h.fake_lsp().observed_opens();
-        assert_eq!(
-            opens.len(),
-            1,
-            "did_open should fire exactly once per buffer lifetime"
-        );
-    }
-
-    #[test]
-    fn auto_spawn_skipped_when_a_real_host_is_installed() {
-        let mut h = TestHarness::with_size(80, 24);
-        h.stoat.set_lsp_auto_spawn(true);
-        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
-        open_buffer(&mut h, root.join("a.rs"));
-        assert!(
-            !h.stoat.lsp_registry.spawn_attempted_any(),
-            "FakeLsp is a non-noop host, so opening a rust buffer attempts no spawn",
-        );
-    }
-
-    #[test]
-    fn lsp_spawn_defers_while_env_loading() {
-        let mut h = TestHarness::with_size(80, 24);
-        h.allow_host_swap();
-        h.stoat
-            .set_lsp_host(std::sync::Arc::new(crate::host::NoopLsp));
-        h.stoat.set_lsp_auto_spawn(true);
-        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
-        h.stoat.active_workspace_mut().env.state = crate::project_env::EnvLoadState::Loading;
-
-        open_buffer(&mut h, root.join("a.rs"));
-
-        assert!(
-            !h.stoat.lsp_registry.spawn_attempted_any(),
-            "the spawn is deferred, not attempted, while the env loads",
-        );
-        let buffer_id = h
-            .stoat
-            .active_workspace()
-            .buffers
-            .id_for_path(&root.join("a.rs"));
-        assert!(buffer_id.is_some());
-        assert_eq!(h.stoat.lsp_spawn_deferred, buffer_id);
-    }
-
-    #[test]
-    fn env_install_consumes_lsp_deferral() {
-        let mut h = TestHarness::with_size(80, 24);
-        h.allow_host_swap();
-        h.stoat
-            .set_lsp_host(std::sync::Arc::new(crate::host::NoopLsp));
-        h.stoat.set_lsp_auto_spawn(true);
-        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
-        let ws_id = h.stoat.active_workspace;
-        h.stoat.active_workspace_mut().env.state = crate::project_env::EnvLoadState::Loading;
-        open_buffer(&mut h, root.join("a.rs"));
-        assert!(h.stoat.lsp_spawn_deferred.is_some());
-
-        // Install a real host so the re-fired spawn is gated at the noop check,
-        // keeping the test free of a real language-server process, then land
-        // the env.
-        h.stoat
-            .set_lsp_host(std::sync::Arc::new(crate::host::FakeLsp::new()));
-        *h.stoat.pending_env.lock().expect("pending env mutex") =
-            Some(crate::project_env::PendingEnvLoad {
-                workspace: ws_id,
-                manual: false,
-                outcome: Ok(Vec::new()),
-            });
-        crate::project_env::install_pending(&mut h.stoat);
-
-        assert_eq!(
-            h.stoat.lsp_spawn_deferred, None,
-            "install consumes the deferral"
-        );
-        assert_eq!(
-            h.stoat.active_workspace().env.state,
-            crate::project_env::EnvLoadState::Loaded,
-        );
-    }
-
-    #[test]
-    fn stcfg_buffer_completes_settings_via_in_process_server() {
-        use crate::completion::{request::COMPLETION_DEBOUNCE, CompletionSource};
-
-        let mut h = TestHarness::with_size(80, 24);
-        h.allow_host_swap();
-        open_stcfg_with_server(&mut h);
-
-        h.type_text("on init { form");
-
-        // did_change (50ms) syncs the buffer to the server before the completion
-        // request (150ms) reads it.
-        h.advance_clock(crate::lsp::sync::LSP_DID_CHANGE_DEBOUNCE);
-        h.advance_clock(COMPLETION_DEBOUNCE);
-
-        let popup = h
-            .stoat
-            .pending_completion
-            .clone()
-            .expect("completion popup armed");
-        let format_item = popup
-            .items
-            .iter()
-            .find(|item| item.label == "format_on_save")
-            .expect("in-process stcfg server offers format_on_save");
-        assert_eq!(format_item.source, CompletionSource::Lsp);
-    }
-
-    #[test]
-    fn stcfg_buffer_reports_syntax_error_diagnostics() {
-        use lsp_types::DiagnosticSeverity;
-
-        let mut h = TestHarness::with_size(80, 24);
-        h.allow_host_swap();
-        let path = open_stcfg_with_server(&mut h);
-
-        h.type_text("on init { format_on_save = ");
-
-        // did_change (50ms) syncs before the pull-diagnostics request (300ms).
-        h.advance_clock(crate::lsp::sync::LSP_DID_CHANGE_DEBOUNCE);
-        h.advance_clock(Duration::from_millis(300));
-
-        let diagnostics: Vec<_> = h
-            .stoat
-            .diagnostics
-            .iter()
-            .find(|(diag_path, _)| *diag_path == path)
-            .map(|(_, diags)| diags.to_vec())
-            .expect("diagnostics recorded for config.stcfg");
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diag| diag.severity == Some(DiagnosticSeverity::ERROR)),
-            "expected a syntax-error diagnostic, got {diagnostics:?}",
-        );
-    }
-
-    #[test]
-    fn each_language_routes_did_open_to_its_own_server() {
-        let mut h = TestHarness::with_size(80, 24);
-        let rust_server = std::sync::Arc::new(crate::host::FakeLsp::new());
-        let json_server = std::sync::Arc::new(crate::host::FakeLsp::new());
-        h.stoat
-            .lsp_registry
-            .insert("rust-analyzer".into(), rust_server.clone());
-        h.stoat
-            .lsp_registry
-            .set_language("rust".into(), "rust-analyzer".into());
-        h.stoat
-            .lsp_registry
-            .insert("json-ls".into(), json_server.clone());
-        h.stoat
-            .lsp_registry
-            .set_language("json".into(), "json-ls".into());
-
-        let root = seed(&mut h, &[("a.rs", "fn a() {}\n"), ("b.json", "{}\n")]);
-        open_buffer(&mut h, root.join("a.rs"));
-        open_buffer(&mut h, root.join("b.json"));
-
-        let rust_opens = rust_server.observed_opens();
-        assert_eq!(rust_opens.len(), 1, "rust server sees only the rust file");
-        assert!(rust_opens[0].text_document.uri.as_str().ends_with("/a.rs"));
-
-        let json_opens = json_server.observed_opens();
-        assert_eq!(json_opens.len(), 1, "json server sees only the json file");
-        assert!(json_opens[0]
-            .text_document
-            .uri
-            .as_str()
-            .ends_with("/b.json"));
     }
 
     #[test]
@@ -4105,43 +3546,6 @@ mod tests {
             .expect("finder filled from the stashed server");
         let titles: Vec<&str> = finder.entries.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, vec!["foo"]);
-    }
-
-    #[test]
-    fn did_open_falls_back_to_plaintext_when_no_language() {
-        let mut h = TestHarness::with_size(80, 24);
-        let root = seed(&mut h, &[("note.txt", "hello\n")]);
-        crate::action_handlers::dispatch(
-            &mut h.stoat,
-            &OpenFile {
-                path: root.join("note.txt"),
-            },
-        );
-        h.settle();
-        let opens = h.fake_lsp().observed_opens();
-        assert_eq!(opens.len(), 1);
-        assert_eq!(opens[0].text_document.language_id, "plaintext");
-    }
-
-    #[test]
-    fn did_open_separate_files_each_dispatch() {
-        let mut h = TestHarness::with_size(80, 24);
-        let root = seed(&mut h, &[("a.rs", "x\n"), ("b.rs", "y\n")]);
-        crate::action_handlers::dispatch(
-            &mut h.stoat,
-            &OpenFile {
-                path: root.join("a.rs"),
-            },
-        );
-        crate::action_handlers::dispatch(
-            &mut h.stoat,
-            &OpenFile {
-                path: root.join("b.rs"),
-            },
-        );
-        h.settle();
-        let opens = h.fake_lsp().observed_opens();
-        assert_eq!(opens.len(), 2);
     }
 
     #[test]

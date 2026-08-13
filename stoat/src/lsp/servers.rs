@@ -4,7 +4,7 @@
 //! table, applies the user's `lsp.server.<language>` [`Settings`] override to
 //! the primary server, and returns the ordered servers to spawn and route
 //! through, feeding the lazy-spawn path in
-//! [`crate::action_handlers::lsp::notify_buffer_opened`].
+//! [`crate::lsp::session::notify_buffer_opened`].
 
 use crate::{
     host::{LanguageServerFeature, LspHost},

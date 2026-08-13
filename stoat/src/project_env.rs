@@ -163,7 +163,7 @@ pub(crate) fn reload_active_workspace(stoat: &mut Stoat) {
 /// transient message follows the outcome and whether the load was manual.
 ///
 /// A language-server spawn deferred while the env was loading (see
-/// [`crate::action_handlers::lsp::maybe_spawn_language_server`]) is re-fired
+/// [`crate::lsp::session::maybe_spawn_language_server`]) is re-fired
 /// here, now with the installed diff.
 pub(crate) fn install_pending(stoat: &mut Stoat) {
     let pending = stoat.pending_env.lock().expect("pending env mutex").take();
@@ -216,7 +216,7 @@ pub(crate) fn install_pending(stoat: &mut Stoat) {
         };
         for id in ids {
             let workspace = stoat.active_workspace;
-            crate::action_handlers::lsp::maybe_spawn_language_server(stoat, workspace, id);
+            crate::lsp::session::maybe_spawn_language_server(stoat, workspace, id);
         }
     }
 }

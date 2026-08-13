@@ -1448,7 +1448,7 @@ fn finish_open(
     // The buffer's own rope, not the text just read from disk. An already-open
     // buffer keeps what it holds, so its rope is what the server needs to see.
     let rope = buffer.read().expect("buffer lock").rope().clone();
-    super::lsp::notify_buffer_opened(stoat, workspace, buffer_id, absolute, rope);
+    crate::lsp::session::notify_buffer_opened(stoat, workspace, buffer_id, absolute, rope);
 
     super::jump::record_pane_switch(stoat, workspace, target, buffer_id);
     show_buffer_in_pane(stoat, workspace, target, buffer_id, buffer, executor)

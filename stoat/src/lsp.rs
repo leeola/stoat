@@ -11,6 +11,7 @@ pub(crate) mod pull_diagnostics;
 pub(crate) mod registry;
 pub(crate) mod semantic_tokens;
 pub(crate) mod servers;
+pub(crate) mod session;
 pub(crate) mod signature_help;
 pub(crate) mod stamp;
 pub mod stcfg;
