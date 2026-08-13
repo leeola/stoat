@@ -14,6 +14,7 @@ mod commit_picker;
 pub mod completion;
 pub(crate) mod conflict_session;
 pub(crate) mod debounce;
+pub(crate) mod diagnostic_spans;
 pub mod diagnostics;
 pub(crate) mod diagnostics_picker;
 pub mod diff;

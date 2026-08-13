@@ -1057,12 +1057,12 @@ fn resolve_hover_diagnostic(stoat: &mut Stoat, column: u16, row: u16) -> Option<
     let editor = workspaces[*active_workspace].editors.get_mut(editor_id)?;
     let snapshot = editor.display_map.snapshot();
     let buffer = snapshot.buffer_snapshot();
-    crate::render::editor::build_diagnostic_span_cache(editor, diagnostics, &path, buffer);
+    crate::diagnostic_spans::build_diagnostic_span_cache(editor, diagnostics, &path, buffer);
     let spans = editor
         .diagnostic_span_cache
         .as_ref()
         .map_or(&[][..], |cache| cache.spans.as_slice());
-    crate::render::editor::diagnostic_at_offset(spans, offset)
+    crate::diagnostic_spans::diagnostic_at_offset(spans, offset)
 }
 
 /// Track the hovered cell and redraw only when the diagnostic under it

@@ -191,7 +191,7 @@ pub(crate) struct EditorState {
     /// Diagnostic spans resolved to byte offsets, keyed by the diagnostic-set
     /// and buffer versions, so the per-frame render paths reuse one resolution.
     /// Transient render state, not persisted.
-    pub(crate) diagnostic_span_cache: Option<crate::render::editor::DiagnosticSpanCache>,
+    pub(crate) diagnostic_span_cache: Option<crate::diagnostic_spans::DiagnosticSpanCache>,
     /// Collections the diagnostic paint refills every frame, retained so it
     /// reuses their capacity instead of allocating a pair per pane per frame.
     /// Holds nothing between frames. Transient render state, not persisted.
