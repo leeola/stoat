@@ -6,6 +6,7 @@ pub(crate) mod keys;
 
 use crate::{
     app::{Stoat, UpdateEffect},
+    debounce,
     keymap::resolve_config_action,
     keymap_state::arg_as_str,
     lsp::registry::ServerSelector,
@@ -436,10 +437,10 @@ impl TestHarness {
     /// [`crate::host::FakeFsWatcher`] hook installed in
     /// [`Self::new_with_settings`] auto-emits a
     /// [`crate::host::FsEventKind::Modified`] event on every watched
-    /// path; [`crate::app::Stoat::drain_fs_watch_events`] consumes
+    /// path; [`crate::debounce::drain_fs_watch_events`] consumes
     /// it and arms a 50ms debounce keyed on the path. Callers must
     /// follow up with [`Self::advance_clock`] past
-    /// [`crate::app::REVIEW_EXTERNAL_EDIT_DEBOUNCE`] to fire the
+    /// [`crate::debounce::REVIEW_EXTERNAL_EDIT_DEBOUNCE`] to fire the
     /// timer and land the [`stoat_action::ReviewExternalEdit`]
     /// dispatch; calling `external_edit` repeatedly within the
     /// window coalesces the bursts into one dispatch, matching the
@@ -464,7 +465,7 @@ impl TestHarness {
         self.fake_fs
             .write(&path, new_text.as_bytes())
             .expect("FakeFs::write");
-        self.stoat.drain_fs_watch_events();
+        debounce::drain_fs_watch_events(&mut self.stoat);
         self.settle();
         self.capture("external_edit");
     }
@@ -475,7 +476,7 @@ impl TestHarness {
     /// non-`WorkingTree` sources because their content is not on disk.
     /// The created event arms the same debounce as
     /// [`Self::external_edit`]; callers advance the clock past
-    /// [`crate::app::REVIEW_EXTERNAL_EDIT_DEBOUNCE`] to fire the
+    /// [`crate::debounce::REVIEW_EXTERNAL_EDIT_DEBOUNCE`] to fire the
     /// dispatch.
     pub(crate) fn inject_external_create(&mut self, rel: &str, text: &str) {
         use crate::{
@@ -501,7 +502,7 @@ impl TestHarness {
             .write(&path, text.as_bytes())
             .expect("FakeFs::write");
         self.fake_fs_watcher.inject(&path, FsEventKind::Created);
-        self.stoat.drain_fs_watch_events();
+        debounce::drain_fs_watch_events(&mut self.stoat);
         self.settle();
         self.capture("inject_external_create");
     }
@@ -638,7 +639,7 @@ impl TestHarness {
             let symbol_doc = crate::action_handlers::lsp::pump_symbol_finder_doc(&mut self.stoat);
             crate::action_handlers::lsp::sync_symbol_finder(&mut self.stoat);
             crate::action_handlers::code_search::sync_code_search(&mut self.stoat);
-            let code_search_drain = self.stoat.drain_pending_code_search();
+            let code_search_drain = debounce::drain_pending_code_search(&mut self.stoat);
             let code_search =
                 crate::action_handlers::code_search::pump_code_search(&mut self.stoat);
             let format_on_save = crate::action_handlers::file::pump_format_on_save(&mut self.stoat);
@@ -647,8 +648,8 @@ impl TestHarness {
                 crate::action_handlers::completion::pump_completion_resolve(&mut self.stoat);
             let completion_accept =
                 crate::completion::accept::pump_completion_accept(&mut self.stoat);
-            let external_edits = self.stoat.drain_pending_external_edits();
-            let git_refresh = self.stoat.drain_pending_git_refresh();
+            let external_edits = debounce::drain_pending_external_edits(&mut self.stoat);
+            let git_refresh = debounce::drain_pending_git_refresh(&mut self.stoat);
             if !commits
                 && !commit_picker
                 && !review

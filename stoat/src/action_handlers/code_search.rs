@@ -5,6 +5,7 @@ use crate::{
         read_text, scan_file, scan_paths_parallel, scan_text, CodeSearchFinder, SearchMatch,
         SearchMode, MATCH_CAP,
     },
+    debounce,
     pane::View,
     picker::PreviewSource,
 };
@@ -171,7 +172,7 @@ pub(crate) fn sync_code_search(stoat: &mut Stoat) {
             finder.matches.clear();
             finder.selected = 0;
         }
-        stoat.set_code_search_query(query);
+        debounce::set_code_search_query(stoat, query);
     }
     sync_code_search_preview(stoat);
 }

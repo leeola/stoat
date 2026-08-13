@@ -4,7 +4,6 @@ pub(crate) mod registry;
 
 use crate::{
     agent_status::AgentStatus,
-    app::INDEX_EDIT_DEBOUNCE,
     badge::BadgeTray,
     buffer::{BufferId, SharedBuffer},
     buffer_registry::{self, BufferRegistry},
@@ -14,6 +13,7 @@ use crate::{
     },
     commit_list::CommitListState,
     conflict_session::ConflictSession,
+    debounce::INDEX_EDIT_DEBOUNCE,
     diff,
     diff_cache::ContentHash,
     diff_map::{changes_to_hunks, line_starts, BaseHighlights, DiffMap},

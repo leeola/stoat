@@ -803,7 +803,7 @@ mod tests {
 
     // ----- TestHarness integration tests -----
 
-    use crate::test_harness::TestHarness;
+    use crate::{debounce, test_harness::TestHarness};
 
     /// Insert `files` into the harness' [`crate::host::FakeFs`] under a
     /// fixed virtual root and point the active workspace at it. Returns the
@@ -1419,7 +1419,7 @@ mod tests {
 
         h.fake_fs_watcher()
             .inject(root.join("b.rs"), crate::host::FsEventKind::Removed);
-        h.stoat.drain_fs_watch_events();
+        debounce::drain_fs_watch_events(&mut h.stoat);
         h.type_keys("space p");
 
         assert!(

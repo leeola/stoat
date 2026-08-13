@@ -2192,8 +2192,12 @@ fn build_review_blocks(session: &ReviewSession, view: &ReviewViewState) -> Vec<B
 #[cfg(test)]
 mod tests {
     use crate::{
-        app::REVIEW_EXTERNAL_EDIT_DEBOUNCE, diff_cache::DiffCacheKey, editor_state::ScrollGlide,
-        host::FsEventKind, review_session::ChunkStatus, test_harness::TestHarness,
+        debounce::{self, REVIEW_EXTERNAL_EDIT_DEBOUNCE},
+        diff_cache::DiffCacheKey,
+        editor_state::ScrollGlide,
+        host::FsEventKind,
+        review_session::ChunkStatus,
+        test_harness::TestHarness,
     };
     use std::path::{Path, PathBuf};
 
@@ -2625,7 +2629,7 @@ mod tests {
             PathBuf::from("/work/.git/refs/heads/main"),
             FsEventKind::Modified,
         );
-        h.stoat.drain_fs_watch_events();
+        debounce::drain_fs_watch_events(&mut h.stoat);
         h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
 
         assert!(

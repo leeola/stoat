@@ -114,7 +114,8 @@ pub(crate) fn ensure_diff_warm(stoat: &mut Stoat) {
 /// Complete pass on the next review open upgrades it (see the `move_aware` flag
 /// on [`crate::diff_cache::DiffCache`]). The status bar shows a diff spinner
 /// segment until [`install_finished`] clears every warm. Called from
-/// [`Stoat::drain_pending_diff_warm_files`] after the per-path debounce fires.
+/// [`crate::debounce::drain_pending_diff_warm_files`] after the per-path
+/// debounce fires.
 pub(crate) fn spawn_file_warm(stoat: &mut Stoat, path: PathBuf) {
     let git_root = stoat.active_workspace().git_root.clone();
     let git_host = stoat.git_host.clone();
@@ -272,7 +273,7 @@ fn warm_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{action_handlers::review::diff_cache_key, test_harness::TestHarness};
+    use crate::{action_handlers::review::diff_cache_key, debounce, test_harness::TestHarness};
 
     /// A harness with one changed file and diff-warming enabled.
     fn warm_harness() -> TestHarness {
@@ -325,10 +326,10 @@ mod tests {
     /// warm, mirroring the run loop's update() drains.
     fn drive_fs_event(h: &mut TestHarness, path: &Path, kind: crate::host::FsEventKind) {
         h.fake_fs_watcher().inject(path, kind);
-        h.stoat.drain_fs_watch_events();
-        h.advance_clock(crate::app::REVIEW_EXTERNAL_EDIT_DEBOUNCE);
-        h.stoat.drain_pending_diff_warm_files();
-        h.stoat.drain_pending_git_refresh();
+        debounce::drain_fs_watch_events(&mut h.stoat);
+        h.advance_clock(debounce::REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+        debounce::drain_pending_diff_warm_files(&mut h.stoat);
+        debounce::drain_pending_git_refresh(&mut h.stoat);
         h.settle();
     }
 

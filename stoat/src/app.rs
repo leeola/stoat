@@ -9,13 +9,14 @@ use crate::{
         store::{IndexWrites, ManifestEdit},
     },
     command_palette::CommandPalette,
+    debounce,
     display_map::{syntax_theme::SyntaxStyles, DisplayPoint, DisplaySnapshot},
     editor_state::{EditorId, ScrollGlide},
     file_finder::{FileFinder, FinderPathCache},
     help::Help,
     host::{
-        EnvHost, FsEventKind, FsHost, FsWatchHost, GitHost, GitRepo, LanguageServerFeature,
-        LocalEnv, LocalFs, LocalGit, LspHost, NoopFsWatcher,
+        EnvHost, FsHost, FsWatchHost, GitHost, LanguageServerFeature, LocalEnv, LocalFs, LocalGit,
+        LspHost, NoopFsWatcher,
     },
     input_view::InputView,
     keymap::{Keymap, ResolvedAction, StateValue},
@@ -33,7 +34,6 @@ use crate::{
         pane_cache::PaneCacheEntry,
         undercurl::{self, UndercurlBatch},
     },
-    review_session::ReviewSource,
     run::{CommandMark, GridSelection, PtyNotification, RunId},
     selection::{merge_overlapping_spans, EndCell},
     symbol_finder::SymbolFinder,
@@ -55,14 +55,13 @@ use slotmap::SlotMap;
 use std::{
     cell::OnceCell,
     collections::hash_map::{DefaultHasher, Entry},
-    ffi::OsStr,
     hash::{Hash, Hasher},
     io,
     ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use stoat_action::{Conflict, Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
+use stoat_action::{Conflict, Diff, OpenFile};
 use stoat_config::{LineNumbers, MinimapMode, Settings, TabBarMode, WrapMode};
 use stoat_language::{self as language, LanguageRegistry};
 use stoat_scheduler::Executor;
@@ -92,48 +91,6 @@ const THEME_ONE_DARK: &str = include_str!("../../themes/one-dark.json");
 const THEME_GRUVBOX_DARK: &str = include_str!("../../themes/gruvbox-dark.json");
 const THEME_GRUVBOX_LIGHT: &str = include_str!("../../themes/gruvbox-light.json");
 const THEME_ONE_LIGHT: &str = include_str!("../../themes/one-light.json");
-
-/// Quiet window after the last filesystem-watch event for a path
-/// before [`ReviewExternalEdit`] dispatches. Mirrors
-/// [`crate::action_handlers::lsp::LSP_DID_CHANGE_DEBOUNCE`] so a
-/// formatter-on-save burst (or an agent edit chain) collapses
-/// into one diff rebuild rather than three.
-pub(crate) const REVIEW_EXTERNAL_EDIT_DEBOUNCE: std::time::Duration =
-    std::time::Duration::from_millis(50);
-
-/// Quiet window after the last parse of a buffer before its symbols are
-/// extracted again.
-///
-/// An extract reads the whole file and its drain rebuilds the project's
-/// adjacency, so a burst of keystrokes must collapse into one rather than
-/// queue an extract each. Far longer than
-/// [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`], which is sized for a
-/// formatter-on-save burst. Typing pauses less often than that, and nothing
-/// reads the symbol index between keystrokes.
-pub(crate) const INDEX_EDIT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// External-change paths [`Stoat::drain_pending_index_edits`] hands to the
-/// blocking pool in one pass.
-///
-/// Each costs only a spawn on the run loop, the read and the parse having moved
-/// into the job. What the cap paces is the pool: a checkout naming thousands of
-/// files queues them over several windows rather than in one turn.
-const INDEX_EXTERNAL_DRAIN_CAP: usize = 256;
-
-/// Directory verdicts [`Stoat::ignored_dir_cache`] holds before dropping the
-/// lot. Far above the directory count of any one build, so the bound is a
-/// backstop against a pathological tree rather than a working limit.
-const IGNORED_DIR_CACHE_MAX: usize = 8192;
-
-/// Quiet window after the last code-search keystroke before the blocking
-/// workspace scan spawns, so a burst of typing re-scans once rather than per
-/// character.
-pub(crate) const CODE_SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
-
-/// Longer debounce for AST search, whose scan parses every same-language file
-/// per query and so costs more than a regex sweep.
-pub(crate) const CODE_SEARCH_AST_DEBOUNCE: std::time::Duration =
-    std::time::Duration::from_millis(300);
 
 /// Frame interval for scroll-animation ticks, about 60 fps to match a typical
 /// display rather than shipping targets that can never be presented.
@@ -694,7 +651,7 @@ pub struct Stoat {
     pub(crate) finder_path_cache: Option<FinderPathCache>,
     /// Counts the changes that would make a cached workspace file list wrong.
     ///
-    /// Bumped by [`Self::drain_fs_watch_events`] for anything that moves the set
+    /// Bumped by [`debounce::drain_fs_watch_events`] for anything that moves the set
     /// of paths a walk would yield, meaning a create, a delete, a rename, or a
     /// `.gitignore` write under the root. Plain content edits leave it alone,
     /// since they change what a file holds and not whether it is listed.
@@ -861,7 +818,7 @@ pub struct Stoat {
     /// In-flight code-search scan streaming match batches from the blocking pool.
     pub(crate) pending_code_search: Option<action_handlers::code_search::PendingCodeSearch>,
     /// Timer that forwards the latest code-search query on
-    /// [`Self::code_search_query_tx`] after [`CODE_SEARCH_DEBOUNCE`]. A new
+    /// [`Self::code_search_query_tx`] after [`debounce::CODE_SEARCH_DEBOUNCE`]. A new
     /// keystroke drops it, cancelling the pending scan trigger.
     pub(crate) code_search_debounce: Option<stoat_scheduler::Task<()>>,
     pub(crate) code_search_query_tx: Sender<String>,
@@ -1215,11 +1172,11 @@ pub struct Stoat {
     /// [`NoopFsWatcher`]; the bin layer installs
     /// [`crate::host::LocalFsWatcher`] and tests install
     /// [`crate::host::FakeFsWatcher`]. Drained per-tick by
-    /// [`Self::drain_fs_watch_events`] so external edits can flow
+    /// [`debounce::drain_fs_watch_events`] so external edits can flow
     /// into the active review session.
     pub(crate) fs_watch_host: Arc<dyn FsWatchHost>,
     /// Pending [`ReviewExternalEdit`] debounce timer per path. Each
-    /// [`Self::arm_review_external_edit_debounce`] call replaces the
+    /// [`debounce::arm_review_external_edit_debounce`] call replaces the
     /// entry, dropping the prior [`stoat_scheduler::Task`] which
     /// cancels its spawned future before the timer fires; only the
     /// most recent burst-event for a path proceeds to dispatch.
@@ -1228,7 +1185,7 @@ pub struct Stoat {
     /// Channel the per-path debounce tasks push onto once their
     /// 50ms timer fires. Decouples the spawned async work from the
     /// main-thread action dispatch in
-    /// [`Self::drain_pending_external_edits`].
+    /// [`debounce::drain_pending_external_edits`].
     pub(crate) review_external_edit_tx: Sender<PathBuf>,
     pub(crate) review_external_edit_rx: Receiver<PathBuf>,
     /// Single-slot debounce for a whole-session git refresh. A commit writes
@@ -1238,7 +1195,7 @@ pub struct Stoat {
     /// timer.
     pub(crate) review_pending_git_refresh: Option<stoat_scheduler::Task<()>>,
     /// Channel the git-refresh debounce task pushes onto once its timer fires,
-    /// drained by [`Self::drain_pending_git_refresh`].
+    /// drained by [`debounce::drain_pending_git_refresh`].
     pub(crate) review_git_refresh_tx: Sender<()>,
     pub(crate) review_git_refresh_rx: Receiver<()>,
     /// Per-path debounce tasks for the incremental diff-warm of a file edited
@@ -1248,7 +1205,7 @@ pub struct Stoat {
     pub(crate) pending_diff_warm_file:
         std::collections::HashMap<PathBuf, stoat_scheduler::Task<()>>,
     /// Channel the diff-warm debounce tasks push a path onto once their timer
-    /// fires, drained by [`Self::drain_pending_diff_warm_files`].
+    /// fires, drained by [`debounce::drain_pending_diff_warm_files`].
     pub(crate) diff_warm_file_tx: Sender<PathBuf>,
     pub(crate) diff_warm_file_rx: Receiver<PathBuf>,
     /// In-flight single-file diff warms. Held so their tasks are not dropped
@@ -1273,7 +1230,7 @@ pub struct Stoat {
     /// [`Self::index_pending_external_edits`] holds.
     ///
     /// Armed when the set goes from empty to occupied, so the window closes a
-    /// fixed [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`] after a burst starts. Under a
+    /// fixed [`debounce::REVIEW_EXTERNAL_EDIT_DEBOUNCE`] after a burst starts. Under a
     /// reset-per-event timer, a build emitting events faster than that window
     /// holds the index off for as long as it runs.
     pub(crate) index_external_edit_timer: Option<stoat_scheduler::Task<()>>,
@@ -1285,7 +1242,7 @@ pub struct Stoat {
     /// change an answer already in here.
     pub(crate) ignored_dir_cache: std::collections::HashMap<PathBuf, bool>,
     /// Channel [`Self::index_external_edit_timer`] signals when its window
-    /// closes, waking [`Self::drain_pending_index_edits`].
+    /// closes, waking [`debounce::drain_pending_index_edits`].
     ///
     /// Carries no path. The window covers whichever paths
     /// [`Self::index_pending_external_edits`] has collected by the time it
@@ -3755,12 +3712,12 @@ impl Stoat {
         self.drain_lsp_notifications();
         self.drain_lsp_incoming_requests();
         self.install_pending_lsp_host();
-        self.drain_fs_watch_events();
-        self.drain_pending_external_edits();
-        self.drain_pending_git_refresh();
-        self.drain_pending_code_search();
-        self.drain_pending_diff_warm_files();
-        self.drain_pending_index_edits();
+        debounce::drain_fs_watch_events(self);
+        debounce::drain_pending_external_edits(self);
+        debounce::drain_pending_git_refresh(self);
+        debounce::drain_pending_code_search(self);
+        debounce::drain_pending_diff_warm_files(self);
+        debounce::drain_pending_index_edits(self);
         let effect = match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
@@ -3830,182 +3787,6 @@ impl Stoat {
         effect
     }
 
-    /// Drain queued [`crate::host::FsWatchEvent`]s from the active
-    /// [`FsWatchHost`]. Each event arms (or resets) a 50ms
-    /// per-path debounce via
-    /// [`Self::arm_review_external_edit_debounce`] when a review
-    /// session is active; the dispatch itself lands later from
-    /// [`Self::drain_pending_external_edits`] once the timer
-    /// fires. Cap matches [`Self::drain_lsp_notifications`] so a
-    /// pathological burst can't starve the event loop.
-    pub(crate) fn drain_fs_watch_events(&mut self) {
-        let host = self.fs_watch_host.clone();
-        let mut events: Vec<(PathBuf, FsEventKind)> = Vec::new();
-        for _ in 0..256 {
-            let Some(event) = host.try_recv() else {
-                break;
-            };
-            tracing::trace!(
-                target: "stoat::app",
-                path = %event.path.display(),
-                kind = ?event.kind,
-                "fs watch event observed",
-            );
-            events.push((event.path, event.kind));
-        }
-
-        if events.is_empty() {
-            return;
-        }
-        // `review.follow` gates every automatic refresh below. A manual `r`
-        // (ReviewRefresh) dispatches through a separate path and still works.
-        let review_active =
-            self.active_workspace().review.is_some() && self.settings.review_follow.unwrap_or(true);
-        // With no review open, keep the diff cache warm incrementally instead,
-        // gated the same as the full background warm.
-        let precompute = self.active_workspace().review.is_none()
-            && self.diff_warm_auto
-            && self.settings.review_precompute.unwrap_or(true);
-        let git_root = self.active_workspace().git_root.clone();
-        let git_dir = git_root.join(".git");
-        let mut repo: Option<Option<Arc<dyn GitRepo>>> = None;
-        for (path, kind) in events {
-            let in_git_dir = path.starts_with(&git_dir);
-            let is_gitignore = path.file_name() == Some(OsStr::new(".gitignore"));
-
-            // Invalidate before reading any verdict, so a .gitignore edit drained
-            // alongside later paths in the same batch cannot leave them resolving
-            // against the rules it just replaced.
-            if in_git_dir || is_gitignore {
-                self.ignored_dir_cache.clear();
-            }
-
-            // The rules deciding which files a walk yields just moved, so the
-            // cached list was built under different ones.
-            if is_gitignore {
-                self.finder_path_epoch += 1;
-            }
-
-            // A whole ignored directory is build churn, so none of the three arms
-            // below want it. The initial index walk filters these out too, so
-            // reindexing one here would put generated files in the code graph
-            // that a rebuild drops.
-            if !in_git_dir && self.parent_dir_ignored(&path, &git_root, &mut repo) {
-                continue;
-            }
-
-            // Past the ignored-directory filter, so what is left is a real
-            // source-tree change rather than build churn. Anything that adds or
-            // removes a path makes a cached walk list wrong, and a plain content
-            // edit does not.
-            if !in_git_dir
-                && path.starts_with(&git_root)
-                && matches!(
-                    kind,
-                    FsEventKind::Created | FsEventKind::Removed | FsEventKind::Renamed
-                )
-            {
-                self.finder_path_epoch += 1;
-
-                // Watches are per directory, so one created after startup is
-                // invisible until it gets its own. The stat is affordable here
-                // because the ignored-directory filter above already dropped
-                // build churn, leaving creates in the source tree, which are
-                // rare.
-                if kind == FsEventKind::Created
-                    && self
-                        .fs_host
-                        .metadata(&path)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|meta| meta.is_dir)
-                {
-                    let _ = self.fs_watch_host.watch(&path);
-                }
-            }
-
-            if in_git_dir {
-                // A .git write (a commit, reset, rebase step, or branch switch)
-                // moved HEAD and staled every diff base, so it refreshes through
-                // the shared debounce whatever the session state is. Its drain
-                // refreshes an open review, clears the diff_warmed flag, and
-                // stales every open buffer's diff map.
-                self.arm_review_git_refresh_debounce();
-            } else if review_active {
-                let in_session = self
-                    .active_workspace()
-                    .review
-                    .as_ref()
-                    .is_some_and(|s| s.files.iter().any(|f| f.path == path));
-                if in_session {
-                    // A tracked file keeps the per-path debounce, which scrolls
-                    // the review to the edited chunk when the refresh lands.
-                    self.arm_review_external_edit_debounce(path.clone());
-                } else if path.starts_with(&git_root) {
-                    // A change to a working-tree file not yet in the session
-                    // pulls it in on the next refresh, unless gitignored so
-                    // build churn such as target/ cannot thrash the rescan.
-                    let repo = repo.get_or_insert_with(|| self.git_host.discover(&git_root));
-                    if !repo.as_ref().is_some_and(|r| r.is_path_ignored(&path)) {
-                        self.arm_review_git_refresh_debounce();
-                    }
-                }
-            } else if precompute && path.starts_with(&git_root) {
-                // An edited working-tree file warms its own diff, unless
-                // gitignored so build churn cannot thrash the recompute.
-                let repo = repo.get_or_insert_with(|| self.git_host.discover(&git_root));
-                if !repo.as_ref().is_some_and(|r| r.is_path_ignored(&path)) {
-                    self.arm_diff_warm_file_debounce(path.clone());
-                }
-            }
-            if path.starts_with(&git_root) && self.language_registry.for_path(&path).is_some() {
-                self.arm_index_external_edit_debounce(path);
-            }
-        }
-    }
-
-    /// Whether `path` sits in a gitignored directory, answering from
-    /// [`Self::ignored_dir_cache`] when the directory has been asked about
-    /// before.
-    ///
-    /// Asks about the parent rather than `path` itself, which is what makes the
-    /// answer reusable, since one query then covers every file a build writes
-    /// into that directory. A file individually ignored inside a clean directory
-    /// is not caught here, so the callers that care keep their own per-file
-    /// check.
-    ///
-    /// `repo` memoizes the repository discovery across one drain batch. Paths
-    /// outside `git_root` have no verdict and report false.
-    fn parent_dir_ignored(
-        &mut self,
-        path: &Path,
-        git_root: &Path,
-        repo: &mut Option<Option<Arc<dyn GitRepo>>>,
-    ) -> bool {
-        if !path.starts_with(git_root) {
-            return false;
-        }
-        let Some(parent) = path.parent() else {
-            return false;
-        };
-        if let Some(ignored) = self.ignored_dir_cache.get(parent) {
-            return *ignored;
-        }
-
-        let git_host = self.git_host.clone();
-        let repo = repo.get_or_insert_with(|| git_host.discover(git_root));
-        let ignored = repo.as_ref().is_some_and(|r| r.is_path_ignored(parent));
-
-        // A bound rather than an eviction policy, because the working set here is
-        // the directories one build touches. Dropping all of it costs at most one
-        // query per directory the next batch revisits.
-        if self.ignored_dir_cache.len() >= IGNORED_DIR_CACHE_MAX {
-            self.ignored_dir_cache.clear();
-        }
-        self.ignored_dir_cache.insert(parent.to_path_buf(), ignored);
-        ignored
-    }
-
     /// Spawn `future` on the executor and wake the run loop once it
     /// resolves, so a background result that drives a render lands
     /// without waiting for the next keystroke.
@@ -4038,315 +3819,11 @@ impl Stoat {
         }));
     }
 
-    /// Schedule a debounced [`ReviewExternalEdit`] dispatch for
-    /// `path`. Inserting into [`Self::review_pending_external_edits`]
-    /// drops any prior task for the same path, which cancels the
-    /// spawned future at its [`Executor::timer`] await; only the
-    /// most recent burst event proceeds. The spawned task forwards
-    /// `path` on [`Self::review_external_edit_tx`] when its
-    /// [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`] window elapses; the main
-    /// loop drains the channel via
-    /// [`Self::drain_pending_external_edits`] and dispatches the
-    /// action there because async tasks cannot mutate `Stoat`.
-    fn arm_review_external_edit_debounce(&mut self, path: PathBuf) {
-        let executor = self.executor.clone();
-        let tx = self.review_external_edit_tx.clone();
-        let redraw = self.redraw_notify.clone();
-        let path_for_send = path.clone();
-        let task = self.executor.spawn_with_redraw(redraw, async move {
-            executor.timer(REVIEW_EXTERNAL_EDIT_DEBOUNCE).await;
-            let _ = tx.send(path_for_send).await;
-        });
-        self.review_pending_external_edits.insert(path, task);
-    }
-
-    /// Point the code-search scan at `query`, debounced.
-    ///
-    /// Drops any in-flight scan and arms a timer that forwards `query` on
-    /// [`Self::code_search_query_tx`] after [`CODE_SEARCH_DEBOUNCE`], so a burst
-    /// of typing spawns one scan. An empty or invalid pattern cancels without
-    /// arming, since an empty regex would otherwise match every position.
-    pub(crate) fn set_code_search_query(&mut self, query: String) {
-        self.pending_code_search = None;
-        let Some(finder) = self.code_search.as_ref() else {
-            self.code_search_debounce = None;
-            return;
-        };
-        let is_ast = matches!(finder.mode, crate::code_search::SearchMode::Ast);
-        let valid = finder.pattern_valid(&query);
-
-        // AST mode surfaces a non-empty, unparseable query as a placeholder;
-        // regex validity is silent, since an invalid regex just clears the list.
-        if is_ast && let Some(finder) = self.code_search.as_mut() {
-            finder.invalid_pattern = !query.is_empty() && !valid;
-        }
-        if !valid {
-            self.code_search_debounce = None;
-            return;
-        }
-
-        let debounce = if is_ast {
-            CODE_SEARCH_AST_DEBOUNCE
-        } else {
-            CODE_SEARCH_DEBOUNCE
-        };
-        let executor = self.executor.clone();
-        let tx = self.code_search_query_tx.clone();
-        let redraw = self.redraw_notify.clone();
-        self.code_search_debounce = Some(self.executor.spawn_with_redraw(redraw, async move {
-            executor.timer(debounce).await;
-            let _ = tx.send(query).await;
-        }));
-    }
-
-    /// Drain the debounced code-search query and spawn its scan.
-    ///
-    /// The debounce timer forwards the settled query here. Spawning the blocking
-    /// walk on the main loop lets its batches stream into the open finder.
-    pub(crate) fn drain_pending_code_search(&mut self) -> bool {
-        let mut progressed = false;
-        for _ in 0..256 {
-            let Ok(query) = self.code_search_query_rx.try_recv() else {
-                break;
-            };
-            if self.code_search.is_none() {
-                continue;
-            }
-            let git_root = self.active_workspace().git_root.clone();
-            if let Some(pending) =
-                action_handlers::code_search::spawn_code_search(self, git_root, &query)
-            {
-                self.pending_code_search = Some(pending);
-                progressed = true;
-            }
-        }
-        progressed
-    }
-
-    /// Schedule a debounced whole-session [`ReviewRefresh`] after a git-state
-    /// change under `<git_root>/.git`.
-    ///
-    /// The debounce is single-slot rather than per-path, so re-arming drops the
-    /// prior task, which cancels its future at the [`Executor::timer`] await. A
-    /// burst of `.git` writes from one commit then fires a single refresh once
-    /// the [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`] window elapses. The main loop drains
-    /// it via [`Self::drain_pending_git_refresh`], since async tasks cannot
-    /// mutate `Stoat`.
-    fn arm_review_git_refresh_debounce(&mut self) {
-        let executor = self.executor.clone();
-        let tx = self.review_git_refresh_tx.clone();
-        let redraw = self.redraw_notify.clone();
-        let task = self.executor.spawn_with_redraw(redraw, async move {
-            executor.timer(REVIEW_EXTERNAL_EDIT_DEBOUNCE).await;
-            let _ = tx.send(()).await;
-        });
-        self.review_pending_git_refresh = Some(task);
-    }
-
-    /// Schedule a debounced single-file diff warm for `path` edited while review
-    /// is closed. Mirrors [`Self::arm_review_external_edit_debounce`]: inserting
-    /// into [`Self::pending_diff_warm_file`] drops any prior task for the same
-    /// path, so only the latest burst event warms once its
-    /// [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`] window elapses. The spawned task
-    /// forwards `path` on [`Self::diff_warm_file_tx`], drained by
-    /// [`Self::drain_pending_diff_warm_files`], which spawns the warm off-thread.
-    fn arm_diff_warm_file_debounce(&mut self, path: PathBuf) {
-        let executor = self.executor.clone();
-        let tx = self.diff_warm_file_tx.clone();
-        let redraw = self.redraw_notify.clone();
-        let path_for_send = path.clone();
-        let task = self.executor.spawn_with_redraw(redraw, async move {
-            executor.timer(REVIEW_EXTERNAL_EDIT_DEBOUNCE).await;
-            let _ = tx.send(path_for_send).await;
-        });
-        self.pending_diff_warm_file.insert(path, task);
-    }
-
-    /// Drain every path the per-path debounce tasks have pushed onto
-    /// [`Self::review_external_edit_tx`] since the last call. Each
-    /// path becomes one [`ReviewExternalEdit`] dispatch when a review
-    /// session is active; otherwise the path is dropped. Returns
-    /// `true` if any dispatch fired so the test harness's settle
-    /// loop can re-iterate. Cap matches
-    /// [`Self::drain_fs_watch_events`].
-    pub(crate) fn drain_pending_external_edits(&mut self) -> bool {
-        let mut progressed = false;
-        for _ in 0..256 {
-            let Ok(path) = self.review_external_edit_rx.try_recv() else {
-                break;
-            };
-            self.review_pending_external_edits.remove(&path);
-            if self.active_workspace().review.is_some() {
-                action_handlers::dispatch(self, &ReviewExternalEdit { path });
-                progressed = true;
-            }
-        }
-        progressed
-    }
-
-    /// Drain the git-refresh debounce marker and refresh the review when one
-    /// fired since the last call.
-    ///
-    /// Only a [`ReviewSource::WorkingTree`] session refreshes. Commit and
-    /// commit-range sources are fixed snapshots the rebase edit-pause review
-    /// relies on not churning, and in-memory agent-edit sources are not
-    /// git-backed. With no working-tree review, a `.git` change instead re-arms
-    /// the full background warm, since HEAD moved and staled every cached base.
-    ///
-    /// Either way the drain stales every open buffer's diff map, since those are
-    /// keyed by buffer version alone and a moved HEAD leaves them describing a
-    /// base that no longer exists. Gutter marks and the per-file `:diff` view
-    /// then follow each rebase step instead of freezing at the pre-rebase base.
-    ///
-    /// Returns `true` if a refresh dispatched so the test harness settle loop
-    /// re-iterates.
-    pub(crate) fn drain_pending_git_refresh(&mut self) -> bool {
-        let mut progressed = false;
-        for _ in 0..256 {
-            let Ok(()) = self.review_git_refresh_rx.try_recv() else {
-                break;
-            };
-            self.review_pending_git_refresh = None;
-            self.active_workspace_mut().invalidate_all_diffs();
-            // A working-tree review refreshes on any git write. An auto_source
-            // session refreshes too even when it currently displays a Commit,
-            // so a rebase-fallback view re-decides and follows each rebase step.
-            let refreshes = matches!(
-                self.active_workspace().review.as_ref(),
-                Some(s) if matches!(s.source, ReviewSource::WorkingTree { .. }) || s.auto_source
-            );
-            if refreshes {
-                action_handlers::dispatch(self, &ReviewRefresh);
-                progressed = true;
-            } else {
-                self.active_workspace_mut().diff_warmed = false;
-            }
-        }
-        progressed
-    }
-
     /// Whether any background diff warm is in flight, driving the status bar's
     /// transient diff spinner segment and keeping the frame clock ticking so it
     /// animates.
     pub(crate) fn diff_warm_busy(&self) -> bool {
         self.pending_diff_warm.is_some() || !self.diff_warm_files.is_empty()
-    }
-
-    /// Drain the diff-warm debounce channel, spawning a single-file warm for
-    /// each path edited while review was closed.
-    ///
-    /// Mirrors [`Self::drain_pending_external_edits`]. Skips a path when review
-    /// has since opened -- its own refresh covers the edit -- or when
-    /// `review.precompute` or the warm auto-gate is off. Returns `true` if a
-    /// warm spawned so the test harness settle loop re-iterates.
-    pub(crate) fn drain_pending_diff_warm_files(&mut self) -> bool {
-        let mut progressed = false;
-        for _ in 0..256 {
-            let Ok(path) = self.diff_warm_file_rx.try_recv() else {
-                break;
-            };
-            self.pending_diff_warm_file.remove(&path);
-            let precompute = self.diff_warm_auto && self.settings.review_precompute.unwrap_or(true);
-            if precompute && self.active_workspace().review.is_none() {
-                crate::diff_warm::spawn_file_warm(self, path);
-                progressed = true;
-            }
-        }
-        progressed
-    }
-
-    /// Collect `path` for a debounced reindex after an external change.
-    ///
-    /// Unlike [`Self::arm_review_external_edit_debounce`], a burst shares one
-    /// window rather than getting a timer each. The window opens on the first
-    /// path and covers every path that arrives before it closes, so a checkout
-    /// costs one task however many files it touches.
-    fn arm_index_external_edit_debounce(&mut self, path: PathBuf) {
-        let opening = self.index_pending_external_edits.is_empty();
-        self.index_pending_external_edits.insert(path);
-        if opening {
-            self.arm_index_external_edit_timer();
-        }
-    }
-
-    /// Start the shared debounce window, replacing any timer already held.
-    fn arm_index_external_edit_timer(&mut self) {
-        let executor = self.executor.clone();
-        let tx = self.index_external_edit_tx.clone();
-        let redraw = self.redraw_notify.clone();
-        self.index_external_edit_timer =
-            Some(self.executor.spawn_with_redraw(redraw, async move {
-                executor.timer(REVIEW_EXTERNAL_EDIT_DEBOUNCE).await;
-                let _ = tx.send(()).await;
-            }));
-    }
-
-    /// Reindex the external-change paths whose debounce window has closed.
-    /// Returns `true` if any path was handled so the harness settle loop
-    /// re-iterates.
-    ///
-    /// Takes at most [`INDEX_EXTERNAL_DRAIN_CAP`] paths per pass and re-arms
-    /// the window on whatever is left, so a checkout's worth of files reaches
-    /// the blocking pool in paced batches rather than all in one turn.
-    pub(crate) fn drain_pending_index_edits(&mut self) -> bool {
-        if self.index_external_edit_rx.try_recv().is_err() {
-            return false;
-        }
-
-        let mut pending = std::mem::take(&mut self.index_pending_external_edits);
-        let batch: Vec<PathBuf> = pending
-            .iter()
-            .take(INDEX_EXTERNAL_DRAIN_CAP)
-            .cloned()
-            .collect();
-        for path in &batch {
-            pending.remove(path);
-        }
-        self.index_pending_external_edits = pending;
-
-        for path in batch {
-            self.reindex_external_path(path);
-        }
-
-        if !self.index_pending_external_edits.is_empty() {
-            self.arm_index_external_edit_timer();
-        }
-        true
-    }
-
-    /// Reindex a file changed outside the editor.
-    ///
-    /// A still-present file whose on-disk content matches the graph's
-    /// recorded hash is skipped, since the editor's own save already
-    /// indexed it. A changed file is re-extracted from disk. A file that no
-    /// longer exists is removed from the graph.
-    ///
-    /// All three decisions are the job's, because telling them apart means
-    /// reading the file. What stays here is the graph lookup naming what the
-    /// job expects to find, which costs one map read.
-    fn reindex_external_path(&mut self, path: PathBuf) {
-        let workspace = self.active_workspace;
-        let git_root = self.active_workspace().git_root.clone();
-        let Some(rel_path) = crate::code_index::build::relpath(&git_root, &path) else {
-            return;
-        };
-        let file = crate::code_index::build::file_id(&rel_path);
-
-        let handles = crate::code_index::build::IndexBuild {
-            fs: self.fs_host.clone(),
-            languages: self.language_registry.clone(),
-            tx: self.index_update_tx.clone(),
-            redraw: self.redraw_notify.clone(),
-        };
-        let target = crate::code_index::build::ExternalReindex {
-            git_root,
-            workspace,
-            path,
-            rel_path,
-            file,
-            expected: self.active_workspace().code_graph.content_hash(file),
-        };
-        crate::code_index::build::reindex_path(&self.executor, handles, target).detach();
     }
 
     /// Drains every notification currently buffered on
@@ -11208,7 +10685,9 @@ mod tests {
     use crate::{
         action_handlers::lsp::RenameInputState,
         agent_status::AgentHookEvent,
+        debounce::{INDEX_EDIT_DEBOUNCE, REVIEW_EXTERNAL_EDIT_DEBOUNCE},
         display_map::highlights::{HighlightStyleId, HighlightStyleInterner},
+        host::FsEventKind,
         input_view::{InputView, SubmitTarget},
         term_session::TermSession,
     };
@@ -12944,9 +12423,9 @@ mod tests {
 
         let drive = |stoat: &mut Stoat, kind: FsEventKind| {
             watcher.inject(&path, kind);
-            stoat.drain_fs_watch_events();
+            debounce::drain_fs_watch_events(stoat);
             scheduler.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
-            stoat.drain_pending_index_edits();
+            debounce::drain_pending_index_edits(stoat);
             scheduler.run_until_parked();
             stoat.drain_index_updates();
         };
@@ -13035,7 +12514,7 @@ mod tests {
         let fresh = PathBuf::from("/repo/src/fresh");
         fs.insert_dir(&fresh);
         watcher.inject(&fresh, FsEventKind::Created);
-        stoat.drain_fs_watch_events();
+        debounce::drain_fs_watch_events(&mut stoat);
         assert!(
             watcher.is_watching(&fresh),
             "the new directory is watched from its create event",
@@ -13043,7 +12522,7 @@ mod tests {
 
         let file = PathBuf::from("/repo/src/a.rs");
         watcher.inject(&file, FsEventKind::Created);
-        stoat.drain_fs_watch_events();
+        debounce::drain_fs_watch_events(&mut stoat);
         assert!(
             !watcher.is_watching(&file),
             "a created file needs no watch of its own, its directory has one",
@@ -13085,9 +12564,9 @@ mod tests {
         };
         let drive = |stoat: &mut Stoat| {
             watcher.inject(&path, FsEventKind::Modified);
-            stoat.drain_fs_watch_events();
+            debounce::drain_fs_watch_events(stoat);
             scheduler.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
-            stoat.drain_pending_index_edits();
+            debounce::drain_pending_index_edits(stoat);
             scheduler.run_until_parked();
             stoat.drain_index_updates();
         };
@@ -13171,12 +12650,12 @@ mod tests {
         );
 
         watcher.inject(&a, FsEventKind::Modified);
-        stoat.drain_fs_watch_events();
+        debounce::drain_fs_watch_events(&mut stoat);
 
         // Most of the window elapses, then the second path arrives inside it.
         scheduler.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE / 2);
         watcher.inject(&b, FsEventKind::Modified);
-        stoat.drain_fs_watch_events();
+        debounce::drain_fs_watch_events(&mut stoat);
         assert_eq!(
             stoat.index_pending_external_edits.len(),
             2,
@@ -13185,7 +12664,7 @@ mod tests {
 
         scheduler.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
         assert!(
-            stoat.drain_pending_index_edits(),
+            debounce::drain_pending_index_edits(&mut stoat),
             "the window the first path opened closed and carried both",
         );
         assert!(
@@ -22219,85 +21698,12 @@ mod tests {
 
         h.fake_fs_watcher()
             .inject(Path::new("/repo/.git/HEAD"), FsEventKind::Modified);
-        h.stoat.drain_fs_watch_events();
+        debounce::drain_fs_watch_events(&mut h.stoat);
         h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
 
         assert!(
             !h.stoat.active_workspace().diff_map_current(buffer_id),
             "a .git write stales the open buffer's diff map even with no review and no precompute",
-        );
-    }
-
-    /// A repo with `target/` gitignored and precompute on, so a drained event
-    /// reaches both the diff-warm arm and the reindex arm.
-    fn ignored_dir_harness() -> crate::test_harness::TestHarness {
-        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
-        h.stage_review_scenario("/repo", &[("a.rs", "a\n", "b\n")]);
-        h.stoat.set_diff_warm_auto(true);
-        h.fake_git().add_repo("/repo").ignored("target/debug");
-        h
-    }
-
-    /// A build writing into an ignored directory used to cost a libgit2 query
-    /// per file in the review and diff-warm arms, and the reindex arm checked
-    /// nothing at all, so generated files entered the code graph.
-    #[test]
-    fn a_burst_under_an_ignored_dir_arms_nothing() {
-        let mut h = ignored_dir_harness();
-
-        for name in ["one.rs", "two.rs", "three.rs"] {
-            h.fake_fs_watcher().inject(
-                PathBuf::from("/repo/target/debug").join(name),
-                FsEventKind::Modified,
-            );
-        }
-        h.stoat.drain_fs_watch_events();
-
-        assert!(
-            h.stoat.pending_diff_warm_file.is_empty(),
-            "no diff warm is armed for build output"
-        );
-        assert!(
-            h.stoat.index_pending_external_edits.is_empty(),
-            "and none of it reaches the code graph"
-        );
-
-        h.fake_fs_watcher()
-            .inject(Path::new("/repo/src/b.rs"), FsEventKind::Modified);
-        h.stoat.drain_fs_watch_events();
-
-        assert_eq!(
-            h.stoat.index_pending_external_edits.len(),
-            1,
-            "a source file beside it still arms the index debounce"
-        );
-    }
-
-    /// The cached verdict has to die with the rules it came from, or a directory
-    /// already asked about keeps its old answer for the rest of the session.
-    #[test]
-    fn a_gitignore_edit_drops_the_cached_verdict() {
-        let mut h = ignored_dir_harness();
-        let built = PathBuf::from("/repo/generated/one.rs");
-
-        h.fake_fs_watcher().inject(&built, FsEventKind::Modified);
-        h.stoat.drain_fs_watch_events();
-        assert_eq!(
-            h.stoat.index_pending_external_edits.len(),
-            1,
-            "the directory is clean, so its verdict caches as not ignored"
-        );
-        h.stoat.index_pending_external_edits.clear();
-
-        h.fake_git().add_repo("/repo").ignored("generated");
-        h.fake_fs_watcher()
-            .inject(Path::new("/repo/.gitignore"), FsEventKind::Modified);
-        h.fake_fs_watcher().inject(&built, FsEventKind::Modified);
-        h.stoat.drain_fs_watch_events();
-
-        assert!(
-            h.stoat.index_pending_external_edits.is_empty(),
-            "the new rule applies rather than the verdict cached before it"
         );
     }
 

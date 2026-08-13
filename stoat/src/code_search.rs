@@ -367,7 +367,7 @@ mod tests {
         SearchMatch, SearchMode, MATCH_CAP, WALK_BATCH_SIZE,
     };
     use crate::{
-        app::{CODE_SEARCH_AST_DEBOUNCE, CODE_SEARCH_DEBOUNCE},
+        debounce::{CODE_SEARCH_AST_DEBOUNCE, CODE_SEARCH_DEBOUNCE},
         host::{FakeFs, FsHost},
         test_harness::TestHarness,
     };
