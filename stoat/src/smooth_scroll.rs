@@ -19,7 +19,7 @@ use crate::{
     commit_list::CommitListState,
     completion::CompletionItem,
     conflict_session::ConflictViewState,
-    display_map::{display_width, highlights::HighlightEndpoint, DisplaySnapshot},
+    display_map::{highlights::HighlightEndpoint, DisplaySnapshot},
     file_finder::FileFinder,
     help::Help,
     render::{
@@ -29,7 +29,7 @@ use crate::{
         conflict_view::render_conflict_rows,
         editor::{
             draw_fallback_line_numbers, gutter_component_lines, gutter_diff_marks, gutter_geometry,
-            rich_gutter, RichGutterColors,
+            paint_chunk_rows, rich_gutter, RichGutterColors,
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
@@ -207,63 +207,16 @@ pub(crate) fn render_page_from_snapshot(
         paint_page_gutter(snapshot, top_row, end_row, &mut buf, area, gutter, live);
 
     if end_row > top_row {
-        let right = area.x + area.width;
-        let bottom = area.y + area.height;
-        let text_x = area.x + gutter_w;
-        let mut x = text_x;
-        let mut y = area.y;
-        let inlay_style =
-            fallback_style.patch(gutter.theme().get(crate::theme::scope::UI_VIRTUAL_INLAY));
-        'chunks: for chunk in
-            snapshot.highlighted_chunks_with_endpoints(top_row..end_row, endpoints)
-        {
-            let style = if chunk.is_inlay {
-                inlay_style
-            } else {
-                chunk
-                    .highlight_style
-                    .as_ref()
-                    .map(|hs| hs.to_ratatui_style())
-                    .unwrap_or(fallback_style)
-            };
-            let mut rest: &str = &chunk.text;
-            while let Some(ch) = rest.chars().next() {
-                // `x` only grows within a line and only resets on a newline, so
-                // once it reaches the page edge nothing on the rest of the line
-                // can paint. Jump straight to the newline rather than stepping
-                // an over-wide line's remainder every frame. A chunk holding no
-                // newline ends here, and the line's next chunk repeats the check.
-                if x >= right && ch != '\n' {
-                    match memchr::memchr(b'\n', rest.as_bytes()) {
-                        Some(nl) => rest = &rest[nl..],
-                        None => break,
-                    }
-                    continue;
-                }
-                rest = &rest[ch.len_utf8()..];
-                if ch == '\n' {
-                    y += 1;
-                    x = text_x;
-                    if y >= bottom {
-                        break 'chunks;
-                    }
-                    continue;
-                }
-                let w = display_width(ch);
-                if w == 0 {
-                    continue;
-                }
-                if x + w as u16 <= right {
-                    buf[(x, y)].set_char(ch).set_style(style);
-                    // A double-width glyph occupies two cells. Clear the second
-                    // so stale content under it does not show through.
-                    if w == 2 {
-                        buf[(x + 1, y)].set_char(' ').set_style(style);
-                    }
-                }
-                x += w as u16;
-            }
-        }
+        paint_chunk_rows(
+            snapshot.highlighted_chunks_with_endpoints(top_row..end_row, endpoints),
+            area.x + gutter_w,
+            area.x + area.width,
+            area.y,
+            area.y + area.height,
+            fallback_style,
+            fallback_style.patch(gutter.theme().get(crate::theme::scope::UI_VIRTUAL_INLAY)),
+            &mut buf,
+        );
     }
 
     dim_page(&mut buf, area, gutter.theme(), dim);
@@ -850,9 +803,12 @@ mod tests {
         let mut h = Stoat::test();
         let root = PathBuf::from("/page-snapshot");
         let path = root.join("doc.txt");
+        // The combining mark on line zero occupies no cell of its own, so both
+        // paths must join it to the cell its base went into. Without it the
+        // byte comparison below passes over a paint loop that drops marks.
         h.fake_fs().insert_file(
             &path,
-            b"line zero\nline one\nline two\nline three\nline four\nline five\nline six\nline seven\nline eight\nline nine\n",
+            "l\u{301}ine zero\nline one\nline two\nline three\nline four\nline five\nline six\nline seven\nline eight\nline nine\n".as_bytes(),
         );
         h.stoat.active_workspace_mut().git_root = root;
         dispatch(&mut h.stoat, &OpenFile { path });

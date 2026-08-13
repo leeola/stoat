@@ -17,9 +17,9 @@ use crate::{
     multi_buffer::{ExcerptId, MultiBuffer, MultiBufferSnapshot},
 };
 pub use block_map::{
-    balancing_block, Block, BlockContext, BlockId, BlockMap, BlockPlacement, BlockPoint,
-    BlockProperties, BlockRow, BlockRowKind, BlockSnapshot, BlockStyle, CompanionView, CustomBlock,
-    CustomBlockId, RenderBlock,
+    balancing_block, Block, BlockChunks, BlockContext, BlockId, BlockMap, BlockPlacement,
+    BlockPoint, BlockProperties, BlockRow, BlockRowKind, BlockSnapshot, BlockStyle, CompanionView,
+    CustomBlock, CustomBlockId, RenderBlock,
 };
 pub use crease_map::{
     Crease, CreaseId, CreaseMap, CreaseMetadata, CreaseSnapshot, RenderToggleFn, RenderTrailerFn,
@@ -1145,11 +1145,7 @@ impl DisplaySnapshot {
         self.block_snapshot.buffer_snapshot()
     }
 
-    pub fn chunks(
-        &self,
-        display_rows: Range<u32>,
-        highlights: Highlights<'_>,
-    ) -> block_map::BlockChunks<'_> {
+    pub fn chunks(&self, display_rows: Range<u32>, highlights: Highlights<'_>) -> BlockChunks<'_> {
         let byte_range = self
             .block_snapshot
             .row_range_to_buffer_byte_range(display_rows.clone());
@@ -1174,7 +1170,7 @@ impl DisplaySnapshot {
             .then_some(&self.lsp_token_highlights)
     }
 
-    pub fn highlighted_chunks(&self, display_rows: Range<u32>) -> block_map::BlockChunks<'_> {
+    pub fn highlighted_chunks(&self, display_rows: Range<u32>) -> BlockChunks<'_> {
         let endpoints = self.highlighted_endpoints(display_rows.clone());
         self.highlighted_chunks_with_endpoints(display_rows, endpoints)
     }
@@ -1235,7 +1231,7 @@ impl DisplaySnapshot {
         &self,
         display_rows: Range<u32>,
         endpoints: Arc<[highlights::HighlightEndpoint]>,
-    ) -> block_map::BlockChunks<'_> {
+    ) -> BlockChunks<'_> {
         self.block_snapshot.chunks(display_rows, endpoints)
     }
 
@@ -1271,11 +1267,7 @@ impl DisplaySnapshot {
     /// stream open across them, because it paints other things between rows.
     /// Rows must be asked for in ascending order, which is the order such a
     /// painter visits them.
-    pub fn row_chunks(
-        &self,
-        row: u32,
-        cursor: &mut RowHighlightCursor,
-    ) -> block_map::BlockChunks<'_> {
+    pub fn row_chunks(&self, row: u32, cursor: &mut RowHighlightCursor) -> BlockChunks<'_> {
         let endpoints = cursor.endpoints.clone();
         let seed = cursor.seed_at(self.row_start_offset(row));
         self.block_snapshot
@@ -1297,7 +1289,7 @@ impl DisplaySnapshot {
         &self,
         display_rows: Range<u32>,
         cache: &mut Option<CachedHighlightEndpoints>,
-    ) -> block_map::BlockChunks<'_> {
+    ) -> BlockChunks<'_> {
         let highlights = Highlights {
             text_highlights: Some(&self.text_highlights),
             inlay_highlights: Some(self.inlay_highlights.as_ref()),
@@ -4108,7 +4100,7 @@ mod tests {
             let rows = 0..snapshot.line_count();
             let endpoints = snapshot.highlighted_endpoints(rows.clone());
 
-            let styled = |chunks: super::block_map::BlockChunks<'_>| {
+            let styled = |chunks: super::BlockChunks<'_>| {
                 chunks
                     .map(|c| (c.text.into_owned(), c.highlight_style))
                     .collect::<Vec<_>>()

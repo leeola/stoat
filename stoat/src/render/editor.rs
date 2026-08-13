@@ -1,7 +1,9 @@
 use super::TEXT_SCALE_COMPACT;
 use crate::{
     diff_map::DiffHunkStatus,
-    display_map::{display_width, tab_map, BlockRowKind, DisplayPoint, DisplaySnapshot, TabPoint},
+    display_map::{
+        display_width, tab_map, BlockChunks, BlockRowKind, DisplayPoint, DisplaySnapshot, TabPoint,
+    },
     editor_state::{EditorState, SearchMatchCache},
     minimap::color_to_rgb,
     render::{
@@ -350,88 +352,19 @@ pub(crate) fn render_editor_with_overlay(
     let right = inner.x + inner.width;
     let bottom = inner.y + inner.height;
 
-    {
-        let mut x = inner.x;
-        let mut y = inner.y;
-        // Cell holding the character a combining mark would attach to. It
-        // cannot be derived from `x` once that has advanced, since how far back
-        // the base sits depends on how wide it was.
-        //
-        // Cleared at a row's start, where a mark has nothing before it to join,
-        // and after a base too wide for the room left. Only a base that did not
-        // fit puts `x` past the edge, so the skip at the top of the loop
-        // swallows anything after it and that second case is unreachable, but
-        // reading a cell no character went into is not a thing to leave resting
-        // on a guard elsewhere.
-        let mut base_cell: Option<u16> = None;
-        let inlay_style = fallback_style.patch(theme.get(crate::theme::scope::UI_VIRTUAL_INLAY));
-        'chunks: for chunk in snapshot.highlighted_chunks_cached(
+    paint_chunk_rows(
+        snapshot.highlighted_chunks_cached(
             editor.scroll_row..end_row,
             &mut editor.highlight_endpoint_cache,
-        ) {
-            let style = if chunk.is_inlay {
-                inlay_style
-            } else {
-                chunk
-                    .highlight_style
-                    .as_ref()
-                    .map(|hs| hs.to_ratatui_style())
-                    .unwrap_or(fallback_style)
-            };
-            let mut rest: &str = &chunk.text;
-            while let Some(ch) = rest.chars().next() {
-                // `x` only grows within a line and only resets on a newline, so
-                // once it reaches the pane edge nothing on the rest of the line
-                // can paint. Jump straight to the newline rather than stepping
-                // an over-wide line's remainder every frame. A chunk holding no
-                // newline ends here, and the line's next chunk repeats the check.
-                if x >= right && ch != '\n' {
-                    match memchr::memchr(b'\n', rest.as_bytes()) {
-                        Some(nl) => rest = &rest[nl..],
-                        None => break,
-                    }
-                    continue;
-                }
-                rest = &rest[ch.len_utf8()..];
-                if ch == '\n' {
-                    y += 1;
-                    x = inner.x;
-                    base_cell = None;
-                    if y >= bottom {
-                        break 'chunks;
-                    }
-                    continue;
-                }
-                let w = display_width(ch);
-                // A mark occupies no cell of its own, being drawn on the
-                // character before it. A cell carries a whole cluster, so it
-                // joins the one its base went into rather than being dropped,
-                // which would leave the screen saying something the buffer does
-                // not.
-                if w == 0 {
-                    if let Some(base) = base_cell {
-                        let cell = &mut buf[(base, y)];
-                        let mut symbol = String::from(cell.symbol());
-                        symbol.push(ch);
-                        cell.set_symbol(&symbol);
-                    }
-                    continue;
-                }
-                if x + w as u16 <= right {
-                    buf[(x, y)].set_char(ch).set_style(style);
-                    // A double-width glyph occupies two cells. Clear the second
-                    // so stale content under it does not show through.
-                    if w == 2 {
-                        buf[(x + 1, y)].set_char(' ').set_style(style);
-                    }
-                    base_cell = Some(x);
-                } else {
-                    base_cell = None;
-                }
-                x += w as u16;
-            }
-        }
-    }
+        ),
+        inner.x,
+        right,
+        inner.y,
+        bottom,
+        fallback_style,
+        fallback_style.patch(theme.get(crate::theme::scope::UI_VIRTUAL_INLAY)),
+        buf,
+    );
 
     let buffer_snapshot = snapshot.buffer_snapshot();
     let visible = visible_byte_range(
@@ -788,6 +721,108 @@ pub(crate) fn render_editor_with_overlay(
                 }
                 buf[(x, y)].set_char(ch).set_style(label_style);
             }
+        }
+    }
+}
+
+/// Paint `chunks` into `buf` as rows of cells, from `left`, `top` up to but
+/// not including `right` and `bottom`.
+///
+/// The live editor and a pooled smooth-scroll page both paint their text
+/// through this, so a glide and the grid it settles onto agree cell for cell.
+/// They differ only in what they hand over, which is why the chunk iterator,
+/// the inlay style, and the geometry all arrive as arguments.
+///
+/// `left` is both the first column and the column a newline returns to, so a
+/// caller reserving a gutter passes the column just past it.
+// Eight arguments, because the geometry is four independent columns and rows
+// rather than a Rect. `left` is the newline reset column, which a region's own
+// left edge is not once a gutter is reserved.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_chunk_rows(
+    chunks: BlockChunks<'_>,
+    left: u16,
+    right: u16,
+    top: u16,
+    bottom: u16,
+    fallback_style: Style,
+    inlay_style: Style,
+    buf: &mut Buffer,
+) {
+    let mut x = left;
+    let mut y = top;
+    // Cell holding the character a combining mark would attach to. It
+    // cannot be derived from `x` once that has advanced, since how far back
+    // the base sits depends on how wide it was.
+    //
+    // Cleared at a row's start, where a mark has nothing before it to join,
+    // and after a base too wide for the room left. Only a base that did not
+    // fit puts `x` past the edge, so the skip at the top of the loop
+    // swallows anything after it and that second case is unreachable, but
+    // reading a cell no character went into is not a thing to leave resting
+    // on a guard elsewhere.
+    let mut base_cell: Option<u16> = None;
+    'chunks: for chunk in chunks {
+        let style = if chunk.is_inlay {
+            inlay_style
+        } else {
+            chunk
+                .highlight_style
+                .as_ref()
+                .map(|hs| hs.to_ratatui_style())
+                .unwrap_or(fallback_style)
+        };
+        let mut rest: &str = &chunk.text;
+        while let Some(ch) = rest.chars().next() {
+            // `x` only grows within a line and only resets on a newline, so
+            // once it reaches the right edge nothing on the rest of the line
+            // can paint. Jump straight to the newline rather than stepping
+            // an over-wide line's remainder every frame. A chunk holding no
+            // newline ends here, and the line's next chunk repeats the check.
+            if x >= right && ch != '\n' {
+                match memchr::memchr(b'\n', rest.as_bytes()) {
+                    Some(nl) => rest = &rest[nl..],
+                    None => break,
+                }
+                continue;
+            }
+            rest = &rest[ch.len_utf8()..];
+            if ch == '\n' {
+                y += 1;
+                x = left;
+                base_cell = None;
+                if y >= bottom {
+                    break 'chunks;
+                }
+                continue;
+            }
+            let w = display_width(ch);
+            // A mark occupies no cell of its own, being drawn on the
+            // character before it. A cell carries a whole cluster, so it
+            // joins the one its base went into rather than being dropped,
+            // which would leave the screen saying something the buffer does
+            // not.
+            if w == 0 {
+                if let Some(base) = base_cell {
+                    let cell = &mut buf[(base, y)];
+                    let mut symbol = String::from(cell.symbol());
+                    symbol.push(ch);
+                    cell.set_symbol(&symbol);
+                }
+                continue;
+            }
+            if x + w as u16 <= right {
+                buf[(x, y)].set_char(ch).set_style(style);
+                // A double-width glyph occupies two cells. Clear the second
+                // so stale content under it does not show through.
+                if w == 2 {
+                    buf[(x + 1, y)].set_char(' ').set_style(style);
+                }
+                base_cell = Some(x);
+            } else {
+                base_cell = None;
+            }
+            x += w as u16;
         }
     }
 }
