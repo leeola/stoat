@@ -34,7 +34,7 @@ use std::{
     sync::Arc,
 };
 use stoat_config::{LineNumbers, WrapMode};
-use stoat_text::{cursor_offset, Anchor, Bias, Point, Rope};
+use stoat_text::{cursor_offset, Anchor, Bias, Rope};
 use stoat_widgets::{
     bar::Bar,
     gutter::{Diagnostic, GitMark, Gutter, GutterLine},
@@ -165,10 +165,7 @@ pub(crate) fn render_editor_with_overlay(
     let gutter_is_rich = scene.is_some() && chrome.rich_gutter.is_some();
     let measured_gutter_w = if line_numbers != LineNumbers::Off {
         let buffer = editor.display_map.buffer_snapshot();
-        measure_gutter_width(
-            gutter_digits(buffer.line_count(), buffer.rope().max_point()),
-            gutter_is_rich,
-        )
+        measure_gutter_width(gutter_digits(buffer.line_count()), gutter_is_rich)
     } else {
         match diagnostic_info {
             Some((path, set)) if !set.get(path).is_empty() => 1,
@@ -1281,10 +1278,8 @@ fn decimal_digits(mut n: u32) -> u16 {
 /// Shared by the live gutter and the pooled-page gutter so both number and fold
 /// wrap and block rows identically, keeping the settle handoff pixel-identical.
 ///
-/// A trailing newline leaves a final empty line the min-width-1 cursor can never
-/// reach, so it is rendering padding rather than a line. Its gutter number is
-/// dropped and it is excluded from the width, so a bare `"\n"` scratch shows one
-/// numbered row and a trailing newline never widens the gutter.
+/// A trailing newline leaves a final empty line, and the cursor reaches it, so
+/// it numbers like any other. A bare `"\n"` scratch shows two numbered rows.
 pub(crate) fn gutter_geometry(
     snapshot: &DisplaySnapshot,
     scroll_row: u32,
@@ -1297,39 +1292,24 @@ pub(crate) fn gutter_geometry(
         .display_to_buffer(DisplayPoint::new(scroll_row, 0))
         .map(|point| point.row + 1)
         .unwrap_or(1);
-    let mut folded = fold_gutter_lines(&rows, lead_number);
-
-    // The rope ends with a newline exactly when its max point sits at column 0
-    // of a row past the first, making that last row the cursor-unreachable
-    // phantom. Never fires for the empty command-input rope (row 0).
-    let max = snapshot.buffer_snapshot().rope().max_point();
-    let phantom = (max.row > 0 && max.column == 0).then_some(max.row + 1);
-    folded.retain(|&(number, _)| Some(number) != phantom);
+    let folded = fold_gutter_lines(&rows, lead_number);
 
     (folded, gutter_width_digits(snapshot))
 }
 
 /// [`gutter_digits`] for a snapshot the caller already holds.
 fn gutter_width_digits(snapshot: &DisplaySnapshot) -> u16 {
-    gutter_digits(
-        snapshot.buffer_line_count(),
-        snapshot.buffer_snapshot().rope().max_point(),
-    )
+    gutter_digits(snapshot.buffer_line_count())
 }
 
 /// The digit width the gutter reserves for a buffer's line numbers, at least
 /// two.
 ///
-/// A trailing newline leaves an empty final line the min-width-1 cursor cannot
-/// reach, so it is rendering padding rather than a line and never widens the
-/// gutter. `max_point` is what identifies it.
-///
-/// Both inputs are buffer facts, never wrap or block rows, which is what lets
+/// `line_count` is a buffer fact, never wrap or block rows, which is what lets
 /// the paint size the gutter and resolve the wrap width before the display
-/// snapshot they would otherwise be read from exists.
-fn gutter_digits(line_count: u32, max_point: Point) -> u16 {
-    let phantom = max_point.row > 0 && max_point.column == 0;
-    decimal_digits(line_count - phantom as u32).max(2)
+/// snapshot it is otherwise read from exists.
+fn gutter_digits(line_count: u32) -> u16 {
+    decimal_digits(line_count).max(2)
 }
 
 /// The cell columns the line-number gutter reserves, measured without painting.
@@ -3004,7 +2984,7 @@ mod tests {
         let mut h = Stoat::test();
         let root = PathBuf::from("/gutter-digits");
         let path = root.join("a.txt");
-        let body: String = (0..99).map(|i| format!("line {i}\n")).collect();
+        let body: String = (0..98).map(|i| format!("line {i}\n")).collect();
         h.fake_fs().insert_file(&path, body.as_bytes());
         h.stoat.active_workspace_mut().git_root = root;
         dispatch(&mut h.stoat, &OpenFile { path });
@@ -3015,8 +2995,8 @@ mod tests {
             .expect("focused editor")
             .gutter_width;
 
-        // 99 lines plus the trailing newline's phantom line still fit in two
-        // digits. One more line does not.
+        // 98 lines of text plus the one the trailing newline opens is 99, which
+        // still fits in two digits. One more line does not.
         let (_, buffer_id) = h.stoat.focused_editor_ids().expect("a focused editor");
         {
             let buffer = h
@@ -3027,7 +3007,7 @@ mod tests {
                 .expect("buffer");
             let mut guard = buffer.write().expect("poisoned");
             let end = guard.snapshot.visible_text.len();
-            guard.edit(end..end, "line 99\n");
+            guard.edit(end..end, "line 98\n");
         }
 
         rendered_gutter(&mut h.stoat, true, false, LineNumbers::Absolute, 6);
@@ -4306,19 +4286,80 @@ mod tests {
         );
     }
 
+    /// A cursor resting on the buffer end is zero-width, and it still draws a
+    /// block on the cell past the last character.
+    ///
+    /// Nothing else paints that cell, so a cursor there is either drawn from
+    /// its own offset or invisible. Rendering without a scene is what puts the
+    /// primary through the painting path rather than handing its position to
+    /// the terminal.
     #[test]
-    fn scratch_gutter_numbers_only_the_real_line() {
+    fn a_cursor_on_the_buffer_end_draws_a_block_there() {
         let mut h = Stoat::test();
-        // A bare scratch is a seeded "\n": one real line plus the phantom line
-        // the trailing newline creates. The phantom row stays blank.
-        assert_eq!(
-            rendered_gutter(&mut h.stoat, true, false, LineNumbers::Relative, 2),
-            ["1", ""],
+        let root = PathBuf::from("/eof-cursor");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"ab\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        for _ in 0..3 {
+            dispatch(&mut h.stoat, &MoveRight);
+        }
+
+        let theme = crate::theme::Theme::empty();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let area = Rect::new(0, 0, 12, 4);
+        let mut buf = Buffer::empty(area);
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &chrome,
+            &mut buf,
+            true,
+            false,
+            LineNumbers::Absolute,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.0,
+            WrapMode::None,
+            80,
+        );
+
+        // Row 1 is the line the trailing newline opens, and the gutter takes
+        // the columns before `gutter_width`.
+        let x = editor.gutter_width;
+        assert!(
+            buf[(x, 1)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED),
+            "the block paints on the buffer-end cell",
         );
     }
 
     #[test]
-    fn absolute_gutter_skips_the_phantom_final_line() {
+    fn scratch_gutter_numbers_the_line_after_the_trailing_newline() {
+        let mut h = Stoat::test();
+        // A bare scratch is a seeded "\n", so it holds two lines: the empty
+        // first one and the empty one the newline opens. The cursor reaches
+        // both, so both number.
+        assert_eq!(
+            rendered_gutter(&mut h.stoat, true, false, LineNumbers::Relative, 2),
+            ["1", "1"],
+        );
+    }
+
+    #[test]
+    fn absolute_gutter_numbers_the_final_line() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/phantom-abs");
         let path = root.join("a.txt");
@@ -4328,13 +4369,15 @@ mod tests {
         h.settle();
         assert_eq!(
             rendered_gutter(&mut h.stoat, true, false, LineNumbers::Absolute, 3),
-            ["1", "2", ""],
-            "the two real lines are numbered and the phantom row is blank",
+            ["1", "2", "3"],
+            "the line the trailing newline opens is numbered like the rest",
         );
     }
 
+    /// The line a trailing newline opens counts toward the gutter width, since
+    /// the cursor reaches it and it carries a number of its own.
     #[test]
-    fn trailing_newline_does_not_widen_the_gutter() {
+    fn a_trailing_newline_widens_the_gutter_at_a_digit_boundary() {
         let width_of = |contents: &[u8]| {
             let mut h = Stoat::test();
             let root = PathBuf::from("/gutter-width");
@@ -4348,15 +4391,14 @@ mod tests {
                 .expect("focused editor")
                 .gutter_width
         };
-        // 99 real lines: a trailing newline pushes the rope line count to 100,
-        // but the phantom line is excluded, so the width stays 2-digit rather
-        // than widening to 3 digits.
+        // 99 lines of text plus the line the trailing newline opens is 100, so
+        // the gutter takes a third digit that the same text without the newline
+        // does not need.
         let with_newline = "x\n".repeat(99);
         let without_newline = format!("{}x", "x\n".repeat(98));
-        assert_eq!(
-            width_of(with_newline.as_bytes()),
-            width_of(without_newline.as_bytes()),
-            "the trailing newline does not widen the gutter"
+        assert!(
+            width_of(with_newline.as_bytes()) > width_of(without_newline.as_bytes()),
+            "the hundredth line needs a digit the ninety-ninth does not"
         );
     }
 
