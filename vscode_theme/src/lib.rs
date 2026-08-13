@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Deserializer};
 use snafu::{ResultExt, Snafu};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 /// A parsed VSCode color theme.
 ///
@@ -256,6 +256,61 @@ fn hex_digit(b: u8) -> Option<u8> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
+}
+
+/// The built-in themes, embedded so `theme = "one-dark"` and its siblings
+/// resolve without any file on disk.
+///
+/// Embedded here rather than in each program, so the terminal and the editor it
+/// hosts always agree about which themes exist.
+const BUILTINS: [(&str, &str); 4] = [
+    ("one-dark", include_str!("../../themes/one-dark.json")),
+    (
+        "gruvbox-dark",
+        include_str!("../../themes/gruvbox-dark.json"),
+    ),
+    (
+        "gruvbox-light",
+        include_str!("../../themes/gruvbox-light.json"),
+    ),
+    ("one-light", include_str!("../../themes/one-light.json")),
+];
+
+/// The `(stem, JSON)` pairs of every theme built into the binary.
+pub fn builtin_sources() -> Vec<(String, String)> {
+    BUILTINS
+        .iter()
+        .map(|(stem, source)| (stem.to_string(), source.to_string()))
+        .collect()
+}
+
+/// The `(stem, JSON)` pairs of the `*.json` files in `themes_dir`, sorted by
+/// stem.
+///
+/// Sorted because the pool takes them in order, and an unsorted directory read
+/// would give a different pool from one run to the next.
+///
+/// An unreadable directory yields none rather than an error, since a user with
+/// no themes of their own is the common case. A file that fails to read is
+/// skipped for the same reason.
+pub fn discover(themes_dir: &Path) -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(themes_dir) else {
+        return Vec::new();
+    };
+
+    let mut themes: Vec<(String, String)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension()? != "json" {
+                return None;
+            }
+            let stem = path.file_stem()?.to_str()?.to_string();
+            Some((stem, std::fs::read_to_string(&path).ok()?))
+        })
+        .collect();
+    themes.sort_by(|a, b| a.0.cmp(&b.0));
+    themes
 }
 
 #[cfg(test)]

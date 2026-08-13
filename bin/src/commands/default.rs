@@ -331,7 +331,7 @@ fn run_tui(
         let user_config =
             stoat::user_config_path().and_then(|path| std::fs::read_to_string(path).ok());
         let user_themes = stoat::user_themes_dir()
-            .map(read_user_themes)
+            .map(|dir| vscode_theme::discover(&dir))
             .unwrap_or_default();
         let env_theme = std::env::var("STOAT_THEME").ok().filter(|s| !s.is_empty());
         let mut stoat = Stoat::new_with_user_config(
@@ -462,29 +462,6 @@ async fn drive_inputs(tx: UnboundedSender<Event>, keys: Vec<KeyEvent>, executor:
             break;
         }
     }
-}
-
-/// Read the VSCode theme JSON files in `dir` as `(stem, contents)` pairs, sorted
-/// by stem for a deterministic pool order. A missing or unreadable dir yields
-/// none, and a non-JSON or unreadable entry is skipped.
-fn read_user_themes(dir: PathBuf) -> Vec<(String, String)> {
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut themes: Vec<(String, String)> = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension()?.to_str()? != "json" {
-                return None;
-            }
-            let stem = path.file_stem()?.to_str()?.to_string();
-            let contents = std::fs::read_to_string(&path).ok()?;
-            Some((stem, contents))
-        })
-        .collect();
-    themes.sort_by(|a, b| a.0.cmp(&b.0));
-    themes
 }
 
 #[cfg(test)]

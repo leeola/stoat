@@ -16,13 +16,6 @@ use vscode_theme::{Rgba, VsCodeTheme};
 /// carries it without the source tree.
 const DEFAULT_CONFIG: &str = include_str!("../../stoatty.toml");
 
-/// The built-in VSCode themes, embedded so `theme = "one-dark"` and its
-/// siblings resolve without any file on disk.
-const THEME_ONE_DARK: &str = include_str!("../../themes/one-dark.json");
-const THEME_GRUVBOX_DARK: &str = include_str!("../../themes/gruvbox-dark.json");
-const THEME_GRUVBOX_LIGHT: &str = include_str!("../../themes/gruvbox-light.json");
-const THEME_ONE_LIGHT: &str = include_str!("../../themes/one-light.json");
-
 /// The `terminal.ansi*` color keys in palette-index order, the 8 normal colors
 /// followed by the 8 bright ones.
 const ANSI_KEYS: [&str; 16] = [
@@ -380,44 +373,19 @@ fn user_themes_dir() -> Option<PathBuf> {
 ///
 /// User files come last so one whose stem matches a built-in shadows it.
 fn vscode_theme_sources() -> Vec<(String, String)> {
-    let mut sources = builtin_vscode_themes();
+    let mut sources = vscode_theme::builtin_sources();
     sources.extend(user_vscode_themes());
     sources
 }
 
-/// The `(stem, JSON)` pairs of the themes embedded in the binary.
-fn builtin_vscode_themes() -> Vec<(String, String)> {
-    vec![
-        ("one-dark".to_string(), THEME_ONE_DARK.to_string()),
-        ("gruvbox-dark".to_string(), THEME_GRUVBOX_DARK.to_string()),
-        ("gruvbox-light".to_string(), THEME_GRUVBOX_LIGHT.to_string()),
-        ("one-light".to_string(), THEME_ONE_LIGHT.to_string()),
-    ]
-}
-
 /// The `(stem, JSON)` pairs of the `*.json` files in the themes directory.
 ///
-/// An unresolvable or unreadable directory yields no themes rather than an
-/// error, since a user with no themes of their own is the common case.
+/// An unresolvable directory yields no themes rather than an error, since a
+/// user with no themes of their own is the common case.
 fn user_vscode_themes() -> Vec<(String, String)> {
-    let Some(dir) = user_themes_dir() else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension()? != "json" {
-                return None;
-            }
-            let stem = path.file_stem()?.to_str()?.to_string();
-            Some((stem, std::fs::read_to_string(&path).ok()?))
-        })
-        .collect()
+    user_themes_dir()
+        .map(|dir| vscode_theme::discover(&dir))
+        .unwrap_or_default()
 }
 
 /// Parse theme sources into a map keyed by stem, dropping the ones that fail.
@@ -499,10 +467,11 @@ fn merge_tables(base: &mut toml::Table, overlay: toml::Table) {
 #[cfg(test)]
 mod tests {
     use super::{
-        builtin_vscode_themes, embedded_default, merge_tables, parse_vscode_themes, settle, Config,
-        CursorAnimation, ShellConfig, DEFAULT_CONFIG,
+        embedded_default, merge_tables, parse_vscode_themes, settle, Config, CursorAnimation,
+        ShellConfig, DEFAULT_CONFIG,
     };
     use stoatty_term::{grid::Rgb, theme::Theme};
+    use vscode_theme::builtin_sources;
 
     #[test]
     fn embedded_default_sets_the_logical_font_size() {
@@ -604,7 +573,7 @@ mod tests {
     #[test]
     fn default_theme_resolves_to_one_dark_colors() {
         let mut config = settle(DEFAULT_CONFIG, None).unwrap();
-        config.vscode_themes = parse_vscode_themes(builtin_vscode_themes());
+        config.vscode_themes = parse_vscode_themes(builtin_sources());
         let theme = config.resolve_theme();
 
         assert_eq!(theme.background, Rgb::new(0x28, 0x2c, 0x34));
@@ -621,7 +590,7 @@ mod tests {
     #[test]
     fn gruvbox_light_resolves_as_a_builtin() {
         let mut config = settle(DEFAULT_CONFIG, Some("theme = \"gruvbox-light\"\n")).unwrap();
-        config.vscode_themes = parse_vscode_themes(builtin_vscode_themes());
+        config.vscode_themes = parse_vscode_themes(builtin_sources());
         let theme = config.resolve_theme();
 
         assert_eq!(
@@ -636,7 +605,7 @@ mod tests {
     #[test]
     fn one_light_resolves_as_a_builtin() {
         let mut config = settle(DEFAULT_CONFIG, Some("theme = \"one-light\"\n")).unwrap();
-        config.vscode_themes = parse_vscode_themes(builtin_vscode_themes());
+        config.vscode_themes = parse_vscode_themes(builtin_sources());
         let theme = config.resolve_theme();
 
         assert_eq!(
@@ -749,7 +718,7 @@ mod tests {
     #[test]
     fn builtin_gruvbox_dark_resolves_with_no_user_files() {
         let mut config = settle(DEFAULT_CONFIG, Some("theme = \"gruvbox-dark\"")).unwrap();
-        config.vscode_themes = parse_vscode_themes(builtin_vscode_themes());
+        config.vscode_themes = parse_vscode_themes(builtin_sources());
         let theme = config.resolve_theme();
 
         assert_eq!(theme.background, Rgb::new(0x28, 0x28, 0x28));

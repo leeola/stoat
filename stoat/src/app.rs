@@ -73,10 +73,6 @@ pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
 /// The default stoatty config, embedded so `:open-config stoatty` can seed a
 /// missing one with the same file the terminal ships.
 pub(crate) const DEFAULT_STOATTY_CONFIG: &str = include_str!("../../stoatty.toml");
-const THEME_ONE_DARK: &str = include_str!("../../themes/one-dark.json");
-const THEME_GRUVBOX_DARK: &str = include_str!("../../themes/gruvbox-dark.json");
-const THEME_GRUVBOX_LIGHT: &str = include_str!("../../themes/gruvbox-light.json");
-const THEME_ONE_LIGHT: &str = include_str!("../../themes/one-light.json");
 
 /// Frame interval for scroll-animation ticks, about 60 fps to match a typical
 /// display rather than shipping targets that can never be presented.
@@ -1770,15 +1766,8 @@ impl Stoat {
         // pool without re-reading the theme directory, and lets a theme already
         // converted stay converted across the reload.
         let imported_themes: Vec<Arc<VscodeSource>> = {
-            let builtins = [
-                ("one-dark", THEME_ONE_DARK),
-                ("gruvbox-dark", THEME_GRUVBOX_DARK),
-                ("gruvbox-light", THEME_GRUVBOX_LIGHT),
-                ("one-light", THEME_ONE_LIGHT),
-            ];
-            builtins
+            vscode_theme::builtin_sources()
                 .into_iter()
-                .map(|(stem, source)| (stem.to_string(), source.to_string()))
                 .chain(user_themes)
                 .map(|(stem, source)| Arc::new(VscodeSource::new(stem, source)))
                 .collect()

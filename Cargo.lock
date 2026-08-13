@@ -4046,6 +4046,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "viewport",
+ "vscode_theme",
 ]
 
 [[package]]

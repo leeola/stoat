@@ -27,6 +27,7 @@ fixture = ["stoat/fixture"]
 
 [dependencies]
 stoat = { path = "../stoat" }
+vscode_theme = { path = "../vscode_theme" }
 stoat_cli = { path = "../cli" }
 stoat_language = { path = "../language" }
 stoat_scheduler = { path = "../scheduler" }
