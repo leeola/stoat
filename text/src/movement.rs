@@ -348,7 +348,7 @@ pub struct NumberMatch {
 /// `0o`/`0O` octal literal, or a decimal number (with optional leading
 /// `-`). Underscore separators inside the body (`0xff_ff_ff_ff`) are
 /// accepted; the caller is expected to regroup on emit (see
-/// `compute_number_delta`). Trailing `_`s are excluded from the
+/// [`compute_number_delta`]). Trailing `_`s are excluded from the
 /// captured range. Falls through to [`find_decimal_number_at`] when
 /// the surrounding text does not form a radix literal.
 pub fn find_number_at(rope: &Rope, offset: usize) -> Option<NumberMatch> {
@@ -514,6 +514,117 @@ pub fn find_decimal_number_at(rope: &Rope, offset: usize) -> Option<std::ops::Ra
     }
 
     Some(start..end)
+}
+
+/// Returns `text` with `delta` added to the number it holds, written back in
+/// the format it arrived in, or [`None`] when it does not parse as `kind`.
+///
+/// The counterpart to [`find_number_at`]: that returns a literal's range and
+/// category, this rewrites the literal in place. Incrementing a number in a
+/// source file must not reformat it, so the shape of the original survives the
+/// arithmetic. A leading zero marks a decimal as a fixed-width field and the
+/// width is kept, widening by one where a sign appears. A radix literal keeps
+/// its marker, its body's hex case, its zero padding, and its underscore
+/// grouping, which is re-laid from the right so an overflow into a new group
+/// stays even.
+///
+/// Values saturate rather than wrap at the ends of [`i64`] for a decimal and
+/// [`u64`] for a radix literal.
+pub fn compute_number_delta(text: &str, kind: NumberKind, delta: i64) -> Option<String> {
+    match kind {
+        NumberKind::Decimal => {
+            let parsed = text.parse::<i64>().ok()?;
+            let new_value = parsed.saturating_add(delta);
+
+            // A leading zero marks the literal as a fixed-width field, so the
+            // width is carried over rather than letting the number shrink out
+            // of it. The sign takes one of those columns, which is why crossing
+            // zero moves the width by one.
+            if !text.starts_with('0') && !text.starts_with("-0") {
+                return Some(new_value.to_string());
+            }
+            let width = match (parsed.is_negative(), new_value.is_negative()) {
+                (true, false) => text.len() - 1,
+                (false, true) => text.len() + 1,
+                _ => text.len(),
+            };
+
+            // The `0` flag rather than a `0>` fill, which would pad ahead of
+            // the sign and give `00-7` instead of `-007`.
+            Some(format!("{new_value:0width$}"))
+        },
+        _ => {
+            let mut chars = text.chars();
+            chars.next()?;
+            let marker = chars.next()?;
+            let body = &text[2..];
+
+            let digits_only: String = body.chars().filter(|c| *c != '_').collect();
+            if digits_only.is_empty() {
+                return None;
+            }
+
+            let parsed = u64::from_str_radix(&digits_only, kind.radix()).ok()?;
+            let new_value = if delta < 0 {
+                parsed.saturating_sub(delta.unsigned_abs())
+            } else {
+                parsed.saturating_add(delta as u64)
+            };
+
+            let body_uppercase = matches!(kind, NumberKind::Hex)
+                && (marker.is_ascii_uppercase()
+                    || body
+                        .chars()
+                        .any(|c| c.is_ascii_uppercase() && c.is_ascii_alphabetic()));
+            let new_body = match (kind, body_uppercase) {
+                (NumberKind::Hex, true) => format!("{new_value:X}"),
+                (NumberKind::Hex, false) => format!("{new_value:x}"),
+                (NumberKind::Binary, _) => format!("{new_value:b}"),
+                (NumberKind::Octal, _) => format!("{new_value:o}"),
+                _ => unreachable!(),
+            };
+
+            let padded = if new_body.len() < digits_only.len() {
+                format!("{new_body:0>width$}", width = digits_only.len())
+            } else {
+                new_body
+            };
+
+            let formatted = match group_size_for_body(body) {
+                Some(g) => regroup_right(&padded, g),
+                None => padded,
+            };
+
+            Some(format!("0{marker}{formatted}"))
+        },
+    }
+}
+
+fn group_size_for_body(body: &str) -> Option<usize> {
+    let trimmed = body.trim_matches('_');
+    let last = trimmed.rfind('_')?;
+    Some(trimmed.len() - last - 1)
+}
+
+fn regroup_right(digits: &str, group_size: usize) -> String {
+    let n = digits.len();
+    if n == 0 || group_size == 0 || n <= group_size {
+        return digits.to_string();
+    }
+    let first_size = if n.is_multiple_of(group_size) {
+        group_size
+    } else {
+        n % group_size
+    };
+    let mut out = String::with_capacity(n + (n - 1) / group_size);
+    out.push_str(&digits[..first_size]);
+    let mut idx = first_size;
+    while idx < n {
+        out.push('_');
+        out.push_str(&digits[idx..idx + group_size]);
+        idx += group_size;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1329,5 +1440,89 @@ mod tests {
         assert_eq!(long_word_category('!'), CharCategory::Word);
         assert_eq!(long_word_category(' '), CharCategory::Whitespace);
         assert_eq!(long_word_category('\n'), CharCategory::Eol);
+    }
+
+    /// A decimal written with a leading zero is a fixed-width field, so it
+    /// keeps that width instead of collapsing to the shortest form.
+    ///
+    /// Crossing zero moves the width by one, because the sign occupies a column
+    /// of its own. A literal without a leading zero is left to size itself.
+    #[test]
+    fn incrementing_a_zero_padded_decimal_keeps_its_width() {
+        for (text, delta, want) in [
+            ("007", 1, "008"),
+            ("-08", 1, "-07"),
+            ("-01", 1, "00"),
+            ("01", -2, "-01"),
+            ("09", 1, "10"),
+            ("7", 1, "8"),
+        ] {
+            assert_eq!(
+                compute_number_delta(text, NumberKind::Decimal, delta).as_deref(),
+                Some(want),
+                "{text} incremented by {delta}",
+            );
+        }
+    }
+
+    /// A radix literal is rewritten in the case and width it arrived in.
+    ///
+    /// The case is taken from the whole literal, marker included, so an
+    /// uppercase `0X` uppercases the digits even over a lowercase body.
+    /// Digits added by the increment take that case too, and a body that
+    /// shrinks is zero-padded back to the width it held rather than losing a
+    /// column.
+    #[test]
+    fn incrementing_a_radix_literal_keeps_its_case_and_width() {
+        for (text, kind, delta, want) in [
+            ("0xff", NumberKind::Hex, 1, "0x100"),
+            ("0xFF", NumberKind::Hex, 1, "0x100"),
+            ("0XfF", NumberKind::Hex, 1, "0X100"),
+            ("0Xfe", NumberKind::Hex, 1, "0XFF"),
+            ("0xfe", NumberKind::Hex, 1, "0xff"),
+            ("0x0f", NumberKind::Hex, 1, "0x10"),
+            ("0x10", NumberKind::Hex, -1, "0x0f"),
+            ("0x00ff", NumberKind::Hex, 1, "0x0100"),
+            ("0b0111", NumberKind::Binary, 1, "0b1000"),
+            ("0o077", NumberKind::Octal, 1, "0o100"),
+        ] {
+            assert_eq!(
+                compute_number_delta(text, kind, delta).as_deref(),
+                Some(want),
+                "{text} incremented by {delta}",
+            );
+        }
+    }
+
+    /// An underscored body keeps its grouping, re-laid from the right.
+    ///
+    /// The group size comes from the last separator alone, so `ff_ff` is read
+    /// as groups of two and stays in twos, rather than as one group of four.
+    /// Laying the groups out from the right is what keeps an
+    /// increment that overflows into a new group even, leaving the short group
+    /// at the front where a reader expects it.
+    #[test]
+    fn incrementing_an_underscored_literal_regroups_it() {
+        for (text, kind, delta, want) in [
+            ("0xff_ff", NumberKind::Hex, 1, "0x1_00_00"),
+            ("0xff_fe", NumberKind::Hex, 1, "0xff_ff"),
+            ("0b1111_1111", NumberKind::Binary, 1, "0b1_0000_0000"),
+            ("0xf_ff", NumberKind::Hex, 1, "0x10_00"),
+        ] {
+            assert_eq!(
+                compute_number_delta(text, kind, delta).as_deref(),
+                Some(want),
+                "{text} incremented by {delta}",
+            );
+        }
+    }
+
+    /// A body that is only separators has no digits to parse, and a decimal
+    /// that is not one is left alone rather than rewritten as zero.
+    #[test]
+    fn a_literal_that_does_not_parse_yields_nothing() {
+        assert_eq!(compute_number_delta("0x__", NumberKind::Hex, 1), None);
+        assert_eq!(compute_number_delta("beef", NumberKind::Decimal, 1), None);
+        assert_eq!(compute_number_delta("", NumberKind::Hex, 1), None);
     }
 }

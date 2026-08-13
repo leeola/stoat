@@ -652,29 +652,6 @@ fn incrementing_several_cursors_leaves_each_over_its_own_number() {
     );
 }
 
-/// A decimal written with a leading zero is a fixed-width field, so it
-/// keeps that width instead of collapsing to the shortest form.
-///
-/// Crossing zero moves the width by one, because the sign occupies a column
-/// of its own. A literal without a leading zero is left to size itself.
-#[test]
-fn incrementing_a_zero_padded_decimal_keeps_its_width() {
-    for (text, delta, want) in [
-        ("007", 1, "008"),
-        ("-08", 1, "-07"),
-        ("-01", 1, "00"),
-        ("01", -2, "-01"),
-        ("09", 1, "10"),
-        ("7", 1, "8"),
-    ] {
-        assert_eq!(
-            compute_number_delta(text, NumberKind::Decimal, delta).as_deref(),
-            Some(want),
-            "{text} incremented by {delta}",
-        );
-    }
-}
-
 /// Casing a ligature yields two ASCII letters for three bytes, so the
 /// selections after it shift left rather than right.
 #[test]

@@ -23,10 +23,11 @@ use std::{
 use stoat_language::structural_diff;
 use stoat_scheduler::Task;
 use stoat_text::{
-    cursor_offset, find_number_seeking, next_char_boundary, next_long_word_end_range,
-    next_long_word_start_range, next_word_end_range, next_word_start_range,
-    prev_long_word_end_range, prev_long_word_start_range, prev_word_end_range,
-    prev_word_start_range, Anchor, Bias, NumberKind, Point, Rope, Selection, SelectionGoal,
+    compute_number_delta, cursor_offset, find_number_seeking, next_char_boundary,
+    next_long_word_end_range, next_long_word_start_range, next_word_end_range,
+    next_word_start_range, prev_long_word_end_range, prev_long_word_start_range,
+    prev_word_end_range, prev_word_start_range, Anchor, Bias, Point, Rope, Selection,
+    SelectionGoal,
 };
 
 pub(crate) fn set_cursor_row(editor: &mut EditorState, row: u32) {
@@ -1608,103 +1609,6 @@ fn apply_number_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
         new
     });
     UpdateEffect::Redraw
-}
-
-fn compute_number_delta(text: &str, kind: NumberKind, delta: i64) -> Option<String> {
-    match kind {
-        NumberKind::Decimal => {
-            let parsed = text.parse::<i64>().ok()?;
-            let new_value = parsed.saturating_add(delta);
-
-            // A leading zero marks the literal as a fixed-width field, so the
-            // width is carried over rather than letting the number shrink out
-            // of it. The sign takes one of those columns, which is why crossing
-            // zero moves the width by one.
-            if !text.starts_with('0') && !text.starts_with("-0") {
-                return Some(new_value.to_string());
-            }
-            let width = match (parsed.is_negative(), new_value.is_negative()) {
-                (true, false) => text.len() - 1,
-                (false, true) => text.len() + 1,
-                _ => text.len(),
-            };
-
-            // The `0` flag rather than a `0>` fill, which would pad ahead of
-            // the sign and give `00-7` instead of `-007`.
-            Some(format!("{new_value:0width$}"))
-        },
-        _ => {
-            let mut chars = text.chars();
-            chars.next()?;
-            let marker = chars.next()?;
-            let body = &text[2..];
-
-            let digits_only: String = body.chars().filter(|c| *c != '_').collect();
-            if digits_only.is_empty() {
-                return None;
-            }
-
-            let parsed = u64::from_str_radix(&digits_only, kind.radix()).ok()?;
-            let new_value = if delta < 0 {
-                parsed.saturating_sub(delta.unsigned_abs())
-            } else {
-                parsed.saturating_add(delta as u64)
-            };
-
-            let body_uppercase = matches!(kind, NumberKind::Hex)
-                && (marker.is_ascii_uppercase()
-                    || body
-                        .chars()
-                        .any(|c| c.is_ascii_uppercase() && c.is_ascii_alphabetic()));
-            let new_body = match (kind, body_uppercase) {
-                (NumberKind::Hex, true) => format!("{new_value:X}"),
-                (NumberKind::Hex, false) => format!("{new_value:x}"),
-                (NumberKind::Binary, _) => format!("{new_value:b}"),
-                (NumberKind::Octal, _) => format!("{new_value:o}"),
-                _ => unreachable!(),
-            };
-
-            let padded = if new_body.len() < digits_only.len() {
-                format!("{new_body:0>width$}", width = digits_only.len())
-            } else {
-                new_body
-            };
-
-            let formatted = match group_size_for_body(body) {
-                Some(g) => regroup_right(&padded, g),
-                None => padded,
-            };
-
-            Some(format!("0{marker}{formatted}"))
-        },
-    }
-}
-
-fn group_size_for_body(body: &str) -> Option<usize> {
-    let trimmed = body.trim_matches('_');
-    let last = trimmed.rfind('_')?;
-    Some(trimmed.len() - last - 1)
-}
-
-fn regroup_right(digits: &str, group_size: usize) -> String {
-    let n = digits.len();
-    if n == 0 || group_size == 0 || n <= group_size {
-        return digits.to_string();
-    }
-    let first_size = if n.is_multiple_of(group_size) {
-        group_size
-    } else {
-        n % group_size
-    };
-    let mut out = String::with_capacity(n + (n - 1) / group_size);
-    out.push_str(&digits[..first_size]);
-    let mut idx = first_size;
-    while idx < n {
-        out.push('_');
-        out.push_str(&digits[idx..idx + group_size]);
-        idx += group_size;
-    }
-    out
 }
 
 pub(super) fn delete_selection(stoat: &mut Stoat) -> UpdateEffect {
