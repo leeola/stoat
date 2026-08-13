@@ -1,6 +1,6 @@
 use crate::{
-    action::define_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
-    ValueSource,
+    action::{define_action, define_action_def},
+    Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind, ValueSource,
 };
 use std::any::Any;
 
@@ -12,40 +12,18 @@ const WALKTHROUGH_OPEN_PARAMS: &[ParamDef] = &[ParamDef {
     description: "Slug of the stored walkthrough to play.",
 }];
 
-#[derive(Debug)]
-pub struct WalkthroughOpenDef;
-
-impl ActionDef for WalkthroughOpenDef {
-    fn name(&self) -> &'static str {
-        "WalkthroughOpen"
-    }
-
-    fn command_name(&self) -> Option<&'static str> {
-        Some("walkthrough")
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::WalkthroughOpen
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        WALKTHROUGH_OPEN_PARAMS
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "play a stored walkthrough"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Load the named walkthrough from the workspace and jump to its first \
-         stop. Reports why without changing anything when no walkthrough is \
-         stored under that slug, or when the one stored has no stops."
-    }
-
-    fn priority(&self) -> ActionPriority {
-        ActionPriority::Normal
-    }
-}
+define_action_def!(
+    WalkthroughOpenDef,
+    "WalkthroughOpen",
+    ActionKind::WalkthroughOpen,
+    "play a stored walkthrough",
+    "Load the named walkthrough from the workspace and jump to its first \
+     stop. Reports why without changing anything when no walkthrough is \
+     stored under that slug, or when the one stored has no stops.",
+    ActionPriority::Normal,
+    command_name = "walkthrough",
+    params = WALKTHROUGH_OPEN_PARAMS
+);
 
 #[derive(Debug)]
 pub struct WalkthroughOpen {

@@ -1,4 +1,7 @@
-use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind, ValueSource};
+use crate::{
+    action::define_action_def, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
+    ValueSource,
+};
 use std::any::Any;
 
 const PARAMS: &[ParamDef] = &[ParamDef {
@@ -9,38 +12,16 @@ const PARAMS: &[ParamDef] = &[ParamDef {
     description: "Name of the theme block to activate, resolved against the config's `theme NAME { ... }` blocks.",
 }];
 
-#[derive(Debug)]
-pub struct SetThemeDef;
-
-impl ActionDef for SetThemeDef {
-    fn name(&self) -> &'static str {
-        "SetTheme"
-    }
-
-    fn command_name(&self) -> Option<&'static str> {
-        Some("theme")
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::SetTheme
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        PARAMS
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "switch the active theme"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Re-resolve the named theme against the loaded theme blocks and apply it immediately, without restarting. Keeps the current theme and shows a message when the name is unknown."
-    }
-
-    fn priority(&self) -> ActionPriority {
-        ActionPriority::Normal
-    }
-}
+define_action_def!(
+    SetThemeDef,
+    "SetTheme",
+    ActionKind::SetTheme,
+    "switch the active theme",
+    "Re-resolve the named theme against the loaded theme blocks and apply it immediately, without restarting. Keeps the current theme and shows a message when the name is unknown.",
+    ActionPriority::Normal,
+    command_name = "theme",
+    params = PARAMS
+);
 
 #[derive(Debug)]
 pub struct SetTheme {

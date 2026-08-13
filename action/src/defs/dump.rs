@@ -1,4 +1,7 @@
-use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind, ValueSource};
+use crate::{
+    action::define_action_def, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
+    ValueSource,
+};
 use std::any::Any;
 
 const PARAMS: &[ParamDef] = &[ParamDef {
@@ -9,34 +12,15 @@ const PARAMS: &[ParamDef] = &[ParamDef {
     description: "Human-readable name for the dump. Sanitized into a path-friendly slug (lowercase, whitespace becomes '-', invalid chars dropped, truncated to 64 chars).",
 }];
 
-#[derive(Debug)]
-pub struct DumpDef;
-
-impl ActionDef for DumpDef {
-    fn name(&self) -> &'static str {
-        "Dump"
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::Dump
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        PARAMS
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "capture a workspace dump"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Write a single-file snapshot of the current repository (working tree + `.git/`) plus metadata to `$XDG_DATA_HOME/stoat/dumps/<timestamp>_<name>.dump`. The name is sanitized into a path-safe slug."
-    }
-
-    fn priority(&self) -> ActionPriority {
-        ActionPriority::Rare
-    }
-}
+define_action_def!(
+    DumpDef,
+    "Dump",
+    ActionKind::Dump,
+    "capture a workspace dump",
+    "Write a single-file snapshot of the current repository (working tree + `.git/`) plus metadata to `$XDG_DATA_HOME/stoat/dumps/<timestamp>_<name>.dump`. The name is sanitized into a path-safe slug.",
+    ActionPriority::Rare,
+    params = PARAMS
+);
 
 #[derive(Debug)]
 pub struct Dump {

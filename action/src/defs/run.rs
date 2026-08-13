@@ -1,6 +1,6 @@
 use crate::{
-    action::define_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
-    ValueSource,
+    action::{define_action, define_action_def},
+    Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind, ValueSource,
 };
 use std::any::Any;
 
@@ -69,34 +69,15 @@ const RUN_PARAMS: &[ParamDef] = &[ParamDef {
     description: "Shell command to execute in a modal overlay.",
 }];
 
-#[derive(Debug)]
-pub struct RunDef;
-
-impl ActionDef for RunDef {
-    fn name(&self) -> &'static str {
-        "Run"
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::Run
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        RUN_PARAMS
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "run command"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Run a shell command in a temporary modal overlay. The modal shows output while running and can be dismissed when done."
-    }
-
-    fn priority(&self) -> ActionPriority {
-        ActionPriority::Common
-    }
-}
+define_action_def!(
+    RunDef,
+    "Run",
+    ActionKind::Run,
+    "run command",
+    "Run a shell command in a temporary modal overlay. The modal shows output while running and can be dismissed when done.",
+    ActionPriority::Common,
+    params = RUN_PARAMS
+);
 
 #[derive(Debug)]
 pub struct Run {

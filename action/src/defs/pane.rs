@@ -1,6 +1,6 @@
 use crate::{
-    action::define_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
-    ValueSource,
+    action::{define_action, define_action_def},
+    Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind, ValueSource,
 };
 use std::any::Any;
 
@@ -173,34 +173,15 @@ const FOCUS_PANE_PARAMS: &[ParamDef] = &[ParamDef {
     description: "1-based pane position in layout order. 10 addresses the pane displayed as 0.",
 }];
 
-#[derive(Debug)]
-pub struct FocusPaneDef;
-
-impl ActionDef for FocusPaneDef {
-    fn name(&self) -> &'static str {
-        "FocusPane"
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::FocusPane
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        FOCUS_PANE_PARAMS
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "focus pane by number"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Move focus to the pane at the given 1-based position in layout order, including panes detached to other windows, the same order pane-ID badges number panes. Focusing a detached pane raises its window. Out-of-range indices leave focus unchanged."
-    }
-
-    fn priority(&self) -> ActionPriority {
-        ActionPriority::Rare
-    }
-}
+define_action_def!(
+    FocusPaneDef,
+    "FocusPane",
+    ActionKind::FocusPane,
+    "focus pane by number",
+    "Move focus to the pane at the given 1-based position in layout order, including panes detached to other windows, the same order pane-ID badges number panes. Focusing a detached pane raises its window. Out-of-range indices leave focus unchanged.",
+    ActionPriority::Rare,
+    params = FOCUS_PANE_PARAMS
+);
 
 #[derive(Debug)]
 pub struct FocusPane {

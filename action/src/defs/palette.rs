@@ -1,56 +1,21 @@
-use crate::{Action, ActionDef, ActionKind, ParamDef};
-use std::any::Any;
+use crate::{action::define_action, ActionKind, ActionPriority};
 
-#[derive(Debug)]
-pub struct OpenCommandPaletteDef;
-
-impl ActionDef for OpenCommandPaletteDef {
-    fn name(&self) -> &'static str {
-        "OpenCommandPalette"
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::OpenCommandPalette
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        &[]
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "open the command palette"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Open an interactive list of every visible action. Type to filter, \
-         Up/Down to navigate, Enter to invoke, Escape to cancel."
-    }
-
-    fn palette_visible(&self) -> bool {
-        false
-    }
-}
-
-#[derive(Debug)]
-pub struct OpenCommandPalette;
-
-impl OpenCommandPalette {
-    pub const DEF: &OpenCommandPaletteDef = &OpenCommandPaletteDef;
-}
-
-impl Action for OpenCommandPalette {
-    fn def(&self) -> &'static dyn ActionDef {
-        Self::DEF
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
+define_action!(
+    OpenCommandPaletteDef,
+    OpenCommandPalette,
+    "OpenCommandPalette",
+    ActionKind::OpenCommandPalette,
+    "open the command palette",
+    "Open an interactive list of every visible action. Type to filter, \
+     Up/Down to navigate, Enter to invoke, Escape to cancel.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Action;
 
     #[test]
     fn kind_and_name() {

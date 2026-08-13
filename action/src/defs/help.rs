@@ -1,225 +1,69 @@
-use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef};
-use std::any::Any;
+use crate::{action::define_action, ActionKind, ActionPriority};
 
-#[derive(Debug)]
-pub struct OpenHelpDef;
+define_action!(
+    OpenHelpDef,
+    OpenHelp,
+    "OpenHelp",
+    ActionKind::OpenHelp,
+    "open the help modal",
+    "Open an interactive help modal that lists keybindings active for the \
+     current state. Type to filter, Up/Down to browse, Shift-Tab to toggle \
+     between active bindings and every registered action, Enter to invoke \
+     the selected action, Escape to switch to normal mode (then Escape \
+     again to close).",
+    ActionPriority::Normal,
+    palette_visible = false
+);
 
-impl ActionDef for OpenHelpDef {
-    fn name(&self) -> &'static str {
-        "OpenHelp"
-    }
+define_action!(
+    ToggleKeyHintsDef,
+    ToggleKeyHints,
+    "ToggleKeyHints",
+    ActionKind::ToggleKeyHints,
+    "toggle the keybinding hints overlay",
+    "Show or hide the compact keybinding hints overlay for the current \
+     mode. Normal mode shows it on nothing else, so this is how to bring up \
+     its active-binding list. Invoke it again to dismiss.",
+    ActionPriority::Common,
+    command_name = "hints"
+);
 
-    fn kind(&self) -> ActionKind {
-        ActionKind::OpenHelp
-    }
+define_action!(
+    DismissKeyHintsDef,
+    DismissKeyHints,
+    "DismissKeyHints",
+    ActionKind::DismissKeyHints,
+    "dismiss the keybinding hints overlay",
+    "Hide the keybinding hints overlay when it is showing. Bound to Escape \
+     in normal mode as a dedicated close for the hints, and a no-op when \
+     they are already hidden.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
 
-    fn params(&self) -> &'static [ParamDef] {
-        &[]
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "open the help modal"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Open an interactive help modal that lists keybindings active for the \
-         current state. Type to filter, Up/Down to browse, Shift-Tab to toggle \
-         between active bindings and every registered action, Enter to invoke \
-         the selected action, Escape to switch to normal mode (then Escape \
-         again to close)."
-    }
-
-    fn palette_visible(&self) -> bool {
-        false
-    }
-}
-
-#[derive(Debug)]
-pub struct OpenHelp;
-
-impl OpenHelp {
-    pub const DEF: &OpenHelpDef = &OpenHelpDef;
-}
-
-impl Action for OpenHelp {
-    fn def(&self) -> &'static dyn ActionDef {
-        Self::DEF
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-#[derive(Debug)]
-pub struct ToggleKeyHintsDef;
-
-impl ActionDef for ToggleKeyHintsDef {
-    fn name(&self) -> &'static str {
-        "ToggleKeyHints"
-    }
-
-    fn command_name(&self) -> Option<&'static str> {
-        Some("hints")
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::ToggleKeyHints
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        &[]
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "toggle the keybinding hints overlay"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Show or hide the compact keybinding hints overlay for the current \
-         mode. Normal mode shows it on nothing else, so this is how to bring up \
-         its active-binding list. Invoke it again to dismiss."
-    }
-
-    fn priority(&self) -> ActionPriority {
-        ActionPriority::Common
-    }
-}
-
-#[derive(Debug)]
-pub struct ToggleKeyHints;
-
-impl ToggleKeyHints {
-    pub const DEF: &ToggleKeyHintsDef = &ToggleKeyHintsDef;
-}
-
-impl Action for ToggleKeyHints {
-    fn def(&self) -> &'static dyn ActionDef {
-        Self::DEF
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-#[derive(Debug)]
-pub struct DismissKeyHintsDef;
-
-impl ActionDef for DismissKeyHintsDef {
-    fn name(&self) -> &'static str {
-        "DismissKeyHints"
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::DismissKeyHints
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        &[]
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "dismiss the keybinding hints overlay"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Hide the keybinding hints overlay when it is showing. Bound to Escape \
-         in normal mode as a dedicated close for the hints, and a no-op when \
-         they are already hidden."
-    }
-
-    fn palette_visible(&self) -> bool {
-        false
-    }
-}
-
-#[derive(Debug)]
-pub struct DismissKeyHints;
-
-impl DismissKeyHints {
-    pub const DEF: &DismissKeyHintsDef = &DismissKeyHintsDef;
-}
-
-impl Action for DismissKeyHints {
-    fn def(&self) -> &'static dyn ActionDef {
-        Self::DEF
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-macro_rules! plumbing_action {
-    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021) => {
-        #[derive(Debug)]
-        pub struct $def;
-
-        impl ActionDef for $def {
-            fn name(&self) -> &'static str {
-                $name
-            }
-
-            fn kind(&self) -> ActionKind {
-                $kind
-            }
-
-            fn params(&self) -> &'static [ParamDef] {
-                &[]
-            }
-
-            fn short_desc(&self) -> &'static str {
-                $short
-            }
-
-            fn long_desc(&self) -> &'static str {
-                $long
-            }
-
-            fn palette_visible(&self) -> bool {
-                false
-            }
-        }
-
-        #[derive(Debug)]
-        pub struct $action;
-
-        impl $action {
-            pub const DEF: &$def = &$def;
-        }
-
-        impl Action for $action {
-            fn def(&self) -> &'static dyn ActionDef {
-                Self::DEF
-            }
-
-            fn as_any(&self) -> &dyn Any {
-                self
-            }
-        }
-    };
-}
-
-plumbing_action!(
+define_action!(
     HelpSelectPrevDef,
     HelpSelectPrev,
     "HelpSelectPrev",
     ActionKind::HelpSelectPrev,
     "previous help entry",
-    "Move the help selection up by one row while the help modal is open."
+    "Move the help selection up by one row while the help modal is open.",
+    ActionPriority::Normal,
+    palette_visible = false
 );
 
-plumbing_action!(
+define_action!(
     HelpSelectNextDef,
     HelpSelectNext,
     "HelpSelectNext",
     ActionKind::HelpSelectNext,
     "next help entry",
-    "Move the help selection down by one row while the help modal is open."
+    "Move the help selection down by one row while the help modal is open.",
+    ActionPriority::Normal,
+    palette_visible = false
 );
 
-plumbing_action!(
+define_action!(
     HelpCompleteDef,
     HelpComplete,
     "HelpComplete",
@@ -228,66 +72,81 @@ plumbing_action!(
     "Complete the highlighted action's name into the help search input, \
      replacing what was typed. The completed action stays selected. Bound by \
      default to Tab while the help modal's search input is focused; a no-op \
-     when the list is empty."
+     when the list is empty.",
+    ActionPriority::Normal,
+    palette_visible = false
 );
 
-plumbing_action!(
+define_action!(
     HelpScopeToggleDef,
     HelpScopeToggle,
     "HelpScopeToggle",
     ActionKind::HelpScopeToggle,
     "toggle help scope",
-    "Toggle the help listing between active-bindings-only and all registered actions."
+    "Toggle the help listing between active-bindings-only and all registered actions.",
+    ActionPriority::Normal,
+    palette_visible = false
 );
 
-plumbing_action!(
+define_action!(
     HelpScrollDetailUpDef,
     HelpScrollDetailUp,
     "HelpScrollDetailUp",
     ActionKind::HelpScrollDetailUp,
     "scroll help detail up",
-    "Scroll the help detail pane toward the top by five rows."
+    "Scroll the help detail pane toward the top by five rows.",
+    ActionPriority::Normal,
+    palette_visible = false
 );
 
-plumbing_action!(
+define_action!(
     HelpScrollDetailDownDef,
     HelpScrollDetailDown,
     "HelpScrollDetailDown",
     ActionKind::HelpScrollDetailDown,
     "scroll help detail down",
-    "Scroll the help detail pane toward the bottom by five rows."
+    "Scroll the help detail pane toward the bottom by five rows.",
+    ActionPriority::Normal,
+    palette_visible = false
 );
 
-plumbing_action!(
+define_action!(
     HelpJumpFirstDef,
     HelpJumpFirst,
     "HelpJumpFirst",
     ActionKind::HelpJumpFirst,
     "jump to first help entry",
-    "Move the help selection to the first entry in the current filter."
+    "Move the help selection to the first entry in the current filter.",
+    ActionPriority::Normal,
+    palette_visible = false
 );
 
-plumbing_action!(
+define_action!(
     HelpJumpLastDef,
     HelpJumpLast,
     "HelpJumpLast",
     ActionKind::HelpJumpLast,
     "jump to last help entry",
-    "Move the help selection to the last entry in the current filter."
+    "Move the help selection to the last entry in the current filter.",
+    ActionPriority::Normal,
+    palette_visible = false
 );
 
-plumbing_action!(
+define_action!(
     CloseHelpDef,
     CloseHelp,
     "CloseHelp",
     ActionKind::CloseHelp,
     "close help",
-    "Close the help modal and restore the mode that was active before it opened."
+    "Close the help modal and restore the mode that was active before it opened.",
+    ActionPriority::Normal,
+    palette_visible = false
 );
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Action;
 
     #[test]
     fn kind_and_name() {
