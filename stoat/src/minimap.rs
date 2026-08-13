@@ -18,6 +18,8 @@ use stoat_text::{
     Rope,
 };
 
+pub(crate) mod emit;
+
 /// Minimap columns a line is summarized into, matching the strip's declared
 /// `max_columns`. Display columns past this are dropped.
 const MAX_COLUMNS: u32 = 120;

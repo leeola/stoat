@@ -50,7 +50,7 @@ use crate::{
         FocusFlags, StoatKeymapState,
     },
     lsp::{progress::LspProgressMap, registry::LspRegistry},
-    minimap::MinimapContent,
+    minimap::{emit, MinimapContent},
     pane::{DockVisibility, FocusTarget, View},
     rebase::RebasePause,
     run::{RunId, RunState},
@@ -471,7 +471,7 @@ pub(crate) fn frame(
 
     let minimap_mode = stoat.minimap_mode();
     let minimap_enabled = minimap_mode != MinimapMode::Off;
-    stoat.ensure_minimap_content_ids();
+    emit::ensure_minimap_content_ids(stoat);
 
     let tab_bar_rows = u16::from(stoat.tab_bar_visible());
 
