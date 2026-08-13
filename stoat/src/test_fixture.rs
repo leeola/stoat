@@ -17,6 +17,7 @@ use crate::{
     pane::FocusTarget,
     test_harness::TestHarness,
 };
+use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use std::path::PathBuf;
 use stoat_action::OpenFile;
@@ -111,4 +112,15 @@ pub(crate) fn focused_editor_pane_area(h: &TestHarness) -> Rect {
         FocusTarget::SplitPane => ws.panes.pane(ws.panes.focus()).area,
         FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).expect("dock").area,
     }
+}
+
+/// A synthetic mouse event at a screen cell, for a test driving the router
+/// through the same entry the terminal uses.
+pub(crate) fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Event {
+    Event::Mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })
 }
