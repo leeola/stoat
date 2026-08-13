@@ -1,5 +1,23 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ActionKind {
+/// Declare [`ActionKind`] and the list of every variant in one place.
+///
+/// The list is what lets a test assert that every kind is registered. Written
+/// twice by hand it would drift, and a kind missing from the list is exactly
+/// what the test exists to catch.
+macro_rules! action_kinds {
+    ($($name:ident),* $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum ActionKind {
+            $($name,)*
+        }
+
+        impl ActionKind {
+            /// Every variant, in declaration order.
+            pub const ALL: &[ActionKind] = &[$(ActionKind::$name,)*];
+        }
+    };
+}
+
+action_kinds! {
     Quit,
     QuitAll,
     QuitAllConfirm,

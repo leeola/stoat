@@ -3049,7 +3049,7 @@ mod tests {
         let p = path.to_str().unwrap();
         h.fake_lsp()
             .set_references(p, 0, 0, &[(p, 0, 0), (p, 1, 0), (p, 2, 0)]);
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::defs::editor::GotoReferences);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoReferences);
         h.settle();
 
         let picker = h.stoat.location_picker.as_ref().expect("picker open");
@@ -3072,7 +3072,7 @@ mod tests {
         let p = path.to_str().unwrap();
         h.fake_lsp()
             .set_references(p, 0, 0, &[(p, 0, 0), (p, 1, 0), (p, 2, 0)]);
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::defs::editor::GotoReferences);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoReferences);
         h.settle();
 
         assert!(h.stoat.location_picker.is_none(), "LSP path is gated off");

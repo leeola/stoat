@@ -1176,6 +1176,8 @@ pub fn lookup_alias(token: &str) -> Option<&'static RegistryEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ActionKind;
+    use std::collections::HashSet;
 
     const ZERO_ARG_NAMES: &[&str] = &[
         "Quit",
@@ -1872,5 +1874,39 @@ mod tests {
             assert!(!entry.def.short_desc().is_empty(), "{}", entry.def.name());
             assert!(!entry.def.long_desc().is_empty(), "{}", entry.def.name());
         }
+    }
+
+    /// Kinds no registered action carries, and why.
+    ///
+    /// Both are built programmatically with payloads no string parser produces,
+    /// so there is nothing for a user to type and nothing for the palette to
+    /// list. Every other kind must be reachable by name.
+    const UNREGISTERED: &[ActionKind] = &[
+        ActionKind::ReviewExternalEdit,
+        ActionKind::OpenReviewAgentEdits,
+    ];
+
+    /// An action added without a registry entry is unreachable by name and
+    /// absent from the palette, and nothing else fails when that happens.
+    #[test]
+    fn every_kind_is_registered_or_exempt() {
+        let registered: HashSet<ActionKind> = all().map(|entry| entry.def.kind()).collect();
+
+        let missing: Vec<ActionKind> = ActionKind::ALL
+            .iter()
+            .copied()
+            .filter(|kind| !registered.contains(kind) && !UNREGISTERED.contains(kind))
+            .collect();
+        assert!(missing.is_empty(), "unregistered kinds: {missing:?}");
+
+        let stale: Vec<ActionKind> = UNREGISTERED
+            .iter()
+            .copied()
+            .filter(|kind| registered.contains(kind))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "exempt kinds that are now registered: {stale:?}"
+        );
     }
 }

@@ -5601,10 +5601,7 @@ mod tests {
         let path = h.write_file("s.txt", "foo.bar baz qux quux\n");
         h.open_file(&path);
         h.stoat.pending_count = Some(3);
-        crate::action_handlers::dispatch(
-            &mut h.stoat,
-            &stoat_action::defs::editor::MoveNextLongWordStart,
-        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::MoveNextLongWordStart);
         assert_eq!(
             h.primary_head_offset(),
             15,

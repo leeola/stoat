@@ -5,114 +5,16 @@ mod param;
 pub mod registry;
 
 pub use action::{Action, ActionDef, ActionPriority};
+// Every action type is re-exported at the crate root, so a consumer writes
+// `stoat_action::Quit` rather than the module it happens to be defined in.
+//
+// Glob rather than a list per module, because a hand-written list falls behind
+// the moment an action is added, and a consumer that fails to find a name at the
+// root deep-paths around the gap instead of noticing it.
 pub use defs::{
-    app::{OpenLogs, Quit, QuitAll, ShowVersion},
-    commits::{
-        CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview, CommitsPageDown,
-        CommitsPageUp, CommitsPrev, CommitsRefresh, GitLs, OpenCommits,
-    },
-    conflict::{
-        CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
-        ConflictPickBoth, ConflictPickOurs, ConflictPickOursLine, ConflictPickTheirs,
-        ConflictPickTheirsLine, ConflictPrevChunk, ConflictPrevFile, ConflictResetChunk,
-    },
-    dump::Dump,
-    editor::{
-        AcceptCompletion, AddSelectionBelow, AlignSelections, AlignViewBottom, AlignViewCenter,
-        AlignViewTop, ChangeSelection, CloseBuffer, CollapseSelection, Decrement, DeleteSelection,
-        DeleteSelectionNoYank, EnsureSelectionsForward, ExpandSelection, ExtendDown,
-        ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn, ExtendGotoFileStart,
-        ExtendGotoFirstNonwhitespace, ExtendGotoLastLine, ExtendGotoWindowBottom,
-        ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft, ExtendMoveParentNodeEnd,
-        ExtendMoveParentNodeStart, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd,
-        ExtendPrevWordStart, ExtendRight, ExtendSelectNextSibling, ExtendSelectPrevSibling,
-        ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine,
-        ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar,
-        FindPrevChar, FlipSelections, GotoColumn, GotoFileStart, GotoFirstNonwhitespace,
-        GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact,
-        GotoNextChange, GotoNextClass, GotoNextFunction, GotoNextParagraph, GotoPrevChange,
-        GotoPrevClass, GotoPrevFunction, GotoPrevParagraph, GotoWindowBottom, GotoWindowCenter,
-        GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection,
-        InsertRegister, JoinSelections, JoinSelectionsSpace, JumpBackward, JumpForward,
-        KeepPrimarySelection, KeepSelections, MatchBrackets, MoveDown, MoveLeft, MoveNextWordEnd,
-        MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevWordEnd,
-        MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow, OpenCodeSearch,
-        OpenJumplistPicker, OpenLastPicker, OpenReverseSearchInput, OpenSearchInput, PageDown,
-        PageUp, PasteAfter, PasteBefore, PasteClipboardAfter, PasteClipboardBefore, RecordMacro,
-        Redo, RemovePrimarySelection, RemoveSelections, RepeatLastMotion, ReplaceChar,
-        ReplaceWithYanked, ReplayMacro, RotateSelectionContentsBackward,
-        RotateSelectionContentsForward, RotateSelectionsBackward, RotateSelectionsForward,
-        SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll,
-        SelectAllChildren, SelectAllSiblings, SelectLineBelow, SelectNextSibling,
-        SelectPrevSibling, SelectRegex, SelectRegister, SelectTextobjectAround,
-        SelectTextobjectInner, SetMark, ShellAppendOutput, ShellInsertOutput, ShellKeepPipe,
-        ShellPipe, ShellPipeTo, ShrinkSelection, ShrinkToLineBounds, SmartTab, SplitSelection,
-        SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase,
-        SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints,
-        ToggleLspStatus, ToggleSyntaxHighlight, TriggerCompletion, TrimSelections, Undo,
-        UnindentSelection, WriteQuit, Yank, YankMainToClipboard, YankToClipboard,
-    },
-    file::{
-        AutoReload, AutoReloadConfig, FontSizeDec, FontSizeInc, ForceReloadAll, ForceReloadBuffer,
-        ForceSaveBuffer, OpenBuffer, OpenConfig, OpenFile, ReloadAll, ReloadBuffer, ToggleMinimap,
-        ToggleWrap,
-    },
-    file_finder::{
-        FileFinderComplete, FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle,
-        FileFinderSelectNext, FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker,
-        OpenFileFinder, OpenFileFinderHSplit, OpenFileFinderVSplit, OpenWorkspaceFileFinder,
-    },
-    help::{
-        CloseHelp, DismissKeyHints, HelpComplete, HelpJumpFirst, HelpJumpLast, HelpScopeToggle,
-        HelpScrollDetailDown, HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
-        ToggleKeyHints,
-    },
-    lsp::{
-        CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition, GotoImplementation,
-        GotoNextDiagnostic, GotoPrevDiagnostic, GotoTypeDefinition, Hover, OpenDiagnosticsPicker,
-        OpenSymbolPicker, OpenWorkspaceDiagnosticsPicker, OpenWorkspaceSymbolPicker, RenameSymbol,
-        SymbolFinderComplete, SymbolFinderPageDown, SymbolFinderPageUp, SymbolFinderSelectNext,
-        SymbolFinderSelectPrev,
-    },
-    palette::OpenCommandPalette,
-    pane::{
-        ClosePane, FocusDown, FocusLeft, FocusNext, FocusPane, FocusPrev, FocusRight, FocusUp,
-        MovePaneDown, MovePaneLeft, MovePaneNext, MovePanePrev, MovePaneRight, MovePaneUp,
-        SplitDown, SplitNewDown, SplitNewRight, SplitRight, ToggleDockLeft, ToggleDockRight,
-    },
-    prompt::{
-        CancelPromptInput, PaletteComplete, PaletteHistoryNext, PaletteHistoryPrev,
-        PalettePageDown, PalettePageUp, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
-        PromptInsertNewline, SubmitPromptInput,
-    },
-    rebase::{
-        AbortRebase, EnterRebase, ExecuteRebase, RebaseConflictAbort, RebaseConflictApply,
-        RebaseConflictNextFile, RebaseConflictPrevFile, RebaseConflictSkipEntry,
-        RebaseConflictTakeOurs, RebaseConflictTakeTheirs, RebaseContinue, RebaseMoveDown,
-        RebaseMoveUp, RebaseNext, RebasePrev, RewordAbort, RewordConfirm, SetRebaseOpDrop,
-        SetRebaseOpEdit, SetRebaseOpFixup, SetRebaseOpPick, SetRebaseOpReword, SetRebaseOpSquash,
-    },
-    review::{
-        AgentEdit, CloseReview, Diff, GitReview, JumpToMoveSource, JumpToMoveTarget,
-        JumpToNextMoveSource, JumpToPrevMoveSource, OpenReviewAgentEdits, OpenReviewCommit,
-        OpenReviewCommitRange, QueryMoveRelationships, ReviewApplyStaged, ReviewDone,
-        ReviewExternalEdit, ReviewNextChunk, ReviewNextCommit, ReviewPrevChunk, ReviewPrevCommit,
-        ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk, ReviewToggleStage,
-        ReviewUnstageChunk, StageHunk, StageLine, ToggleDiff, ToggleStageHunk, ToggleStageLine,
-        UnstageHunk, UnstageLine,
-    },
-    run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
-    set_theme::SetTheme,
-    tab::{CloseTab, GotoTab, NewTab, NextTab, PrevTab, RenameTab, ToggleTab, ToggleTabBar},
-    terminal::Terminal,
-    walkthrough::{
-        WalkthroughDone, WalkthroughNext, WalkthroughNextAnnotation, WalkthroughOpen,
-        WalkthroughPrev, WalkthroughPrevAnnotation, WalkthroughShowNarration,
-    },
-    workspace::{
-        CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd, ShowCwd,
-        SwitchWorkspace,
-    },
+    agent::*, app::*, commits::*, conflict::*, dump::*, editor::*, file::*, file_finder::*,
+    help::*, lsp::*, palette::*, pane::*, picker::*, prompt::*, rebase::*, review::*, run::*,
+    set_theme::*, tab::*, terminal::*, walkthrough::*, workspace::*,
 };
 pub use kind::ActionKind;
 pub use param::{ParamDef, ParamError, ParamKind, ParamValue, ValueSource};
