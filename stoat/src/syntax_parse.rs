@@ -817,7 +817,6 @@ mod tests {
     use stoat_language::LanguageRegistry;
     use stoat_text::Anchor;
 
-    /// When `parse_buffer_step` aborts on the deadline, the prior state
     /// A named viewport narrows the fallback walk to it, and the same buffer
     /// with none named still walks the whole file. The narrowing has to be
     /// visible in the tokens, not just in what the parse reports.
@@ -885,6 +884,7 @@ mod tests {
         );
     }
 
+    /// When `parse_buffer_step` aborts on the deadline, the prior state
     /// passed via `&mut Option<_>` must remain populated so the caller
     /// can hand it to a follow-up parse without losing incrementality.
     #[test]
