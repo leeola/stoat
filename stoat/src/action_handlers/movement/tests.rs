@@ -1003,6 +1003,19 @@ fn move_down_at_last_row_is_noop() {
     assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 0)]);
 }
 
+/// A trailing newline opens a line below the text, and `j` reaches it.
+///
+/// The cursor is zero-width there, having nothing to cover, which is what makes
+/// the row a position rather than the padding it used to be.
+#[test]
+fn move_down_onto_the_line_a_trailing_newline_opens() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "ab\n");
+    dispatch(&mut stoat, &MoveDown);
+    assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(1, 0)]);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(3, 3, false)]);
+}
+
 #[test]
 fn move_down_preserves_goal_column() {
     let mut stoat = stoat();
@@ -1454,6 +1467,34 @@ fn extend_down_at_last_row_is_noop() {
     editor::seed_focused_buffer(&mut stoat, "abc");
     dispatch(&mut stoat, &ExtendDown);
     assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 1, false)]);
+}
+
+/// Extending onto the line a trailing newline opens does nothing, though a
+/// plain motion reaches it.
+///
+/// That line holds no characters. Extending onto it only drags the selection
+/// over the newline ending the line above, which stops reading as a selection
+/// of anything.
+#[test]
+fn extend_down_onto_the_line_a_trailing_newline_opens_is_a_noop() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "ab\n");
+    dispatch(&mut stoat, &ExtendDown);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 1, false)]);
+}
+
+/// A blank line in the middle of a buffer is an ordinary target. Only the line
+/// past the last newline is off limits to an extend.
+#[test]
+fn extend_down_onto_a_blank_middle_line_still_extends() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "ab\n\ncd\n");
+    dispatch(&mut stoat, &ExtendDown);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(0, 4, false)],
+        "the span grows through the blank line's own newline",
+    );
 }
 
 #[test]

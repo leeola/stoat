@@ -259,7 +259,16 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
-    let max_row = rope.max_point().row;
+    let max_point = rope.max_point();
+    let max_row = max_point.row;
+    // The line a trailing newline opens, which holds no characters at all. A
+    // plain motion lands on it, that being a cursor position of its own, but an
+    // extend stops short. Growing onto it only takes in the newline ending the
+    // line above, leaving a selection that covers nothing the user aimed at.
+    //
+    // Column zero on the last row is what identifies it. A blank line in the
+    // middle of a buffer owns its own newline, so this never catches one.
+    let empty_final_row = (max_point.column == 0 && max_row > 0).then_some(max_row);
 
     // Where a cursor at `head`/`tail` carrying `goal` lands, with the goal
     // column it takes along. Both arms land on the same cell. Extending decides
@@ -280,6 +289,9 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
         // A plain j/k at the file edge stays a no-op. An overshooting count jump
         // lands on the clamped edge row rather than doing nothing.
         if new_row == cursor_pt.row {
+            return None;
+        }
+        if extend && Some(new_row) == empty_final_row {
             return None;
         }
         // Back to a byte column on the landing line, which leaves the display
