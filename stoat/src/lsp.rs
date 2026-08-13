@@ -5,6 +5,7 @@ pub(crate) mod edit_apply;
 pub(crate) mod folding;
 pub(crate) mod pending;
 pub(crate) mod progress;
+pub(crate) mod pull_diagnostics;
 pub(crate) mod registry;
 pub(crate) mod servers;
 pub(crate) mod stamp;
@@ -70,7 +71,7 @@ pub(crate) fn pump_all(stoat: &mut Stoat) -> bool {
 
     let inlay_hints = action_handlers::lsp::pump_lsp_inlay_hints(stoat);
     let document_highlight = document_highlight::pump_lsp_document_highlight(stoat);
-    let pull_diagnostics = action_handlers::lsp::pump_lsp_pull_diagnostics(stoat);
+    let pull_diagnostics = pull_diagnostics::pump_lsp_pull_diagnostics(stoat);
     let semantic_tokens = action_handlers::lsp::pump_lsp_semantic_tokens(stoat);
     let folding_ranges = folding::pump_lsp_folding_ranges(stoat);
 

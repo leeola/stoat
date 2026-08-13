@@ -18,6 +18,7 @@ use crate::{
     test_harness::TestHarness,
 };
 use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
+use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use ratatui::layout::Rect;
 use std::path::PathBuf;
 use stoat_action::OpenFile;
@@ -126,6 +127,22 @@ pub(crate) fn seed(h: &mut TestHarness, files: &[(&str, &str)]) -> PathBuf {
 pub(crate) fn open_buffer(h: &mut TestHarness, path: PathBuf) {
     action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
     h.settle();
+}
+
+/// An error diagnostic one column wide at `(line, col)`, for a test whose
+/// subject is what the editor does with a diagnostic rather than what is in it.
+pub(crate) fn diag(line: u32, col: u32, message: &str) -> Diagnostic {
+    Diagnostic {
+        range: Range::new(Position::new(line, col), Position::new(line, col + 1)),
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: None,
+        code_description: None,
+        source: None,
+        message: message.to_string(),
+        related_information: None,
+        tags: None,
+        data: None,
+    }
 }
 
 /// The screen rect of whatever holds focus, split pane or dock, so a test aims

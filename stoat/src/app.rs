@@ -874,11 +874,12 @@ pub struct Stoat {
     /// `previous_result_id` on the next pull so the server may answer Unchanged.
     pub(crate) pull_diagnostic_result_ids: std::collections::HashMap<BufferId, String>,
     /// In-flight pull-diagnostic requests per buffer, armed by
-    /// [`action_handlers::lsp::pull_diagnostics_trigger`] behind a debounce and
-    /// applied by [`action_handlers::lsp::pump_lsp_pull_diagnostics`].
+    /// [`crate::lsp::pull_diagnostics::pull_diagnostics_trigger`] behind a
+    /// debounce and applied by
+    /// [`crate::lsp::pull_diagnostics::pump_lsp_pull_diagnostics`].
     pub(crate) pending_pull_diagnostics: std::collections::HashMap<
         BufferId,
-        stoat_scheduler::Task<Option<action_handlers::lsp::PullDiagnosticsOutcome>>,
+        stoat_scheduler::Task<Option<crate::lsp::pull_diagnostics::PullDiagnosticsOutcome>>,
     >,
     /// Buffer version the pull-diagnostic trigger last requested for, per buffer,
     /// so an unchanged tick does not re-request.
@@ -3772,7 +3773,7 @@ impl Stoat {
         action_handlers::lsp::signature_help_trigger(self);
         action_handlers::lsp::inlay_hints_trigger(self);
         crate::lsp::document_highlight::document_highlight_trigger(self);
-        action_handlers::lsp::pull_diagnostics_trigger(self);
+        crate::lsp::pull_diagnostics::pull_diagnostics_trigger(self);
         action_handlers::lsp::semantic_tokens_trigger(self);
         crate::lsp::folding::folding_ranges_trigger(self);
         effect
