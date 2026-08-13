@@ -20,7 +20,6 @@
 //! successful record the writer thread prepends a
 //! `{"dropped": N}` breadcrumb so the transcript remains self-describing.
 
-use etcetera::base_strategy::{BaseStrategy, Xdg};
 use std::{
     fmt,
     fs::{File, OpenOptions},
@@ -230,13 +229,7 @@ fn write_record(
 /// Does not create the directory. Callers that write files should ensure it
 /// exists via [`std::fs::create_dir_all`].
 pub fn log_dir() -> io::Result<PathBuf> {
-    let base = Xdg::new().ok().and_then(|x| x.state_dir()).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "could not resolve XDG state directory",
-        )
-    })?;
-    Ok(base.join("stoat").join("logs"))
+    Ok(crate::paths::state_dir()?.join("logs"))
 }
 
 #[cfg(test)]
