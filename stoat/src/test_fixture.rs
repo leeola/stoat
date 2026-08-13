@@ -129,6 +129,26 @@ pub(crate) fn open_buffer(h: &mut TestHarness, path: PathBuf) {
     h.settle();
 }
 
+/// Bring up the in-process stcfg server against an empty `config.stcfg`.
+///
+/// Resets the registry so no injected sole host suppresses auto-spawn, opens
+/// the file (queuing the in-process spawn), then drives one `update` so the
+/// parked host installs. Returns the file path.
+pub(crate) fn open_stcfg_with_server(h: &mut TestHarness) -> PathBuf {
+    h.stoat.lsp_registry = crate::lsp::registry::LspRegistry::new();
+    h.stoat.set_lsp_auto_spawn(true);
+
+    let root = PathBuf::from("/cfg");
+    let path = root.join("config.stcfg");
+    h.fake_fs()
+        .insert_files(std::iter::once((path.clone(), b"".as_slice())));
+    h.stoat.active_workspace_mut().git_root = root;
+
+    open_buffer(h, path.clone());
+    h.type_keys("i");
+    path
+}
+
 /// An error diagnostic one column wide at `(line, col)`, for a test whose
 /// subject is what the editor does with a diagnostic rather than what is in it.
 pub(crate) fn diag(line: u32, col: u32, message: &str) -> Diagnostic {

@@ -885,10 +885,11 @@ pub struct Stoat {
     /// so an unchanged tick does not re-request.
     pub(crate) last_pull_diagnostic_key: std::collections::HashMap<BufferId, u64>,
     /// In-flight semantic-token request for the focused editor, armed by
-    /// [`action_handlers::lsp::semantic_tokens_trigger`] behind a debounce and
-    /// applied by [`action_handlers::lsp::pump_lsp_semantic_tokens`].
+    /// [`crate::lsp::semantic_tokens::semantic_tokens_trigger`] behind a
+    /// debounce and applied by
+    /// [`crate::lsp::semantic_tokens::pump_lsp_semantic_tokens`].
     pub(crate) pending_semantic_tokens:
-        Pending<Option<action_handlers::lsp::SemanticTokensOutcome>>,
+        Pending<Option<crate::lsp::semantic_tokens::SemanticTokensOutcome>>,
     /// `(buffer, version)` the semantic-token trigger last requested for, so an
     /// unchanged tick does not re-request.
     pub(crate) last_semantic_tokens_key: Option<(BufferId, u64)>,
@@ -3775,7 +3776,7 @@ impl Stoat {
         action_handlers::lsp::inlay_hints_trigger(self);
         crate::lsp::document_highlight::document_highlight_trigger(self);
         crate::lsp::pull_diagnostics::pull_diagnostics_trigger(self);
-        action_handlers::lsp::semantic_tokens_trigger(self);
+        crate::lsp::semantic_tokens::semantic_tokens_trigger(self);
         crate::lsp::folding::folding_ranges_trigger(self);
         effect
     }
