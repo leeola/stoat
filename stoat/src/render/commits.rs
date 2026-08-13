@@ -6,6 +6,7 @@ use crate::{
         layout::split_pane_status,
         paint::{render_empty_num, render_side_num, render_side_text},
         pane::render_overlay_status,
+        review::{DiffColumns, DiffLayout},
         text::{truncate_to_cols, write_str},
         FrameCtx,
     },
@@ -298,16 +299,16 @@ pub(crate) fn render_commit_preview(
     // One buffer for every number this loop paints, rather than one per row.
     let mut num_text = String::new();
 
-    let full_w = area.width as usize;
-    let status_w: usize = 1;
-    let num_w: usize = 5;
-    let gutter_w = status_w + num_w;
-    let sep: usize = 1;
-    let half_w = (full_w.saturating_sub(sep)) / 2;
-    let left_content_w = half_w.saturating_sub(gutter_w);
-    let right_start = area.x + half_w as u16 + sep as u16;
-    let right_content_w = (full_w - half_w - sep).saturating_sub(gutter_w);
-    let sep_x = area.x + half_w as u16;
+    let DiffColumns {
+        left_num_x,
+        left_text_x,
+        left_content_w,
+        right_num_x,
+        right_text_x,
+        right_content_w,
+        sep_x,
+        ..
+    } = DiffColumns::compute(area, DiffLayout::REVIEW);
 
     let mut y = area.y;
     let end_y = area.y + area.height;
@@ -354,13 +355,11 @@ pub(crate) fn render_commit_preview(
                 if y >= end_y {
                     return;
                 }
-                if sep_x < area.x + area.width {
+                if let Some(sep_x) = sep_x
+                    && sep_x < area.x + area.width
+                {
                     crate::render::chrome::vline(buf, sep_x, y, 1, dim, &mut *scene);
                 }
-                let left_num_x = area.x + status_w as u16;
-                let right_num_x = right_start + status_w as u16;
-                let left_text_x = left_num_x + num_w as u16;
-                let right_text_x = right_num_x + num_w as u16;
                 match diff_row {
                     ReviewRow::Context { left, right } => {
                         render_side_num(buf, &mut num_text, left_num_x, y, left.line_num, dim);

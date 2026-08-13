@@ -100,7 +100,7 @@ pub(crate) fn render_review(
 /// mirrors unchanged lines dimmed. Added and modified new lines leave it blank.
 /// Line numbers are base-file lines on the left and buffer lines on the right.
 ///
-/// Reuses [`render_review_rows`]'s two-column geometry. When a `scene` is
+/// Lays its columns out per [`DiffLayout::DIFF_VIEW`]. When a `scene` is
 /// threaded (a stoatty terminal) the gutter paints with the rich sub-cell
 /// components, otherwise it falls back to the ASCII gutter.
 pub(crate) fn render_diff_view(
@@ -254,48 +254,108 @@ fn build_diff_row_states(
     .collect()
 }
 
+/// One diff body's gutter shape and the narrowest rect it still splits in two.
+///
+/// The two bodies that draw a diff want different gutters. The diff view reads
+/// as an editor with a base column bolted on, so it leads with the line number
+/// and rules the gutter off from the code. The review screen and the commit
+/// preview lead with the chunk-status glyph, because a reviewer scans statuses
+/// down the left edge, and they run the text straight after the number to buy
+/// back a column.
+///
+/// A layout exists so both bodies resolve their columns through
+/// [`DiffColumns`]. Click mapping reads the same geometry the paint does (see
+/// [`right_text_x`]), so a second formula misplaces clicks with nothing
+/// failing.
+#[derive(Clone, Copy)]
+pub(crate) struct DiffLayout {
+    num_w: u16,
+    status_w: u16,
+    /// Width of the rule between the gutter and the text. Zero for a layout
+    /// that runs the text straight after the gutter.
+    sep_w: u16,
+    /// The status column precedes the line number rather than following it.
+    status_first: bool,
+    /// Inner width below which both sides alias onto one unified column. Zero
+    /// for a layout that always splits.
+    two_column_min: u16,
+}
+
+impl DiffLayout {
+    /// The diff view's gutter: line number, change/staged status, then a rule.
+    pub(crate) const DIFF_VIEW: Self = Self {
+        num_w: 5,
+        status_w: 2,
+        sep_w: 1,
+        status_first: false,
+        two_column_min: DIFF_TWO_COLUMN_MIN,
+    };
+
+    /// The review screen's and commit preview's gutter: a one-cell chunk-status
+    /// glyph, then the line number, then the text.
+    pub(crate) const REVIEW: Self = Self {
+        num_w: 5,
+        status_w: 1,
+        sep_w: 0,
+        status_first: true,
+        two_column_min: 0,
+    };
+
+    /// Offsets of the number, status, and rule columns from a side's start.
+    fn offsets(&self) -> (u16, u16, Option<u16>) {
+        let (num, status) = if self.status_first {
+            (self.status_w, 0)
+        } else {
+            (0, self.num_w)
+        };
+        let sep = (self.sep_w > 0).then_some(self.num_w + self.status_w);
+        (num, status, sep)
+    }
+}
+
 /// Column geometry for one diff body, resolved once from the inner rect.
 ///
-/// Each side lays out like the editor gutter, with a five-cell line-number
-/// column, a two-cell change/staged status column, a one-cell gutter/code
-/// separator, then the text. A wide rect splits into a base column on the left
-/// and a buffer column on the right. A narrow rect (under
-/// [`DIFF_TWO_COLUMN_MIN`]) aliases both sides onto one full-width column with
-/// no mid-divider, so Block and buffer rows land in the same place and read as
-/// a unified diff.
-struct DiffColumns {
-    left_num_x: u16,
-    status_left_x: u16,
-    left_sep_x: u16,
-    left_text_x: u16,
-    left_content_w: usize,
-    right_num_x: u16,
-    status_right_x: u16,
-    right_sep_x: u16,
-    right_text_x: u16,
-    right_content_w: usize,
-    sep_x: Option<u16>,
+/// A wide rect splits into a base column on the left and a buffer column on the
+/// right, each laid out per its [`DiffLayout`]. A rect narrower than the
+/// layout's threshold aliases both sides onto one full-width column with no
+/// mid-divider, so Block and buffer rows land in the same place and read as a
+/// unified diff.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DiffColumns {
+    pub(crate) left_num_x: u16,
+    pub(crate) status_left_x: u16,
+    /// Absolute x of the rule between the left gutter and its text, absent for
+    /// a layout with no rule.
+    pub(crate) left_sep_x: Option<u16>,
+    pub(crate) left_text_x: u16,
+    pub(crate) left_content_w: usize,
+    pub(crate) right_num_x: u16,
+    pub(crate) status_right_x: u16,
+    pub(crate) right_sep_x: Option<u16>,
+    pub(crate) right_text_x: u16,
+    pub(crate) right_content_w: usize,
+    /// Absolute x of the mid-divider, absent in the unified layout.
+    pub(crate) sep_x: Option<u16>,
 }
 
 impl DiffColumns {
-    fn compute(inner: Rect) -> Self {
-        let num_w: u16 = 5;
-        let status_w: u16 = 2;
-        let sep_w: u16 = 1;
-        let gutter_w = (num_w + status_w + sep_w) as usize;
+    pub(crate) fn compute(inner: Rect, layout: DiffLayout) -> Self {
+        let gutter_w = (layout.num_w + layout.status_w + layout.sep_w) as usize;
+        let (num_off, status_off, sep_off) = layout.offsets();
 
-        if inner.width < DIFF_TWO_COLUMN_MIN {
-            let status_x = inner.x + num_w;
-            let sep_x = status_x + status_w;
-            let text_x = sep_x + sep_w;
+        if inner.width < layout.two_column_min {
+            let num_x = inner.x + num_off;
+            let status_x = inner.x + status_off;
+            let sep_x = sep_off.map(|off| inner.x + off);
+            let text_x = inner.x + gutter_w as u16;
             let content_w = (inner.width as usize).saturating_sub(gutter_w);
             return Self {
-                left_num_x: inner.x,
+                left_num_x: num_x,
                 status_left_x: status_x,
                 left_sep_x: sep_x,
                 left_text_x: text_x,
                 left_content_w: content_w,
-                right_num_x: inner.x,
+                right_num_x: num_x,
                 status_right_x: status_x,
                 right_sep_x: sep_x,
                 right_text_x: text_x,
@@ -311,15 +371,15 @@ impl DiffColumns {
         let right_start = inner.x + half_w as u16 + sep as u16;
         let right_content_w = (full_w - half_w - sep).saturating_sub(gutter_w);
         Self {
-            left_num_x: inner.x,
-            status_left_x: inner.x + num_w,
-            left_sep_x: inner.x + num_w + status_w,
-            left_text_x: inner.x + num_w + status_w + sep_w,
+            left_num_x: inner.x + num_off,
+            status_left_x: inner.x + status_off,
+            left_sep_x: sep_off.map(|off| inner.x + off),
+            left_text_x: inner.x + gutter_w as u16,
             left_content_w,
-            right_num_x: right_start,
-            status_right_x: right_start + num_w,
-            right_sep_x: right_start + num_w + status_w,
-            right_text_x: right_start + num_w + status_w + sep_w,
+            right_num_x: right_start + num_off,
+            status_right_x: right_start + status_off,
+            right_sep_x: sep_off.map(|off| right_start + off),
+            right_text_x: right_start + gutter_w as u16,
             right_content_w,
             sep_x: Some(inner.x + half_w as u16),
         }
@@ -383,7 +443,7 @@ pub(crate) fn paint_diff_rows(
         right_text_x,
         right_content_w,
         sep_x,
-    } = DiffColumns::compute(inner);
+    } = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
 
     use crate::theme::scope as s;
     let dim_style = theme.get(s::DIFF_CONTEXT);
@@ -426,7 +486,7 @@ pub(crate) fn paint_diff_rows(
             if let Some(sep_x) = sep_x {
                 buf[(sep_x, y)].set_char('│').set_style(dim_style);
             }
-            for gutter_sep in [left_sep_x, right_sep_x] {
+            for gutter_sep in [left_sep_x, right_sep_x].into_iter().flatten() {
                 if gutter_sep < inner.x + inner.width {
                     buf[(gutter_sep, y)].set_char('│').set_style(dim_style);
                 }
@@ -613,10 +673,7 @@ pub(crate) fn paint_diff_rows(
     // per-row glyph. Centered in its cell via the +8 sixteenths offset.
     if let Some(rg) = rich.as_mut() {
         let height = (end_row - scroll_row) as u16 * 16;
-        for sep in [Some(left_sep_x), Some(right_sep_x), sep_x]
-            .into_iter()
-            .flatten()
-        {
+        for sep in [left_sep_x, right_sep_x, sep_x].into_iter().flatten() {
             if sep < inner.x + inner.width {
                 Bar {
                     x: ((sep - inner.x) * 16 + 8) as i16,
@@ -1021,19 +1078,17 @@ fn render_review_empty(watching: bool, inner: Rect, theme: &crate::theme::Theme,
 /// In the two-column layout this is the right pane's text column. In the narrow
 /// unified layout it is the single shared text column. See [`DiffColumns`].
 pub(crate) fn right_text_x(inner: Rect) -> u16 {
-    DiffColumns::compute(inner).right_text_x
+    DiffColumns::compute(inner, DiffLayout::DIFF_VIEW).right_text_x
 }
 
 /// X column where the review session's buffer text begins, for placing its
 /// cursor.
 ///
-/// The review screen keeps a one-cell status gutter, unlike the diff view's
-/// two-cell one, so its cursor column is computed separately from
-/// [`right_text_x`] and is always two-column.
+/// The review screen lays its gutter out per [`DiffLayout::REVIEW`], which puts
+/// its text a column left of the diff view's and never collapses to a unified
+/// column, so its cursor lands elsewhere than [`right_text_x`].
 fn review_cursor_text_x(inner: Rect) -> u16 {
-    let half_w = (inner.width.saturating_sub(1)) / 2;
-    let right_start = inner.x + half_w + 1;
-    right_start + 1 + 5
+    DiffColumns::compute(inner, DiffLayout::REVIEW).right_text_x
 }
 
 /// Paint the primary selection's cursor over the right pane's text, or set the
@@ -1105,15 +1160,18 @@ pub(crate) fn render_review_rows(
     // One buffer for every number this loop paints, rather than one per row.
     let mut num_text = String::new();
 
-    let full_w = inner.width as usize;
-    let status_w: usize = 1;
-    let num_w: usize = 5;
-    let gutter_w: usize = status_w + num_w;
-    let sep: usize = 1;
-    let half_w = (full_w.saturating_sub(sep)) / 2;
-    let left_content_w = half_w.saturating_sub(gutter_w);
-    let right_start = inner.x + half_w as u16 + sep as u16;
-    let right_content_w = (full_w - half_w - sep).saturating_sub(gutter_w);
+    let DiffColumns {
+        left_num_x,
+        status_left_x,
+        left_text_x,
+        left_content_w,
+        right_num_x,
+        status_right_x,
+        right_text_x,
+        right_content_w,
+        sep_x,
+        ..
+    } = DiffColumns::compute(inner, DiffLayout::REVIEW);
 
     use crate::theme::scope as s;
     let dim_style = theme.get(s::DIFF_CONTEXT);
@@ -1136,8 +1194,10 @@ pub(crate) fn render_review_rows(
             break;
         }
 
-        let sep_x = inner.x + half_w as u16;
-        if rich.is_none() && sep_x < inner.x + inner.width {
+        if let Some(sep_x) = sep_x
+            && rich.is_none()
+            && sep_x < inner.x + inner.width
+        {
             buf[(sep_x, y)].set_char('│').set_style(dim_style);
         }
 
@@ -1152,7 +1212,7 @@ pub(crate) fn render_review_rows(
                         &mut rich,
                         buf,
                         inner,
-                        inner.x,
+                        status_left_x,
                         y,
                         status,
                         is_current,
@@ -1163,7 +1223,7 @@ pub(crate) fn render_review_rows(
                         &mut rich,
                         buf,
                         inner,
-                        right_start,
+                        status_right_x,
                         y,
                         status,
                         is_current,
@@ -1171,10 +1231,6 @@ pub(crate) fn render_review_rows(
                         theme,
                     );
                 }
-                let left_num_x = inner.x + status_w as u16;
-                let right_num_x = right_start + status_w as u16;
-                let left_text_x = left_num_x + num_w as u16;
-                let right_text_x = right_num_x + num_w as u16;
                 match row {
                     ReviewRow::Context { left, right } => {
                         draw_side_num(
@@ -1318,8 +1374,7 @@ pub(crate) fn render_review_rows(
 
     // One hairline separator spanning the visible rows, replacing the per-row
     // glyph. Centered in its cell via the +8 sixteenths offset.
-    if let Some(rg) = rich.as_mut() {
-        let sep_x = inner.x + half_w as u16;
+    if let (Some(rg), Some(sep_x)) = (rich.as_mut(), sep_x) {
         Bar {
             x: ((sep_x - inner.x) * 16 + 8) as i16,
             y: 0,
@@ -1685,6 +1740,92 @@ mod tests {
         (buf.area.x..buf.area.x + buf.area.width)
             .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
             .collect()
+    }
+
+    /// The review screen and the commit preview lay a side out as status glyph,
+    /// line number, text, and split at every width.
+    ///
+    /// These are the values their two inline formulas produced before both
+    /// folded into [`DiffColumns`]. The paint and the cursor read the same
+    /// numbers, so a drift shows here rather than as a cursor off its column.
+    #[test]
+    fn the_review_layout_leads_with_the_status_glyph_and_never_unifies() {
+        assert_eq!(
+            DiffColumns::compute(Rect::new(3, 0, 121, 10), DiffLayout::REVIEW),
+            DiffColumns {
+                left_num_x: 4,
+                status_left_x: 3,
+                left_sep_x: None,
+                left_text_x: 9,
+                left_content_w: 54,
+                right_num_x: 65,
+                status_right_x: 64,
+                right_sep_x: None,
+                right_text_x: 70,
+                right_content_w: 54,
+                sep_x: Some(63),
+            },
+            "a wide review body splits either side of the mid-divider"
+        );
+
+        assert_eq!(
+            DiffColumns::compute(Rect::new(0, 0, 40, 5), DiffLayout::REVIEW),
+            DiffColumns {
+                left_num_x: 1,
+                status_left_x: 0,
+                left_sep_x: None,
+                left_text_x: 6,
+                left_content_w: 13,
+                right_num_x: 21,
+                status_right_x: 20,
+                right_sep_x: None,
+                right_text_x: 26,
+                right_content_w: 14,
+                sep_x: Some(19),
+            },
+            "a review body stays two-column however narrow it gets"
+        );
+    }
+
+    /// The diff view lays a side out as line number, status column, rule, text,
+    /// and aliases both sides onto one column below [`DIFF_TWO_COLUMN_MIN`].
+    #[test]
+    fn the_diff_view_layout_rules_off_its_gutter_and_unifies_when_narrow() {
+        assert_eq!(
+            DiffColumns::compute(Rect::new(3, 0, 121, 10), DiffLayout::DIFF_VIEW),
+            DiffColumns {
+                left_num_x: 3,
+                status_left_x: 8,
+                left_sep_x: Some(10),
+                left_text_x: 11,
+                left_content_w: 52,
+                right_num_x: 64,
+                status_right_x: 69,
+                right_sep_x: Some(71),
+                right_text_x: 72,
+                right_content_w: 52,
+                sep_x: Some(63),
+            },
+            "a wide diff body puts base text left and buffer text right"
+        );
+
+        assert_eq!(
+            DiffColumns::compute(Rect::new(0, 0, 40, 5), DiffLayout::DIFF_VIEW),
+            DiffColumns {
+                left_num_x: 0,
+                status_left_x: 5,
+                left_sep_x: Some(7),
+                left_text_x: 8,
+                left_content_w: 32,
+                right_num_x: 0,
+                status_right_x: 5,
+                right_sep_x: Some(7),
+                right_text_x: 8,
+                right_content_w: 32,
+                sep_x: None,
+            },
+            "a narrow diff body aliases both sides onto one column, no divider"
+        );
     }
 
     /// A repaint that changed nothing reuses the derived rows, and a change to
