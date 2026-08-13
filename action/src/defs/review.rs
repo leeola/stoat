@@ -272,7 +272,7 @@ define_action!(
     ActionPriority::Rare
 );
 
-use crate::{Action, ActionDef, ParamDef, ParamKind, ValueSource};
+use crate::{action::define_action_def, Action, ActionDef, ParamDef, ParamKind, ValueSource};
 use std::{any::Any, path::PathBuf};
 
 define_action!(
@@ -322,41 +322,19 @@ const GIT_REVIEW_PARAMS: &[ParamDef] = &[ParamDef {
     description: "Branch, tag, sha, or revspec whose history to review from.",
 }];
 
-#[derive(Debug)]
-pub struct GitReviewDef;
-
-impl ActionDef for GitReviewDef {
-    fn name(&self) -> &'static str {
-        "GitReview"
-    }
-
-    fn command_name(&self) -> Option<&'static str> {
-        Some("git-review")
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::GitReview
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        GIT_REVIEW_PARAMS
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "review from a commit on a ref"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Resolve the given branch, tag, sha, or revspec and open a picker over \
-         its first-parent history so a commit can be chosen as the review \
-         base. Reports an error without opening anything when the revision \
-         does not resolve or the workspace is not inside a repository."
-    }
-
-    fn priority(&self) -> ActionPriority {
-        ActionPriority::Normal
-    }
-}
+define_action_def!(
+    GitReviewDef,
+    "GitReview",
+    ActionKind::GitReview,
+    "review from a commit on a ref",
+    "Resolve the given branch, tag, sha, or revspec and open a picker over \
+     its first-parent history so a commit can be chosen as the review \
+     base. Reports an error without opening anything when the revision \
+     does not resolve or the workspace is not inside a repository.",
+    ActionPriority::Normal,
+    command_name = "git-review",
+    params = GIT_REVIEW_PARAMS
+);
 
 #[derive(Debug)]
 pub struct GitReview {
@@ -394,37 +372,19 @@ const OPEN_REVIEW_COMMIT_PARAMS: &[ParamDef] = &[
     },
 ];
 
-#[derive(Debug)]
-pub struct OpenReviewCommitDef;
-
-impl ActionDef for OpenReviewCommitDef {
-    fn name(&self) -> &'static str {
-        "OpenReviewCommit"
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::OpenReviewCommit
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        OPEN_REVIEW_COMMIT_PARAMS
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "review a single commit"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Open a review session diffing the given commit's tree against its \
-         first parent. Root commits diff against the empty tree."
-    }
-
-    /// Hidden from the palette because its workdir and sha parameters are not
-    /// something a user can type. The commits view dispatches it directly.
-    fn palette_visible(&self) -> bool {
-        false
-    }
-}
+// Hidden from the palette because its workdir and sha parameters are not
+// something a user can type. The commits view dispatches it directly.
+define_action_def!(
+    OpenReviewCommitDef,
+    "OpenReviewCommit",
+    ActionKind::OpenReviewCommit,
+    "review a single commit",
+    "Open a review session diffing the given commit's tree against its \
+     first parent. Root commits diff against the empty tree.",
+    ActionPriority::Normal,
+    palette_visible = false,
+    params = OPEN_REVIEW_COMMIT_PARAMS
+);
 
 #[derive(Debug)]
 pub struct OpenReviewCommit {
@@ -470,37 +430,19 @@ const OPEN_REVIEW_COMMIT_RANGE_PARAMS: &[ParamDef] = &[
     },
 ];
 
-#[derive(Debug)]
-pub struct OpenReviewCommitRangeDef;
-
-impl ActionDef for OpenReviewCommitRangeDef {
-    fn name(&self) -> &'static str {
-        "OpenReviewCommitRange"
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::OpenReviewCommitRange
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        OPEN_REVIEW_COMMIT_RANGE_PARAMS
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "review a commit range"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Open a review session diffing `to`'s tree against `from`'s tree. \
-         Mirrors `git diff from..to`."
-    }
-
-    /// Hidden from the palette because its workdir and revision parameters are
-    /// not something a user can type. The commits view dispatches it directly.
-    fn palette_visible(&self) -> bool {
-        false
-    }
-}
+// Hidden from the palette because its workdir and revision parameters are
+// not something a user can type. The commits view dispatches it directly.
+define_action_def!(
+    OpenReviewCommitRangeDef,
+    "OpenReviewCommitRange",
+    ActionKind::OpenReviewCommitRange,
+    "review a commit range",
+    "Open a review session diffing `to`'s tree against `from`'s tree. \
+     Mirrors `git diff from..to`.",
+    ActionPriority::Normal,
+    palette_visible = false,
+    params = OPEN_REVIEW_COMMIT_RANGE_PARAMS
+);
 
 #[derive(Debug)]
 pub struct OpenReviewCommitRange {
@@ -523,40 +465,21 @@ impl Action for OpenReviewCommitRange {
     }
 }
 
-/// Palette-invisible because the path is supplied by the filesystem
-/// watcher dispatch, not user input. Triggers a session rescan and
-/// jumps the cursor to the first chunk in the affected file.
-#[derive(Debug)]
-pub struct ReviewExternalEditDef;
-
-impl ActionDef for ReviewExternalEditDef {
-    fn name(&self) -> &'static str {
-        "ReviewExternalEdit"
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::ReviewExternalEdit
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        &[]
-    }
-
-    fn palette_visible(&self) -> bool {
-        false
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "react to an external edit on a reviewed file"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Refresh the active review session because the named file \
-         changed on disk, then jump the cursor to the first chunk in \
-         that file. Dispatched by the filesystem-watch drain when the \
-         path is one of the session's reviewed files."
-    }
-}
+// Palette-invisible because the path is supplied by the filesystem
+// watcher dispatch, not user input. Triggers a session rescan and
+// jumps the cursor to the first chunk in the affected file.
+define_action_def!(
+    ReviewExternalEditDef,
+    "ReviewExternalEdit",
+    ActionKind::ReviewExternalEdit,
+    "react to an external edit on a reviewed file",
+    "Refresh the active review session because the named file \
+     changed on disk, then jump the cursor to the first chunk in \
+     that file. Dispatched by the filesystem-watch drain when the \
+     path is one of the session's reviewed files.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
 
 #[derive(Debug)]
 pub struct ReviewExternalEdit {
@@ -577,38 +500,19 @@ impl Action for ReviewExternalEdit {
     }
 }
 
-/// Palette-invisible because the edits payload cannot be constructed from
-/// a string. Dispatched programmatically by agent-bridge code.
-#[derive(Debug)]
-pub struct OpenReviewAgentEditsDef;
-
-impl ActionDef for OpenReviewAgentEditsDef {
-    fn name(&self) -> &'static str {
-        "OpenReviewAgentEdits"
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::OpenReviewAgentEdits
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        &[]
-    }
-
-    fn palette_visible(&self) -> bool {
-        false
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "review agent-proposed edits"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Open a review session over a list of agent-proposed edits. \
-         Dispatched programmatically; not visible in the palette because \
-         the edits payload cannot be represented as a parameter string."
-    }
-}
+// Palette-invisible because the edits payload cannot be constructed from
+// a string. Dispatched programmatically by agent-bridge code.
+define_action_def!(
+    OpenReviewAgentEditsDef,
+    "OpenReviewAgentEdits",
+    ActionKind::OpenReviewAgentEdits,
+    "review agent-proposed edits",
+    "Open a review session over a list of agent-proposed edits. \
+     Dispatched programmatically; not visible in the palette because \
+     the edits payload cannot be represented as a parameter string.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
 
 #[derive(Debug, Clone)]
 pub struct AgentEdit {

@@ -1,6 +1,6 @@
 use crate::{
-    action::define_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
-    ValueSource,
+    action::{define_action, define_action_def},
+    Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind, ValueSource,
 };
 use std::any::Any;
 
@@ -130,34 +130,15 @@ const RENAME_WORKSPACE_PARAMS: &[ParamDef] = &[ParamDef {
     description: "New display name for the active workspace. Empty string re-engages the default basename fallback.",
 }];
 
-#[derive(Debug)]
-pub struct RenameWorkspaceDef;
-
-impl ActionDef for RenameWorkspaceDef {
-    fn name(&self) -> &'static str {
-        "RenameWorkspace"
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::RenameWorkspace
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        RENAME_WORKSPACE_PARAMS
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "rename this workspace"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Set a user-facing display name for the active workspace. The name is persisted with the workspace and shown in the workspace picker and pane footer. Pass an empty string to revert to the default `git_root.file_name()` fallback."
-    }
-
-    fn priority(&self) -> ActionPriority {
-        ActionPriority::Common
-    }
-}
+define_action_def!(
+    RenameWorkspaceDef,
+    "RenameWorkspace",
+    ActionKind::RenameWorkspace,
+    "rename this workspace",
+    "Set a user-facing display name for the active workspace. The name is persisted with the workspace and shown in the workspace picker and pane footer. Pass an empty string to revert to the default `git_root.file_name()` fallback.",
+    ActionPriority::Common,
+    params = RENAME_WORKSPACE_PARAMS
+);
 
 #[derive(Debug)]
 pub struct RenameWorkspace {
@@ -186,38 +167,16 @@ const SET_CWD_PARAMS: &[ParamDef] = &[ParamDef {
     description: "Directory to set as the active workspace's working directory. A relative path resolves against the current root.",
 }];
 
-#[derive(Debug)]
-pub struct SetCwdDef;
-
-impl ActionDef for SetCwdDef {
-    fn name(&self) -> &'static str {
-        "SetCwd"
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::SetCwd
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        SET_CWD_PARAMS
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "change the working directory"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Set the active workspace's working directory to the given path. Subsequent file-finder, diff, and review operations resolve against the new root."
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["cd"]
-    }
-
-    fn priority(&self) -> ActionPriority {
-        ActionPriority::Common
-    }
-}
+define_action_def!(
+    SetCwdDef,
+    "SetCwd",
+    ActionKind::SetCwd,
+    "change the working directory",
+    "Set the active workspace's working directory to the given path. Subsequent file-finder, diff, and review operations resolve against the new root.",
+    ActionPriority::Common,
+    aliases = &["cd"],
+    params = SET_CWD_PARAMS
+);
 
 #[derive(Debug)]
 pub struct SetCwd {
@@ -238,101 +197,26 @@ impl Action for SetCwd {
     }
 }
 
-#[derive(Debug)]
-pub struct ShowCwdDef;
+define_action!(
+    ShowCwdDef,
+    ShowCwd,
+    "ShowCwd",
+    ActionKind::ShowCwd,
+    "show the working directory",
+    "Report the active workspace's working directory as a status message. This is the root the file finder, diff, and review resolve against, not the process working directory.",
+    ActionPriority::Common,
+    command_name = "pwd"
+);
 
-impl ActionDef for ShowCwdDef {
-    fn name(&self) -> &'static str {
-        "ShowCwd"
-    }
-
-    fn command_name(&self) -> Option<&'static str> {
-        Some("pwd")
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::ShowCwd
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        &[]
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "show the working directory"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Report the active workspace's working directory as a status message. This is the root the file finder, diff, and review resolve against, not the process working directory."
-    }
-
-    fn priority(&self) -> ActionPriority {
-        ActionPriority::Common
-    }
-}
-
-#[derive(Debug)]
-pub struct ShowCwd;
-
-impl ShowCwd {
-    pub const DEF: &ShowCwdDef = &ShowCwdDef;
-}
-
-impl Action for ShowCwd {
-    fn def(&self) -> &'static dyn ActionDef {
-        Self::DEF
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-#[derive(Debug)]
-pub struct ReloadEnvDef;
-
-impl ActionDef for ReloadEnvDef {
-    fn name(&self) -> &'static str {
-        "ReloadEnv"
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::ReloadEnv
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        &[]
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "reload the project environment"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Re-run direnv against the active workspace's root and replace its stored environment diff. Runs even when `direnv.load` is disabled, since invoking it is explicit intent. Child processes spawned after the reload pick up the new environment; already-running ones keep theirs."
-    }
-
-    fn priority(&self) -> ActionPriority {
-        ActionPriority::Common
-    }
-}
-
-#[derive(Debug)]
-pub struct ReloadEnv;
-
-impl ReloadEnv {
-    pub const DEF: &ReloadEnvDef = &ReloadEnvDef;
-}
-
-impl Action for ReloadEnv {
-    fn def(&self) -> &'static dyn ActionDef {
-        Self::DEF
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
+define_action!(
+    ReloadEnvDef,
+    ReloadEnv,
+    "ReloadEnv",
+    ActionKind::ReloadEnv,
+    "reload the project environment",
+    "Re-run direnv against the active workspace's root and replace its stored environment diff. Runs even when `direnv.load` is disabled, since invoking it is explicit intent. Child processes spawned after the reload pick up the new environment; already-running ones keep theirs.",
+    ActionPriority::Common
+);
 
 #[cfg(test)]
 mod tests {

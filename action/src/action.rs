@@ -182,6 +182,34 @@ macro_rules! define_action_def {
             params = $params
         );
     };
+    ($def:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, aliases = $aliases:expr_2021, params = $params:expr_2021) => {
+        $crate::action::define_action_def!(
+            $def,
+            $name,
+            $kind,
+            $short,
+            $long,
+            $priority,
+            palette_visible = true,
+            aliases = $aliases,
+            command_name_opt = None,
+            params = $params
+        );
+    };
+    ($def:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, palette_visible = $visible:expr_2021, params = $params:expr_2021) => {
+        $crate::action::define_action_def!(
+            $def,
+            $name,
+            $kind,
+            $short,
+            $long,
+            $priority,
+            palette_visible = $visible,
+            aliases = &[],
+            command_name_opt = None,
+            params = $params
+        );
+    };
     ($def:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, aliases = $aliases:expr_2021, command_name = $command:expr_2021, params = $params:expr_2021) => {
         $crate::action::define_action_def!(
             $def,

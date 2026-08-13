@@ -1,6 +1,6 @@
 use crate::{
-    action::define_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
-    ValueSource,
+    action::{define_action, define_action_def},
+    Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind, ValueSource,
 };
 use std::any::Any;
 
@@ -12,40 +12,18 @@ const GOTO_TAB_PARAMS: &[ParamDef] = &[ParamDef {
     description: "1-based tab position in display order.",
 }];
 
-#[derive(Debug)]
-pub struct GotoTabDef;
-
-impl ActionDef for GotoTabDef {
-    fn name(&self) -> &'static str {
-        "GotoTab"
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::GotoTab
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        GOTO_TAB_PARAMS
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "switch to tab by number"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Switch to the tab at the given 1-based position in display order. An \
-         index past the last tab reports it in the status line and leaves the \
-         current tab alone."
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["tab"]
-    }
-
-    fn priority(&self) -> ActionPriority {
-        ActionPriority::Common
-    }
-}
+define_action_def!(
+    GotoTabDef,
+    "GotoTab",
+    ActionKind::GotoTab,
+    "switch to tab by number",
+    "Switch to the tab at the given 1-based position in display order. An \
+     index past the last tab reports it in the status line and leaves the \
+     current tab alone.",
+    ActionPriority::Common,
+    aliases = &["tab"],
+    params = GOTO_TAB_PARAMS
+);
 
 #[derive(Debug)]
 pub struct GotoTab {
@@ -74,41 +52,19 @@ const RENAME_TAB_PARAMS: &[ParamDef] = &[ParamDef {
     description: "new tab title; omitted prompts in the palette, empty clears the rename",
 }];
 
-#[derive(Debug)]
-pub struct RenameTabDef;
-
-impl ActionDef for RenameTabDef {
-    fn name(&self) -> &'static str {
-        "RenameTab"
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::RenameTab
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        RENAME_TAB_PARAMS
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "rename the active tab"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Give the active tab a title that overrides the one derived from its \
-         focused pane, shown in the tab bar and kept across a restart. With no \
-         name it opens the command palette ready for one; an empty or \
-         whitespace name clears the override back to the derived title."
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["tab-rename"]
-    }
-
-    fn priority(&self) -> ActionPriority {
-        ActionPriority::Common
-    }
-}
+define_action_def!(
+    RenameTabDef,
+    "RenameTab",
+    ActionKind::RenameTab,
+    "rename the active tab",
+    "Give the active tab a title that overrides the one derived from its \
+     focused pane, shown in the tab bar and kept across a restart. With no \
+     name it opens the command palette ready for one; an empty or \
+     whitespace name clears the override back to the derived title.",
+    ActionPriority::Common,
+    aliases = &["tab-rename"],
+    params = RENAME_TAB_PARAMS
+);
 
 #[derive(Debug)]
 pub struct RenameTab {
