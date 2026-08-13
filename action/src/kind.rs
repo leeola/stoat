@@ -330,6 +330,7 @@ pub enum ActionKind {
     WalkthroughOpen,
     WalkthroughNext,
     WalkthroughPrev,
+    WalkthroughShowNarration,
     WalkthroughDone,
     Hover,
     CodeAction,

@@ -1,5 +1,5 @@
 use crate::{
-    action_handlers,
+    action_handlers::{self, lsp::HoverPopup},
     app::{Stoat, UpdateEffect},
     walkthrough::{self, run::WalkthroughRun, store},
 };
@@ -37,6 +37,28 @@ pub(crate) fn next(stoat: &mut Stoat) -> UpdateEffect {
 /// Step back to the previous stop.
 pub(crate) fn prev(stoat: &mut Stoat) -> UpdateEffect {
     step(stoat, -1)
+}
+
+/// Raise the current stop's narration again after something dismissed it.
+///
+/// The narration shares the hover popup, so the next key press takes it down.
+/// This puts it back without moving the reader off the stop.
+pub(crate) fn show_narration_again(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(run) = stoat.active_workspace().walkthrough.as_ref() else {
+        stoat.set_status("no walkthrough is playing");
+        return UpdateEffect::Redraw;
+    };
+    let focus = run.current_stop().focus.clone();
+
+    let Some(offset) = focus_offset(stoat, &focus) else {
+        return UpdateEffect::None;
+    };
+    show_narration(stoat, offset);
+
+    if stoat.pending_hover.is_none() {
+        stoat.set_status("this stop has no narration");
+    }
+    UpdateEffect::Redraw
 }
 
 /// End the walkthrough, leaving the reader wherever it put them.
@@ -83,7 +105,7 @@ fn jump_to_stop(stoat: &mut Stoat) -> UpdateEffect {
     let stop = run.current_stop();
     let (path, focus, id) = (stop.focus.path.clone(), stop.focus.clone(), stop.id.clone());
     let (at, stops) = run.progress();
-    let title = stop.title.clone().unwrap_or_else(|| stop.narration.clone());
+    let title = stop_title(run);
 
     action_handlers::jump::push_jump(stoat);
     let target = stoat.active_workspace().panes.focus();
@@ -93,12 +115,57 @@ fn jump_to_stop(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::Redraw;
     };
     let effect = action_handlers::movement::jump_to_offset(stoat, offset);
+    show_narration(stoat, offset);
 
     match drifted(stoat, &focus) {
         true => stoat.set_status(format!("stop {id} drifted from its capture")),
         false => stoat.set_status(format!("{at}/{stops}: {title}")),
     }
     effect
+}
+
+/// What to call the current stop, being its own title or the tour's.
+///
+/// A stop needs no title of its own, and the walkthrough's says more about
+/// where the reader is than the narration's first paragraph does.
+fn stop_title(run: &WalkthroughRun) -> String {
+    run.current_stop()
+        .title
+        .clone()
+        .unwrap_or_else(|| run.walkthrough.title.clone())
+}
+
+/// Put the current stop's narration in the hover popup, anchored at `offset`.
+///
+/// A stop with nothing to say takes the popup down rather than leaving the
+/// previous stop's up, so what is on screen always describes where the reader
+/// is. The popup itself is the one a hover raises, which is why the next key
+/// press dismisses it and [`show_narration_again`] exists to bring it back.
+fn show_narration(stoat: &mut Stoat, offset: usize) {
+    let Some(run) = stoat.active_workspace().walkthrough.as_ref() else {
+        return;
+    };
+    let narration = run.current_stop().narration.clone();
+    if narration.trim().is_empty() {
+        stoat.pending_hover = None;
+        return;
+    }
+
+    let (at, stops) = run.progress();
+    let heading = format!("{} - {at}/{stops}", stop_title(run));
+
+    let Some((editor_id, _)) = stoat.focused_editor_ids() else {
+        return;
+    };
+
+    let mut lines = vec![vec![(heading, stoat.theme.get("syntax.markup.title"))]];
+    lines.extend(crate::markdown::render_markdown(
+        &narration,
+        &stoat.theme,
+        &stoat.language_registry,
+    ));
+
+    stoat.pending_hover = Some(HoverPopup::new(lines, offset, editor_id));
 }
 
 /// Byte offset of `focus`'s start in the focused buffer.
@@ -135,7 +202,7 @@ fn drifted(stoat: &mut Stoat, focus: &walkthrough::Location) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{done, next, open, prev};
+    use super::{done, next, open, prev, show_narration_again};
     use crate::{
         action_handlers,
         app::Stoat,
@@ -148,6 +215,8 @@ mod tests {
 
     const FIRST: &str = "fn one() {}\nfn two() {}\n";
     const SECOND: &str = "fn three() {}\n";
+    /// Stop 1's narration. Stop 2 has none, so one tour covers both cases.
+    const NARRATION: &str = "The **entry** point.";
 
     fn location(path: &str, line: u32, cols: (u32, u32), snippet: &str) -> Location {
         Location {
@@ -175,7 +244,7 @@ mod tests {
         walkthrough
             .add_stop(
                 Some("first".to_owned()),
-                "n".to_owned(),
+                NARRATION.to_owned(),
                 location("a.rs", 2, (1, 11), "fn two() {}"),
                 None,
             )
@@ -183,7 +252,7 @@ mod tests {
         walkthrough
             .add_stop(
                 Some("second".to_owned()),
-                "n".to_owned(),
+                String::new(),
                 location("b.rs", 1, (1, 13), "fn three() {}"),
                 None,
             )
@@ -226,6 +295,25 @@ mod tests {
         (path, offset)
     }
 
+    /// The popup's text, one string per line, with the styling dropped.
+    fn popup_lines(stoat: &Stoat) -> Vec<String> {
+        stoat
+            .pending_hover
+            .as_ref()
+            .map(|popup| {
+                popup
+                    .lines
+                    .iter()
+                    .map(|line| {
+                        line.iter()
+                            .map(|(text, _)| text.as_str())
+                            .collect::<String>()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     #[test]
     fn open_lands_on_the_first_stops_focus() {
         let mut stoat = stoat_with_tour(FIRST);
@@ -262,6 +350,54 @@ mod tests {
         assert_eq!(
             stoat.pending_message.as_deref(),
             Some("already on the first stop")
+        );
+    }
+
+    #[test]
+    fn arriving_shows_the_narration_under_a_title_line() {
+        let mut stoat = stoat_with_tour(FIRST);
+        open(&mut stoat, "tour");
+
+        assert_eq!(
+            popup_lines(&stoat),
+            ["first - 1/2", "The entry point."],
+            "the title line names the stop and where it sits, then the markdown",
+        );
+
+        let popup = stoat.pending_hover.as_ref().expect("a popup");
+        assert_eq!(
+            popup.anchor_offset, 12,
+            "the popup sits at the focus the cursor landed on",
+        );
+    }
+
+    /// Every popup on screen describes the stop the reader is on, so a stop
+    /// with nothing to say takes the previous one's down.
+    #[test]
+    fn a_stop_with_no_narration_shows_no_popup() {
+        let mut stoat = stoat_with_tour(FIRST);
+        open(&mut stoat, "tour");
+        next(&mut stoat);
+
+        assert!(stoat.pending_hover.is_none());
+    }
+
+    #[test]
+    fn the_narration_shows_again_after_a_dismissal() {
+        let mut stoat = stoat_with_tour(FIRST);
+        open(&mut stoat, "tour");
+        stoat.pending_hover = None;
+
+        show_narration_again(&mut stoat);
+        assert_eq!(popup_lines(&stoat), ["first - 1/2", "The entry point."]);
+
+        next(&mut stoat);
+        show_narration_again(&mut stoat);
+        assert!(stoat.pending_hover.is_none());
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("this stop has no narration"),
+            "a stop with nothing to re-show says so",
         );
     }
 

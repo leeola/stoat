@@ -122,7 +122,10 @@ use crate::{
         set_theme::SetTheme,
         tab::{CloseTab, GotoTab, NewTab, NextTab, PrevTab, RenameTab, ToggleTab, ToggleTabBar},
         terminal::Terminal,
-        walkthrough::{WalkthroughDone, WalkthroughNext, WalkthroughOpen, WalkthroughPrev},
+        walkthrough::{
+            WalkthroughDone, WalkthroughNext, WalkthroughOpen, WalkthroughPrev,
+            WalkthroughShowNarration,
+        },
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
             ShowCwd, SwitchWorkspace, WorkspacePickerClose, WorkspacePickerComplete,
@@ -772,6 +775,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(WalkthroughNext::DEF, |_| Ok(Box::new(WalkthroughNext)));
     add(WalkthroughPrev::DEF, |_| Ok(Box::new(WalkthroughPrev)));
+    add(WalkthroughShowNarration::DEF, |_| {
+        Ok(Box::new(WalkthroughShowNarration))
+    });
     add(WalkthroughDone::DEF, |_| Ok(Box::new(WalkthroughDone)));
     add(ExtendGotoColumn::DEF, |_| Ok(Box::new(ExtendGotoColumn)));
     add(GotoNextChange::DEF, |_| Ok(Box::new(GotoNextChange)));
@@ -1228,6 +1234,7 @@ mod tests {
         "TrailClear",
         "WalkthroughNext",
         "WalkthroughPrev",
+        "WalkthroughShowNarration",
         "WalkthroughDone",
         "Hover",
         "CodeAction",
@@ -1787,7 +1794,7 @@ mod tests {
         // + 1 GotoImplementors.
         // + 2 GotoDiffCallerUp, GotoDiffCalleeDown.
         // + 5 MarkTrailStart, MarkTrailEnd, TrailNext, TrailPrev, TrailClear.
-        // + 4 WalkthroughOpen/Next/Prev/Done.
+        // + 5 WalkthroughOpen/Next/Prev/ShowNarration/Done.
         // + 2 FileFinderPageUp, FileFinderPageDown.
         // + 1 FileFinderComplete.
         // + 2 PalettePageUp, PalettePageDown.
@@ -1848,7 +1855,7 @@ mod tests {
         // + 8 Jumplist/Diagnostics/Location/WorkspacePicker PageDown/PageUp.
         // + 2 CommitPickerDrillIn/CommitPickerBack.
         // + 2 CommitPickerNextBranch/CommitPickerPrevBranch.
-        assert_eq!(all().count(), 432);
+        assert_eq!(all().count(), 433);
     }
 
     #[test]
