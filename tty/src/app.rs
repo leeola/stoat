@@ -2323,7 +2323,7 @@ fn redraw(state: &mut State) {
                     grid: &state.pool_anims[&pool.id].document_grid,
                     origin_cells: [region.left as f32, region.top as f32],
                     scissor: [x0, y0, x1 - x0, y1 - y0],
-                    shift_rows: -pool.frac,
+                    shift_rows: -snap_shift_to_pixels(pool.frac, ch),
                     content_changed: pool.content_changed,
                     scrolled_rows: pool.scrolled_rows,
                     occludable: pool.id < NON_PANE_POOL_BASE,
@@ -2528,7 +2528,7 @@ fn redraw_aux(
             grid: &aux.pool_anims[&pool.id].document_grid,
             origin_cells: [pool.region.left as f32, pool.region.top as f32],
             scissor: region_scissor(pool.region, cw, ch),
-            shift_rows: -pool.frac,
+            shift_rows: -snap_shift_to_pixels(pool.frac, ch),
             content_changed: pool.content_changed,
             scrolled_rows: pool.scrolled_rows,
             occludable: pool.id < NON_PANE_POOL_BASE,
@@ -2562,6 +2562,25 @@ fn redraw_aux(
         None,
     );
     easing || heal
+}
+
+/// The sub-cell glide shift `frac` rounded so it moves the pool a whole number
+/// of physical pixels, over a cell `cell_h` pixels tall.
+///
+/// Glyph masks are sampled nearest with no subpixel variants, so a quad landing
+/// mid-pixel reads its bitmap off-center. Font glyphs sit at a fractional
+/// baseline phase and procedural cell-fill glyphs at none, so a fractional shift
+/// carries the two across the half-pixel boundary on different frames and the
+/// text re-snaps mid-glide while the cell backgrounds hold. A whole-pixel shift
+/// makes each glide frame the rested frame merely translated, so text,
+/// backgrounds, and pool widgets step together.
+///
+/// A cell with no height has no pixel to round to, so the shift passes through.
+fn snap_shift_to_pixels(frac: f32, cell_h: f32) -> f32 {
+    if cell_h <= 0.0 {
+        return frac;
+    }
+    (frac * cell_h).round() / cell_h
 }
 
 /// Hash the inputs [`compose_aux_grid`] reads, so [`redraw_aux`] can skip the
@@ -2926,8 +2945,8 @@ fn selection_copy_text(terminal: &FairMutex<Terminal>) -> Option<String> {
 mod tests {
     use super::{
         app_has_focus, aux_drag_event, bell_should_ring, classify_window_open, forwards_zoom,
-        selection_copy_text, swallow_super_combo, Input, PendingResize, PtyWrite, Visibility,
-        WindowOpenVerdict, MAX_AUX_WINDOWS,
+        selection_copy_text, snap_shift_to_pixels, swallow_super_combo, Input, PendingResize,
+        PtyWrite, Visibility, WindowOpenVerdict, MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
     use super::{
@@ -2940,6 +2959,46 @@ mod tests {
     use std::time::{Duration, Instant};
     use stoatty_term::{term::Terminal, theme::Theme};
     use winit::keyboard::ModifiersState;
+
+    /// Every shift a glide ships moves the pool a whole number of pixels.
+    ///
+    /// Glyph masks sample nearest with no subpixel variants, so a fractional
+    /// shift re-rasterizes font and procedural glyphs on different frames and
+    /// the text visibly re-snaps under motion. Whole pixels make each frame the
+    /// rested frame translated.
+    #[test]
+    fn a_glide_shift_moves_the_pool_a_whole_pixel() {
+        // font_size 16 at scale factor 1 gives a 19.2px cell. The height has to
+        // be fractional here. At an integer one every shift already lands on a
+        // pixel and this pins nothing.
+        let cell_h = 19.2;
+
+        for step in 0..=20 {
+            let frac = step as f32 / 20.0;
+            let snapped = snap_shift_to_pixels(frac, cell_h);
+            let pixels = snapped * cell_h;
+
+            assert!(
+                (pixels - pixels.round()).abs() < 1e-3,
+                "shift {frac} moves {pixels} pixels, which is not a whole one",
+            );
+            assert!(
+                (snapped - frac).abs() * cell_h <= 0.5 + 1e-3,
+                "shift {frac} snapped to {snapped}, further than the nearest pixel",
+            );
+        }
+
+        assert_eq!(
+            snap_shift_to_pixels(0.0, cell_h),
+            0.0,
+            "a rested pool does not move",
+        );
+        assert_eq!(
+            snap_shift_to_pixels(0.4, 0.0),
+            0.4,
+            "a cell with no height has no pixel to round to",
+        );
+    }
 
     /// A burst of sizes costs one fitting, on the size it ended at.
     ///
