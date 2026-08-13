@@ -663,7 +663,7 @@ fn add_annotation(
     let captured = capture_resolved(fs, root, &file, parse_range(range)?)?;
 
     let id = walkthrough
-        .add_annotation(stop, captured.range, captured.snippet, label)
+        .add_annotation(stop, None, captured.range, captured.snippet, label)
         .whatever_context(format!("annotate stop '{stop}'"))?
         .id
         .clone();
@@ -700,6 +700,7 @@ fn edit_annotation(
             stop,
             annotation,
             AnnotationEdit {
+                path: None,
                 range: captured.as_ref().map(|location| location.range),
                 snippet: captured.map(|location| location.snippet),
                 label,

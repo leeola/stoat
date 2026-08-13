@@ -2,9 +2,10 @@
 //!
 //! A walkthrough is a guided tour of a codebase. It is an ordered list of
 //! stops, each naming one range of one file, a markdown narration of what that
-//! code does, and labeled annotations over ranges inside it. It is authored out
-//! of band and stored as one JSON file per walkthrough, so the tour survives
-//! the session that wrote it and travels with the repository.
+//! code does, and labeled annotations over ranges in that file or in another
+//! beside it. It is authored out of band and stored as one JSON file per
+//! walkthrough, so the tour survives the session that wrote it and travels with
+//! the repository.
 //!
 //! Every range carries the bytes it covered when it was captured. Code moves,
 //! and a stored range on its own then points at the wrong lines with nothing to
@@ -17,7 +18,10 @@
 
 use serde::{Deserialize, Serialize};
 use snafu::{Location as ErrorLocation, Snafu};
-use std::path::{Path, PathBuf};
+use std::{
+    borrow::Cow,
+    path::{Path, PathBuf},
+};
 
 pub mod store;
 
@@ -58,14 +62,22 @@ pub struct Stop {
     pub annotations: Vec<Annotation>,
 }
 
-/// A labeled range inside its stop's focus file.
+/// A labeled range, in its stop's focus file or in one beside it.
 ///
-/// It carries no path of its own, since an annotation calls out part of the
-/// code the stop already put on screen.
+/// Most annotations call out part of the code the stop already put on screen,
+/// so [`Self::path`] stays `None` and the range reads against the focus file.
+/// A stop that walks between two files sets it, which is what lets one slide
+/// name a caller and its callee at once.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Annotation {
     /// `a<N>`, assigned once and never reused.
     pub id: String,
+    /// Workspace-relative, and `None` for the stop's own focus file.
+    ///
+    /// Absent from the stored form while `None`, so a same-file annotation
+    /// writes the same bytes it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
     pub range: Range,
     /// Bytes [`Self::range`] covered when the annotation was captured.
     pub snippet: String,
@@ -117,8 +129,13 @@ pub struct StopEdit {
 }
 
 /// The fields an annotation edit replaces, each `None` leaving what is there.
+///
+/// [`Self::path`] nests two layers the way [`StopEdit::title`] does, since the
+/// path is itself optional. The outer `None` leaves it alone. `Some(None)`
+/// returns the annotation to its stop's focus file.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct AnnotationEdit {
+    pub path: Option<Option<PathBuf>>,
     pub range: Option<Range>,
     pub snippet: Option<String>,
     pub label: Option<String>,
@@ -299,10 +316,13 @@ impl Walkthrough {
 
     /// Add an annotation to the stop `stop`, appended after its existing ones.
     ///
+    /// A `path` of `None` puts the annotation in the stop's focus file.
+    ///
     /// Returns the annotation, whose `id` the counter just assigned.
     pub fn add_annotation(
         &mut self,
         stop: &str,
+        path: Option<PathBuf>,
         range: Range,
         snippet: String,
         label: String,
@@ -311,6 +331,7 @@ impl Walkthrough {
 
         let annotation = Annotation {
             id: format!("a{}", self.next_annotation_id),
+            path,
             range,
             snippet,
             label,
@@ -332,6 +353,9 @@ impl Walkthrough {
         let (stop_at, annotation_at) = self.annotation_index(stop, id)?;
         let annotation = &mut self.stops[stop_at].annotations[annotation_at];
 
+        if let Some(path) = edit.path {
+            annotation.path = path;
+        }
         if let Some(range) = edit.range {
             annotation.range = range;
         }
@@ -411,9 +435,11 @@ pub fn snippet_for(content: &str, range: Range) -> Result<String, WalkthroughErr
 /// reader rather than a path keeps this pure, so the same call validates a
 /// working tree, a commit, or a fixture.
 ///
-/// A file that fails to read yields one finding for the stop and none for its
-/// annotations. Their ranges point into that same file, so a repeat of the
-/// failure per annotation buries the one fact that matters.
+/// A focus file that fails to read yields one finding for the stop, and none
+/// for the annotations that share it. Their ranges point into that same file,
+/// so a repeat of the failure per annotation buries the one fact that matters.
+/// An annotation naming its own file is checked either way, and reports its own
+/// read failure against itself.
 ///
 /// An empty result means every stop still points at what it was written
 /// against.
@@ -421,25 +447,46 @@ pub fn validate(walkthrough: &Walkthrough, read: &dyn Fn(&Path) -> Option<String
     let mut findings = Vec::new();
 
     for stop in &walkthrough.stops {
-        let Some(content) = read(&stop.focus.path) else {
-            findings.push(Finding {
+        let focus = read(&stop.focus.path);
+
+        match &focus {
+            Some(content) => {
+                if let Some(finding) = check(content, stop.focus.range, &stop.focus.snippet) {
+                    findings.push(Finding {
+                        stop: stop.id.clone(),
+                        annotation: None,
+                        ..finding
+                    });
+                }
+            },
+            None => findings.push(Finding {
                 stop: stop.id.clone(),
                 annotation: None,
                 kind: FindingKind::Error,
                 detail: format!("cannot read {}", stop.focus.path.display()),
-            });
-            continue;
-        };
-
-        if let Some(finding) = check(&content, stop.focus.range, &stop.focus.snippet) {
-            findings.push(Finding {
-                stop: stop.id.clone(),
-                annotation: None,
-                ..finding
-            });
+            }),
         }
 
         for annotation in &stop.annotations {
+            let content = match &annotation.path {
+                Some(path) => match read(path) {
+                    Some(content) => Cow::Owned(content),
+                    None => {
+                        findings.push(Finding {
+                            stop: stop.id.clone(),
+                            annotation: Some(annotation.id.clone()),
+                            kind: FindingKind::Error,
+                            detail: format!("cannot read {}", path.display()),
+                        });
+                        continue;
+                    },
+                },
+                None => match &focus {
+                    Some(content) => Cow::Borrowed(content.as_str()),
+                    None => continue,
+                },
+            };
+
             if let Some(finding) = check(&content, annotation.range, &annotation.snippet) {
                 findings.push(Finding {
                     stop: stop.id.clone(),
@@ -576,6 +623,7 @@ mod tests {
         original
             .add_annotation(
                 "s1",
+                None,
                 range((1, 1), (1, 1)),
                 "x".to_owned(),
                 "here".to_owned(),
@@ -586,6 +634,69 @@ mod tests {
         let parsed: Walkthrough = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(parsed, original);
+    }
+
+    /// Every walkthrough stored before annotations named files must read back
+    /// the same, and keep writing the same bytes it always did.
+    #[test]
+    fn a_same_file_annotation_stores_no_path() {
+        let mut walkthrough = with_stops(1);
+        walkthrough
+            .add_annotation(
+                "s1",
+                None,
+                range((1, 1), (1, 1)),
+                "x".to_owned(),
+                "here".to_owned(),
+            )
+            .expect("s1 exists");
+
+        let json = serde_json::to_string(&walkthrough).expect("serialize");
+        assert!(
+            !json.contains("\"path\":null"),
+            "the field is absent: {json}"
+        );
+
+        let parsed: Walkthrough = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.stops[0].annotations[0].path, None);
+    }
+
+    #[test]
+    fn an_annotation_path_survives_an_edit_back_to_none() {
+        let mut walkthrough = with_stops(1);
+        walkthrough
+            .add_annotation(
+                "s1",
+                Some(PathBuf::from("other.rs")),
+                range((1, 1), (1, 1)),
+                "x".to_owned(),
+                "l".to_owned(),
+            )
+            .expect("s1 exists");
+
+        let edited = walkthrough
+            .edit_annotation(
+                "s1",
+                "a1",
+                AnnotationEdit {
+                    path: Some(Some(PathBuf::from("third.rs"))),
+                    ..AnnotationEdit::default()
+                },
+            )
+            .expect("a1 exists");
+        assert_eq!(edited.path.as_deref(), Some(Path::new("third.rs")));
+
+        let cleared = walkthrough
+            .edit_annotation(
+                "s1",
+                "a1",
+                AnnotationEdit {
+                    path: Some(None),
+                    ..AnnotationEdit::default()
+                },
+            )
+            .expect("a1 exists");
+        assert_eq!(cleared.path, None, "an inner None returns it to the focus");
     }
 
     /// Ids outlive the items that held them. A note or an annotation naming s2
@@ -608,6 +719,7 @@ mod tests {
         walkthrough
             .add_annotation(
                 "s1",
+                None,
                 range((1, 1), (1, 1)),
                 "x".to_owned(),
                 "one".to_owned(),
@@ -619,6 +731,7 @@ mod tests {
         let added = walkthrough
             .add_annotation(
                 "s1",
+                None,
                 range((1, 1), (1, 1)),
                 "x".to_owned(),
                 "two".to_owned(),
@@ -704,6 +817,7 @@ mod tests {
         walkthrough
             .add_annotation(
                 "s1",
+                None,
                 range((1, 1), (1, 1)),
                 "x".to_owned(),
                 "old".to_owned(),
@@ -741,7 +855,13 @@ mod tests {
         );
         assert!(
             walkthrough
-                .add_annotation("s9", range((1, 1), (1, 1)), "x".to_owned(), "l".to_owned())
+                .add_annotation(
+                    "s9",
+                    None,
+                    range((1, 1), (1, 1)),
+                    "x".to_owned(),
+                    "l".to_owned()
+                )
                 .is_err(),
             "unknown stop"
         );
@@ -843,6 +963,7 @@ mod tests {
         walkthrough
             .add_annotation(
                 "s1",
+                None,
                 range((2, 1), (2, 3)),
                 "two".to_owned(),
                 "l".to_owned(),
@@ -867,6 +988,7 @@ mod tests {
         walkthrough
             .add_annotation(
                 "s1",
+                None,
                 range((2, 1), (2, 3)),
                 "two".to_owned(),
                 "l".to_owned(),
@@ -900,6 +1022,7 @@ mod tests {
         walkthrough
             .add_annotation(
                 "s1",
+                None,
                 range((2, 1), (2, 3)),
                 "TWO".to_owned(),
                 "l".to_owned(),
@@ -929,6 +1052,112 @@ mod tests {
             found[1].detail.contains("TWO") && found[1].detail.contains("two"),
             "a stale detail shows both what was captured and what is there: {}",
             found[1].detail,
+        );
+    }
+
+    #[test]
+    fn validate_reads_an_annotation_against_the_file_it_names() {
+        let mut walkthrough = Walkthrough::new("t".to_owned(), "T".to_owned(), None);
+        walkthrough
+            .add_stop(
+                None,
+                "n".to_owned(),
+                location("a.rs", range((1, 1), (1, 3)), "one"),
+                None,
+            )
+            .expect("append");
+        walkthrough
+            .add_annotation(
+                "s1",
+                Some(PathBuf::from("b.rs")),
+                range((1, 1), (1, 3)),
+                "far".to_owned(),
+                "l".to_owned(),
+            )
+            .expect("s1 exists");
+
+        let found = validate(
+            &walkthrough,
+            &reads(&[("a.rs", CONTENT), ("b.rs", "far\naway\n")]),
+        );
+        assert_eq!(found, Vec::new(), "each range met its own file");
+    }
+
+    #[test]
+    fn validate_blames_the_annotation_for_its_own_unreadable_file() {
+        let mut walkthrough = Walkthrough::new("t".to_owned(), "T".to_owned(), None);
+        walkthrough
+            .add_stop(
+                None,
+                "n".to_owned(),
+                location("a.rs", range((1, 1), (1, 3)), "one"),
+                None,
+            )
+            .expect("append");
+        walkthrough
+            .add_annotation(
+                "s1",
+                Some(PathBuf::from("gone.rs")),
+                range((1, 1), (1, 3)),
+                "far".to_owned(),
+                "l".to_owned(),
+            )
+            .expect("s1 exists");
+
+        let found = validate(&walkthrough, &reads(&[("a.rs", CONTENT)]));
+        assert_eq!(
+            found,
+            vec![Finding {
+                stop: "s1".to_owned(),
+                annotation: Some("a1".to_owned()),
+                kind: FindingKind::Error,
+                detail: "cannot read gone.rs".to_owned(),
+            }],
+            "the stop's own focus still reads, so only the annotation is at fault",
+        );
+    }
+
+    /// A stop whose focus is gone says so once, and still reports the
+    /// annotations that point somewhere else.
+    #[test]
+    fn validate_checks_a_cross_file_annotation_under_a_missing_focus() {
+        let mut walkthrough = Walkthrough::new("t".to_owned(), "T".to_owned(), None);
+        walkthrough
+            .add_stop(
+                None,
+                "n".to_owned(),
+                location("gone.rs", range((1, 1), (1, 3)), "one"),
+                None,
+            )
+            .expect("append");
+        walkthrough
+            .add_annotation(
+                "s1",
+                None,
+                range((2, 1), (2, 3)),
+                "two".to_owned(),
+                "same".to_owned(),
+            )
+            .expect("s1 exists");
+        walkthrough
+            .add_annotation(
+                "s1",
+                Some(PathBuf::from("a.rs")),
+                range((1, 1), (1, 3)),
+                "NOPE".to_owned(),
+                "cross".to_owned(),
+            )
+            .expect("s1 exists");
+
+        let found = validate(&walkthrough, &reads(&[("a.rs", CONTENT)]));
+        let seen: Vec<(Option<&str>, FindingKind)> = found
+            .iter()
+            .map(|finding| (finding.annotation.as_deref(), finding.kind))
+            .collect();
+        assert_eq!(
+            seen,
+            [(None, FindingKind::Error), (Some("a2"), FindingKind::Stale)],
+            "a1 shares the unreadable focus, a2 has a file of its own",
         );
     }
 }
