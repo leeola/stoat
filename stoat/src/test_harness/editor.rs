@@ -6,6 +6,7 @@ use crate::{
     selection::SelectionsCollection,
     View,
 };
+use std::path::PathBuf;
 use stoat_text::{cursor_offset, Bias, Point, SelectionGoal};
 
 /// Append `text` at offset 0 in the focused editor's buffer, then re-seed the
@@ -230,6 +231,24 @@ pub(crate) fn place_cursor(editor: &mut EditorState, row: u32, col: u32) {
     editor
         .selections
         .insert_cursor(anchor, SelectionGoal::None, buffer_snapshot);
+}
+
+/// Path of the file backing the focused editor's buffer.
+///
+/// Panics if the buffer has no path, so a test that expects a jump to have
+/// landed in a file fails on the jump rather than on a `None`.
+pub(crate) fn focused_buffer_path(stoat: &Stoat) -> PathBuf {
+    let ws = stoat.active_workspace();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => panic!("focused pane is not an editor"),
+    };
+    let buffer_id = ws.editors[editor_id].buffer_id;
+    ws.buffers
+        .path_for(buffer_id)
+        .expect("buffer has a path")
+        .to_path_buf()
 }
 
 /// Buffer row of the focused editor's primary selection head.

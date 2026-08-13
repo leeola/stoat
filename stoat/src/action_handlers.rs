@@ -12,6 +12,7 @@ pub(crate) mod jump;
 pub(crate) mod lsp;
 pub(crate) mod macro_recording;
 pub(crate) mod marks;
+pub(crate) mod move_nav;
 pub(crate) mod movement;
 mod palette;
 mod pane;
@@ -727,21 +728,21 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             if focused_editor_mut(stoat).is_some_and(|e| e.review_view.is_some()) {
                 review::jump_to_move(stoat, review::MoveJumpDir::Source)
             } else {
-                movement::move_nav(stoat, movement::MoveNavigation::FirstSource)
+                move_nav::navigate(stoat, move_nav::MoveNavigation::FirstSource)
             }
         },
         ActionKind::JumpToMoveTarget => {
             if focused_editor_mut(stoat).is_some_and(|e| e.review_view.is_some()) {
                 review::jump_to_move(stoat, review::MoveJumpDir::Target)
             } else {
-                movement::move_nav(stoat, movement::MoveNavigation::Target)
+                move_nav::navigate(stoat, move_nav::MoveNavigation::Target)
             }
         },
         ActionKind::JumpToNextMoveSource => {
-            movement::move_nav(stoat, movement::MoveNavigation::NextSource)
+            move_nav::navigate(stoat, move_nav::MoveNavigation::NextSource)
         },
         ActionKind::JumpToPrevMoveSource => {
-            movement::move_nav(stoat, movement::MoveNavigation::PrevSource)
+            move_nav::navigate(stoat, move_nav::MoveNavigation::PrevSource)
         },
         ActionKind::QueryMoveRelationships => {
             // Scriptable surface: observes the move metadata under the
@@ -749,7 +750,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             // will expose this via the action SDK; for now it resolves
             // and logs the relationship count so the action is
             // observable from tests.
-            if let Some(summary) = movement::current_move_summary(stoat) {
+            if let Some(summary) = move_nav::current_move_summary(stoat) {
                 tracing::info!(
                     sources = summary.source_count,
                     same_side_target = ?summary.target_ref,
