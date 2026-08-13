@@ -7,6 +7,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# Compile the in-memory fakes. Off by default so a release build carries none
+# of them, and enabled from a consumer's [dev-dependencies] so its tests do.
+[features]
+test-support = []
+
 [dependencies]
 compact_str.workspace = true
 ignore.workspace = true

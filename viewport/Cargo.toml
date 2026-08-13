@@ -16,3 +16,4 @@ futures = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+stoat_host = { path = "../host", features = ["test-support"] }

@@ -7,6 +7,12 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# Compile the deterministic test clock and scheduler. Off by default so a
+# release build carries neither, and enabled from a consumer's
+# [dev-dependencies] so its tests do.
+[features]
+test-support = []
+
 [lib]
 path = "src/scheduler.rs"
 doctest = false

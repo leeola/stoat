@@ -1,12 +1,15 @@
 mod clock;
 mod executor;
 mod local_scheduler;
+#[cfg(any(test, feature = "test-support"))]
 mod test_scheduler;
 #[cfg(test)]
 mod tests;
 mod tokio_scheduler;
 
-pub use clock::{Clock, LocalClock, TestClock};
+#[cfg(any(test, feature = "test-support"))]
+pub use clock::TestClock;
+pub use clock::{Clock, LocalClock};
 pub use executor::{Executor, Task};
 use futures::channel::oneshot;
 pub use local_scheduler::LocalScheduler;
@@ -16,6 +19,7 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
+#[cfg(any(test, feature = "test-support"))]
 pub use test_scheduler::TestScheduler;
 pub use tokio_scheduler::TokioScheduler;
 

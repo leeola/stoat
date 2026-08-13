@@ -9,12 +9,14 @@
 //! - Small `Copy` return types for metadata
 
 pub mod env;
+#[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 pub mod fs;
 pub mod shell;
 pub mod watch;
 
 pub use env::{EnvHost, LocalEnv};
+#[cfg(any(test, feature = "test-support"))]
 pub use fake::{FakeEnv, FakeFs, FakeFsOp, FakeFsWatcher, FakeShell, FakeShellInvocation};
 pub use fs::{FsDirEntry, FsHost, FsMetadata, LocalFs};
 pub use shell::{LocalShell, ShellHost, ShellOutput};

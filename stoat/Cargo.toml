@@ -65,6 +65,8 @@ brush-parser.workspace = true
 
 [dev-dependencies]
 insta = "1"
+stoat_host = { path = "../host", features = ["test-support"] }
+stoat_scheduler = { path = "../scheduler", features = ["test-support"] }
 
 # Live integration tests that drive a real headless Stoat against a
 # materialized fixture. Gated on the `fixture` feature so a plain `cargo test`

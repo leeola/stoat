@@ -50,6 +50,7 @@ libc = { workspace = true }
 [dev-dependencies]
 git2 = { version = "0.21", default-features = false }
 insta = "1"
-stoat_host = { path = "../host" }
+stoat_host = { path = "../host", features = ["test-support"] }
+stoat_scheduler = { path = "../scheduler", features = ["test-support"] }
 tokio-util.workspace = true
 bytes.workspace = true

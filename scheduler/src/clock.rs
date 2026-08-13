@@ -1,5 +1,8 @@
+#[cfg(any(test, feature = "test-support"))]
 use parking_lot::Mutex;
-use std::time::{Duration, Instant, SystemTime};
+#[cfg(any(test, feature = "test-support"))]
+use std::time::Duration;
+use std::time::{Instant, SystemTime};
 
 pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
@@ -23,15 +26,18 @@ impl Clock for LocalClock {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 struct TestClockState {
     instant: Instant,
     system: SystemTime,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub struct TestClock {
     state: Mutex<TestClockState>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl TestClock {
     pub fn new() -> Self {
         Self {
@@ -49,12 +55,14 @@ impl TestClock {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Default for TestClock {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Clock for TestClock {
     fn now(&self) -> Instant {
         self.state.lock().instant
