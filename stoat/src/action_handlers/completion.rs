@@ -115,7 +115,7 @@ fn resolve_plan(
         .server
         .as_deref()
         .and_then(|name| stoat.lsp_registry.client(name))
-        .unwrap_or_else(|| stoat.lsp_host());
+        .unwrap_or_else(|| crate::lsp::hosts::lsp_host(stoat));
     if !resolve_advertised(&host) {
         return None;
     }

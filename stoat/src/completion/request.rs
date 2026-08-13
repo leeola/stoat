@@ -208,9 +208,11 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
     let trigger_char = owned.text_before_cursor.chars().last();
     let is_trigger_char = match (
         trigger_char,
-        server_trigger_characters(
-            &stoat.lsp_for_feature(snapshot.buffer_id, LanguageServerFeature::Completion),
-        ),
+        server_trigger_characters(&crate::lsp::hosts::lsp_for_feature(
+            stoat,
+            snapshot.buffer_id,
+            LanguageServerFeature::Completion,
+        )),
     ) {
         (Some(ch), Some(triggers)) => triggers.contains(&ch.to_string()),
         _ => false,
@@ -256,8 +258,11 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         return;
     }
 
-    let completion_hosts =
-        stoat.feature_hosts(snapshot.buffer_id, LanguageServerFeature::Completion);
+    let completion_hosts = crate::lsp::hosts::feature_hosts(
+        stoat,
+        snapshot.buffer_id,
+        LanguageServerFeature::Completion,
+    );
     let fs_host = stoat.fs_host.clone();
     let executor = stoat.executor.clone();
     let home_dir = stoat.env_host.var("HOME").map(PathBuf::from);
@@ -450,11 +455,14 @@ fn ask_again(
     owned: ContextOwned,
     servers: Vec<String>,
 ) {
-    let hosts: Vec<(String, Arc<dyn LspHost>)> = stoat
-        .feature_hosts(snapshot.buffer_id, LanguageServerFeature::Completion)
-        .into_iter()
-        .filter(|(name, _)| servers.iter().any(|wanted| wanted == name))
-        .collect();
+    let hosts: Vec<(String, Arc<dyn LspHost>)> = crate::lsp::hosts::feature_hosts(
+        stoat,
+        snapshot.buffer_id,
+        LanguageServerFeature::Completion,
+    )
+    .into_iter()
+    .filter(|(name, _)| servers.iter().any(|wanted| wanted == name))
+    .collect();
 
     // Unbuilt, so each host is asked in the encoding it negotiated rather than
     // in whatever the first of them uses.

@@ -8,7 +8,7 @@
 //! No key reaches this. A trigger fires from the post-event fan-out, and a pump
 //! collects the reply, both of them background work the user never asks for.
 
-use crate::{action_handlers, app::Stoat, buffer::BufferId, lsp};
+use crate::{action_handlers, app::Stoat, buffer::BufferId, lsp, lsp::hosts};
 use lsp_types::{FoldingRange, FoldingRangeParams, TextDocumentIdentifier};
 use std::{path::Path, time::Duration};
 use stoat_text::{Anchor, Bias, Point, Rope};
@@ -39,7 +39,7 @@ pub(crate) fn folding_ranges_trigger(stoat: &mut Stoat) {
         return;
     }
 
-    let host = stoat.lsp_for(buffer_id);
+    let host = hosts::lsp_for(stoat, buffer_id);
     if host.capabilities().folding_range_provider.is_none() {
         return;
     }

@@ -167,7 +167,7 @@ impl TestHarness {
     /// Expose the [`crate::host::FakeLsp`] backing this harness so
     /// tests can seed hovers, completions, definitions, diagnostics,
     /// etc. before driving code that reads them through
-    /// `stoat.lsp_host()`.
+    /// `crate::lsp::hosts::lsp_host(stoat)`.
     pub fn fake_lsp(&self) -> &Arc<crate::host::FakeLsp> {
         &self.fake_lsp
     }
@@ -258,7 +258,7 @@ impl TestHarness {
             "GitHost was replaced during the test; real git operations may have escaped"
         );
         assert_eq!(
-            alloc_ptr(&self.stoat.lsp_host()),
+            alloc_ptr(&crate::lsp::hosts::lsp_host(&self.stoat)),
             alloc_ptr(&self.fake_lsp),
             "LspHost was replaced during the test; real LSP traffic may have escaped"
         );

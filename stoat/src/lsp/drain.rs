@@ -425,7 +425,7 @@ mod tests {
             Some("lsp: rust-analyzer: NotFound")
         );
         assert!(
-            stoat.lsp_host().is_noop(),
+            crate::lsp::hosts::lsp_host(&stoat).is_noop(),
             "the placeholder stays after a spawn failure"
         );
     }
@@ -448,7 +448,7 @@ mod tests {
         install_pending_lsp_host(&mut stoat);
 
         assert!(
-            !stoat.lsp_host().is_noop(),
+            !crate::lsp::hosts::lsp_host(&stoat).is_noop(),
             "a ready host replaces the placeholder"
         );
         assert_eq!(

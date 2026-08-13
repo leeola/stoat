@@ -176,7 +176,7 @@ fn resolve_host(
     item.server
         .as_deref()
         .and_then(|name| stoat.lsp_registry.client(name))
-        .unwrap_or_else(|| stoat.lsp_for(buffer_id))
+        .unwrap_or_else(|| crate::lsp::hosts::lsp_for(stoat, buffer_id))
 }
 
 fn resolve_advertised(host: &std::sync::Arc<dyn crate::host::LspHost>) -> bool {

@@ -72,8 +72,7 @@ pub(crate) fn pull_diagnostics_trigger(stoat: &mut Stoat) {
                 .is_some_and(|version| stoat.last_pull_diagnostic_key.get(&id) != Some(&version))
         })
         .filter(|&id| {
-            stoat
-                .feature_hosts(id, LanguageServerFeature::PullDiagnostics)
+            crate::lsp::hosts::feature_hosts(stoat, id, LanguageServerFeature::PullDiagnostics)
                 .into_iter()
                 .next()
                 .is_some()
@@ -92,7 +91,11 @@ pub(crate) fn pull_diagnostics_trigger(stoat: &mut Stoat) {
             partial_result_params: Default::default(),
         };
 
-        let host = stoat.lsp_for_feature(plan.id, LanguageServerFeature::PullDiagnostics);
+        let host = crate::lsp::hosts::lsp_for_feature(
+            stoat,
+            plan.id,
+            LanguageServerFeature::PullDiagnostics,
+        );
         let executor = stoat.executor.clone();
         let path = plan.path;
         let task = stoat.spawn_woken(async move {
@@ -202,13 +205,13 @@ fn apply_pull_diagnostics(
             diagnostics,
             result_id,
         }) => {
-            let server = stoat
-                .feature_hosts(id, LanguageServerFeature::PullDiagnostics)
-                .into_iter()
-                .next()
-                .map(|(name, _)| name)
-                .unwrap_or_else(|| String::from("lsp"));
-            let encoding = stoat.lsp_for(id).offset_encoding();
+            let server =
+                crate::lsp::hosts::feature_hosts(stoat, id, LanguageServerFeature::PullDiagnostics)
+                    .into_iter()
+                    .next()
+                    .map(|(name, _)| name)
+                    .unwrap_or_else(|| String::from("lsp"));
+            let encoding = crate::lsp::hosts::lsp_for(stoat, id).offset_encoding();
             let spans = util::publish_spans(
                 &path,
                 &diagnostics,

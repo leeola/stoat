@@ -21,7 +21,7 @@ use crate::{
     buffer_registry::LspSymbolKindIndex,
     display_map::{syntax_theme, HighlightStyleId, SemanticTokenHighlight},
     host::{LspHost, OffsetEncoding},
-    lsp::{self, util, LspSymbolKind},
+    lsp::{self, hosts, util, LspSymbolKind},
 };
 use lsp_types::{
     Position, SemanticToken, SemanticTokenType, SemanticTokensDeltaParams, SemanticTokensEdit,
@@ -93,7 +93,7 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
         return;
     }
 
-    let host = stoat.lsp_for(buffer_id);
+    let host = hosts::lsp_for(stoat, buffer_id);
     let capabilities = host.capabilities();
     let Some(legend) = semantic_tokens_legend(&capabilities) else {
         return;

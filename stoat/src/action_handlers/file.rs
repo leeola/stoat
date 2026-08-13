@@ -180,8 +180,7 @@ fn format_on_save_host(
     if stoat.settings.format_on_save != Some(true) {
         return None;
     }
-    stoat
-        .feature_hosts(buffer_id, LanguageServerFeature::Format)
+    crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::Format)
         .into_iter()
         .next()
         .map(|(_, host)| host)
@@ -362,7 +361,7 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, for
         text_document: TextDocumentIdentifier { uri },
         text: Some(text),
     };
-    for lsp in stoat.hosts_for_buffer(buffer_id) {
+    for lsp in crate::lsp::hosts::hosts_for_buffer(stoat, buffer_id) {
         let params = params.clone();
         stoat
             .executor
@@ -1166,7 +1165,7 @@ pub(super) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
         let params = DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier { uri },
         };
-        for lsp in stoat.hosts_for_buffer(buffer_id) {
+        for lsp in crate::lsp::hosts::hosts_for_buffer(stoat, buffer_id) {
             let params = params.clone();
             stoat
                 .executor

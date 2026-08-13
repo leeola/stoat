@@ -16,8 +16,7 @@ use crate::{
     file_finder::{FileFinder, FinderPathCache},
     help::Help,
     host::{
-        EnvHost, FsHost, FsWatchHost, GitHost, LanguageServerFeature, LocalEnv, LocalFs, LocalGit,
-        LspHost, NoopFsWatcher,
+        EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspHost, NoopFsWatcher,
     },
     keymap::{Keymap, ResolvedAction, StateValue},
     keymap_state::{
@@ -45,7 +44,7 @@ use crate::{
     workspace_picker::WorkspacePicker,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
-use futures::{future, FutureExt};
+use futures::FutureExt;
 use ratatui::{buffer::Buffer, layout::Rect};
 use slotmap::SlotMap;
 use std::{
@@ -84,11 +83,6 @@ const THEME_ONE_LIGHT: &str = include_str!("../../themes/one-light.json");
 /// [`Stoat::run`] arms a timer at this cadence while a scroll glide is active,
 /// advancing the inertial scroll one step per fire.
 const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
-
-/// Backstop on reaping every language server at quit, applied across all of
-/// them together. Exceeds what one host's own shutdown and reap bounds add up
-/// to, so this fires only for a host that hangs somewhere those do not cover.
-const SHUTDOWN_LSP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
 
 /// Frame interval for the LSP work-done spinner popout, about 10 fps. Fast enough
 /// to read as motion, slow enough not to churn repaints while progress streams.
@@ -1249,8 +1243,9 @@ pub struct Stoat {
     /// frame.
     pub(crate) home: Option<PathBuf>,
     /// Language-server requests route through this trait. Defaults to
-    /// Language servers keyed by name. Reached through [`Self::lsp_host`] and
-    /// [`Self::lsp_for`], never directly, and empty until a real `LocalLsp` is
+    /// Language servers keyed by name. Reached through
+    /// [`crate::lsp::hosts::lsp_host`] and [`crate::lsp::hosts::lsp_for`],
+    /// never directly, and empty until a real `LocalLsp` is
     /// wired in. Tests install [`crate::host::FakeLsp`] as the sole client to
     /// drive end-to-end LSP scenarios.
     pub(crate) lsp_registry: crate::lsp::registry::LspRegistry,
@@ -2578,123 +2573,6 @@ impl Stoat {
     /// the test harness never spawns a warm pass. The binary turns it on.
     pub fn set_diff_warm_auto(&mut self, enabled: bool) {
         self.diff_warm_auto = enabled;
-    }
-
-    /// The single active language server, or a noop when none is up.
-    ///
-    /// Editor-wide LSP traffic (shutdown, notification pumps) routes through
-    /// this. Buffer-specific requests use [`Self::lsp_for`].
-    pub(crate) fn lsp_host(&self) -> Arc<dyn LspHost> {
-        self.lsp_registry.sole_or_noop()
-    }
-
-    /// The language server that should serve `buffer_id`.
-    ///
-    /// A buffer with a language routes to that language's own server, an
-    /// injected sole client, or a noop. A buffer with no language falls back
-    /// to the sole client, or a noop.
-    pub(crate) fn lsp_for(&self, buffer_id: BufferId) -> Arc<dyn LspHost> {
-        match action_handlers::lsp::lsp_language_name(&self.active_workspace().buffers, buffer_id) {
-            Some(name) => self.lsp_registry.route(&name),
-            None => self.lsp_registry.sole_or_noop(),
-        }
-    }
-
-    /// Every language server that mirrors `buffer_id`'s document, for
-    /// fan-out of `did_open` / `did_change` / `did_save` / `did_close`.
-    ///
-    /// Every running server for the buffer's language needs the document, so
-    /// this returns all of them (or the injected sole client when none are up).
-    pub(crate) fn hosts_for_buffer(&self, buffer_id: BufferId) -> Vec<Arc<dyn LspHost>> {
-        let name =
-            action_handlers::lsp::lsp_language_name(&self.active_workspace().buffers, buffer_id)
-                .unwrap_or_default();
-        self.lsp_registry.hosts_for_language(&name)
-    }
-
-    /// The language server that should answer a single-target `feature` request
-    /// for `buffer_id`, the first of its language's servers whose selector
-    /// routes the feature and whose capabilities support it.
-    ///
-    /// Falls back to [`Self::lsp_host`] (a noop when nothing supports it), so a
-    /// caller's `supports_feature` guard still rejects unavailable features.
-    pub(crate) fn lsp_for_feature(
-        &self,
-        buffer_id: BufferId,
-        feature: LanguageServerFeature,
-    ) -> Arc<dyn LspHost> {
-        self.feature_hosts(buffer_id, feature)
-            .into_iter()
-            .next()
-            .map(|(_, host)| host)
-            .unwrap_or_else(|| self.lsp_host())
-    }
-
-    /// Every server, with its registry name, that routes `feature` for
-    /// `buffer_id`'s language and advertises it.
-    ///
-    /// Fan-out requests (completion) dispatch to all of them; single-target
-    /// requests take the first via [`Self::lsp_for_feature`].
-    pub(crate) fn feature_hosts(
-        &self,
-        buffer_id: BufferId,
-        feature: LanguageServerFeature,
-    ) -> Vec<(String, Arc<dyn LspHost>)> {
-        let name =
-            action_handlers::lsp::lsp_language_name(&self.active_workspace().buffers, buffer_id)
-                .unwrap_or_default();
-        self.lsp_registry.hosts_with_feature(&name, feature)
-    }
-
-    /// The label for the highest-priority explicit LSP request in flight, or
-    /// `None` when none is pending, driving the status bar's ` lsp: ...  `
-    /// segment so a slow server does not make the keypress look dead.
-    ///
-    /// Background-debounced requests (inlay hints, signature help, document
-    /// highlight, diagnostics, semantic tokens, folding) are deliberately
-    /// excluded because they fire on every edit and scroll and would flash the
-    /// segment constantly.
-    pub(crate) fn lsp_pending_label(&self) -> Option<&'static str> {
-        if let Some((label, _)) = &self.pending_lsp_jump {
-            return Some(label);
-        }
-
-        [
-            ("hover", self.pending_hover_request.is_some()),
-            ("code actions", self.pending_code_action_request.is_some()),
-            ("code action", self.pending_code_action_resolve.is_pending()),
-            (
-                "rename",
-                self.pending_prepare_rename.is_some() || self.pending_rename.is_pending(),
-            ),
-            ("symbols", self.pending_symbol_picker_request.is_some()),
-            (
-                "workspace symbols",
-                self.pending_workspace_symbol_request.is_some(),
-            ),
-            (
-                "format",
-                self.pending_format_request.is_pending() || self.pending_format_on_save.is_some(),
-            ),
-        ]
-        .into_iter()
-        .find_map(|(label, pending)| pending.then_some(label))
-    }
-
-    /// Reap the language servers on quit.
-    ///
-    /// Every host is shut down at once rather than in turn, so one server that
-    /// drags its exit out cannot spend the budget the others need. [`NoopLsp`]
-    /// and the test fake return immediately, so the call is unconditional.
-    /// Errors are ignored, the process being on its way out regardless.
-    ///
-    /// [`SHUTDOWN_LSP_TIMEOUT`] is only a backstop against a host that hangs
-    /// somewhere its own bounds do not cover. It has to exceed those bounds, or
-    /// it cuts short the kill they exist to reach.
-    pub async fn shutdown_lsp(&self) {
-        let hosts = self.lsp_registry.hosts();
-        let reaps = future::join_all(hosts.iter().map(|host| host.shutdown()));
-        let _ = tokio::time::timeout(SHUTDOWN_LSP_TIMEOUT, reaps).await;
     }
 
     pub fn active_workspace(&self) -> &Workspace {
@@ -13946,23 +13824,6 @@ mod tests {
             assert!(
                 matches!(result, Ok(Ok(()))),
                 "run must quit after shutdown notify, got {result:?}"
-            );
-        });
-    }
-
-    #[test]
-    fn shutdown_lsp_reaps_the_server_on_quit() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        rt.block_on(async {
-            let h = Stoat::test();
-            assert!(!h.fake_lsp().was_shut_down());
-            h.stoat.shutdown_lsp().await;
-            assert!(
-                h.fake_lsp().was_shut_down(),
-                "the quit teardown shuts the language server down",
             );
         });
     }

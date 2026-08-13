@@ -234,7 +234,7 @@ pub(crate) struct FrameCtx<'a> {
     pub(crate) diff_warm_busy: bool,
     /// Label of the explicit LSP request still in flight, so the status bar
     /// shows a "lsp: {label}..." segment until the response lands. `None` when no
-    /// such request is pending. See [`crate::app::Stoat::lsp_pending_label`].
+    /// such request is pending. See [`crate::lsp::lsp_pending_label`].
     pub(crate) lsp_pending: Option<&'static str>,
     /// Freshest `window/showMessage` text. `MessageType::ERROR` paints as a
     /// wrapped popout card above the status bar. Other levels paint in the bar's
@@ -525,7 +525,7 @@ pub(crate) fn frame(
         }
     });
 
-    let lsp_pending = stoat.lsp_pending_label();
+    let lsp_pending = crate::lsp::lsp_pending_label(stoat);
     let diff_warm_busy = stoat.diff_warm_busy();
 
     // Resolved here because the modal chain below cannot resolve it. active_modal

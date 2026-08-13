@@ -80,11 +80,13 @@ pub(crate) fn document_highlight_trigger(stoat: &mut Stoat) {
         return;
     }
 
-    let Some((_, host)) = stoat
-        .feature_hosts(buffer_id, LanguageServerFeature::DocumentHighlight)
-        .into_iter()
-        .next()
-    else {
+    let Some((_, host)) = crate::lsp::hosts::feature_hosts(
+        stoat,
+        buffer_id,
+        LanguageServerFeature::DocumentHighlight,
+    )
+    .into_iter()
+    .next() else {
         return;
     };
     let encoding = host.offset_encoding();

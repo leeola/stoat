@@ -74,10 +74,10 @@ pub(crate) fn signature_help_trigger(stoat: &mut Stoat) {
     };
     let ch = ch.to_string();
 
-    let Some((_, host)) = stoat
-        .feature_hosts(buffer_id, LanguageServerFeature::SignatureHelp)
-        .into_iter()
-        .next()
+    let Some((_, host)) =
+        crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::SignatureHelp)
+            .into_iter()
+            .next()
     else {
         return;
     };
@@ -142,10 +142,10 @@ fn request_signature_help(stoat: &mut Stoat) {
         )
     };
 
-    let Some((_, host)) = stoat
-        .feature_hosts(buffer_id, LanguageServerFeature::SignatureHelp)
-        .into_iter()
-        .next()
+    let Some((_, host)) =
+        crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::SignatureHelp)
+            .into_iter()
+            .next()
     else {
         return;
     };

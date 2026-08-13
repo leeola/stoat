@@ -4,7 +4,9 @@ use snafu::{whatever, ResultExt, Whatever};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use stoat::{
     host::{LocalClipboard, LocalFs, LocalFsWatcher},
-    input_parse, Axis, Settings, Stoat,
+    input_parse,
+    lsp::hosts,
+    Axis, Settings, Stoat,
 };
 use stoat_cli::{CommonArgs, FixtureArgs, FixtureSub};
 use stoat_scheduler::{Executor, TokioScheduler};
@@ -423,7 +425,7 @@ fn run_tui(
         }
 
         let outcome = stoat.run(event_rx, render_tx).await;
-        stoat.shutdown_lsp().await;
+        hosts::shutdown_lsp(&stoat).await;
         outcome
     })
     .whatever_context("stoat event loop")?;

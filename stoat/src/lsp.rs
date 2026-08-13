@@ -4,6 +4,7 @@ pub(crate) mod document_highlight;
 pub(crate) mod drain;
 pub(crate) mod edit_apply;
 pub(crate) mod folding;
+pub mod hosts;
 pub(crate) mod pending;
 pub(crate) mod progress;
 pub(crate) mod pull_diagnostics;
@@ -55,6 +56,44 @@ pub(crate) fn focused_buffer_version(stoat: &mut Stoat) -> Option<u64> {
         return None;
     }
     Some(editor.display_map.snapshot().buffer_snapshot().version())
+}
+
+/// The label for the highest-priority explicit LSP request in flight, or
+/// `None` when none is pending, driving the status bar's ` lsp: ...  `
+/// segment so a slow server does not make the keypress look dead.
+///
+/// Background-debounced requests (inlay hints, signature help, document
+/// highlight, diagnostics, semantic tokens, folding) are deliberately
+/// excluded because they fire on every edit and scroll and would flash the
+/// segment constantly.
+pub(crate) fn lsp_pending_label(stoat: &Stoat) -> Option<&'static str> {
+    if let Some((label, _)) = &stoat.pending_lsp_jump {
+        return Some(label);
+    }
+
+    [
+        ("hover", stoat.pending_hover_request.is_some()),
+        ("code actions", stoat.pending_code_action_request.is_some()),
+        (
+            "code action",
+            stoat.pending_code_action_resolve.is_pending(),
+        ),
+        (
+            "rename",
+            stoat.pending_prepare_rename.is_some() || stoat.pending_rename.is_pending(),
+        ),
+        ("symbols", stoat.pending_symbol_picker_request.is_some()),
+        (
+            "workspace symbols",
+            stoat.pending_workspace_symbol_request.is_some(),
+        ),
+        (
+            "format",
+            stoat.pending_format_request.is_pending() || stoat.pending_format_on_save.is_some(),
+        ),
+    ]
+    .into_iter()
+    .find_map(|(label, pending)| pending.then_some(label))
 }
 
 /// Poll every in-flight LSP request once, and report whether any of them

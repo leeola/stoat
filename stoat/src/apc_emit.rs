@@ -228,7 +228,7 @@ pub(crate) fn emit_windows(stoat: &mut Stoat) {
 /// paint.
 fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
     let mode = stoat.focused_mode().to_string();
-    let lsp_pending = stoat.lsp_pending_label();
+    let lsp_pending = crate::lsp::lsp_pending_label(stoat);
     stoat.refresh_chrome();
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     let windowed = ws.panes.windowed_panes();

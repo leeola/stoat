@@ -191,7 +191,7 @@ pub(crate) fn notify_buffer_opened(
         .lock()
         .expect("lsp version mutex")
         .insert(buffer_id, buffer_version);
-    for lsp in stoat.hosts_for_buffer(buffer_id) {
+    for lsp in crate::lsp::hosts::hosts_for_buffer(stoat, buffer_id) {
         let (uri, language_id, text) = (uri.clone(), language_id.clone(), text.clone());
         stoat
             .executor
@@ -512,7 +512,7 @@ fn dispatch_did_change(
     // different encodings -- each get content changes shaped their own way.
     // A host on sync NONE takes no change.
     let mut groups: HostSyncGroups = Vec::new();
-    for host in stoat.hosts_for_buffer(id) {
+    for host in crate::lsp::hosts::hosts_for_buffer(stoat, id) {
         let sync_kind = resolve_sync_kind(&host.capabilities().text_document_sync);
         if !matches!(
             sync_kind,
@@ -832,7 +832,11 @@ pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
     let Some(site) = lsp_request_site(stoat) else {
         return UpdateEffect::None;
     };
-    let hosts = stoat.feature_hosts(site.buffer_id, LanguageServerFeature::GotoReference);
+    let hosts = crate::lsp::hosts::feature_hosts(
+        stoat,
+        site.buffer_id,
+        LanguageServerFeature::GotoReference,
+    );
     if hosts.is_empty() {
         return crate::code_index::nav::goto_references(stoat);
     }
@@ -1008,7 +1012,7 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
     let Some(site) = lsp_request_site(stoat) else {
         return UpdateEffect::None;
     };
-    let hosts = stoat.feature_hosts(site.buffer_id, kind.feature());
+    let hosts = crate::lsp::hosts::feature_hosts(stoat, site.buffer_id, kind.feature());
     if hosts.is_empty() {
         return report_lsp_unavailable(stoat, &format!("goto {}", kind.status_label()));
     }
@@ -1339,7 +1343,7 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
         )
     };
 
-    let hosts = stoat.feature_hosts(buffer_id, LanguageServerFeature::Hover);
+    let hosts = crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::Hover);
     if hosts.is_empty() {
         return report_lsp_unavailable(stoat, "hover");
     }
@@ -1497,7 +1501,8 @@ pub(crate) fn answer_agent_query(
                 },
                 work_done_progress_params: Default::default(),
             };
-            let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::Hover);
+            let lsp =
+                crate::lsp::hosts::lsp_for_feature(stoat, buffer_id, LanguageServerFeature::Hover);
             stoat
                 .executor
                 .spawn(async move {
@@ -1727,10 +1732,10 @@ fn request_inlay_hints(stoat: &mut Stoat, debounce: Duration) -> bool {
         return true;
     }
 
-    let Some((_, host)) = stoat
-        .feature_hosts(buffer_id, LanguageServerFeature::InlayHints)
-        .into_iter()
-        .next()
+    let Some((_, host)) =
+        crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::InlayHints)
+            .into_iter()
+            .next()
     else {
         return false;
     };
@@ -2017,10 +2022,10 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
         ((lo, hi), head, editor.buffer_id, buf_snap.rope().clone())
     };
 
-    let Some((server, host)) = stoat
-        .feature_hosts(buffer_id, LanguageServerFeature::CodeAction)
-        .into_iter()
-        .next()
+    let Some((server, host)) =
+        crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::CodeAction)
+            .into_iter()
+            .next()
     else {
         return report_lsp_unavailable(stoat, "code actions");
     };
@@ -2261,8 +2266,10 @@ fn resolve_code_action_host(
         return host;
     }
     match buffer_id {
-        Some(id) => stoat.lsp_for_feature(id, LanguageServerFeature::CodeAction),
-        None => stoat.lsp_host(),
+        Some(id) => {
+            crate::lsp::hosts::lsp_for_feature(stoat, id, LanguageServerFeature::CodeAction)
+        },
+        None => crate::lsp::hosts::lsp_host(stoat),
     }
 }
 
@@ -2355,10 +2362,10 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
         (offset, editor.buffer_id, buf_snap.rope().clone())
     };
 
-    let Some((server, host)) = stoat
-        .feature_hosts(buffer_id, LanguageServerFeature::RenameSymbol)
-        .into_iter()
-        .next()
+    let Some((server, host)) =
+        crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::RenameSymbol)
+            .into_iter()
+            .next()
     else {
         return report_lsp_unavailable(stoat, "rename");
     };
@@ -2500,7 +2507,11 @@ pub(crate) fn rename_input_submit(stoat: &mut Stoat) -> bool {
         .as_deref()
         .and_then(|name| stoat.lsp_registry.client(name))
         .unwrap_or_else(|| {
-            stoat.lsp_for_feature(rename_state.buffer_id, LanguageServerFeature::RenameSymbol)
+            crate::lsp::hosts::lsp_for_feature(
+                stoat,
+                rename_state.buffer_id,
+                LanguageServerFeature::RenameSymbol,
+            )
         });
     let encoding = lsp.offset_encoding();
     let task = stoat.spawn_woken(async move {
@@ -2592,7 +2603,8 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         (editor.buffer_id, buf_snap.rope().clone())
     };
 
-    let hosts = stoat.feature_hosts(buffer_id, LanguageServerFeature::DocumentSymbols);
+    let hosts =
+        crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::DocumentSymbols);
     if hosts.is_empty() {
         return report_lsp_unavailable(stoat, "document symbols");
     }
@@ -2786,10 +2798,10 @@ fn spawn_symbol_doc_request(
     buffer_id: BufferId,
     target: &SymbolTarget,
 ) -> Option<Task<Option<String>>> {
-    let (_, host) = stoat
-        .feature_hosts(buffer_id, LanguageServerFeature::Hover)
-        .into_iter()
-        .next()?;
+    let (_, host) =
+        crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::Hover)
+            .into_iter()
+            .next()?;
     let encoding = host.offset_encoding();
 
     let (uri, position) = match target {
@@ -3165,11 +3177,11 @@ pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
         return UpdateEffect::None;
     };
-    let servers: Vec<String> = stoat
-        .feature_hosts(buffer_id, LanguageServerFeature::WorkspaceSymbols)
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect();
+    let servers: Vec<String> =
+        crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::WorkspaceSymbols)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
     if servers.is_empty() {
         return report_lsp_unavailable(stoat, "workspace symbols");
     }
@@ -3214,11 +3226,14 @@ fn spawn_workspace_symbol_request(
         .filter_map(|name| stoat.lsp_registry.client(name))
         .collect();
     if hosts.is_empty() {
-        hosts = stoat
-            .feature_hosts(buffer_id, LanguageServerFeature::WorkspaceSymbols)
-            .into_iter()
-            .map(|(_, host)| host)
-            .collect();
+        hosts = crate::lsp::hosts::feature_hosts(
+            stoat,
+            buffer_id,
+            LanguageServerFeature::WorkspaceSymbols,
+        )
+        .into_iter()
+        .map(|(_, host)| host)
+        .collect();
     }
 
     stoat.spawn_woken(async move {
@@ -3400,10 +3415,10 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
         ((lo, hi), editor.buffer_id, buf_snap.rope().clone())
     };
 
-    let Some((_, host)) = stoat
-        .feature_hosts(buffer_id, LanguageServerFeature::Format)
-        .into_iter()
-        .next()
+    let Some((_, host)) =
+        crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::Format)
+            .into_iter()
+            .next()
     else {
         return report_lsp_unavailable(stoat, "format");
     };
@@ -3469,10 +3484,10 @@ pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
     else {
         return UpdateEffect::None;
     };
-    let Some((_, host)) = stoat
-        .feature_hosts(buffer_id, LanguageServerFeature::Format)
-        .into_iter()
-        .next()
+    let Some((_, host)) =
+        crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::Format)
+            .into_iter()
+            .next()
     else {
         return report_lsp_unavailable(stoat, "format");
     };
@@ -3981,15 +3996,18 @@ mod tests {
         let completion: std::sync::Arc<dyn LspHost> = completion_server.clone();
         assert!(
             std::sync::Arc::ptr_eq(
-                &h.stoat.lsp_for_feature(id, LanguageServerFeature::Hover),
+                &crate::lsp::hosts::lsp_for_feature(&h.stoat, id, LanguageServerFeature::Hover),
                 &hover,
             ),
             "hover routes to the hover-capable server"
         );
         assert!(
             std::sync::Arc::ptr_eq(
-                &h.stoat
-                    .lsp_for_feature(id, LanguageServerFeature::Completion),
+                &crate::lsp::hosts::lsp_for_feature(
+                    &h.stoat,
+                    id,
+                    LanguageServerFeature::Completion
+                ),
                 &completion,
             ),
             "completion routes to the completion-capable server"
