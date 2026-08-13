@@ -413,7 +413,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ToggleInlayHints => {
             stoat.inlay_hints_enabled = !stoat.inlay_hints_enabled;
             stoat.last_inlay_hint_key = None;
-            stoat.pending_inlay_hint_request = None;
+            stoat.pending_inlay_hint_request.clear();
             if stoat.inlay_hints_enabled {
                 lsp::enable_inlay_hints_now(stoat);
             } else {

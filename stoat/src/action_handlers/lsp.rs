@@ -2089,7 +2089,7 @@ fn request_inlay_hints(stoat: &mut Stoat, debounce: Duration) -> bool {
             },
         }
     });
-    stoat.pending_inlay_hint_request = Some(task);
+    stoat.pending_inlay_hint_request.arm(task);
     true
 }
 
@@ -2208,22 +2208,13 @@ fn inlay_hint_text(hint: &InlayHint) -> String {
 /// editor's display map, replacing the buffer's previous hint inlays. Returns
 /// true when state changed.
 pub(crate) fn pump_lsp_inlay_hints(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_inlay_hint_request.take() else {
+    let Some(response) = stoat.pending_inlay_hint_request.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some((buffer_id, items))) => {
-            apply_inlay_hints(stoat, buffer_id, items);
-            true
-        },
-        Poll::Ready(None) => true,
-        Poll::Pending => {
-            stoat.pending_inlay_hint_request = Some(task);
-            false
-        },
+    if let Some((buffer_id, items)) = response {
+        apply_inlay_hints(stoat, buffer_id, items);
     }
+    true
 }
 
 fn apply_inlay_hints(stoat: &mut Stoat, buffer_id: BufferId, items: Vec<InlayHintItem>) {
@@ -2307,7 +2298,7 @@ pub(crate) fn document_highlight_trigger(stoat: &mut Stoat) {
         if stoat.last_document_highlight_key.is_some() {
             clear_document_highlights(stoat);
             stoat.last_document_highlight_key = None;
-            stoat.pending_document_highlight_request = None;
+            stoat.pending_document_highlight_request.clear();
         }
         return;
     }
@@ -2354,7 +2345,7 @@ pub(crate) fn document_highlight_trigger(stoat: &mut Stoat) {
             },
         }
     });
-    stoat.pending_document_highlight_request = Some(task);
+    stoat.pending_document_highlight_request.arm(task);
 }
 
 fn build_document_highlight_request(
@@ -2421,22 +2412,13 @@ fn convert_document_highlights(
 /// and write text highlights on the focused editor. Returns true when state
 /// changed.
 pub(crate) fn pump_lsp_document_highlight(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_document_highlight_request.take() else {
+    let Some(response) = stoat.pending_document_highlight_request.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some((buffer_id, items))) => {
-            apply_document_highlights(stoat, buffer_id, items);
-            true
-        },
-        Poll::Ready(None) => true,
-        Poll::Pending => {
-            stoat.pending_document_highlight_request = Some(task);
-            false
-        },
+    if let Some((buffer_id, items)) = response {
+        apply_document_highlights(stoat, buffer_id, items);
     }
+    true
 }
 
 fn apply_document_highlights(
@@ -2841,7 +2823,7 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
         let items = convert_semantic_tokens(&data, &legend, &rope, encoding);
         Some((buffer_id, version, result_id, data, items))
     });
-    stoat.pending_semantic_tokens = Some(task);
+    stoat.pending_semantic_tokens.arm(task);
 }
 
 /// The whole token stream and the result id the server named it by.
@@ -3118,29 +3100,20 @@ fn decode_semantic_tokens(
 /// Poll any in-flight semantic-tokens request and paint the results onto the
 /// focused editor's LSP highlight channel. Returns true when state changed.
 pub(crate) fn pump_lsp_semantic_tokens(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_semantic_tokens.take() else {
+    let Some(outcome) = stoat.pending_semantic_tokens.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some((buffer_id, version, result_id, data, items))) => {
-            // Retained before the anchoring below, which drops the reply when the
-            // buffer has moved on. The stream is still what the server holds
-            // whatever this buffer now reads as, so the next delta can name it.
-            stoat
-                .active_workspace_mut()
-                .buffers
-                .store_lsp_token_source(buffer_id, result_id, data);
-            apply_semantic_tokens(stoat, buffer_id, version, items);
-            true
-        },
-        Poll::Ready(None) => true,
-        Poll::Pending => {
-            stoat.pending_semantic_tokens = Some(task);
-            false
-        },
+    if let Some((buffer_id, version, result_id, data, items)) = outcome {
+        // Retained before the anchoring below, which drops the reply when the
+        // buffer has moved on. The stream is still what the server holds
+        // whatever this buffer now reads as, so the next delta can name it.
+        stoat
+            .active_workspace_mut()
+            .buffers
+            .store_lsp_token_source(buffer_id, result_id, data);
+        apply_semantic_tokens(stoat, buffer_id, version, items);
     }
+    true
 }
 
 /// Anchor a semantic-token reply onto `buffer_id` and paint it, provided the
@@ -3305,7 +3278,7 @@ pub(crate) fn folding_ranges_trigger(stoat: &mut Stoat) {
             },
         }
     });
-    stoat.pending_folding_ranges = Some(task);
+    stoat.pending_folding_ranges.arm(task);
 }
 
 fn build_folding_range_request(
@@ -3363,22 +3336,13 @@ fn convert_folding_ranges(
 /// Poll any in-flight folding-range request and install the results as foldable
 /// creases on the focused editor. Returns true when state changed.
 pub(crate) fn pump_lsp_folding_ranges(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_folding_ranges.take() else {
+    let Some(outcome) = stoat.pending_folding_ranges.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some((buffer_id, items))) => {
-            apply_folding_ranges(stoat, buffer_id, items);
-            true
-        },
-        Poll::Ready(None) => true,
-        Poll::Pending => {
-            stoat.pending_folding_ranges = Some(task);
-            false
-        },
+    if let Some((buffer_id, items)) = outcome {
+        apply_folding_ranges(stoat, buffer_id, items);
     }
+    true
 }
 
 fn apply_folding_ranges(
@@ -10734,7 +10698,7 @@ mod tests {
         // the reply is itself what asks for the next one.
         super::semantic_tokens_trigger(&mut h.stoat);
         assert!(
-            h.stoat.pending_semantic_tokens.is_some(),
+            h.stoat.pending_semantic_tokens.is_pending(),
             "and a fresh request is already out for the moved text",
         );
     }
@@ -10840,7 +10804,7 @@ mod tests {
         h.stoat.last_semantic_tokens_key = None;
         super::semantic_tokens_trigger(&mut h.stoat);
         assert!(
-            h.stoat.pending_semantic_tokens.is_none(),
+            !h.stoat.pending_semantic_tokens.is_pending(),
             "a version-current cache hit spawns no request"
         );
         assert_eq!(lsp_token_count(&mut h), 1, "cached tokens are reinstalled");
@@ -10899,7 +10863,7 @@ mod tests {
         h.stoat.last_semantic_tokens_key = None;
         super::semantic_tokens_trigger(&mut h.stoat);
         assert!(
-            h.stoat.pending_semantic_tokens.is_none(),
+            !h.stoat.pending_semantic_tokens.is_pending(),
             "a version-current cache hit spawns no request"
         );
         assert_eq!(lsp_token_count(&mut h), 1, "cached tokens are reinstalled");

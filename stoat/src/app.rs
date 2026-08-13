@@ -24,6 +24,7 @@ use crate::{
         self, active_modal, debug_assert_modal_exclusivity, modal_predicate, normalize_shift_event,
         resolve_action, ActiveModal, StoatKeymapState,
     },
+    lsp::pending::Pending,
     minimap::emit::{self},
     mouse::{self, mouse_event_kind},
     pane::{DockId, DockVisibility, FocusTarget, NodeId, PaneId, PaneTree, Placement, View},
@@ -856,8 +857,7 @@ pub struct Stoat {
     /// In-flight viewport inlay-hint request, armed by
     /// [`action_handlers::lsp::inlay_hints_trigger`] behind a debounce and
     /// applied by [`action_handlers::lsp::pump_lsp_inlay_hints`].
-    pub(crate) pending_inlay_hint_request:
-        Option<stoat_scheduler::Task<Option<action_handlers::lsp::InlayHintResponse>>>,
+    pub(crate) pending_inlay_hint_request: Pending<Option<action_handlers::lsp::InlayHintResponse>>,
     /// `(buffer, version, first row, last row)` the inlay-hint trigger last
     /// requested for, so an unchanged tick does not re-request.
     pub(crate) last_inlay_hint_key: Option<(BufferId, u64, u32, u32)>,
@@ -865,7 +865,7 @@ pub struct Stoat {
     /// [`action_handlers::lsp::document_highlight_trigger`] behind a debounce
     /// and applied by [`action_handlers::lsp::pump_lsp_document_highlight`].
     pub(crate) pending_document_highlight_request:
-        Option<stoat_scheduler::Task<Option<action_handlers::lsp::DocumentHighlightResponse>>>,
+        Pending<Option<action_handlers::lsp::DocumentHighlightResponse>>,
     /// `(buffer, version, cursor offset)` the document-highlight trigger last
     /// requested for, so an unchanged tick does not re-request.
     pub(crate) last_document_highlight_key: Option<(BufferId, u64, usize)>,
@@ -886,15 +886,14 @@ pub struct Stoat {
     /// [`action_handlers::lsp::semantic_tokens_trigger`] behind a debounce and
     /// applied by [`action_handlers::lsp::pump_lsp_semantic_tokens`].
     pub(crate) pending_semantic_tokens:
-        Option<stoat_scheduler::Task<Option<action_handlers::lsp::SemanticTokensOutcome>>>,
+        Pending<Option<action_handlers::lsp::SemanticTokensOutcome>>,
     /// `(buffer, version)` the semantic-token trigger last requested for, so an
     /// unchanged tick does not re-request.
     pub(crate) last_semantic_tokens_key: Option<(BufferId, u64)>,
     /// In-flight folding-range request for the focused editor, armed by
     /// [`action_handlers::lsp::folding_ranges_trigger`] behind a debounce and
     /// applied by [`action_handlers::lsp::pump_lsp_folding_ranges`].
-    pub(crate) pending_folding_ranges:
-        Option<stoat_scheduler::Task<Option<action_handlers::lsp::FoldingRangesOutcome>>>,
+    pub(crate) pending_folding_ranges: Pending<Option<action_handlers::lsp::FoldingRangesOutcome>>,
     /// `(buffer, version)` the folding-range trigger last requested for, so an
     /// unchanged tick does not re-request.
     pub(crate) last_folding_range_key: Option<(BufferId, u64)>,
@@ -1934,16 +1933,16 @@ impl Stoat {
             hints_cache: None,
             review_footer_cache: None,
             inlay_hints_enabled: false,
-            pending_inlay_hint_request: None,
+            pending_inlay_hint_request: Pending::default(),
             last_inlay_hint_key: None,
-            pending_document_highlight_request: None,
+            pending_document_highlight_request: Pending::default(),
             last_document_highlight_key: None,
             pull_diagnostic_result_ids: std::collections::HashMap::new(),
             pending_pull_diagnostics: std::collections::HashMap::new(),
             last_pull_diagnostic_key: std::collections::HashMap::new(),
-            pending_semantic_tokens: None,
+            pending_semantic_tokens: Pending::default(),
             last_semantic_tokens_key: None,
-            pending_folding_ranges: None,
+            pending_folding_ranges: Pending::default(),
             last_folding_range_key: None,
             render_tick: 0,
             completion_layout: None,
