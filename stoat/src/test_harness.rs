@@ -603,41 +603,7 @@ impl TestHarness {
     pub fn settle(&mut self) {
         loop {
             self.scheduler.run_until_parked();
-            let commits = crate::action_handlers::pump_commits(&mut self.stoat);
-            let commit_picker =
-                crate::action_handlers::review_walk::pump_commit_picker(&mut self.stoat);
-            crate::action_handlers::review_walk::sync_commit_picker(&mut self.stoat);
-            let review = crate::action_handlers::pump_review_scan(&mut self.stoat);
-            let changed_file_jump =
-                crate::action_handlers::movement::pump_changed_file_jump(&mut self.stoat);
-            let lsp = crate::lsp::pump_all(&mut self.stoat);
-            crate::action_handlers::workspace::sync_workspace_picker(&mut self.stoat);
-            crate::action_handlers::code_search::sync_code_search(&mut self.stoat);
-            let code_search_drain = debounce::drain_pending_code_search(&mut self.stoat);
-            let code_search =
-                crate::action_handlers::code_search::pump_code_search(&mut self.stoat);
-            let format_on_save = crate::action_handlers::file::pump_format_on_save(&mut self.stoat);
-            let completion = crate::completion::request::pump(&mut self.stoat);
-            let completion_resolve =
-                crate::action_handlers::completion::pump_completion_resolve(&mut self.stoat);
-            let completion_accept =
-                crate::completion::accept::pump_completion_accept(&mut self.stoat);
-            let external_edits = debounce::drain_pending_external_edits(&mut self.stoat);
-            let git_refresh = debounce::drain_pending_git_refresh(&mut self.stoat);
-            if !commits
-                && !commit_picker
-                && !review
-                && !changed_file_jump
-                && !lsp
-                && !format_on_save
-                && !completion
-                && !completion_resolve
-                && !completion_accept
-                && !external_edits
-                && !git_refresh
-                && !code_search_drain
-                && !code_search
-            {
+            if !self.stoat.drive_pumps() {
                 break;
             }
         }

@@ -3680,16 +3680,34 @@ impl Stoat {
         }
     }
 
-    pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {
+    /// Apply what the outside world pushed at the editor since the last pass,
+    /// and report whether any of it dispatched.
+    ///
+    /// Language servers and the debounce timers both deliver on their own
+    /// schedule, so every entry point that is about to act on editor state
+    /// drains them first. Written once here because a drain enumerated in one
+    /// entry point and not another silently never runs there.
+    ///
+    /// [`debounce::drain_fs_watch_events`] is deliberately absent. It arms the
+    /// per-path debounces rather than dispatching them, so it has nothing to
+    /// report and belongs at the event edge.
+    fn drain_external(&mut self) -> bool {
         self.drain_lsp_notifications();
         self.drain_lsp_incoming_requests();
         self.install_pending_lsp_host();
+
+        let external_edits = debounce::drain_pending_external_edits(self);
+        let git_refresh = debounce::drain_pending_git_refresh(self);
+        let code_search = debounce::drain_pending_code_search(self);
+        let diff_warm_files = debounce::drain_pending_diff_warm_files(self);
+        let index_edits = debounce::drain_pending_index_edits(self);
+
+        external_edits || git_refresh || code_search || diff_warm_files || index_edits
+    }
+
+    pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {
         debounce::drain_fs_watch_events(self);
-        debounce::drain_pending_external_edits(self);
-        debounce::drain_pending_git_refresh(self);
-        debounce::drain_pending_code_search(self);
-        debounce::drain_pending_diff_warm_files(self);
-        debounce::drain_pending_index_edits(self);
+        self.drain_external();
         let effect = match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
@@ -6442,9 +6460,6 @@ impl Stoat {
     /// keeping [`Self::render`] a pure paint. Tests that previously relied on
     /// `render` to drive this call it directly.
     pub(crate) fn drive_background(&mut self) {
-        self.drain_lsp_notifications();
-        self.drain_lsp_incoming_requests();
-        self.install_pending_lsp_host();
         crate::project_env::ensure_loaded(self);
         crate::project_env::install_pending(self);
         self.install_pending_workspace_restore();
@@ -6455,19 +6470,56 @@ impl Stoat {
         action_handlers::sync_file_finder_preview(self);
         self.drive_parse_jobs();
         self.drive_diff_jobs();
-        action_handlers::pump_commits(self);
-        action_handlers::review_walk::pump_commit_picker(self);
+
+        self.drive_pumps();
+    }
+
+    /// Advance every asynchronous request the editor has out, and report
+    /// whether any of them moved.
+    ///
+    /// The run loop reaches this through [`Self::drive_background`], once per
+    /// painted frame. Tests reach it directly and repeat it until it reports
+    /// `false`, which is how a chain that takes several passes to resolve
+    /// settles without the test counting the passes.
+    ///
+    /// This binds each result first and combines them after. A short-circuited
+    /// OR leaves later pumps unpolled, and the fixpoint depends on every pump
+    /// running on every pass.
+    ///
+    /// [`Self::drive_background`] keeps the rest to itself. Loading the project
+    /// environment, warming diffs, and driving parse jobs answer to a frame
+    /// rather than to a request. A fixpoint has no reason to repeat them.
+    pub(crate) fn drive_pumps(&mut self) -> bool {
+        let external = self.drain_external();
+
+        let commits = action_handlers::pump_commits(self);
+        let commit_picker = action_handlers::review_walk::pump_commit_picker(self);
         action_handlers::review_walk::sync_commit_picker(self);
-        action_handlers::pump_review_scan(self);
-        action_handlers::code_search::pump_code_search(self);
+        let review = action_handlers::pump_review_scan(self);
+
+        let code_search = action_handlers::code_search::pump_code_search(self);
         action_handlers::code_search::sync_code_search(self);
-        action_handlers::movement::pump_changed_file_jump(self);
-        crate::lsp::pump_all(self);
+
+        let changed_file_jump = action_handlers::movement::pump_changed_file_jump(self);
+        let lsp = crate::lsp::pump_all(self);
         action_handlers::workspace::sync_workspace_picker(self);
-        action_handlers::file::pump_format_on_save(self);
-        crate::completion::request::pump(self);
-        action_handlers::completion::pump_completion_resolve(self);
-        crate::completion::accept::pump_completion_accept(self);
+
+        let format_on_save = action_handlers::file::pump_format_on_save(self);
+        let completion = crate::completion::request::pump(self);
+        let completion_resolve = action_handlers::completion::pump_completion_resolve(self);
+        let completion_accept = crate::completion::accept::pump_completion_accept(self);
+
+        external
+            || commits
+            || commit_picker
+            || review
+            || code_search
+            || changed_file_jump
+            || lsp
+            || format_on_save
+            || completion
+            || completion_resolve
+            || completion_accept
     }
 
     /// Resolve a `(line, column)` 0-based point to a byte
