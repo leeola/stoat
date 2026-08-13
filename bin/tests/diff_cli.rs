@@ -6,6 +6,10 @@
 //! `stoat/tests/local_git.rs` integration tests rely on -- a real
 //! git2 repo is the only realistic way to exercise `LocalGit`'s
 //! discovery and head-content paths.
+//!
+//! Seeding that repo means writing real files, so the crate's ban on direct
+//! `std::fs` calls is lifted for this test binary.
+#![allow(clippy::disallowed_methods)]
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};

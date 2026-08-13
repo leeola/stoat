@@ -38,6 +38,9 @@ pub fn run(sub: AgentApiCommand) -> Result<(), Whatever> {
     }
 }
 
+// The env read is the blessed boundary. It hands the value straight to
+// resolve_socket_path, which is pure and unit-tested.
+#[allow(clippy::disallowed_methods)]
 fn hook(name: &str, values: &[String], session: Option<&str>) -> Result<(), Whatever> {
     let event = build_event(name, values)?;
     let env_sock = std::env::var("STOAT_AGENT_SOCK").ok();

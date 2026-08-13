@@ -1,3 +1,11 @@
+//! Process entry point for the `stoat` editor.
+//!
+//! This is the syscall boundary the host layer exists to keep out of everything
+//! below it. Logging has to be configured and its directory created before any
+//! host is constructed, so the reads here are the intended implementation
+//! rather than a bypass.
+#![allow(clippy::disallowed_methods)]
+
 use clap::Parser;
 #[cfg(unix)]
 use std::io::IsTerminal;

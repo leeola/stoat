@@ -232,7 +232,10 @@ pub fn log_dir() -> io::Result<PathBuf> {
     Ok(crate::paths::state_dir()?.join("logs"))
 }
 
+// The log writes real files by design, so its tests seed and read them back on
+// disk under a per-test tempdir rather than through a fake.
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use std::io::Read;

@@ -191,6 +191,10 @@ impl WriteError {
 /// Production reads `$TMPDIR` on macOS and `$XDG_RUNTIME_DIR`
 /// elsewhere with a `/tmp` fallback; tests pass an explicit
 /// `socket_dir` to [`run_with_io`].
+// Both variables name a directory, and EnvHost::var yields only UTF-8, so
+// routing them through the host silently drops a path that carries other
+// bytes.
+#[allow(clippy::disallowed_methods)]
 fn runtime_socket_dir() -> PathBuf {
     if cfg!(target_os = "macos") {
         std::env::var_os("TMPDIR")
@@ -303,6 +307,9 @@ fn cached_hunks_via_socket(
     })
 }
 
+// Unlinking a socket the kernel just refused is socket lifecycle, not the user
+// file IO FsHost abstracts, and no host reaches this probe path.
+#[allow(clippy::disallowed_methods)]
 async fn fetch_all_from_socket(
     sock: &Path,
     inputs: &[ReviewFileInput],
@@ -361,6 +368,9 @@ fn discover_sockets(dir: &Path) -> Vec<PathBuf> {
 
 /// Resolve which pager (if any) should consume stdout. `None` means
 /// write directly to stdout.
+// Terminal-detection and pager selection read the process's own console state,
+// which sits beside the env read rather than behind FsHost.
+#[allow(clippy::disallowed_methods)]
 fn select_pager(no_pager_flag: bool) -> Option<Vec<String>> {
     if no_pager_flag {
         return None;

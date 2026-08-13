@@ -408,6 +408,10 @@ fn parse_vscode_themes(sources: Vec<(String, String)>) -> BTreeMap<String, VsCod
 
 /// The user config file's contents, or `None` when it is absent or the config
 /// path cannot be resolved. A read failure other than absence is an error.
+// The terminal owns its config file and holds no FsHost to read it through.
+// The parse and overlay steps this feeds take their text as an argument, so
+// they stay testable without disk.
+#[allow(clippy::disallowed_methods)]
 fn read_user_config() -> Result<Option<String>, ConfigError> {
     let Some(path) = user_config_path() else {
         return Ok(None);

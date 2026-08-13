@@ -1,9 +1,13 @@
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueHint};
 use crossterm::event::{Event, KeyEvent};
 use snafu::{whatever, ResultExt, Whatever};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use stoat::{
-    host::{LocalClipboard, LocalFs, LocalFsWatcher},
+    host::{EnvHost, FsHost, LocalClipboard, LocalEnv, LocalFs, LocalFsWatcher},
     input_parse,
     lsp::hosts,
     Axis, Settings, Stoat,
@@ -226,8 +230,7 @@ fn run_tui(
     let (stoatty_tx, stoatty_rx) = tokio::sync::mpsc::unbounded_channel::<Option<u32>>();
 
     let mouse_capture_policy = stoat::default_mouse_capture_policy();
-    let mouse_captured =
-        stoat::resolve_mouse_captured(mouse_capture_policy, &stoat::host::LocalEnv);
+    let mouse_captured = stoat::resolve_mouse_captured(mouse_capture_policy, &LocalEnv);
 
     // Cloned only when a sequence will be driven. A lingering extra sender
     // would hold the event channel open past a natural shutdown.
@@ -328,12 +331,11 @@ fn run_tui(
     };
 
     rt.block_on(async {
-        let user_config =
-            stoat::user_config_path().and_then(|path| std::fs::read_to_string(path).ok());
+        let user_config = stoat::user_config_path().and_then(|path| read_config(&path));
         let user_themes = stoat::user_themes_dir()
             .map(|dir| vscode_theme::discover(&dir))
             .unwrap_or_default();
-        let env_theme = std::env::var("STOAT_THEME").ok().filter(|s| !s.is_empty());
+        let env_theme = LocalEnv.var("STOAT_THEME").filter(|s| !s.is_empty());
         let mut stoat = Stoat::new_with_user_config(
             executor.clone(),
             cli_settings,
@@ -344,7 +346,7 @@ fn run_tui(
         );
         stoat.set_apc_tx(apc_tx.clone());
         stoat.set_stoatty_rx(stoatty_rx);
-        stoat.set_window_ipc(std::env::var_os("STOATTY_WINDOW_SOCKET").map(PathBuf::from));
+        stoat.set_window_ipc(window_socket_path());
         stoat.set_version_info(VERSION_INFO);
         stoat.set_lsp_auto_spawn(true);
         stoat.set_env_auto_load(true);
@@ -436,6 +438,26 @@ fn run_tui(
         .whatever_context("ui thread")?;
 
     Ok(())
+}
+
+/// The user config file's contents, or `None` when it is absent or holds
+/// bytes that are not UTF-8.
+///
+/// A missing or unreadable config is not an error. The editor starts on its
+/// built-in defaults, which is what a first run does anyway.
+fn read_config(path: &Path) -> Option<String> {
+    let mut bytes = Vec::new();
+    LocalFs.read(path, &mut bytes).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+/// The window-event socket stoatty passes down through `STOATTY_WINDOW_SOCKET`,
+/// or `None` when the editor was not launched by one.
+// The value is a filesystem path, and EnvHost::var yields only UTF-8. Routing
+// this through the host silently drops a path that carries other bytes.
+#[allow(clippy::disallowed_methods)]
+fn window_socket_path() -> Option<PathBuf> {
+    std::env::var_os("STOATTY_WINDOW_SOCKET").map(PathBuf::from)
 }
 
 /// Delay before the first driven key, so the workspace, UI thread, and

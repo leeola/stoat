@@ -12,6 +12,9 @@ use std::{
 /// returning, honoring the `$EDITOR <file>` contract so an owned agent's editor
 /// edits land in the IDE. A connection that closes without a reply (the parent
 /// instance exited) also returns, so the agent's editor is never left hanging.
+// The env read is the blessed boundary. It hands the value straight to
+// resolve_socket_path, which is pure and unit-tested.
+#[allow(clippy::disallowed_methods)]
 pub fn run(file: PathBuf) -> Result<(), Whatever> {
     let socket_path = resolve_socket_path(std::env::var("STOAT_AGENT_SOCK").ok())?;
     let mut stream =

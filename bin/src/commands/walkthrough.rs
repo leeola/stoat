@@ -12,7 +12,10 @@
 
 use clap::{Args, Subcommand};
 use snafu::{whatever, OptionExt, ResultExt, Whatever};
-use std::path::{Path, PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 use stoat::{
     host::{FsHost, LocalFs},
     walkthrough::{
@@ -303,7 +306,7 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
             &file,
             &range,
             title,
-            narration.read()?.unwrap_or_default(),
+            narration.read(fs)?.unwrap_or_default(),
             before.as_deref(),
         ),
 
@@ -324,7 +327,7 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
             file.as_deref(),
             range.as_deref(),
             title_edit(title, no_title),
-            narration.read()?,
+            narration.read(fs)?,
         ),
 
         WalkthroughCommand::RemoveStop {
@@ -412,7 +415,7 @@ impl NarrationArgs {
     ///
     /// `-` reads stdin, which is how a long markdown narration arrives without
     /// becoming one enormous shell argument.
-    fn read(&self) -> Result<Option<String>, Whatever> {
+    fn read(&self, fs: &dyn FsHost) -> Result<Option<String>, Whatever> {
         if let Some(inline) = &self.narration {
             return Ok(Some(inline.clone()));
         }
@@ -421,9 +424,10 @@ impl NarrationArgs {
         };
 
         let text = match path.as_os_str() == "-" {
-            true => std::io::read_to_string(std::io::stdin())
-                .whatever_context("read the narration from stdin")?,
-            false => std::fs::read_to_string(path)
+            true => {
+                io::read_to_string(io::stdin()).whatever_context("read the narration from stdin")?
+            },
+            false => read_file(fs, path)
                 .whatever_context(format!("read the narration from {}", path.display()))?,
         };
         Ok(Some(text))
@@ -860,6 +864,18 @@ fn report(findings: Vec<String>) -> Result<(), Whatever> {
     }
 }
 
+/// The file at `path` as text.
+///
+/// Content that is not UTF-8 comes back as an `InvalidData` io error rather
+/// than lossily, matching how the store reads a walkthrough. A narration that
+/// decodes with replacement characters is not the narration that was written.
+fn read_file(fs: &dyn FsHost, path: &Path) -> io::Result<String> {
+    let mut bytes = Vec::new();
+    fs.read(path, &mut bytes)?;
+    String::from_utf8(bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.utf8_error()))
+}
+
 /// The location `range` of `file` names, with the bytes it covers right now.
 fn capture(fs: &dyn FsHost, root: &Path, file: &Path, range: &str) -> Result<Location, Whatever> {
     capture_resolved(fs, root, file, parse_range(range)?)
@@ -975,7 +991,11 @@ fn relative_path(root: &Path, slug: &str) -> String {
         .to_string()
 }
 
+// These commands capture snippets out of real files and canonicalize paths
+// against a real workspace, so the tests build a source tree in a per-test
+// tempdir and run LocalFs over it.
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::{
         add_annotation, add_stop, check, delete, edit_annotation, edit_stop, list, move_stop, new,

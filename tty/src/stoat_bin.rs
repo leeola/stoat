@@ -14,6 +14,9 @@ use std::{ffi::OsString, path::PathBuf};
 /// the `stoat_program` config override, then the `stoat` binary beside the
 /// running stoatty executable, and finally the bare name `stoat` resolved via
 /// PATH at spawn.
+// The env and exe reads are the blessed boundary. They hand their values to
+// resolve_with, which applies the precedence and is unit-tested.
+#[allow(clippy::disallowed_methods)]
 pub fn resolve(config: &Config) -> PathBuf {
     resolve_with(std::env::var_os("STOAT_BIN"), config, sibling_stoat())
 }

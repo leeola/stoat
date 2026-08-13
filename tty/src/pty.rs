@@ -279,6 +279,9 @@ const MULTIPLEXER_ENV_VARS: [&str; 5] = [
 /// control this window. A real multiplexer launched inside stoatty re-sets
 /// these for its own children, so in-stoatty-mux detection still stands down as
 /// intended.
+// PATH is inherited to be extended, not consulted, and EnvHost::var yields only
+// UTF-8, which a PATH is not required to be. prepend_path holds the pure part.
+#[allow(clippy::disallowed_methods)]
 fn configure_child_env(
     command: &mut CommandBuilder,
     stoat_dir: Option<&Path>,
@@ -578,6 +581,9 @@ fn wait_exit_status(
 ///
 /// Used for the `--terminal` opt-out, which runs the login shell instead of the
 /// stoat editor.
+// The env read is the blessed boundary. It hands the value to shell_or_default,
+// which applies the precedence and is unit-tested.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn default_shell() -> String {
     shell_or_default(std::env::var("SHELL").ok(), passwd_shell())
 }

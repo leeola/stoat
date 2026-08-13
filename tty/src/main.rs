@@ -1,6 +1,11 @@
 //! Binary entry point for the `stoatty` terminal: parses argv, opens a window
 //! running the requested command (or the user's shell), and drives the event
 //! loop until the window closes.
+//!
+//! This is the process's syscall boundary. Logging is configured and its
+//! directory created before anything else runs, so the environment and
+//! filesystem reads here are the intended implementation.
+#![allow(clippy::disallowed_methods)]
 
 use clap::{CommandFactory, Parser};
 use std::{backtrace::Backtrace, panic, sync::Once};

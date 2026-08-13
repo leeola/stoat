@@ -2728,7 +2728,10 @@ fn window_socket_path(dir: &Path, pid: u32) -> PathBuf {
 
 /// Bind the per-pid window-event socket under the log directory and spawn the
 /// thread forwarding queued events to the connected child.
+// Creating the log directory and clearing a stale socket are socket lifecycle,
+// and the terminal holds no FsHost to route them through.
 #[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
 fn bind_window_socket() -> io::Result<(PathBuf, Sender<String>, Arc<AtomicBool>)> {
     let dir = stoat_log::log_dir()?;
     std::fs::create_dir_all(&dir)?;
