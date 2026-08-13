@@ -6,7 +6,7 @@
 
 use crate::completion::{CompletionContext, CompletionItem, CompletionSource};
 use std::collections::BTreeSet;
-use stoat_text::Rope;
+use stoat_text::{char_is_word, Rope};
 
 /// Unique matches one fetch keeps before it stops walking the buffer.
 ///
@@ -38,7 +38,7 @@ pub fn fetch(ctx: &CompletionContext<'_>, rope: &Rope) -> Vec<CompletionItem> {
     let mut current: String = String::new();
 
     for ch in rope.chars() {
-        if is_word_char(ch) {
+        if char_is_word(ch) {
             current.push(ch);
         } else if !current.is_empty() {
             collect(&mut current, ctx.prefix, &mut seen);
@@ -76,10 +76,6 @@ fn collect(current: &mut String, prefix: &str, seen: &mut BTreeSet<String>) {
         seen.insert(current.clone());
     }
     current.clear();
-}
-
-fn is_word_char(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_'
 }
 
 #[cfg(test)]

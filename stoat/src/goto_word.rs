@@ -8,7 +8,7 @@
 //! [`crate::render`].
 
 use std::collections::BTreeMap;
-use stoat_text::Rope;
+use stoat_text::{char_is_word, Rope};
 
 /// Label alphabet, lowercase only. 26 letters yields 676 two-char
 /// labels which is more than enough for any practical viewport.
@@ -54,9 +54,9 @@ fn scan_line_word_starts(line: &str, row_offset: usize, max: usize, out: &mut Ve
     let mut chars = line.char_indices().peekable();
     let mut prev_was_word = false;
     while let Some((byte_idx, ch)) = chars.next() {
-        let is_word = is_word_char(ch);
+        let is_word = char_is_word(ch);
         if is_word && !prev_was_word {
-            let next_is_word = chars.peek().is_some_and(|&(_, c)| is_word_char(c));
+            let next_is_word = chars.peek().is_some_and(|&(_, c)| char_is_word(c));
             if next_is_word {
                 out.push(row_offset + byte_idx);
                 if out.len() >= max {
@@ -66,10 +66,6 @@ fn scan_line_word_starts(line: &str, row_offset: usize, max: usize, out: &mut Ve
         }
         prev_was_word = is_word;
     }
-}
-
-fn is_word_char(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_'
 }
 
 /// Assign labels to `targets`. When `targets.len() <= alphabet.len()`,

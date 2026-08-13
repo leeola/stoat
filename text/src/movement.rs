@@ -41,7 +41,9 @@ fn char_is_line_ending(ch: char) -> bool {
     matches!(ch, '\n' | '\r')
 }
 
-fn char_is_word(ch: char) -> bool {
+/// Whether `ch` belongs to a word for the short-word motions and the word
+/// completer, which is any alphanumeric plus the underscore.
+pub fn char_is_word(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
 
