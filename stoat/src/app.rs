@@ -1363,7 +1363,7 @@ pub struct Stoat {
     /// intercept in [`Self::handle_key`]): Escape and Ctrl-c are consumed by the
     /// close, every other key closes it and then dispatches. Any non-Hover action
     /// also clears it, so the popup vanishes on cursor motion.
-    pub(crate) pending_hover: Option<action_handlers::lsp::HoverPopup>,
+    pub(crate) pending_hover: Option<crate::render::hover::HoverPopup>,
 
     /// In-flight `textDocument/signatureHelp` request, armed by
     /// [`crate::lsp::signature_help::signature_help_trigger`] on a trigger
@@ -10727,7 +10727,7 @@ mod tests {
     /// Lay out a hover of `num_lines` lines each `line_width` wide in a
     /// `width` x `height` window, returning the popup and inner rects.
     fn hover_layout(width: u16, height: u16, num_lines: usize, line_width: usize) -> (Rect, Rect) {
-        use crate::{action_handlers::lsp::HoverPopup, test_harness::TestHarness};
+        use crate::{render::hover::HoverPopup, test_harness::TestHarness};
         use ratatui::style::Style;
 
         let mut h = TestHarness::with_size(width, height);
@@ -10773,9 +10773,9 @@ mod tests {
     fn hover_sel_popup(
         lines: &[&str],
         scroll_half_pages: usize,
-    ) -> action_handlers::lsp::HoverPopup {
+    ) -> crate::render::hover::HoverPopup {
         use ratatui::style::Style;
-        let mut popup = action_handlers::lsp::HoverPopup::new(
+        let mut popup = crate::render::hover::HoverPopup::new(
             lines
                 .iter()
                 .map(|l| vec![(l.to_string(), Style::default())])
@@ -10828,7 +10828,7 @@ mod tests {
 
     #[test]
     fn unplaceable_hover_popup_stops_consuming_mouse_input() {
-        use crate::action_handlers::lsp::HoverPopup;
+        use crate::render::hover::HoverPopup;
         use ratatui::style::Style;
 
         let mut h = Stoat::test();
@@ -10911,7 +10911,7 @@ mod tests {
 
     #[test]
     fn hover_hit_test_inverts_the_stoatty_scale() {
-        use crate::action_handlers::lsp::HoverPopup;
+        use crate::render::hover::HoverPopup;
         use ratatui::style::Style;
 
         let mut popup = HoverPopup::new(
@@ -10935,7 +10935,7 @@ mod tests {
     #[test]
     fn hover_grid_highlight_paints_the_selection_bg() {
         use crate::{
-            action_handlers::lsp::{HoverPopup, HoverSelection},
+            render::hover::{HoverPopup, HoverSelection},
             test_harness::TestHarness,
         };
         use ratatui::style::Style;
@@ -10988,7 +10988,7 @@ mod tests {
 
     #[test]
     fn hover_y_yanks_the_live_selection() {
-        use crate::{action_handlers::lsp::HoverSelection, register::Register};
+        use crate::{register::Register, render::hover::HoverSelection};
 
         let mut h = Stoat::test();
         let _ = open_scratch_file(&mut h, "x\n");

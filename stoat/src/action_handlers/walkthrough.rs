@@ -1,7 +1,8 @@
 use crate::{
-    action_handlers::{self, lsp::HoverPopup, read_string_via_host},
+    action_handlers::{self, read_string_via_host},
     app::{Stoat, UpdateEffect},
     code_index::{build, nav},
+    render::hover::HoverPopup,
     walkthrough::{self, run::WalkthroughRun, store},
 };
 use codegraph::{EdgeKind, SymbolKey};

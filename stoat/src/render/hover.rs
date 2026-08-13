@@ -1,8 +1,5 @@
 use super::TEXT_SCALE_POPUP;
-use crate::{
-    action_handlers::lsp::{HoverPopup, HoverSelection},
-    app::Stoat,
-};
+use crate::{app::Stoat, editor_state::EditorId};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -13,6 +10,85 @@ use stoatty_widgets::{
     text_run::{self, TextRun},
     ApcScene,
 };
+
+/// A live text selection over the hover popup body.
+///
+/// Endpoints are `(content line, char column)` into [`HoverPopup::lines`], so
+/// tuple ordering sorts them into a range. `dragging` is true between the mouse
+/// down and its release, so a drag past the popup rect keeps extending the head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HoverSelection {
+    pub(crate) anchor: (usize, usize),
+    pub(crate) head: (usize, usize),
+    pub(crate) dragging: bool,
+}
+
+/// Hover popup state ready to paint. Mirrors [`HoverResponse`] but
+/// lives on [`Stoat::pending_hover`] (separate from the in-flight
+/// task slot) so the renderer can borrow it without polling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HoverPopup {
+    /// Rendered content, one line per entry, each a list of styled spans.
+    pub(crate) lines: Vec<Vec<(String, Style)>>,
+    pub(crate) anchor_offset: usize,
+    /// The editor that requested this hover. Set from the response's
+    /// [`HoverResponse::editor_id`] once focus is confirmed unchanged.
+    pub(crate) editor_id: EditorId,
+    /// Half-page scroll offset applied by [`render_hover`],
+    /// advanced by Ctrl-d/Ctrl-u while the popup is open. Clamped to the content
+    /// height at render, so an over-scroll past the bottom does not accumulate.
+    pub(crate) scroll_half_pages: usize,
+    /// Screen rect the popup last painted over, stamped by
+    /// [`render_hover`]. The mouse handler hit-tests it so
+    /// a wheel over the popup scrolls it rather than the pane beneath. Empty
+    /// ([`Rect::default`]) until the first render.
+    pub(crate) area: Rect,
+    /// Interior rect (inside the border) the body last painted over, stamped by
+    /// [`render_hover`]. The selection hit-test maps a
+    /// pointer through this. Empty until the first render.
+    pub(crate) inner: Rect,
+    /// The live mouse selection over the body, if any.
+    pub(crate) selection: Option<HoverSelection>,
+    /// Content-version stamp for the hover pool, from the shared generation
+    /// counter, set once at construction. A popup's body is immutable once
+    /// built, so a new hover gets a new stamp and the per-frame version is O(1)
+    /// instead of a walk of every line's text.
+    pub(crate) generation: u64,
+    /// Characters in the widest of [`Self::lines`], measured at construction on
+    /// the same immutability the generation stamp relies on.
+    ///
+    /// The popup's box is sized from this every frame, twice, and measuring it
+    /// there would walk every span of every line for a body that cannot have
+    /// changed since the last frame asked.
+    pub(crate) max_line_width: usize,
+}
+
+impl HoverPopup {
+    /// Build a popup around `lines`, measuring them and claiming a generation
+    /// stamp before anything paints.
+    ///
+    /// The measurement is why this exists rather than a struct literal.
+    /// [`Self::max_line_width`] has to agree with [`Self::lines`], and a caller
+    /// free to set both can silently disagree, which mis-sizes the box without
+    /// failing anything. The fields a render stamps later start empty.
+    pub(crate) fn new(
+        lines: Vec<Vec<(String, Style)>>,
+        anchor_offset: usize,
+        editor_id: EditorId,
+    ) -> Self {
+        Self {
+            max_line_width: lines.iter().map(|line| line_width(line)).max().unwrap_or(0),
+            lines,
+            anchor_offset,
+            editor_id,
+            scroll_half_pages: 0,
+            area: Rect::default(),
+            inner: Rect::default(),
+            selection: None,
+            generation: crate::picker::next_generation(),
+        }
+    }
+}
 
 /// Rows that must remain below the cursor for the popup to open there. With
 /// fewer, placement flips above the cursor. Matches Helix's popup bias

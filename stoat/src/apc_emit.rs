@@ -2033,7 +2033,7 @@ mod tests {
 
     #[test]
     fn emit_smooth_scroll_pools_the_hover_and_retires_it_on_close() {
-        use crate::action_handlers::lsp::HoverPopup;
+        use crate::render::hover::HoverPopup;
         use ratatui::style::Style;
         use stoatty_protocol::command::Command;
 
@@ -2080,7 +2080,7 @@ mod tests {
 
     #[test]
     fn a_live_hover_selection_retires_the_pool() {
-        use crate::action_handlers::lsp::{HoverPopup, HoverSelection};
+        use crate::render::hover::{HoverPopup, HoverSelection};
         use ratatui::style::Style;
         use stoatty_protocol::command::Command;
 

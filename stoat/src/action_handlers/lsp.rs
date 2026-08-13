@@ -17,7 +17,6 @@ use crate::{
     host::{LanguageServerFeature, LspHost, OffsetEncoding},
     location_picker::{LocationEntry, LocationPicker},
     lsp::stamp::DocumentStamp,
-    render::hover,
     symbol_finder::{SymbolFinder, SymbolFinderEntry, SymbolFinderScope, SymbolTarget},
 };
 pub(crate) use lsp_types::Uri;
@@ -30,7 +29,7 @@ use lsp_types::{
     TextDocumentPositionParams, TextEdit, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol,
     WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
-use ratatui::{layout::Rect, style::Style};
+use ratatui::style::Style;
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
@@ -584,89 +583,6 @@ pub(crate) enum HoverOutcome {
     Failed,
 }
 
-/// A live text selection over the hover popup body.
-///
-/// Endpoints are `(content line, char column)` into [`HoverPopup::lines`], so
-/// tuple ordering sorts them into a range. `dragging` is true between the mouse
-/// down and its release, so a drag past the popup rect keeps extending the head.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HoverSelection {
-    pub(crate) anchor: (usize, usize),
-    pub(crate) head: (usize, usize),
-    pub(crate) dragging: bool,
-}
-
-/// Hover popup state ready to paint. Mirrors [`HoverResponse`] but
-/// lives on [`Stoat::pending_hover`] (separate from the in-flight
-/// task slot) so the renderer can borrow it without polling.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HoverPopup {
-    /// Rendered content, one line per entry, each a list of styled spans.
-    pub(crate) lines: Vec<Vec<(String, Style)>>,
-    pub(crate) anchor_offset: usize,
-    /// The editor that requested this hover. Set from the response's
-    /// [`HoverResponse::editor_id`] once focus is confirmed unchanged.
-    pub(crate) editor_id: EditorId,
-    /// Half-page scroll offset applied by [`crate::render::hover::render_hover`],
-    /// advanced by Ctrl-d/Ctrl-u while the popup is open. Clamped to the content
-    /// height at render, so an over-scroll past the bottom does not accumulate.
-    pub(crate) scroll_half_pages: usize,
-    /// Screen rect the popup last painted over, stamped by
-    /// [`crate::render::hover::render_hover`]. The mouse handler hit-tests it so
-    /// a wheel over the popup scrolls it rather than the pane beneath. Empty
-    /// ([`Rect::default`]) until the first render.
-    pub(crate) area: Rect,
-    /// Interior rect (inside the border) the body last painted over, stamped by
-    /// [`crate::render::hover::render_hover`]. The selection hit-test maps a
-    /// pointer through this. Empty until the first render.
-    pub(crate) inner: Rect,
-    /// The live mouse selection over the body, if any.
-    pub(crate) selection: Option<HoverSelection>,
-    /// Content-version stamp for the hover pool, from the shared generation
-    /// counter, set once at construction. A popup's body is immutable once
-    /// built, so a new hover gets a new stamp and the per-frame version is O(1)
-    /// instead of a walk of every line's text.
-    pub(crate) generation: u64,
-    /// Characters in the widest of [`Self::lines`], measured at construction on
-    /// the same immutability the generation stamp relies on.
-    ///
-    /// The popup's box is sized from this every frame, twice, and measuring it
-    /// there would walk every span of every line for a body that cannot have
-    /// changed since the last frame asked.
-    pub(crate) max_line_width: usize,
-}
-
-impl HoverPopup {
-    /// Build a popup around `lines`, measuring them and claiming a generation
-    /// stamp before anything paints.
-    ///
-    /// The measurement is why this exists rather than a struct literal.
-    /// [`Self::max_line_width`] has to agree with [`Self::lines`], and a caller
-    /// free to set both can silently disagree, which mis-sizes the box without
-    /// failing anything. The fields a render stamps later start empty.
-    pub(crate) fn new(
-        lines: Vec<Vec<(String, Style)>>,
-        anchor_offset: usize,
-        editor_id: EditorId,
-    ) -> Self {
-        Self {
-            max_line_width: lines
-                .iter()
-                .map(|line| hover::line_width(line))
-                .max()
-                .unwrap_or(0),
-            lines,
-            anchor_offset,
-            editor_id,
-            scroll_half_pages: 0,
-            area: Rect::default(),
-            inner: Rect::default(),
-            selection: None,
-            generation: crate::picker::next_generation(),
-        }
-    }
-}
-
 /// Issue a `textDocument/hover` request for the symbol under the
 /// focused editor's primary cursor. The async response is stored on
 /// [`Stoat::pending_hover_request`] and applied by [`pump_lsp_hover`]
@@ -881,7 +797,7 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
                     &stoat.language_registry,
                 )
             };
-            stoat.pending_hover = Some(HoverPopup::new(
+            stoat.pending_hover = Some(crate::render::hover::HoverPopup::new(
                 lines,
                 response.anchor_offset,
                 response.editor_id,
@@ -2661,8 +2577,10 @@ mod tests {
     /// or one span per line all give a plausible wrong answer.
     #[test]
     fn a_popup_stores_the_width_measuring_its_lines_would_find() {
-        use super::HoverPopup;
-        use crate::{editor_state::EditorId, render::hover};
+        use crate::{
+            editor_state::EditorId,
+            render::{hover, hover::HoverPopup},
+        };
 
         let span = |text: &str| (text.to_string(), Style::default());
         let lines = vec![

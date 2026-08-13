@@ -653,7 +653,7 @@ fn handle_hover_selection_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<
                 mouse.row,
             );
             if let Some(popup) = stoat.pending_hover.as_mut() {
-                popup.selection = Some(action_handlers::lsp::HoverSelection {
+                popup.selection = Some(crate::render::hover::HoverSelection {
                     anchor: pos,
                     head: pos,
                     dragging: true,
@@ -1515,7 +1515,7 @@ mod tests {
 
     #[test]
     fn hover_popup_overflows_across_a_vertical_split() {
-        use crate::{action_handlers::lsp::HoverPopup, test_harness::TestHarness};
+        use crate::{render::hover::HoverPopup, test_harness::TestHarness};
         use ratatui::style::Style;
 
         let mut h = TestHarness::with_size(80, 24);
@@ -1613,7 +1613,7 @@ mod tests {
 
     #[test]
     fn hover_popup_overflows_into_the_pane_below() {
-        use crate::{action_handlers::lsp::HoverPopup, test_harness::TestHarness};
+        use crate::{render::hover::HoverPopup, test_harness::TestHarness};
         use ratatui::style::Style;
 
         let mut h = TestHarness::with_size(40, 24);
@@ -1872,7 +1872,7 @@ mod tests {
 
     #[test]
     fn mouse_focus_change_closes_the_hover_popup() {
-        use crate::action_handlers::lsp::HoverPopup;
+        use crate::render::hover::HoverPopup;
         use ratatui::style::Style;
 
         let mut h = Stoat::test();
