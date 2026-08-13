@@ -4,7 +4,7 @@ pub(crate) mod registry;
 
 use crate::{
     agent_status::AgentStatus,
-    app::{parse_buffer_step, ParseJobOutput, INDEX_EDIT_DEBOUNCE},
+    app::INDEX_EDIT_DEBOUNCE,
     badge::BadgeTray,
     buffer::{BufferId, SharedBuffer},
     buffer_registry::{self, BufferRegistry},
@@ -27,6 +27,7 @@ use crate::{
     review::ReviewFileInput,
     review_session::ReviewSession,
     run::{RunId, RunState},
+    syntax_parse::{parse_buffer_step, ParseJobOutput},
     term_session::{TermId, TermReturnFocus, TermSession},
 };
 use codegraph::{CodeGraph, FileId};

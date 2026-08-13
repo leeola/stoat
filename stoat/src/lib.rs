@@ -64,6 +64,7 @@ pub mod run;
 mod selection;
 mod smooth_scroll;
 pub(crate) mod symbol_finder;
+pub(crate) mod syntax_parse;
 pub mod term_screen;
 pub mod term_session;
 pub mod theme;
