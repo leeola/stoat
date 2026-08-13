@@ -226,6 +226,12 @@ pub(crate) fn max_scroll_offset(editor: &mut EditorState) -> f32 {
 /// fast. A wheel glide eases slower, so a stream of reports overlaps into
 /// continuous motion. Within `EPSILON` of the target it snaps exactly onto it
 /// and reports settled, so the caller can stop ticking.
+///
+/// The step never falls under `MIN_STEP`, which turns the exponential tail into
+/// a constant-velocity lock-in that lands exactly on the target. Left
+/// asymptotic, the last fraction of a row moves under a pixel per frame for many
+/// frames, and the renderer quantizes that to whole pixels, so the stop reads as
+/// an irregular train of one-pixel steps rather than an arrival.
 pub(crate) fn step_scroll_ease(
     offset: f32,
     target: f32,
@@ -234,14 +240,26 @@ pub(crate) fn step_scroll_ease(
 ) -> (f32, bool) {
     const NOMINAL_DT: f32 = 0.008;
     const EPSILON: f32 = 0.01;
+    // Rows per NOMINAL_DT, so 9.4 rows per second. Under the velocity at which a
+    // wheel glide re-homes the cursor mid-flight, which keeps that re-home firing
+    // through the lock-in instead of the floor carrying the glide past it.
+    const MIN_STEP: f32 = 0.075;
 
-    let kept = (1.0 - ease_per_nominal).powf(dt / NOMINAL_DT);
-    let next = target - (target - offset) * kept;
-    if (target - next).abs() < EPSILON {
-        (target, true)
-    } else {
-        (next, false)
+    let remaining = target - offset;
+    if remaining.abs() < EPSILON {
+        return (target, true);
     }
+
+    let frames = dt / NOMINAL_DT;
+    let kept = (1.0 - ease_per_nominal).powf(frames);
+    let step = (remaining.abs() * (1.0 - kept)).max(MIN_STEP * frames);
+
+    // Landing on `target` itself rather than adding the capped step, which in
+    // f32 arrives a hair to one side of it.
+    if step >= remaining.abs() {
+        return (target, true);
+    }
+    (offset + step.copysign(remaining), false)
 }
 
 pub(super) fn align_view(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
@@ -1090,6 +1108,54 @@ mod tests {
             (one_step - two_steps).abs() < 0.01,
             "one 16ms ease {one_step} should equal two 8ms eases {two_steps}"
         );
+    }
+
+    /// An unfloored exponential tail moves under a pixel per frame for many
+    /// frames, and the renderer quantizes that to whole pixels, so the stop
+    /// paints as an irregular train of one-pixel steps.
+    #[test]
+    fn ease_floors_its_tail_step_and_lands_exactly() {
+        // Mirrors step_scroll_ease's own MIN_STEP, in rows per NOMINAL_DT.
+        const MIN_STEP: f32 = 0.075;
+        const NOMINAL_DT: f32 = 0.008;
+        const WHEEL_EASE: f32 = 0.13;
+
+        // From twice the floor out the geometric step is the smaller of the two,
+        // so the floor is what advances the offset.
+        let (next, done) = step_scroll_ease(0.0, MIN_STEP * 2.0, NOMINAL_DT, WHEEL_EASE);
+        assert!(
+            (next - MIN_STEP).abs() < 1e-5,
+            "the tail advances by the floor, not by {next}",
+        );
+        assert!(!done, "and is still easing");
+
+        // The floor is a velocity, so a frame twice as long carries twice as far.
+        let (next, _) = step_scroll_ease(0.0, MIN_STEP * 4.0, NOMINAL_DT * 2.0, WHEEL_EASE);
+        assert!(
+            (next - MIN_STEP * 2.0).abs() < 1e-5,
+            "the floor scales with the frame time, giving {next}",
+        );
+
+        // Walking a whole tail keeps every step at the floor and lands on the
+        // target rather than approaching it asymptotically.
+        let target = 0.6_f32;
+        let mut offset = 0.0_f32;
+        let mut settled = false;
+        for _ in 0..100 {
+            let (next, done) = step_scroll_ease(offset, target, NOMINAL_DT, WHEEL_EASE);
+            assert!(
+                done || next - offset >= MIN_STEP - 1e-5,
+                "step of {} fell under the floor",
+                next - offset,
+            );
+            offset = next;
+            if done {
+                settled = true;
+                break;
+            }
+        }
+        assert!(settled, "the tail settles");
+        assert_eq!(offset, target, "exactly on the target");
     }
 
     fn harness_with_long_buffer() -> TestHarness {
