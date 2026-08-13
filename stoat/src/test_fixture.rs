@@ -18,7 +18,7 @@ use crate::{
     test_harness::TestHarness,
 };
 use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
-use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, SymbolInformation, SymbolKind};
 use ratatui::layout::Rect;
 use std::path::PathBuf;
 use stoat_action::OpenFile;
@@ -202,4 +202,54 @@ pub(crate) fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Event 
         row,
         modifiers: KeyModifiers::NONE,
     })
+}
+
+/// Advertise document symbols on the fake server, for a test whose subject is
+/// what the symbol picker or finder does with them.
+pub(crate) fn enable_document_symbols(h: &TestHarness) {
+    use lsp_types::{OneOf, ServerCapabilities};
+    h.fake_lsp().set_capabilities(ServerCapabilities {
+        document_symbol_provider: Some(OneOf::Left(true)),
+        ..Default::default()
+    });
+}
+
+/// [`enable_document_symbols`] with hover as well, for the finder tests that
+/// read a symbol's documentation beside it.
+pub(crate) fn enable_document_symbols_and_hover(h: &TestHarness) {
+    use lsp_types::{HoverProviderCapability, OneOf, ServerCapabilities};
+    h.fake_lsp().set_capabilities(ServerCapabilities {
+        document_symbol_provider: Some(OneOf::Left(true)),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        ..Default::default()
+    });
+}
+
+/// Advertise workspace symbols on the fake server, for a test whose subject is
+/// the workspace-scope finder.
+pub(crate) fn enable_workspace_symbols(h: &TestHarness) {
+    use lsp_types::{OneOf, ServerCapabilities};
+    h.fake_lsp().set_capabilities(ServerCapabilities {
+        workspace_symbol_provider: Some(OneOf::Left(true)),
+        ..Default::default()
+    });
+}
+
+/// A one-character function symbol at `(line, col)` in `file`, in the flat
+/// shape a server that reports no nesting sends.
+pub(crate) fn flat_symbol(name: &str, file: &str, line: u32, col: u32) -> SymbolInformation {
+    use lsp_types::{Location, Uri};
+    use std::str::FromStr;
+    #[allow(deprecated)]
+    SymbolInformation {
+        name: name.to_string(),
+        kind: SymbolKind::FUNCTION,
+        tags: None,
+        deprecated: None,
+        location: Location {
+            uri: Uri::from_str(&format!("file://{file}")).expect("uri"),
+            range: Range::new(Position::new(line, col), Position::new(line, col + 1)),
+        },
+        container_name: None,
+    }
 }

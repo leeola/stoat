@@ -1426,7 +1426,7 @@ pub struct Stoat {
 
     /// Selectable code-graph navigation picker waiting for the user to
     /// choose a symbol to jump to (number keys 1-9) or cancel.
-    pub(crate) pending_symbol_picker: Option<action_handlers::lsp::SymbolPicker>,
+    pub(crate) pending_symbol_picker: Option<crate::symbol_finder::SymbolPicker>,
 
     /// In-flight `workspace/symbol` request for the [`Self::symbol_finder`]
     /// modal's workspace scope, re-issued as the query changes. Polled by

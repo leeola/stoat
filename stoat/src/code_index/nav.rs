@@ -6,12 +6,12 @@
 
 use crate::{
     action_handlers,
-    action_handlers::lsp::{SymbolEntry, SymbolPicker},
     app::{Stoat, UpdateEffect},
     badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
     code_index::build,
     editor_state::EditorState,
     nav_list::NavList,
+    symbol_finder::{SymbolEntry, SymbolPicker},
     workspace::Workspace,
 };
 use codegraph::{Dir, EdgeKind, SymbolKey};

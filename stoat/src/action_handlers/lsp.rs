@@ -18,22 +18,19 @@ use crate::{
     host::{LanguageServerFeature, LspHost, OffsetEncoding},
     location_picker::{LocationEntry, LocationPicker},
     lsp::stamp::DocumentStamp,
-    picker::PreviewSource,
     render::hover,
     symbol_finder::{SymbolFinder, SymbolFinderEntry, SymbolFinderScope, SymbolTarget},
     workspace::WorkspaceUid,
 };
-use codegraph::SymbolKey;
 pub(crate) use lsp_types::Uri;
 use lsp_types::{
     CodeActionContext, CodeActionOrCommand, CodeActionParams, DocumentFormattingParams,
-    DocumentRangeFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-    GotoDefinitionParams, GotoDefinitionResponse, HoverContents, HoverParams, InlayHint,
-    InlayHintLabel, InlayHintParams, MarkedString, MarkupKind, OneOf, Position,
-    PrepareRenameResponse, Range, ReferenceContext, ReferenceParams, RenameParams,
-    SymbolInformation, SymbolKind, TextDocumentIdentifier, TextDocumentPositionParams, TextEdit,
-    WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    DocumentRangeFormattingParams, DocumentSymbolParams, GotoDefinitionParams,
+    GotoDefinitionResponse, HoverContents, HoverParams, InlayHint, InlayHintLabel, InlayHintParams,
+    MarkedString, MarkupKind, OneOf, Position, PrepareRenameResponse, Range, ReferenceContext,
+    ReferenceParams, RenameParams, SymbolInformation, SymbolKind, TextDocumentIdentifier,
+    TextDocumentPositionParams, TextEdit, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use ratatui::{layout::Rect, style::Style};
 use serde_json::{json, Value};
@@ -1930,31 +1927,6 @@ pub(crate) fn pump_lsp_rename(stoat: &mut Stoat) -> bool {
     true
 }
 
-/// One entry in the graph-navigation [`SymbolPicker`]. `title` is the symbol
-/// name as painted in the popup and `symbol` the graph node the entry jumps to
-/// on selection.
-#[derive(Debug, Clone)]
-pub(crate) struct SymbolEntry {
-    pub(crate) title: String,
-    pub(crate) symbol: SymbolKey,
-}
-
-/// Cursor-anchored graph-navigation picker. Painted as a numbered
-/// popup over a viewport of up to 9 visible entries that follows
-/// [`Self::selected_idx`]. The user navigates with `j`/`k`, picks
-/// the selected entry with Enter, picks visible entries 1..=9 with
-/// the corresponding digit keys, and dismisses with Escape or any
-/// other action.
-///
-/// Document symbols use the [`crate::symbol_finder::SymbolFinder`] modal
-/// instead. Only code-graph navigation still populates this popup.
-#[derive(Debug, Clone)]
-pub(crate) struct SymbolPicker {
-    pub(crate) entries: Vec<SymbolEntry>,
-    pub(crate) anchor_offset: usize,
-    pub(crate) selected_idx: usize,
-}
-
 /// Issue a `textDocument/documentSymbol` request for the focused
 /// buffer. The async response is stored on
 /// [`Stoat::pending_symbol_picker_request`] and applied by
@@ -2009,9 +1981,9 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         let mut entries = Vec::new();
         for (encoding, result) in responses {
             match result {
-                Ok(Some(response)) => {
-                    entries.extend(symbol_picker_entries(&rope, encoding, response))
-                },
+                Ok(Some(response)) => entries.extend(crate::symbol_finder::symbol_picker_entries(
+                    &rope, encoding, response,
+                )),
                 Ok(None) => {},
                 Err(err) => {
                     tracing::warn!(target: "stoat::lsp", ?err, "document_symbol request failed")
@@ -2110,7 +2082,7 @@ pub(crate) fn sync_symbol_finder(stoat: &mut Stoat) {
         finder.refilter(&query);
     }
 
-    sync_symbol_finder_preview(stoat);
+    crate::symbol_finder::sync_symbol_finder_preview(stoat);
     sync_symbol_finder_doc(stoat);
 }
 
@@ -2230,264 +2202,6 @@ pub(crate) fn pump_symbol_finder_doc(stoat: &mut Stoat) -> bool {
             finder.pending_doc = Some(task);
             false
         },
-    }
-}
-
-/// Sync the finder's preview pane to the selected entry.
-///
-/// Loads the entry's source (the focused buffer for document scope, the target
-/// file or its live buffer for workspace scope), scrolls it so the symbol line
-/// sits a third down the pane, and lands the preview cursor at the symbol offset
-/// so the target line is markable. Clears the pane when nothing is selected.
-///
-/// Runs once per ranking, selection, and pane height. The per-frame sync above
-/// would otherwise redo all of it every frame the modal stays open.
-fn sync_symbol_finder_preview(stoat: &mut Stoat) {
-    let Some((buffer_id, rows, entry)) = stoat.symbol_finder.as_mut().and_then(|finder| {
-        let rows = finder.preview_rows.unwrap_or(24);
-        finder.preview_needs_sync(rows).then(|| {
-            (
-                finder.buffer_id,
-                rows,
-                finder.selected_entry().map(|e| (e.line, e.target.clone())),
-            )
-        })
-    }) else {
-        return;
-    };
-
-    let idx = stoat.active_workspace;
-    let fs_host = &*stoat.fs_host;
-    let language_registry = &stoat.language_registry;
-    let ws = &mut stoat.workspaces[idx];
-    let Some(finder) = stoat.symbol_finder.as_mut() else {
-        return;
-    };
-
-    let Some((line, target)) = entry else {
-        finder.preview.clear(ws);
-        return;
-    };
-
-    let source = match &target {
-        SymbolTarget::Offset(_) => PreviewSource::Buffer(buffer_id),
-        SymbolTarget::Workspace { path, .. } => match ws.buffers.id_for_path(path) {
-            Some(id) => PreviewSource::Buffer(id),
-            None => PreviewSource::File(path.clone()),
-        },
-    };
-    finder.preview.sync(ws, fs_host, language_registry, source);
-
-    let scroll_row = line.saturating_sub((rows / 3) as u32);
-    let editor_id = finder.preview.editor;
-    if let Some(editor) = ws.editors.get_mut(editor_id) {
-        editor.scroll_row = scroll_row;
-        editor.scroll_offset = scroll_row as f32;
-
-        let offset = {
-            let snapshot = editor.display_map.snapshot();
-            let buf_snap = snapshot.buffer_snapshot();
-            match &target {
-                SymbolTarget::Offset(off) => *off,
-                SymbolTarget::Workspace {
-                    position, encoding, ..
-                } => {
-                    crate::lsp::util::lsp_pos_to_byte_offset(buf_snap.rope(), *position, *encoding)
-                },
-            }
-        };
-        let display_snapshot = editor.display_map.snapshot();
-        let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let rope = buffer_snapshot.rope();
-        let clamped = offset.min(rope.len());
-        crate::action_handlers::movement::move_cursors(
-            &mut editor.selections,
-            buffer_snapshot,
-            false,
-            |_| Some((clamped, stoat_text::SelectionGoal::None)),
-        );
-    }
-}
-
-/// Complete the highlighted symbol's title into the finder input, replacing
-/// what was typed, and leave that symbol selected.
-///
-/// No-op when the finder is closed or its list is empty. Under the workspace
-/// scope the completed query re-issues `workspace/symbol` through the per-frame
-/// [`sync_symbol_finder`] path, so this only touches local state.
-///
-/// Re-ranking against the completed title moves it to the top of the list while
-/// the selection cursor keeps its old index, so the cursor is repositioned onto
-/// the completed entry afterwards. It is tracked by its index into `entries`
-/// rather than by assuming the exact match ranks first, since symbol titles are
-/// not unique and equal scores tie-break on title alone.
-pub(crate) fn symbol_finder_complete(stoat: &mut Stoat) -> UpdateEffect {
-    let active_idx = stoat.active_workspace;
-
-    let Some((entry_idx, title)) = stoat.symbol_finder.as_ref().and_then(|finder| {
-        let entry_idx = *finder.filtered.get(finder.selected)?;
-        let title = finder.entries.get(entry_idx)?.title.clone();
-        Some((entry_idx, title))
-    }) else {
-        return UpdateEffect::None;
-    };
-
-    {
-        let ws = &mut stoat.workspaces[active_idx];
-        if let Some(finder) = stoat.symbol_finder.as_ref() {
-            finder.input.replace_text(ws, &title);
-        }
-    }
-
-    if let Some(finder) = stoat.symbol_finder.as_mut() {
-        finder.refilter(&title);
-        if let Some(row) = finder.filtered.iter().position(|&i| i == entry_idx) {
-            finder.selected = row;
-        }
-    }
-    UpdateEffect::Redraw
-}
-
-/// Move the symbol finder selection by `delta`, saturating at list bounds.
-pub(crate) fn symbol_finder_move_selection(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
-    match stoat.symbol_finder.as_mut() {
-        Some(finder) => {
-            finder.move_selection(delta);
-            UpdateEffect::Redraw
-        },
-        None => UpdateEffect::None,
-    }
-}
-
-/// Page the symbol finder selection by half the list height in `dir`.
-pub(crate) fn symbol_finder_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
-    match stoat.symbol_finder.as_mut() {
-        Some(finder) => {
-            finder.page(dir);
-            UpdateEffect::Redraw
-        },
-        None => UpdateEffect::None,
-    }
-}
-
-/// Jump to the selected symbol and close the finder.
-///
-/// Returns `None` when no finder is open so [`super::submit_prompt_input`] falls
-/// through to the next probe. An empty list closes without jumping.
-pub(crate) fn symbol_finder_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
-    stoat.symbol_finder.as_ref()?;
-    let target = stoat
-        .symbol_finder
-        .as_ref()
-        .and_then(|finder| finder.selected_entry())
-        .map(|entry| entry.target.clone());
-    close_symbol_finder(stoat);
-    match target {
-        Some(SymbolTarget::Offset(offset)) => {
-            crate::action_handlers::movement::jump_to_offset(stoat, offset);
-        },
-        Some(SymbolTarget::Workspace {
-            path,
-            position,
-            encoding,
-        }) => {
-            open_workspace_symbol_target(stoat, &path, position, encoding);
-        },
-        None => {},
-    }
-    Some(UpdateEffect::Redraw)
-}
-
-/// Close the symbol finder on Escape.
-///
-/// Returns `None` when no finder is open so [`super::cancel_prompt_input`] falls
-/// through to the next probe.
-pub(crate) fn symbol_finder_cancel(stoat: &mut Stoat) -> Option<UpdateEffect> {
-    if stoat.symbol_finder.is_some() {
-        close_symbol_finder(stoat);
-        return Some(UpdateEffect::Redraw);
-    }
-    None
-}
-
-/// Close the symbol finder, disposing its input editor and dropping any
-/// in-flight document or workspace request so a late response is discarded.
-pub(crate) fn close_symbol_finder(stoat: &mut Stoat) {
-    stoat.pending_symbol_picker_request = None;
-    stoat.pending_workspace_symbol_request = None;
-    if let Some(finder) = stoat.symbol_finder.take() {
-        finder.dispose(stoat.active_workspace_mut());
-    }
-}
-
-/// Convert a [`DocumentSymbolResponse`] into a flat list of picker
-/// entries, resolving each symbol's LSP position to a byte offset
-/// in the supplied rope. Nested responses are flattened DFS with a
-/// dotted ancestor-path prefix on the title (e.g. `outer.inner`) so
-/// the picker conveys hierarchy. The full list is returned; the
-/// renderer paints a 9-row viewport over `entries`.
-fn symbol_picker_entries(
-    rope: &Rope,
-    encoding: OffsetEncoding,
-    response: DocumentSymbolResponse,
-) -> Vec<SymbolFinderEntry> {
-    let mut entries: Vec<SymbolFinderEntry> = Vec::new();
-    match response {
-        DocumentSymbolResponse::Flat(items) => {
-            for SymbolInformation {
-                name,
-                location,
-                kind,
-                ..
-            } in items
-            {
-                let offset =
-                    crate::lsp::util::lsp_pos_to_byte_offset(rope, location.range.start, encoding);
-                entries.push(finder_entry(rope, name, kind, offset));
-            }
-        },
-        DocumentSymbolResponse::Nested(items) => {
-            fn walk(
-                rope: &Rope,
-                encoding: OffsetEncoding,
-                items: Vec<DocumentSymbol>,
-                ancestors: &mut Vec<String>,
-                out: &mut Vec<SymbolFinderEntry>,
-            ) {
-                for symbol in items {
-                    let offset = crate::lsp::util::lsp_pos_to_byte_offset(
-                        rope,
-                        symbol.selection_range.start,
-                        encoding,
-                    );
-                    let title = if ancestors.is_empty() {
-                        symbol.name.clone()
-                    } else {
-                        format!("{}.{}", ancestors.join("."), symbol.name)
-                    };
-                    out.push(finder_entry(rope, title, symbol.kind, offset));
-                    if let Some(children) = symbol.children {
-                        ancestors.push(symbol.name);
-                        walk(rope, encoding, children, ancestors, out);
-                        ancestors.pop();
-                    }
-                }
-            }
-            let mut ancestors: Vec<String> = Vec::new();
-            walk(rope, encoding, items, &mut ancestors, &mut entries);
-        },
-    }
-    entries
-}
-
-/// Build a document-symbol finder entry, deriving the display line from the
-/// resolved byte `offset`.
-fn finder_entry(rope: &Rope, title: String, kind: SymbolKind, offset: usize) -> SymbolFinderEntry {
-    SymbolFinderEntry {
-        title,
-        kind: Some(kind),
-        line: rope.offset_to_point(offset).row,
-        target: SymbolTarget::Offset(offset),
     }
 }
 
@@ -2730,7 +2444,7 @@ fn workspace_symbol_entries(
 
 /// Open a picked workspace symbol's file in the focused pane and jump the
 /// primary cursor to `position`, resolved against the file's server `encoding`.
-fn open_workspace_symbol_target(
+pub(crate) fn open_workspace_symbol_target(
     stoat: &mut Stoat,
     path: &Path,
     position: Position,
@@ -3019,7 +2733,10 @@ pub(crate) fn path_to_uri(path: &Path) -> Option<Uri> {
 mod tests {
     use crate::{
         agent_ipc::{AgentControl, AgentQuery},
-        test_fixture::{diag, open_buffer, seed},
+        test_fixture::{
+            diag, enable_document_symbols, enable_document_symbols_and_hover,
+            enable_workspace_symbols, flat_symbol, open_buffer, seed,
+        },
         test_harness::TestHarness,
     };
     use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
@@ -5635,34 +5352,6 @@ mod tests {
 
     use lsp_types::{DocumentSymbol, DocumentSymbolResponse};
 
-    fn enable_document_symbols(h: &TestHarness) {
-        use lsp_types::{OneOf, ServerCapabilities};
-        h.fake_lsp().set_capabilities(ServerCapabilities {
-            document_symbol_provider: Some(OneOf::Left(true)),
-            ..Default::default()
-        });
-    }
-
-    fn flat_symbol(name: &str, file: &str, line: u32, col: u32) -> lsp_types::SymbolInformation {
-        use lsp_types::{
-            Location, Position as LspPosition, Range as LspRange, SymbolInformation, SymbolKind,
-            Uri,
-        };
-        use std::str::FromStr;
-        #[allow(deprecated)]
-        SymbolInformation {
-            name: name.to_string(),
-            kind: SymbolKind::FUNCTION,
-            tags: None,
-            deprecated: None,
-            location: Location {
-                uri: Uri::from_str(&format!("file://{file}")).expect("uri"),
-                range: LspRange::new(LspPosition::new(line, col), LspPosition::new(line, col + 1)),
-            },
-            container_name: None,
-        }
-    }
-
     #[test]
     fn symbol_picker_unsupported_capability_is_noop() {
         let mut h = TestHarness::with_size(80, 24);
@@ -5881,230 +5570,6 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
         h.settle();
         h.assert_snapshot("snapshot_symbol_picker");
-    }
-
-    #[test]
-    fn symbol_finder_previews_document_scrolled_to_line() {
-        let mut h = TestHarness::with_size(80, 24);
-        enable_document_symbols(&h);
-        let src = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nfn target() {}\n";
-        let root = seed(&mut h, &[("main.rs", src)]);
-        let path = root.join("main.rs");
-        open_buffer(&mut h, path.clone());
-        h.fake_lsp().set_document_symbols(
-            path.to_str().unwrap(),
-            DocumentSymbolResponse::Flat(vec![flat_symbol(
-                "target",
-                path.to_str().unwrap(),
-                10,
-                3,
-            )]),
-        );
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
-        h.settle();
-
-        let finder = h.stoat.symbol_finder.as_ref().expect("finder open");
-        let preview_editor = finder.preview.editor;
-        let preview_buffer = finder.preview.buffer;
-        let ws = h.stoat.active_workspace();
-        let content = ws
-            .buffers
-            .get(preview_buffer)
-            .expect("preview buffer")
-            .read()
-            .expect("preview buffer")
-            .rope()
-            .to_string();
-        assert_eq!(content, src, "the preview mirrors the focused buffer");
-        assert_eq!(
-            ws.editors
-                .get(preview_editor)
-                .expect("preview editor")
-                .scroll_row,
-            2,
-            "line 10 sits a third down a 24-row pane (10 - 8)",
-        );
-    }
-
-    #[test]
-    fn symbol_finder_previews_workspace_file_from_disk() {
-        use lsp_types::SymbolKind;
-        let mut h = TestHarness::with_size(80, 24);
-        enable_workspace_symbols(&h);
-        let root = seed(
-            &mut h,
-            &[("main.rs", "fn foo() {}\n"), ("lib.rs", "fn bar() {}\n")],
-        );
-        let lib = root.join("lib.rs");
-        open_buffer(&mut h, root.join("main.rs"));
-        h.fake_lsp().add_workspace_symbol(
-            "bar",
-            "bar",
-            SymbolKind::FUNCTION,
-            lib.to_str().unwrap(),
-            0,
-            3,
-        );
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
-        h.settle();
-        h.type_keys("b a r");
-        h.settle();
-
-        let preview_buffer = h
-            .stoat
-            .symbol_finder
-            .as_ref()
-            .expect("finder")
-            .preview
-            .buffer;
-        let content = h
-            .stoat
-            .active_workspace()
-            .buffers
-            .get(preview_buffer)
-            .expect("preview buffer")
-            .read()
-            .expect("preview buffer")
-            .rope()
-            .to_string();
-        assert_eq!(
-            content, "fn bar() {}\n",
-            "the workspace preview shows the unopened target file from disk",
-        );
-    }
-
-    #[test]
-    fn symbol_finder_close_disposes_preview() {
-        let mut h = TestHarness::with_size(80, 24);
-        enable_document_symbols(&h);
-        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
-        let path = root.join("main.rs");
-        open_buffer(&mut h, path.clone());
-        h.fake_lsp().set_document_symbols(
-            path.to_str().unwrap(),
-            DocumentSymbolResponse::Flat(vec![flat_symbol("foo", path.to_str().unwrap(), 0, 3)]),
-        );
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
-        h.settle();
-
-        let (editor_id, buffer_id) = {
-            let finder = h.stoat.symbol_finder.as_ref().expect("finder open");
-            (finder.preview.editor, finder.preview.buffer)
-        };
-        assert!(h.stoat.active_workspace().editors.get(editor_id).is_some());
-
-        h.type_keys("escape");
-        assert!(h.stoat.symbol_finder.is_none());
-        assert!(
-            h.stoat.active_workspace().editors.get(editor_id).is_none(),
-            "the preview editor is disposed on close",
-        );
-        assert!(
-            h.stoat.active_workspace().buffers.get(buffer_id).is_none(),
-            "the preview scratch buffer is disposed on close",
-        );
-    }
-
-    fn enable_document_symbols_and_hover(h: &TestHarness) {
-        use lsp_types::{HoverProviderCapability, OneOf, ServerCapabilities};
-        h.fake_lsp().set_capabilities(ServerCapabilities {
-            document_symbol_provider: Some(OneOf::Left(true)),
-            hover_provider: Some(HoverProviderCapability::Simple(true)),
-            ..Default::default()
-        });
-    }
-
-    /// The symbols are ordered so completing reshuffles the list rather than
-    /// narrowing it to one row. An empty query lists them in document order, so
-    /// `aaa` sits second. Completing it re-ranks the exact match to the top
-    /// while `aaa_longer` still matches and stays on the list. A cursor left at
-    /// its old index would therefore land on `aaa_longer`, and clamping cannot
-    /// rescue it because the index is still in range.
-    #[test]
-    fn symbol_finder_tab_completes_and_keeps_the_entry_selected() {
-        let mut h = TestHarness::with_size(120, 30);
-        enable_document_symbols_and_hover(&h);
-        let root = seed(&mut h, &[("main.rs", "fn aaa_longer() {}\nfn aaa() {}\n")]);
-        let path = root.join("main.rs");
-        open_buffer(&mut h, path.clone());
-        h.fake_lsp().set_document_symbols(
-            path.to_str().unwrap(),
-            DocumentSymbolResponse::Flat(vec![
-                flat_symbol("aaa_longer", path.to_str().unwrap(), 0, 3),
-                flat_symbol("aaa", path.to_str().unwrap(), 1, 3),
-            ]),
-        );
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
-        h.settle();
-
-        h.type_keys("down");
-        h.settle();
-        assert_eq!(
-            h.stoat
-                .symbol_finder
-                .as_ref()
-                .unwrap()
-                .selected_entry()
-                .map(|e| e.title.as_str()),
-            Some("aaa"),
-            "the second row is highlighted before completing"
-        );
-
-        h.type_keys("tab");
-        h.settle();
-
-        let finder = h.stoat.symbol_finder.as_ref().unwrap();
-        assert_eq!(
-            finder.input.text(h.stoat.active_workspace()),
-            "aaa",
-            "Tab completes the highlighted title into the input"
-        );
-        assert_eq!(
-            finder.filtered.len(),
-            2,
-            "the completed query still matches both symbols, so the list reshuffles"
-        );
-        assert_eq!(
-            finder.selected_entry().map(|e| e.title.as_str()),
-            Some("aaa"),
-            "the completed symbol stays selected after the re-rank"
-        );
-    }
-
-    #[test]
-    fn symbol_finder_tab_with_an_empty_list_is_a_noop() {
-        let mut h = TestHarness::with_size(120, 30);
-        enable_document_symbols_and_hover(&h);
-        let root = seed(&mut h, &[("main.rs", "fn aaa() {}\n")]);
-        let path = root.join("main.rs");
-        open_buffer(&mut h, path.clone());
-        h.fake_lsp().set_document_symbols(
-            path.to_str().unwrap(),
-            DocumentSymbolResponse::Flat(vec![flat_symbol("aaa", path.to_str().unwrap(), 0, 3)]),
-        );
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
-        h.settle();
-
-        h.type_text("zzz");
-        h.settle();
-        assert!(
-            h.stoat.symbol_finder.as_ref().unwrap().filtered.is_empty(),
-            "the query matches nothing"
-        );
-
-        h.type_keys("tab");
-        h.settle();
-
-        assert_eq!(
-            h.stoat
-                .symbol_finder
-                .as_ref()
-                .unwrap()
-                .input
-                .text(h.stoat.active_workspace()),
-            "zzz",
-            "Tab with no selectable row leaves the query unchanged"
-        );
     }
 
     #[test]
@@ -6371,14 +5836,6 @@ mod tests {
             vec!["foo", "bar"],
             "both servers' symbols, primary first"
         );
-    }
-
-    fn enable_workspace_symbols(h: &TestHarness) {
-        use lsp_types::{OneOf, ServerCapabilities};
-        h.fake_lsp().set_capabilities(ServerCapabilities {
-            workspace_symbol_provider: Some(OneOf::Left(true)),
-            ..Default::default()
-        });
     }
 
     #[test]

@@ -544,7 +544,7 @@ pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
             stoat.location_picker = None;
         },
         ActiveModal::FileFinder => action_handlers::close_file_finder(stoat),
-        ActiveModal::SymbolFinder => action_handlers::lsp::close_symbol_finder(stoat),
+        ActiveModal::SymbolFinder => crate::symbol_finder::close_symbol_finder(stoat),
         ActiveModal::CodeSearch => {
             action_handlers::code_search::close_code_search(stoat);
         },
