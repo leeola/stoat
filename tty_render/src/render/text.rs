@@ -1206,6 +1206,7 @@ impl TextPass {
                     queue,
                     content.window(window.clone()),
                     RowRotation::unrotated(),
+                    [0.0; 2],
                     base,
                 );
                 self.overlay_windows.push(window);
@@ -1585,7 +1586,14 @@ impl TextPass {
         self.composite_run_scratch = run_instances;
 
         let mut instances = mem::take(&mut self.composite_upload_scratch);
-        self.build_text_instances_into(device, queue, &pending, rotation, &mut instances);
+        self.build_text_instances_into(
+            device,
+            queue,
+            &pending,
+            rotation,
+            origin_cells,
+            &mut instances,
+        );
         let target = self.composite_slots.entry(pool, || new_slot(device));
         target.glyphs.count = instances.len() as u32;
         upload_instances(
@@ -1655,12 +1663,17 @@ impl TextPass {
     /// draw will be bound with, so `rotation` has to be the one written into
     /// the globals those instances are drawn against. Screen-anchored draws
     /// pass an unrotated one.
+    ///
+    /// `origin` is the region origin in cells written into those same globals,
+    /// so the pixel snap lands on the absolute screen grid rather than the
+    /// region's. A screen-anchored draw passes zero.
     fn build_text_instances_into(
         &mut self,
         device: &Device,
         queue: &Queue,
         pending: &[PendingGlyph],
         rotation: RowRotation,
+        origin: [f32; 2],
         out: &mut Vec<TextInstance>,
     ) {
         out.clear();
@@ -1684,7 +1697,7 @@ impl TextPass {
             // with cell-fill codepoints scaled to the cell box.
             let (pos, dim) = match glyph.source {
                 GlyphSource::Procedural { .. } => {
-                    cell_box_rect(glyph.row, glyph.col, glyph.scale, self.metrics)
+                    cell_box_rect(glyph.row, glyph.col, glyph.scale, self.metrics, origin)
                 },
                 GlyphSource::Font(_) => {
                     let pos = glyph_origin(
@@ -1693,6 +1706,7 @@ impl TextPass {
                         info.placement,
                         self.baseline * glyph.scale,
                         self.metrics,
+                        origin,
                     );
                     let dim = [info.size[0] as f32, info.size[1] as f32];
                     if glyph.cell_fill {
@@ -1703,6 +1717,7 @@ impl TextPass {
                             glyph.scale,
                             self.baseline,
                             self.metrics,
+                            origin,
                         )
                     } else {
                         (pos, dim)
@@ -2594,6 +2609,7 @@ impl TextPass {
                     queue,
                     &outside_pending,
                     rotation,
+                    [0.0; 2],
                     &mut plain,
                 );
                 self.build_text_instances_into(
@@ -2601,13 +2617,16 @@ impl TextPass {
                     queue,
                     &inside_pending,
                     rotation,
+                    [0.0; 2],
                     &mut inside,
                 );
                 self.plain_pending_scratch = outside_pending;
                 self.region_pending_scratch = inside_pending;
             },
             None => {
-                self.build_text_instances_into(device, queue, &glyphs, rotation, &mut plain);
+                self.build_text_instances_into(
+                    device, queue, &glyphs, rotation, [0.0; 2], &mut plain,
+                );
                 inside.clear();
             },
         }
@@ -3349,19 +3368,36 @@ fn create_atlas_bind_group(
 /// The cell origin is snapped to whole pixels (the cell metrics are fractional)
 /// so glyphs land on the same integer grid the background pass snaps its cells
 /// to. The within-cell baseline offset is left unrounded.
+///
+/// `origin` is the draw's region origin in cells, zero for a screen-anchored
+/// draw. The snap is taken on the absolute cell, then the unrounded origin
+/// pixels are subtracted back out, because the shader adds them again. Snapping
+/// the region-relative cell instead puts a pooled glyph up to a pixel off the
+/// live grid's, which shows as a shift when a glide starts or settles.
 fn glyph_origin(
     col: usize,
     row: usize,
     placement: [i32; 2],
     baseline: f32,
     metrics: CellMetrics,
+    origin: [f32; 2],
 ) -> [f32; 2] {
-    let pen_x = (col as f32 * metrics.width).round();
-    let baseline_y = (row as f32 * metrics.height).round() + baseline;
+    let pen_x = snap_cell(col as f32, origin[0], metrics.width);
+    let baseline_y = snap_cell(row as f32, origin[1], metrics.height) + baseline;
     [
         pen_x + placement[0] as f32,
         baseline_y - placement[1] as f32,
     ]
+}
+
+/// Pixel offset of cell coordinate `cell` within a region starting at `origin`
+/// cells, snapped to the absolute screen pixel grid.
+///
+/// The shader adds `origin * size` back unrounded, so subtracting it here leaves
+/// the sum equal to the absolute snap `((cell + origin) * size).round()` -- what
+/// the live grid computes directly for the same screen cell.
+fn snap_cell(cell: f32, origin: f32, size: f32) -> f32 {
+    ((cell + origin) * size).round() - origin * size
 }
 
 /// Whether `ch` is a cell-fill codepoint: box-drawing (U+2500-257F), block
@@ -3394,9 +3430,10 @@ fn fill_cell_box(
     scale: f32,
     baseline: f32,
     metrics: CellMetrics,
+    origin: [f32; 2],
 ) -> ([f32; 2], [f32; 2]) {
     let scale_y = metrics.height / metrics.font_size;
-    let baseline_y = (row as f32 * metrics.height).round() + baseline * scale;
+    let baseline_y = snap_cell(row as f32, origin[1], metrics.height) + baseline * scale;
     (
         [pos[0], baseline_y + (pos[1] - baseline_y) * scale_y],
         [dim[0], dim[1] * scale_y],
@@ -3418,11 +3455,17 @@ fn cell_fill_pixels(scale: f32, metrics: CellMetrics) -> (u32, u32) {
 /// Each edge is rounded to a whole pixel exactly as the background pass snaps
 /// its cells, so a procedural cell-fill glyph shares an integer boundary with
 /// the neighbouring cell backgrounds and leaves no seam.
-fn cell_box_rect(row: usize, col: usize, scale: f32, metrics: CellMetrics) -> ([f32; 2], [f32; 2]) {
-    let left = (col as f32 * metrics.width).round();
-    let top = (row as f32 * metrics.height).round();
-    let right = ((col as f32 + scale) * metrics.width).round();
-    let bottom = ((row as f32 + scale) * metrics.height).round();
+fn cell_box_rect(
+    row: usize,
+    col: usize,
+    scale: f32,
+    metrics: CellMetrics,
+    origin: [f32; 2],
+) -> ([f32; 2], [f32; 2]) {
+    let left = snap_cell(col as f32, origin[0], metrics.width);
+    let top = snap_cell(row as f32, origin[1], metrics.height);
+    let right = snap_cell(col as f32 + scale, origin[0], metrics.width);
+    let bottom = snap_cell(row as f32 + scale, origin[1], metrics.height);
     ([left, top], [right - left, bottom - top])
 }
 
@@ -3943,7 +3986,7 @@ mod tests {
         };
 
         for row in 0..5usize {
-            let absolute = glyph_origin(3, row, [1, 9], 10.0, metrics);
+            let absolute = glyph_origin(3, row, [1, 9], 10.0, metrics, [0.0; 2]);
             let stored = absolute[1] - row as f32 * metrics.height;
 
             assert_eq!(
@@ -3954,12 +3997,64 @@ mod tests {
         }
     }
 
+    /// A pooled glyph and a live-grid glyph on the same screen cell must land on
+    /// the same pixel, or the frame visibly shifts when a glide starts or
+    /// settles and the renderer swaps between the two paths.
+    ///
+    /// The builder returns a region-relative position and the shader adds the
+    /// unrounded region origin back, so what has to match the live grid is the
+    /// sum. Metrics are fractional here on purpose: at integer metrics both
+    /// formulas agree whatever they do, which is why the bug never showed on
+    /// configs whose cells land on whole pixels.
+    #[test]
+    fn a_pooled_glyph_lands_on_the_same_pixel_as_the_live_grid() {
+        let metrics = CellMetrics {
+            font_size: 16.0,
+            width: 9.5,
+            height: 12.5,
+            scale_factor: 1.0,
+        };
+        let baseline = 10.0;
+        let region = [1.0, 1.0];
+
+        // Region cell (1, 1) is screen cell (2, 2). Rounding the region-relative
+        // cell instead gives round(9.5) + 9.5 = 19.5 across, half a pixel off the
+        // live grid's round(19.0).
+        for (col, row) in [(0, 0), (1, 1), (3, 2), (7, 5)] {
+            let pooled = glyph_origin(col, row, [1, 2], baseline, metrics, region);
+            let live = glyph_origin(col + 1, row + 1, [1, 2], baseline, metrics, [0.0; 2]);
+
+            assert_eq!(
+                [
+                    pooled[0] + region[0] * metrics.width,
+                    pooled[1] + region[1] * metrics.height
+                ],
+                live,
+                "pooled cell ({col}, {row}) must land where the live grid puts it"
+            );
+        }
+
+        // A procedural separator spans the same whole pixels as the cell
+        // backgrounds beside it, which the background pass snaps absolutely.
+        let (pooled_pos, pooled_dim) = cell_box_rect(2, 3, 1.0, metrics, region);
+        let (live_pos, live_dim) = cell_box_rect(3, 4, 1.0, metrics, [0.0; 2]);
+        assert_eq!(
+            [
+                pooled_pos[0] + region[0] * metrics.width,
+                pooled_pos[1] + region[1] * metrics.height
+            ],
+            live_pos,
+            "a pooled cell box starts on the live grid's pixel"
+        );
+        assert_eq!(pooled_dim, live_dim, "and spans the same whole pixels");
+    }
+
     #[test]
     fn glyph_origin_offsets_from_cell_pen_and_baseline() {
         let metrics = CellMetrics::from_font_size(30, 1.0);
         let baseline = 14.0;
 
-        let origin = glyph_origin(3, 2, [1, 10], baseline, metrics);
+        let origin = glyph_origin(3, 2, [1, 10], baseline, metrics, [0.0; 2]);
         assert_eq!(
             origin,
             [
@@ -3968,7 +4063,7 @@ mod tests {
             ]
         );
 
-        let origin = glyph_origin(0, 0, [-2, -3], baseline, metrics);
+        let origin = glyph_origin(0, 0, [-2, -3], baseline, metrics, [0.0; 2]);
         assert_eq!(origin, [-2.0, baseline + 3.0]);
     }
 
@@ -3979,7 +4074,7 @@ mod tests {
 
         // col 3 -> round(23.4) = 23, row 2 -> round(31.2) = 31; unsnapped the
         // origin would be the fractional [24.4, 39.2].
-        let origin = glyph_origin(3, 2, [1, 2], 10.0, metrics);
+        let origin = glyph_origin(3, 2, [1, 2], 10.0, metrics, [0.0; 2]);
         assert_eq!(origin, [24.0, 39.0]);
     }
 
@@ -4009,7 +4104,8 @@ mod tests {
             |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3;
 
         // A full-em glyph spanning [5, 35] at row 0 scales to fill the 36px cell.
-        let (pos, dim) = fill_cell_box([2.0, 5.0], [8.0, 30.0], 0, 1.0, baseline, metrics);
+        let (pos, dim) =
+            fill_cell_box([2.0, 5.0], [8.0, 30.0], 0, 1.0, baseline, metrics, [0.0; 2]);
         assert!(
             approx(pos, [2.0, 0.0]),
             "x unchanged, top at cell top: {pos:?}"
@@ -4020,7 +4116,15 @@ mod tests {
         );
 
         // A scaled 2x glyph fills its two-cell block.
-        let (pos, dim) = fill_cell_box([0.0, 10.0], [8.0, 60.0], 0, 2.0, baseline, metrics);
+        let (pos, dim) = fill_cell_box(
+            [0.0, 10.0],
+            [8.0, 60.0],
+            0,
+            2.0,
+            baseline,
+            metrics,
+            [0.0; 2],
+        );
         assert!(approx(pos, [0.0, 0.0]), "{pos:?}");
         assert!(approx(dim, [8.0, 72.0]), "fills two cells: {dim:?}");
     }
@@ -4097,7 +4201,7 @@ mod tests {
         // a run at scale 1 is indistinguishable from cell text.
         assert_eq!(
             text_run_origin(3.0, 2.0, 0, 1.0, [1, 10], baseline, metrics),
-            glyph_origin(3, 2, [1, 10], baseline, metrics)
+            glyph_origin(3, 2, [1, 10], baseline, metrics, [0.0; 2])
         );
     }
 
@@ -4424,6 +4528,7 @@ mod tests {
             &queue,
             &pending,
             RowRotation::unrotated(),
+            [0.0; 2],
             &mut from_stored,
         );
 
@@ -4442,6 +4547,7 @@ mod tests {
             &queue,
             &stale,
             RowRotation::unrotated(),
+            [0.0; 2],
             &mut from_lookup,
         );
 
@@ -4475,6 +4581,7 @@ mod tests {
             &queue,
             &poisoned,
             RowRotation::unrotated(),
+            [0.0; 2],
             &mut trusted,
         );
 
@@ -4491,6 +4598,7 @@ mod tests {
             &queue,
             &poisoned_stale,
             RowRotation::unrotated(),
+            [0.0; 2],
             &mut refused,
         );
 
@@ -4547,6 +4655,7 @@ mod tests {
             &queue,
             &pending,
             RowRotation::unrotated(),
+            [0.0; 2],
             &mut built,
         );
         let [instance] = built[..] else {
@@ -4569,7 +4678,7 @@ mod tests {
             "the glyph's color and the atlas it samples share one word"
         );
 
-        let (_, cell) = cell_box_rect(0, 0, 1.0, CellMetrics::from_font_size(16, 1.0));
+        let (_, cell) = cell_box_rect(0, 0, 1.0, CellMetrics::from_font_size(16, 1.0), [0.0; 2]);
         assert_eq!(
             instance.dim,
             pack_dim(cell),
