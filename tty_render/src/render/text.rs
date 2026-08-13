@@ -265,6 +265,13 @@ struct TextCompositeSlot {
     /// since means a glyph moved, so the pool must be reshaped even though its
     /// grid content held steady. A grow leaves the texels alone.
     epoch: u64,
+    /// The region origin in cells this slot was prepared under.
+    ///
+    /// Positions snap against the absolute screen pixel grid, which folds the
+    /// origin into the rounding, so a slot prepared at one origin describes no
+    /// other. The pool's content version does not stand in for this: it tracks
+    /// the region's size, never where the region sits.
+    baked_origin: [f32; 2],
     /// What each row shaped to, kept so a scrolled frame can slide them and
     /// re-shape only the rows the scroll exposed.
     ///
@@ -1086,13 +1093,13 @@ impl TextPass {
         if runs_rebuilt {
             let epoch_at_build = self.atlas.content_epoch();
             let mut instances = mem::take(&mut self.text_run_build_scratch);
-            self.build_text_run_instances_into(device, queue, grid, &mut instances);
+            self.build_text_run_instances_into(device, queue, grid, [0.0; 2], &mut instances);
             // Packing a run glyph can move the UVs the instances already emitted
             // this pass froze. An eviction reuses a slot without resizing the
             // texture, so only the content epoch reveals it. Every run glyph is
             // resident after the first pass, so a second one reads final UVs.
             if self.atlas.content_epoch() != epoch_at_build {
-                self.build_text_run_instances_into(device, queue, grid, &mut instances);
+                self.build_text_run_instances_into(device, queue, grid, [0.0; 2], &mut instances);
             }
             self.text_run_build_scratch = instances;
 
@@ -1426,12 +1433,12 @@ impl TextPass {
         // During a pure sub-cell glide the composed rows are identical and only
         // the shift moved, which the globals write above already carried. Reuse
         // the instances built for these rows on an earlier frame, unless the
-        // atlas has since relocated their UVs.
+        // atlas has since relocated their UVs or the region has moved out from
+        // under the pixel snap they were built with.
         if !content_changed
-            && self
-                .composite_slots
-                .get(pool)
-                .is_some_and(|target| target.epoch == self.atlas.content_epoch())
+            && self.composite_slots.get(pool).is_some_and(|target| {
+                target.epoch == self.atlas.content_epoch() && target.baked_origin == origin_cells
+            })
         {
             return;
         }
@@ -1447,6 +1454,7 @@ impl TextPass {
         let rotate_by = scrolled_rows.filter(|&by| by != 0).filter(|_| {
             self.composite_slots.get(pool).is_some_and(|slot| {
                 slot.epoch == epoch_before
+                    && slot.baked_origin == origin_cells
                     && slot.glyph_rows.len() == rows
                     && slot.underline_rows.len() == rows
             })
@@ -1522,7 +1530,7 @@ impl TextPass {
         let atlas_dims = self.atlas.texture_dims();
 
         let mut run_instances = mem::take(&mut self.composite_run_scratch);
-        self.build_text_run_instances_into(device, queue, grid, &mut run_instances);
+        self.build_text_run_instances_into(device, queue, grid, origin_cells, &mut run_instances);
 
         let mut run_rects = mem::take(&mut self.composite_rect_scratch);
         self.build_run_rects_into(grid, &mut run_rects);
@@ -1571,7 +1579,13 @@ impl TextPass {
         // now, so a second pass reads final UVs without growing again. The grid
         // build below already resolves post-pack.
         if self.atlas.texture_dims() != atlas_dims {
-            self.build_text_run_instances_into(device, queue, grid, &mut run_instances);
+            self.build_text_run_instances_into(
+                device,
+                queue,
+                grid,
+                origin_cells,
+                &mut run_instances,
+            );
         }
         let target = self.composite_slots.entry(pool, || new_slot(device));
         target.text_runs.count = run_instances.len() as u32;
@@ -1639,11 +1653,13 @@ impl TextPass {
             }),
         );
 
-        // Record the atlas state these instances resolved against, so a later
-        // shift-only frame can tell whether their UVs still hold.
+        // Record the atlas state and the origin these instances resolved
+        // against, so a later shift-only frame tells whether their UVs and their
+        // pixel snap both still hold.
         let epoch = self.atlas.content_epoch();
         let target = self.composite_slots.entry(pool, || new_slot(device));
         target.epoch = epoch;
+        target.baked_origin = origin_cells;
         target.glyph_rows = glyph_rows;
         target.underline_rows = underline_rows;
     }
@@ -1772,9 +1788,10 @@ impl TextPass {
         device: &Device,
         queue: &Queue,
         grid: &Grid,
+        origin: [f32; 2],
     ) -> Vec<TextInstance> {
         let mut instances = Vec::new();
-        self.build_text_run_instances_into(device, queue, grid, &mut instances);
+        self.build_text_run_instances_into(device, queue, grid, origin, &mut instances);
         instances
     }
 
@@ -1785,6 +1802,10 @@ impl TextPass {
     /// scaled cell width per glyph, vertically centered in its row. A
     /// non-positive scale draws nothing.
     ///
+    /// `origin` is the region origin in cells the draw's globals carry, so the
+    /// pixel snap lands on the absolute screen grid rather than the region's. A
+    /// screen-anchored draw passes zero.
+    ///
     /// `out` is cleared first, so a reused scratch buffer holds only this
     /// frame's instances.
     fn build_text_run_instances_into(
@@ -1792,6 +1813,7 @@ impl TextPass {
         device: &Device,
         queue: &Queue,
         grid: &Grid,
+        origin: [f32; 2],
         out: &mut Vec<TextInstance>,
     ) {
         out.clear();
@@ -1830,6 +1852,7 @@ impl TextPass {
                         info.placement,
                         self.baseline,
                         self.metrics,
+                        origin,
                     ),
                     dim: pack_dim([info.size[0] as f32, info.size[1] as f32]),
                     texel_origin,
@@ -3131,6 +3154,7 @@ fn new_slot(device: &Device) -> TextCompositeSlot {
         text_runs: alloc_slot::<TextInstance>(device, "composite text run instances"),
         rects: alloc_slot::<RectInstance>(device, "composite text run rect instances"),
         epoch: 0,
+        baked_origin: [0.0; 2],
         glyph_rows: Vec::new(),
         underline_rows: Vec::new(),
     }
@@ -3486,6 +3510,14 @@ fn cell_box_rect(
 ///
 /// Each pen is derived from `index` rather than accumulated, so the rounding
 /// never compounds along the run.
+///
+/// `origin` is the draw's region origin in cells, zero for a screen-anchored
+/// draw. Both roundings are taken on the absolute cell and give the unrounded
+/// origin pixels back, exactly as [`glyph_origin`] does, so a pooled run sits on
+/// the same pixels the live grid puts it on. The centering is an offset within
+/// the row rather than a cell coordinate, so it rides inside the round without
+/// the origin scaling it.
+#[allow(clippy::too_many_arguments)]
 fn text_run_origin(
     col: f32,
     row: f32,
@@ -3494,10 +3526,13 @@ fn text_run_origin(
     placement: [i32; 2],
     baseline: f32,
     metrics: CellMetrics,
+    origin: [f32; 2],
 ) -> [f32; 2] {
-    let pen_x = ((col + index as f32 * scale) * metrics.width).round();
-    let centered_top =
-        (row * metrics.height + (metrics.height - metrics.height * scale) / 2.0).round();
+    let pen_x = snap_cell(col + index as f32 * scale, origin[0], metrics.width);
+    let centered_top = ((row + origin[1]) * metrics.height
+        + (metrics.height - metrics.height * scale) / 2.0)
+        .round()
+        - origin[1] * metrics.height;
     let baseline_y = centered_top + baseline * scale;
     [
         pen_x + placement[0] as f32,
@@ -4034,6 +4069,31 @@ mod tests {
             );
         }
 
+        // A pooled row carrying a scaled text run snaps the same way, so a
+        // pooled gutter's runs sit where the screen-anchored ones do.
+        for index in 0..4 {
+            let pooled = text_run_origin(2.0, 3.0, index, 0.625, [1, 2], baseline, metrics, region);
+            let live = text_run_origin(
+                2.0 + region[0],
+                3.0 + region[1],
+                index,
+                0.625,
+                [1, 2],
+                baseline,
+                metrics,
+                [0.0; 2],
+            );
+
+            assert_eq!(
+                [
+                    pooled[0] + region[0] * metrics.width,
+                    pooled[1] + region[1] * metrics.height
+                ],
+                live,
+                "pooled run glyph {index} must land where a screen-anchored run puts it"
+            );
+        }
+
         // A procedural separator spans the same whole pixels as the cell
         // backgrounds beside it, which the background pass snaps absolutely.
         let (pooled_pos, pooled_dim) = cell_box_rect(2, 3, 1.0, metrics, region);
@@ -4200,7 +4260,7 @@ mod tests {
         // The first glyph of a unit-scale run lands exactly on the cell grid, so
         // a run at scale 1 is indistinguishable from cell text.
         assert_eq!(
-            text_run_origin(3.0, 2.0, 0, 1.0, [1, 10], baseline, metrics),
+            text_run_origin(3.0, 2.0, 0, 1.0, [1, 10], baseline, metrics, [0.0; 2]),
             glyph_origin(3, 2, [1, 10], baseline, metrics, [0.0; 2])
         );
     }
@@ -4210,7 +4270,7 @@ mod tests {
         let metrics = CellMetrics::from_font_size(30, 1.0);
         let baseline = 14.0;
 
-        let origin = text_run_origin(0.0, 0.0, 2, 0.5, [0, 0], baseline, metrics);
+        let origin = text_run_origin(0.0, 0.0, 2, 0.5, [0, 0], baseline, metrics, [0.0; 2]);
 
         // Two half-scale glyphs advance one cell, and the shorter line is
         // centered within the full row's height above its scaled baseline.
@@ -4234,7 +4294,9 @@ mod tests {
         // Three quarters of an 18px cell advances 13.5px, so every other pen
         // lands mid-pixel before the rounding.
         let pens: Vec<f32> = (0..5)
-            .map(|index| text_run_origin(0.0, 0.0, index, 0.75, [0, 0], baseline, metrics)[0])
+            .map(|index| {
+                text_run_origin(0.0, 0.0, index, 0.75, [0, 0], baseline, metrics, [0.0; 2])[0]
+            })
             .collect();
 
         assert!(
@@ -4795,7 +4857,7 @@ mod tests {
         queue: &wgpu::Queue,
         grid: &Grid,
     ) {
-        let fresh = pass.build_text_run_instances(device, queue, grid);
+        let fresh = pass.build_text_run_instances(device, queue, grid, [0.0; 2]);
         assert!(!fresh.is_empty(), "the run contributes glyph instances");
         assert_eq!(
             bytemuck::cast_slice::<TextInstance, u8>(&pass.composite_run_scratch),
@@ -5804,6 +5866,84 @@ mod tests {
                 "every carried glyph lands on the cell a rebuild would put it on",
             );
         }
+    }
+
+    /// A pool that moved rebuilds, even though its rows say nothing changed.
+    ///
+    /// Instances snap against the absolute screen pixel grid, so where the region
+    /// sits is folded into every position. The pool's content version tracks the
+    /// region's size and never its corner, so nothing but the recorded origin
+    /// tells a moved region from a still one, and reusing the old instances puts
+    /// the pooled text up to a pixel off the live grid.
+    #[test]
+    fn a_moved_composite_rebuilds_against_its_new_origin() {
+        // font_size 16 -> width 9.6, height 19.2, so the snap depends on the
+        // origin. At integer metrics every origin agrees and this pins nothing.
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+        let resolution = [640.0, 480.0];
+        let mut grid = Grid::new(3, 20);
+        fill_row(&mut grid, 0, "alpha");
+        fill_row(&mut grid, 1, "bravo");
+        grid.set_text_runs(vec![TextRun {
+            col: 32,
+            row: 32,
+            scale: 160,
+            color: Rgb::new(255, 255, 255),
+            bg: None,
+            text: "charlie".into(),
+            seq: 0,
+        }]);
+
+        let composite = |pass: &mut TextPass, origin, content_changed| {
+            pass.prepare_composite(
+                &device,
+                &queue,
+                &grid,
+                &[],
+                resolution,
+                0.0,
+                origin,
+                content_changed,
+                None,
+                0,
+                0,
+            );
+            (
+                pass.composite_upload_scratch.clone(),
+                pass.composite_run_scratch.clone(),
+            )
+        };
+
+        let (glyphs_at_rest, runs_at_rest) = composite(&mut pass, [0.0; 2], true);
+        let (glyphs_moved, runs_moved) = composite(&mut pass, [1.0, 1.0], false);
+        let (glyphs_rebuilt, runs_rebuilt) = composite(&mut pass, [1.0, 1.0], true);
+
+        assert!(
+            !glyphs_rebuilt.is_empty() && !runs_rebuilt.is_empty(),
+            "the fixture has to build both grid glyphs and run glyphs"
+        );
+        assert_ne!(
+            bytemuck::cast_slice::<TextInstance, u8>(&glyphs_at_rest),
+            bytemuck::cast_slice::<TextInstance, u8>(&glyphs_rebuilt),
+            "the move has to change the snap, or the reuse below proves nothing"
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<TextInstance, u8>(&glyphs_moved),
+            bytemuck::cast_slice::<TextInstance, u8>(&glyphs_rebuilt),
+            "a moved pool holds the grid glyphs a rebuild at its new origin holds"
+        );
+        assert_ne!(
+            bytemuck::cast_slice::<TextInstance, u8>(&runs_at_rest),
+            bytemuck::cast_slice::<TextInstance, u8>(&runs_rebuilt),
+            "and the move has to change the run snap too"
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<TextInstance, u8>(&runs_moved),
+            bytemuck::cast_slice::<TextInstance, u8>(&runs_rebuilt),
+            "and the run glyphs a rebuild at its new origin holds"
+        );
     }
 
     /// The scroll below stays inside the overlay's single line of content.
