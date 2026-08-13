@@ -8,7 +8,7 @@
 //! per feature that is six lines of ceremony around one question, repeated for
 //! every request kind the editor makes.
 
-use crate::action_handlers::lsp::DocumentStamp;
+use crate::lsp::stamp::DocumentStamp;
 use futures::task::noop_waker;
 use std::{
     future::Future,

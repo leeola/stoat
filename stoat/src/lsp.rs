@@ -3,6 +3,7 @@ pub(crate) mod pending;
 pub(crate) mod progress;
 pub(crate) mod registry;
 pub(crate) mod servers;
+pub(crate) mod stamp;
 pub mod stcfg;
 pub mod util;
 

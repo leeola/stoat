@@ -16,6 +16,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
     completion::CompletionItem,
+    lsp::stamp::DocumentStamp,
     pane::{FocusTarget, View},
 };
 use std::{path::Path, time::Duration};
@@ -161,7 +162,7 @@ fn apply_or_resolve_additional_edits(
         let edits = resolved.additional_text_edits?;
         (!edits.is_empty()).then_some(AcceptedImports { buffer_id, edits })
     });
-    let stamp = crate::action_handlers::lsp::DocumentStamp::take(stoat, buffer_id, lsp_encoding);
+    let stamp = DocumentStamp::take(stoat, buffer_id, lsp_encoding);
     stoat.pending_completion_accept.arm(stamp, task);
 }
 
