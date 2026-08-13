@@ -831,6 +831,7 @@ pub(crate) fn frame(
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     badges::sync_agent_badge(&mut ws.badges, ws.agent.as_ref());
     badges::sync_trail_badge(&mut ws.badges, ws.trail.as_ref());
+    badges::sync_walkthrough_badge(&mut ws.badges, ws.walkthrough.as_ref());
     badges::render_badges(
         &ws.badges,
         &stoat.badges,

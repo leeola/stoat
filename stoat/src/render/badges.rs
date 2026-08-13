@@ -6,6 +6,7 @@ use crate::{
         review::style_rgb,
         text::{write_cell, write_str},
     },
+    walkthrough::run::WalkthroughRun,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use stoatty_protocol::command::{BorderStyle, PanelShadow};
@@ -114,6 +115,19 @@ pub(crate) fn sync_agent_badge(tray: &mut BadgeTray, agent: Option<&AgentStatus>
 pub(crate) fn sync_trail_badge(tray: &mut BadgeTray, trail: Option<&TrailState>) {
     tray.remove_by_source(BadgeSource::Trail);
     if let Some(badge) = trail.map(TrailState::badge) {
+        tray.insert(badge);
+    }
+}
+
+/// Reflect the walkthrough being played into `tray` under
+/// [`BadgeSource::Walkthrough`], replacing any left from a previous frame.
+///
+/// Mirrors [`sync_trail_badge`], and re-derives per frame for the same reason:
+/// the label carries the stop the reader is on, which every step moves. No run
+/// leaves no badge, which is what `WalkthroughDone` shows up as.
+pub(crate) fn sync_walkthrough_badge(tray: &mut BadgeTray, run: Option<&WalkthroughRun>) {
+    tray.remove_by_source(BadgeSource::Walkthrough);
+    if let Some(badge) = run.map(WalkthroughRun::badge) {
         tray.insert(badge);
     }
 }

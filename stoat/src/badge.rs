@@ -52,6 +52,11 @@ pub enum BadgeSource {
     /// one Trail-sourced badge exists per workspace, and none once the trail
     /// is cleared.
     Trail,
+    /// The walkthrough being played, re-derived each frame from the
+    /// workspace's [`WalkthroughRun`](crate::walkthrough::run::WalkthroughRun).
+    /// At most one Walkthrough-sourced badge exists per workspace, and none
+    /// once the tour ends.
+    Walkthrough,
     /// One-shot version notice raised by `ShowVersion`, living in the
     /// app-level tray until the next key press dismisses it.
     Version,

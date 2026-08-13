@@ -1,4 +1,7 @@
-use crate::walkthrough::{Annotation, Stop, Walkthrough};
+use crate::{
+    badge::{Anchor, Badge, BadgeSource, BadgeState},
+    walkthrough::{Annotation, Stop, Walkthrough},
+};
 
 /// A stored walkthrough being played, and where in it the reader is.
 ///
@@ -72,6 +75,22 @@ impl WalkthroughRun {
         moved
     }
 
+    /// Project the run into its workspace badge.
+    ///
+    /// The slug names which tour is open, since a workspace stores several, and
+    /// the count says how far through it the reader has come. The status line
+    /// says both on arrival, but a status message expires where a tour does not.
+    pub(crate) fn badge(&self) -> Badge {
+        let (at, stops) = self.progress();
+        Badge {
+            source: BadgeSource::Walkthrough,
+            anchor: Anchor::BottomRight,
+            state: BadgeState::Active,
+            label: format!("{} {at}/{stops}", self.walkthrough.slug),
+            detail: None,
+        }
+    }
+
     /// Move `delta` places along the current stop's focus and annotations,
     /// clamped at both ends.
     ///
@@ -90,7 +109,10 @@ impl WalkthroughRun {
 #[cfg(test)]
 mod tests {
     use super::WalkthroughRun;
-    use crate::walkthrough::{Location, Point, Range, Walkthrough};
+    use crate::{
+        badge::{Anchor, BadgeState},
+        walkthrough::{Location, Point, Range, Walkthrough},
+    };
     use std::path::PathBuf;
 
     fn run(stops: u32) -> Option<WalkthroughRun> {
@@ -209,6 +231,19 @@ mod tests {
             None,
             "the annotations belonged to the stop just left",
         );
+    }
+
+    /// The badge is what says a tour is open at all, so it names which one and
+    /// tracks every step through it.
+    #[test]
+    fn the_badge_names_the_tour_and_the_stop() {
+        let mut run = run(3).expect("three stops");
+        assert_eq!(run.badge().label, "tour 1/3");
+        assert_eq!(run.badge().anchor, Anchor::BottomRight);
+        assert_eq!(run.badge().state, BadgeState::Active);
+
+        run.step(9);
+        assert_eq!(run.badge().label, "tour 3/3");
     }
 
     #[test]
