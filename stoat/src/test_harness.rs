@@ -608,36 +608,10 @@ impl TestHarness {
                 crate::action_handlers::review_walk::pump_commit_picker(&mut self.stoat);
             crate::action_handlers::review_walk::sync_commit_picker(&mut self.stoat);
             let review = crate::action_handlers::pump_review_scan(&mut self.stoat);
-            let lsp_jumps = crate::action_handlers::pump_lsp_jumps(&mut self.stoat);
             let changed_file_jump =
                 crate::action_handlers::movement::pump_changed_file_jump(&mut self.stoat);
-            let lsp_hover = crate::action_handlers::lsp::pump_lsp_hover(&mut self.stoat);
-            let lsp_sig_help =
-                crate::action_handlers::lsp::pump_lsp_signature_help(&mut self.stoat);
-            let lsp_inlay_hints =
-                crate::action_handlers::lsp::pump_lsp_inlay_hints(&mut self.stoat);
-            let lsp_doc_highlight =
-                crate::action_handlers::lsp::pump_lsp_document_highlight(&mut self.stoat);
-            let lsp_pull_diagnostics =
-                crate::action_handlers::lsp::pump_lsp_pull_diagnostics(&mut self.stoat);
-            let lsp_semantic_tokens =
-                crate::action_handlers::lsp::pump_lsp_semantic_tokens(&mut self.stoat);
-            let lsp_folding_ranges =
-                crate::action_handlers::lsp::pump_lsp_folding_ranges(&mut self.stoat);
-            let lsp_code_actions =
-                crate::action_handlers::lsp::pump_lsp_code_actions(&mut self.stoat);
-            let lsp_code_action_resolve =
-                crate::action_handlers::lsp::pump_lsp_code_action_resolve(&mut self.stoat);
-            let lsp_prepare_rename =
-                crate::action_handlers::lsp::pump_lsp_prepare_rename(&mut self.stoat);
-            let lsp_rename = crate::action_handlers::lsp::pump_lsp_rename(&mut self.stoat);
-            let lsp_symbol_picker =
-                crate::action_handlers::lsp::pump_lsp_symbol_picker(&mut self.stoat);
-            let lsp_workspace_symbol =
-                crate::action_handlers::lsp::pump_lsp_workspace_symbol(&mut self.stoat);
-            let lsp_format = crate::action_handlers::lsp::pump_lsp_format(&mut self.stoat);
-            let symbol_doc = crate::action_handlers::lsp::pump_symbol_finder_doc(&mut self.stoat);
-            crate::action_handlers::lsp::sync_symbol_finder(&mut self.stoat);
+            let lsp = crate::lsp::pump_all(&mut self.stoat);
+            crate::action_handlers::workspace::sync_workspace_picker(&mut self.stoat);
             crate::action_handlers::code_search::sync_code_search(&mut self.stoat);
             let code_search_drain = debounce::drain_pending_code_search(&mut self.stoat);
             let code_search =
@@ -653,23 +627,8 @@ impl TestHarness {
             if !commits
                 && !commit_picker
                 && !review
-                && !lsp_jumps
                 && !changed_file_jump
-                && !lsp_hover
-                && !lsp_sig_help
-                && !lsp_inlay_hints
-                && !lsp_doc_highlight
-                && !lsp_pull_diagnostics
-                && !lsp_semantic_tokens
-                && !lsp_folding_ranges
-                && !lsp_code_actions
-                && !lsp_code_action_resolve
-                && !lsp_prepare_rename
-                && !lsp_rename
-                && !lsp_symbol_picker
-                && !lsp_workspace_symbol
-                && !lsp_format
-                && !symbol_doc
+                && !lsp
                 && !format_on_save
                 && !completion
                 && !completion_resolve

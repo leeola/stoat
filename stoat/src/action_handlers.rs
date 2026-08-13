@@ -53,7 +53,6 @@ pub(crate) use commits::pump_commits;
 pub(crate) use file_finder::{
     close_file_finder, file_finder_move_selection, sync_file_finder_preview,
 };
-pub(crate) use lsp::pump_lsp_jumps;
 pub(crate) use palette::{palette_move_selection, sync_palette_picker};
 pub(crate) use pane::{close_pane_by_id, restore_pane_after_term_exit};
 #[cfg(test)]

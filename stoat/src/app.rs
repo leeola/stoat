@@ -1339,7 +1339,7 @@ pub struct Stoat {
     /// label of the jump kind ("definition", "references", ...) so the
     /// pump can name it in a zero-result message. Replacing the entry
     /// drops the prior task, cancelling its spawned future before the
-    /// response can land. Polled by [`action_handlers::pump_lsp_jumps`]
+    /// response can land. Polled by [`action_handlers::lsp::pump_lsp_jumps`]
     /// at the top of each render tick. `Ready(Some)` opens the target
     /// file in the focused pane (when cross-file) and jumps the primary
     /// cursor. A zero-result `Ready` reports "lsp: no {label} found" in
@@ -2654,28 +2654,27 @@ impl Stoat {
         if let Some((label, _)) = &self.pending_lsp_jump {
             return Some(label);
         }
-        if self.pending_hover_request.is_some() {
-            return Some("hover");
-        }
-        if self.pending_code_action_request.is_some() {
-            return Some("code actions");
-        }
-        if self.pending_code_action_resolve.is_pending() {
-            return Some("code action");
-        }
-        if self.pending_prepare_rename.is_some() || self.pending_rename.is_pending() {
-            return Some("rename");
-        }
-        if self.pending_symbol_picker_request.is_some() {
-            return Some("symbols");
-        }
-        if self.pending_workspace_symbol_request.is_some() {
-            return Some("workspace symbols");
-        }
-        if self.pending_format_request.is_pending() || self.pending_format_on_save.is_some() {
-            return Some("format");
-        }
-        None
+
+        [
+            ("hover", self.pending_hover_request.is_some()),
+            ("code actions", self.pending_code_action_request.is_some()),
+            ("code action", self.pending_code_action_resolve.is_pending()),
+            (
+                "rename",
+                self.pending_prepare_rename.is_some() || self.pending_rename.is_pending(),
+            ),
+            ("symbols", self.pending_symbol_picker_request.is_some()),
+            (
+                "workspace symbols",
+                self.pending_workspace_symbol_request.is_some(),
+            ),
+            (
+                "format",
+                self.pending_format_request.is_pending() || self.pending_format_on_save.is_some(),
+            ),
+        ]
+        .into_iter()
+        .find_map(|(label, pending)| pending.then_some(label))
     }
 
     /// Reap the language servers on quit.
@@ -6462,25 +6461,9 @@ impl Stoat {
         action_handlers::pump_review_scan(self);
         action_handlers::code_search::pump_code_search(self);
         action_handlers::code_search::sync_code_search(self);
-        action_handlers::pump_lsp_jumps(self);
         action_handlers::movement::pump_changed_file_jump(self);
-        action_handlers::lsp::pump_lsp_hover(self);
-        action_handlers::lsp::pump_lsp_signature_help(self);
-        action_handlers::lsp::pump_lsp_inlay_hints(self);
-        action_handlers::lsp::pump_lsp_document_highlight(self);
-        action_handlers::lsp::pump_lsp_pull_diagnostics(self);
-        action_handlers::lsp::pump_lsp_semantic_tokens(self);
-        action_handlers::lsp::pump_lsp_folding_ranges(self);
-        action_handlers::lsp::pump_lsp_code_actions(self);
-        action_handlers::lsp::pump_lsp_code_action_resolve(self);
-        action_handlers::lsp::pump_lsp_prepare_rename(self);
-        action_handlers::lsp::pump_lsp_rename(self);
-        action_handlers::lsp::pump_lsp_symbol_picker(self);
-        action_handlers::lsp::pump_lsp_workspace_symbol(self);
-        action_handlers::lsp::pump_symbol_finder_doc(self);
-        action_handlers::lsp::sync_symbol_finder(self);
+        crate::lsp::pump_all(self);
         action_handlers::workspace::sync_workspace_picker(self);
-        action_handlers::lsp::pump_lsp_format(self);
         action_handlers::file::pump_format_on_save(self);
         crate::completion::request::pump(self);
         action_handlers::completion::pump_completion_resolve(self);

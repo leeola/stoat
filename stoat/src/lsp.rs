@@ -1,3 +1,5 @@
+use crate::{action_handlers, app::Stoat};
+
 pub(crate) mod edit_apply;
 pub(crate) mod pending;
 pub(crate) mod progress;
@@ -34,4 +36,55 @@ impl LspSymbolKind {
             Self::Symbol => "symbol",
         }
     }
+}
+
+/// Poll every in-flight LSP request once, and report whether any of them
+/// answered.
+///
+/// The run loop and the test harness both drive these features. A pump
+/// enumerated in only one of the two silently never runs in the other, so this
+/// is the one list both call.
+///
+/// This binds each result first and combines them after. A short-circuited OR
+/// leaves later pumps unpolled, and the harness settles by repeating the call
+/// until it reports `false`.
+pub(crate) fn pump_all(stoat: &mut Stoat) -> bool {
+    let jumps = action_handlers::lsp::pump_lsp_jumps(stoat);
+    let hover = action_handlers::lsp::pump_lsp_hover(stoat);
+    let signature_help = action_handlers::lsp::pump_lsp_signature_help(stoat);
+
+    let inlay_hints = action_handlers::lsp::pump_lsp_inlay_hints(stoat);
+    let document_highlight = action_handlers::lsp::pump_lsp_document_highlight(stoat);
+    let pull_diagnostics = action_handlers::lsp::pump_lsp_pull_diagnostics(stoat);
+    let semantic_tokens = action_handlers::lsp::pump_lsp_semantic_tokens(stoat);
+    let folding_ranges = action_handlers::lsp::pump_lsp_folding_ranges(stoat);
+
+    let code_actions = action_handlers::lsp::pump_lsp_code_actions(stoat);
+    let code_action_resolve = action_handlers::lsp::pump_lsp_code_action_resolve(stoat);
+    let prepare_rename = action_handlers::lsp::pump_lsp_prepare_rename(stoat);
+    let rename = action_handlers::lsp::pump_lsp_rename(stoat);
+
+    let symbol_picker = action_handlers::lsp::pump_lsp_symbol_picker(stoat);
+    let workspace_symbol = action_handlers::lsp::pump_lsp_workspace_symbol(stoat);
+    let symbol_finder_doc = action_handlers::lsp::pump_symbol_finder_doc(stoat);
+    action_handlers::lsp::sync_symbol_finder(stoat);
+
+    let format = action_handlers::lsp::pump_lsp_format(stoat);
+
+    jumps
+        || hover
+        || signature_help
+        || inlay_hints
+        || document_highlight
+        || pull_diagnostics
+        || semantic_tokens
+        || folding_ranges
+        || code_actions
+        || code_action_resolve
+        || prepare_rename
+        || rename
+        || symbol_picker
+        || workspace_symbol
+        || symbol_finder_doc
+        || format
 }
