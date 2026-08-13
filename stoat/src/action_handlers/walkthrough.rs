@@ -1,14 +1,20 @@
 use crate::{
-    action_handlers::{self, lsp::HoverPopup},
+    action_handlers::{self, lsp::HoverPopup, read_string_via_host},
     app::{Stoat, UpdateEffect},
+    code_index::{build, nav},
     walkthrough::{self, run::WalkthroughRun, store},
 };
+use codegraph::{EdgeKind, SymbolKey};
+use stoat_text::Rope;
 
 /// Load the walkthrough `slug` and jump to its first stop.
 ///
 /// Replaces whatever tour the workspace already holds. A slug that does not
 /// load, or one whose walkthrough has no stops, reports why and leaves the
 /// previous tour in place.
+///
+/// Any trail goes. The first stop follows nothing, so there is no pair of stops
+/// for a trail to connect yet.
 pub(crate) fn open(stoat: &mut Stoat, slug: &str) -> UpdateEffect {
     let git_root = stoat.active_workspace().git_root.clone();
 
@@ -26,7 +32,8 @@ pub(crate) fn open(stoat: &mut Stoat, slug: &str) -> UpdateEffect {
     };
 
     stoat.active_workspace_mut().walkthrough = Some(run);
-    jump_to_stop(stoat)
+    clear_trail(stoat);
+    jump_to_stop(stoat, None)
 }
 
 /// Step forward to the next stop.
@@ -62,6 +69,9 @@ pub(crate) fn show_narration_again(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 /// End the walkthrough, leaving the reader wherever it put them.
+///
+/// The trail goes with it. It was laid between two stops of a tour that is
+/// over, and nothing else put it there.
 pub(crate) fn done(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.active_workspace().walkthrough.is_none() {
         stoat.set_status("no walkthrough is playing");
@@ -69,19 +79,23 @@ pub(crate) fn done(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     stoat.active_workspace_mut().walkthrough = None;
+    clear_trail(stoat);
     stoat.set_status("walkthrough closed");
     UpdateEffect::Redraw
 }
 
-/// Move `delta` stops and jump to where that lands.
+/// Move `delta` stops, lay the trail between the two, and jump to where that
+/// lands.
 ///
 /// A step off either end says the tour is over rather than jumping again, which
-/// tells a clamped step apart from one that moved.
+/// tells a clamped step apart from one that moved. A clamped step lays no
+/// trail, since the reader has not moved between two stops.
 fn step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     let Some(run) = stoat.active_workspace_mut().walkthrough.as_mut() else {
         stoat.set_status("no walkthrough is playing");
         return UpdateEffect::Redraw;
     };
+    let from = run.current_stop().focus.clone();
 
     if !run.step(delta) {
         let end = if delta < 0 { "first" } else { "last" };
@@ -89,16 +103,28 @@ fn step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
 
-    jump_to_stop(stoat)
+    let to = {
+        let run = stoat
+            .active_workspace()
+            .walkthrough
+            .as_ref()
+            .expect("stepped one just above");
+        run.current_stop().focus.clone()
+    };
+
+    let note = install_step_trail(stoat, &from, &to);
+    jump_to_stop(stoat, note)
 }
 
 /// Open the current stop's file, put the cursor on its focus, and say where the
-/// reader now is.
+/// reader now is, with `note` appended when a step has more to report.
 ///
 /// A stop whose captured bytes no longer match the file still jumps. The range
 /// is the best guide left to where the code went, and a refusal to move strands
-/// the reader on the one stop that most needs a look.
-fn jump_to_stop(stoat: &mut Stoat) -> UpdateEffect {
+/// the reader on the one stop that most needs a look. Drift is the whole of
+/// that report, since a stop pointing at the wrong code outranks whatever a
+/// trail found between it and the last one.
+fn jump_to_stop(stoat: &mut Stoat, note: Option<String>) -> UpdateEffect {
     let Some(run) = stoat.active_workspace().walkthrough.as_ref() else {
         return UpdateEffect::None;
     };
@@ -117,9 +143,10 @@ fn jump_to_stop(stoat: &mut Stoat) -> UpdateEffect {
     let effect = action_handlers::movement::jump_to_offset(stoat, offset);
     show_narration(stoat, offset);
 
-    match drifted(stoat, &focus) {
-        true => stoat.set_status(format!("stop {id} drifted from its capture")),
-        false => stoat.set_status(format!("{at}/{stops}: {title}")),
+    match (drifted(stoat, &focus), note) {
+        (true, _) => stoat.set_status(format!("stop {id} drifted from its capture")),
+        (false, Some(note)) => stoat.set_status(format!("{at}/{stops}: {title} ({note})")),
+        (false, None) => stoat.set_status(format!("{at}/{stops}: {title}")),
     }
     effect
 }
@@ -168,6 +195,82 @@ fn show_narration(stoat: &mut Stoat, offset: usize) {
     stoat.pending_hover = Some(HoverPopup::new(lines, offset, editor_id));
 }
 
+/// Lay the call-graph trail between the stops `from` and `to`, and say how
+/// long it is.
+///
+/// Two stops that call each other, either way round, are worth walking between,
+/// and the trail is what walks them. Stops with no call relation between them
+/// clear the trail rather than leave the last pair's up, since a stale trail
+/// claims a connection these two stops do not have.
+///
+/// Runs before the jump, so `to`'s file is usually still unopened. That is what
+/// [`resolve_location_symbol`] reads through the fs host for.
+fn install_step_trail(
+    stoat: &mut Stoat,
+    from: &walkthrough::Location,
+    to: &walkthrough::Location,
+) -> Option<String> {
+    let path = {
+        let (Some(a), Some(b)) = (
+            resolve_location_symbol(stoat, from),
+            resolve_location_symbol(stoat, to),
+        ) else {
+            clear_trail(stoat);
+            return None;
+        };
+        stoat
+            .active_workspace()
+            .code_graph
+            .path_relating(a, b, EdgeKind::Calls)
+    };
+
+    let Some(path) = path else {
+        clear_trail(stoat);
+        return None;
+    };
+
+    let stops = path.len();
+    nav::install_trail(stoat, &path);
+    Some(format!("trail: {stops} stops"))
+}
+
+/// Drop any trail, whether a walkthrough laid it or the reader marked it.
+fn clear_trail(stoat: &mut Stoat) {
+    stoat.active_workspace_mut().trail = None;
+}
+
+/// The indexed symbol whose definition encloses a stop's focus.
+///
+/// Reads the open buffer when the workspace has one for the path, since that is
+/// what the reader sees, and the file on disk when it does not. `None` when the
+/// file is unreadable or the focus lands outside every indexed definition,
+/// which is ordinary for a stop over a comment or a config file.
+fn resolve_location_symbol(stoat: &Stoat, focus: &walkthrough::Location) -> Option<SymbolKey> {
+    let ws = stoat.active_workspace();
+    let absolute = ws.git_root.join(&focus.path);
+
+    let offset = {
+        let point = stoat_text::Point::new(
+            focus.range.start.line.saturating_sub(1),
+            focus.range.start.col.saturating_sub(1),
+        );
+        match ws.buffers.id_for_path(&absolute) {
+            Some(id) => {
+                let shared = ws.buffers.get(id)?;
+                let guard = shared.read().expect("buffer poisoned");
+                guard.snapshot.visible_text.point_to_offset(point)
+            },
+            None => {
+                let text = read_string_via_host(&*stoat.fs_host, &absolute).ok()?;
+                Rope::from(text.as_str()).point_to_offset(point)
+            },
+        }
+    };
+
+    let rel = build::relpath(&ws.git_root, &absolute)?;
+    ws.code_graph.symbol_at(build::file_id(&rel), offset)
+}
+
 /// Byte offset of `focus`'s start in the focused buffer.
 ///
 /// The stored point counts lines and byte columns from one, where the rope
@@ -206,11 +309,14 @@ mod tests {
     use crate::{
         action_handlers,
         app::Stoat,
+        code_index::{build, nav},
         host::FakeFs,
         walkthrough::{Location, Point, Range, Walkthrough},
     };
-    use std::{path::PathBuf, sync::Arc};
+    use codegraph::{Confidence, Edge, EdgeKind, FileId, FileShard, Symbol, SymbolKey, Target};
+    use std::{ops::Range as ByteRange, path::PathBuf, sync::Arc};
     use stoat_config::Settings;
+    use stoat_language::SymbolKind;
     use stoat_scheduler::TestScheduler;
 
     const FIRST: &str = "fn one() {}\nfn two() {}\n";
@@ -293,6 +399,65 @@ mod tests {
             .map(|path| path.display().to_string())
             .unwrap_or_default();
         (path, offset)
+    }
+
+    /// The two symbols the tour's stops focus on, `two` in `a.rs` calling
+    /// `three` in `b.rs`.
+    fn indexed_symbols() -> [(u8, FileId, &'static str, ByteRange<usize>); 2] {
+        [
+            (1, build::file_id("a.rs"), "two", 12..23),
+            (2, build::file_id("b.rs"), "three", 0..13),
+        ]
+    }
+
+    /// Index both stops' symbols, with the call edge between them only when
+    /// `calls` is set, which is how a test picks a related or unrelated pair.
+    fn index_the_tour(stoat: &mut Stoat, calls: bool) {
+        let symbols = indexed_symbols();
+        let keys: Vec<SymbolKey> = symbols
+            .iter()
+            .map(|(id, ..)| SymbolKey([*id; 16]))
+            .collect();
+
+        for (index, (id, file, name, def_range)) in symbols.into_iter().enumerate() {
+            let edges = match calls && index == 0 {
+                true => vec![Edge {
+                    from: keys[0],
+                    to: Target::Sym(keys[1]),
+                    kind: EdgeKind::Calls,
+                    site_range: def_range.clone(),
+                    confidence: Confidence::Resolved,
+                }],
+                false => Vec::new(),
+            };
+
+            stoat
+                .active_workspace_mut()
+                .code_graph
+                .insert_shard(FileShard {
+                    content_hash: [0u8; 32],
+                    symbols: vec![Symbol {
+                        key: SymbolKey([id; 16]),
+                        file,
+                        name: name.to_owned(),
+                        kind: SymbolKind::Function,
+                        container: vec![],
+                        def_range,
+                        name_range: 0..1,
+                        body_hash: [0u8; 32],
+                    }],
+                    edges,
+                });
+        }
+    }
+
+    /// Where the active trail sits and how long it is, or `None` for no trail.
+    fn trail_progress(stoat: &Stoat) -> Option<(usize, usize)> {
+        stoat
+            .active_workspace()
+            .trail
+            .as_ref()
+            .and_then(|trail| trail.progress())
     }
 
     /// The popup's text, one string per line, with the styling dropped.
@@ -402,12 +567,58 @@ mod tests {
     }
 
     #[test]
+    fn stepping_between_related_stops_lays_the_trail() {
+        let mut stoat = stoat_with_tour(FIRST);
+        index_the_tour(&mut stoat, true);
+        open(&mut stoat, "tour");
+
+        assert_eq!(trail_progress(&stoat), None, "the first stop follows none");
+
+        next(&mut stoat);
+        assert_eq!(
+            trail_progress(&stoat),
+            Some((1, 2)),
+            "the trail runs from the caller to the callee, sitting on the first",
+        );
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("2/2: second (trail: 2 stops)"),
+            "the stop the reader landed on comes first, then what connects it",
+        );
+    }
+
+    /// A trail between the last pair of stops says nothing true about this
+    /// pair, so an unrelated step takes it down rather than leaving it up.
+    #[test]
+    fn stepping_between_unrelated_stops_clears_the_trail() {
+        let mut stoat = stoat_with_tour(FIRST);
+        index_the_tour(&mut stoat, false);
+        open(&mut stoat, "tour");
+        nav::install_trail(&mut stoat, &[SymbolKey([9u8; 16]), SymbolKey([8u8; 16])]);
+
+        next(&mut stoat);
+        assert_eq!(trail_progress(&stoat), None);
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("2/2: second"),
+            "with no trail to report, the stop status stands alone",
+        );
+    }
+
+    #[test]
     fn done_ends_the_walkthrough() {
         let mut stoat = stoat_with_tour(FIRST);
+        index_the_tour(&mut stoat, true);
         open(&mut stoat, "tour");
+        next(&mut stoat);
         done(&mut stoat);
 
         assert!(stoat.active_workspace().walkthrough.is_none());
+        assert_eq!(
+            trail_progress(&stoat),
+            None,
+            "the trail belonged to the tour that just ended",
+        );
         assert_eq!(stoat.pending_message.as_deref(), Some("walkthrough closed"));
 
         next(&mut stoat);

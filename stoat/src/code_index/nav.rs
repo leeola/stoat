@@ -250,14 +250,9 @@ pub(crate) fn mark_trail_end(stoat: &mut Stoat) -> UpdateEffect {
 
     let first = path.first().copied();
     let stops = path.len();
-    let mut trail_path = NavList::default();
-    for &key in &path {
-        trail_path.push_tip(key);
-    }
-    trail_path.set_cursor(0);
     stoat.active_workspace_mut().trail = Some(TrailState {
         start: Some(start),
-        path: trail_path,
+        path: nav_list_of(&path),
     });
 
     if related {
@@ -269,6 +264,29 @@ pub(crate) fn mark_trail_end(stoat: &mut Stoat) -> UpdateEffect {
         Some(key) => jump_to_symbol(stoat, key),
         None => UpdateEffect::Redraw,
     }
+}
+
+/// Install `path` as the active trail, sitting on its first symbol.
+///
+/// For a trail worked out for the reader rather than marked by them, such as
+/// the one a walkthrough lays between consecutive stops. It carries no start
+/// anchor, since the path is already built and there is nothing left to
+/// resolve one against.
+pub(crate) fn install_trail(stoat: &mut Stoat, path: &[SymbolKey]) {
+    stoat.active_workspace_mut().trail = Some(TrailState {
+        start: None,
+        path: nav_list_of(path),
+    });
+}
+
+/// `path` as a list sitting on its first entry, which is where a trail starts.
+fn nav_list_of(path: &[SymbolKey]) -> NavList<SymbolKey> {
+    let mut list = NavList::default();
+    for &key in path {
+        list.push_tip(key);
+    }
+    list.set_cursor(0);
+    list
 }
 
 /// Forget the active trail.
