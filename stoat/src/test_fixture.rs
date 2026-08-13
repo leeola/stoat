@@ -104,6 +104,30 @@ pub(crate) fn open_scratch_file(h: &mut TestHarness, contents: &str) -> PathBuf 
     path
 }
 
+/// Write `files` under a fake git root and make that root the active
+/// workspace's, for a test whose subject is which file the editor picked.
+/// Returns the root the relative names hang off.
+///
+/// Nothing is opened. The name of the root is arbitrary, and is kept as it is
+/// only so the LSP tests that grew this helper go on writing the same paths.
+pub(crate) fn seed(h: &mut TestHarness, files: &[(&str, &str)]) -> PathBuf {
+    let root = PathBuf::from("/lsp-did-open-test");
+    h.fake_fs().insert_files(
+        files
+            .iter()
+            .map(|(rel, content)| (root.join(rel), content.as_bytes())),
+    );
+    h.stoat.active_workspace_mut().git_root = root.clone();
+    root
+}
+
+/// Open `path` in the focused pane and settle, so whatever the open armed has
+/// resolved before the test asserts.
+pub(crate) fn open_buffer(h: &mut TestHarness, path: PathBuf) {
+    action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+    h.settle();
+}
+
 /// The screen rect of whatever holds focus, split pane or dock, so a test aims
 /// a click at the same cells the paint used.
 pub(crate) fn focused_editor_pane_area(h: &TestHarness) -> Rect {

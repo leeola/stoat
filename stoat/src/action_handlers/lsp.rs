@@ -36,13 +36,13 @@ use lsp_types::{
     DocumentDiagnosticReport, DocumentDiagnosticReportResult, DocumentFormattingParams,
     DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
     DocumentRangeFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-    Documentation, FoldingRange, FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse,
-    HoverContents, HoverParams, InlayHint, InlayHintLabel, InlayHintParams, MarkedString,
-    MarkupKind, OneOf, ParameterLabel, Position, PrepareRenameResponse, Range, ReferenceContext,
-    ReferenceParams, RenameParams, SemanticToken, SemanticTokenType, SemanticTokensDeltaParams,
-    SemanticTokensEdit, SemanticTokensFullDeltaResult, SemanticTokensFullOptions,
-    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities, ServerInfo,
-    SignatureHelp, SignatureHelpParams, SignatureInformation, SymbolInformation, SymbolKind,
+    Documentation, GotoDefinitionParams, GotoDefinitionResponse, HoverContents, HoverParams,
+    InlayHint, InlayHintLabel, InlayHintParams, MarkedString, MarkupKind, OneOf, ParameterLabel,
+    Position, PrepareRenameResponse, Range, ReferenceContext, ReferenceParams, RenameParams,
+    SemanticToken, SemanticTokenType, SemanticTokensDeltaParams, SemanticTokensEdit,
+    SemanticTokensFullDeltaResult, SemanticTokensFullOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerInfo, SignatureHelp,
+    SignatureHelpParams, SignatureInformation, SymbolInformation, SymbolKind,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
     VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol,
@@ -2680,19 +2680,6 @@ pub(crate) type SemanticTokensOutcome = (
     )>,
 );
 
-/// The focused editor's current buffer-snapshot version, or `None` on a review
-/// view or absent editor.
-///
-/// Lets a trigger check its `(buffer_id, version)` dedupe key without the rope
-/// clone its request builder does.
-fn focused_buffer_version(stoat: &mut Stoat) -> Option<u64> {
-    let editor = crate::action_handlers::focused_editor_mut(stoat)?;
-    if editor.review_view.is_some() {
-        return None;
-    }
-    Some(editor.display_map.snapshot().buffer_snapshot().version())
-}
-
 /// Request semantic tokens for the focused editor when the server advertises a
 /// full-document legend and the `(buffer, version)` key changed.
 ///
@@ -2705,7 +2692,7 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
     let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
         return;
     };
-    let Some(version) = focused_buffer_version(stoat) else {
+    let Some(version) = crate::lsp::focused_buffer_version(stoat) else {
         return;
     };
     if stoat.last_semantic_tokens_key == Some((buffer_id, version)) {
@@ -3169,154 +3156,6 @@ fn apply_semantic_tokens(
             );
         }
     }
-}
-
-/// Debounce before requesting folding ranges, so a burst of edits collapses into
-/// a single request once typing settles.
-const FOLDING_RANGE_DEBOUNCE: Duration = Duration::from_millis(500);
-
-/// A completed folding-range request's payload. It carries the buffer and each
-/// foldable region as a `(byte range, collapsed text)` pair in request-time
-/// coordinates.
-pub(crate) type FoldingRangesOutcome = (BufferId, Vec<(std::ops::Range<usize>, Option<String>)>);
-
-/// Request folding ranges for the focused editor when the server advertises the
-/// capability and the `(buffer, version)` key changed.
-///
-/// A newly-focused buffer and each edit re-request behind a 500ms debounce.
-/// [`pump_lsp_folding_ranges`] feeds the response into the display map's
-/// `set_lsp_folding_ranges` hook, which replaces the buffer's foldable creases.
-pub(crate) fn folding_ranges_trigger(stoat: &mut Stoat) {
-    let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
-        return;
-    };
-    let Some(version) = focused_buffer_version(stoat) else {
-        return;
-    };
-    if stoat.last_folding_range_key == Some((buffer_id, version)) {
-        return;
-    }
-
-    let lsp = stoat.lsp_for(buffer_id);
-    if lsp.capabilities().folding_range_provider.is_none() {
-        return;
-    }
-
-    let Some((buffer_id, version, rope, params)) = build_folding_range_request(stoat) else {
-        return;
-    };
-
-    let key = (buffer_id, version);
-    stoat.last_folding_range_key = Some(key);
-
-    let executor = stoat.executor.clone();
-    let task = stoat.spawn_woken(async move {
-        executor.timer(FOLDING_RANGE_DEBOUNCE).await;
-        match lsp.folding_range(params).await {
-            Ok(Some(ranges)) => Some((buffer_id, convert_folding_ranges(ranges, &rope))),
-            Ok(None) => None,
-            Err(err) => {
-                tracing::warn!(target: "stoat::lsp", ?err, "folding_range request failed");
-                None
-            },
-        }
-    });
-    stoat.pending_folding_ranges.arm(task);
-}
-
-fn build_folding_range_request(
-    stoat: &mut Stoat,
-) -> Option<(BufferId, u64, Rope, FoldingRangeParams)> {
-    let (buffer_id, version, rope) = {
-        let editor = crate::action_handlers::focused_editor_mut(stoat)?;
-        if editor.review_view.is_some() {
-            return None;
-        }
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        (
-            editor.buffer_id,
-            buf_snap.version(),
-            buf_snap.rope().clone(),
-        )
-    };
-
-    let path = stoat
-        .active_workspace()
-        .buffers
-        .path_for(buffer_id)
-        .map(Path::to_path_buf)?;
-    let uri = path_to_uri(&path)?;
-    let params = FoldingRangeParams {
-        text_document: TextDocumentIdentifier { uri },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
-    };
-    Some((buffer_id, version, rope, params))
-}
-
-/// Convert LSP folding ranges into `(byte range, collapsed text)` foldable spans
-/// using the request-time rope.
-///
-/// Each span runs from the end of the start line to the end of the end line, so a
-/// fold keeps the header line visible and collapses the body. Degenerate spans
-/// (start at or after end) are dropped.
-fn convert_folding_ranges(
-    ranges: Vec<FoldingRange>,
-    rope: &Rope,
-) -> Vec<(std::ops::Range<usize>, Option<String>)> {
-    let line_end_offset = |line: u32| rope.point_to_offset(Point::new(line, rope.line_len(line)));
-    ranges
-        .into_iter()
-        .filter_map(|fr| {
-            let start = line_end_offset(fr.start_line);
-            let end = line_end_offset(fr.end_line);
-            (start < end).then_some((start..end, fr.collapsed_text))
-        })
-        .collect()
-}
-
-/// Poll any in-flight folding-range request and install the results as foldable
-/// creases on the focused editor. Returns true when state changed.
-pub(crate) fn pump_lsp_folding_ranges(stoat: &mut Stoat) -> bool {
-    let Some(outcome) = stoat.pending_folding_ranges.poll() else {
-        return false;
-    };
-    if let Some((buffer_id, items)) = outcome {
-        apply_folding_ranges(stoat, buffer_id, items);
-    }
-    true
-}
-
-fn apply_folding_ranges(
-    stoat: &mut Stoat,
-    buffer_id: BufferId,
-    items: Vec<(std::ops::Range<usize>, Option<String>)>,
-) {
-    let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
-        return;
-    };
-    if editor.buffer_id != buffer_id {
-        return;
-    }
-
-    let anchored: Vec<(std::ops::Range<Anchor>, Option<String>)> = {
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        items
-            .into_iter()
-            .map(|(range, text)| {
-                (
-                    buf_snap.anchor_at(range.start, Bias::Right)
-                        ..buf_snap.anchor_at(range.end, Bias::Left),
-                    text,
-                )
-            })
-            .collect()
-    };
-    editor
-        .display_map
-        .set_lsp_folding_ranges(buffer_id, anchored);
 }
 
 /// One actionable entry in [`CodeActionPicker`]. Variants reflect
@@ -5018,6 +4857,7 @@ mod tests {
     use crate::{
         agent_ipc::{AgentControl, AgentQuery},
         lsp::LspSymbolKind,
+        test_fixture::{open_buffer, seed},
         test_harness::TestHarness,
     };
     use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
@@ -5063,17 +4903,6 @@ mod tests {
             0,
             "an empty body measures zero rather than panicking"
         );
-    }
-
-    fn seed(h: &mut TestHarness, files: &[(&str, &str)]) -> PathBuf {
-        let root = PathBuf::from("/lsp-did-open-test");
-        h.fake_fs().insert_files(
-            files
-                .iter()
-                .map(|(rel, content)| (root.join(rel), content.as_bytes())),
-        );
-        h.stoat.active_workspace_mut().git_root = root.clone();
-        root
     }
 
     #[test]
@@ -5864,11 +5693,6 @@ mod tests {
         h.settle();
         let opens = h.fake_lsp().observed_opens();
         assert_eq!(opens.len(), 2);
-    }
-
-    fn open_buffer(h: &mut TestHarness, path: PathBuf) {
-        crate::action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
-        h.settle();
     }
 
     fn edit_buffer(h: &mut TestHarness, range: std::ops::Range<usize>, text: &str) {
@@ -10972,56 +10796,6 @@ mod tests {
         assert!(
             lsp_token_count(&mut h) > 0,
             "the in-process stcfg server highlights the config buffer",
-        );
-    }
-
-    fn enable_folding_range(h: &TestHarness) {
-        use lsp_types::{FoldingRangeProviderCapability, ServerCapabilities};
-        h.fake_lsp().set_capabilities(ServerCapabilities {
-            folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
-            ..Default::default()
-        });
-    }
-
-    fn crease_point_ranges(h: &mut TestHarness) -> Vec<std::ops::Range<stoat_text::Point>> {
-        let editor =
-            crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        let resolve =
-            |a: &stoat_text::Anchor| buf_snap.rope().offset_to_point(buf_snap.resolve_anchor(a));
-        snapshot
-            .crease_snapshot()
-            .crease_items_with_offsets(&resolve)
-            .into_iter()
-            .map(|(_, range)| range)
-            .collect()
-    }
-
-    #[test]
-    fn folding_ranges_land_as_creases() {
-        use lsp_types::FoldingRange;
-        let mut h = TestHarness::with_size(40, 10);
-        enable_folding_range(&h);
-        let root = seed(&mut h, &[("main.rs", "fn a() {\n    x;\n}\n")]);
-        let path = root.join("main.rs");
-        open_buffer(&mut h, path.clone());
-        h.fake_lsp().set_folding_ranges(
-            path.to_str().unwrap(),
-            vec![FoldingRange {
-                start_line: 0,
-                start_character: None,
-                end_line: 2,
-                end_character: None,
-                kind: None,
-                collapsed_text: None,
-            }],
-        );
-        h.type_keys("escape");
-        h.advance_clock(Duration::from_millis(550));
-        assert_eq!(
-            crease_point_ranges(&mut h),
-            vec![stoat_text::Point::new(0, 8)..stoat_text::Point::new(2, 1)]
         );
     }
 

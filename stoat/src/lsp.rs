@@ -1,6 +1,7 @@
 use crate::{action_handlers, app::Stoat};
 
 pub(crate) mod edit_apply;
+pub(crate) mod folding;
 pub(crate) mod pending;
 pub(crate) mod progress;
 pub(crate) mod registry;
@@ -38,6 +39,19 @@ impl LspSymbolKind {
     }
 }
 
+/// The focused editor's current buffer-snapshot version, or `None` on a review
+/// view or absent editor.
+///
+/// Lets a trigger check its `(buffer_id, version)` dedupe key without the rope
+/// clone its request builder does.
+pub(crate) fn focused_buffer_version(stoat: &mut Stoat) -> Option<u64> {
+    let editor = action_handlers::focused_editor_mut(stoat)?;
+    if editor.review_view.is_some() {
+        return None;
+    }
+    Some(editor.display_map.snapshot().buffer_snapshot().version())
+}
+
 /// Poll every in-flight LSP request once, and report whether any of them
 /// answered.
 ///
@@ -57,7 +71,7 @@ pub(crate) fn pump_all(stoat: &mut Stoat) -> bool {
     let document_highlight = action_handlers::lsp::pump_lsp_document_highlight(stoat);
     let pull_diagnostics = action_handlers::lsp::pump_lsp_pull_diagnostics(stoat);
     let semantic_tokens = action_handlers::lsp::pump_lsp_semantic_tokens(stoat);
-    let folding_ranges = action_handlers::lsp::pump_lsp_folding_ranges(stoat);
+    let folding_ranges = folding::pump_lsp_folding_ranges(stoat);
 
     let code_actions = action_handlers::lsp::pump_lsp_code_actions(stoat);
     let code_action_resolve = action_handlers::lsp::pump_lsp_code_action_resolve(stoat);

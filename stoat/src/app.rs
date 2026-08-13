@@ -891,9 +891,9 @@ pub struct Stoat {
     /// unchanged tick does not re-request.
     pub(crate) last_semantic_tokens_key: Option<(BufferId, u64)>,
     /// In-flight folding-range request for the focused editor, armed by
-    /// [`action_handlers::lsp::folding_ranges_trigger`] behind a debounce and
-    /// applied by [`action_handlers::lsp::pump_lsp_folding_ranges`].
-    pub(crate) pending_folding_ranges: Pending<Option<action_handlers::lsp::FoldingRangesOutcome>>,
+    /// [`crate::lsp::folding::folding_ranges_trigger`] behind a debounce and
+    /// applied by [`crate::lsp::folding::pump_lsp_folding_ranges`].
+    pub(crate) pending_folding_ranges: Pending<Option<crate::lsp::folding::FoldingRangesOutcome>>,
     /// `(buffer, version)` the folding-range trigger last requested for, so an
     /// unchanged tick does not re-request.
     pub(crate) last_folding_range_key: Option<(BufferId, u64)>,
@@ -3773,7 +3773,7 @@ impl Stoat {
         action_handlers::lsp::document_highlight_trigger(self);
         action_handlers::lsp::pull_diagnostics_trigger(self);
         action_handlers::lsp::semantic_tokens_trigger(self);
-        action_handlers::lsp::folding_ranges_trigger(self);
+        crate::lsp::folding::folding_ranges_trigger(self);
         effect
     }
 
