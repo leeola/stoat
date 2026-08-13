@@ -8,6 +8,7 @@ use crate::{
     action_handlers,
     action_handlers::lsp::{SymbolEntry, SymbolPicker},
     app::{Stoat, UpdateEffect},
+    badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
     code_index::build,
     editor_state::EditorState,
     nav_list::NavList,
@@ -51,6 +52,27 @@ impl TrailState {
     /// there is nothing to step along, only a point waiting for its partner.
     pub(crate) fn is_armed(&self) -> bool {
         self.path.entries().is_empty()
+    }
+
+    /// Project the trail into its workspace badge.
+    ///
+    /// Total where [`AgentStatus::badge`](crate::agent_status::AgentStatus::badge)
+    /// is not, though it mirrors that one otherwise. A session that ended warrants
+    /// no overlay, where every trail state warrants one. A trail that no longer
+    /// deserves a badge is a trail that no longer exists, and [`trail_clear`] is
+    /// what makes that so.
+    pub(crate) fn badge(&self) -> Badge {
+        let label = match self.progress() {
+            Some((at, stops)) => format!("trail {at}/{stops}"),
+            None => "trail armed".to_string(),
+        };
+        Badge {
+            source: BadgeSource::Trail,
+            anchor: BadgeAnchor::BottomRight,
+            state: BadgeState::Active,
+            label,
+            detail: None,
+        }
     }
 }
 
@@ -781,6 +803,64 @@ mod tests {
             Some(foo),
             "and runs back up the call chain to the end mark",
         );
+    }
+
+    /// The badge is the only sign a trail is live, so its label has to say
+    /// which of the two states it is in. A half-marked trail has no position
+    /// to report, and a walked one has nothing else worth the room.
+    #[test]
+    fn the_badge_names_the_trail_state_it_is_in() {
+        let mut stoat = stoat_with_repo();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/src/a.rs", "fn foo() {}\nfn bar() {}\n");
+        stoat.set_fs_host(fs);
+
+        let file = build::file_id("src/a.rs");
+        let (foo, bar) = (SymbolKey([1u8; 16]), SymbolKey([2u8; 16]));
+        {
+            let ws = stoat.active_workspace_mut();
+            ws.code_graph.insert_shard(FileShard {
+                content_hash: [0u8; 32],
+                symbols: vec![sym(1, file, "foo", 0..11), sym(2, file, "bar", 12..23)],
+                edges: vec![call_edge(foo, bar)],
+            });
+            ws.file_paths.insert(file, PathBuf::from("src/a.rs"));
+        }
+        let label = |stoat: &Stoat| {
+            stoat
+                .active_workspace()
+                .trail
+                .as_ref()
+                .map(|trail| trail.badge().label)
+        };
+
+        assert_eq!(label(&stoat), None, "no trail, no badge");
+
+        jump_to_symbol(&mut stoat, foo);
+        mark_trail_start(&mut stoat);
+        assert_eq!(
+            label(&stoat).as_deref(),
+            Some("trail armed"),
+            "a start alone has no position to report",
+        );
+
+        jump_to_symbol(&mut stoat, bar);
+        mark_trail_end(&mut stoat);
+        assert_eq!(
+            label(&stoat).as_deref(),
+            Some("trail 1/2"),
+            "computing the path parks the reader on its first stop",
+        );
+
+        trail_next(&mut stoat);
+        assert_eq!(
+            label(&stoat).as_deref(),
+            Some("trail 2/2"),
+            "and the label follows every step",
+        );
+
+        trail_clear(&mut stoat);
+        assert_eq!(label(&stoat), None, "clearing takes the badge with it");
     }
 
     /// Marking a new start replaces a trail, so before this the only way to be

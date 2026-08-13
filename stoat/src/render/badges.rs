@@ -1,6 +1,7 @@
 use crate::{
     agent_status::AgentStatus,
     badge::{Anchor, Badge, BadgeSource, BadgeState, BadgeTray, StackDirection},
+    code_index::nav::TrailState,
     render::{
         review::style_rgb,
         text::{write_cell, write_str},
@@ -100,6 +101,19 @@ pub(crate) fn render_badges(
 pub(crate) fn sync_agent_badge(tray: &mut BadgeTray, agent: Option<&AgentStatus>) {
     tray.remove_by_source(BadgeSource::Agent);
     if let Some(badge) = agent.and_then(AgentStatus::badge) {
+        tray.insert(badge);
+    }
+}
+
+/// Reflect the marked trail into `tray` under [`BadgeSource::Trail`], replacing
+/// any trail badge left from a previous frame.
+///
+/// Mirrors [`sync_agent_badge`], and re-derives per frame for the same reason:
+/// the label carries the position along the trail, which every step moves. No
+/// trail leaves no badge, which is what a `TrailClear` shows up as.
+pub(crate) fn sync_trail_badge(tray: &mut BadgeTray, trail: Option<&TrailState>) {
+    tray.remove_by_source(BadgeSource::Trail);
+    if let Some(badge) = trail.map(TrailState::badge) {
         tray.insert(badge);
     }
 }

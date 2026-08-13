@@ -47,6 +47,11 @@ pub enum BadgeSource {
     /// workspace's [`AgentStatus`](crate::agent_status::AgentStatus). At most
     /// one Agent-sourced badge exists per workspace.
     Agent,
+    /// The marked call-graph trail, re-derived each frame from the
+    /// workspace's [`TrailState`](crate::code_index::nav::TrailState). At most
+    /// one Trail-sourced badge exists per workspace, and none once the trail
+    /// is cleared.
+    Trail,
     /// One-shot version notice raised by `ShowVersion`, living in the
     /// app-level tray until the next key press dismisses it.
     Version,
