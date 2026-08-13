@@ -1,6 +1,7 @@
 use crate::{action_handlers, app::Stoat};
 
 pub(crate) mod document_highlight;
+pub(crate) mod drain;
 pub(crate) mod edit_apply;
 pub(crate) mod folding;
 pub(crate) mod pending;

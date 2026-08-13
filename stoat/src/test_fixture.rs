@@ -149,6 +149,24 @@ pub(crate) fn open_stcfg_with_server(h: &mut TestHarness) -> PathBuf {
     path
 }
 
+/// Open `name` holding `contents` and drive the parse to completion, for a test
+/// whose subject reads the syntax tree rather than the text.
+pub(crate) fn open_indent_buffer(h: &mut TestHarness, name: &str, contents: &[u8]) {
+    let root = PathBuf::from("/indent");
+    let path = root.join(name);
+    h.fake_fs().insert_file(&path, contents);
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+    h.settle();
+    // Three beats, because a parse is spawned and installed by different
+    // passes. The first drive spawns the job, the settle runs it on the
+    // pool, and the second drive polls its output into the registry, which
+    // is where auto-indent reads the tree from.
+    h.stoat.drive_background();
+    h.settle();
+    h.stoat.drive_background();
+}
+
 /// An error diagnostic one column wide at `(line, col)`, for a test whose
 /// subject is what the editor does with a diagnostic rather than what is in it.
 pub(crate) fn diag(line: u32, col: u32, message: &str) -> Diagnostic {

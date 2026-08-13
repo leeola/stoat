@@ -195,7 +195,7 @@ impl TestHarness {
     /// [`crate::host::FakeLsp`] before any `update` event still see
     /// the dispatched state in the next snapshot.
     pub fn drain_lsp(&mut self) {
-        self.stoat.drain_lsp_notifications();
+        crate::lsp::drain::drain_lsp_notifications(&mut self.stoat);
     }
 
     /// Expose the [`crate::host::FakeClipboard`] backing this harness
@@ -979,7 +979,7 @@ impl TestHarness {
         diagnostics: Vec<lsp_types::Diagnostic>,
     ) {
         let path = path.as_ref();
-        let spans = crate::app::publish_spans(
+        let spans = crate::lsp::util::publish_spans(
             path,
             &diagnostics,
             crate::host::OffsetEncoding::Utf16,

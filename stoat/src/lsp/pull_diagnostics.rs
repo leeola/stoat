@@ -14,10 +14,7 @@
 //! collects the replies, both of them background work the user never asks for.
 
 use crate::{
-    action_handlers,
-    app::{self, Stoat},
-    buffer::BufferId,
-    host::LanguageServerFeature,
+    action_handlers, app::Stoat, buffer::BufferId, host::LanguageServerFeature, lsp::util,
 };
 use futures::task::noop_waker;
 use lsp_types::{
@@ -212,7 +209,7 @@ fn apply_pull_diagnostics(
                 .map(|(name, _)| name)
                 .unwrap_or_else(|| String::from("lsp"));
             let encoding = stoat.lsp_for(id).offset_encoding();
-            let spans = app::publish_spans(
+            let spans = util::publish_spans(
                 &path,
                 &diagnostics,
                 encoding,

@@ -1129,7 +1129,7 @@ fn resolve_one_target(
     encoding: OffsetEncoding,
     fs: &dyn crate::host::FsHost,
 ) -> Option<LocationEntry> {
-    let target_path = crate::app::lsp_uri_to_path(&uri)?;
+    let target_path = crate::lsp::util::lsp_uri_to_path(&uri)?;
 
     let (offset, text) = if target_path == source_path {
         (
@@ -3297,7 +3297,7 @@ fn workspace_symbol_entries(
                 ..
             } in items
             {
-                let Some(path) = crate::app::lsp_uri_to_path(&location.uri) else {
+                let Some(path) = crate::lsp::util::lsp_uri_to_path(&location.uri) else {
                     continue;
                 };
                 entries.push(WorkspaceSymbolEntry {
@@ -3326,7 +3326,7 @@ fn workspace_symbol_entries(
                         (workspace_loc.uri, Position::new(0, 0))
                     },
                 };
-                let Some(path) = crate::app::lsp_uri_to_path(&uri) else {
+                let Some(path) = crate::lsp::util::lsp_uri_to_path(&uri) else {
                     continue;
                 };
                 entries.push(WorkspaceSymbolEntry {
@@ -4950,7 +4950,7 @@ mod tests {
             path.clone(),
             "ra".into(),
             vec![diag(0, 2, "ra")],
-            crate::app::publish_spans(
+            crate::lsp::util::publish_spans(
                 &path,
                 &[diag(0, 2, "ra")],
                 OffsetEncoding::Utf8,
@@ -4962,7 +4962,7 @@ mod tests {
             path,
             "clippy".into(),
             vec![diag(1, 1, "clippy")],
-            crate::app::publish_spans(
+            crate::lsp::util::publish_spans(
                 &path2,
                 &[diag(1, 1, "clippy")],
                 OffsetEncoding::Utf16,

@@ -15,10 +15,13 @@
 //! - An inverted [`Range`] (`start > end`) normalizes to an empty range at `end`, matching the
 //!   vscode precedent that several language servers depend on.
 
-use crate::host::OffsetEncoding;
+use crate::{buffer_registry::BufferRegistry, host::OffsetEncoding};
 use lsp_types::{Position, Range, Uri};
 use percent_encoding::{percent_decode_str, percent_encode, AsciiSet, CONTROLS};
-use std::{ops::Range as ByteRange, path::PathBuf};
+use std::{
+    ops::Range as ByteRange,
+    path::{Path, PathBuf},
+};
 use stoat_text::{Bias, Point, PointUtf16, Rope};
 
 /// The bytes a URI path may not carry literally.
@@ -179,9 +182,142 @@ pub fn byte_range_to_lsp_range(
     Range::new(start, end)
 }
 
+/// Anchor each of `published`'s ranges into the buffer for `path`, converting
+/// through `encoding`.
+///
+/// Anchored here, where the publish has just landed and the ranges still name
+/// the text the server measured, rather than every frame against text that has
+/// moved since. From here the fragment tree carries each mark along with the
+/// text it sits on, so a reader resolves instead of replaying edits. A path with
+/// no open buffer has nothing to anchor into and yields unresolved spans.
+///
+/// Starts take [`Bias::Right`] and ends [`Bias::Left`], so text inserted at
+/// either edge falls outside the mark rather than widening it.
+pub(crate) fn publish_spans(
+    path: &Path,
+    published: &[lsp_types::Diagnostic],
+    encoding: OffsetEncoding,
+    buffers: &BufferRegistry,
+) -> Vec<crate::diagnostics::PublishedSpan> {
+    let Some(buffer) = buffers.id_for_path(path).and_then(|id| buffers.get(id)) else {
+        return vec![crate::diagnostics::PublishedSpan::unresolved(); published.len()];
+    };
+    let guard = buffer.read().expect("buffer lock");
+    let rope = guard.rope();
+
+    let ranges: Vec<ByteRange<usize>> = published
+        .iter()
+        .map(|diag| lsp_range_to_byte_range(rope, diag.range, encoding))
+        .collect();
+    let starts: Vec<usize> = ranges.iter().map(|r| r.start).collect();
+    let ends: Vec<usize> = ranges.iter().map(|r| r.end).collect();
+
+    let snapshot = &guard.snapshot;
+    snapshot
+        .anchors_at_batch(&starts, Bias::Right)
+        .into_iter()
+        .zip(snapshot.anchors_at_batch(&ends, Bias::Left))
+        .map(|pair| crate::diagnostics::PublishedSpan {
+            anchors: Some(pair),
+        })
+        .collect()
+}
+
+/// Convert an LSP `file:` URI to a [`PathBuf`]. Returns `None` for any
+/// other scheme; non-`file:` diagnostic notifications are silently
+/// dropped because stoat has no concept of remote-path buffers today.
+pub(crate) fn lsp_uri_to_path(uri: &Uri) -> Option<PathBuf> {
+    if uri.scheme().map(|s| s.as_str()) != Some("file") {
+        return None;
+    }
+    Some(percent_decode_path(uri))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{app::Stoat, test_fixture::open_indent_buffer};
+
+    #[test]
+    fn publish_spans_resolve_in_the_publishing_servers_encoding() {
+        use crate::host::OffsetEncoding;
+        use lsp_types::{Diagnostic, Position, Range as LspRange};
+
+        let mut h = Stoat::test();
+        // é is two UTF-8 bytes but one UTF-16 unit, so character 2 is byte 2
+        // under UTF-8 and byte 3 under UTF-16.
+        open_indent_buffer(&mut h, "a.txt", "\u{e9}xy\n".as_bytes());
+        let path = PathBuf::from("/indent/a.txt");
+
+        let diag = Diagnostic::new_simple(
+            LspRange::new(Position::new(0, 2), Position::new(0, 3)),
+            "boom".to_string(),
+        );
+        let buffers = &h.stoat.active_workspace().buffers;
+        let utf8 = publish_spans(
+            &path,
+            std::slice::from_ref(&diag),
+            OffsetEncoding::Utf8,
+            buffers,
+        );
+        let utf16 = publish_spans(&path, &[diag], OffsetEncoding::Utf16, buffers);
+
+        // A span is anchored rather than stored as offsets, so reading one back
+        // resolves it against the buffer it was taken in.
+        let buffer = buffers
+            .id_for_path(&path)
+            .and_then(|id| buffers.get(id))
+            .expect("open buffer");
+        let snapshot = buffer.read().expect("poisoned").snapshot.clone();
+        let offsets = |span: &crate::diagnostics::PublishedSpan| {
+            let (start, end) = span.anchors.expect("the buffer is open, so it anchored");
+            snapshot.resolve_anchor(&start)..snapshot.resolve_anchor(&end)
+        };
+
+        assert_eq!(offsets(&utf8[0]), 2..3, "utf-8 character 2 is the x");
+        assert_eq!(offsets(&utf16[0]), 3..4, "utf-16 character 2 is the y");
+    }
+
+    /// Typing against either edge of a marked span has to leave the mark on the
+    /// text the server named rather than stretch it over what was just typed.
+    /// The biases the publish anchors with are what decide that.
+    #[test]
+    fn publish_spans_anchor_typing_at_an_edge_outside_the_mark() {
+        use crate::host::OffsetEncoding;
+        use lsp_types::{Diagnostic, Position, Range as LspRange};
+
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.txt", b"alpha bravo\n");
+        let path = PathBuf::from("/indent/a.txt");
+
+        // `bravo` is [6, 11).
+        let diag = Diagnostic::new_simple(
+            LspRange::new(Position::new(0, 6), Position::new(0, 11)),
+            "boom".to_string(),
+        );
+        let buffers = &h.stoat.active_workspace().buffers;
+        let spans = publish_spans(&path, &[diag], OffsetEncoding::Utf16, buffers);
+        let (start, end) = spans[0]
+            .anchors
+            .expect("the buffer is open, so it anchored");
+
+        let buffer = buffers
+            .id_for_path(&path)
+            .and_then(|id| buffers.get(id))
+            .expect("open buffer");
+        {
+            let mut guard = buffer.write().expect("poisoned");
+            guard.edit(11..11, "Z");
+            guard.edit(6..6, "Y");
+        }
+        let after = buffer.read().expect("poisoned").snapshot.clone();
+
+        assert_eq!(
+            after.resolve_anchor(&start)..after.resolve_anchor(&end),
+            7..12,
+            "the mark covers `bravo` alone, the Y before it and the Z after",
+        );
+    }
 
     fn rope(s: &str) -> Rope {
         let mut r = Rope::new();
@@ -196,7 +332,7 @@ mod tests {
     /// The path a URI built from `path` reads back as, which is the whole round
     /// trip a buffer's identity depends on.
     fn round_trip(path: &str) -> PathBuf {
-        let uri = crate::action_handlers::lsp::path_to_uri(std::path::Path::new(path))
+        let uri = crate::action_handlers::lsp::path_to_uri(Path::new(path))
             .expect("path makes a valid uri");
         percent_decode_path(&uri)
     }
@@ -220,7 +356,7 @@ mod tests {
         // Every one of these is a pchar, so the uri stoat sends for them is
         // unchanged and a server matching what it sent still recognizes it.
         let path = "/ws/a:b@c!d$e&f'g(h)i*j+k,l;m=n-o.p_q~r.rs";
-        let uri = crate::action_handlers::lsp::path_to_uri(std::path::Path::new(path))
+        let uri = crate::action_handlers::lsp::path_to_uri(Path::new(path))
             .expect("path makes a valid uri");
         assert_eq!(uri.as_str(), format!("file://{path}"));
     }
