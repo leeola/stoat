@@ -24,7 +24,7 @@ use crate::{
         self, active_modal, debug_assert_modal_exclusivity, modal_predicate, normalize_shift_event,
         resolve_action, ActiveModal, StoatKeymapState,
     },
-    lsp::pending::Pending,
+    lsp::pending::{Pending, StampedPending},
     minimap::emit::{self},
     mouse::{self, mouse_event_kind},
     pane::{DockId, DockVisibility, FocusTarget, NodeId, PaneId, PaneTree, Placement, View},
@@ -1398,10 +1398,7 @@ pub struct Stoat {
     /// [`action_handlers::lsp::pump_lsp_code_action_resolve`]; on
     /// `Ready(Some(edit))` the edit is applied via
     /// [`crate::lsp::edit_apply::apply_workspace_edit`].
-    pub(crate) pending_code_action_resolve: Option<(
-        action_handlers::lsp::DocumentStamp,
-        stoat_scheduler::Task<Option<lsp_types::WorkspaceEdit>>,
-    )>,
+    pub(crate) pending_code_action_resolve: StampedPending<Option<lsp_types::WorkspaceEdit>>,
 
     /// In-flight `textDocument/prepareRename` request. On response,
     /// [`action_handlers::lsp::pump_lsp_prepare_rename`] opens
@@ -1420,10 +1417,7 @@ pub struct Stoat {
     /// [`action_handlers::lsp::pump_lsp_rename`]; on `Ready(Some(edit))`
     /// the edit is applied via
     /// [`crate::lsp::edit_apply::apply_workspace_edit`].
-    pub(crate) pending_rename: Option<(
-        action_handlers::lsp::DocumentStamp,
-        stoat_scheduler::Task<Option<lsp_types::WorkspaceEdit>>,
-    )>,
+    pub(crate) pending_rename: StampedPending<Option<lsp_types::WorkspaceEdit>>,
 
     /// In-flight `textDocument/documentSymbol` request. Polled by
     /// [`action_handlers::lsp::pump_lsp_symbol_picker`], which installs the
@@ -1447,10 +1441,7 @@ pub struct Stoat {
     /// [`action_handlers::lsp::pump_lsp_format`]; on `Ready(Some)`
     /// the returned text edits are applied via
     /// [`crate::lsp::edit_apply::apply_workspace_edit`].
-    pub(crate) pending_format_request: Option<(
-        action_handlers::lsp::DocumentStamp,
-        stoat_scheduler::Task<Option<action_handlers::lsp::FormatResponse>>,
-    )>,
+    pub(crate) pending_format_request: StampedPending<Option<action_handlers::lsp::FormatResponse>>,
     /// In-flight format-on-save task. Set when a save with `format_on_save`
     /// enabled arms a formatting request bounded by a save-time budget;
     /// [`action_handlers::file::pump_format_on_save`] applies any edits and
@@ -1505,10 +1496,8 @@ pub struct Stoat {
     /// 300ms timeout. Polled by
     /// [`crate::completion::accept::pump_completion_accept`], which
     /// applies the resolved edits to the captured buffer.
-    pub(crate) pending_completion_accept: Option<(
-        action_handlers::lsp::DocumentStamp,
-        stoat_scheduler::Task<Option<crate::completion::accept::AcceptedImports>>,
-    )>,
+    pub(crate) pending_completion_accept:
+        StampedPending<Option<crate::completion::accept::AcceptedImports>>,
 
     /// Buffer signature `(BufferId, version)` recorded at the most
     /// recent completion-trigger call. The trigger pipeline returns
@@ -2046,14 +2035,14 @@ impl Stoat {
             last_signature_help_key: None,
             pending_code_action_request: None,
             pending_code_action_picker: None,
-            pending_code_action_resolve: None,
+            pending_code_action_resolve: StampedPending::default(),
             pending_prepare_rename: None,
             rename_input: None,
-            pending_rename: None,
+            pending_rename: StampedPending::default(),
             pending_symbol_picker_request: None,
             pending_symbol_picker: None,
             pending_workspace_symbol_request: None,
-            pending_format_request: None,
+            pending_format_request: StampedPending::default(),
             pending_format_on_save: None,
             quit_after_save: false,
             quit_requested: false,
@@ -2061,7 +2050,7 @@ impl Stoat {
             completion_generation: 0,
             pending_completion_request: None,
             pending_completion_resolve: None,
-            pending_completion_accept: None,
+            pending_completion_accept: StampedPending::default(),
             last_completion_signature: None,
             completion_context: None,
             active_snippet: None,
@@ -2671,10 +2660,10 @@ impl Stoat {
         if self.pending_code_action_request.is_some() {
             return Some("code actions");
         }
-        if self.pending_code_action_resolve.is_some() {
+        if self.pending_code_action_resolve.is_pending() {
             return Some("code action");
         }
-        if self.pending_prepare_rename.is_some() || self.pending_rename.is_some() {
+        if self.pending_prepare_rename.is_some() || self.pending_rename.is_pending() {
             return Some("rename");
         }
         if self.pending_symbol_picker_request.is_some() {
@@ -2683,7 +2672,7 @@ impl Stoat {
         if self.pending_workspace_symbol_request.is_some() {
             return Some("workspace symbols");
         }
-        if self.pending_format_request.is_some() || self.pending_format_on_save.is_some() {
+        if self.pending_format_request.is_pending() || self.pending_format_on_save.is_some() {
             return Some("format");
         }
         None

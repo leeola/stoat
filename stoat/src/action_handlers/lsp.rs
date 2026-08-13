@@ -3597,29 +3597,29 @@ pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
 /// the app. On `Ready(None)` the resolve produced no edit, which is a
 /// silent no-op.
 pub(crate) fn pump_lsp_code_action_resolve(stoat: &mut Stoat) -> bool {
-    let Some((requested_at, mut task)) = stoat.pending_code_action_resolve.take() else {
+    let Some((requested_at, edit)) = stoat.pending_code_action_resolve.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some(_)) if !requested_at.is_current(stoat) => {
-            set_lsp_status(
-                stoat,
-                "lsp: code action skipped, buffer changed".to_string(),
-            );
-            true
-        },
-        Poll::Ready(Some(edit)) => {
-            apply_code_action_edit(stoat, edit, requested_at.encoding());
-            true
-        },
-        Poll::Ready(None) => true,
-        Poll::Pending => {
-            stoat.pending_code_action_resolve = Some((requested_at, task));
-            false
-        },
+    if let Some(edit) = edit
+        && !skipped_as_stale(stoat, &requested_at, "code action")
+    {
+        apply_code_action_edit(stoat, edit, requested_at.encoding());
     }
+    true
+}
+
+/// Whether the buffer moved since `stamp` was taken, reporting a skipped `what`
+/// in the status bar when it did.
+///
+/// A reply names offsets in the text the request measured. Applying it to a
+/// buffer that has changed since puts the edit somewhere the user never asked
+/// for, so the reply is dropped and the reason said out loud.
+fn skipped_as_stale(stoat: &mut Stoat, stamp: &DocumentStamp, what: &str) -> bool {
+    if stamp.is_current(stoat) {
+        return false;
+    }
+    set_lsp_status(stoat, format!("lsp: {what} skipped, buffer changed"));
+    true
 }
 
 /// Apply a code-action [`WorkspaceEdit`] and log+swallow any error.
@@ -3678,9 +3678,8 @@ pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
                     },
                 }
             });
-            stoat.pending_code_action_resolve = buffer_id
-                .and_then(|id| DocumentStamp::take(stoat, id, encoding))
-                .map(|at| (at, task));
+            let stamp = buffer_id.and_then(|id| DocumentStamp::take(stoat, id, encoding));
+            stoat.pending_code_action_resolve.arm(stamp, task);
         },
         CodeActionEntry::Command {
             command, server, ..
@@ -3954,8 +3953,8 @@ pub(crate) fn rename_input_submit(stoat: &mut Stoat) -> bool {
             },
         }
     });
-    stoat.pending_rename =
-        DocumentStamp::take(stoat, rename_state.buffer_id, encoding).map(|at| (at, task));
+    let stamp = DocumentStamp::take(stoat, rename_state.buffer_id, encoding);
+    stoat.pending_rename.arm(stamp, task);
     true
 }
 
@@ -3972,33 +3971,22 @@ pub(crate) fn rename_input_cancel(stoat: &mut Stoat) -> bool {
 
 /// Poll any in-flight rename task and apply its [`WorkspaceEdit`].
 pub(crate) fn pump_lsp_rename(stoat: &mut Stoat) -> bool {
-    let Some((requested_at, mut task)) = stoat.pending_rename.take() else {
+    let Some((requested_at, edit)) = stoat.pending_rename.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some(_)) if !requested_at.is_current(stoat) => {
-            set_lsp_status(stoat, "lsp: rename skipped, buffer changed".to_string());
-            true
-        },
-        Poll::Ready(Some(edit)) => {
-            let encoding = requested_at.encoding();
-            if let Err(err) = crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, encoding) {
-                tracing::warn!(
-                    target: "stoat::lsp",
-                    ?err,
-                    "rename workspace edit failed to apply",
-                );
-            }
-            true
-        },
-        Poll::Ready(None) => true,
-        Poll::Pending => {
-            stoat.pending_rename = Some((requested_at, task));
-            false
-        },
+    if let Some(edit) = edit
+        && !skipped_as_stale(stoat, &requested_at, "rename")
+    {
+        let encoding = requested_at.encoding();
+        if let Err(err) = crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, encoding) {
+            tracing::warn!(
+                target: "stoat::lsp",
+                ?err,
+                "rename workspace edit failed to apply",
+            );
+        }
     }
+    true
 }
 
 /// One entry in the graph-navigation [`SymbolPicker`]. `title` is the symbol
@@ -4902,8 +4890,8 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
             },
         }
     });
-    stoat.pending_format_request =
-        DocumentStamp::take(stoat, buffer_id, encoding).map(|at| (at, task));
+    let stamp = DocumentStamp::take(stoat, buffer_id, encoding);
+    stoat.pending_format_request.arm(stamp, task);
     UpdateEffect::None
 }
 
@@ -4964,8 +4952,8 @@ pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
             },
         }
     });
-    stoat.pending_format_request =
-        DocumentStamp::take(stoat, buffer_id, encoding).map(|at| (at, task));
+    let stamp = DocumentStamp::take(stoat, buffer_id, encoding);
+    stoat.pending_format_request.arm(stamp, task);
     UpdateEffect::None
 }
 
@@ -4974,42 +4962,31 @@ pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
 /// [`crate::lsp::edit_apply::apply_workspace_edit`] are logged and
 /// swallowed so a malformed edit does not crash the app.
 pub(crate) fn pump_lsp_format(stoat: &mut Stoat) -> bool {
-    let Some((requested_at, mut task)) = stoat.pending_format_request.take() else {
+    let Some((requested_at, response)) = stoat.pending_format_request.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some(_)) if !requested_at.is_current(stoat) => {
-            set_lsp_status(stoat, "lsp: format skipped, buffer changed".to_string());
-            true
-        },
-        Poll::Ready(Some(FormatResponse { uri, edits })) => {
-            #[allow(clippy::mutable_key_type)]
-            let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-            changes.insert(uri, edits);
-            let edit = WorkspaceEdit {
-                changes: Some(changes),
-                document_changes: None,
-                change_annotations: None,
-            };
-            if let Err(err) =
-                crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, requested_at.encoding())
-            {
-                tracing::warn!(
-                    target: "stoat::lsp",
-                    ?err,
-                    "format text edit failed to apply",
-                );
-            }
-            true
-        },
-        Poll::Ready(None) => true,
-        Poll::Pending => {
-            stoat.pending_format_request = Some((requested_at, task));
-            false
-        },
+    if let Some(FormatResponse { uri, edits }) = response
+        && !skipped_as_stale(stoat, &requested_at, "format")
+    {
+        #[allow(clippy::mutable_key_type)]
+        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+        changes.insert(uri, edits);
+        let edit = WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        };
+        if let Err(err) =
+            crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, requested_at.encoding())
+        {
+            tracing::warn!(
+                target: "stoat::lsp",
+                ?err,
+                "format text edit failed to apply",
+            );
+        }
     }
+    true
 }
 
 /// Poll any in-flight LSP jump request ([`Stoat::pending_lsp_jump`])
@@ -8223,7 +8200,7 @@ mod tests {
         crate::action_handlers::lsp::pick_code_action(&mut h.stoat, 0);
         h.settle();
         assert!(h.stoat.pending_code_action_picker.is_none());
-        assert!(h.stoat.pending_code_action_resolve.is_none());
+        assert!(!h.stoat.pending_code_action_resolve.is_pending());
     }
 
     #[test]

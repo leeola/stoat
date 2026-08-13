@@ -18,13 +18,7 @@ use crate::{
     completion::CompletionItem,
     pane::{FocusTarget, View},
 };
-use std::{
-    future::Future,
-    path::Path,
-    pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
-};
+use std::{path::Path, time::Duration};
 
 /// The `additionalTextEdits` a `completionItem/resolve` returned for an
 /// accepted completion, plus the buffer they apply to. Carried from the
@@ -167,9 +161,8 @@ fn apply_or_resolve_additional_edits(
         let edits = resolved.additional_text_edits?;
         (!edits.is_empty()).then_some(AcceptedImports { buffer_id, edits })
     });
-    stoat.pending_completion_accept =
-        crate::action_handlers::lsp::DocumentStamp::take(stoat, buffer_id, lsp_encoding)
-            .map(|at| (at, task));
+    let stamp = crate::action_handlers::lsp::DocumentStamp::take(stoat, buffer_id, lsp_encoding);
+    stoat.pending_completion_accept.arm(stamp, task);
 }
 
 /// The server to route `item`'s `completionItem/resolve` back to: the server
@@ -219,30 +212,22 @@ fn apply_additional_edits(
 /// cursor rides edit-tracking anchors, so imports inserted above it keep
 /// it correct. Returns `true` when the buffer changed.
 pub(crate) fn pump_completion_accept(stoat: &mut Stoat) -> bool {
-    let Some((requested_at, mut task)) = stoat.pending_completion_accept.take() else {
+    let Some((requested_at, imports)) = stoat.pending_completion_accept.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        // Imports name lines in the text the accept left behind. Typing since
-        // then moves them, and an import landing mid-line is worse than none.
-        Poll::Ready(Some(_)) if !requested_at.is_current(stoat) => false,
-        Poll::Ready(Some(imports)) => {
-            apply_additional_edits(
-                stoat,
-                imports.buffer_id,
-                imports.edits,
-                requested_at.encoding(),
-            );
-            true
-        },
-        Poll::Ready(None) => false,
-        Poll::Pending => {
-            stoat.pending_completion_accept = Some((requested_at, task));
-            false
-        },
-    }
+    // Imports name lines in the text the accept left behind. Typing since then
+    // moves them, and an import landing mid-line is worse than none.
+    let Some(imports) = imports.filter(|_| requested_at.is_current(stoat)) else {
+        return false;
+    };
+
+    apply_additional_edits(
+        stoat,
+        imports.buffer_id,
+        imports.edits,
+        requested_at.encoding(),
+    );
+    true
 }
 
 #[cfg(test)]
@@ -721,7 +706,7 @@ mod tests {
 
         assert_eq!(buffer_text(&h, &path), "foobar");
         assert!(
-            h.stoat.pending_completion_accept.is_none(),
+            !h.stoat.pending_completion_accept.is_pending(),
             "a word accept issues no resolve",
         );
     }
