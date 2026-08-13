@@ -1149,7 +1149,7 @@ fn handle_editor_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16, r
             if place_cursor_at_click(stoat, editor_id, area, col, row).is_none() {
                 return false;
             }
-            action_handlers::lsp::hover(stoat);
+            crate::lsp::hover::hover(stoat);
             true
         },
         MouseEventKind::Drag(MouseButton::Left) => {

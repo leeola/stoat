@@ -1354,7 +1354,7 @@ pub struct Stoat {
     /// tick, which resolves the [`HoverOutcome`] into a popup or an
     /// honest status message.
     pub(crate) pending_hover_request:
-        Option<stoat_scheduler::Task<action_handlers::lsp::HoverOutcome>>,
+        Option<stoat_scheduler::Task<crate::lsp::hover::HoverOutcome>>,
 
     /// Hover popup content waiting to be painted. Set by
     /// [`action_handlers::pump_lsp_hover`] when a hover response lands.

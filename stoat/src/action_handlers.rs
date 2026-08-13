@@ -801,7 +801,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::WalkthroughPrevAnnotation => walkthrough::prev_annotation(stoat),
         ActionKind::WalkthroughShowNarration => walkthrough::show_narration_again(stoat),
         ActionKind::WalkthroughDone => walkthrough::done(stoat),
-        ActionKind::Hover => lsp::hover(stoat),
+        ActionKind::Hover => crate::lsp::hover::hover(stoat),
         ActionKind::CodeAction => lsp::code_action(stoat),
         ActionKind::RenameSymbol => lsp::rename_symbol(stoat),
         ActionKind::OpenSymbolPicker => lsp::open_symbol_picker(stoat),

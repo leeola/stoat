@@ -5,6 +5,7 @@ pub(crate) mod drain;
 pub(crate) mod edit_apply;
 pub(crate) mod folding;
 pub mod hosts;
+pub(crate) mod hover;
 pub(crate) mod pending;
 pub(crate) mod progress;
 pub(crate) mod pull_diagnostics;
@@ -110,7 +111,7 @@ pub(crate) fn lsp_pending_label(stoat: &Stoat) -> Option<&'static str> {
 /// until it reports `false`.
 pub(crate) fn pump_all(stoat: &mut Stoat) -> bool {
     let jumps = action_handlers::lsp::pump_lsp_jumps(stoat);
-    let hover = action_handlers::lsp::pump_lsp_hover(stoat);
+    let hover = hover::pump_lsp_hover(stoat);
     let signature_help = signature_help::pump_lsp_signature_help(stoat);
 
     let inlay_hints = action_handlers::lsp::pump_lsp_inlay_hints(stoat);
