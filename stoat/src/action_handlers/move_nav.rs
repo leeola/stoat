@@ -16,7 +16,7 @@
 //! from more than one place. The editor holds a cursor into that list, keyed by
 //! the hunk line so it resets when the reader moves to another hunk.
 
-use super::{file, focused_editor_mut, movement};
+use super::{focused_editor_mut, movement};
 use crate::{
     app::{Stoat, UpdateEffect},
     diff_map::{DiffHunkStatus, TokenDetail},
@@ -197,7 +197,7 @@ pub(super) fn navigate(stoat: &mut Stoat, nav: MoveNavigation) -> UpdateEffect {
 
     if let Some(buffer_ref) = target_ref.buffer.as_ref() {
         let focused = stoat.active_workspace().panes.focus();
-        if file::open_file_in_pane(stoat, focused, &buffer_ref.path).is_none() {
+        if crate::buffer_lifecycle::open_file_in_pane(stoat, focused, &buffer_ref.path).is_none() {
             return UpdateEffect::None;
         }
     }

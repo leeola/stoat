@@ -1192,10 +1192,10 @@ pub struct Stoat {
     /// completed ones.
     pub(crate) diff_warm_files: Vec<crate::diff_warm::PendingFileWarm>,
     /// Large files reading on the blocking pool, awaiting install by
-    /// [`crate::action_handlers::file::install_pending_opens`] in
+    /// [`crate::buffer_lifecycle::install_pending_opens`] in
     /// [`Self::drive_background`]. Holding the task here keeps the read alive;
     /// dropping it (on quit) cancels it.
-    pub(crate) pending_file_opens: Vec<action_handlers::file::PendingFileOpen>,
+    pub(crate) pending_file_opens: Vec<crate::buffer_lifecycle::PendingFileOpen>,
     /// Files changed outside the editor, waiting on the shared debounce window
     /// to be reindexed into the code graph.
     ///
@@ -5737,7 +5737,7 @@ impl Stoat {
                 };
 
                 let Some(buffer_id) =
-                    action_handlers::file::open_file_in_pane(self, new_pane, &path)
+                    crate::buffer_lifecycle::open_file_in_pane(self, new_pane, &path)
                 else {
                     return UpdateEffect::None;
                 };
@@ -6086,7 +6086,7 @@ impl Stoat {
         self.install_pending_workspace_restore();
         crate::diff_warm::ensure_diff_warm(self);
         crate::diff_warm::install_finished(self);
-        action_handlers::file::install_pending_opens(self);
+        crate::buffer_lifecycle::install_pending_opens(self);
         action_handlers::sync_palette_picker(self);
         action_handlers::sync_file_finder_preview(self);
         self.drive_parse_jobs();
@@ -8415,9 +8415,12 @@ mod tests {
         stoat.set_fs_host(fs);
 
         let pane = stoat.active_workspace().panes.focus();
-        let buffer_id =
-            action_handlers::file::open_file_in_pane(&mut stoat, pane, Path::new("/repo/src/a.rs"))
-                .expect("open the buffer");
+        let buffer_id = crate::buffer_lifecycle::open_file_in_pane(
+            &mut stoat,
+            pane,
+            Path::new("/repo/src/a.rs"),
+        )
+        .expect("open the buffer");
 
         // A parse arms the index debounce rather than extracting, so the
         // extract lands on a later pass once the buffer has gone quiet. The
@@ -8494,9 +8497,12 @@ mod tests {
         stoat.set_fs_host(fs);
 
         let pane = stoat.active_workspace().panes.focus();
-        let buffer_id =
-            action_handlers::file::open_file_in_pane(&mut stoat, pane, Path::new("/repo/src/a.rs"))
-                .expect("open the buffer");
+        let buffer_id = crate::buffer_lifecycle::open_file_in_pane(
+            &mut stoat,
+            pane,
+            Path::new("/repo/src/a.rs"),
+        )
+        .expect("open the buffer");
 
         // Nothing drains here, so the updates queue up and each phase reads the
         // ones it produced. A drain resolves the index directory, which is the
@@ -8567,9 +8573,12 @@ mod tests {
         stoat.set_fs_host(fs);
 
         let pane = stoat.active_workspace().panes.focus();
-        let buffer_id =
-            action_handlers::file::open_file_in_pane(&mut stoat, pane, Path::new("/repo/src/a.rs"))
-                .expect("open the buffer");
+        let buffer_id = crate::buffer_lifecycle::open_file_in_pane(
+            &mut stoat,
+            pane,
+            Path::new("/repo/src/a.rs"),
+        )
+        .expect("open the buffer");
 
         let parse = |stoat: &mut Stoat| {
             stoat.drive_parse_jobs();

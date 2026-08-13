@@ -5,6 +5,7 @@ pub mod apc_emit;
 pub mod app;
 pub mod badge;
 pub mod buffer;
+pub(crate) mod buffer_lifecycle;
 mod buffer_registry;
 mod code_index;
 pub mod command_palette;

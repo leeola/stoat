@@ -278,3 +278,24 @@ pub(crate) fn focused_cursor_point(stoat: &mut Stoat) -> Point {
     let cursor = cursor_offset(buffer_snapshot.rope(), tail, head);
     buffer_snapshot.rope().offset_to_point(cursor)
 }
+
+/// Whether the focused editor's buffer holds unsaved edits.
+pub(crate) fn focused_dirty(stoat: &Stoat) -> bool {
+    let editor_id = match stoat
+        .active_workspace()
+        .panes
+        .pane(stoat.active_workspace().panes.focus())
+        .view
+    {
+        View::Editor(id) => id,
+        _ => return false,
+    };
+    let buffer_id = stoat.active_workspace().editors[editor_id].buffer_id;
+    let buffer = stoat
+        .active_workspace()
+        .buffers
+        .get(buffer_id)
+        .expect("buffer");
+    let guard = buffer.read().expect("buffer poisoned");
+    guard.dirty
+}

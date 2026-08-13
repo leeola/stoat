@@ -1382,7 +1382,7 @@ fn toggle_diff_off(stoat: &mut Stoat) -> UpdateEffect {
     park_review_session(stoat);
 
     let focused = stoat.active_workspace().panes.focus();
-    super::file::open_file_in_pane(stoat, focused, &path);
+    crate::buffer_lifecycle::open_file_in_pane(stoat, focused, &path);
     if let Some(editor) = super::focused_editor_mut(stoat) {
         super::movement::set_cursor_row(editor, line.saturating_sub(1));
     }

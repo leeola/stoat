@@ -3489,7 +3489,7 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
     };
 
     let focused_pane = stoat.active_workspace().panes.focus();
-    if super::file::open_file_in_pane(stoat, focused_pane, &path).is_none() {
+    if crate::buffer_lifecycle::open_file_in_pane(stoat, focused_pane, &path).is_none() {
         return true;
     }
 

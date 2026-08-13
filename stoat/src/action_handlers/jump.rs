@@ -56,8 +56,9 @@ pub(crate) fn push_entry(stoat: &mut Stoat, entry: JumpEntry) {
 /// a file open swaps its editor, so the open reverses with a backward jump.
 ///
 /// A no-op when the pane already shows `incoming` (a same-buffer reopen) or
-/// shows no editor. Kept out of [`show_buffer_in_pane`](super::file::show_buffer_in_pane)
-/// so a jumplist walk re-showing a buffer records nothing.
+/// shows no editor. Kept out of
+/// [`show_buffer_in_pane`](crate::buffer_lifecycle::show_buffer_in_pane) so a jumplist walk
+/// re-showing a buffer records nothing.
 pub(crate) fn record_pane_switch(
     stoat: &mut Stoat,
     workspace: WorkspaceId,
@@ -89,7 +90,7 @@ pub(crate) fn record_pane_switch(
 /// already on it, then restoring the recorded selection set.
 ///
 /// A no-op when the entry's buffer has been closed. Cross-buffer jumps reuse
-/// [`show_buffer_in_pane`](super::file::show_buffer_in_pane), so an open buffer
+/// [`show_buffer_in_pane`](crate::buffer_lifecycle::show_buffer_in_pane), so an open buffer
 /// is re-shown without a disk read.
 pub(crate) fn apply_jump_entry(stoat: &mut Stoat, entry: JumpEntry) {
     let resolved = {
@@ -116,7 +117,7 @@ pub(crate) fn apply_jump_entry(stoat: &mut Stoat, entry: JumpEntry) {
     if let Some((pane_id, buffer)) = resolved {
         let executor = stoat.executor.clone();
         let workspace = stoat.active_workspace;
-        super::file::show_buffer_in_pane(
+        crate::buffer_lifecycle::show_buffer_in_pane(
             stoat,
             workspace,
             pane_id,

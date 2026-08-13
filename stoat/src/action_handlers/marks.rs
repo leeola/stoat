@@ -120,7 +120,7 @@ fn goto_global(
 
     if !already_focused {
         let target = stoat.active_workspace().panes.focus();
-        if crate::action_handlers::file::open_file_in_pane(stoat, target, &path).is_none() {
+        if crate::buffer_lifecycle::open_file_in_pane(stoat, target, &path).is_none() {
             return UpdateEffect::None;
         }
     }

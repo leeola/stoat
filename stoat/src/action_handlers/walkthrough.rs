@@ -274,7 +274,7 @@ fn jump_to_range(
 ) -> Option<Landing> {
     action_handlers::jump::push_jump(stoat);
     let target = stoat.active_workspace().panes.focus();
-    action_handlers::file::open_file_in_pane(stoat, target, path);
+    crate::buffer_lifecycle::open_file_in_pane(stoat, target, path);
 
     let offset = focused_offset_of(stoat, range.start)?;
     let effect = action_handlers::movement::jump_to_offset(stoat, offset);
