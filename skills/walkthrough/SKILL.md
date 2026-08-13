@@ -8,7 +8,8 @@ user_invocable: true
 
 A walkthrough is a saved tour of a codebase. It is an ordered list of **stops**,
 each naming one range of one file, a markdown **narration** of what that code
-does, and optional labeled **annotations** over smaller ranges inside it.
+does, and optional labeled **annotations** over smaller ranges in that file or
+in another beside it.
 
 Reach for this when a "show me how X works" answer would otherwise be a wall of
 chat text. A walkthrough outlives the conversation, travels with the repository,
@@ -23,15 +24,16 @@ the slug.
 |---|---|
 | Walkthrough | A slug, a title, and an ordered list of stops. One JSON file. |
 | Stop | One focus range of one file, plus narration. Id `s1`, `s2`, ... |
-| Annotation | A labeled range **inside that stop's focus file**. Id `a1`, `a2`, ... |
+| Annotation | A labeled range, in that stop's focus file or in another. Id `a1`, `a2`, ... |
 | Focus | Path, range, and the bytes the range covered when captured. |
 
 Ids are stable handles. They are assigned once and never reused, so `s2` keeps
 meaning the same stop after you remove `s1`. Use them for every edit, move, and
 remove.
 
-Annotations carry no path of their own. They always point into the file their
-stop focuses on.
+An annotation points into its stop's focus file unless `--file` names another
+one. Reach for that when a stop is about two files at once, such as a call and
+the function it lands in.
 
 ## Where files live
 
@@ -140,13 +142,24 @@ stoat walkthrough add-annotation startup s1 \
   --range 3:14-3:27 --label "the error type"
 # a1
 
+stoat walkthrough add-annotation startup s1 \
+  --file src/error.rs --range 8:1-8:24 --label "where it is raised"
+# a2
+
 stoat walkthrough edit-annotation startup s1 a1 --label "the error alias"
 stoat walkthrough edit-annotation startup s1 a1 --range 3:14-3:20   # re-captures
+stoat walkthrough edit-annotation startup s1 a2 --no-file --range 4  # back to the focus
 stoat walkthrough remove-annotation startup s1 a1
 ```
 
-The range is within stop `s1`'s focus file. As with `edit-stop`, only a
-`--range` re-captures the snippet.
+The range is within `--file`, or within stop `s1`'s focus file when you omit it.
+As with `edit-stop`, only a `--file`, `--no-file`, or `--range` re-captures the
+snippet.
+
+A `--range` on its own re-captures from whichever file the annotation already
+reads against, so a cross-file annotation stays where it is. Pair `--file` with
+a `--range` when you move one, since the stored range is exact bytes and rarely
+lands well in a different file.
 
 ### Check
 

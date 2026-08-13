@@ -18,8 +18,8 @@ use stoat::{
     walkthrough::{
         self,
         store::{self, StoreError},
-        AnnotationEdit, Finding, FindingKind, Location, MoveTarget, Point, Range, StopEdit,
-        Walkthrough,
+        Annotation, AnnotationEdit, Finding, FindingKind, Location, MoveTarget, Point, Range,
+        StopEdit, Walkthrough,
     },
 };
 
@@ -137,12 +137,17 @@ pub enum WalkthroughCommand {
         workspace: WorkspaceArgs,
     },
 
-    /// Add a labeled annotation inside a stop's file, and print its new id.
+    /// Add a labeled annotation to a stop, and print its new id.
     AddAnnotation {
         slug: String,
         stop: String,
 
-        /// Range within the stop's focus file, as `L`, `L-L`, or `L:C-L:C`.
+        /// File the annotation is about. Must be inside the workspace. Omit for
+        /// the stop's own focus file.
+        #[arg(long)]
+        file: Option<PathBuf>,
+
+        /// Range within that file, as `L`, `L-L`, or `L:C-L:C`.
         #[arg(long)]
         range: String,
 
@@ -153,11 +158,20 @@ pub enum WalkthroughCommand {
         workspace: WorkspaceArgs,
     },
 
-    /// Change an annotation's range or label, and print its id.
+    /// Change an annotation's file, range, or label, and print its id.
     EditAnnotation {
         slug: String,
         stop: String,
         annotation: String,
+
+        /// New file for the annotation. Re-captures the snippet.
+        #[arg(long)]
+        file: Option<PathBuf>,
+
+        /// Return the annotation to its stop's focus file. Re-captures the
+        /// snippet.
+        #[arg(long, conflicts_with = "file")]
+        no_file: bool,
 
         /// New range. Re-captures the snippet.
         #[arg(long)]
@@ -329,15 +343,26 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
         WalkthroughCommand::AddAnnotation {
             slug,
             stop,
+            file,
             range,
             label,
             workspace,
-        } => add_annotation(fs, &workspace.resolve()?, &slug, &stop, &range, label),
+        } => add_annotation(
+            fs,
+            &workspace.resolve()?,
+            &slug,
+            &stop,
+            file.as_deref(),
+            &range,
+            label,
+        ),
 
         WalkthroughCommand::EditAnnotation {
             slug,
             stop,
             annotation,
+            file,
+            no_file,
             range,
             label,
             workspace,
@@ -347,6 +372,8 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
             &slug,
             &stop,
             &annotation,
+            file.as_deref(),
+            no_file,
             range.as_deref(),
             label,
         ),
@@ -648,22 +675,30 @@ fn move_stop(
     Ok(stop.to_owned())
 }
 
-/// Add an annotation over `range` of the stop's focus file, returning its id.
+/// Add an annotation over `range` of `file`, returning its id.
+///
+/// A `file` of `None` annotates the stop's own focus file, which is the usual
+/// case and the one that stores no path of its own.
 fn add_annotation(
     fs: &dyn FsHost,
     root: &Path,
     slug: &str,
     stop: &str,
+    file: Option<&Path>,
     range: &str,
     label: String,
 ) -> Result<String, Whatever> {
     let mut walkthrough = load(fs, root, slug)?;
 
-    let file = root.join(&find_stop(&walkthrough, stop)?.focus.path);
-    let captured = capture_resolved(fs, root, &file, parse_range(range)?)?;
+    let target = match file {
+        Some(file) => file.to_path_buf(),
+        None => root.join(&find_stop(&walkthrough, stop)?.focus.path),
+    };
+    let captured = capture_resolved(fs, root, &target, parse_range(range)?)?;
+    let path = file.is_some().then_some(captured.path);
 
     let id = walkthrough
-        .add_annotation(stop, None, captured.range, captured.snippet, label)
+        .add_annotation(stop, path, captured.range, captured.snippet, label)
         .whatever_context(format!("annotate stop '{stop}'"))?
         .id
         .clone();
@@ -674,25 +709,55 @@ fn add_annotation(
 
 /// Change the annotation `annotation`, returning its id.
 ///
-/// A new range re-captures the snippet from the stop's focus file. A label-only
-/// edit leaves it alone.
+/// The snippet is re-captured whenever `file`, `no_file`, or `range` is given,
+/// each falling back to what the annotation already holds. A label-only edit
+/// leaves the capture alone, so renaming never re-baselines a range the author
+/// did not mention.
+///
+/// A re-capture reads the file the annotation itself names, not the stop's
+/// focus, so a bare range edit on a cross-file annotation stays cross-file.
+///
+/// A file change with no range of its own carries the stored range over as the
+/// exact bytes it is, and fails when the new file is too short for it. Name a
+/// range alongside the file to move both at once.
+#[allow(clippy::too_many_arguments)]
 fn edit_annotation(
     fs: &dyn FsHost,
     root: &Path,
     slug: &str,
     stop: &str,
     annotation: &str,
+    file: Option<&Path>,
+    no_file: bool,
     range: Option<&str>,
     label: Option<String>,
 ) -> Result<String, Whatever> {
     let mut walkthrough = load(fs, root, slug)?;
 
-    let captured = match range {
-        None => None,
-        Some(range) => {
-            let file = root.join(&find_stop(&walkthrough, stop)?.focus.path);
-            Some(capture_resolved(fs, root, &file, parse_range(range)?)?)
+    let captured = match (file, no_file, range) {
+        (None, false, None) => None,
+        _ => {
+            let stored = find_annotation(&walkthrough, stop, annotation)?;
+            let range = match range {
+                Some(text) => parse_range(text)?,
+                None => RangeSpec::Points(stored.range),
+            };
+
+            let target = match (file, &stored.path) {
+                (Some(file), _) => file.to_path_buf(),
+                (None, Some(stored)) if !no_file => root.join(stored),
+                (None, _) => root.join(&find_stop(&walkthrough, stop)?.focus.path),
+            };
+            Some(capture_resolved(fs, root, &target, range)?)
         },
+    };
+
+    let path = match (file, no_file) {
+        (Some(_), _) => captured
+            .as_ref()
+            .map(|location| Some(location.path.clone())),
+        (None, true) => Some(None),
+        (None, false) => None,
     };
 
     walkthrough
@@ -700,7 +765,7 @@ fn edit_annotation(
             stop,
             annotation,
             AnnotationEdit {
-                path: None,
+                path,
                 range: captured.as_ref().map(|location| location.range),
                 snippet: captured.map(|location| location.snippet),
                 label,
@@ -859,6 +924,20 @@ fn find_stop<'a>(
         .with_whatever_context(|| format!("no stop '{stop}'"))
 }
 
+/// The annotation `annotation` of stop `stop`, or an error naming the id that
+/// is not there.
+fn find_annotation<'a>(
+    walkthrough: &'a Walkthrough,
+    stop: &str,
+    annotation: &str,
+) -> Result<&'a Annotation, Whatever> {
+    find_stop(walkthrough, stop)?
+        .annotations
+        .iter()
+        .find(|candidate| candidate.id == annotation)
+        .with_whatever_context(|| format!("no annotation '{annotation}' on stop '{stop}'"))
+}
+
 /// Which of `--title` and `--no-title` the caller gave, as the format layer's
 /// two-layer edit.
 fn title_edit(title: Option<String>, no_title: bool) -> Option<Option<String>> {
@@ -900,7 +979,8 @@ fn relative_path(root: &Path, slug: &str) -> String {
 mod tests {
     use super::{
         add_annotation, add_stop, check, delete, edit_annotation, edit_stop, list, move_stop, new,
-        parse_range, remove_annotation, remove_stop, show, MoveArgs, Point, Range, RangeSpec,
+        parse_range, remove_annotation, remove_stop, show, Annotation, MoveArgs, Point, Range,
+        RangeSpec,
     };
     use git2::Repository;
     use std::path::{Path, PathBuf};
@@ -908,6 +988,7 @@ mod tests {
     use tempfile::TempDir;
 
     const SOURCE: &str = "use std::io;\nfn main() {\n    println!(\"hi\");\n}\n";
+    const OTHER: &str = "fn helper() {}\nfn second() {}\n";
 
     /// A workspace holding one source file to focus stops on.
     fn workspace() -> TempDir {
@@ -934,8 +1015,23 @@ mod tests {
         dir.path().join("main.rs")
     }
 
+    /// A second file to point annotations at, beside the one stops focus on.
+    fn other_file(dir: &TempDir) -> PathBuf {
+        let path = dir.path().join("other.rs");
+        std::fs::write(&path, OTHER).expect("write");
+        path
+    }
+
     fn stored(dir: &TempDir) -> stoat::walkthrough::Walkthrough {
         store::load(&LocalFs, dir.path(), "tour").expect("load")
+    }
+
+    /// An annotation as the file it names and the bytes it captured.
+    fn annotated(annotation: &Annotation) -> (Option<&str>, &str) {
+        (
+            annotation.path.as_deref().and_then(Path::to_str),
+            annotation.snippet.as_str(),
+        )
     }
 
     fn lines(start: u32, end: u32) -> RangeSpec {
@@ -1153,6 +1249,7 @@ mod tests {
             dir.path(),
             "tour",
             "s1",
+            None,
             "2:4-2:7",
             "the name".to_owned(),
         )
@@ -1175,6 +1272,7 @@ mod tests {
             dir.path(),
             "tour",
             "s1",
+            None,
             "2:4-2:7",
             "the name".to_owned(),
         )
@@ -1197,6 +1295,7 @@ mod tests {
             dir.path(),
             "tour",
             "s1",
+            None,
             "2:4-2:7",
             "l".to_owned(),
         )
@@ -1208,6 +1307,8 @@ mod tests {
             "tour",
             "s1",
             "a1",
+            None,
+            false,
             Some("1:5-1:7"),
             Some("moved".to_owned()),
         )
@@ -1229,6 +1330,7 @@ mod tests {
             dir.path(),
             "tour",
             "s1",
+            None,
             "2:4-2:7",
             "l".to_owned(),
         )
@@ -1242,6 +1344,8 @@ mod tests {
             "s1",
             "a1",
             None,
+            false,
+            None,
             Some("renamed".to_owned()),
         )
         .expect("edit-annotation");
@@ -1254,13 +1358,203 @@ mod tests {
     }
 
     #[test]
+    fn an_annotation_may_name_a_file_beside_the_stop() {
+        let dir = workspace();
+        with_stop(&dir);
+        let other = other_file(&dir);
+
+        add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            Some(&other),
+            "1:4-1:9",
+            "the helper".to_owned(),
+        )
+        .expect("add-annotation");
+
+        let stops = stored(&dir).stops;
+        assert_eq!(
+            annotated(&stops[0].annotations[0]),
+            (Some("other.rs"), "helper"),
+        );
+        assert_eq!(
+            stops[0].focus.path,
+            PathBuf::from("main.rs"),
+            "annotating elsewhere leaves the stop where it was",
+        );
+    }
+
+    /// A cross-file annotation reads against its own file, so re-capturing it
+    /// must not silently fall back to the stop's focus.
+    #[test]
+    fn a_range_edit_recaptures_from_the_annotations_own_file() {
+        let dir = workspace();
+        with_stop(&dir);
+        let other = other_file(&dir);
+        add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            Some(&other),
+            "1:4-1:9",
+            "l".to_owned(),
+        )
+        .expect("add-annotation");
+
+        edit_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            "a1",
+            None,
+            false,
+            Some("2:4-2:9"),
+            None,
+        )
+        .expect("edit-annotation");
+
+        assert_eq!(
+            annotated(&stored(&dir).stops[0].annotations[0]),
+            (Some("other.rs"), "second"),
+        );
+    }
+
+    #[test]
+    fn editing_the_file_moves_the_annotation() {
+        let dir = workspace();
+        with_stop(&dir);
+        let other = other_file(&dir);
+        add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            None,
+            "2:4-2:7",
+            "l".to_owned(),
+        )
+        .expect("add-annotation");
+
+        edit_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            "a1",
+            Some(&other),
+            false,
+            Some("1:4-1:9"),
+            None,
+        )
+        .expect("edit-annotation");
+
+        assert_eq!(
+            annotated(&stored(&dir).stops[0].annotations[0]),
+            (Some("other.rs"), "helper"),
+        );
+    }
+
+    /// Clearing the file re-captures without a range of its own, so the stored
+    /// range has to be read against the focus file it just returned to.
+    #[test]
+    fn no_file_returns_the_annotation_to_the_focus() {
+        let dir = workspace();
+        with_stop(&dir);
+        let other = other_file(&dir);
+        add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            Some(&other),
+            "1:1-1:3",
+            "l".to_owned(),
+        )
+        .expect("add-annotation");
+
+        edit_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            "a1",
+            None,
+            true,
+            None,
+            None,
+        )
+        .expect("edit-annotation");
+
+        assert_eq!(
+            annotated(&stored(&dir).stops[0].annotations[0]),
+            (None, "use"),
+            "the stored range now reads against main.rs, where it read 'fn '",
+        );
+    }
+
+    #[test]
+    fn show_prints_the_file_an_annotation_names() {
+        let dir = workspace();
+        with_stop(&dir);
+        let other = other_file(&dir);
+        add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            Some(&other),
+            "1:4-1:9",
+            "l".to_owned(),
+        )
+        .expect("add-annotation");
+        add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            None,
+            "2:4-2:7",
+            "l".to_owned(),
+        )
+        .expect("add-annotation");
+
+        let printed = show(&LocalFs, dir.path(), "tour").expect("show");
+        assert_eq!(
+            printed.matches("\"path\"").count(),
+            2,
+            "the focus and the cross-file annotation, not the same-file one: {printed}",
+        );
+        assert!(printed.contains("other.rs"), "got {printed}");
+    }
+
+    #[test]
     fn remove_annotation_takes_only_that_annotation() {
         let dir = workspace();
         with_stop(&dir);
-        add_annotation(&LocalFs, dir.path(), "tour", "s1", "1", "one".to_owned())
-            .expect("add-annotation");
-        add_annotation(&LocalFs, dir.path(), "tour", "s1", "2", "two".to_owned())
-            .expect("add-annotation");
+        add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            None,
+            "1",
+            "one".to_owned(),
+        )
+        .expect("add-annotation");
+        add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            None,
+            "2",
+            "two".to_owned(),
+        )
+        .expect("add-annotation");
 
         remove_annotation(&LocalFs, dir.path(), "tour", "s1", "a1").expect("remove-annotation");
 
@@ -1387,8 +1681,16 @@ mod tests {
     fn check_says_nothing_about_a_walkthrough_that_still_matches() {
         let dir = workspace();
         with_stop(&dir);
-        add_annotation(&LocalFs, dir.path(), "tour", "s1", "1", "l".to_owned())
-            .expect("add-annotation");
+        add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            None,
+            "1",
+            "l".to_owned(),
+        )
+        .expect("add-annotation");
 
         assert_eq!(check(&LocalFs, dir.path(), None).expect("check"), [""; 0]);
     }
@@ -1429,8 +1731,16 @@ mod tests {
     fn check_names_the_annotation_that_drifted() {
         let dir = workspace();
         let file = with_stop(&dir);
-        add_annotation(&LocalFs, dir.path(), "tour", "s1", "1", "l".to_owned())
-            .expect("add-annotation");
+        add_annotation(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            "s1",
+            None,
+            "1",
+            "l".to_owned(),
+        )
+        .expect("add-annotation");
         // Line 2 stays put, so only the annotation over line 1 drifts.
         std::fs::write(&file, "USE STD::IO;\nfn main() {\n").expect("rewrite");
 
