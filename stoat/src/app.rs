@@ -863,9 +863,9 @@ pub struct Stoat {
     /// Timer that forwards the latest code-search query on
     /// [`Self::code_search_query_tx`] after [`CODE_SEARCH_DEBOUNCE`]. A new
     /// keystroke drops it, cancelling the pending scan trigger.
-    code_search_debounce: Option<stoat_scheduler::Task<()>>,
-    code_search_query_tx: Sender<String>,
-    code_search_query_rx: Receiver<String>,
+    pub(crate) code_search_debounce: Option<stoat_scheduler::Task<()>>,
+    pub(crate) code_search_query_tx: Sender<String>,
+    pub(crate) code_search_query_rx: Receiver<String>,
     /// An in-flight background diff-cache warm pass, drained by
     /// [`crate::diff_warm::install_finished`] in [`Self::drive_background`].
     pub(crate) pending_diff_warm: Option<crate::diff_warm::PendingDiffWarm>,
@@ -1230,26 +1230,27 @@ pub struct Stoat {
     /// main-thread action dispatch in
     /// [`Self::drain_pending_external_edits`].
     pub(crate) review_external_edit_tx: Sender<PathBuf>,
-    review_external_edit_rx: Receiver<PathBuf>,
+    pub(crate) review_external_edit_rx: Receiver<PathBuf>,
     /// Single-slot debounce for a whole-session git refresh. A commit writes
     /// many `.git` files at once, and unlike the per-path
     /// [`Self::review_pending_external_edits`] this collapses that burst to one
     /// [`ReviewRefresh`]. Re-arming replaces the task, cancelling the prior
     /// timer.
-    review_pending_git_refresh: Option<stoat_scheduler::Task<()>>,
+    pub(crate) review_pending_git_refresh: Option<stoat_scheduler::Task<()>>,
     /// Channel the git-refresh debounce task pushes onto once its timer fires,
     /// drained by [`Self::drain_pending_git_refresh`].
-    review_git_refresh_tx: Sender<()>,
-    review_git_refresh_rx: Receiver<()>,
+    pub(crate) review_git_refresh_tx: Sender<()>,
+    pub(crate) review_git_refresh_rx: Receiver<()>,
     /// Per-path debounce tasks for the incremental diff-warm of a file edited
     /// while review is closed. Mirrors [`Self::review_pending_external_edits`];
     /// re-arming a path drops the prior [`stoat_scheduler::Task`], cancelling
     /// its timer so only the latest burst event warms.
-    pending_diff_warm_file: std::collections::HashMap<PathBuf, stoat_scheduler::Task<()>>,
+    pub(crate) pending_diff_warm_file:
+        std::collections::HashMap<PathBuf, stoat_scheduler::Task<()>>,
     /// Channel the diff-warm debounce tasks push a path onto once their timer
     /// fires, drained by [`Self::drain_pending_diff_warm_files`].
-    diff_warm_file_tx: Sender<PathBuf>,
-    diff_warm_file_rx: Receiver<PathBuf>,
+    pub(crate) diff_warm_file_tx: Sender<PathBuf>,
+    pub(crate) diff_warm_file_rx: Receiver<PathBuf>,
     /// In-flight single-file diff warms. Held so their tasks are not dropped
     /// (which would cancel them) and so the status bar's diff segment stays up
     /// until every one finishes. [`crate::diff_warm::install_finished`] drops the
@@ -1267,7 +1268,7 @@ pub struct Stoat {
     /// [`Self::review_pending_external_edits`]. A checkout or a formatter run
     /// names thousands of files at once, and the burst is what this has to
     /// survive.
-    index_pending_external_edits: std::collections::HashSet<PathBuf>,
+    pub(crate) index_pending_external_edits: std::collections::HashSet<PathBuf>,
     /// The one debounce timer covering whatever
     /// [`Self::index_pending_external_edits`] holds.
     ///
@@ -1275,14 +1276,14 @@ pub struct Stoat {
     /// fixed [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`] after a burst starts. Under a
     /// reset-per-event timer, a build emitting events faster than that window
     /// holds the index off for as long as it runs.
-    index_external_edit_timer: Option<stoat_scheduler::Task<()>>,
+    pub(crate) index_external_edit_timer: Option<stoat_scheduler::Task<()>>,
     /// Memoized [`GitRepo::is_path_ignored`] verdicts, keyed by the directory
     /// asked about rather than the file, so an fs-event storm out of a build
     /// directory costs one libgit2 query instead of one per file.
     ///
     /// Cleared on any `.git` write or `.gitignore` edit, the two events that can
     /// change an answer already in here.
-    ignored_dir_cache: std::collections::HashMap<PathBuf, bool>,
+    pub(crate) ignored_dir_cache: std::collections::HashMap<PathBuf, bool>,
     /// Channel [`Self::index_external_edit_timer`] signals when its window
     /// closes, waking [`Self::drain_pending_index_edits`].
     ///
@@ -1290,7 +1291,7 @@ pub struct Stoat {
     /// [`Self::index_pending_external_edits`] has collected by the time it
     /// fires, so the signal only has to say that it fired.
     pub(crate) index_external_edit_tx: Sender<()>,
-    index_external_edit_rx: Receiver<()>,
+    pub(crate) index_external_edit_rx: Receiver<()>,
     /// Git operations flow through this trait so tests can use
     /// [`crate::host::FakeGit`] without a real repository.
     pub(crate) git_host: Arc<dyn GitHost>,
