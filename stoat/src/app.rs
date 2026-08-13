@@ -862,10 +862,11 @@ pub struct Stoat {
     /// requested for, so an unchanged tick does not re-request.
     pub(crate) last_inlay_hint_key: Option<(BufferId, u64, u32, u32)>,
     /// In-flight document-highlight request, armed by
-    /// [`action_handlers::lsp::document_highlight_trigger`] behind a debounce
-    /// and applied by [`action_handlers::lsp::pump_lsp_document_highlight`].
+    /// [`crate::lsp::document_highlight::document_highlight_trigger`] behind a
+    /// debounce and applied by
+    /// [`crate::lsp::document_highlight::pump_lsp_document_highlight`].
     pub(crate) pending_document_highlight_request:
-        Pending<Option<action_handlers::lsp::DocumentHighlightResponse>>,
+        Pending<Option<crate::lsp::document_highlight::DocumentHighlightResponse>>,
     /// `(buffer, version, cursor offset)` the document-highlight trigger last
     /// requested for, so an unchanged tick does not re-request.
     pub(crate) last_document_highlight_key: Option<(BufferId, u64, usize)>,
@@ -3770,7 +3771,7 @@ impl Stoat {
         crate::completion::request::trigger(self);
         action_handlers::lsp::signature_help_trigger(self);
         action_handlers::lsp::inlay_hints_trigger(self);
-        action_handlers::lsp::document_highlight_trigger(self);
+        crate::lsp::document_highlight::document_highlight_trigger(self);
         action_handlers::lsp::pull_diagnostics_trigger(self);
         action_handlers::lsp::semantic_tokens_trigger(self);
         crate::lsp::folding::folding_ranges_trigger(self);
