@@ -11,7 +11,8 @@
 pub use crate::grid::Damage;
 use crate::{
     grid::{
-        self, whole_row, Cell, DocumentOffset, Flags, Grid, MinimapView, PagePool, Rgb, RowDamage,
+        self, whole_row, Cell, DocumentOffset, Flags, Grid, MinimapView, PagePool, PoolRegion, Rgb,
+        RowDamage,
     },
     theme::Theme,
 };
@@ -662,7 +663,7 @@ pub enum TermEvent {
 #[derive(Clone, Copy, Debug)]
 pub struct PoolView {
     pub id: u32,
-    pub region: PoolRegionCommand,
+    pub region: PoolRegion,
     pub scroll_target: DocumentOffset,
     /// The primary cursor's glide anchor as `(row, col)`, or `None` to ease the
     /// cursor normally.
@@ -682,7 +683,7 @@ pub struct PoolView {
 /// target, and that target. One per `Gstoatty;pool_region` id; the renderer
 /// reads its visible region from [`Self::page_pool`] at the eased offset.
 struct Pool {
-    region: PoolRegionCommand,
+    region: PoolRegion,
     page_pool: PagePool,
     scroll_target: DocumentOffset,
     /// A pending discontinuous-jump destination from `Gstoatty;reposition`,
@@ -703,7 +704,7 @@ struct Pool {
 
 impl Pool {
     /// Create a pool for `region`, its page buffer sized to the region.
-    fn new(region: PoolRegionCommand) -> Pool {
+    fn new(region: PoolRegion) -> Pool {
         Pool {
             page_pool: PagePool::new(
                 region.height.max(1) as usize,
@@ -1346,7 +1347,7 @@ impl Terminal {
                 // Clamped on arrival rather than at the allocation, so the
                 // stored region the renderer places and sizes by is the same
                 // one the pages were built for.
-                let region = self.clamp_region(region);
+                let region = grid::pool_region_from_command(self.clamp_region(region));
                 let window = region.window;
                 // Whether the declare left the pool's pages newly built or
                 // rebuilt, so a page painting into them lost the slot it started

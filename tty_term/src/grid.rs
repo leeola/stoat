@@ -11,7 +11,9 @@ use std::{
     ops::{BitOr, BitOrAssign, Range},
     sync::Arc,
 };
-use stoatty_protocol::command::{BarCommand, MinimapCommand, PolylineCommand, TextRunCommand};
+use stoatty_protocol::command::{
+    BarCommand, MinimapCommand, PolylineCommand, PoolRegionCommand, TextRunCommand,
+};
 /// A minimap line's run summary, re-exported so a consumer of
 /// [`Grid::minimap_content`] has a name for what it gets back.
 ///
@@ -1329,6 +1331,24 @@ impl ScrollRegion {
     }
 }
 
+/// One smooth-scroll surface's declared rectangle, and which pool and window
+/// it belongs to.
+///
+/// The pool's content lives in a [`PagePool`] rather than in the grid cells, so
+/// this is where the renderer places and clips that content. [`Self::window`]
+/// is `0` for the primary grid, where the coordinates are grid-absolute, and a
+/// nonzero `N` binds the pool to aux window `N`, where they are relative to
+/// that window's own grid.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PoolRegion {
+    pub pool: u32,
+    pub window: u32,
+    pub top: u16,
+    pub left: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
 /// A fixed renderer-drawn status icon composited above the cells.
 ///
 /// Like an [`Overlay`], it is grid-level rather than a cell attribute: the
@@ -1503,6 +1523,18 @@ pub struct MinimapStrip {
     pub thumb_border: Rgb,
     /// Colors a run's class indexes, up to 64 entries.
     pub palette: Vec<Rgb>,
+}
+
+/// Project a declared [`PoolRegionCommand`] into the grid's [`PoolRegion`].
+pub(crate) fn pool_region_from_command(command: PoolRegionCommand) -> PoolRegion {
+    PoolRegion {
+        pool: command.pool,
+        window: command.window,
+        top: command.top,
+        left: command.left,
+        width: command.width,
+        height: command.height,
+    }
 }
 
 /// Project a declared [`MinimapCommand`] into the grid's [`MinimapStrip`],

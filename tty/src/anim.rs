@@ -7,9 +7,8 @@
 
 use crate::config::CursorAnimation;
 use std::time::Duration;
-use stoatty_protocol::command::PoolRegionCommand;
 use stoatty_term::{
-    grid::{Grid, Overlay},
+    grid::{Grid, Overlay, PoolRegion},
     term::{Cursor, CursorShape, PoolView, Terminal},
 };
 
@@ -342,7 +341,7 @@ pub(crate) fn cursor_position(cursor: Cursor) -> Option<[f32; 2]> {
 }
 
 /// Whether the cursor cell falls within `region`.
-pub(crate) fn cursor_in_region(cursor: Cursor, region: PoolRegionCommand) -> bool {
+pub(crate) fn cursor_in_region(cursor: Cursor, region: PoolRegion) -> bool {
     let col = cursor.col;
     let row = cursor.row;
     col >= region.left as usize
@@ -370,7 +369,7 @@ pub(crate) struct AnchoredCursor {
     /// has scrolled off either edge.
     pub(crate) in_region: bool,
     /// The gliding pool's region, used to clip the drawn cursor to the pane.
-    pub(crate) region: PoolRegionCommand,
+    pub(crate) region: PoolRegion,
 }
 
 /// The screen position a cursor anchored to a document row draws at while its
@@ -394,7 +393,7 @@ pub(crate) fn anchored_cursor_pos(
 
 /// The pixel scissor rect [x, y, width, height] covering pool `region`, laid out
 /// on a `cw` by `ch` cell grid.
-pub(crate) fn region_scissor(region: PoolRegionCommand, cw: f32, ch: f32) -> [u32; 4] {
+pub(crate) fn region_scissor(region: PoolRegion, cw: f32, ch: f32) -> [u32; 4] {
     let x0 = (region.left as f32 * cw) as u32;
     let y0 = (region.top as f32 * ch) as u32;
     let x1 = ((region.left as f32 + region.width as f32) * cw) as u32;
@@ -496,7 +495,7 @@ impl PoolAnim {
 /// it: which pool, its region, and the sub-cell fraction to shift its rows by.
 pub(crate) struct ActivePool {
     pub(crate) id: u32,
-    pub(crate) region: PoolRegionCommand,
+    pub(crate) region: PoolRegion,
     pub(crate) frac: f32,
     /// Whether the pool's composed rows changed since the previous frame. When
     /// `false` the glide only advanced the sub-cell fraction, so the copy into
@@ -671,7 +670,7 @@ mod tests {
 
     #[test]
     fn cursor_in_region_uses_exclusive_far_edges() {
-        let region = PoolRegionCommand {
+        let region = PoolRegion {
             pool: 0,
             top: 2,
             left: 3,

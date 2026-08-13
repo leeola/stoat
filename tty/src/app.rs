@@ -48,7 +48,7 @@ use std::{
 };
 use stoat_cli::CommonArgs;
 use stoatty_protocol::{
-    command::{WindowOpenCommand, NON_PANE_POOL_BASE},
+    command::WindowOpenCommand,
     window_ipc::{MouseKind, WindowIpcEvent},
 };
 use stoatty_render::{
@@ -59,6 +59,7 @@ use stoatty_term::{
     grid::{Grid, Rgb},
     term::{Damage, PoolView, TermEvent, Terminal},
     theme::Theme,
+    NON_PANE_POOL_BASE,
 };
 use winit::{
     application::ApplicationHandler,
