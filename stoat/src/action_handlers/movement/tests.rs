@@ -942,16 +942,21 @@ fn move_right_advances_one_grapheme() {
     assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
 }
 
+/// `l` reaches the position past the last character, then stops.
+///
+/// That position is the buffer end, where the cursor is zero-width. Stopping
+/// one cell earlier is what used to make the end unreachable, leaving no way
+/// to append after the last character.
 #[test]
-fn move_right_at_end_is_noop() {
+fn move_right_reaches_the_end_then_stops() {
     let mut stoat = stoat();
     editor::seed_focused_buffer(&mut stoat, "abc");
+    for _ in 0..3 {
+        dispatch(&mut stoat, &MoveRight);
+    }
+    assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
     dispatch(&mut stoat, &MoveRight);
-    dispatch(&mut stoat, &MoveRight);
-    dispatch(&mut stoat, &MoveRight);
-    assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
-    dispatch(&mut stoat, &MoveRight);
-    assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![3], "and stays there");
 }
 
 #[test]
@@ -1072,16 +1077,18 @@ fn move_next_word_end_creates_selection() {
     assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
 }
 
+/// A word-end motion with no word left ahead lands on the buffer end, where
+/// the cursor is zero-width.
 #[test]
-fn move_next_word_end_at_eof_is_noop() {
+fn move_next_word_end_at_eof_lands_on_the_end() {
     let mut stoat = stoat();
     editor::seed_focused_buffer(&mut stoat, "foo");
     for _ in 0..3 {
         dispatch(&mut stoat, &MoveRight);
     }
-    assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
     dispatch(&mut stoat, &MoveNextWordEnd);
-    assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 3, false)]);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(3, 3, false)]);
 }
 
 #[test]
@@ -1187,23 +1194,22 @@ fn count_next_word_start_overshoot_selects_last_word() {
     assert_eq!(editor::selection_spans(&mut stoat), vec![(45, 48, false)]);
 }
 
-/// A word motion that cannot advance still leaves a selection a block cursor
-/// can sit on.
+/// A word motion that runs out of buffer lands on the end and stays there,
+/// zero-width.
 ///
-/// The raw range returns an empty span at the buffer end, since there is
-/// nothing left to scan. Every other landing path repairs that to one cell
-/// wide, and the anchoring here has to as well, or the cursor renders with no
-/// width at all.
+/// The buffer end is a cursor position of its own, so the motion arrives at it
+/// rather than falling back onto the trailing newline. Re-covering that newline
+/// leaves the position past it unreachable by any motion.
 #[test]
-fn a_word_motion_at_the_buffer_end_keeps_a_one_cell_cursor() {
+fn a_word_motion_at_the_buffer_end_lands_zero_width() {
     let mut stoat = stoat();
     editor::seed_focused_buffer(&mut stoat, "foo\n");
     dispatch(&mut stoat, &MoveNextWordStart);
     dispatch(&mut stoat, &MoveNextWordStart);
     assert_eq!(
         editor::selection_spans(&mut stoat),
-        vec![(3, 4, false)],
-        "the cursor stays on the trailing newline rather than collapsing",
+        vec![(4, 4, false)],
+        "the cursor sits past the trailing newline, on the buffer end",
     );
 }
 
@@ -1393,7 +1399,6 @@ fn extend_right_further_keeps_tail() {
 fn extend_right_at_end_is_noop() {
     let mut stoat = stoat();
     editor::seed_focused_buffer(&mut stoat, "ab");
-    dispatch(&mut stoat, &MoveRight);
     dispatch(&mut stoat, &MoveRight);
     assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 2, false)]);
     dispatch(&mut stoat, &ExtendRight);
@@ -2602,13 +2607,18 @@ fn repeated_delete_walks_forward_through_line() {
     assert_eq!(focused_buffer_text(&mut h), "cdef\n");
 }
 
+/// Deleting the last character leaves the cursor on the buffer end, where it
+/// covers nothing, so a second delete has nothing to take.
+///
+/// Reaching back onto the new last character instead lets a held `d` eat the
+/// line backwards from its end, which is the reported bug this model fixes.
 #[test]
-fn delete_at_line_end_rewidens_backward() {
+fn delete_at_the_buffer_end_stops_after_the_last_character() {
     let mut h = TestHarness::with_size(30, 5);
     let path = h.write_file("s.txt", "abc");
     h.open_file(&path);
     h.type_keys("l l d d");
-    assert_eq!(focused_buffer_text(&mut h), "a");
+    assert_eq!(focused_buffer_text(&mut h), "ab");
 }
 
 #[test]

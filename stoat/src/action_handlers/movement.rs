@@ -11,7 +11,7 @@ use crate::{
     pane::View,
     selection::{
         anchor_selection, forward_block_cursor, land_block_cursor, merge_overlapping_spans,
-        EndCell, ResolvedRead, SelectionsCollection, SpanLanding,
+        ResolvedRead, SelectionsCollection, SpanLanding,
     },
 };
 use std::{
@@ -504,7 +504,7 @@ pub(crate) fn move_cursors<F>(
 {
     if !extend {
         let landings = block_cursor_landings(selections, buffer, target_for);
-        selections.land_block_cursors(&landings, EndCell::Previous, buffer);
+        selections.land_block_cursors(&landings, buffer);
         return;
     }
 
@@ -961,7 +961,7 @@ pub(super) fn collapse_selection(stoat: &mut Stoat) -> UpdateEffect {
     });
     editor
         .selections
-        .land_block_cursors(&landings, EndCell::Previous, buffer_snapshot);
+        .land_block_cursors(&landings, buffer_snapshot);
     UpdateEffect::Redraw
 }
 

@@ -922,17 +922,16 @@ mod tests {
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
-    /// A block cursor at the rope end covers the last character rather than
-    /// resting past it, so insert types before that character and append is
-    /// what reaches the end of the buffer.
+    /// A block cursor left on the rope end rests past the last character and
+    /// covers nothing, so insert types at the end and append does too.
     ///
-    /// There is no next cluster to cover at the end, so the cursor widens
-    /// backward over the previous one. That is a workable model only because
-    /// both intents stay reachable, which is why the two keys are pinned
-    /// together. A change here would show up as text landing on the wrong side
-    /// of the cursor at the end of a file and nowhere else.
+    /// The end is a cursor position of its own rather than an alias for the
+    /// cell before it, which is what keeps the position past the final
+    /// character reachable at all. A change here shows up as text landing on
+    /// the wrong side of the cursor at the end of a file and nowhere else,
+    /// which is why the two keys are pinned together.
     #[test]
-    fn delete_at_buffer_end_then_insert_types_before_the_widened_cursor() {
+    fn delete_at_buffer_end_leaves_the_cursor_past_the_last_character() {
         let typed_after = |keys: &str| {
             let mut h = TestHarness::with_size(40, 10);
             let path = seed(&mut h, "abc");
@@ -942,11 +941,7 @@ mod tests {
                 "a",
                 "the delete empties the line's tail"
             );
-            assert_eq!(
-                cursor_offset(&mut h),
-                0,
-                "the cursor widens back onto \"a\""
-            );
+            assert_eq!(cursor_offset(&mut h), 1, "the cursor rests on the end");
 
             h.type_keys(keys);
             buffer_text(&h, &path)
@@ -954,13 +949,13 @@ mod tests {
 
         assert_eq!(
             typed_after("i x escape"),
-            "xa",
-            "insert goes before the cell the cursor widened onto",
+            "ax",
+            "insert goes at the end, where the cursor sits",
         );
         assert_eq!(
             typed_after("a x escape"),
             "ax",
-            "append reaches the insert point past the buffer's last character",
+            "and append reaches the same insert point",
         );
     }
 

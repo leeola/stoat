@@ -35,7 +35,7 @@ use crate::{
         undercurl::{self, UndercurlBatch},
     },
     run::{CommandMark, PtyNotification, RunId},
-    selection::{merge_overlapping_spans, EndCell},
+    selection::merge_overlapping_spans,
     symbol_finder::SymbolFinder,
     term_session::{TermId, TermReturnFocus},
     theme_pool::{ThemePool, VscodeSource},
@@ -5227,9 +5227,7 @@ impl Stoat {
             .into_iter()
             .map(|(id, offset)| (id, offset, SelectionGoal::None))
             .collect();
-        editor
-            .selections
-            .land_block_cursors(&landings, EndCell::Empty, new_buf);
+        editor.selections.land_block_cursors(&landings, new_buf);
     }
 
     /// Insert a string per cursor in one multi-edit, mirroring
@@ -5665,9 +5663,7 @@ impl Stoat {
 
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        editor
-            .selections
-            .land_block_cursors(&new_offsets, EndCell::Empty, new_buf);
+        editor.selections.land_block_cursors(&new_offsets, new_buf);
     }
 
     /// New offset of `target` after deleting the ascending, disjoint `ranges`.
@@ -15734,7 +15730,7 @@ mod tests {
     }
 
     #[test]
-    fn editor_mouse_down_below_last_line_lands_on_row_zero() {
+    fn editor_mouse_down_below_last_line_lands_on_the_buffer_end() {
         let mut h = Stoat::test();
         let area = focused_editor_pane_area(&h);
         h.stoat.update(mouse_event(
@@ -15744,8 +15740,8 @@ mod tests {
         ));
         assert_eq!(
             focused_primary_offsets(&mut h),
-            (0, 1),
-            "a click below the seeded scratch's one line covers the newline on row 0"
+            (1, 1),
+            "a click past the content clamps to the end, zero-width past the newline"
         );
     }
 

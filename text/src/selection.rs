@@ -163,29 +163,23 @@ impl Selection<usize> {
         }
     }
 
-    /// Widen an empty selection to cover one grapheme cluster, leaving any
-    /// non-empty selection untouched, so the block cursor always has a cell.
+    /// Widen an empty selection forward over one grapheme cluster, leaving any
+    /// non-empty selection untouched, so the block cursor has a cell.
     ///
-    /// An empty selection widens its head forward over the next cluster, or
-    /// backward over the previous one at the rope end where there is no next
-    /// cluster. The vertical-movement goal is preserved.
+    /// The head only ever moves forward, so an empty selection already at the
+    /// rope end stays zero-width. No next cluster exists to take, and the
+    /// position after the last character is a cursor position in its own right
+    /// rather than an alias for the one before it. The vertical-movement goal is
+    /// preserved.
     pub fn min_width_1(&self, rope: &Rope) -> Selection<usize> {
         if !self.is_empty() {
             return self.clone();
         }
 
-        let offset = self.start;
-        let forward = next_char_boundary(rope, offset);
-        let (start, end) = if forward > offset {
-            (offset, forward)
-        } else {
-            (prev_char_boundary(rope, offset), offset)
-        };
-
         Selection {
             id: self.id,
-            start,
-            end,
+            start: self.start,
+            end: next_char_boundary(rope, self.start),
             reversed: false,
             goal: self.goal,
         }
@@ -468,8 +462,8 @@ mod tests {
         );
         assert_eq!(
             usel(18, 18, false).min_width_1(&rope),
-            usel(0, 18, false),
-            "at the rope end it widens backward over the same cluster",
+            usel(18, 18, false),
+            "at the rope end there is no forward cluster, so it stays zero-width",
         );
     }
 
@@ -487,11 +481,15 @@ mod tests {
     }
 
     #[test]
-    fn put_cursor_without_extend_covers_prev_char_at_eof() {
+    /// A non-extending put goes through `min_width_1`, so it inherits the rope
+    /// end's zero width rather than covering the character before it.
+    fn put_cursor_without_extend_is_zero_width_at_eof() {
         assert_eq!(
             usel(1, 1, false).put_cursor(&Rope::from("abcd"), 4, false),
-            usel(3, 4, false)
+            usel(4, 4, false)
         );
+        // Offset 3 is mid-cluster in "café", where a forward cluster still
+        // exists, so this one widens as usual.
         assert_eq!(
             usel(0, 0, false).put_cursor(&Rope::from("café"), 3, false),
             usel(3, 5, false)
@@ -522,14 +520,18 @@ mod tests {
     }
 
     #[test]
-    fn min_width_1_widens_backward_at_eof() {
+    /// The head only shifts forward, so the rope end is the one input that
+    /// keeps a zero width. Widening backward there aliases the position after
+    /// the last character onto the one before it, which is what makes that
+    /// position unreachable.
+    fn min_width_1_stays_zero_width_at_eof() {
         assert_eq!(
             usel(4, 4, false).min_width_1(&Rope::from("abcd")),
-            usel(3, 4, false)
+            usel(4, 4, false)
         );
         assert_eq!(
             usel(5, 5, false).min_width_1(&Rope::from("café")),
-            usel(3, 5, false)
+            usel(5, 5, false)
         );
     }
 

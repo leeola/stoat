@@ -780,12 +780,12 @@ mod tests {
         movement::set_cursor_row(editor, buffer_rows - 1);
         editor.scroll_row = 0;
         ensure_cursor_in_view(editor, 0);
-        // The 1-wide cursor cannot sit on the empty final row, so it lands on
-        // the last content line one row up, scrolling one short of the bound.
+        // The cursor is zero-width on the empty final row, so it reaches it and
+        // the view scrolls all the way to the bound.
         assert_eq!(
             editor.scroll_row,
-            line_count - 11,
-            "following the cursor to the last content line nears the display bound",
+            line_count - 10,
+            "following the cursor to the final row reaches the display bound",
         );
     }
 
@@ -1424,8 +1424,8 @@ mod tests {
         dispatch(&mut stoat, &PageDown);
         assert_eq!(
             editor::cursor_display_positions(&mut stoat),
-            vec![(29, 6)],
-            "huge count clamps the 1-wide cursor onto the last real cell, not the empty final row"
+            vec![(30, 0)],
+            "a huge count clamps to the buffer end, which is the empty final row"
         );
     }
 
