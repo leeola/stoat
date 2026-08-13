@@ -14,3 +14,18 @@ base64.workspace = true
 # isatty. Nothing else in the crate touches the platform.
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+# Pure-VT emitter programs, each run as the PTY shell of a stoatty scenario in
+# tty/examples/. They are listed rather than left to autodiscovery so the
+# manifest states the set instead of implying it from a directory listing.
+[[example]]
+name = "example_edit_app"
+path = "examples/example_edit_app.rs"
+
+[[example]]
+name = "example_hello_app"
+path = "examples/example_hello_app.rs"
+
+[[example]]
+name = "example_smooth_scroll_history_app"
+path = "examples/example_smooth_scroll_history_app.rs"

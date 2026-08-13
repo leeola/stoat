@@ -10,3 +10,38 @@ workspace = true
 [dependencies]
 ratatui.workspace = true
 stoatty_protocol = { path = "../tty_protocol" }
+
+# Emitter programs, each run as the PTY shell of a stoatty scenario in
+# tty/examples/. They are listed rather than left to autodiscovery so the
+# manifest states the set instead of implying it from a directory listing.
+[[example]]
+name = "example_diagnostics_app"
+path = "examples/example_diagnostics_app.rs"
+
+[[example]]
+name = "example_doc_tooltip_app"
+path = "examples/example_doc_tooltip_app.rs"
+
+[[example]]
+name = "example_gutter_app"
+path = "examples/example_gutter_app.rs"
+
+[[example]]
+name = "example_panel_app"
+path = "examples/example_panel_app.rs"
+
+[[example]]
+name = "example_panes_app"
+path = "examples/example_panes_app.rs"
+
+[[example]]
+name = "example_scale_app"
+path = "examples/example_scale_app.rs"
+
+[[example]]
+name = "example_smooth_scroll_pages_app"
+path = "examples/example_smooth_scroll_pages_app.rs"
+
+[[example]]
+name = "example_split_scroll_app"
+path = "examples/example_split_scroll_app.rs"
