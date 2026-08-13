@@ -70,11 +70,22 @@ pub trait Action: Debug + Send + 'static {
     fn as_any(&self) -> &dyn Any;
 }
 
-macro_rules! define_action {
-    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021) => {
-        $crate::action::define_action!(
+/// Declare an action's [`ActionDef`], leaving its [`Action`] struct to the
+/// caller.
+///
+/// Written directly by actions that carry a payload. Their `Action` struct
+/// holds parsed argument fields, which no macro generates. An action with no
+/// payload goes through [`define_action!`] instead, which calls this and adds
+/// the unit struct.
+///
+/// The arms form a chain. Each one supplies the next default and forwards, so a
+/// caller names only the options it departs from, and the last arm emits. The
+/// options in chain order are `priority`, `palette_visible`, `aliases`,
+/// `command_name`, and `params`.
+macro_rules! define_action_def {
+    ($def:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021) => {
+        $crate::action::define_action_def!(
             $def,
-            $action,
             $name,
             $kind,
             $short,
@@ -82,10 +93,9 @@ macro_rules! define_action {
             $crate::ActionPriority::Normal
         );
     };
-    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021) => {
-        $crate::action::define_action!(
+    ($def:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021) => {
+        $crate::action::define_action_def!(
             $def,
-            $action,
             $name,
             $kind,
             $short,
@@ -94,10 +104,9 @@ macro_rules! define_action {
             palette_visible = true
         );
     };
-    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, palette_visible = $visible:expr_2021) => {
-        $crate::action::define_action!(
+    ($def:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, palette_visible = $visible:expr_2021) => {
+        $crate::action::define_action_def!(
             $def,
-            $action,
             $name,
             $kind,
             $short,
@@ -107,10 +116,9 @@ macro_rules! define_action {
             aliases = &[]
         );
     };
-    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, aliases = $aliases:expr_2021) => {
-        $crate::action::define_action!(
+    ($def:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, aliases = $aliases:expr_2021) => {
+        $crate::action::define_action_def!(
             $def,
-            $action,
             $name,
             $kind,
             $short,
@@ -120,10 +128,9 @@ macro_rules! define_action {
             aliases = $aliases
         );
     };
-    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, command_name = $command:expr_2021) => {
-        $crate::action::define_action!(
+    ($def:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, command_name = $command:expr_2021) => {
+        $crate::action::define_action_def!(
             $def,
-            $action,
             $name,
             $kind,
             $short,
@@ -134,10 +141,9 @@ macro_rules! define_action {
             command_name_opt = Some($command)
         );
     };
-    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, aliases = $aliases:expr_2021, command_name = $command:expr_2021) => {
-        $crate::action::define_action!(
+    ($def:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, aliases = $aliases:expr_2021, command_name = $command:expr_2021) => {
+        $crate::action::define_action_def!(
             $def,
-            $action,
             $name,
             $kind,
             $short,
@@ -148,10 +154,51 @@ macro_rules! define_action {
             command_name_opt = Some($command)
         );
     };
-    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, palette_visible = $visible:expr_2021, aliases = $aliases:expr_2021) => {
-        $crate::action::define_action!(
+    ($def:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, params = $params:expr_2021) => {
+        $crate::action::define_action_def!(
             $def,
-            $action,
+            $name,
+            $kind,
+            $short,
+            $long,
+            $priority,
+            palette_visible = true,
+            aliases = &[],
+            command_name_opt = None,
+            params = $params
+        );
+    };
+    ($def:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, command_name = $command:expr_2021, params = $params:expr_2021) => {
+        $crate::action::define_action_def!(
+            $def,
+            $name,
+            $kind,
+            $short,
+            $long,
+            $priority,
+            palette_visible = true,
+            aliases = &[],
+            command_name_opt = Some($command),
+            params = $params
+        );
+    };
+    ($def:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, aliases = $aliases:expr_2021, command_name = $command:expr_2021, params = $params:expr_2021) => {
+        $crate::action::define_action_def!(
+            $def,
+            $name,
+            $kind,
+            $short,
+            $long,
+            $priority,
+            palette_visible = true,
+            aliases = $aliases,
+            command_name_opt = Some($command),
+            params = $params
+        );
+    };
+    ($def:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, palette_visible = $visible:expr_2021, aliases = $aliases:expr_2021) => {
+        $crate::action::define_action_def!(
+            $def,
             $name,
             $kind,
             $short,
@@ -162,7 +209,21 @@ macro_rules! define_action {
             command_name_opt = None
         );
     };
-    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, palette_visible = $visible:expr_2021, aliases = $aliases:expr_2021, command_name_opt = $command:expr_2021) => {
+    ($def:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, palette_visible = $visible:expr_2021, aliases = $aliases:expr_2021, command_name_opt = $command:expr_2021) => {
+        $crate::action::define_action_def!(
+            $def,
+            $name,
+            $kind,
+            $short,
+            $long,
+            $priority,
+            palette_visible = $visible,
+            aliases = $aliases,
+            command_name_opt = $command,
+            params = &[]
+        );
+    };
+    ($def:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, palette_visible = $visible:expr_2021, aliases = $aliases:expr_2021, command_name_opt = $command:expr_2021, params = $params:expr_2021) => {
         #[derive(Debug)]
         pub struct $def;
 
@@ -176,7 +237,7 @@ macro_rules! define_action {
             }
 
             fn params(&self) -> &'static [$crate::ParamDef] {
-                &[]
+                $params
             }
 
             fn short_desc(&self) -> &'static str {
@@ -203,6 +264,17 @@ macro_rules! define_action {
                 $command
             }
         }
+    };
+}
+
+/// Declare an action that carries no payload, as its [`ActionDef`] and the unit
+/// struct implementing [`Action`].
+///
+/// Everything after the two struct names is the [`define_action_def!`] argument
+/// list, so the options and their defaults are documented there.
+macro_rules! define_action {
+    ($def:ident, $action:ident, $($rest:tt)*) => {
+        $crate::action::define_action_def!($def, $($rest)*);
 
         #[derive(Debug)]
         pub struct $action;
@@ -224,3 +296,4 @@ macro_rules! define_action {
 }
 
 pub(crate) use define_action;
+pub(crate) use define_action_def;
