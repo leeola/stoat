@@ -5,7 +5,7 @@
 //! renderer reads this grid to draw and the terminal driver writes it; colors
 //! are stored fully resolved, so the renderer needs no palette of its own.
 
-use from_command::{bar_from_command, polyline_from_command, text_run_from_command};
+use from_command::{bar_from_command, fill_polyline, text_run_from_command, StoredTextRun};
 use std::{
     collections::HashMap,
     mem,
@@ -840,9 +840,23 @@ impl PagePool {
     ) {
         let slot = self.slot(index);
         let page = &mut self.pages[slot];
-        page.text_runs = text_runs.into_iter().map(text_run_from_command).collect();
-        page.bars = bars.into_iter().map(bar_from_command).collect();
-        page.polylines = polylines.into_iter().map(polyline_from_command).collect();
+
+        page.text_runs = text_runs
+            .into_iter()
+            .map(|command| {
+                let run = StoredTextRun::from(command);
+                text_run_from_command(&run, run.row, 0)
+            })
+            .collect();
+        page.bars = bars
+            .iter()
+            .map(|command| bar_from_command(command, command.y, 0))
+            .collect();
+
+        page.polylines.resize_with(polylines.len(), Polyline::empty);
+        for (slot, command) in page.polylines.iter_mut().zip(&polylines) {
+            fill_polyline(slot, command, 0);
+        }
     }
 
     /// The page-targeted decorations buffered for document page `index`, or
@@ -1442,6 +1456,22 @@ pub struct Polyline {
     /// Monotonic declaration-order index across all non-cell components. See
     /// [`Panel::seq`].
     pub seq: u32,
+}
+
+impl Polyline {
+    /// A path with no points, for a caller growing a list it refills in place.
+    ///
+    /// The lists of paths are rebuilt far more often than their contents change,
+    /// so each one keeps its slots and their point vectors across rebuilds. A
+    /// grown list needs a slot to refill, which is what this is.
+    pub(crate) fn empty() -> Polyline {
+        Polyline {
+            points: Vec::new(),
+            width: 0,
+            color: Rgb::new(0, 0, 0),
+            seq: 0,
+        }
+    }
 }
 
 /// Fill `list` with `count` items built by `item`, keeping the vector's allocation.

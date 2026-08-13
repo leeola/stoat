@@ -6,13 +6,16 @@
 //! the decoded commands and the [`Grid`] to stamp them on, and the damage-aware
 //! ones skip a decoration whose rows the projection did not rewrite.
 
-use super::{Damage, StoredTextRun};
+use super::Damage;
 use crate::grid::{
-    from_command::{grid_border_style, minimap_strip_from_command, panel_grid, popover_overlay},
+    from_command::{
+        bar_from_command, fill_polyline, grid_border_style, minimap_strip_from_command, panel_grid,
+        popover_overlay, text_run_from_command, StoredTextRun,
+    },
     Bar, Border, BorderEdge, Grid, Icon, IconKind, Minimap, MinimapView, PagePool, Polyline, Rgb,
     ScrollRegion, TextRun,
 };
-use std::{collections::HashMap, mem, sync::Arc};
+use std::{collections::HashMap, mem};
 use stoatty_protocol::command::{
     self, BarCommand, BorderCommand, IconCommand, LineLayoutCommand, MinimapCommand, PanelCommand,
     PolylineCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand,
@@ -294,12 +297,7 @@ pub(super) fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, 
             // survive the shift drops the whole path, because a partial point
             // list would draw a wrong line rather than none.
             if kept == polylines.len() {
-                polylines.push(Polyline {
-                    points: Vec::new(),
-                    width: 0,
-                    color: Rgb::new(0, 0, 0),
-                    seq: 0,
-                });
+                polylines.push(Polyline::empty());
             }
             let slot = &mut polylines[kept];
 
@@ -346,15 +344,7 @@ pub(super) fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, 
 pub(super) fn apply_text_runs(grid: &mut Grid, runs: &[StoredTextRun], seqs: &[u32]) {
     grid.fill_text_runs(runs.len(), |grid, index| {
         let run = &runs[index];
-        TextRun {
-            col: run.col,
-            row: resolve_logical_row(grid, run.row),
-            scale: run.scale,
-            color: Rgb::new(run.color[0], run.color[1], run.color[2]),
-            bg: run.bg.map(|b| Rgb::new(b[0], b[1], b[2])),
-            text: Arc::clone(&run.text),
-            seq: seqs[index],
-        }
+        text_run_from_command(run, resolve_logical_row(grid, run.row), seqs[index])
     });
 }
 
@@ -366,14 +356,7 @@ pub(super) fn apply_text_runs(grid: &mut Grid, runs: &[StoredTextRun], seqs: &[u
 pub(super) fn apply_bars(grid: &mut Grid, commands: &[BarCommand], seqs: &[u32]) {
     grid.fill_bars(commands.len(), |grid, index| {
         let command = &commands[index];
-        Bar {
-            x: command.x,
-            y: resolve_logical_row(grid, command.y),
-            width: command.width,
-            height: command.height,
-            color: Rgb::new(command.color[0], command.color[1], command.color[2]),
-            seq: seqs[index],
-        }
+        bar_from_command(command, resolve_logical_row(grid, command.y), seqs[index])
     });
 }
 
@@ -389,18 +372,9 @@ pub(super) fn apply_bars(grid: &mut Grid, commands: &[BarCommand], seqs: &[u32])
 pub(super) fn apply_polylines(grid: &mut Grid, commands: &[PolylineCommand], seqs: &[u32]) {
     let mut polylines = mem::take(grid.polylines_mut());
 
-    polylines.resize_with(commands.len(), || Polyline {
-        points: Vec::new(),
-        width: 0,
-        color: Rgb::new(0, 0, 0),
-        seq: 0,
-    });
+    polylines.resize_with(commands.len(), Polyline::empty);
     for ((slot, command), &seq) in polylines.iter_mut().zip(commands).zip(seqs) {
-        slot.points.clear();
-        slot.points.extend_from_slice(&command.points);
-        slot.width = command.width;
-        slot.color = Rgb::new(command.color[0], command.color[1], command.color[2]);
-        slot.seq = seq;
+        fill_polyline(slot, command, seq);
     }
 
     grid.set_polylines(polylines);

@@ -11,8 +11,8 @@
 pub use crate::grid::Damage;
 use crate::{
     grid::{
-        self, whole_row, Cell, DocumentOffset, Flags, Grid, MinimapView, PagePool, PoolRegion, Rgb,
-        RowDamage,
+        self, from_command::StoredTextRun, whole_row, Cell, DocumentOffset, Flags, Grid,
+        MinimapView, PagePool, PoolRegion, Rgb, RowDamage,
     },
     theme::Theme,
 };
@@ -816,35 +816,6 @@ impl FillTarget {
 struct ContentCapture {
     target: CaptureTarget,
     content: Vec<u8>,
-}
-
-/// A declared text run as the terminal holds it between projections.
-///
-/// Mirrors [`TextRunCommand`], the wire shape, but shares its text rather than
-/// owning a `String`. Every dirty projection hands the whole run list to the
-/// grid, so an owned string would be rebuilt into the grid's shared text once
-/// per frame per run, and a gutter declares one run per visible line.
-#[derive(Clone, PartialEq, Eq)]
-struct StoredTextRun {
-    col: i16,
-    row: i16,
-    scale: u16,
-    color: [u8; 3],
-    bg: Option<[u8; 3]>,
-    text: Arc<str>,
-}
-
-impl From<TextRunCommand> for StoredTextRun {
-    fn from(command: TextRunCommand) -> Self {
-        StoredTextRun {
-            col: command.col,
-            row: command.row,
-            scale: command.scale,
-            color: command.color,
-            bg: command.bg,
-            text: Arc::from(command.text),
-        }
-    }
 }
 
 /// The command awaiting its streamed text in an open [`ContentCapture`].

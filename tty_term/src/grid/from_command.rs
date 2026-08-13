@@ -8,56 +8,98 @@
 //! A command enum's map to its grid enum lives here when the conversion that
 //! needs it does. The icon-kind map stays in the decoration module, since
 //! nothing here calls it.
+//!
+//! [`StoredTextRun`] lives here for the same reason: it is a decoded command as
+//! the terminal holds it, so the conversion into it and the projection out of it
+//! are both conversions in this direction.
 
 use crate::grid::{
     Bar, BorderStyle, MinimapStrip, Overlay, Panel, PanelShadow, Polyline, PoolRegion, Rgb, Rgba,
     TextRun,
 };
+use std::sync::Arc;
 use stoatty_protocol::command::{
     self, BarCommand, MinimapCommand, PanelCommand, PolylineCommand, PoolRegionCommand,
     PopoverCommand, TextRunCommand,
 };
 
-/// Convert a page-local [`TextRunCommand`] to its grid [`TextRun`] at capture
-/// time, so the pool projection re-stamps it without re-decoding per frame.
+/// A declared text run as the terminal holds it between projections.
 ///
-/// The declared row passes through unresolved because a pool page carries no
-/// line layout, so its logical-to-physical row resolution is the identity. The
-/// run is the base layer of a pool composite, so it takes `seq` 0.
-pub(super) fn text_run_from_command(command: TextRunCommand) -> TextRun {
-    TextRun {
-        col: command.col,
-        row: command.row,
-        scale: command.scale,
-        color: Rgb::new(command.color[0], command.color[1], command.color[2]),
-        bg: command.bg.map(|bg| Rgb::new(bg[0], bg[1], bg[2])),
-        text: command.text.into(),
-        seq: 0,
+/// Mirrors [`TextRunCommand`], the wire shape, but shares its text rather than
+/// owning a `String`. Every dirty projection hands the whole run list to the
+/// grid, so an owned string would be rebuilt into the grid's shared text once
+/// per frame per run, and a gutter declares one run per visible line.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct StoredTextRun {
+    pub(crate) col: i16,
+    pub(crate) row: i16,
+    pub(crate) scale: u16,
+    pub(crate) color: [u8; 3],
+    pub(crate) bg: Option<[u8; 3]>,
+    pub(crate) text: Arc<str>,
+}
+
+impl From<TextRunCommand> for StoredTextRun {
+    fn from(command: TextRunCommand) -> Self {
+        StoredTextRun {
+            col: command.col,
+            row: command.row,
+            scale: command.scale,
+            color: command.color,
+            bg: command.bg,
+            text: Arc::from(command.text),
+        }
     }
 }
 
-/// Convert a page-local [`BarCommand`] to its grid [`Bar`]. See
-/// [`text_run_from_command`] for the identity-row and `seq` 0 rationale.
-pub(super) fn bar_from_command(command: BarCommand) -> Bar {
+/// Project a declared text run into its grid [`TextRun`].
+///
+/// `row` is the run's declared row already resolved through the target grid's
+/// line layout, and `seq` its declaration order among the non-cell components.
+/// Both come from the caller because a pool page has neither. A page carries no
+/// line layout, so its row resolution is the identity, and its runs are the base
+/// layer of the composite, so they take `seq` 0.
+pub(crate) fn text_run_from_command(run: &StoredTextRun, row: i16, seq: u32) -> TextRun {
+    TextRun {
+        col: run.col,
+        row,
+        scale: run.scale,
+        color: Rgb::new(run.color[0], run.color[1], run.color[2]),
+        bg: run.bg.map(|bg| Rgb::new(bg[0], bg[1], bg[2])),
+        text: Arc::clone(&run.text),
+        seq,
+    }
+}
+
+/// Project a declared [`BarCommand`] into its grid [`Bar`]. See
+/// [`text_run_from_command`] for where `y` and `seq` come from.
+pub(crate) fn bar_from_command(command: &BarCommand, y: i16, seq: u32) -> Bar {
     Bar {
         x: command.x,
-        y: command.y,
+        y,
         width: command.width,
         height: command.height,
         color: Rgb::new(command.color[0], command.color[1], command.color[2]),
-        seq: 0,
+        seq,
     }
 }
 
-/// Convert a page-local [`PolylineCommand`] to its grid [`Polyline`]. See
-/// [`text_run_from_command`] for the identity-row and `seq` 0 rationale.
-pub(super) fn polyline_from_command(command: PolylineCommand) -> Polyline {
-    Polyline {
-        points: command.points,
-        width: command.width,
-        color: Rgb::new(command.color[0], command.color[1], command.color[2]),
-        seq: 0,
-    }
+/// Refill `slot` from a declared [`PolylineCommand`].
+///
+/// Fills a slot instead of returning a path, because both callers rebuild their
+/// whole list whenever anything about it changes, and a returning constructor
+/// allocates a point vector per path per rebuild. A commit graph declares a path
+/// per lane, so that is the allocation this shape exists to avoid.
+///
+/// Points pass through unresolved, because a path is free geometry rather than a
+/// component anchored to a logical row. See [`text_run_from_command`] for where
+/// `seq` comes from.
+pub(crate) fn fill_polyline(slot: &mut Polyline, command: &PolylineCommand, seq: u32) {
+    slot.points.clear();
+    slot.points.extend_from_slice(&command.points);
+    slot.width = command.width;
+    slot.color = Rgb::new(command.color[0], command.color[1], command.color[2]);
+    slot.seq = seq;
 }
 
 /// Project a declared [`PoolRegionCommand`] into the grid's [`PoolRegion`].
