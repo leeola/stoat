@@ -505,7 +505,7 @@ impl Grid {
         self.bars = bars;
     }
 
-    /// The bar list, for a caller rewriting it from another grid.s. See
+    /// The bar list, for a caller rewriting it from another grid's. See
     /// [`Self::text_runs_mut`].
     pub fn bars_mut(&mut self) -> &mut Vec<Bar> {
         &mut self.bars
@@ -524,8 +524,12 @@ impl Grid {
         self.polylines = polylines;
     }
 
-    /// The path list, for a caller rewriting it from another grid.s. See
+    /// The path list, for a caller rewriting it from another grid's. See
     /// [`Self::text_runs_mut`].
+    pub fn polylines_mut(&mut self) -> &mut Vec<Polyline> {
+        &mut self.polylines
+    }
+
     /// Copy `rows` rows of `src` in at (`top`, `left`), replacing whatever
     /// decorations this grid held with `src`'s, shifted to land there.
     ///
@@ -611,10 +615,6 @@ impl Grid {
         for r in 0..rows {
             self.row_mut(top + r)[left..left + cols].copy_from_slice(&src.row(r)[..cols]);
         }
-    }
-
-    pub fn polylines_mut(&mut self) -> &mut Vec<Polyline> {
-        &mut self.polylines
     }
 
     /// The declared minimap strips, each carrying its viewport thumb.
