@@ -82,6 +82,9 @@ pub use app::{Stoat, UpdateEffect};
 #[cfg(test)]
 mod test_harness;
 
+#[cfg(test)]
+pub(crate) mod test_fixture;
+
 /// A redraw handle for tests, where nothing listens for the wake.
 ///
 /// Constructors take one so no production site can be built without a live

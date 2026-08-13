@@ -8458,6 +8458,10 @@ mod tests {
         input_view::{InputView, SubmitTarget},
         minimap::emit::minimap_line_tokens,
         term_session::TermSession,
+        test_fixture::{
+            drain_apc, finder_layout, focused_editor_pane_area, help_layout, open_scratch_file,
+            open_with_minimap_strip, palette_sizing,
+        },
     };
     use std::path::{Path, PathBuf};
     use stoat_config::LineNumbers;
@@ -9444,47 +9448,6 @@ mod tests {
         h.settle();
 
         finder_layout(h).list
-    }
-
-    /// The open help modal's layout, sized from the same content and zoom the
-    /// renderer would read, so a test rect matches the painted one.
-    fn help_layout(h: &crate::test_harness::TestHarness) -> crate::render::help::HelpLayout {
-        let help = h.stoat.help.as_ref().expect("the help modal is open");
-        crate::render::help::help_layout(
-            h.stoat.size(),
-            crate::render::help::help_content_rows(help),
-            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::Help),
-        )
-        .expect("the help modal fits the test viewport")
-    }
-
-    /// The open palette's sizing inputs, so a test lays its box out exactly as
-    /// the renderer would.
-    fn palette_sizing(h: &crate::test_harness::TestHarness) -> (u16, i8) {
-        let palette = h
-            .stoat
-            .command_palette
-            .as_ref()
-            .expect("the palette is open");
-        (
-            palette.list_rows_hint(),
-            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::Palette),
-        )
-    }
-
-    /// The open finder's layout, sized from the same content and zoom the
-    /// renderer would read, so a test rect matches the painted one.
-    fn finder_layout(
-        h: &crate::test_harness::TestHarness,
-    ) -> crate::render::file_finder::FinderLayout {
-        let finder = h.stoat.file_finder.as_ref().expect("the finder is open");
-        crate::render::file_finder::file_finder_layout(
-            h.stoat.size(),
-            finder.content_size,
-            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
-            modal_split_percent(&h.stoat.modal_split, ModalKind::FileFinder),
-        )
-        .expect("the finder fits the test terminal")
     }
 
     fn finder_selected(h: &crate::test_harness::TestHarness) -> usize {
@@ -17290,18 +17253,6 @@ mod tests {
         );
     }
 
-    /// Drain every APC batch currently queued on `rx` into one decoded command
-    /// list. A plain editor pane fills its pages asynchronously, so one
-    /// `emit_smooth_scroll` pushes the region/scroll batch plus a fill batch per
-    /// page. Draining folds them together so a test reads the whole emit at once.
-    fn drain_apc(rx: &mut UnboundedReceiver<Vec<u8>>) -> Vec<command::Command> {
-        let mut cmds = Vec::new();
-        while let Ok(batch) = rx.try_recv() {
-            cmds.extend(command::decode_stream(&batch));
-        }
-        cmds
-    }
-
     #[test]
     fn mouse_routes_to_focused_dock_when_focus_is_dock() {
         use crate::pane::{DockPanel, DockSide, DockVisibility, View};
@@ -19439,20 +19390,6 @@ mod tests {
         );
     }
 
-    fn open_with_minimap_strip(h: &mut crate::test_harness::TestHarness) -> EditorId {
-        h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
-        let body: String = (0..60)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        open_scratch_file(h, &body);
-        let editor_id = h.stoat.focused_editor_ids().expect("editor").0;
-        let editor = &mut h.stoat.active_workspace_mut().editors[editor_id];
-        editor.minimap_rect = Some(Rect::new(72, 0, 8, 10));
-        editor.viewport_rows = Some(20);
-        editor_id
-    }
-
     #[test]
     fn minimap_click_scrolls_to_the_proportional_line() {
         let mut h = Stoat::test();
@@ -20214,16 +20151,6 @@ mod tests {
         drag_select_ell_in_hello(&mut h);
         assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
         assert!(h.fake_clipboard().osc52_emits().is_empty());
-    }
-
-    fn open_scratch_file(h: &mut crate::test_harness::TestHarness, contents: &str) -> PathBuf {
-        let path = PathBuf::from("/ws/buf.txt");
-        h.fake_fs()
-            .insert_files(std::iter::once((path.clone(), contents.as_bytes())));
-        h.stoat.active_workspace_mut().git_root = PathBuf::from("/ws");
-        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
-        h.settle();
-        path
     }
 
     fn buffer_text(h: &crate::test_harness::TestHarness, path: &Path) -> String {
@@ -21792,14 +21719,6 @@ mod tests {
         h.type_keys("escape");
         assert_eq!(h.stoat.focused_mode(), "normal");
         assert!(h.stoat.active_snippet.is_none());
-    }
-
-    fn focused_editor_pane_area(h: &crate::test_harness::TestHarness) -> Rect {
-        let ws = h.stoat.active_workspace();
-        match ws.focus {
-            FocusTarget::SplitPane => ws.panes.pane(ws.panes.focus()).area,
-            FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).expect("dock").area,
-        }
     }
 
     fn focused_primary_offsets(h: &mut crate::test_harness::TestHarness) -> (usize, usize) {
