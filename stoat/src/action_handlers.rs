@@ -7,7 +7,7 @@ mod conflict_view;
 pub(crate) mod file;
 mod file_finder;
 pub(crate) mod filter_selections;
-mod help;
+pub(crate) mod help;
 pub(crate) mod jump;
 pub(crate) mod lsp;
 pub(crate) mod macro_recording;
@@ -42,12 +42,9 @@ use crate::{
     command_palette::CommandPalette,
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
-    help::{build_help_bindings, Help, SnapshotState},
     host::FsHost,
     input_view::{InputView, SubmitTarget},
     jumplist::JumpList,
-    keymap::{KeymapState, StateValue},
-    keymap_state::{StoatKeymapState, BUILTIN_FIELDS},
     pane::{Axis, Direction, DockSide, FocusTarget, View},
     workspace_picker::WorkspacePicker,
 };
@@ -60,7 +57,7 @@ pub(crate) use pane::{close_pane_by_id, restore_pane_after_term_exit};
 #[cfg(test)]
 pub(crate) use review::install_review_session;
 pub(crate) use review::{pump_review_scan, PendingReviewScan};
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, AutoReloadConfig, Dump, FocusPane, GitLs, GitReview, GotoTab,
     OpenBuffer, OpenConfig, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
@@ -279,7 +276,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::OpenHelp => {
-            open_help(stoat);
+            help::open_help(stoat);
             UpdateEffect::Redraw
         },
         ActionKind::Diff => {
@@ -522,9 +519,11 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SaveSelection => jump::save_selection(stoat),
         ActionKind::JumpBackward => jump::jump_backward(stoat),
         ActionKind::JumpForward => jump::jump_forward(stoat),
-        ActionKind::OpenJumplistPicker => open_jumplist_picker(stoat),
-        ActionKind::OpenDiagnosticsPicker => open_diagnostics_picker(stoat),
-        ActionKind::OpenWorkspaceDiagnosticsPicker => open_workspace_diagnostics_picker(stoat),
+        ActionKind::OpenJumplistPicker => picker::open_jumplist_picker(stoat),
+        ActionKind::OpenDiagnosticsPicker => picker::open_diagnostics_picker(stoat),
+        ActionKind::OpenWorkspaceDiagnosticsPicker => {
+            picker::open_workspace_diagnostics_picker(stoat)
+        },
         ActionKind::JumplistPickerNext => picker::jumplist_picker_next(stoat),
         ActionKind::JumplistPickerPrev => picker::jumplist_picker_prev(stoat),
         ActionKind::JumplistPickerPageDown => picker::jumplist_picker_page(stoat, 1),
@@ -1244,92 +1243,6 @@ pub(crate) fn gc_editor_if_unreferenced(ws: &mut crate::workspace::Workspace, ed
     ws.editors.remove(editor_id);
 }
 
-/// Drive [`ActionKind::OpenJumplistPicker`]. Builds a snapshot of the focused
-/// pane's jumplist and stores it in [`Stoat::jumplist_picker`]. No-op when the
-/// jumplist is empty or focus is on a dock.
-fn open_jumplist_picker(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(jumplist) = focused_pane_jumplist(stoat) else {
-        return UpdateEffect::None;
-    };
-    if jumplist.entries().is_empty() {
-        return UpdateEffect::None;
-    }
-    let jumplist = jumplist.clone();
-    let picker =
-        crate::jumplist_picker::JumplistPicker::new(&jumplist, &stoat.active_workspace().buffers);
-    stoat.jumplist_picker = Some(picker);
-    UpdateEffect::Redraw
-}
-
-/// Drive [`ActionKind::OpenWorkspaceDiagnosticsPicker`].
-/// Snapshots every `(path, diagnostic)` pair currently in
-/// `Stoat::diagnostics` and stores the workspace-scope picker
-/// on `Stoat::diagnostics_picker`. No-op when the workspace
-/// has no diagnostics loaded.
-fn open_workspace_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
-    if stoat.diagnostics.iter().next().is_none() {
-        return UpdateEffect::None;
-    }
-    let encodings = stoat.lsp_registry.offset_encodings();
-    let picker =
-        crate::diagnostics_picker::DiagnosticsPicker::workspace(&stoat.diagnostics, &encodings);
-    if picker.entries().is_empty() {
-        return UpdateEffect::None;
-    }
-    stoat.diagnostics_picker = Some(picker);
-    UpdateEffect::Redraw
-}
-
-/// Drive [`ActionKind::OpenDiagnosticsPicker`]. Snapshots the
-/// focused buffer's diagnostic list from `Stoat::diagnostics`
-/// and stores the picker on `Stoat::diagnostics_picker`. No-op
-/// when the focused pane is not an editor, the buffer has no
-/// path on disk, or the path has no diagnostics.
-fn open_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
-    let ws = stoat.active_workspace_mut();
-    let editor_id = match ws.focus {
-        FocusTarget::SplitPane => match ws.panes.pane(ws.panes.focus()).view {
-            View::Editor(id) => id,
-            _ => return UpdateEffect::None,
-        },
-        FocusTarget::Dock(_) => return UpdateEffect::None,
-    };
-    let buffer_id = match ws.editors.get(editor_id) {
-        Some(e) => e.buffer_id,
-        None => return UpdateEffect::None,
-    };
-    let path = match ws.buffers.path_for(buffer_id) {
-        Some(p) => p.to_path_buf(),
-        None => return UpdateEffect::None,
-    };
-    let encodings = stoat.lsp_registry.offset_encodings();
-    let diagnostics: Vec<(crate::host::OffsetEncoding, lsp_types::Diagnostic)> = stoat
-        .diagnostics
-        .attributed(&path)
-        .map(|(server, diag)| {
-            let encoding = encodings
-                .get(server)
-                .copied()
-                .unwrap_or(crate::host::OffsetEncoding::Utf16);
-            (encoding, diag.clone())
-        })
-        .collect();
-    if diagnostics.is_empty() {
-        return UpdateEffect::None;
-    }
-    let ws = stoat.active_workspace_mut();
-    let buffer = match ws.buffers.get(buffer_id) {
-        Some(b) => b,
-        None => return UpdateEffect::None,
-    };
-    let picker = {
-        let guard = buffer.read().expect("buffer poisoned");
-        crate::diagnostics_picker::DiagnosticsPicker::new(&diagnostics, &guard)
-    };
-    stoat.diagnostics_picker = Some(picker);
-    UpdateEffect::Redraw
-}
-
 /// Drive [`ActionKind::QuitAll`]. Quits immediately when no buffer is
 /// dirty; otherwise opens the [`crate::quit_all_confirm::QuitAllConfirm`]
 /// modal and waits for the user to confirm or cancel.
@@ -1390,48 +1303,6 @@ fn show_version(stoat: &mut Stoat) -> UpdateEffect {
         detail: None,
     });
     UpdateEffect::Redraw
-}
-
-/// Open the full help modal, snapshotting the bindings active for the focused
-/// mode. Backs the `OpenHelp` action that `?` dispatches from normal mode and
-/// most others (goto keeps reverse-search, the space leader keeps the hints
-/// toggle).
-pub(crate) fn open_help(stoat: &mut Stoat) {
-    let active = stoat.active_bindings_for_current_mode();
-    let mode = stoat.focused_mode().to_string();
-    let context = help_context(stoat);
-    let bindings = build_help_bindings(&stoat.keymap, &context);
-    let executor = stoat.executor.clone();
-    let ws = stoat.active_workspace_mut();
-    stoat.help = Some(Help::new(&mode, active, bindings, context, ws, executor));
-}
-
-/// Snapshot the predicate fields a help binding's conditions may test.
-///
-/// User variables seed the map so a `SetVar` field is available. The builtin
-/// fields then overwrite any that collide, since [`StoatKeymapState`] is the
-/// authority on `mode`/`view`/`token` and the rest.
-fn help_context(stoat: &Stoat) -> SnapshotState {
-    let mut fields: HashMap<String, StateValue> = stoat.user_vars.clone();
-    let state = StoatKeymapState::from_stoat(stoat);
-    for &field in BUILTIN_FIELDS {
-        if let Some(value) = state.get(field) {
-            fields.insert(field.to_string(), value.clone());
-        }
-    }
-    SnapshotState(fields)
-}
-
-/// Close the help modal, disposing its scratch editor and restoring the
-/// mode that was active before the modal opened. No-op when help is not
-/// open. Shared between `CancelPromptInput`, Ctrl-C cleanup, and the help
-/// `HelpOutcome::Close`/`HelpOutcome::Dispatch` paths.
-pub(crate) fn close_help(stoat: &mut Stoat) {
-    let Some(help) = stoat.help.take() else {
-        return;
-    };
-    let active_idx = stoat.active_workspace;
-    help.dispose(&mut stoat.workspaces[active_idx]);
 }
 
 /// Read `path` through the supplied [`FsHost`] as a UTF-8 string.
@@ -2155,77 +2026,6 @@ mod tests {
     }
 
     #[test]
-    fn open_jumplist_picker_with_empty_jumplist_is_noop() {
-        let mut stoat = stoat();
-        editor::seed_focused_buffer(&mut stoat, "alpha\nbeta\n");
-        assert_eq!(
-            dispatch(&mut stoat, &stoat_action::OpenJumplistPicker),
-            UpdateEffect::None
-        );
-        assert!(stoat.jumplist_picker.is_none());
-    }
-
-    #[test]
-    fn open_jumplist_picker_opens_modal_when_jumplist_has_entries() {
-        let mut stoat = stoat();
-        editor::seed_focused_buffer(&mut stoat, "alpha\nbeta\ngamma\n");
-        dispatch(&mut stoat, &SaveSelection);
-        dispatch(&mut stoat, &MoveDown);
-        dispatch(&mut stoat, &SaveSelection);
-        assert_eq!(
-            dispatch(&mut stoat, &stoat_action::OpenJumplistPicker),
-            UpdateEffect::Redraw
-        );
-        let picker = stoat.jumplist_picker.as_ref().expect("modal open");
-        assert_eq!(picker.entries().len(), 2);
-    }
-
-    #[test]
-    fn jumplist_picker_enter_jumps_focused_cursor() {
-        let mut h = Stoat::test();
-        h.seed_focused_buffer("alpha\nbeta\ngamma\n");
-        dispatch(&mut h.stoat, &SaveSelection);
-        dispatch(&mut h.stoat, &MoveDown);
-        dispatch(&mut h.stoat, &MoveDown);
-        dispatch(&mut h.stoat, &SaveSelection);
-        dispatch(&mut h.stoat, &stoat_action::OpenJumplistPicker);
-        h.stoat.update(Event::Key(keys::key(KeyCode::Up)));
-        assert_eq!(
-            h.stoat.update(Event::Key(keys::key(KeyCode::Enter))),
-            UpdateEffect::Redraw
-        );
-        assert!(h.stoat.jumplist_picker.is_none());
-        assert_eq!(editor::head_offsets(&mut h.stoat), vec![0]);
-    }
-
-    #[test]
-    fn jumplist_picker_esc_closes_without_jumping() {
-        let mut h = Stoat::test();
-        h.seed_focused_buffer("alpha\nbeta\n");
-        dispatch(&mut h.stoat, &MoveDown);
-        let before = editor::head_offsets(&mut h.stoat);
-        dispatch(&mut h.stoat, &SaveSelection);
-        dispatch(&mut h.stoat, &stoat_action::OpenJumplistPicker);
-        assert_eq!(
-            h.stoat.update(Event::Key(keys::key(KeyCode::Esc))),
-            UpdateEffect::Redraw
-        );
-        assert!(h.stoat.jumplist_picker.is_none());
-        assert_eq!(editor::head_offsets(&mut h.stoat), before);
-    }
-
-    #[test]
-    fn jumplist_picker_ctrl_c_closes_without_jumping() {
-        let mut h = Stoat::test();
-        h.seed_focused_buffer("alpha\nbeta\n");
-        dispatch(&mut h.stoat, &SaveSelection);
-        dispatch(&mut h.stoat, &stoat_action::OpenJumplistPicker);
-        let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(h.stoat.update(Event::Key(event)), UpdateEffect::Redraw);
-        assert!(h.stoat.jumplist_picker.is_none());
-    }
-
-    #[test]
     fn split_new_right_uses_fresh_scratch_buffer() {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "original");
@@ -2422,35 +2222,6 @@ mod tests {
         assert!(
             !hint_box_visible(&mut h.stoat, "normal"),
             "dismissing hides it again",
-        );
-    }
-
-    #[test]
-    fn question_mark_opens_help_in_normal_mode() {
-        let mut h = Stoat::test();
-        assert!(h.stoat.help.is_none(), "no help open by default");
-
-        h.type_text("?");
-        let all = h
-            .stoat
-            .help
-            .as_ref()
-            .expect("? opens help directly in normal mode")
-            .filtered()
-            .len();
-        assert!(all > 0, "help lists the active bindings");
-
-        h.type_text("quit");
-        let filtered = h
-            .stoat
-            .help
-            .as_ref()
-            .expect("help stays open while typing")
-            .filtered()
-            .len();
-        assert!(
-            filtered < all,
-            "typing into the help search filters the list ({all} -> {filtered})",
         );
     }
 

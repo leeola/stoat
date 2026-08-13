@@ -554,7 +554,7 @@ pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
                 palette.dispose(&mut stoat.workspaces[active_idx]);
             }
         },
-        ActiveModal::Help => action_handlers::close_help(stoat),
+        ActiveModal::Help => action_handlers::help::close_help(stoat),
         ActiveModal::Rename => {
             action_handlers::lsp::rename_input_cancel(stoat);
         },
