@@ -969,7 +969,7 @@ fn collapse_to_buffer_end(editor: &mut EditorState, scrolloff: u32) {
         sel.collapse_to(anchor, SelectionGoal::None);
         sel
     });
-    super::movement::ensure_cursor_in_view(editor, scrolloff);
+    super::view::ensure_cursor_in_view(editor, scrolloff);
 }
 
 /// Collapse `editor`'s selection onto `offset` and scroll it into view, so a
@@ -983,7 +983,7 @@ fn collapse_to_offset(editor: &mut EditorState, offset: usize, scrolloff: u32) {
         sel.collapse_to(anchor, SelectionGoal::None);
         sel
     });
-    super::movement::ensure_cursor_in_view(editor, scrolloff);
+    super::view::ensure_cursor_in_view(editor, scrolloff);
 }
 
 /// The number of leading bytes the rope `chunks` share with `new`.

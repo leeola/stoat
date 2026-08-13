@@ -12,7 +12,7 @@
 //! the pages that moved.
 
 use crate::{
-    action_handlers::movement,
+    action_handlers::view,
     app::{modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
     display_map::DisplaySnapshot,
     editor_state::{EditorId, ScrollGlide},
@@ -865,7 +865,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             && editor.scroll_glide != ScrollGlide::None
             && let Some((col, _)) = editor.cursor_screen_cell
         {
-            let row = movement::cursor_display_row(editor) as u64;
+            let row = view::cursor_display_row(editor) as u64;
             stoatty_protocol::command::encode_pool_cursor_into(
                 &mut out,
                 &stoatty_protocol::command::PoolCursorCommand {
@@ -880,7 +880,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         // live paint records its screen cell, so derive the display cell
         // directly. The actual emit is change-gated after the loop.
         if region.window != 0 && focused_editor == Some(*editor_id) {
-            let (row, column) = movement::cursor_display_cell(editor);
+            let (row, column) = view::cursor_display_cell(editor);
             let col = region.left + editor.gutter_width + column as u16;
             detached_cursor = Some((region.pool, row as u64, col));
         }
@@ -1789,6 +1789,8 @@ pub(crate) fn editor_page_content_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::action_handlers::movement;
+
     /// The rich review gutter engages only when every color resolves to RGB, so
     /// tests need a hex theme. The default theme uses named colors.
     fn rgb_review_theme() -> crate::theme::Theme {
@@ -3939,7 +3941,7 @@ mod tests {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.scroll_glide = ScrollGlide::Wheel;
             editor.cursor_screen_cell = Some((7, 3));
-            movement::cursor_display_row(editor) as u64
+            view::cursor_display_row(editor) as u64
         };
         assert_eq!(expected_row, 15, "the cursor sits on display row 15");
 
@@ -3991,7 +3993,7 @@ mod tests {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.viewport_rows = Some(10);
             editor.cursor_screen_cell = Some((4, 2));
-            movement::ensure_cursor_in_view(editor, 3);
+            view::ensure_cursor_in_view(editor, 3);
             editor.scroll_glide = ScrollGlide::None;
         }
 
@@ -4057,7 +4059,7 @@ mod tests {
         // the relative-number content version every tick without the held line.
         {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
-            movement::wheel_scroll(editor, true);
+            view::wheel_scroll(editor, true);
         }
         app::tick_animation(&mut h.stoat, 0.016);
         assert!(app::animating(&h.stoat), "the wheel glide is still easing");

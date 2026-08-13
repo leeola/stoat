@@ -30,6 +30,7 @@ mod tab;
 mod terminal;
 pub(crate) mod textobject;
 pub(crate) mod textobject_nav;
+pub(crate) mod view;
 pub(crate) mod walkthrough;
 pub(crate) mod workspace;
 pub(crate) mod yank;
@@ -425,10 +426,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::MoveRight => movement::move_horizontal(stoat, 1, false),
         ActionKind::MoveUp => movement::move_vertical(stoat, -1, false),
         ActionKind::MoveDown => movement::move_vertical(stoat, 1, false),
-        ActionKind::PageUp => movement::page_motion(stoat, movement::PageDir::Up, false),
-        ActionKind::PageDown => movement::page_motion(stoat, movement::PageDir::Down, false),
-        ActionKind::HalfPageUp => movement::page_motion(stoat, movement::PageDir::Up, true),
-        ActionKind::HalfPageDown => movement::page_motion(stoat, movement::PageDir::Down, true),
+        ActionKind::PageUp => view::page_motion(stoat, view::PageDir::Up, false),
+        ActionKind::PageDown => view::page_motion(stoat, view::PageDir::Down, false),
+        ActionKind::HalfPageUp => view::page_motion(stoat, view::PageDir::Up, true),
+        ActionKind::HalfPageDown => view::page_motion(stoat, view::PageDir::Down, true),
         ActionKind::MoveNextWordStart => {
             movement::move_word(stoat, movement::WordTarget::NextStart, false)
         },
@@ -650,33 +651,25 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SelectRegister => yank::select_register(stoat),
         ActionKind::InsertRegister => yank::insert_register(stoat),
         ActionKind::RepeatLastMotion => movement::repeat_last_motion(stoat),
-        ActionKind::GotoWindowTop => {
-            movement::goto_window(stoat, movement::WindowAlign::Top, false)
-        },
-        ActionKind::GotoWindowCenter => {
-            movement::goto_window(stoat, movement::WindowAlign::Center, false)
-        },
-        ActionKind::GotoWindowBottom => {
-            movement::goto_window(stoat, movement::WindowAlign::Bottom, false)
-        },
+        ActionKind::GotoWindowTop => view::goto_window(stoat, view::WindowAlign::Top, false),
+        ActionKind::GotoWindowCenter => view::goto_window(stoat, view::WindowAlign::Center, false),
+        ActionKind::GotoWindowBottom => view::goto_window(stoat, view::WindowAlign::Bottom, false),
         ActionKind::GotoWord => movement::goto_word(stoat),
         ActionKind::ExtendGotoFirstNonwhitespace => movement::goto_first_nonwhitespace(stoat, true),
         ActionKind::ExtendGotoFileStart => movement::goto_file_start(stoat, true),
         ActionKind::ExtendGotoLastLine => movement::goto_last_line(stoat, true),
-        ActionKind::ExtendGotoWindowTop => {
-            movement::goto_window(stoat, movement::WindowAlign::Top, true)
-        },
+        ActionKind::ExtendGotoWindowTop => view::goto_window(stoat, view::WindowAlign::Top, true),
         ActionKind::ExtendGotoWindowCenter => {
-            movement::goto_window(stoat, movement::WindowAlign::Center, true)
+            view::goto_window(stoat, view::WindowAlign::Center, true)
         },
         ActionKind::ExtendGotoWindowBottom => {
-            movement::goto_window(stoat, movement::WindowAlign::Bottom, true)
+            view::goto_window(stoat, view::WindowAlign::Bottom, true)
         },
-        ActionKind::AlignViewTop => movement::align_view(stoat, movement::ViewAlign::Top),
-        ActionKind::AlignViewCenter => movement::align_view(stoat, movement::ViewAlign::Center),
-        ActionKind::AlignViewBottom => movement::align_view(stoat, movement::ViewAlign::Bottom),
-        ActionKind::ScrollUp => movement::scroll_view(stoat, movement::ScrollDir::Up),
-        ActionKind::ScrollDown => movement::scroll_view(stoat, movement::ScrollDir::Down),
+        ActionKind::AlignViewTop => view::align_view(stoat, view::ViewAlign::Top),
+        ActionKind::AlignViewCenter => view::align_view(stoat, view::ViewAlign::Center),
+        ActionKind::AlignViewBottom => view::align_view(stoat, view::ViewAlign::Bottom),
+        ActionKind::ScrollUp => view::scroll_view(stoat, view::ScrollDir::Up),
+        ActionKind::ScrollDown => view::scroll_view(stoat, view::ScrollDir::Down),
         ActionKind::SwitchCase => movement::switch_case(stoat),
         ActionKind::SwitchToUppercase => movement::switch_to_uppercase(stoat),
         ActionKind::SwitchToLowercase => movement::switch_to_lowercase(stoat),

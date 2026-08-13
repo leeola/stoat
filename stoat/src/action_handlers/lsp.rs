@@ -2253,9 +2253,9 @@ pub(crate) fn apply_jump(stoat: &mut Stoat, path: &Path, offset: usize) {
     // Landing in another file means a freshly shown editor with no prior view to
     // glide from, so it snaps.
     if Some(editor.buffer_id) == buffer_before {
-        super::movement::follow_jump(editor, scrolloff);
+        super::view::follow_jump(editor, scrolloff);
     } else {
-        super::movement::ensure_cursor_in_view(editor, scrolloff);
+        super::view::ensure_cursor_in_view(editor, scrolloff);
     }
 }
 

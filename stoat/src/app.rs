@@ -3029,19 +3029,15 @@ impl Stoat {
             let target = editor.scroll_row as f32;
             let viewport = editor
                 .viewport_rows
-                .unwrap_or(action_handlers::movement::DEFAULT_VIEWPORT_ROWS)
+                .unwrap_or(action_handlers::view::DEFAULT_VIEWPORT_ROWS)
                 .max(1);
             let mut closed = 0.0;
             if (target - editor.scroll_offset).abs() > viewport as f32 * 3.0 {
                 editor.scroll_offset = target;
                 editor.scroll_glide = ScrollGlide::None;
             } else {
-                let (offset, settled) = action_handlers::movement::step_scroll_ease(
-                    editor.scroll_offset,
-                    target,
-                    dt,
-                    ease,
-                );
+                let (offset, settled) =
+                    action_handlers::view::step_scroll_ease(editor.scroll_offset, target, dt, ease);
                 closed = (offset - editor.scroll_offset).abs();
                 editor.scroll_offset = offset;
                 if settled {
@@ -3051,7 +3047,7 @@ impl Stoat {
             // A wheel glide defers its cursor follow to the settle, so when it
             // just cleared, clamp the anchored cursor into the landing band.
             if was == ScrollGlide::Wheel && editor.scroll_glide == ScrollGlide::None {
-                action_handlers::movement::clamp_cursor_to_view(editor, scrolloff);
+                action_handlers::view::clamp_cursor_to_view(editor, scrolloff);
             }
             // While the glide is still in flight but has slowed below the re-home
             // velocity, land the cursor in the band now rather than at the settle.
@@ -3061,7 +3057,7 @@ impl Stoat {
                 && editor.scroll_glide == ScrollGlide::Wheel
                 && closed / dt.max(1e-6) <= WHEEL_REHOME_MAX_VELOCITY
             {
-                action_handlers::movement::clamp_cursor_to_view(editor, scrolloff);
+                action_handlers::view::clamp_cursor_to_view(editor, scrolloff);
             }
             animating |= editor.scroll_glide != ScrollGlide::None;
         }
@@ -3596,7 +3592,7 @@ impl Stoat {
                 if let Some(editor) = action_handlers::focused_editor_mut(self)
                     && editor.scroll_glide == ScrollGlide::Wheel
                 {
-                    action_handlers::movement::clamp_cursor_to_view(editor, scrolloff);
+                    action_handlers::view::clamp_cursor_to_view(editor, scrolloff);
                 }
 
                 let before = self.focused_cursor_pos();
@@ -3612,7 +3608,7 @@ impl Stoat {
                 // (z j / z k) never moves the cursor, so its view stays put.
                 let scrolled = match action_handlers::focused_editor_mut(self) {
                     Some(editor) => {
-                        cursor_moved && action_handlers::movement::follow_jump(editor, scrolloff)
+                        cursor_moved && action_handlers::view::follow_jump(editor, scrolloff)
                     },
                     None => false,
                 };
@@ -7040,7 +7036,7 @@ mod tests {
         let away = {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.viewport_rows = Some(10);
-            action_handlers::movement::ensure_cursor_in_view(editor, 3);
+            action_handlers::view::ensure_cursor_in_view(editor, 3);
             editor.scroll_glide = ScrollGlide::None;
             editor.scroll_row
         };
@@ -7083,7 +7079,7 @@ mod tests {
         {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.viewport_rows = Some(10);
-            action_handlers::movement::wheel_scroll(editor, true);
+            action_handlers::view::wheel_scroll(editor, true);
         }
         assert!(
             h.stoat.is_animating(),
@@ -7130,7 +7126,7 @@ mod tests {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.viewport_rows = Some(10);
             for _ in 0..4 {
-                action_handlers::movement::wheel_scroll(editor, true);
+                action_handlers::view::wheel_scroll(editor, true);
             }
         }
         for _ in 0..1000 {
@@ -7192,7 +7188,7 @@ mod tests {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.viewport_rows = Some(10);
             for _ in 0..4 {
-                action_handlers::movement::wheel_scroll(editor, true);
+                action_handlers::view::wheel_scroll(editor, true);
             }
         }
         // One tick keeps the glide in flight. The selection has not moved.
@@ -7247,7 +7243,7 @@ mod tests {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.viewport_rows = Some(10);
             for _ in 0..4 {
-                action_handlers::movement::wheel_scroll(editor, true);
+                action_handlers::view::wheel_scroll(editor, true);
             }
         }
 
@@ -7286,7 +7282,7 @@ mod tests {
         // time mid-glide rather than freezing until the settle.
         {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
-            action_handlers::movement::wheel_scroll(editor, true);
+            action_handlers::view::wheel_scroll(editor, true);
         }
         let mut ticks = 0;
         while head_row(&mut h) == landed {
@@ -11400,7 +11396,7 @@ mod tests {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.viewport_rows = Some(10);
             for _ in 0..5 {
-                action_handlers::movement::wheel_scroll(editor, true);
+                action_handlers::view::wheel_scroll(editor, true);
             }
         }
         // The trigger every one of those notches ran through, had the glide not
@@ -12844,7 +12840,7 @@ mod tests {
 
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let scroll_row = editor.scroll_row;
-        let cursor_row = action_handlers::movement::cursor_display_row(editor);
+        let cursor_row = action_handlers::view::cursor_display_row(editor);
         assert!(
             scroll_row > 0,
             "opening the diff view scrolled away from the top"

@@ -778,7 +778,7 @@ fn handle_mouse_scroll(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
             && rect.contains(Position::new(mouse.column, mouse.row))
         {
             if let Some(editor) = stoat.active_workspace_mut().editors.get_mut(editor_id) {
-                action_handlers::movement::wheel_scroll(editor, down);
+                action_handlers::view::wheel_scroll(editor, down);
             }
             return UpdateEffect::None;
         }
@@ -887,7 +887,7 @@ pub(crate) fn scroll_view_at(
             let Some(editor) = ws.editors.get_mut(id) else {
                 return UpdateEffect::None;
             };
-            action_handlers::movement::wheel_scroll(editor, down);
+            action_handlers::view::wheel_scroll(editor, down);
             UpdateEffect::None
         },
         View::Run(id) => {

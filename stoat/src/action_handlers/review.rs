@@ -1032,7 +1032,7 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
     if jumped {
         let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
         if let Some(editor) = super::focused_editor_mut(stoat) {
-            super::movement::ensure_cursor_in_view(editor, scrolloff);
+            super::view::ensure_cursor_in_view(editor, scrolloff);
         }
     }
 

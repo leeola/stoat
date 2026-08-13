@@ -142,9 +142,9 @@ pub(crate) fn apply_jump_entry(stoat: &mut Stoat, entry: JumpEntry) {
     // A cross-buffer jump lands in a freshly shown editor with no prior view to
     // glide from, so it snaps.
     if swapped_buffer {
-        super::movement::ensure_cursor_in_view(editor, scrolloff);
+        super::view::ensure_cursor_in_view(editor, scrolloff);
     } else {
-        super::movement::follow_jump(editor, scrolloff);
+        super::view::follow_jump(editor, scrolloff);
     }
 }
 

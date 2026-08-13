@@ -952,7 +952,7 @@ fn land_cursor(stoat: &mut Stoat, editor_id: EditorId, offset: usize) {
 fn scroll_cursor_into_view(stoat: &mut Stoat, editor_id: EditorId) {
     let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
     if let Some(editor) = stoat.active_workspace_mut().editors.get_mut(editor_id) {
-        super::movement::ensure_cursor_in_view(editor, scrolloff);
+        super::view::ensure_cursor_in_view(editor, scrolloff);
     }
 }
 
@@ -1004,7 +1004,7 @@ fn land_first_chunk(stoat: &mut Stoat, offset: Option<usize>, origin: Option<Jum
     if jumped {
         let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
         if let Some(editor) = focused_editor_mut(stoat) {
-            super::movement::ensure_cursor_in_view(editor, scrolloff);
+            super::view::ensure_cursor_in_view(editor, scrolloff);
         }
         if let Some(entry) = origin {
             super::jump::push_entry(stoat, entry);

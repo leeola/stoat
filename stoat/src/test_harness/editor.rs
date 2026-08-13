@@ -232,6 +232,19 @@ pub(crate) fn place_cursor(editor: &mut EditorState, row: u32, col: u32) {
         .insert_cursor(anchor, SelectionGoal::None, buffer_snapshot);
 }
 
+/// Buffer row of the focused editor's primary selection head.
+///
+/// The raw head rather than the block-cursor cell, for tests asserting which
+/// line a jump or a scroll landed the selection on.
+pub(crate) fn focused_head_row(stoat: &mut Stoat) -> u32 {
+    let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let head = editor.selections.newest_anchor().head();
+    let offset = buffer_snapshot.resolve_anchor(&head);
+    buffer_snapshot.rope().offset_to_point(offset).row
+}
+
 /// Buffer point of the focused editor's block cursor.
 ///
 /// The single-cursor counterpart to [`cursor_buffer_positions`], for the common
