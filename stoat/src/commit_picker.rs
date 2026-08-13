@@ -648,6 +648,7 @@ mod tests {
         age_label, CommitColumn, CommitPicker, CommitPickerRole, PreviewCache, COMMIT_COLUMNS,
     };
     use crate::{
+        apc_emit,
         app::{ModalKind, MIN_PREVIEW_ROWS},
         buffer::BufferId,
         commit_graph,
@@ -1510,7 +1511,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
 
-        h.stoat.emit_smooth_scroll();
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
         let preview = layout(&h).preview.expect("the diff pane is present");
         let expected = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_PREVIEW,
@@ -1526,7 +1527,7 @@ mod tests {
         );
 
         h.stoat.commit_picker = None;
-        h.stoat.emit_smooth_scroll();
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
         assert!(
             drained_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
                 pool: crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_PREVIEW,
@@ -1582,7 +1583,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
 
-        h.stoat.emit_smooth_scroll();
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
         let body = layout(&h).body();
         let expected = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_LIST,
@@ -1598,7 +1599,7 @@ mod tests {
         );
 
         h.stoat.commit_picker = None;
-        h.stoat.emit_smooth_scroll();
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
         assert!(
             drained_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
                 pool: crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_LIST,

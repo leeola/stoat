@@ -1,6 +1,7 @@
 pub mod action_handlers;
 pub mod agent_ipc;
 pub mod agent_status;
+pub mod apc_emit;
 pub mod app;
 pub mod badge;
 pub mod buffer;

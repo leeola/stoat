@@ -35,6 +35,7 @@ pub(crate) mod workspace;
 pub(crate) mod yank;
 
 use crate::{
+    apc_emit,
     app::{Stoat, UpdateEffect},
     command_palette::CommandPalette,
     display_map::syntax_theme::SyntaxStyles,
@@ -1158,7 +1159,7 @@ fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
             stoat.minimap_content.clear();
             stoat.theme_epoch += 1;
             stoat.paint_generation += 1;
-            stoat.emit_theme_default_colors();
+            apc_emit::emit_theme_default_colors(stoat);
             UpdateEffect::Redraw
         },
         Err(e) => {

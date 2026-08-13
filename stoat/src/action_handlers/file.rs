@@ -1,5 +1,6 @@
 use crate::{
     action_handlers::read_string_via_host,
+    apc_emit,
     app::{Stoat, UpdateEffect},
     badge::{Anchor, Badge, BadgeSource, BadgeState},
     buffer::{BufferId, SharedBuffer},
@@ -404,7 +405,7 @@ fn maybe_apply_config_save(
     if stoat_config == Some(path) {
         stoat.reload_user_config(text);
     } else if stoatty_config == Some(path) {
-        stoat.emit_config_reload();
+        apc_emit::emit_config_reload(stoat);
         stoat.set_status("stoatty config reloaded");
     }
 }
@@ -421,7 +422,7 @@ pub(crate) fn font_size_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
 
-    stoat.emit_font_step(delta);
+    apc_emit::emit_font_step(stoat, delta);
     UpdateEffect::None
 }
 

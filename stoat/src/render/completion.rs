@@ -381,6 +381,7 @@ fn viewport_top_for(selected: usize, total: usize, window: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use crate::{
+        apc_emit,
         completion::{CompletionItem, CompletionPopup, CompletionSource},
         test_harness::TestHarness,
     };
@@ -438,7 +439,7 @@ mod tests {
 
         h.stoat.completion_layouts.set(0);
         h.stoat.render();
-        h.stoat.emit_smooth_scroll();
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
 
         assert_eq!(
             h.stoat.completion_layouts.get(),
@@ -447,7 +448,7 @@ mod tests {
         );
 
         h.stoat.render();
-        h.stoat.emit_smooth_scroll();
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
 
         assert_eq!(
             h.stoat.completion_layouts.get(),
