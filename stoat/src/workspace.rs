@@ -241,6 +241,10 @@ pub struct Workspace {
     /// session it opens, so closing a diff leaves the walk in place and only
     /// `ReviewDone` ends it.
     pub(crate) review_walk: Option<crate::review_walk::ReviewWalk>,
+    /// Walkthrough being played (if any). Opened by `WalkthroughOpen` and
+    /// dropped only by `WalkthroughDone`, so moving away from a stop's file
+    /// leaves the tour where it was.
+    pub(crate) walkthrough: Option<crate::walkthrough::run::WalkthroughRun>,
     /// Active rebase plan (if any). Populated when the user enters
     /// `"rebase"` mode from the commit list; dropped on abort or after
     /// successful execution.
@@ -438,6 +442,7 @@ impl Workspace {
             conflict: None,
             commits: None,
             review_walk: None,
+            walkthrough: None,
             rebase: None,
             rebase_active: None,
             parse_jobs: HashMap::new(),

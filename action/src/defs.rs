@@ -18,4 +18,5 @@ pub mod run;
 pub mod set_theme;
 pub mod tab;
 pub mod terminal;
+pub mod walkthrough;
 pub mod workspace;

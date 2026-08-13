@@ -30,6 +30,7 @@ mod tab;
 mod terminal;
 pub(crate) mod textobject;
 pub(crate) mod textobject_nav;
+pub(crate) mod walkthrough;
 pub(crate) mod workspace;
 pub(crate) mod yank;
 
@@ -62,6 +63,7 @@ use stoat_action::{
     Action, ActionKind, AutoReload, AutoReloadConfig, Dump, FocusPane, GitLs, GitReview, GotoTab,
     OpenBuffer, OpenConfig, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
     OpenReviewCommitRange, RenameTab, RenameWorkspace, ReviewExternalEdit, Run, SetCwd, SetTheme,
+    WalkthroughOpen,
 };
 use stoat_text::{Anchor, BufferId, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
@@ -786,6 +788,16 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::TrailNext => crate::code_index::nav::trail_next(stoat),
         ActionKind::TrailPrev => crate::code_index::nav::trail_prev(stoat),
         ActionKind::TrailClear => crate::code_index::nav::trail_clear(stoat),
+        ActionKind::WalkthroughOpen => {
+            let action = action
+                .as_any()
+                .downcast_ref::<WalkthroughOpen>()
+                .expect("WalkthroughOpen action downcast");
+            walkthrough::open(stoat, &action.slug)
+        },
+        ActionKind::WalkthroughNext => walkthrough::next(stoat),
+        ActionKind::WalkthroughPrev => walkthrough::prev(stoat),
+        ActionKind::WalkthroughDone => walkthrough::done(stoat),
         ActionKind::Hover => lsp::hover(stoat),
         ActionKind::CodeAction => lsp::code_action(stoat),
         ActionKind::RenameSymbol => lsp::rename_symbol(stoat),

@@ -105,6 +105,7 @@ pub use defs::{
     set_theme::SetTheme,
     tab::{CloseTab, GotoTab, NewTab, NextTab, PrevTab, RenameTab, ToggleTab, ToggleTabBar},
     terminal::Terminal,
+    walkthrough::{WalkthroughDone, WalkthroughNext, WalkthroughOpen, WalkthroughPrev},
     workspace::{
         CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd, ShowCwd,
         SwitchWorkspace,

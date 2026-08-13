@@ -23,6 +23,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) mod run;
 pub mod store;
 
 /// One authored walkthrough, the whole contents of its JSON file.

@@ -122,6 +122,7 @@ use crate::{
         set_theme::SetTheme,
         tab::{CloseTab, GotoTab, NewTab, NextTab, PrevTab, RenameTab, ToggleTab, ToggleTabBar},
         terminal::Terminal,
+        walkthrough::{WalkthroughDone, WalkthroughNext, WalkthroughOpen, WalkthroughPrev},
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
             ShowCwd, SwitchWorkspace, WorkspacePickerClose, WorkspacePickerComplete,
@@ -756,6 +757,22 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(TrailNext::DEF, |_| Ok(Box::new(TrailNext)));
     add(TrailPrev::DEF, |_| Ok(Box::new(TrailPrev)));
     add(TrailClear::DEF, |_| Ok(Box::new(TrailClear)));
+    add(WalkthroughOpen::DEF, |params| {
+        let slug = params
+            .first()
+            .context(MissingSnafu { name: "slug" })?
+            .as_string()
+            .context(WrongKindSnafu {
+                name: "slug",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(WalkthroughOpen {
+            slug: slug.to_owned(),
+        }))
+    });
+    add(WalkthroughNext::DEF, |_| Ok(Box::new(WalkthroughNext)));
+    add(WalkthroughPrev::DEF, |_| Ok(Box::new(WalkthroughPrev)));
+    add(WalkthroughDone::DEF, |_| Ok(Box::new(WalkthroughDone)));
     add(ExtendGotoColumn::DEF, |_| Ok(Box::new(ExtendGotoColumn)));
     add(GotoNextChange::DEF, |_| Ok(Box::new(GotoNextChange)));
     add(GotoPrevChange::DEF, |_| Ok(Box::new(GotoPrevChange)));
@@ -1209,6 +1226,9 @@ mod tests {
         "TrailNext",
         "TrailPrev",
         "TrailClear",
+        "WalkthroughNext",
+        "WalkthroughPrev",
+        "WalkthroughDone",
         "Hover",
         "CodeAction",
         "RenameSymbol",
@@ -1767,6 +1787,7 @@ mod tests {
         // + 1 GotoImplementors.
         // + 2 GotoDiffCallerUp, GotoDiffCalleeDown.
         // + 5 MarkTrailStart, MarkTrailEnd, TrailNext, TrailPrev, TrailClear.
+        // + 4 WalkthroughOpen/Next/Prev/Done.
         // + 2 FileFinderPageUp, FileFinderPageDown.
         // + 1 FileFinderComplete.
         // + 2 PalettePageUp, PalettePageDown.
@@ -1827,7 +1848,7 @@ mod tests {
         // + 8 Jumplist/Diagnostics/Location/WorkspacePicker PageDown/PageUp.
         // + 2 CommitPickerDrillIn/CommitPickerBack.
         // + 2 CommitPickerNextBranch/CommitPickerPrevBranch.
-        assert_eq!(all().count(), 428);
+        assert_eq!(all().count(), 432);
     }
 
     #[test]
