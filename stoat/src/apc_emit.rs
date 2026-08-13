@@ -29,11 +29,11 @@ use std::{
     sync::Arc,
 };
 use stoat_config::{LineNumbers, WrapMode};
-use stoatty_protocol::command::PoolRegionCommand;
-use stoatty_widgets::{
+use stoat_widgets::{
     pool::{self, MinimapWindowInputs},
     ApcScene,
 };
+use stoatty_protocol::command::PoolRegionCommand;
 
 /// Flush the frame's APC decoration scene to the channel, when it changed.
 ///

@@ -38,7 +38,7 @@ pub(crate) fn render_workspace_picker(
     chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let Some((picker_area, inner)) = workspace_picker_layout(area, picker.entries().len()) else {
         return;
@@ -255,7 +255,7 @@ mod tests {
             &crate::render::editor::ResolvedChrome::resolve(&theme),
             area,
             buf,
-            &mut stoatty_widgets::ApcScene::new(),
+            &mut stoat_widgets::ApcScene::new(),
         );
     }
 

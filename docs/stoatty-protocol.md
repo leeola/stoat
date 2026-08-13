@@ -184,6 +184,6 @@ terminal has to keep understanding the prefix it knows.
 | The frame grammar in code | `tty_protocol/src/frame.rs` |
 | Every command and its payload | `tty_protocol/src/command.rs` |
 | Detection | `tty_protocol/src/detect.rs` |
-| Ratatui widgets that emit these frames | `tty_widgets/` |
+| Ratatui widgets that emit these frames | `widgets/` |
 | Runnable examples | `cargo run --example panel`, and its siblings in `tty/examples/` |
 | Why non-cell components exist at all | `docs/stoatty-non-cell-components.md` |

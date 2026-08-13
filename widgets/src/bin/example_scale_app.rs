@@ -19,7 +19,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::{io, thread};
-use stoatty_widgets::{scale::Scale, ApcScene, ApcSession, SessionOptions};
+use stoat_widgets::{scale::Scale, ApcScene, ApcSession, SessionOptions};
 
 /// Editor background (`#282c34`) and foreground (`#abb2bf`), the One Dark colors
 /// the default theme uses, set explicitly so the scene looks the same under any

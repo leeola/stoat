@@ -18,7 +18,7 @@ pub(crate) fn render_code_search(
     zoom: i8,
     list_percent: u16,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     // Search hits are unbounded and each one is worth reading in context, so the
     // modal asks for the whole area rather than measuring a list it would only

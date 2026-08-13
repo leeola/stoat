@@ -21,7 +21,7 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
 };
 use stoat_text::{cursor_offset, Point};
-use stoatty_widgets::{
+use stoat_widgets::{
     bar::Bar,
     text_run::{self, TextRun},
     ApcScene,

@@ -25,7 +25,7 @@ pub(crate) fn render_commits(
     state: &mut CommitListState,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let theme = frame.theme;
     let workspace_root = frame.workspace_root;
@@ -161,7 +161,7 @@ fn render_commit_detail_pane(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let dim = theme.get(crate::theme::scope::VCS_COMMIT_METADATA);
     let Some(sha) = state.selected_sha() else {
@@ -282,7 +282,7 @@ pub(crate) fn render_commit_preview(
     area: Rect,
     skip_rows: usize,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     if area.height == 0 || area.width == 0 {
         return;

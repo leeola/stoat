@@ -28,14 +28,14 @@ use std::{
 };
 use stoat_config::{LineNumbers, WrapMode};
 use stoat_text::{cursor_offset, Anchor, Bias, Point, Rope};
-use stoatty_protocol::command::IconKind;
-use stoatty_widgets::{
+use stoat_widgets::{
     bar::Bar,
     gutter::{Diagnostic, GitMark, Gutter, GutterLine},
     icon::Icon,
     popover::Popover,
     ApcScene,
 };
+use stoatty_protocol::command::IconKind;
 
 /// Columns reserved on a pane's right edge for the minimap strip, matching the
 /// width the terminal's GPU minimap pass paints there.

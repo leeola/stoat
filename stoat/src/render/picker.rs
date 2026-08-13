@@ -37,7 +37,7 @@ pub(crate) fn filter_header(
     ws: &mut Workspace,
     theme: &Theme,
     chrome: &ResolvedChrome,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     write_str(buf, inner.x, inner.y, prompt, theme.get(scope::UI_PROMPT));
 

@@ -7,7 +7,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
 };
-use stoatty_widgets::ApcScene;
+use stoat_widgets::ApcScene;
 
 /// Place a popout card of `height` rows above `status_area`.
 ///
@@ -156,7 +156,7 @@ mod tests {
     };
     use crate::{render::review, theme::Theme};
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
-    use stoatty_widgets::ApcScene;
+    use stoat_widgets::ApcScene;
 
     #[test]
     fn popout_area_sits_directly_above_the_bar_inset_one_cell() {

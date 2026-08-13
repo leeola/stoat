@@ -27,7 +27,7 @@ stoat_text = { path = "../text" }
 regex-cursor.workspace = true
 stoatty_protocol = { path = "../tty_protocol" }
 vscode_theme = { path = "../vscode_theme" }
-stoatty_widgets = { path = "../tty_widgets" }
+stoat_widgets = { path = "../widgets" }
 ast-grep-core.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true

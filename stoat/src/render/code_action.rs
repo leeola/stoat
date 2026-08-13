@@ -16,7 +16,7 @@ use ratatui::buffer::Buffer;
 pub(crate) fn render_code_action(
     stoat: &mut Stoat,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let anchor_offset = match &stoat.pending_code_action_picker {
         Some(p) if !p.entries.is_empty() => p.anchor_offset,

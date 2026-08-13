@@ -1,6 +1,6 @@
 //! Renders stoat's surfaces into stoatty's smooth-scroll pool slots.
 //!
-//! [`stoatty_widgets::pool`] owns the state machine: which region is declared,
+//! [`stoat_widgets::pool`] owns the state machine: which region is declared,
 //! which pages are buffered, and where each pool's scroll target sits. This
 //! module supplies the two things that machine has no way to know, the page
 //! bytes for each of stoat's surfaces and the pool id a surface scrolls under.
@@ -41,8 +41,8 @@ use lsp_types::DiagnosticSeverity;
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use stoat_action::registry::RegistryEntry;
+use stoat_widgets::ApcScene;
 use stoatty_protocol::command::encode_fill_scope;
-use stoatty_widgets::ApcScene;
 
 /// Pool ids for the non-pane smooth-scroll surfaces (overlays and popups).
 ///

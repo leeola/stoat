@@ -98,7 +98,7 @@ pub(crate) fn render_help(
     area: Rect,
     zoom: i8,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     use crate::help::{help_input_mode, HelpInput, HelpScope};
     let input_mode = help_input_mode(stoat_mode);

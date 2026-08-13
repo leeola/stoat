@@ -164,7 +164,7 @@ pub(crate) fn render_command_palette(
     area: Rect,
     zoom: i8,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     if palette.arg_picker.is_some() && palette.arg_source().is_some() {
         render_palette_arg_picker(palette, ws, home, theme, chrome, area, zoom, buf, scene);
@@ -224,7 +224,7 @@ fn render_palette_arg_picker(
     area: Rect,
     zoom: i8,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let entry = palette.command.expect("arg picker requires a command");
     let title = format!(" {} ", entry.command_name);
@@ -309,7 +309,7 @@ fn render_palette_free_arg(
     area: Rect,
     zoom: i8,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let title = format!(" {} ", entry.command_name);
     let Some(layout) = render_palette_prelude(
@@ -389,7 +389,7 @@ fn render_palette_prelude(
     area: Rect,
     zoom: i8,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) -> Option<PaletteFilterLayout> {
     let layout = palette_filter_layout(area, content_rows, zoom)?;
 
@@ -423,7 +423,7 @@ fn render_palette_filter(
     chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let title = match scope {
         PaletteScope::Active => " command palette (applicable) ",

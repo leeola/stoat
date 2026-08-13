@@ -12,7 +12,7 @@ use crate::{
 };
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 use std::cmp::Ordering;
-use stoatty_widgets::{polyline::Polyline, ApcScene};
+use stoat_widgets::{polyline::Polyline, ApcScene};
 
 /// Rows the list keeps however small the body gets, so a short modal still
 /// shows enough history to choose from, and dragging the separator all the way

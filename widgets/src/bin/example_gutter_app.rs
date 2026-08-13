@@ -30,12 +30,12 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::{io, thread};
-use stoatty_protocol::command::BorderStyle;
-use stoatty_widgets::{
+use stoat_widgets::{
     border::Border,
     gutter::{Diagnostic, GitMark, Gutter, GutterLine},
     ApcScene, ApcSession, SessionOptions,
 };
+use stoatty_protocol::command::BorderStyle;
 
 /// Editor background (`#282c34`) and foreground (`#abb2bf`), the One Dark colors
 /// the default theme uses, set explicitly so erased cells share a known

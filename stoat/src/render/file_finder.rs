@@ -83,7 +83,7 @@ pub(crate) fn render_file_finder(
     zoom: i8,
     list_percent: u16,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let Some(layout) = file_finder_layout(area, finder.content_size, zoom, list_percent) else {
         return;

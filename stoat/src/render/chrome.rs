@@ -6,8 +6,8 @@ use ratatui::{
     style::{Color, Style},
     widgets::{Block, Borders, StatefulWidget, Widget},
 };
+use stoat_widgets::{bar::Bar, panel::Panel, text_run::TextRun, ApcScene};
 use stoatty_protocol::command::{BorderStyle, PanelShadow};
-use stoatty_widgets::{bar::Bar, panel::Panel, text_run::TextRun, ApcScene};
 
 /// Cells left bare between a modal box and the edge of the area it floats over,
 /// split evenly across the two opposing edges.
@@ -378,11 +378,11 @@ mod tests {
         layout::Rect,
         style::{Color, Style},
     };
+    use stoat_widgets::ApcScene;
     use stoatty_protocol::command::{
         encode_bar, encode_panel, encode_text_run, BarCommand, BorderStyle, PanelCommand,
         PanelShadow, TextRunCommand,
     };
-    use stoatty_widgets::ApcScene;
 
     fn rgb_style() -> Style {
         Style::default().fg(Color::Rgb(1, 2, 3))

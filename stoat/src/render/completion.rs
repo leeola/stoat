@@ -220,7 +220,7 @@ fn detail_footer(item: &CompletionItem) -> Option<String> {
 pub(crate) fn render_completion(
     stoat: &mut Stoat,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     // Parked back before every return, since the pool emit runs after this and
     // reads what the frame's first consumer left rather than laying out again.

@@ -19,8 +19,8 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::{io, thread, time::Duration};
+use stoat_widgets::{border::Border, ApcScene, ApcSession, SessionOptions};
 use stoatty_protocol::command::BorderStyle;
-use stoatty_widgets::{border::Border, ApcScene, ApcSession, SessionOptions};
 
 /// Editor background (`#282c34`) and foreground (`#abb2bf`), the One Dark colors
 /// the default theme uses, set explicitly so the scene looks the same under any

@@ -93,7 +93,7 @@ pub(crate) fn render_hints_grouped(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     if cache.rows.is_empty() || area.width < 10 || area.height < 4 {
         return;
@@ -321,7 +321,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         // An empty theme resolves no RGB colours, so the helpers still take their
         // cell fallback and the assertions below read real glyphs.
-        let mut scene = stoatty_widgets::ApcScene::new();
+        let mut scene = stoat_widgets::ApcScene::new();
         render_hints_grouped(
             "normal",
             cache,

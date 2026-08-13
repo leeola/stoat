@@ -75,7 +75,7 @@ pub(crate) fn render_symbol_finder(
     zoom: i8,
     list_percent: u16,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let Some((modal, inner, list, preview)) =
         symbol_finder_layout(area, finder.content_rows, zoom, list_percent)
@@ -237,7 +237,7 @@ fn render_doc_pane(
     area: Rect,
     separator_style: Style,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) -> Rect {
     let max_doc_rows = (area.height / 2).max(1);
     let doc_rows = (lines.len() as u16).min(max_doc_rows);
@@ -316,7 +316,7 @@ mod tests {
     fn the_doc_separator_is_a_hairline_when_the_style_resolves() {
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        let mut scene = stoatty_widgets::ApcScene::new();
+        let mut scene = stoat_widgets::ApcScene::new();
         let rgb = Style::default().fg(ratatui::style::Color::Rgb(1, 2, 3));
 
         let doc = vec![vec![("one line of doc".to_string(), Style::default())]];

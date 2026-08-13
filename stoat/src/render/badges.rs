@@ -9,8 +9,8 @@ use crate::{
     walkthrough::run::WalkthroughRun,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use stoat_widgets::{panel::Panel, ApcScene};
 use stoatty_protocol::command::{BorderStyle, PanelShadow};
-use stoatty_widgets::{panel::Panel, ApcScene};
 
 pub(crate) fn render_badges(
     workspace: &BadgeTray,

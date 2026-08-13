@@ -4001,8 +4001,8 @@ dependencies = [
  "stoat_log",
  "stoat_scheduler",
  "stoat_text",
+ "stoat_widgets",
  "stoatty_protocol",
- "stoatty_widgets",
  "tempfile",
  "time",
  "tokio",
@@ -4126,6 +4126,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "stoat_widgets"
+version = "0.1.0"
+dependencies = [
+ "ratatui",
+ "stoatty_protocol",
+]
+
+[[package]]
 name = "stoatty"
 version = "0.1.0"
 dependencies = [
@@ -4185,14 +4193,6 @@ dependencies = [
  "parking_lot",
  "stoatty_protocol",
  "tracing",
-]
-
-[[package]]
-name = "stoatty_widgets"
-version = "0.1.0"
-dependencies = [
- "ratatui",
- "stoatty_protocol",
 ]
 
 [[package]]

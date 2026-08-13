@@ -31,7 +31,7 @@ pub(crate) fn render_quit_all_confirm(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let entries = modal.entries();
     let Some((modal_area, inner)) = quit_all_confirm_layout(area, entries.len()) else {

@@ -51,7 +51,7 @@ pub(crate) fn render_location_picker(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let Some((modal_area, inner)) = location_picker_layout(area, picker.entries().len()) else {
         return;
@@ -146,7 +146,7 @@ mod tests {
             &Theme::empty(),
             area,
             &mut Buffer::empty(area),
-            &mut stoatty_widgets::ApcScene::new(),
+            &mut stoat_widgets::ApcScene::new(),
         );
 
         let half = picker.viewport_rows.expect("the render stamped a viewport") / 2;

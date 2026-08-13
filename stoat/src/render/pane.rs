@@ -32,7 +32,7 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     path::Path,
 };
-use stoatty_widgets::{
+use stoat_widgets::{
     minimap::Minimap,
     status_bar::{StatusBar, StatusSegment},
     ApcScene,

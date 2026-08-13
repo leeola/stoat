@@ -13,7 +13,7 @@ use ratatui::buffer::Buffer;
 pub(crate) fn render_rename_input(
     stoat: &mut Stoat,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     if stoat.rename_input.is_none() {
         return;

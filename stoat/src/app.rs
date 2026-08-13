@@ -58,8 +58,8 @@ use stoat_config::{MinimapMode, Settings, TabBarMode, WrapMode};
 use stoat_language::{self as language, LanguageRegistry};
 use stoat_scheduler::Executor;
 use stoat_text::{Anchor, Bias, IndentStyle, Rope, Selection, SelectionGoal};
+use stoat_widgets::{pool::SmoothScrollState, ApcScene};
 use stoatty_protocol::window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent};
-use stoatty_widgets::{pool::SmoothScrollState, ApcScene};
 use tokio::{
     io::AsyncBufReadExt,
     sync::{

@@ -70,7 +70,7 @@ use std::{
     path::Path,
 };
 use stoat_config::{LineNumbers, MinimapMode, WrapMode};
-use stoatty_widgets::{minimap::Minimap, popover::Popover, ApcScene};
+use stoat_widgets::{minimap::Minimap, popover::Popover, ApcScene};
 
 /// Full-cell text scale under stoatty, in 256ths of a cell, for grid-size modal
 /// titles.

@@ -16,10 +16,10 @@
 
 use ratatui::{backend::CrosstermBackend, layout::Rect, style::Style, Frame, Terminal};
 use std::{io, thread, time::Duration};
-use stoatty_protocol::command::BorderStyle;
-use stoatty_widgets::{
+use stoat_widgets::{
     border::Border, scroll_region::ScrollRegion, ApcScene, ApcSession, SessionOptions,
 };
+use stoatty_protocol::command::BorderStyle;
 
 /// Left (fixed) pane border, in 0-based grid coordinates.
 const LEFT: Rect = Rect {

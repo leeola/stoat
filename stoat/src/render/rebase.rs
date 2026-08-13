@@ -17,7 +17,7 @@ pub(crate) fn render_rebase(
     state: &RebaseState,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let theme = frame.theme;
     let (inner, status_area) = split_pane_status(pane.area);

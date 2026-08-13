@@ -9,7 +9,7 @@ pub(crate) fn render_dock_minimized(
     is_focused: bool,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let area = dock.area;
     if area.width == 0 || area.height == 0 {
@@ -29,7 +29,7 @@ pub(crate) fn render_dock_open(
     ctx: PaneCtx<'_>,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let area = dock.area;
     if area.width == 0 || area.height == 0 {

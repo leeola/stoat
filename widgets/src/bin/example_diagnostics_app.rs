@@ -24,8 +24,8 @@ use std::{
     io::{self, Write},
     thread,
 };
+use stoat_widgets::{icon::Icon, popover::Popover, ApcScene, ApcSession, SessionOptions};
 use stoatty_protocol::command::IconKind;
-use stoatty_widgets::{icon::Icon, popover::Popover, ApcScene, ApcSession, SessionOptions};
 
 /// Editor background (`#282c34`) and foreground (`#abb2bf`), the One Dark colors
 /// the default theme uses, set explicitly so erased cells and body text share the

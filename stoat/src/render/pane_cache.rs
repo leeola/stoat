@@ -30,7 +30,7 @@ use ratatui::{
 };
 use slotmap::SlotMap;
 use stoat_config::{LineNumbers, WrapMode};
-use stoatty_widgets::ApcScene;
+use stoat_widgets::ApcScene;
 
 /// Everything an unfocused editor pane's paint reads that can change between
 /// two frames.

@@ -19,7 +19,7 @@ pub(crate) fn render_conflict(
     active: &ActiveRebase,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     use crate::rebase::ConflictResolution;
 

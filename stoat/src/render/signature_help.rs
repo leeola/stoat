@@ -14,7 +14,7 @@ use ratatui::{buffer::Buffer, style::Modifier};
 pub(crate) fn render_signature_help(
     stoat: &mut Stoat,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     if stoat.pending_completion.is_some() {
         return;

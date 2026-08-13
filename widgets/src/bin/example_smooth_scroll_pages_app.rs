@@ -28,11 +28,11 @@
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 use std::io::{self, Write};
-use stoatty_protocol::command::PoolRegionCommand;
-use stoatty_widgets::{
+use stoat_widgets::{
     pool::{self, SmoothScrollState},
     ApcSession, SessionOptions,
 };
+use stoatty_protocol::command::PoolRegionCommand;
 
 /// Viewport size in cells, matching the window the `smooth_scroll_pages` example
 /// opens.

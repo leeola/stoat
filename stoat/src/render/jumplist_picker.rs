@@ -51,7 +51,7 @@ pub(crate) fn render_jumplist_picker(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let Some((modal_area, inner)) = jumplist_picker_layout(area, picker.entries().len()) else {
         return;
@@ -169,7 +169,7 @@ mod tests {
             &selection_theme(),
             area,
             buf,
-            &mut stoatty_widgets::ApcScene::new(),
+            &mut stoat_widgets::ApcScene::new(),
         );
     }
 

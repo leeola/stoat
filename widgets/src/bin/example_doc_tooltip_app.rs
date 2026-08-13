@@ -14,7 +14,7 @@
 
 use ratatui::{backend::CrosstermBackend, layout::Rect, style::Style, Frame, Terminal};
 use std::{io, thread};
-use stoatty_widgets::{popover::Popover, ApcScene, ApcSession, SessionOptions};
+use stoat_widgets::{popover::Popover, ApcScene, ApcSession, SessionOptions};
 
 /// The static code buffer, drawn from the top-left.
 const BUFFER: [&str; 5] = [

@@ -767,7 +767,7 @@ mod tests {
     /// `(width, color)`. A node is the zero-length path the renderer draws as a
     /// disc, so the lane runs between rows -- which carry two or more points --
     /// are left out.
-    fn node_discs(scene: &mut stoatty_widgets::ApcScene) -> Vec<(u16, [u8; 3])> {
+    fn node_discs(scene: &mut stoat_widgets::ApcScene) -> Vec<(u16, [u8; 3])> {
         use stoatty_protocol::command::Command;
 
         command::decode_stream(scene.buffer())
@@ -782,7 +782,7 @@ mod tests {
     /// Every lane transition the graph emitted, in emission order. A transition
     /// is the only path whose ends sit in different columns, so straight runs
     /// and node discs fall out.
-    fn lane_transitions(scene: &mut stoatty_widgets::ApcScene) -> Vec<PolylineCommand> {
+    fn lane_transitions(scene: &mut stoat_widgets::ApcScene) -> Vec<PolylineCommand> {
         use stoatty_protocol::command::Command;
 
         command::decode_stream(scene.buffer())
@@ -1463,10 +1463,10 @@ mod tests {
         p: &CommitPicker,
         theme: &crate::theme::Theme,
         live: bool,
-    ) -> (ratatui::buffer::Buffer, stoatty_widgets::ApcScene) {
+    ) -> (ratatui::buffer::Buffer, stoat_widgets::ApcScene) {
         let area = ratatui::layout::Rect::new(0, 0, 8, 4);
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        let mut scene = stoatty_widgets::ApcScene::new();
+        let mut scene = stoat_widgets::ApcScene::new();
         scene.set_live(live);
         crate::render::commit_picker::paint_commit_graph(p, 0, area, theme, &mut buf, &mut scene);
         (buf, scene)
@@ -1559,7 +1559,7 @@ mod tests {
             );
 
             let mut live = crate::smooth_scroll::page_buffer(area, &h.stoat.theme);
-            let mut scene = stoatty_widgets::ApcScene::new();
+            let mut scene = stoat_widgets::ApcScene::new();
             crate::render::commits::render_commit_preview(
                 session,
                 &h.stoat.theme,

@@ -6,7 +6,7 @@ use ratatui::{
     style::{Color, Style},
     widgets::{Block, Borders, StatefulWidget},
 };
-use stoatty_widgets::{
+use stoat_widgets::{
     text_run::{self, TextRun},
     ApcScene,
 };

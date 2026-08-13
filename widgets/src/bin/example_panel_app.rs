@@ -16,8 +16,8 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::{io, thread};
+use stoat_widgets::{panel::Panel, text_run::TextRun, ApcScene, ApcSession, SessionOptions};
 use stoatty_protocol::command::{BorderStyle, PanelShadow};
-use stoatty_widgets::{panel::Panel, text_run::TextRun, ApcScene, ApcSession, SessionOptions};
 
 /// Editor background (`#282c34`) and foreground (`#abb2bf`), the One Dark colors
 /// the default theme uses, set explicitly so the scene looks the same under any
