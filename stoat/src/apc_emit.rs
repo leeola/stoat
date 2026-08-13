@@ -1641,7 +1641,7 @@ const OSC_RESET_DEFAULT_COLORS: &[u8] = b"\x1b]110\x1b\\\x1b]111\x1b\\";
 /// guessed at, so a partial theme overrides only what it actually specifies and
 /// leaves the rest to the terminal. Both missing yields empty bytes.
 pub(crate) fn osc_default_colors(theme: &crate::theme::Theme) -> Vec<u8> {
-    use crate::{render::review::style_rgb, theme::scope};
+    use crate::{render::paint::style_rgb, theme::scope};
 
     let mut out = Vec::new();
     let mut push = |code: u8, rgb: Option<[u8; 3]>| {

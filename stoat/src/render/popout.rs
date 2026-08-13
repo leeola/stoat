@@ -1,5 +1,5 @@
 use crate::{
-    render::{chrome, review, TEXT_SCALE_FULL},
+    render::{chrome, paint, TEXT_SCALE_FULL},
     theme::{scope, Theme},
 };
 use ratatui::{
@@ -61,9 +61,9 @@ pub(crate) fn popout_card_bg(theme: &Theme) -> Color {
         .try_get(scope::UI_BACKGROUND)
         .and_then(|style| style.bg);
 
-    match (review::style_rgb(bar), review::style_rgb(editor)) {
+    match (paint::style_rgb(bar), paint::style_rgb(editor)) {
         (Some(bar_rgb), Some(editor_rgb)) => {
-            let [r, g, b] = review::dim_rgb(bar_rgb, editor_rgb, 0.35);
+            let [r, g, b] = paint::dim_rgb(bar_rgb, editor_rgb, 0.35);
             Color::Rgb(r, g, b)
         },
         _ => bar.unwrap_or_else(|| crate::render::themed_bg(theme)),
@@ -154,7 +154,7 @@ mod tests {
         paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
         wrap_popout_lines,
     };
-    use crate::{render::review, theme::Theme};
+    use crate::{render::paint, theme::Theme};
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
     use stoat_widgets::ApcScene;
 
@@ -242,7 +242,7 @@ mod tests {
         let theme = theme_from(
             r##"theme t { ui.statusbar.focused.bg = "#283446"; ui.background.bg = "#181818"; }"##,
         );
-        let [r, g, b] = review::dim_rgb([0x28, 0x34, 0x46], [0x18, 0x18, 0x18], 0.35);
+        let [r, g, b] = paint::dim_rgb([0x28, 0x34, 0x46], [0x18, 0x18, 0x18], 0.35);
 
         assert_ne!(
             popout_card_bg(&theme),

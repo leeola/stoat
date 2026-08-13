@@ -1,5 +1,5 @@
 use super::TEXT_SCALE_FULL;
-use crate::{render::review::style_rgb, theme::Theme};
+use crate::{render::paint::style_rgb, theme::Theme};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,

@@ -3,7 +3,7 @@ use crate::{
     badge::{Anchor, Badge, BadgeSource, BadgeState, BadgeTray, StackDirection},
     code_index::nav::TrailState,
     render::{
-        review::style_rgb,
+        paint::style_rgb,
         text::{write_cell, write_str},
     },
     walkthrough::run::WalkthroughRun,

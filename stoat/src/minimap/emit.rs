@@ -731,7 +731,7 @@ mod tests {
 
     #[test]
     fn unfocused_pane_dims_its_minimap_declaration() {
-        use crate::render::review::{dim_rgb, style_rgb};
+        use crate::render::paint::{dim_rgb, style_rgb};
         use stoatty_protocol::command::{Command, MinimapCommand};
 
         let mut h = Stoat::test();

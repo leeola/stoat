@@ -8,7 +8,8 @@ use crate::{
     minimap::color_to_rgb,
     render::{
         conflict_view::render_conflict_view,
-        review::{dim_rgb, render_diff_view, render_review, style_rgb},
+        paint::{dim_rgb, style_rgb},
+        review::{render_diff_view, render_review},
         undercurl::UndercurlBatch,
     },
 };

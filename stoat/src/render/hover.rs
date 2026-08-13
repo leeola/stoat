@@ -162,15 +162,15 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
     // modal look. The rich arm needs an RGB modal fg and background to compose
     // one TextRun per span at the popover text scale. Without them it paints
     // cells.
-    let modal_fg = crate::render::review::style_rgb(modal_style.fg);
-    let run_bg = crate::render::review::style_rgb(
+    let modal_fg = crate::render::paint::style_rgb(modal_style.fg);
+    let run_bg = crate::render::paint::style_rgb(
         stoat
             .theme
             .try_get(crate::theme::scope::UI_BACKGROUND)
             .and_then(|s| s.bg),
     );
     let sel_rgb =
-        crate::render::review::style_rgb(stoat.theme.get(crate::theme::scope::UI_SELECTION).bg);
+        crate::render::paint::style_rgb(stoat.theme.get(crate::theme::scope::UI_SELECTION).bg);
 
     let end_x = inner.x + inner.width;
     let popup = stoat.pending_hover.as_ref().expect("layout placed a popup");
@@ -209,7 +209,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
 
                 let mut chars_before = 0usize;
                 for (text, style) in line {
-                    let color = crate::render::review::style_rgb(style.fg).unwrap_or(modal_fg);
+                    let color = crate::render::paint::style_rgb(style.fg).unwrap_or(modal_fg);
                     let span_end = chars_before + text.chars().count();
                     let (b0, b1) = match selection {
                         Some((c0, c1, _)) => (
@@ -490,8 +490,8 @@ pub(crate) fn render_hover_page(
     let buf = crate::smooth_scroll::page_buffer(area, theme);
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
-    let modal_fg = crate::render::review::style_rgb(modal_style.fg).unwrap_or([255, 255, 255]);
-    let run_bg = crate::render::review::style_rgb(
+    let modal_fg = crate::render::paint::style_rgb(modal_style.fg).unwrap_or([255, 255, 255]);
+    let run_bg = crate::render::paint::style_rgb(
         theme
             .try_get(crate::theme::scope::UI_BACKGROUND)
             .and_then(|s| s.bg),
@@ -510,7 +510,7 @@ pub(crate) fn render_hover_page(
         let mut chars_before = 0u16;
         for (text, style) in &line {
             let col = text_run::advance_sixteenths(chars_before.into(), TEXT_SCALE_POPUP) as i16;
-            let color = crate::render::review::style_rgb(style.fg).unwrap_or(modal_fg);
+            let color = crate::render::paint::style_rgb(style.fg).unwrap_or(modal_fg);
             TextRun {
                 col,
                 row: 0,

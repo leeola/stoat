@@ -19,6 +19,7 @@ pub(crate) mod hover;
 pub(crate) mod jumplist_picker;
 pub(crate) mod layout;
 pub(crate) mod location_picker;
+pub(crate) mod paint;
 pub(crate) mod pane;
 pub(crate) mod pane_cache;
 pub(crate) mod picker;
@@ -512,7 +513,7 @@ pub(crate) fn frame(
     let minimap_chrome = minimap_enabled.then(|| {
         let thumb = {
             let sel = stoat.theme.get(crate::theme::scope::UI_SELECTION_EDITOR);
-            let [r, g, b] = review::style_rgb(sel.bg).unwrap_or([90, 90, 110]);
+            let [r, g, b] = paint::style_rgb(sel.bg).unwrap_or([90, 90, 110]);
             [r, g, b, 96]
         };
         let palette = stoat.minimap_class_table.palette();
@@ -1360,10 +1361,10 @@ fn render_pane_id_badges(
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    let accent = review::style_rgb(theme.get(crate::theme::scope::UI_SELECTION_EDITOR).bg)
+    let accent = paint::style_rgb(theme.get(crate::theme::scope::UI_SELECTION_EDITOR).bg)
         .unwrap_or([90, 90, 110]);
     let background =
-        review::style_rgb(theme.get(crate::theme::scope::UI_BACKGROUND).bg).unwrap_or([40, 44, 52]);
+        paint::style_rgb(theme.get(crate::theme::scope::UI_BACKGROUND).bg).unwrap_or([40, 44, 52]);
     let focused = ws.panes.focus();
 
     for (i, (pane_id, pane)) in ws.panes.split_panes().enumerate().take(10) {

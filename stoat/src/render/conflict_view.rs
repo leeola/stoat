@@ -3,9 +3,11 @@ use crate::{
     display_map::{CachedHighlightEndpoints, DisplaySnapshot},
     editor_state::EditorState,
     merge_view::{AlignRow, ChunkState, MergeDoc},
-    render::review::{
-        dim_rgb, fill_line_tint, paint_highlighted_row, render_empty_num, render_review_cursor,
-        render_side_num, render_side_text, style_rgb,
+    render::{
+        paint::{
+            dim_rgb, fill_line_tint, render_empty_num, render_side_num, render_side_text, style_rgb,
+        },
+        review::{paint_highlighted_row, render_review_cursor},
     },
     review::ReviewSide,
 };

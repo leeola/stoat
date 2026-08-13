@@ -7,11 +7,11 @@ use crate::{
         chrome,
         editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
+        paint::{dim_rgb, style_rgb},
         popout::{
             paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
             wrap_popout_lines,
         },
-        review::{dim_rgb, style_rgb},
         run_pane::render_run_pane,
         term_pane::render_term_pane,
         undercurl::UndercurlBatch,
@@ -1777,7 +1777,7 @@ mod tests {
     #[test]
     fn dim_pane_content_blends_rgb_and_skips_indexed() {
         use super::dim_pane_content;
-        use crate::render::review::dim_rgb;
+        use crate::render::paint::dim_rgb;
         use ratatui::{
             buffer::Buffer,
             layout::Rect,
@@ -1817,7 +1817,7 @@ mod tests {
     #[test]
     fn dim_pane_content_matches_blending_every_cell() {
         use super::dim_pane_content;
-        use crate::render::review::dim_rgb;
+        use crate::render::paint::dim_rgb;
         use ratatui::{
             buffer::Buffer,
             layout::Rect,

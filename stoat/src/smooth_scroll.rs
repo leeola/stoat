@@ -230,7 +230,7 @@ pub(crate) fn render_page_from_snapshot(
 /// or the theme background is not RGB.
 fn dim_page(buf: &mut Buffer, area: Rect, theme: &crate::theme::Theme, dim: f32) {
     if dim > 0.0
-        && let Some(bg) = crate::render::review::style_rgb(
+        && let Some(bg) = crate::render::paint::style_rgb(
             theme
                 .try_get(crate::theme::scope::UI_BACKGROUND)
                 .and_then(|s| s.bg),
@@ -1051,7 +1051,7 @@ mod tests {
         use super::{dim_page, render_page_from_snapshot, Buffer, PageGutter, Rect};
         use crate::{
             action_handlers::{self, dispatch},
-            render::{pane::dim_pane_content, review::style_rgb},
+            render::{paint::style_rgb, pane::dim_pane_content},
             theme::scope,
             Stoat,
         };

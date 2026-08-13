@@ -2610,7 +2610,7 @@ impl Stoat {
             return;
         }
 
-        let Some(bg) = crate::render::review::style_rgb(
+        let Some(bg) = crate::render::paint::style_rgb(
             self.theme
                 .try_get(crate::theme::scope::UI_BACKGROUND)
                 .and_then(|s| s.bg),
@@ -2622,7 +2622,7 @@ impl Stoat {
             .minimap_class_table
             .palette()
             .iter()
-            .map(|&c| crate::render::review::dim_rgb(c, bg, dim))
+            .map(|&c| crate::render::paint::dim_rgb(c, bg, dim))
             .collect();
         self.dimmed_minimap_palette = Some((self.theme.clone(), dim, blended));
     }

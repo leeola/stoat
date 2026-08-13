@@ -2,7 +2,7 @@ use crate::{
     commit_picker::{CommitColumn, CommitPicker, CommitPickerRole, COMMIT_COLUMNS},
     render::{
         file_finder::file_finder_layout,
-        review::style_rgb,
+        paint::style_rgb,
         table::{self, Column, Width},
         text::write_str_clipped,
     },

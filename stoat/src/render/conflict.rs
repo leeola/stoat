@@ -4,8 +4,8 @@ use crate::{
     rebase::{ActiveRebase, RebasePause},
     render::{
         layout::split_pane_status,
+        paint::{render_empty_num, render_side_num, render_side_text},
         pane::render_overlay_status,
-        review::{render_empty_num, render_side_num, render_side_text},
         text::{truncate_to_cols, write_str},
         FrameCtx,
     },

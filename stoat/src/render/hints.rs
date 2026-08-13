@@ -147,7 +147,7 @@ pub(crate) fn render_hints_grouped(
     let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
     let action_style = theme.get(crate::theme::scope::UI_TEXT);
     let end_x = inner.x + inner.width;
-    let run_bg = crate::render::review::style_rgb(
+    let run_bg = crate::render::paint::style_rgb(
         theme
             .try_get(crate::theme::scope::UI_BACKGROUND)
             .and_then(|s| s.bg),
