@@ -1568,7 +1568,7 @@ mod tests {
                 &mut live,
                 &mut scene,
             );
-            let mut expected = crate::smooth_scroll::serialize_buffer(&live);
+            let mut expected = crate::render::serialize_buffer(&live);
             expected.extend_from_slice(scene.buffer());
 
             assert_eq!(pooled, expected, "page {page} matches the live skip");
@@ -1643,7 +1643,7 @@ mod tests {
             &h.stoat.theme,
             &mut live,
         );
-        let live_bytes = crate::smooth_scroll::serialize_buffer(&live);
+        let live_bytes = crate::render::serialize_buffer(&live);
 
         assert!(
             pooled.starts_with(&live_bytes),

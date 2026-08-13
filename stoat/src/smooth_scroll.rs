@@ -34,6 +34,7 @@ use crate::{
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
         review::{paint_diff_rows, render_review_rows},
+        serialize_buffer,
     },
     review_session::ReviewViewState,
 };
@@ -437,6 +438,31 @@ pub(crate) fn render_conflict_page_from_parts(
     frame
 }
 
+/// Render one page of a row-oriented surface into a fresh region-sized
+/// [`Buffer`], returning the page's self-contained VT byte stream.
+///
+/// `paint` receives the page buffer, the page's area, and the document row the
+/// page starts at. Every list and popup page below shares that shape and differs
+/// only in which painter runs, so each one adapts to this rather than keeping
+/// its own copy.
+fn render_rows_page(
+    region_width: u16,
+    region_height: u16,
+    page: u64,
+    theme: &crate::theme::Theme,
+    paint: impl FnOnce(&mut Buffer, Rect, usize),
+) -> Vec<u8> {
+    let area = Rect::new(0, 0, region_width, region_height);
+    let mut buf = page_buffer(area, theme);
+
+    let start_row = page
+        .saturating_mul(region_height as u64)
+        .min(usize::MAX as u64) as usize;
+    paint(&mut buf, area, start_row);
+
+    serialize_buffer(&buf)
+}
+
 /// Render `region_height` rows of the file finder list starting at row
 /// `page * region_height` into a fresh region-sized [`Buffer`], returning the
 /// page's self-contained VT byte stream.
@@ -452,15 +478,13 @@ pub(crate) fn render_finder_page(
     region_width: u16,
     region_height: u16,
 ) -> Vec<u8> {
-    let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = page_buffer(area, theme);
-
-    let start_row = page
-        .saturating_mul(region_height as u64)
-        .min(usize::MAX as u64) as usize;
-    paint_finder_rows(finder, home, area, start_row, theme, &mut buf);
-
-    serialize_buffer(&buf)
+    render_rows_page(
+        region_width,
+        region_height,
+        page,
+        theme,
+        |buf, area, start_row| paint_finder_rows(finder, home, area, start_row, theme, buf),
+    )
 }
 
 /// Render `region_height` rows of the command-palette result list starting at
@@ -478,23 +502,23 @@ pub(crate) fn render_palette_page(
     region_width: u16,
     region_height: u16,
 ) -> Vec<u8> {
-    let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = page_buffer(area, theme);
-
-    let start_row = page
-        .saturating_mul(region_height as u64)
-        .min(usize::MAX as u64) as usize;
-    paint_palette_rows(
-        filtered,
-        match_indices,
-        selected,
-        area,
-        start_row,
+    render_rows_page(
+        region_width,
+        region_height,
+        page,
         theme,
-        &mut buf,
-    );
-
-    serialize_buffer(&buf)
+        |buf, area, start_row| {
+            paint_palette_rows(
+                filtered,
+                match_indices,
+                selected,
+                area,
+                start_row,
+                theme,
+                buf,
+            )
+        },
+    )
 }
 
 /// Render `region_height` rows of the palette's inline argument-picker list
@@ -512,30 +536,30 @@ pub(crate) fn render_arg_page(
     region_width: u16,
     region_height: u16,
 ) -> Vec<u8> {
-    let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = page_buffer(area, theme);
-
-    let start_row = page
-        .saturating_mul(region_height as u64)
-        .min(usize::MAX as u64) as usize;
-    let core = picker.active_core_ref();
-    let prefix = picker
-        .browse
-        .as_ref()
-        .map(|browse| browse.typed_dir.as_str())
-        .unwrap_or_default();
-    crate::render::picker::paint_path_rows(
-        &core.picklist,
-        &core.git_root,
-        home,
-        prefix,
-        area,
-        start_row,
+    render_rows_page(
+        region_width,
+        region_height,
+        page,
         theme,
-        &mut buf,
-    );
-
-    serialize_buffer(&buf)
+        |buf, area, start_row| {
+            let core = picker.active_core_ref();
+            let prefix = picker
+                .browse
+                .as_ref()
+                .map(|browse| browse.typed_dir.as_str())
+                .unwrap_or_default();
+            crate::render::picker::paint_path_rows(
+                &core.picklist,
+                &core.git_root,
+                home,
+                prefix,
+                area,
+                start_row,
+                theme,
+                buf,
+            )
+        },
+    )
 }
 
 /// Render `region_height` rows of the completion popup list starting at row
@@ -553,23 +577,15 @@ pub(crate) fn render_completion_page(
     region_width: u16,
     region_height: u16,
 ) -> Vec<u8> {
-    let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = page_buffer(area, theme);
-
-    let start_row = page
-        .saturating_mul(region_height as u64)
-        .min(usize::MAX as u64) as usize;
-    paint_completion_rows(
-        items,
-        selected_idx,
-        prefix,
-        start_row,
-        area,
+    render_rows_page(
+        region_width,
+        region_height,
+        page,
         theme,
-        &mut buf,
-    );
-
-    serialize_buffer(&buf)
+        |buf, area, start_row| {
+            paint_completion_rows(items, selected_idx, prefix, start_row, area, theme, buf)
+        },
+    )
 }
 
 /// Render `region_height` rows of the help entry list starting at row
@@ -585,15 +601,13 @@ pub(crate) fn render_help_list_page(
     region_width: u16,
     region_height: u16,
 ) -> Vec<u8> {
-    let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = page_buffer(area, theme);
-
-    let start_row = page
-        .saturating_mul(region_height as u64)
-        .min(usize::MAX as u64) as usize;
-    paint_help_list_rows(help, area, start_row, theme, &mut buf);
-
-    serialize_buffer(&buf)
+    render_rows_page(
+        region_width,
+        region_height,
+        page,
+        theme,
+        |buf, area, start_row| paint_help_list_rows(help, area, start_row, theme, buf),
+    )
 }
 
 /// Render `region_height` lines of the selected help entry's detail starting at
@@ -609,15 +623,13 @@ pub(crate) fn render_help_detail_page(
     region_width: u16,
     region_height: u16,
 ) -> Vec<u8> {
-    let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = page_buffer(area, theme);
-
-    let start_row = page
-        .saturating_mul(region_height as u64)
-        .min(usize::MAX as u64) as usize;
-    paint_help_detail_rows(help, area, start_row, theme, &mut buf);
-
-    serialize_buffer(&buf)
+    render_rows_page(
+        region_width,
+        region_height,
+        page,
+        theme,
+        |buf, area, start_row| paint_help_detail_rows(help, area, start_row, theme, buf),
+    )
 }
 
 /// Render `region_height` rows of the commit list starting at row
@@ -633,15 +645,13 @@ pub(crate) fn render_commits_page(
     region_width: u16,
     region_height: u16,
 ) -> Vec<u8> {
-    let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = page_buffer(area, theme);
-
-    let start_row = page
-        .saturating_mul(region_height as u64)
-        .min(usize::MAX as u64) as usize;
-    paint_commit_rows(state, area, start_row, theme, &mut buf);
-
-    serialize_buffer(&buf)
+    render_rows_page(
+        region_width,
+        region_height,
+        page,
+        theme,
+        |buf, area, start_row| paint_commit_rows(state, area, start_row, theme, buf),
+    )
 }
 
 /// Render `region_height` rows of the commit picker's table, graph column
@@ -667,32 +677,33 @@ pub(crate) fn render_commit_picker_list_page(
 ) -> Vec<u8> {
     use crate::render::commit_picker::{graph_width, paint_commit_graph, paint_commit_picker_rows};
 
-    let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = page_buffer(area, theme);
-
-    let start_row = page
-        .saturating_mul(region_height as u64)
-        .min(usize::MAX as u64) as usize;
-
     let graph_cells = lanes.map(graph_width).unwrap_or(0).min(region_width);
-    let table = Rect::new(
-        graph_cells,
-        0,
-        region_width.saturating_sub(graph_cells),
-        region_height,
-    );
-    // The column header sits above the pool region, so the page hands the
-    // painter a zero-height rect it will never write into.
-    let header = Rect::new(table.x, 0, table.width, 0);
-    paint_commit_picker_rows(picker, start_row, header, table, theme, &mut buf);
-
     let mut scene = (graph_cells > 0).then(ApcScene::new);
-    if let Some(scene) = scene.as_mut() {
-        let graph = Rect::new(0, 0, graph_cells, region_height);
-        paint_commit_graph(picker, start_row, graph, theme, &mut buf, scene);
-    }
 
-    let mut bytes = serialize_buffer(&buf);
+    let mut bytes = render_rows_page(
+        region_width,
+        region_height,
+        page,
+        theme,
+        |buf, area, start_row| {
+            let table = Rect::new(
+                graph_cells,
+                0,
+                area.width.saturating_sub(graph_cells),
+                area.height,
+            );
+            // The column header sits above the pool region, so the page hands the
+            // painter a zero-height rect it will never write into.
+            let header = Rect::new(table.x, 0, table.width, 0);
+            paint_commit_picker_rows(picker, start_row, header, table, theme, buf);
+
+            if let Some(scene) = scene.as_mut() {
+                let graph = Rect::new(0, 0, graph_cells, area.height);
+                paint_commit_graph(picker, start_row, graph, theme, buf, scene);
+            }
+        },
+    );
+
     if let Some(mut scene) = scene {
         bytes.extend_from_slice(scene.buffer());
     }
@@ -714,18 +725,19 @@ pub(crate) fn render_commit_picker_preview_page(
     region_width: u16,
     region_height: u16,
 ) -> Vec<u8> {
-    let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = page_buffer(area, theme);
     let mut scene = ApcScene::new();
 
-    let skip_rows = page
-        .saturating_mul(region_height as u64)
-        .min(usize::MAX as u64) as usize;
-    crate::render::commits::render_commit_preview(
-        session, theme, area, skip_rows, &mut buf, &mut scene,
+    let mut bytes = render_rows_page(
+        region_width,
+        region_height,
+        page,
+        theme,
+        |buf, area, skip_rows| {
+            crate::render::commits::render_commit_preview(
+                session, theme, area, skip_rows, buf, &mut scene,
+            )
+        },
     );
-
-    let mut bytes = serialize_buffer(&buf);
     bytes.extend_from_slice(scene.buffer());
 
     bytes
@@ -738,32 +750,6 @@ pub(crate) fn render_commit_picker_preview_page(
 /// stoat's, and the two disagree for as long as the glide runs.
 pub(crate) fn page_buffer(area: Rect, theme: &crate::theme::Theme) -> Buffer {
     Buffer::filled(area, crate::render::themed_blank(theme))
-}
-
-/// Serialize every cell of `buf` to a self-contained VT byte stream via a
-/// [`CrosstermBackend`] over an in-memory buffer.
-///
-/// Unlike the live render path, which diffs against the previous frame, this
-/// emits all cells unconditionally so the bytes fully paint a pool slot
-/// regardless of what that slot held before. Cursor moves are absolute, so the
-/// stream is positioned for the page's top-left independent of the live grid
-/// cursor.
-pub(crate) fn serialize_buffer(buf: &Buffer) -> Vec<u8> {
-    use ratatui::backend::{Backend, CrosstermBackend};
-
-    let mut bytes = Vec::new();
-    {
-        let mut backend = CrosstermBackend::new(&mut bytes);
-        let cells = buf.content.iter().enumerate().map(|(i, cell)| {
-            let (x, y) = buf.pos_of(i);
-            (x, y, cell)
-        });
-        // CrosstermBackend over a Vec<u8> writer is infallible; the Results are
-        // surfaced only because the Backend trait is generic over fallible writers.
-        let _ = backend.draw(cells);
-        let _ = backend.flush();
-    }
-    bytes
 }
 
 #[cfg(test)]

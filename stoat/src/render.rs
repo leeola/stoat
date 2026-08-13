@@ -444,6 +444,32 @@ pub(crate) fn clear_themed(area: Rect, buf: &mut Buffer, theme: &crate::theme::T
     }
 }
 
+/// Serialize every cell of `buf` to a self-contained VT byte stream via a
+/// [`CrosstermBackend`] over an in-memory buffer.
+///
+/// Unlike the live render path, which diffs against the previous frame, this
+/// emits all cells unconditionally so the bytes fully paint a pool slot
+/// regardless of what that slot held before. Cursor moves are absolute, so the
+/// stream is positioned for the page's top-left independent of the live grid
+/// cursor.
+pub(crate) fn serialize_buffer(buf: &Buffer) -> Vec<u8> {
+    use ratatui::backend::{Backend, CrosstermBackend};
+
+    let mut bytes = Vec::new();
+    {
+        let mut backend = CrosstermBackend::new(&mut bytes);
+        let cells = buf.content.iter().enumerate().map(|(i, cell)| {
+            let (x, y) = buf.pos_of(i);
+            (x, y, cell)
+        });
+        // CrosstermBackend over a Vec<u8> writer is infallible; the Results are
+        // surfaced only because the Backend trait is generic over fallible writers.
+        let _ = backend.draw(cells);
+        let _ = backend.flush();
+    }
+    bytes
+}
+
 /// Paint one full frame of the TUI into `buf`. Called once per [`Stoat::render`]
 /// tick after the parse pipeline and commits pump have run.
 ///

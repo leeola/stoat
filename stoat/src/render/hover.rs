@@ -525,7 +525,7 @@ pub(crate) fn render_hover_page(
     }
 
     let apc = scene.buffer().clone();
-    let mut bytes = crate::smooth_scroll::serialize_buffer(&buf);
+    let mut bytes = crate::render::serialize_buffer(&buf);
     bytes.extend_from_slice(&apc);
     bytes
 }

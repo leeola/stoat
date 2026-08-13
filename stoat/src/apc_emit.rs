@@ -356,7 +356,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
                 }
             }
 
-            let bytes = crate::smooth_scroll::serialize_buffer(&content_buf);
+            let bytes = crate::render::serialize_buffer(&content_buf);
             // A view with no tracked inputs falls back to hashing what it
             // painted, which still suppresses the fill even though it could
             // not suppress the paint.
@@ -435,7 +435,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
 
         let mut buf = crate::smooth_scroll::page_buffer(row, &stoat.theme);
         crate::render::pane::paint_pane_status_cells(&cells, row, &mut buf);
-        let bytes = crate::smooth_scroll::serialize_buffer(&buf);
+        let bytes = crate::render::serialize_buffer(&buf);
         pool::emit_into(
             out,
             &mut stoat.smooth_scroll,
@@ -3736,7 +3736,7 @@ mod tests {
             None,
             None,
         );
-        let expected = crate::smooth_scroll::serialize_buffer(&expected);
+        let expected = crate::render::serialize_buffer(&expected);
 
         let mut fills = Vec::new();
         while let Ok(bytes) = rx.try_recv() {
