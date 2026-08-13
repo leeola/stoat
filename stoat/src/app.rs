@@ -25,6 +25,7 @@ use crate::{
         resolve_action, ActiveModal, StoatKeymapState,
     },
     minimap::emit::{self, minimap_view_window},
+    mouse::mouse_event_kind,
     pane::{DockId, DockVisibility, FocusTarget, NodeId, PaneId, PaneTree, Placement, View},
     quit_all_confirm::QuitAllConfirm,
     rebase::RebasePause,
@@ -8223,32 +8224,16 @@ fn pane_for_window(panes: &PaneTree, window: u32) -> Option<PaneId> {
         .map(|(id, _)| id)
 }
 
-/// Map an aux window's pointer gesture onto the crossterm event kind the pane
-/// mouse handlers dispatch on. A wheel becomes a scroll. A button gesture keeps
-/// its button.
+/// Dispatch every notification `host` has queued, up to a per-tick cap.
 ///
-/// [`None`] for the side buttons, which crossterm does not model.
-/// [`Stoat::handle_jumplist_buttons`] takes every gesture of those before this
-/// runs, so the case does not arise in practice.
-fn mouse_event_kind(kind: MouseKind) -> Option<MouseEventKind> {
-    Some(match kind {
-        MouseKind::Press(button) => MouseEventKind::Down(mouse_button(button)?),
-        MouseKind::Release(button) => MouseEventKind::Up(mouse_button(button)?),
-        MouseKind::Drag(button) => MouseEventKind::Drag(mouse_button(button)?),
-        MouseKind::WheelUp => MouseEventKind::ScrollUp,
-        MouseKind::WheelDown => MouseEventKind::ScrollDown,
-    })
-}
-
-fn mouse_button(button: IpcMouseButton) -> Option<MouseButton> {
-    match button {
-        IpcMouseButton::Left => Some(MouseButton::Left),
-        IpcMouseButton::Middle => Some(MouseButton::Middle),
-        IpcMouseButton::Right => Some(MouseButton::Right),
-        IpcMouseButton::Back | IpcMouseButton::Forward => None,
-    }
-}
-
+/// `Progress` updates the [`crate::lsp::progress::LspProgressMap`]. Other
+/// variants log via tracing for now and become future per-feature consumer
+/// hooks. The cap keeps a pathological notification burst from starving the
+/// event loop, and the remainder drains on the next update.
+///
+/// Takes the three fields it writes rather than the whole [`Stoat`], so
+/// [`Stoat::drain_lsp_notifications`] can walk the registry borrowed instead of
+/// collecting it per event.
 /// Read stoatty's window-event socket, forwarding each event over `tx`.
 ///
 /// Sends [`WindowIpc::Connected`] once the stream opens, then a
@@ -8279,16 +8264,6 @@ async fn connect_window_ipc(path: PathBuf, tx: UnboundedSender<WindowIpc>) {
     let _ = tx.send(WindowIpc::Disconnected);
 }
 
-/// Dispatch every notification `host` has queued, up to a per-tick cap.
-///
-/// `Progress` updates the [`crate::lsp::progress::LspProgressMap`]. Other
-/// variants log via tracing for now and become future per-feature consumer
-/// hooks. The cap keeps a pathological notification burst from starving the
-/// event loop, and the remainder drains on the next update.
-///
-/// Takes the three fields it writes rather than the whole [`Stoat`], so
-/// [`Stoat::drain_lsp_notifications`] can walk the registry borrowed instead of
-/// collecting it per event.
 fn drain_notifications_from(
     server: &str,
     host: &Arc<dyn LspHost>,

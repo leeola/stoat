@@ -47,6 +47,7 @@ pub mod lsp;
 pub(crate) mod markdown;
 pub(crate) mod merge_view;
 pub mod minimap;
+pub(crate) mod mouse;
 pub mod multi_buffer;
 mod nav_list;
 pub mod pane;
