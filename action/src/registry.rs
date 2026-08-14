@@ -19,13 +19,14 @@ use crate::{
             DeleteSelection, DeleteSelectionNoYank, EnsureSelectionsForward, EnterInsertMode,
             ExpandSelection, ExtendDown, ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn,
             ExtendGotoFileStart, ExtendGotoFirstNonwhitespace, ExtendGotoLastLine,
-            ExtendGotoWindowBottom, ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft,
-            ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart, ExtendNextWordEnd,
-            ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
-            ExtendSearchNext, ExtendSearchPrev, ExtendSelectNextSibling, ExtendSelectPrevSibling,
-            ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine,
-            ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar,
-            FindPrevChar, FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
+            ExtendGotoNextParagraph, ExtendGotoPrevParagraph, ExtendGotoWindowBottom,
+            ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft, ExtendMoveParentNodeEnd,
+            ExtendMoveParentNodeStart, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd,
+            ExtendPrevWordStart, ExtendRight, ExtendSearchNext, ExtendSearchPrev,
+            ExtendSelectNextSibling, ExtendSelectPrevSibling, ExtendTillNextChar,
+            ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine, ExtendToLineBounds,
+            ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar,
+            FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
             GotoDiffCallerUp, GotoFileStart, GotoFirstNonwhitespace, GotoImplementors,
             GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact,
             GotoNextChange, GotoNextClass, GotoNextFunction, GotoNextParagraph, GotoPrevChange,
@@ -797,6 +798,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoPrevChange::DEF, |_| Ok(Box::new(GotoPrevChange)));
     add(GotoNextParagraph::DEF, |_| Ok(Box::new(GotoNextParagraph)));
     add(GotoPrevParagraph::DEF, |_| Ok(Box::new(GotoPrevParagraph)));
+    add(ExtendGotoNextParagraph::DEF, |_| {
+        Ok(Box::new(ExtendGotoNextParagraph))
+    });
+    add(ExtendGotoPrevParagraph::DEF, |_| {
+        Ok(Box::new(ExtendGotoPrevParagraph))
+    });
     add(GotoNextFunction::DEF, |_| Ok(Box::new(GotoNextFunction)));
     add(GotoPrevFunction::DEF, |_| Ok(Box::new(GotoPrevFunction)));
     add(GotoNextClass::DEF, |_| Ok(Box::new(GotoNextClass)));
@@ -1774,6 +1781,7 @@ mod tests {
         // + 1 RepeatLastMotion.
         // + 1 GotoColumn.
         // + 2 GotoNextParagraph/GotoPrevParagraph.
+        // + 2 ExtendGotoNextParagraph/ExtendGotoPrevParagraph.
         // + 1 MatchBrackets.
         // + 4 ExtendFindNextChar/ExtendFindPrevChar/ExtendTillNextChar/ExtendTillPrevChar.
         // + 1 ExtendGotoColumn.
@@ -1890,7 +1898,7 @@ mod tests {
         // + 2 MergeSelections/MergeConsecutiveSelections.
         // + 2 SearchSelection/SearchSelectionDetectWordBoundaries.
         // + 2 ExtendSearchNext/ExtendSearchPrev.
-        assert_eq!(all().count(), 442);
+        assert_eq!(all().count(), 444);
     }
 
     #[test]

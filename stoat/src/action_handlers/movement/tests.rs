@@ -5594,6 +5594,39 @@ fn goto_next_paragraph_matches_the_reference_landings() {
     }
 }
 
+/// In select mode `]p` holds the tail, so a run of them grows one selection.
+///
+/// The key passes through a bracket submode on the way, which leaves the motion
+/// no mode to read for the extend flag. The select-flavored submode names the
+/// extend action instead, and returns to select rather than normal.
+#[test]
+fn select_mode_next_paragraph_extends_and_stays_in_select() {
+    let mut h = TestHarness::with_size(30, 20);
+    let path = h.write_file("s.txt", "a\n\nb\n\nc\n");
+    h.open_file(&path);
+
+    h.type_keys("v ] p");
+    assert_eq!(h.stoat.focused_mode(), "select");
+    assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
+
+    h.type_keys("] p");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 6, false)],
+        "the tail holds, so the second reaches further from the same start",
+    );
+}
+
+/// The backward one extends too, reaching back past the tail it started on.
+#[test]
+fn select_mode_prev_paragraph_extends_backward() {
+    assert_eq!(
+        paragraph_span("a\n\nb\n\nc\n", 6, "v [ p"),
+        (3, 7, true),
+        "the head crosses the tail, which keeps the cell it started on covered",
+    );
+}
+
 /// Running it again starts from where the last one left off, rather than
 /// finding the boundary it already sits on.
 #[test]

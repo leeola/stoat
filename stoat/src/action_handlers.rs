@@ -500,6 +500,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoPrevParagraph => {
             movement::goto_paragraph(stoat, movement::ParaDir::Prev, false)
         },
+        ActionKind::ExtendGotoNextParagraph => {
+            movement::goto_paragraph(stoat, movement::ParaDir::Next, true)
+        },
+        ActionKind::ExtendGotoPrevParagraph => {
+            movement::goto_paragraph(stoat, movement::ParaDir::Prev, true)
+        },
         ActionKind::MatchBrackets => movement::match_brackets(stoat),
         ActionKind::ExpandSelection => movement::expand_selection(stoat),
         ActionKind::ShrinkSelection => movement::shrink_selection(stoat),

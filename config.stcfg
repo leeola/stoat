@@ -529,6 +529,17 @@ on key {
         f -> [GotoPrevFunction(), SetMode(normal)];
         t -> [GotoPrevClass(), SetMode(normal)];
     }
+    # The bracket submodes come in select-mode flavors so a bracket motion
+    # made from select extends and returns there, rather than dropping the
+    # selection and the mode the way the normal-mode arms do.
+    mode == select_bracket_next {
+        Escape -> SetMode(select);
+        p -> [ExtendGotoNextParagraph(), SetMode(select)];
+    }
+    mode == select_bracket_prev {
+        Escape -> SetMode(select);
+        p -> [ExtendGotoPrevParagraph(), SetMode(select)];
+    }
     mode == match {
         Escape -> SetMode(normal);
         m -> [MatchBrackets(), SetMode(normal)];
@@ -570,6 +581,8 @@ on key {
         End -> ExtendToLineEnd();
         G -> ExtendToLastLine();
         g -> SetMode(select_goto);
+        ] -> SetMode(select_bracket_next);
+        [ -> SetMode(select_bracket_prev);
         ; -> CollapseSelection();
         Alt-; -> FlipSelections();
         Alt-: -> EnsureSelectionsForward();

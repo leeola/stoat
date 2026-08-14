@@ -1364,7 +1364,7 @@ define_action!(
     "GotoNextParagraph",
     ActionKind::GotoNextParagraph,
     "goto next paragraph",
-    "Move the primary cursor to the start of the next paragraph. A paragraph is a run of lines whose byte length is non-zero; lines with zero bytes (purely a line ending) are paragraph separators. Walks forward over the rest of the current paragraph, then over any empty lines, landing at the first non-empty row that follows. No-op when no further paragraph exists in the buffer. Primary-cursor only.",
+    "Select from each cursor forward to the start of the next paragraph. A paragraph is a run of lines whose byte length is non-zero; lines with zero bytes (purely a line ending) are paragraph separators. Each selection walks on from its own cursor over the rest of its paragraph, then over any empty lines, and reaches the buffer's end when no further paragraph follows.",
     ActionPriority::Rare
 );
 
@@ -1374,7 +1374,27 @@ define_action!(
     "GotoPrevParagraph",
     ActionKind::GotoPrevParagraph,
     "goto previous paragraph",
-    "Move the primary cursor to the start of the previous paragraph. From the row above the cursor, walks backward over any empty lines, then over the run of non-empty lines, landing at the row after the empty separator (or row 0 when the buffer begins with the run). No-op when the cursor is already at row 0. Primary-cursor only.",
+    "Select from each cursor backward to the start of the previous paragraph. From the row above its own cursor, each selection walks backward over any empty lines, then over the run of non-empty lines, landing at the row after the empty separator and reaching row 0 when the buffer begins with the run.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendGotoNextParagraphDef,
+    ExtendGotoNextParagraph,
+    "ExtendGotoNextParagraph",
+    ActionKind::ExtendGotoNextParagraph,
+    "extend to next paragraph",
+    "Like `GotoNextParagraph` but extends each selection rather than replacing it. The tail stays put while the head moves to the paragraph boundary, so repeated use grows one selection.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendGotoPrevParagraphDef,
+    ExtendGotoPrevParagraph,
+    "ExtendGotoPrevParagraph",
+    ActionKind::ExtendGotoPrevParagraph,
+    "extend to previous paragraph",
+    "Like `GotoPrevParagraph` but extends each selection rather than replacing it. The tail stays put while the head moves back to the paragraph boundary.",
     ActionPriority::Rare
 );
 

@@ -263,6 +263,8 @@ action_kinds! {
     GotoPrevChange,
     GotoNextParagraph,
     GotoPrevParagraph,
+    ExtendGotoNextParagraph,
+    ExtendGotoPrevParagraph,
     MatchBrackets,
     GotoWindowTop,
     GotoWindowCenter,

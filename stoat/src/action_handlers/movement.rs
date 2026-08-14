@@ -3264,14 +3264,14 @@ fn landing_range(rope: &Rope, cursor: usize, target: usize) -> (usize, usize) {
     }
 }
 
-/// The cell a block cursor covers when its range's head reaches `head`.
+/// The cell a block cursor covers when its range reaches `head` from `anchor`.
 ///
 /// The inverse of [`landing_range`], for the extend path, which holds the
-/// anchor it already has and asks only which cell to cover. A head reached
-/// going forward sits one past its cell, where one reached going backward sits
-/// on it.
-fn landing_cell(rope: &Rope, cursor: usize, head: usize) -> usize {
-    if head > cursor {
+/// anchor it already has and asks only which cell to cover. The anchor is what
+/// decides the answer, not the cursor: a head past the anchor sits one beyond
+/// the last covered cell, where a head before it sits on the first.
+fn landing_cell(rope: &Rope, anchor: usize, head: usize) -> usize {
+    if head > anchor {
         rope.prev_grapheme_boundary(head)
     } else {
         head
@@ -3308,7 +3308,7 @@ fn move_to_motion_range(
             // identical spans merge, so the set collapses to one cursor.
             let cursor = cursor_offset(rope, read.tail, read.head);
             let (_, head) = range_of(rope, cursor)?;
-            Some((landing_cell(rope, cursor, head), SelectionGoal::None))
+            Some((landing_cell(rope, read.tail, head), SelectionGoal::None))
         });
         return UpdateEffect::Redraw;
     }
