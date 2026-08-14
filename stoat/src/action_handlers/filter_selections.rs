@@ -236,6 +236,31 @@ mod tests {
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
+    /// Alt-k reaches the keep filter and Alt-K the remove filter.
+    ///
+    /// A shifted key extends in this scheme, which took K away from the keep
+    /// filter and left it with no key at all. The two share one modal, so the
+    /// pin filters with each and checks which selection survived rather than
+    /// just that a modal opened.
+    #[test]
+    fn alt_k_keeps_and_alt_shift_k_removes() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("abc 123 def");
+        select_two_ranges(&mut h, (0, 3), (4, 7));
+        h.type_keys("Alt-k");
+        h.type_text("\\d+");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert_eq!(editor::selection_spans(&mut h.stoat), vec![(4, 7, false)]);
+
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("abc 123 def");
+        select_two_ranges(&mut h, (0, 3), (4, 7));
+        h.type_keys("Alt-K");
+        h.type_text("\\d+");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert_eq!(editor::selection_spans(&mut h.stoat), vec![(0, 3, false)]);
+    }
+
     #[test]
     fn open_creates_input_modal_in_prompt_mode() {
         let mut h = Stoat::test();

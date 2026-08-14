@@ -410,6 +410,9 @@ on key {
         Alt-s -> SplitSelectionOnNewline();
         S -> SplitSelection();
         s -> SelectRegex();
+        # A shifted key extends here, so K is taken and the keep filter moves
+        # to Alt-k, beside the remove filter on Alt-K.
+        Alt-k -> KeepSelections();
         Alt-K -> RemoveSelections();
         Q -> RecordMacro();
         Alt-| -> ShellPipeTo();
