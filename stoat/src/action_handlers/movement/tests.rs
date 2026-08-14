@@ -5141,6 +5141,61 @@ fn repeat_last_motion_replays_find_next_char() {
     assert_eq!(h.primary_head_offset(), 8);
 }
 
+/// A replay carries the count the find was made with, rather than advancing
+/// one match at a time.
+#[test]
+fn repeat_last_motion_replays_the_finds_own_count() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abcabcabcabc\n");
+    h.open_file(&path);
+    h.type_keys("2 f c");
+    assert_eq!(h.primary_head_offset(), 5, "the second c");
+    h.type_keys("alt-.");
+    assert_eq!(h.primary_head_offset(), 11, "two more, not one");
+}
+
+/// A replay that runs out of matches keeps the ground the earlier ones
+/// covered, rather than giving up as a whole.
+///
+/// Nine repeats over two remaining matches is two moves and seven that find
+/// nothing. Each of those leaves its selection where it stands.
+#[test]
+fn repeat_last_motion_past_the_last_match_keeps_its_progress() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abcabcabc\n");
+    h.open_file(&path);
+    h.type_keys("f c");
+    assert_eq!(h.primary_head_offset(), 2);
+    h.type_keys("9 alt-.");
+    assert_eq!(
+        h.primary_head_offset(),
+        8,
+        "the last c, not the starting one"
+    );
+}
+
+/// A replay keeps the extend flag of the find it repeats, whatever mode the
+/// editor has since been put into.
+///
+/// Reading the mode instead turns a normal-mode find into an extending one the
+/// moment the user presses v, which is not the motion they recorded.
+#[test]
+fn repeat_last_motion_keeps_the_finds_own_extend_flag() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abcabcabc\n");
+    h.open_file(&path);
+    h.type_keys("f c");
+    assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
+
+    h.type_keys("v");
+    h.type_keys("alt-.");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(2, 6, false)],
+        "the replay collapses to the new match, the way the find in normal mode did",
+    );
+}
+
 #[test]
 fn repeat_last_motion_with_no_history_is_noop() {
     let mut h = TestHarness::with_size(20, 5);

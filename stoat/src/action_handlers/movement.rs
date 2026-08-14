@@ -3194,13 +3194,24 @@ pub(super) fn set_pending_find(stoat: &mut Stoat, kind: FindKind, extend: bool) 
     UpdateEffect::Redraw
 }
 
+/// Run the last find again, this key's count deciding how many times.
+///
+/// The count repeats the whole motion rather than widening its reach, so a
+/// find made with its own count carries that count into each repeat. A repeat
+/// that finds nothing leaves its selection where the one before it landed,
+/// which is what keeps a run of them from throwing away the ground already
+/// covered.
 pub(super) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
-    let Some((kind, ch)) = stoat.last_find else {
+    let Some((kind, ch, count, extend)) = stoat.last_find else {
         return UpdateEffect::None;
     };
-    let extend = stoat.focused_mode() == "select";
-    let count = stoat.take_pending_count().unwrap_or(1);
-    execute_find(stoat, kind, ch, extend, count)
+    let repeat = stoat.take_pending_count().unwrap_or(1).max(1);
+
+    let mut effect = UpdateEffect::None;
+    for _ in 0..repeat {
+        effect = execute_find(stoat, kind, ch, extend, count);
+    }
+    effect
 }
 
 pub(crate) fn execute_find(
@@ -3210,8 +3221,8 @@ pub(crate) fn execute_find(
     extend: bool,
     count: u32,
 ) -> UpdateEffect {
-    stoat.last_find = Some((kind, ch));
     let count = count.max(1);
+    stoat.last_find = Some((kind, ch, count, extend));
     move_to_find_target(stoat, extend, |rope, cursor| {
         find_target(rope, cursor, kind, ch, count)
     })
