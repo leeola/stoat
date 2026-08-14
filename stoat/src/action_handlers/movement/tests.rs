@@ -4694,8 +4694,10 @@ fn select_next_sibling_jumps_to_next_named_node() {
     );
 }
 
+/// Stepping back to a sibling leaves the range reversed, so its cursor sits at
+/// the start and a repeat carries on the way the walk went.
 #[test]
-fn select_prev_sibling_walks_back() {
+fn prev_sibling_leaves_range_reversed() {
     let mut h = TestHarness::with_size(40, 5);
     let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\n");
     h.open_file(&path);
@@ -4703,10 +4705,20 @@ fn select_prev_sibling_walks_back() {
     // A 1-wide cursor already sits on the `a` identifier node, so a single
     // expand reaches the enclosing function_item.
     dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
-    let on_first_fn = h.selection_spans();
+    assert_eq!(h.selection_spans(), vec![(0, 9, false)]);
+
     dispatch(&mut h.stoat, &stoat_action::SelectNextSibling);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(10, 19, false)],
+        "forward leaves it forward",
+    );
     dispatch(&mut h.stoat, &stoat_action::SelectPrevSibling);
-    assert_eq!(h.selection_spans(), on_first_fn);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 9, true)],
+        "and back leaves the same span reversed",
+    );
 }
 
 #[test]
@@ -6530,4 +6542,23 @@ fn goto_next_change_no_op_without_diff_map() {
     let before = h.primary_head_offset();
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
     assert_eq!(h.primary_head_offset(), before);
+}
+
+/// Each selection walks to its own sibling rather than sharing one answer.
+#[test]
+fn select_sibling_walks_each_selection() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n");
+    h.open_file(&path);
+    h.type_keys("l l l");
+    dispatch(&mut h.stoat, &AddSelectionBelow);
+    dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+    assert_eq!(h.selection_spans(), vec![(0, 9, false), (10, 19, false)]);
+
+    dispatch(&mut h.stoat, &stoat_action::SelectNextSibling);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(10, 19, false), (20, 29, false)],
+        "each stepped one sibling on from where it was",
+    );
 }

@@ -3060,72 +3060,90 @@ pub(crate) fn select_sibling_impl(
         _ => return UpdateEffect::None,
     };
 
-    let (buffer_id, sel_start, sel_end) = {
-        let editor = ws.editors.get_mut(editor_id).expect("editor");
-        let buffer_id = editor.buffer_id;
-        let display_snapshot = editor.display_map.snapshot();
-        let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor();
-        let start = buffer_snapshot.resolve_anchor(&sel.start);
-        let end = buffer_snapshot.resolve_anchor(&sel.end);
-        (buffer_id, start, end)
+    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
+    let Some(syntax_map) = ws.buffers.syntax_map(buffer_id) else {
+        return UpdateEffect::None;
     };
+    let snapshot = syntax_map.snapshot();
 
-    let target = {
-        let Some(syntax_map) = ws.buffers.syntax_map(buffer_id) else {
-            return UpdateEffect::None;
-        };
-        let snapshot = syntax_map.snapshot();
-        let Some(layer) = deepest_containing_layer(snapshot, sel_start, sel_end) else {
-            return UpdateEffect::None;
-        };
-        let root = layer.tree.root_node();
-        let Some(node) = root.descendant_for_byte_range(sel_start, sel_end) else {
-            return UpdateEffect::None;
-        };
-        let mut current = node;
-        let mut moved = false;
-        for _ in 0..count {
-            let next = match dir {
-                SiblingDir::Next => current.next_named_sibling(),
-                SiblingDir::Prev => current.prev_named_sibling(),
-            };
-            match next {
-                Some(s) => {
-                    current = s;
-                    moved = true;
-                },
-                None => break,
-            }
-        }
-        if !moved {
-            return UpdateEffect::None;
-        }
-        current.byte_range()
-    };
+    let editor = ws.editors.get_mut(editor_id).expect("editor");
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
 
-    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
     if extend {
-        let new_display = editor.display_map.snapshot();
-        let new_buf = new_display.buffer_snapshot();
-        let new_rope = new_buf.rope();
-        // The sibling's end is one past its last character, so going forward
-        // steps back onto the cell the block cursor should cover. Going
-        // backward the node's start is already that cell.
-        let target_cursor = match dir {
-            SiblingDir::Next => new_rope.prev_grapheme_boundary(target.end),
-            SiblingDir::Prev => target.start,
-        };
+        let rope = buffer_snapshot.rope();
         // Crossing to a sibling moves horizontally, so it drops any column a
-        // prior vertical move was holding. Keeping it would send the next
-        // vertical move back to the column the sibling was reached from.
-        move_cursors(&mut editor.selections, new_buf, true, |_| {
-            Some((target_cursor, SelectionGoal::None))
+        // prior vertical move held. A carried column sends the next vertical
+        // move back to the column the sibling was reached from.
+        move_cursors(&mut editor.selections, buffer_snapshot, true, |read| {
+            let (from, to) = (read.head.min(read.tail), read.head.max(read.tail));
+            let target = sibling_range(snapshot, from, to, dir, count)?;
+            // The sibling's end is one past its last character, so going
+            // forward steps back onto the cell the block cursor covers. Going
+            // backward the node's start is already that cell.
+            let cursor = match dir {
+                SiblingDir::Next => rope.prev_grapheme_boundary(target.end),
+                SiblingDir::Prev => target.start,
+            };
+            Some((cursor, SelectionGoal::None))
         });
-    } else {
-        apply_primary_range(editor, target);
+        return UpdateEffect::Redraw;
+    }
+
+    let mut moved = false;
+    editor
+        .selections
+        .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
+            let (from, to) = (head_offset.min(tail_offset), head_offset.max(tail_offset));
+            let Some(target) = sibling_range(snapshot, from, to, dir, count) else {
+                return sel.clone();
+            };
+            moved = true;
+            // The walk sets the direction rather than the source range. A step
+            // forward leaves its cursor at the sibling's end and a step back
+            // leaves it at the start, so a repeat carries on the way it went.
+            Selection {
+                id: sel.id,
+                start: buffer_snapshot.anchor_at(target.start, Bias::Right),
+                end: buffer_snapshot.anchor_at(target.end, Bias::Left),
+                reversed: matches!(dir, SiblingDir::Prev),
+                goal: SelectionGoal::None,
+            }
+        });
+
+    if !moved {
+        return UpdateEffect::None;
     }
     UpdateEffect::Redraw
+}
+
+/// Byte range of the sibling `count` steps from the node covering `from..to`,
+/// or `None` when the walk takes no step at all.
+fn sibling_range(
+    snapshot: &stoat_language::SyntaxSnapshot,
+    from: usize,
+    to: usize,
+    dir: SiblingDir,
+    count: u32,
+) -> Option<Range<usize>> {
+    let layer = deepest_containing_layer(snapshot, from, to)?;
+    let mut current = layer.tree.root_node().descendant_for_byte_range(from, to)?;
+
+    let mut moved = false;
+    for _ in 0..count {
+        let next = match dir {
+            SiblingDir::Next => current.next_named_sibling(),
+            SiblingDir::Prev => current.prev_named_sibling(),
+        };
+        match next {
+            Some(s) => {
+                current = s;
+                moved = true;
+            },
+            None => break,
+        }
+    }
+    moved.then(|| current.byte_range())
 }
 
 pub(crate) fn select_all_siblings(stoat: &mut Stoat) -> UpdateEffect {
