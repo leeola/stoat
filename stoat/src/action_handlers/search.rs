@@ -104,7 +104,7 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     let last = LastSearch::new(query, direction);
     let origin = super::jump::live_entry(stoat);
     if let Some(regex) = last.regex.as_ref()
-        && jump_to_match(stoat, regex, direction)
+        && jump_to_match(stoat, regex, direction).moved()
         && let Some(entry) = origin
     {
         super::jump::push_entry(stoat, entry);
@@ -146,6 +146,10 @@ pub(super) fn search_prev(stoat: &mut Stoat) -> UpdateEffect {
 /// stored still consumes it. A count of zero clamps to one: an unbound digit
 /// becomes a pending count, so a keymap that frees 0 otherwise sends `0 n`
 /// here as a walk of no steps.
+///
+/// The last step's outcome is what reaches the status bar. A repeat is the
+/// only search that reports, so a submitted one stays silent about both the
+/// wrap and the empty buffer.
 fn repeat_search(
     stoat: &mut Stoat,
     resolve: impl Fn(SearchDirection) -> SearchDirection,
@@ -156,18 +160,20 @@ fn repeat_search(
     };
     let direction = resolve(direction);
 
-    let mut moved = false;
+    let mut outcome = SearchOutcome::NoMatch;
     for _ in 0..count {
-        if !jump_to_match(stoat, &regex, direction) {
+        outcome = jump_to_match(stoat, &regex, direction);
+        if !outcome.moved() {
             break;
         }
-        moved = true;
     }
 
-    match moved {
-        true => UpdateEffect::Redraw,
-        false => UpdateEffect::None,
+    match outcome {
+        SearchOutcome::Landed => {},
+        SearchOutcome::Wrapped => stoat.set_status("Wrapped around document"),
+        SearchOutcome::NoMatch => stoat.set_status("No more matches"),
     }
+    UpdateEffect::Redraw
 }
 
 /// The pattern and direction a repeat press searches with, or `None` when
@@ -180,9 +186,28 @@ fn repeat_target(stoat: &Stoat) -> Option<(CursorRegex, SearchDirection)> {
     Some((last.regex.clone()?, last.direction))
 }
 
+/// How a search step ended, which is what `n` and `N` report and a submitted
+/// search stays silent about.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SearchOutcome {
+    /// A match lay ahead of the selection, so there is nothing to say.
+    Landed,
+    /// Nothing lay ahead, so the scan resumed from the buffer's other end.
+    Wrapped,
+    /// The buffer holds no match at all.
+    NoMatch,
+}
+
+impl SearchOutcome {
+    /// Whether the step landed on a match, wrapping to reach it or not.
+    fn moved(self) -> bool {
+        !matches!(self, SearchOutcome::NoMatch)
+    }
+}
+
 /// Find the next match of `regex` in the focused editor's buffer, walking in
 /// `direction` with wrap-around, and give it to the primary selection as its
-/// new range. Returns true when a match was found.
+/// new range.
 ///
 /// The whole match becomes the selection, so the operation after a search acts
 /// on the matched text. The primary's direction carries over, and every other
@@ -195,14 +220,18 @@ fn repeat_target(stoat: &Stoat) -> Option<(CursorRegex, SearchDirection)> {
 ///
 /// Takes the pattern already compiled, since `n` and `N` repeat one that
 /// [`LastSearch`] built when it was submitted.
-fn jump_to_match(stoat: &mut Stoat, regex: &CursorRegex, direction: SearchDirection) -> bool {
+fn jump_to_match(
+    stoat: &mut Stoat,
+    regex: &CursorRegex,
+    direction: SearchDirection,
+) -> SearchOutcome {
     use crate::pane::View;
 
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
         View::Editor(id) => id,
-        _ => return false,
+        _ => return SearchOutcome::NoMatch,
     };
     let editor = ws.editors.get_mut(editor_id).expect("editor");
     let snapshot = editor.display_map.snapshot();
@@ -219,47 +248,71 @@ fn jump_to_match(stoat: &mut Stoat, regex: &CursorRegex, direction: SearchDirect
         SearchDirection::Forward => find_forward(regex, rope, from),
         SearchDirection::Reverse => find_reverse(regex, rope, from),
     };
-    let Some((start, end)) = target else {
-        return false;
+    let Some(hit) = target else {
+        return SearchOutcome::NoMatch;
     };
     // An empty match at the very start of the buffer selects nothing and lands
     // nowhere, so there is no jump to make.
-    if end == 0 {
-        return false;
+    if hit.end == 0 {
+        return SearchOutcome::NoMatch;
     }
 
     editor
         .selections
-        .replace_primary(start..end, reversed, buffer_snapshot);
-    true
+        .replace_primary(hit.start..hit.end, reversed, buffer_snapshot);
+    match hit.wrapped {
+        true => SearchOutcome::Wrapped,
+        false => SearchOutcome::Landed,
+    }
 }
 
-/// The span of the first match at or after `from`, wrapping to the start of the
-/// buffer when nothing lies ahead.
+/// A match a search step reached, and whether the scan ran off the end of the
+/// buffer and resumed from the other side to get there.
+///
+/// The wrap travels with the span because only the scan that did it knows it
+/// happened, and `n` reports it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Hit {
+    start: usize,
+    end: usize,
+    wrapped: bool,
+}
+
+/// The first match at or after `from`, wrapping to the start of the buffer when
+/// nothing lies ahead.
 ///
 /// `from` is the primary selection's end, so the match it currently covers is
 /// already behind the bound and a repeat advances.
-fn find_forward(regex: &CursorRegex, rope: &Rope, from: usize) -> Option<(usize, usize)> {
-    if let Some(m) = next_match_at_or_after(regex, rope, from.min(rope.len())) {
-        return Some(m);
+fn find_forward(regex: &CursorRegex, rope: &Rope, from: usize) -> Option<Hit> {
+    if let Some(hit) = next_match_at_or_after(regex, rope, from.min(rope.len())) {
+        return Some(hit);
     }
-    next_match_at_or_after(regex, rope, 0)
+    next_match_at_or_after(regex, rope, 0).map(|hit| Hit {
+        wrapped: true,
+        ..hit
+    })
 }
 
-/// The span of the last match starting before `from`, or the last in the file
-/// when there is none, so a reverse search wraps around.
+/// The last match starting before `from`, or the last in the file when there is
+/// none, so a reverse search wraps around.
 ///
 /// One forward pass, stopping at the first match the cursor has already passed.
 /// `find_iter` is lazy, so an ordinary reverse search reads `from` bytes rather
 /// than the file. Only a search with nothing behind the cursor, which is the
 /// one that has to wrap, reads to the end.
-fn find_reverse(regex: &CursorRegex, rope: &Rope, from: usize) -> Option<(usize, usize)> {
+fn find_reverse(regex: &CursorRegex, rope: &Rope, from: usize) -> Option<Hit> {
     let mut matches = regex.find_iter(rope.regex_input(0..rope.len()));
     let mut before = None;
 
     let at_or_after = loop {
         match matches.next() {
-            Some(m) if m.start() < from => before = Some((m.start(), m.end())),
+            Some(m) if m.start() < from => {
+                before = Some(Hit {
+                    start: m.start(),
+                    end: m.end(),
+                    wrapped: false,
+                })
+            },
             other => break other,
         }
     };
@@ -268,25 +321,33 @@ fn find_reverse(regex: &CursorRegex, rope: &Rope, from: usize) -> Option<(usize,
         return before;
     }
     let first = at_or_after?;
-    Some(
-        matches
-            .last()
-            .map_or((first.start(), first.end()), |m| (m.start(), m.end())),
-    )
+    let last = matches.last();
+    Some(Hit {
+        start: last.map_or(first.start(), |m| m.start()),
+        end: last.map_or(first.end(), |m| m.end()),
+        wrapped: true,
+    })
 }
 
-/// The span of the first regex match whose start is at or after `at`.
+/// The first regex match whose start is at or after `at`.
 ///
 /// The scan is bounded to `at..` on the input rather than by slicing, so the
 /// offsets it reports are buffer offsets. A zero-width pattern still reports a
 /// match before the bound, which is why the start is checked.
-fn next_match_at_or_after(regex: &CursorRegex, rope: &Rope, at: usize) -> Option<(usize, usize)> {
+///
+/// The hit is never marked as wrapped. Only the caller knows whether this scan
+/// is the first one or the one that resumed from the buffer's start.
+fn next_match_at_or_after(regex: &CursorRegex, rope: &Rope, at: usize) -> Option<Hit> {
     if at > rope.len() {
         return None;
     }
     let m = regex.find(rope.regex_input(at..rope.len()))?;
     if m.start() >= at {
-        Some((m.start(), m.end()))
+        Some(Hit {
+            start: m.start(),
+            end: m.end(),
+            wrapped: false,
+        })
     } else {
         None
     }
@@ -338,6 +399,25 @@ mod tests {
             buf_snap.resolve_anchor(&sel.tail()),
             buf_snap.resolve_anchor(&sel.head()),
         )
+    }
+
+    /// A match the scan reached without wrapping.
+    fn hit(start: usize, end: usize) -> Option<super::Hit> {
+        Some(super::Hit {
+            start,
+            end,
+            wrapped: false,
+        })
+    }
+
+    /// A match the scan reached only by running off one end of the buffer and
+    /// resuming from the other.
+    fn wrapped_hit(start: usize, end: usize) -> Option<super::Hit> {
+        Some(super::Hit {
+            start,
+            end,
+            wrapped: true,
+        })
     }
 
     fn cached_match_count(h: &mut TestHarness) -> usize {
@@ -449,6 +529,58 @@ mod tests {
         );
     }
 
+    /// A repeat that ran off the end of the buffer says so, and one that found
+    /// a match ahead of the cursor says nothing.
+    ///
+    /// Without the report the jump back to the top is indistinguishable from
+    /// an ordinary step, so a walk through a file silently starts over.
+    #[test]
+    fn a_repeat_that_wraps_reports_it() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc\n");
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+        assert_eq!(h.selection_spans(), vec![(8, 11, false)]);
+        assert_eq!(
+            h.stoat.pending_message, None,
+            "the submitted search reports nothing",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
+        assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("Wrapped around document"),
+        );
+
+        h.stoat.pending_message = None;
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
+        assert_eq!(h.selection_spans(), vec![(8, 11, false)]);
+        assert_eq!(
+            h.stoat.pending_message, None,
+            "a match ahead of the cursor is not worth reporting",
+        );
+    }
+
+    /// A repeat for a pattern the buffer does not hold says so rather than
+    /// looking like a dead key.
+    #[test]
+    fn a_repeat_with_no_match_anywhere_reports_it() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def\n");
+        h.type_keys("/");
+        h.type_text("zzz");
+        h.type_keys("enter");
+        assert_eq!(
+            h.stoat.pending_message, None,
+            "the submitted search reports nothing",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("No more matches"),);
+    }
+
     /// A count walks that many matches in one press, rather than one.
     #[test]
     fn a_count_repeats_the_search_that_many_times() {
@@ -540,20 +672,20 @@ mod tests {
         // offset the buffer clipped differently.
         assert_eq!(
             super::find_forward(&regex, &text, 1),
-            Some((6, 11)),
+            hit(6, 11),
             "a start inside the umlaut still reaches the next match",
         );
         assert_eq!(
             super::find_forward(&regex, &text, 11),
-            Some((0, 5)),
+            wrapped_hit(0, 5),
             "and with nothing after it, wraps rather than stalling there",
         );
 
         // Four bytes wide, so a start one byte in falls inside the character.
         let wide = stoat_text::Rope::from("\u{1F600}x\u{1F600}x");
         let regex = super::compile_cursor_regex("x").expect("valid regex");
-        assert_eq!(super::find_forward(&regex, &wide, 1), Some((4, 5)));
-        assert_eq!(super::find_forward(&regex, &wide, 6), Some((9, 10)));
+        assert_eq!(super::find_forward(&regex, &wide, 1), hit(4, 5));
+        assert_eq!(super::find_forward(&regex, &wide, 6), hit(9, 10));
     }
 
     /// Case-insensitive search folds non-ASCII pairs, not just ASCII ones.
@@ -563,7 +695,7 @@ mod tests {
         let regex = super::compile_cursor_regex("(?i)\u{DC}").expect("valid regex");
         assert_eq!(
             super::find_forward(&regex, &text, 0),
-            Some((1, 3)),
+            hit(1, 3),
             "an uppercase umlaut pattern matches the lowercase one",
         );
 
@@ -588,7 +720,7 @@ mod tests {
         let regex = super::compile_cursor_regex("").expect("valid regex");
         assert_eq!(
             super::find_forward(&regex, &text, 1),
-            Some((2, 2)),
+            hit(2, 2),
             "the boundary after the umlaut, not the byte inside it",
         );
     }
@@ -603,14 +735,14 @@ mod tests {
 
         assert_eq!(
             super::find_reverse(&regex, &text, 8),
-            Some((4, 6)),
+            hit(4, 6),
             "the nearest match before the cursor wins, not the first or last",
         );
-        assert_eq!(super::find_reverse(&regex, &text, 9), Some((8, 10)));
-        assert_eq!(super::find_reverse(&regex, &text, 5), Some((4, 6)));
+        assert_eq!(super::find_reverse(&regex, &text, 9), hit(8, 10));
+        assert_eq!(super::find_reverse(&regex, &text, 5), hit(4, 6));
         assert_eq!(
             super::find_reverse(&regex, &text, 0),
-            Some((8, 10)),
+            wrapped_hit(8, 10),
             "with nothing before the cursor it wraps to the last match",
         );
         assert_eq!(
@@ -638,7 +770,7 @@ mod tests {
         let needle = "needle_in_a_haystack";
         let regex = super::compile_cursor_regex(needle).expect("valid regex");
         let target = at + "the ".len();
-        let span = (target, target + needle.len());
+        let end = target + needle.len();
 
         assert!(
             rope.chunks().count() > 1,
@@ -646,17 +778,17 @@ mod tests {
         );
         assert_eq!(
             super::find_forward(&regex, &rope, 0),
-            Some(span),
+            hit(target, end),
             "found walking forward from the start"
         );
         assert_eq!(
             super::find_reverse(&regex, &rope, rope.len()),
-            Some(span),
+            hit(target, end),
             "and walking back from the end"
         );
         assert_eq!(
-            super::find_forward(&regex, &rope, span.1),
-            Some(span),
+            super::find_forward(&regex, &rope, end),
+            wrapped_hit(target, end),
             "and wrapping round when the selection covers it"
         );
     }
