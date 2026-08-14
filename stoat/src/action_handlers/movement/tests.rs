@@ -4645,6 +4645,115 @@ fn select_all_children_fans_to_each_named_child() {
     assert_eq!(spans, vec![(0, 9, false), (10, 19, false), (20, 29, false)]);
 }
 
+/// Alt-. after an expand expands again, rather than replaying the find that
+/// came before it.
+#[test]
+fn repeat_last_motion_replays_an_expand() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "fn main() {}\n");
+    h.open_file(&path);
+
+    h.type_keys("f a");
+    assert_eq!(h.primary_head_offset(), 4, "the find lands first");
+    dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+    let first = h.selection_spans()[0];
+
+    dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
+    let second = h.selection_spans()[0];
+    assert!(
+        second.0 <= first.0 && second.1 >= first.1 && second != first,
+        "the replay expands again ({first:?} -> {second:?})",
+    );
+}
+
+/// Alt-. after a shrink shrinks again, back down the path the expands took.
+#[test]
+fn repeat_last_motion_replays_a_shrink() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "fn main() {}\n");
+    h.open_file(&path);
+    h.type_keys("l l l");
+
+    dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+    let innermost = h.selection_spans()[0];
+    dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+    dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+    dispatch(&mut h.stoat, &stoat_action::ShrinkSelection);
+    let once_back = h.selection_spans()[0];
+
+    dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
+    let twice_back = h.selection_spans()[0];
+    assert_ne!(twice_back, once_back, "the replay shrinks again");
+    assert!(
+        twice_back.0 >= once_back.0 && twice_back.1 <= once_back.1,
+        "and it shrinks rather than growing ({once_back:?} -> {twice_back:?})",
+    );
+    assert_eq!(twice_back, innermost, "back where the expands started");
+}
+
+/// Alt-. after fanning to siblings fans again, which is a no-op once every
+/// sibling is already covered. The point is that it is not the earlier expand
+/// that runs.
+#[test]
+fn repeat_last_motion_replays_a_sibling_fan() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\nfn c() {}\n");
+    h.open_file(&path);
+    h.type_keys("l l l");
+
+    dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+    dispatch(&mut h.stoat, &stoat_action::SelectAllSiblings);
+    let fanned = h.selection_spans();
+    assert_eq!(
+        fanned,
+        vec![(0, 9, false), (10, 19, false), (20, 29, false)]
+    );
+
+    dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
+    assert_eq!(
+        h.selection_spans(),
+        fanned,
+        "the fan runs again, where a replayed expand would grow each span",
+    );
+}
+
+/// The children fan records itself the same way its sibling does, and a replay
+/// fans each span it produced down to that span's own children.
+#[test]
+fn repeat_last_motion_replays_a_children_fan() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\nfn c() {}\n");
+    h.open_file(&path);
+    h.type_keys("l l l");
+
+    dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+    dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+    dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+    dispatch(&mut h.stoat, &stoat_action::SelectAllChildren);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 9, false), (10, 19, false), (20, 29, false)],
+        "one span per function item",
+    );
+
+    dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
+    assert_eq!(
+        h.selection_spans(),
+        vec![
+            (3, 4, false),
+            (4, 6, false),
+            (7, 9, false),
+            (13, 14, false),
+            (14, 16, false),
+            (17, 19, false),
+            (23, 24, false),
+            (24, 26, false),
+            (27, 29, false)
+        ],
+        "each function item fans to its own name, parameters, and body",
+    );
+}
+
 #[test]
 fn select_all_siblings_no_op_without_syntax_map() {
     let mut h = TestHarness::with_size(40, 5);

@@ -2844,6 +2844,13 @@ pub(crate) enum ChangeDir {
 
 pub(super) fn expand_selection(stoat: &mut Stoat) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
+    expand_selection_impl(stoat, count)
+}
+
+/// [`expand_selection`] with its count supplied rather than read from the
+/// pending keypress, so a replay repeats the count the motion was made with.
+pub(crate) fn expand_selection_impl(stoat: &mut Stoat, count: u32) -> UpdateEffect {
+    stoat.last_motion = Some(LastMotion::ExpandSelection { count });
     let mut effect = UpdateEffect::None;
     for _ in 0..count {
         match expand_selection_step(stoat) {
@@ -2929,6 +2936,13 @@ fn deepest_containing_layer(
 
 pub(super) fn shrink_selection(stoat: &mut Stoat) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
+    shrink_selection_impl(stoat, count)
+}
+
+/// [`shrink_selection`] with its count supplied rather than read from the
+/// pending keypress, so a replay repeats the count the motion was made with.
+pub(crate) fn shrink_selection_impl(stoat: &mut Stoat, count: u32) -> UpdateEffect {
+    stoat.last_motion = Some(LastMotion::ShrinkSelection { count });
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -3047,11 +3061,13 @@ pub(crate) fn select_sibling_impl(
     UpdateEffect::Redraw
 }
 
-pub(super) fn select_all_siblings(stoat: &mut Stoat) -> UpdateEffect {
+pub(crate) fn select_all_siblings(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.last_motion = Some(LastMotion::SelectAllSiblings);
     fan_selections_to_children(stoat, true)
 }
 
-pub(super) fn select_all_children(stoat: &mut Stoat) -> UpdateEffect {
+pub(crate) fn select_all_children(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.last_motion = Some(LastMotion::SelectAllChildren);
     fan_selections_to_children(stoat, false)
 }
 

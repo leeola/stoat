@@ -62,6 +62,7 @@ pub(crate) fn execute_select_textobject(
     mode: TextobjectMode,
     ch: char,
 ) -> UpdateEffect {
+    stoat.last_motion = Some(crate::action_handlers::LastMotion::TextObject { mode, ch });
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -527,6 +528,29 @@ mod tests {
         jump(&mut h, 2);
         h.type_keys("m a p");
         assert_eq!(primary_range(&mut h), (0, 12));
+    }
+
+    /// Alt-. after the chord runs the chord again, without reading its type
+    /// char a second time.
+    ///
+    /// The mode and the char both come from keypresses the replay never sees.
+    /// A recording that dropped them leaves the chord unrepeatable.
+    #[test]
+    fn repeat_last_motion_replays_the_textobject_chord() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "alpha\nbeta\n\ngamma\n");
+        jump(&mut h, 2);
+
+        h.type_keys("m i p");
+        assert_eq!(primary_range(&mut h), (0, 11));
+
+        jump(&mut h, 14);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::RepeatLastMotion);
+        assert_eq!(
+            primary_range(&mut h),
+            (12, 18),
+            "the chord runs again on the paragraph the cursor moved to",
+        );
     }
 
     #[test]
