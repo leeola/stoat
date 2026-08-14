@@ -2901,49 +2901,81 @@ fn expand_selection_step(stoat: &mut Stoat) -> UpdateEffect {
         _ => return UpdateEffect::None,
     };
 
-    let (buffer_id, sel_start, sel_end) = {
-        let editor = ws.editors.get_mut(editor_id).expect("editor");
-        let buffer_id = editor.buffer_id;
-        let display_snapshot = editor.display_map.snapshot();
-        let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor();
-        let start = buffer_snapshot.resolve_anchor(&sel.start);
-        let end = buffer_snapshot.resolve_anchor(&sel.end);
-        (buffer_id, start, end)
+    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
+    let Some(syntax_map) = ws.buffers.syntax_map(buffer_id) else {
+        return UpdateEffect::None;
     };
+    let snapshot = syntax_map.snapshot();
 
-    let target = {
-        let Some(syntax_map) = ws.buffers.syntax_map(buffer_id) else {
-            return UpdateEffect::None;
-        };
-        let snapshot = syntax_map.snapshot();
-        let Some(layer) = deepest_containing_layer(snapshot, sel_start, sel_end) else {
-            return UpdateEffect::None;
-        };
-        let root = layer.tree.root_node();
-        let Some(node) = root.descendant_for_byte_range(sel_start, sel_end) else {
-            return UpdateEffect::None;
-        };
-        let node_range = node.byte_range();
-        if node_range.start == sel_start && node_range.end == sel_end {
-            match node.parent() {
-                Some(parent) => parent.byte_range(),
-                None => return UpdateEffect::None,
-            }
-        } else {
-            node_range
-        }
-    };
+    let editor = ws.editors.get_mut(editor_id).expect("editor");
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
 
-    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
-    let current_range = sel_start..sel_end;
-    if editor.expansion_tip.as_ref() != Some(&current_range) {
+    let before = editor.selections.shared_anchors();
+    let current_ranges = resolved_ranges(&before, buffer_snapshot);
+    if editor.expansion_tip.as_deref() != Some(current_ranges.as_slice()) {
         editor.expansion_history.clear();
     }
-    editor.expansion_history.push(current_range);
-    editor.expansion_tip = Some(target.clone());
-    apply_primary_range(editor, target);
+
+    let mut grew = false;
+    editor
+        .selections
+        .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
+            let (from, to) = (head_offset.min(tail_offset), head_offset.max(tail_offset));
+            let Some(target) = enclosing_node_range(snapshot, from, to) else {
+                return sel.clone();
+            };
+            grew = true;
+            // The direction the selection already had survives the expansion,
+            // so a reversed one stays reversed however far out it grows.
+            Selection {
+                id: sel.id,
+                start: buffer_snapshot.anchor_at(target.start, Bias::Right),
+                end: buffer_snapshot.anchor_at(target.end, Bias::Left),
+                reversed: sel.reversed,
+                goal: SelectionGoal::None,
+            }
+        });
+
+    if !grew {
+        return UpdateEffect::None;
+    }
+    editor.expansion_history.push(before);
+    let after = editor.selections.shared_anchors();
+    editor.expansion_tip = Some(resolved_ranges(&after, buffer_snapshot));
     UpdateEffect::Redraw
+}
+
+/// The byte range a selection spanning `from..to` expands to, which is the
+/// node covering it or that node's parent when the two already agree.
+fn enclosing_node_range(
+    snapshot: &stoat_language::SyntaxSnapshot,
+    from: usize,
+    to: usize,
+) -> Option<Range<usize>> {
+    let layer = deepest_containing_layer(snapshot, from, to)?;
+    let node = layer.tree.root_node().descendant_for_byte_range(from, to)?;
+    let node_range = node.byte_range();
+    if node_range.start == from && node_range.end == to {
+        Some(node.parent()?.byte_range())
+    } else {
+        Some(node_range)
+    }
+}
+
+/// Each selection's byte range, in the collection's order.
+fn resolved_ranges(
+    selections: &[Selection<Anchor>],
+    snapshot: &MultiBufferSnapshot,
+) -> Vec<Range<usize>> {
+    selections
+        .iter()
+        .map(|sel| {
+            let start = snapshot.resolve_anchor(&sel.start);
+            let end = snapshot.resolve_anchor(&sel.end);
+            start..end
+        })
+        .collect()
 }
 
 fn deepest_containing_layer(
@@ -2982,7 +3014,7 @@ pub(crate) fn shrink_selection_impl(stoat: &mut Stoat, count: u32) -> UpdateEffe
     };
 
     let editor = ws.editors.get_mut(editor_id).expect("editor");
-    let mut target: Option<Range<usize>> = None;
+    let mut target = None;
     for _ in 0..count {
         match editor.expansion_history.pop() {
             Some(t) => target = Some(t),
@@ -2992,8 +3024,12 @@ pub(crate) fn shrink_selection_impl(stoat: &mut Stoat, count: u32) -> UpdateEffe
     let Some(target) = target else {
         return UpdateEffect::None;
     };
-    editor.expansion_tip = Some(target.clone());
-    apply_primary_range(editor, target);
+    editor.selections.restore(target);
+
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let after = editor.selections.shared_anchors();
+    editor.expansion_tip = Some(resolved_ranges(&after, buffer_snapshot));
     UpdateEffect::Redraw
 }
 

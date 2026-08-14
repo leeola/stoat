@@ -4453,6 +4453,47 @@ fn expand_selection_grows_from_cursor_to_token() {
     assert_eq!(spans, [(3, 7, false)]);
 }
 
+/// Every selection expands around its own node rather than being stamped with
+/// one answer, so a multi-cursor set stays a set.
+#[test]
+fn expand_selection_expands_each_cursor_independently() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\n");
+    h.open_file(&path);
+    h.type_keys("l l l");
+    dispatch(&mut h.stoat, &AddSelectionBelow);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(3, 4, false), (13, 14, false)],
+        "one cursor on each function's name",
+    );
+
+    dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 9, false), (10, 19, false)],
+        "each grew to its own function item, still two selections",
+    );
+}
+
+/// A shrink puts the whole set back, since the history keeps sets rather than
+/// one range.
+#[test]
+fn shrink_selection_restores_every_selection() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\n");
+    h.open_file(&path);
+    h.type_keys("l l l");
+    dispatch(&mut h.stoat, &AddSelectionBelow);
+    let before = h.selection_spans();
+
+    dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+    assert_eq!(h.selection_spans(), vec![(0, 9, false), (10, 19, false)]);
+
+    dispatch(&mut h.stoat, &stoat_action::ShrinkSelection);
+    assert_eq!(h.selection_spans(), before, "back to both cursors");
+}
+
 #[test]
 fn expand_selection_walks_to_parent_when_already_on_node() {
     let mut h = TestHarness::with_size(40, 5);
