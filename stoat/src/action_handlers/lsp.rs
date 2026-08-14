@@ -1311,11 +1311,8 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
         };
         let placeholder = match response {
             PrepareRenameResponse::Range(range) => {
-                let start_off =
-                    crate::lsp::util::lsp_pos_to_byte_offset(&source_rope, range.start, encoding);
-                let end_off =
-                    crate::lsp::util::lsp_pos_to_byte_offset(&source_rope, range.end, encoding);
-                source_rope.slice(start_off..end_off).to_string()
+                let span = crate::lsp::util::lsp_range_to_byte_range(&source_rope, range, encoding);
+                source_rope.slice(span).to_string()
             },
             PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. } => placeholder,
             PrepareRenameResponse::DefaultBehavior { .. } => String::new(),
@@ -3822,6 +3819,40 @@ mod tests {
         let modal = h.stoat.rename_input.as_ref().expect("modal open");
         assert_eq!(modal.input.text(h.stoat.active_workspace()), "foo");
         assert_eq!(h.stoat.focused_mode(), "insert");
+    }
+
+    /// A range whose endpoints arrive out of order seeds an empty
+    /// placeholder rather than taking the editor down.
+    ///
+    /// A server that has not seen the latest edits answers over a document
+    /// state the buffer no longer holds, and a line past the buffer converts
+    /// to the rope's end. Either way the start offset lands above the end
+    /// offset, and the rope slice then subtracts the chunk start from the
+    /// smaller end offset and underflows.
+    ///
+    /// The fixture spans several rope chunks because the arithmetic only
+    /// underflows once the two offsets fall in different ones.
+    #[test]
+    fn rename_range_response_with_an_inverted_range_seeds_nothing() {
+        use lsp_types::{Position as LspPosition, PrepareRenameResponse, Range as LspRange};
+        let mut h = TestHarness::with_size(80, 24);
+        enable_rename(&h);
+        let root = seed(&mut h, &[("main.rs", &"fn foo() {}\n".repeat(20))]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_prepare_rename(
+            path.to_str().unwrap(),
+            0,
+            0,
+            PrepareRenameResponse::Range(LspRange::new(
+                LspPosition::new(19, 0),
+                LspPosition::new(0, 6),
+            )),
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RenameSymbol);
+        h.settle();
+        let modal = h.stoat.rename_input.as_ref().expect("modal open");
+        assert_eq!(modal.input.text(h.stoat.active_workspace()), "");
     }
 
     #[test]
