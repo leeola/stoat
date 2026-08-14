@@ -287,6 +287,7 @@ action_kinds! {
     DeleteSelection,
     DeleteSelectionNoYank,
     ChangeSelection,
+    ChangeSelectionNoYank,
     Undo,
     Redo,
     CommitUndoCheckpoint,

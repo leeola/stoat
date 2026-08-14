@@ -394,6 +394,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::DeleteSelection => movement::delete_selection(stoat),
         ActionKind::DeleteSelectionNoYank => movement::delete_selection_no_yank(stoat),
         ActionKind::ChangeSelection => movement::change_selection(stoat),
+        ActionKind::ChangeSelectionNoYank => movement::change_selection_no_yank(stoat),
         ActionKind::Undo => movement::undo(stoat),
         ActionKind::Redo => movement::redo(stoat),
         ActionKind::CommitUndoCheckpoint => movement::commit_undo_checkpoint(stoat),

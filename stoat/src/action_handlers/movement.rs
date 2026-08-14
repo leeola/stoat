@@ -1809,8 +1809,17 @@ fn delete_selection_impl(stoat: &mut Stoat, yank: bool) -> UpdateEffect {
 /// following insert types on its own line, matching Helix's linewise change. A
 /// partial-line selection is deleted in place.
 pub(super) fn change_selection(stoat: &mut Stoat) -> UpdateEffect {
+    change_selection_impl(stoat, true)
+}
+
+/// Like [`change_selection`], but the deleted text does not reach any register.
+pub(super) fn change_selection_no_yank(stoat: &mut Stoat) -> UpdateEffect {
+    change_selection_impl(stoat, false)
+}
+
+fn change_selection_impl(stoat: &mut Stoat, yank: bool) -> UpdateEffect {
     let whole_lines = selections_are_whole_lines(stoat);
-    let deleted = delete_selection_impl(stoat, true);
+    let deleted = delete_selection_impl(stoat, yank);
     if whole_lines {
         open_line(stoat, OpenDir::Above, CommentContinuation::Disabled)
     } else {

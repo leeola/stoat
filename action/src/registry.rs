@@ -15,9 +15,9 @@ use crate::{
         editor::{
             AcceptCompletion, AddSelectionAbove, AddSelectionBelow, AlignSelections,
             AlignViewBottom, AlignViewCenter, AlignViewTop, AppendMode, ChangeSelection,
-            CloseBuffer, CollapseSelection, CommitUndoCheckpoint, Decrement, DeleteSelection,
-            DeleteSelectionNoYank, EnsureSelectionsForward, EnterInsertMode, ExpandSelection,
-            ExtendDown, ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn,
+            ChangeSelectionNoYank, CloseBuffer, CollapseSelection, CommitUndoCheckpoint, Decrement,
+            DeleteSelection, DeleteSelectionNoYank, EnsureSelectionsForward, EnterInsertMode,
+            ExpandSelection, ExtendDown, ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn,
             ExtendGotoFileStart, ExtendGotoFirstNonwhitespace, ExtendGotoLastLine,
             ExtendGotoWindowBottom, ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft,
             ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart, ExtendNextWordEnd,
@@ -839,6 +839,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(DeleteSelectionNoYank))
     });
     add(ChangeSelection::DEF, |_| Ok(Box::new(ChangeSelection)));
+    add(ChangeSelectionNoYank::DEF, |_| {
+        Ok(Box::new(ChangeSelectionNoYank))
+    });
     add(Undo::DEF, |_| Ok(Box::new(Undo)));
     add(Redo::DEF, |_| Ok(Box::new(Redo)));
     add(CommitUndoCheckpoint::DEF, |_| {
@@ -1281,6 +1284,7 @@ mod tests {
         "Yank",
         "DeleteSelectionNoYank",
         "ChangeSelection",
+        "ChangeSelectionNoYank",
         "PasteAfter",
         "PasteBefore",
         "YankToClipboard",
@@ -1737,6 +1741,7 @@ mod tests {
         // + 1 DeleteSelection.
         // + 1 DeleteSelectionNoYank.
         // + 1 ChangeSelection.
+        // + 1 ChangeSelectionNoYank.
         // + 2 line indent ops (IndentSelection/UnindentSelection).
         // + 1 AlignSelections.
         // + 1 Undo.
@@ -1885,7 +1890,7 @@ mod tests {
         // + 2 MergeSelections/MergeConsecutiveSelections.
         // + 2 SearchSelection/SearchSelectionDetectWordBoundaries.
         // + 2 ExtendSearchNext/ExtendSearchPrev.
-        assert_eq!(all().count(), 441);
+        assert_eq!(all().count(), 442);
     }
 
     #[test]

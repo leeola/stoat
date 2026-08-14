@@ -91,6 +91,16 @@ define_action!(
 );
 
 define_action!(
+    ChangeSelectionNoYankDef,
+    ChangeSelectionNoYank,
+    "ChangeSelectionNoYank",
+    ActionKind::ChangeSelectionNoYank,
+    "change selected text without yanking",
+    "Delete every non-empty selection without copying the removed text to any register, then, when every selection covered whole lines, open a fresh auto-indented line above the deletion so the following insert types on its own line. A partial-line selection is deleted in place. Pair with entering insert mode.",
+    ActionPriority::Rare
+);
+
+define_action!(
     UndoDef,
     Undo,
     "Undo",

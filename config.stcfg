@@ -379,7 +379,7 @@ on key {
         o -> [OpenBelow(), SetMode(insert)];
         O -> [OpenAbove(), SetMode(insert)];
         c -> [ChangeSelection(), SetMode(insert)];
-        Alt-c -> [DeleteSelectionNoYank(), SetMode(insert)];
+        Alt-c -> [ChangeSelectionNoYank(), SetMode(insert)];
         r -> ReplaceChar();
         v -> SetMode(select);
         C -> AddSelectionBelow();
@@ -604,7 +604,7 @@ on key {
         d -> [DeleteSelection(), SetMode(normal)];
         Alt-d -> [DeleteSelectionNoYank(), SetMode(normal)];
         c -> [ChangeSelection(), SetMode(insert)];
-        Alt-c -> [DeleteSelectionNoYank(), SetMode(insert)];
+        Alt-c -> [ChangeSelectionNoYank(), SetMode(insert)];
         r -> ReplaceChar();
         y -> [Yank(), SetMode(normal)];
         R -> [ReplaceWithYanked(), SetMode(normal)];

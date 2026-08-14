@@ -15083,6 +15083,38 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "XYZef");
     }
 
+    /// Alt-c is change, not delete, so it opens the replacement line.
+    ///
+    /// Both keys delete the selection and enter insert. Only change opens a
+    /// line above a whole-line deletion, so a binding built out of a delete
+    /// types the replacement onto the line that followed instead.
+    #[test]
+    fn a_no_yank_change_of_whole_lines_opens_a_line_to_type_on() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "aaa\nbbb\n");
+        h.type_keys("x");
+        h.type_keys("alt-c");
+        h.type_text("Z");
+        assert_eq!(buffer_text(&h, &path), "Z\nbbb\n");
+    }
+
+    /// Alt-c keeps the deleted text out of every register, the way Alt-d does.
+    #[test]
+    fn a_no_yank_change_leaves_the_register_alone() {
+        use crate::register::Register;
+
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "aaa\nbbb\n");
+        h.type_keys("y");
+        h.type_keys("x");
+        h.type_keys("alt-c");
+        assert_eq!(
+            h.stoat.registers.read(Register::Unnamed),
+            Some(["a".to_string()].as_slice()),
+            "the earlier yank survives, since the change writes no register",
+        );
+    }
+
     #[test]
     fn replace_char_replaces_each_char_in_selection() {
         let mut h = Stoat::test();
