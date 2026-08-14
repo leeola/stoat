@@ -1043,6 +1043,13 @@ fn begin_action_group(stoat: &mut Stoat) -> Option<BufferId> {
 /// sealing an untouched one discards them. Most actions edit nothing, and
 /// gathering costs a copy of the whole selection set.
 fn end_action_group(stoat: &mut Stoat, buffer_id: Option<BufferId>) {
+    // An insert-entry chord runs its editing half before the mode switch, and
+    // the two are one change to the user. Leaving the group open lets the
+    // insert session adopt it, so the edit and everything typed into it undo
+    // together.
+    if stoat.group_held_for_insert {
+        return;
+    }
     let Some(buffer_id) = buffer_id else {
         return;
     };

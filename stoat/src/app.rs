@@ -1003,6 +1003,19 @@ pub struct Stoat {
     /// appended-over) char rather than one cell past it. It is cleared on the
     /// insert-to-normal transition. Other insert entries never set it.
     pub(crate) restore_cursor: bool,
+    /// Set while dispatching a key whose action list switches to insert mode,
+    /// so an editing action in that list leaves its undo group open for the
+    /// insert session to adopt.
+    ///
+    /// The insert-entry keys are `[Action(), SetMode(insert)]` pairs, and the
+    /// user made one change, not two. Sealing between the two halves puts the
+    /// edit and the typing in separate revisions, so one undo takes back only
+    /// the typing.
+    ///
+    /// Only the key-dispatch loop sets it, since it is the only caller that
+    /// sees a whole action list before running it. An action dispatched from
+    /// the palette keeps the per-action grouping.
+    pub(crate) group_held_for_insert: bool,
     /// Selection IDs whose line was auto-indented by the insert entry
     /// (`o`/`O`/`I`/`A` on an empty line). The insert-to-normal transition
     /// takes it and, when the session typed nothing, strips each recorded
@@ -1943,6 +1956,7 @@ impl Stoat {
             last_insert_text: None,
             current_insert_run: None,
             restore_cursor: false,
+            group_held_for_insert: false,
             auto_indent_cursors: Vec::new(),
             registers: register::RegisterStore::new(),
             pending_register_select: false,
@@ -4168,6 +4182,17 @@ impl Stoat {
         let mut dispatched_code_action = false;
         let mut dispatched_rename_symbol = false;
         let mut dispatched_symbol_picker = false;
+        // The editing half of an insert-entry chord runs before the mode
+        // switch, so it has to know the switch follows and leave its undo
+        // group open for the session to adopt.
+        self.group_held_for_insert = actions.iter().any(|ra| {
+            ra.name == "SetMode"
+                && ra
+                    .args
+                    .first()
+                    .and_then(keymap_state::arg_as_str)
+                    .is_some_and(|mode| mode.as_str() == "insert")
+        });
         for ra in actions.iter() {
             if ra.name == "SetMode" {
                 if let Some(mode_name) = ra.args.first().and_then(keymap_state::arg_as_str) {
@@ -4203,6 +4228,9 @@ impl Stoat {
                 }
             }
         }
+        // The chord is over, so a later dispatch from anywhere else seals its
+        // own group again.
+        self.group_held_for_insert = false;
         if dispatched_action {
             self.pending_count = None;
             if !dispatched_hover {
@@ -4963,12 +4991,17 @@ impl Stoat {
 
     /// Open an undo group so the whole insert session collapses into one undo
     /// step, capturing the pre-session selections to restore on undo.
+    ///
+    /// A group left open by the editing half of an insert-entry chord is
+    /// adopted rather than sealed, so the change and the typing land in one
+    /// revision. Its own pre-action selections are what undo restores, which is
+    /// the selection the user had before the change.
     fn begin_insert_undo_group(&mut self) {
         let Some((buffer_id, before)) = self.focused_undo_snapshot() else {
             return;
         };
         if let Some(buffer) = self.active_workspace().buffers.get(buffer_id) {
-            buffer.write().expect("poisoned").begin_group(before);
+            buffer.write().expect("poisoned").try_begin_group(|| before);
         }
     }
 
@@ -14366,6 +14399,61 @@ mod tests {
             "hello",
             "one redo restores the whole session"
         );
+    }
+
+    /// A change and the text typed into it are one revision, so one undo takes
+    /// back both.
+    ///
+    /// The two arrive as one chord, `[ChangeSelection(), SetMode(insert)]`, and
+    /// the user made one change. Sealing between the halves leaves the delete
+    /// standing after an undo, which is a state they never asked for.
+    #[test]
+    fn change_selection_and_typing_undo_as_one_step() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "foo bar\n");
+        h.type_keys("w");
+        let before = h.selection_spans();
+
+        h.type_keys("c");
+        h.type_text("X");
+        h.type_keys("esc");
+        assert_eq!(buffer_text(&h, &path), "Xbar\n");
+
+        h.type_keys("u");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "foo bar\n",
+            "one undo takes back the change and the typing together",
+        );
+        assert_eq!(
+            h.selection_spans(),
+            before,
+            "and restores the selection the change was made from",
+        );
+
+        h.type_keys("U");
+        assert_eq!(buffer_text(&h, &path), "Xbar\n", "one redo puts both back");
+    }
+
+    /// Opening a line and typing into it are likewise one revision.
+    #[test]
+    fn open_below_and_typing_undo_as_one_step() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "foo\n");
+        h.type_keys("o");
+        h.type_text("bar");
+        h.type_keys("esc");
+        assert_eq!(buffer_text(&h, &path), "foo\nbar\n");
+
+        h.type_keys("u");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "foo\n",
+            "the opened line goes with the text typed into it",
+        );
+
+        h.type_keys("U");
+        assert_eq!(buffer_text(&h, &path), "foo\nbar\n");
     }
 
     #[test]
