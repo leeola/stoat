@@ -20,13 +20,13 @@ use crate::{
             ExpandSelection, ExtendDown, ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn,
             ExtendGotoFileStart, ExtendGotoFirstNonwhitespace, ExtendGotoLastLine,
             ExtendGotoNextParagraph, ExtendGotoPrevParagraph, ExtendGotoWindowBottom,
-            ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft, ExtendMoveParentNodeEnd,
-            ExtendMoveParentNodeStart, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd,
-            ExtendPrevWordStart, ExtendRight, ExtendSearchNext, ExtendSearchPrev,
-            ExtendSelectNextSibling, ExtendSelectPrevSibling, ExtendTillNextChar,
-            ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine, ExtendToLineBounds,
-            ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar,
-            FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
+            ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft, ExtendLineDown, ExtendLineUp,
+            ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart, ExtendNextWordEnd,
+            ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
+            ExtendSearchNext, ExtendSearchPrev, ExtendSelectNextSibling, ExtendSelectPrevSibling,
+            ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine,
+            ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar,
+            FindPrevChar, FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
             GotoDiffCallerUp, GotoFileStart, GotoFirstNonwhitespace, GotoImplementors,
             GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact,
             GotoNextChange, GotoNextClass, GotoNextFunction, GotoNextParagraph, GotoPrevChange,
@@ -35,26 +35,27 @@ use crate::{
             IndentSelection, InsertAtLineEnd, InsertAtLineStart, InsertRegister, InsertTab,
             JoinSelections, JoinSelectionsSpace, JumpBackward, JumpForward, KeepPrimarySelection,
             KeepSelections, MarkTrailEnd, MarkTrailStart, MatchBrackets,
-            MergeConsecutiveSelections, MergeSelections, MoveDown, MoveLeft, MoveNextLongWordEnd,
-            MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd,
-            MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd,
-            MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow, OpenCodeSearch,
-            OpenJumplistPicker, OpenLastPicker, OpenReverseSearchInput, OpenSearchInput, PageDown,
-            PageUp, PasteAfter, PasteBefore, PasteClipboardAfter, PasteClipboardBefore,
-            RecordMacro, Redo, RemovePrimarySelection, RemoveSelections, RepeatLastMotion,
-            ReplaceChar, ReplaceWithYanked, ReplayMacro, RotateSelectionContentsBackward,
-            RotateSelectionContentsForward, RotateSelectionsBackward, RotateSelectionsForward,
-            SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev,
-            SearchSelection, SearchSelectionDetectWordBoundaries, SelectAll, SelectAllChildren,
-            SelectAllSiblings, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegex,
-            SelectRegister, SelectTextobjectAround, SelectTextobjectInner, SetMark,
-            ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
-            ShrinkSelection, ShrinkToLineBounds, SmartTab, SplitSelection, SplitSelectionOnNewline,
-            SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase,
-            SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints,
-            ToggleLspStatus, ToggleSyntaxHighlight, TrailClear, TrailNext, TrailPrev,
-            TriggerCompletion, TrimSelections, Undo, UnindentSelection, WriteQuit, Yank,
-            YankMainToClipboard, YankToClipboard,
+            MergeConsecutiveSelections, MergeSelections, MoveDown, MoveLeft, MoveLineDown,
+            MoveLineUp, MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd,
+            MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd,
+            MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp,
+            OpenAbove, OpenBelow, OpenCodeSearch, OpenJumplistPicker, OpenLastPicker,
+            OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore,
+            PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection,
+            RemoveSelections, RepeatLastMotion, ReplaceChar, ReplaceWithYanked, ReplayMacro,
+            RotateSelectionContentsBackward, RotateSelectionContentsForward,
+            RotateSelectionsBackward, RotateSelectionsForward, SaveBuffer, SaveSelection,
+            ScrollDown, ScrollUp, SearchNext, SearchPrev, SearchSelection,
+            SearchSelectionDetectWordBoundaries, SelectAll, SelectAllChildren, SelectAllSiblings,
+            SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegex, SelectRegister,
+            SelectTextobjectAround, SelectTextobjectInner, SetMark, ShellAppendOutput,
+            ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo, ShrinkSelection,
+            ShrinkToLineBounds, SmartTab, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
+            SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
+            TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints, ToggleLspStatus,
+            ToggleSyntaxHighlight, TrailClear, TrailNext, TrailPrev, TriggerCompletion,
+            TrimSelections, Undo, UnindentSelection, WriteQuit, Yank, YankMainToClipboard,
+            YankToClipboard,
         },
         file::{
             AutoReload, AutoReloadConfig, FontSizeDec, FontSizeInc, ForceReloadAll,
@@ -478,6 +479,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(MoveRight::DEF, |_| Ok(Box::new(MoveRight)));
     add(MoveUp::DEF, |_| Ok(Box::new(MoveUp)));
     add(MoveDown::DEF, |_| Ok(Box::new(MoveDown)));
+    add(MoveLineUp::DEF, |_| Ok(Box::new(MoveLineUp)));
+    add(MoveLineDown::DEF, |_| Ok(Box::new(MoveLineDown)));
     add(PageUp::DEF, |_| Ok(Box::new(PageUp)));
     add(PageDown::DEF, |_| Ok(Box::new(PageDown)));
     add(HalfPageUp::DEF, |_| Ok(Box::new(HalfPageUp)));
@@ -502,6 +505,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ExtendRight::DEF, |_| Ok(Box::new(ExtendRight)));
     add(ExtendUp::DEF, |_| Ok(Box::new(ExtendUp)));
     add(ExtendDown::DEF, |_| Ok(Box::new(ExtendDown)));
+    add(ExtendLineUp::DEF, |_| Ok(Box::new(ExtendLineUp)));
+    add(ExtendLineDown::DEF, |_| Ok(Box::new(ExtendLineDown)));
     add(ExtendNextWordStart::DEF, |_| {
         Ok(Box::new(ExtendNextWordStart))
     });
@@ -1898,7 +1903,8 @@ mod tests {
         // + 2 MergeSelections/MergeConsecutiveSelections.
         // + 2 SearchSelection/SearchSelectionDetectWordBoundaries.
         // + 2 ExtendSearchNext/ExtendSearchPrev.
-        assert_eq!(all().count(), 444);
+        // + 4 MoveLineUp/MoveLineDown and their extend variants.
+        assert_eq!(all().count(), 448);
     }
 
     #[test]

@@ -523,6 +523,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::MoveRight => movement::move_horizontal(stoat, 1, false),
         ActionKind::MoveUp => movement::move_vertical(stoat, -1, false),
         ActionKind::MoveDown => movement::move_vertical(stoat, 1, false),
+        ActionKind::MoveLineUp => movement::move_vertical_by_line(stoat, -1, false),
+        ActionKind::MoveLineDown => movement::move_vertical_by_line(stoat, 1, false),
         ActionKind::PageUp => view::page_motion(stoat, view::PageDir::Up, false),
         ActionKind::PageDown => view::page_motion(stoat, view::PageDir::Down, false),
         ActionKind::HalfPageUp => view::page_motion(stoat, view::PageDir::Up, true),
@@ -555,6 +557,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ExtendRight => movement::move_horizontal(stoat, 1, true),
         ActionKind::ExtendUp => movement::move_vertical(stoat, -1, true),
         ActionKind::ExtendDown => movement::move_vertical(stoat, 1, true),
+        ActionKind::ExtendLineUp => movement::move_vertical_by_line(stoat, -1, true),
+        ActionKind::ExtendLineDown => movement::move_vertical_by_line(stoat, 1, true),
         ActionKind::ExtendNextWordStart => {
             movement::move_word(stoat, movement::WordTarget::NextStart, true)
         },

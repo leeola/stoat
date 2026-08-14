@@ -234,6 +234,46 @@ define_action!(
 );
 
 define_action!(
+    MoveLineUpDef,
+    MoveLineUp,
+    "MoveLineUp",
+    ActionKind::MoveLineUp,
+    "move cursor up one text line",
+    "Move every cursor one line of the buffer up, landing on the first display row of that line at the goal column. A soft-wrapped line is one step whatever it takes to draw, where `MoveUp` steps a single display row. Unbound by default.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    MoveLineDownDef,
+    MoveLineDown,
+    "MoveLineDown",
+    ActionKind::MoveLineDown,
+    "move cursor down one text line",
+    "Move every cursor one line of the buffer down, landing on the first display row of that line at the goal column. A soft-wrapped line is one step whatever it takes to draw, where `MoveDown` steps a single display row. Unbound by default.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendLineUpDef,
+    ExtendLineUp,
+    "ExtendLineUp",
+    ActionKind::ExtendLineUp,
+    "extend up one text line",
+    "Like `MoveLineUp` but extends each selection rather than replacing it.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendLineDownDef,
+    ExtendLineDown,
+    "ExtendLineDown",
+    ActionKind::ExtendLineDown,
+    "extend down one text line",
+    "Like `MoveLineDown` but extends each selection rather than replacing it.",
+    ActionPriority::Rare
+);
+
+define_action!(
     PageUpDef,
     PageUp,
     "PageUp",

@@ -256,7 +256,31 @@ pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32, extend: bool) -> Up
     UpdateEffect::Redraw
 }
 
+/// The rows a vertical motion counts.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(super) enum VerticalStep {
+    /// Rows on the screen, so a soft-wrapped line takes as many presses to
+    /// cross as it takes rows to draw. Backs `j` and `k`.
+    ScreenRow,
+    /// Rows in the text, so a soft-wrapped line is one press however it draws.
+    /// The unbound counterpart, for a user who binds it.
+    TextLine,
+}
+
 pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> UpdateEffect {
+    move_vertical_by(stoat, delta, extend, VerticalStep::ScreenRow)
+}
+
+pub(super) fn move_vertical_by_line(stoat: &mut Stoat, delta: i32, extend: bool) -> UpdateEffect {
+    move_vertical_by(stoat, delta, extend, VerticalStep::TextLine)
+}
+
+fn move_vertical_by(
+    stoat: &mut Stoat,
+    delta: i32,
+    extend: bool,
+    step: VerticalStep,
+) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
     let delta = (delta as i64).saturating_mul(count as i64);
     // Clip toward the direction of travel so a block row (e.g. a review
@@ -296,9 +320,20 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
             SelectionGoal::Column(c) => c,
             SelectionGoal::None => cursor_display.column,
         };
-        let new_row = (cursor_display.row as i64)
-            .saturating_add(delta)
-            .clamp(0, max_display_row as i64) as u32;
+        // A text-line step counts rows in the buffer, then aims at the target
+        // line's first screen row. The goal column stays a screen column either
+        // way, so the two steps differ only in how far a wrap carries them.
+        let new_row = match step {
+            VerticalStep::ScreenRow => (cursor_display.row as i64)
+                .saturating_add(delta)
+                .clamp(0, max_display_row as i64) as u32,
+            VerticalStep::TextLine => {
+                let line = (cursor_pt.row as i64)
+                    .saturating_add(delta)
+                    .clamp(0, max_row as i64) as u32;
+                display_snapshot.buffer_to_display(Point::new(line, 0)).row
+            },
+        };
         // A plain j/k at the file edge stays a no-op. An overshooting count jump
         // lands on the clamped edge row rather than doing nothing.
         if new_row == cursor_display.row {

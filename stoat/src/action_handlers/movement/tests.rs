@@ -585,6 +585,31 @@ fn the_vertical_goal_counts_cells_along_the_display_row() {
     assert_eq!(focused_cursor_point(&mut h.stoat), Point::new(0, 15));
 }
 
+/// The text-line step crosses a wrapped line whole, where the screen-row step
+/// takes one of its rows at a time.
+///
+/// It is unbound, so the only way to reach it is a user's own binding. The
+/// split exists because the two are genuinely different motions once a line
+/// draws over several rows.
+#[test]
+fn the_text_line_step_crosses_a_wrapped_line_whole() {
+    let mut h = wrapped_pane_cursor_on_short_line();
+    move_vertical_by_line(&mut h.stoat, -1, false);
+    assert_eq!(
+        focused_cursor_point(&mut h.stoat),
+        Point::new(0, 0),
+        "one step reaches the wrapped line's first row, not its last",
+    );
+}
+
+/// Extending by a text line reaches the same place a plain one does.
+#[test]
+fn the_text_line_step_extends_the_same_way() {
+    let mut h = wrapped_pane_cursor_on_short_line();
+    move_vertical_by_line(&mut h.stoat, -1, true);
+    assert_eq!(focused_cursor_point(&mut h.stoat), Point::new(0, 0));
+}
+
 #[test]
 fn extend_up_under_wrap_extends_the_head_by_a_screen_row() {
     let mut h = wrapped_pane_cursor_on_short_line();
