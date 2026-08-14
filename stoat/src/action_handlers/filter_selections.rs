@@ -54,6 +54,7 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
         return true;
     }
     let Some(regex) = super::search::compile_cursor_regex(&query) else {
+        stoat.set_status(format!("invalid regex: {query}"));
         return true;
     };
     let Some(editor) = super::focused_editor_mut(stoat) else {
@@ -203,6 +204,11 @@ mod tests {
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         let spans = editor::selection_spans(&mut h.stoat);
         assert_eq!(spans, vec![(0, 3, false), (4, 7, false)]);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("invalid regex: [unclosed"),
+            "the pattern that failed is quoted back",
+        );
     }
 
     #[test]

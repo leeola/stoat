@@ -109,6 +109,9 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     {
         super::jump::push_entry(stoat, entry);
     }
+    if last.regex.is_none() {
+        stoat.set_status(format!("invalid regex: {}", last.query));
+    }
     // The query reaches the frame directly rather than through any display
     // layer, so nothing else would report that the highlighted matches moved.
     stoat.paint_generation += 1;
@@ -155,8 +158,11 @@ fn repeat_search(
     resolve: impl Fn(SearchDirection) -> SearchDirection,
 ) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1).max(1);
+    // Redraw either way, since a stored pattern that never compiled reports
+    // from here. A press with no search at all repaints for nothing, which
+    // costs one frame and keeps the branch simple.
     let Some((regex, direction)) = repeat_target(stoat) else {
-        return UpdateEffect::None;
+        return UpdateEffect::Redraw;
     };
     let direction = resolve(direction);
 
@@ -179,11 +185,22 @@ fn repeat_search(
 /// The pattern and direction a repeat press searches with, or `None` when
 /// nothing has been searched for or the stored pattern never compiled.
 ///
+/// Reports the stored pattern that never compiled, and stays silent when no
+/// search has happened at all. The user typed a pattern in the first case and
+/// earned an answer. The second names nothing that failed.
+///
 /// Clones the regex, which is a refcount bump, rather than the whole
-/// [`LastSearch`], which would copy the query text on every press.
-fn repeat_target(stoat: &Stoat) -> Option<(CursorRegex, SearchDirection)> {
+/// [`LastSearch`], which copies the query text on every press. The query is
+/// copied on the failure arm alone, which is not a press being repeated.
+fn repeat_target(stoat: &mut Stoat) -> Option<(CursorRegex, SearchDirection)> {
     let last = stoat.last_search.as_ref()?;
-    Some((last.regex.clone()?, last.direction))
+    if let Some(regex) = last.regex.clone() {
+        return Some((regex, last.direction));
+    }
+
+    let query = last.query.clone();
+    stoat.set_status(format!("invalid regex: {query}"));
+    None
 }
 
 /// How a search step ended, which is what `n` and `N` report and a submitted
@@ -854,10 +871,18 @@ mod tests {
             Some("["),
         );
         assert_eq!(
-            crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext),
-            crate::app::UpdateEffect::None,
-            "repeating a pattern that never compiled stays a no-op",
+            h.stoat.pending_message.as_deref(),
+            Some("invalid regex: ["),
+            "the submit says why nothing happened",
         );
+
+        h.stoat.pending_message = None;
+        assert_eq!(
+            crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext),
+            crate::app::UpdateEffect::Redraw,
+            "and the repeat repaints to say it again",
+        );
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("invalid regex: ["),);
     }
 
     /// Submitting a search moves the paint generation, and moving the cursor
