@@ -3109,20 +3109,15 @@ pub(crate) enum SiblingDir {
     Prev,
 }
 
-pub(super) fn select_sibling(stoat: &mut Stoat, dir: SiblingDir, extend: bool) -> UpdateEffect {
+pub(super) fn select_sibling(stoat: &mut Stoat, dir: SiblingDir) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
-    select_sibling_impl(stoat, dir, extend, count)
+    select_sibling_impl(stoat, dir, count)
 }
 
 /// [`select_sibling`] with its count supplied rather than read from the pending
 /// keypress, so a replay repeats the count the motion was made with.
-pub(crate) fn select_sibling_impl(
-    stoat: &mut Stoat,
-    dir: SiblingDir,
-    extend: bool,
-    count: u32,
-) -> UpdateEffect {
-    stoat.last_motion = Some(LastMotion::TsSibling { dir, count, extend });
+pub(crate) fn select_sibling_impl(stoat: &mut Stoat, dir: SiblingDir, count: u32) -> UpdateEffect {
+    stoat.last_motion = Some(LastMotion::TsSibling { dir, count });
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -3139,26 +3134,6 @@ pub(crate) fn select_sibling_impl(
     let editor = ws.editors.get_mut(editor_id).expect("editor");
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
-
-    if extend {
-        let rope = buffer_snapshot.rope();
-        // Crossing to a sibling moves horizontally, so it drops any column a
-        // prior vertical move held. A carried column sends the next vertical
-        // move back to the column the sibling was reached from.
-        move_cursors(&mut editor.selections, buffer_snapshot, true, |read| {
-            let (from, to) = (read.head.min(read.tail), read.head.max(read.tail));
-            let target = sibling_range(snapshot, from, to, dir, count)?;
-            // The sibling's end is one past its last character, so going
-            // forward steps back onto the cell the block cursor covers. Going
-            // backward the node's start is already that cell.
-            let cursor = match dir {
-                SiblingDir::Next => rope.prev_grapheme_boundary(target.end),
-                SiblingDir::Prev => target.start,
-            };
-            Some((cursor, SelectionGoal::None))
-        });
-        return UpdateEffect::Redraw;
-    }
 
     let mut moved = false;
     editor

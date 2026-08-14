@@ -23,18 +23,18 @@ use crate::{
             ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft, ExtendLineDown, ExtendLineUp,
             ExtendMatchBrackets, ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart,
             ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart,
-            ExtendRight, ExtendSearchNext, ExtendSearchPrev, ExtendSelectNextSibling,
-            ExtendSelectPrevSibling, ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart,
-            ExtendToLastLine, ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
-            FindNextChar, FindPrevChar, FlipSelections, GotoCallee, GotoCaller, GotoColumn,
-            GotoDiffCalleeDown, GotoDiffCallerUp, GotoFileStart, GotoFirstNonwhitespace,
-            GotoImplementors, GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark,
-            GotoMarkExact, GotoNextChange, GotoNextClass, GotoNextFunction, GotoNextParagraph,
-            GotoPrevChange, GotoPrevClass, GotoPrevFunction, GotoPrevParagraph, GotoReferences,
-            GotoWindowBottom, GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp,
-            Increment, IndentSelection, InsertAtLineEnd, InsertAtLineStart, InsertRegister,
-            InsertTab, JoinSelections, JoinSelectionsSpace, JumpBackward, JumpForward,
-            KeepPrimarySelection, KeepSelections, MarkTrailEnd, MarkTrailStart, MatchBrackets,
+            ExtendRight, ExtendSearchNext, ExtendSearchPrev, ExtendTillNextChar,
+            ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine, ExtendToLineBounds,
+            ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar,
+            FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
+            GotoDiffCallerUp, GotoFileStart, GotoFirstNonwhitespace, GotoImplementors,
+            GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact,
+            GotoNextChange, GotoNextClass, GotoNextFunction, GotoNextParagraph, GotoPrevChange,
+            GotoPrevClass, GotoPrevFunction, GotoPrevParagraph, GotoReferences, GotoWindowBottom,
+            GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp, Increment,
+            IndentSelection, InsertAtLineEnd, InsertAtLineStart, InsertRegister, InsertTab,
+            JoinSelections, JoinSelectionsSpace, JumpBackward, JumpForward, KeepPrimarySelection,
+            KeepSelections, MarkTrailEnd, MarkTrailStart, MatchBrackets,
             MergeConsecutiveSelections, MergeSelections, MoveDown, MoveLeft, MoveLineDown,
             MoveLineUp, MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd,
             MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd,
@@ -517,12 +517,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(SelectPrevSibling::DEF, |_| Ok(Box::new(SelectPrevSibling)));
     add(SelectAllSiblings::DEF, |_| Ok(Box::new(SelectAllSiblings)));
     add(SelectAllChildren::DEF, |_| Ok(Box::new(SelectAllChildren)));
-    add(ExtendSelectNextSibling::DEF, |_| {
-        Ok(Box::new(ExtendSelectNextSibling))
-    });
-    add(ExtendSelectPrevSibling::DEF, |_| {
-        Ok(Box::new(ExtendSelectPrevSibling))
-    });
     add(MoveParentNodeStart::DEF, |_| {
         Ok(Box::new(MoveParentNodeStart))
     });
@@ -1797,7 +1791,6 @@ mod tests {
         //   WindowBottom}.
         // + 1 ToggleComments.
         // + 2 ExtendMoveParentNodeStart/ExtendMoveParentNodeEnd.
-        // + 2 ExtendSelectNextSibling/ExtendSelectPrevSibling.
         // + 1 RemovePrimarySelection.
         // + 1 OpenChangedFilePicker.
         // + 1 OpenBufferPicker.
@@ -1908,7 +1901,7 @@ mod tests {
         // + 2 ExtendSearchNext/ExtendSearchPrev.
         // + 4 MoveLineUp/MoveLineDown and their extend variants.
         // + 1 ExtendMatchBrackets.
-        assert_eq!(all().count(), 449);
+        assert_eq!(all().count(), 447);
     }
 
     #[test]

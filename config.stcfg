@@ -581,8 +581,8 @@ on key {
         T -> ExtendTillPrevChar();
         Alt-b -> ExtendMoveParentNodeStart();
         Alt-e -> ExtendMoveParentNodeEnd();
-        Alt-n -> ExtendSelectNextSibling();
-        Alt-p -> ExtendSelectPrevSibling();
+        Alt-n -> SelectNextSibling();
+        Alt-p -> SelectPrevSibling();
         Alt-o -> ExpandSelection();
         Alt-Up -> ExpandSelection();
         Alt-i -> ShrinkSelection();

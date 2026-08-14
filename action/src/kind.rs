@@ -130,8 +130,6 @@ action_kinds! {
     SelectPrevSibling,
     SelectAllSiblings,
     SelectAllChildren,
-    ExtendSelectNextSibling,
-    ExtendSelectPrevSibling,
     MoveParentNodeStart,
     MoveParentNodeEnd,
     ExtendMoveParentNodeStart,

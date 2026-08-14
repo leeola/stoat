@@ -3340,10 +3340,11 @@ fn two_row_statement_source() -> &'static str {
 }
 
 /// Moving to the next sibling is horizontal, so it drops the column a prior
-/// vertical move was holding.
+/// vertical move held.
 ///
-/// Here `j` holds column 8, the sibling extend moves the head to column 28,
-/// and the second `j` has to follow the sibling rather than snap back.
+/// Here `j` holds column 8, the sibling replaces the selection with a node
+/// ending at column 28, and the second `j` follows the node rather than
+/// snapping back to the held column.
 #[test]
 fn select_mode_next_sibling_clears_the_vertical_goal_column() {
     let mut h = TestHarness::with_size(60, 8);
@@ -3356,18 +3357,18 @@ fn select_mode_next_sibling_clears_the_vertical_goal_column() {
         "the head sits on row 2 column 8",
     );
 
-    dispatch(&mut h.stoat, &stoat_action::ExtendSelectNextSibling);
+    dispatch(&mut h.stoat, &stoat_action::SelectNextSibling);
     assert_eq!(
         h.selection_spans()[0],
-        (17, 63, false),
-        "the sibling extend moves the head to row 3 column 28",
+        (38, 63, false),
+        "the sibling node replaces the selection, ending on row 3 column 28",
     );
 
     h.type_keys("j");
     assert_eq!(
         h.selection_spans()[0],
-        (17, 93, false),
-        "the next row is entered at column 28, where the sibling extend left the head",
+        (38, 93, false),
+        "the next row is entered at column 28, where the sibling left the head",
     );
 }
 
@@ -3393,38 +3394,31 @@ fn select_mode_parent_node_start_clears_the_vertical_goal_column() {
     );
 }
 
+/// Select mode runs the same sibling motion normal mode does, so the node
+/// replaces the selection there too rather than the head reaching out to it.
 #[test]
-fn select_mode_alt_n_extends_to_next_sibling() {
+fn select_mode_alt_n_selects_the_next_sibling_node() {
     let mut h = TestHarness::with_size(40, 5);
     let path = h.write_file("s.rs", "fn a() {} fn b() {}\n");
     h.open_file(&path);
     h.type_keys("l l v");
-    let before_offset = h.primary_head_offset();
-    dispatch(&mut h.stoat, &stoat_action::ExtendSelectNextSibling);
-    let head_after = h.primary_head_offset();
-    let (start, end, _reversed) = h.selection_spans()[0];
-    assert!(
-        head_after > before_offset,
-        "head should have moved forward across siblings"
+    dispatch(&mut h.stoat, &stoat_action::SelectNextSibling);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(10, 19, false)],
+        "the second function item, not a span reaching from the cursor",
     );
-    assert!(end > start, "selection has non-empty range");
 }
 
+/// The backward one likewise, leaving the node reversed the way the walk went.
 #[test]
-fn select_mode_alt_p_extends_to_prev_sibling() {
+fn select_mode_alt_p_selects_the_prev_sibling_node() {
     let mut h = TestHarness::with_size(40, 5);
     let path = h.write_file("s.rs", "fn a() {} fn b() {}\n");
     h.open_file(&path);
     h.type_keys("l l l l l l l l l l l l v");
-    let before_offset = h.primary_head_offset();
-    dispatch(&mut h.stoat, &stoat_action::ExtendSelectPrevSibling);
-    let head_after = h.primary_head_offset();
-    let (start, end, _reversed) = h.selection_spans()[0];
-    assert!(
-        head_after < before_offset,
-        "head should have moved backward across siblings"
-    );
-    assert!(end > start, "selection has non-empty range");
+    dispatch(&mut h.stoat, &stoat_action::SelectPrevSibling);
+    assert_eq!(h.selection_spans(), vec![(0, 9, true)]);
 }
 
 #[test]

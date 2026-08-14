@@ -101,7 +101,6 @@ pub(crate) enum LastMotion {
     TsSibling {
         dir: movement::SiblingDir,
         count: u32,
-        extend: bool,
     },
     TsObject {
         kind: textobject_nav::NavKind,
@@ -149,8 +148,8 @@ pub(crate) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
             },
             LastMotion::Change { dir, count } => movement::goto_change_impl(stoat, dir, count),
             LastMotion::Diagnostic { dir } => lsp::goto_diagnostic(stoat, dir),
-            LastMotion::TsSibling { dir, count, extend } => {
-                movement::select_sibling_impl(stoat, dir, extend, count)
+            LastMotion::TsSibling { dir, count } => {
+                movement::select_sibling_impl(stoat, dir, count)
             },
             LastMotion::TsObject { kind, dir } => textobject_nav::goto_textobject(stoat, kind, dir),
             LastMotion::ExpandSelection { count } => movement::expand_selection_impl(stoat, count),
@@ -613,19 +612,13 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ExpandSelection => movement::expand_selection(stoat),
         ActionKind::ShrinkSelection => movement::shrink_selection(stoat),
         ActionKind::SelectNextSibling => {
-            movement::select_sibling(stoat, movement::SiblingDir::Next, false)
+            movement::select_sibling(stoat, movement::SiblingDir::Next)
         },
         ActionKind::SelectPrevSibling => {
-            movement::select_sibling(stoat, movement::SiblingDir::Prev, false)
+            movement::select_sibling(stoat, movement::SiblingDir::Prev)
         },
         ActionKind::SelectAllSiblings => movement::select_all_siblings(stoat),
         ActionKind::SelectAllChildren => movement::select_all_children(stoat),
-        ActionKind::ExtendSelectNextSibling => {
-            movement::select_sibling(stoat, movement::SiblingDir::Next, true)
-        },
-        ActionKind::ExtendSelectPrevSibling => {
-            movement::select_sibling(stoat, movement::SiblingDir::Prev, true)
-        },
         ActionKind::MoveParentNodeStart => {
             movement::move_to_parent_bound(stoat, movement::NodeBound::Start, false)
         },
