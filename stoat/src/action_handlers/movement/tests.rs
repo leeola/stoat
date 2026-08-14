@@ -4606,14 +4606,45 @@ fn shrink_walks_full_expansion_chain() {
     assert_eq!(h.selection_spans(), step0);
 }
 
+/// With no expansion behind it, a shrink descends into the node the selection
+/// covers rather than doing nothing.
 #[test]
-fn shrink_with_no_history_is_noop() {
+fn shrink_without_history_selects_first_child() {
     let mut h = TestHarness::with_size(40, 5);
     let path = h.write_file("s.rs", "fn main() {}\n");
     h.open_file(&path);
-    let before = h.selection_spans();
+    set_range(&mut h, 0, 12);
+
     dispatch(&mut h.stoat, &stoat_action::ShrinkSelection);
-    assert_eq!(h.selection_spans(), before);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(3, 7, false)],
+        "the function item's first named child is its name",
+    );
+}
+
+/// A shrink after the user moved away drops the whole stack rather than
+/// restoring a selection from wherever they used to be.
+///
+/// The stale entry no longer sits inside the live selection, which is what
+/// says the chain was left. Dropping only its top hands back the next one,
+/// which is just as stale.
+#[test]
+fn shrink_after_moving_away_clears_history_and_dives() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "fn a() {}\nfn bcd() {}\n");
+    h.open_file(&path);
+    h.type_keys("l l l");
+    dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+    assert_eq!(h.selection_spans(), vec![(0, 9, false)], "the first item");
+
+    set_range(&mut h, 10, 21);
+    dispatch(&mut h.stoat, &stoat_action::ShrinkSelection);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(13, 16, false)],
+        "into the second item's name, not back to the first item",
+    );
 }
 
 #[test]

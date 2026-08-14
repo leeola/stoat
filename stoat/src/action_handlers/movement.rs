@@ -3013,24 +3013,94 @@ pub(crate) fn shrink_selection_impl(stoat: &mut Stoat, count: u32) -> UpdateEffe
         _ => return UpdateEffect::None,
     };
 
+    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
+    let syntax = ws.buffers.syntax_map(buffer_id).map(|sm| sm.snapshot());
     let editor = ws.editors.get_mut(editor_id).expect("editor");
-    let mut target = None;
+
+    let mut changed = false;
     for _ in 0..count {
-        match editor.expansion_history.pop() {
-            Some(t) => target = Some(t),
-            None => break,
+        if !shrink_one_step(editor, syntax) {
+            break;
         }
+        changed = true;
     }
-    let Some(target) = target else {
+    if !changed {
         return UpdateEffect::None;
-    };
-    editor.selections.restore(target);
+    }
 
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let after = editor.selections.shared_anchors();
     editor.expansion_tip = Some(resolved_ranges(&after, buffer_snapshot));
     UpdateEffect::Redraw
+}
+
+/// Take one step inward, returning whether the selection moved.
+///
+/// The history's top is restored only when the selection still contains it.
+/// Anything else means the user moved away since the expansion, which makes
+/// the whole stack stale rather than only its top, so it is dropped.
+///
+/// With nothing to restore, each range descends to the first named child of
+/// the node it covers. That is what makes the key useful with no expansion
+/// behind it at all.
+fn shrink_one_step(
+    editor: &mut EditorState,
+    syntax: Option<&stoat_language::SyntaxSnapshot>,
+) -> bool {
+    if let Some(prev) = editor.expansion_history.pop() {
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let current = resolved_ranges(&editor.selections.shared_anchors(), buffer_snapshot);
+        let prev_ranges = resolved_ranges(&prev, buffer_snapshot);
+
+        if prev_ranges
+            .iter()
+            .all(|p| current.iter().any(|c| c.start <= p.start && c.end >= p.end))
+        {
+            editor.selections.restore(prev);
+            return true;
+        }
+        editor.expansion_history.clear();
+    }
+
+    let Some(syntax) = syntax else {
+        return false;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+
+    let mut dived = false;
+    editor
+        .selections
+        .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
+            let (from, to) = (head_offset.min(tail_offset), head_offset.max(tail_offset));
+            let Some(target) = first_named_child_range(syntax, from, to) else {
+                return sel.clone();
+            };
+            dived = true;
+            Selection {
+                id: sel.id,
+                start: buffer_snapshot.anchor_at(target.start, Bias::Right),
+                end: buffer_snapshot.anchor_at(target.end, Bias::Left),
+                reversed: sel.reversed,
+                goal: SelectionGoal::None,
+            }
+        });
+    dived
+}
+
+/// Byte range of the first named child of the node covering `from..to`.
+fn first_named_child_range(
+    snapshot: &stoat_language::SyntaxSnapshot,
+    from: usize,
+    to: usize,
+) -> Option<Range<usize>> {
+    let layer = deepest_containing_layer(snapshot, from, to)?;
+    let node = layer.tree.root_node().descendant_for_byte_range(from, to)?;
+    let child = node.named_child(0)?;
+    let range = child.byte_range();
+    (range.start != from || range.end != to).then_some(range)
 }
 
 #[derive(Copy, Clone, Debug)]
