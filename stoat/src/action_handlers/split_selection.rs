@@ -106,6 +106,7 @@ fn split_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
             }
             widen_pieces(rope, pieces)
         });
+    editor.selections.make_first_primary();
 }
 
 /// Replace the selections with every match found inside them. When nothing
@@ -165,6 +166,7 @@ fn select_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
     editor
         .selections
         .replace_with_fresh_ids_from_offsets(&matches, Bias::Right, buffer_snapshot);
+    editor.selections.make_first_primary();
 }
 
 /// Cancel the input modal without splitting. Returns `true` when
@@ -397,6 +399,47 @@ mod tests {
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         let spans = editor::selection_spans(&mut h.stoat);
         assert_eq!(spans, vec![(0, 3, false), (8, 11, false)]);
+    }
+
+    /// The first match is the primary, so keeping the primary keeps the front.
+    ///
+    /// The collection reads the primary off the highest id and the producer
+    /// mints ascending. Without the hand-off the last match wins, which leaves
+    /// the next single-selection action working at the far end of what the user
+    /// searched.
+    #[test]
+    fn selecting_leaves_the_primary_on_the_first_match() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("foo bar foo");
+        select_range(&mut h, 0, 11);
+        dispatch(&mut h.stoat, &action::SelectRegex);
+        h.type_text("foo");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        dispatch(&mut h.stoat, &action::KeepPrimarySelection);
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(0, 3, false)],
+            "the front match survives, not the last",
+        );
+    }
+
+    /// A split hands the primary to its first piece too.
+    #[test]
+    fn splitting_leaves_the_primary_on_the_first_piece() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("foo,bar,baz");
+        select_range(&mut h, 0, 11);
+        dispatch(&mut h.stoat, &action::SplitSelection);
+        h.type_text(",");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        dispatch(&mut h.stoat, &action::KeepPrimarySelection);
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(0, 3, false)],
+            "the first piece survives",
+        );
     }
 
     #[test]

@@ -1434,6 +1434,7 @@ pub(super) fn split_selection_on_newline(stoat: &mut Stoat) -> UpdateEffect {
             }
             split_selection::widen_pieces(rope, pieces)
         });
+    editor.selections.make_first_primary();
     UpdateEffect::Redraw
 }
 

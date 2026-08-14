@@ -57,6 +57,32 @@ impl SelectionsCollection {
         &self.disjoint
     }
 
+    /// Hand the primary to the leftmost selection.
+    ///
+    /// The primary is whichever selection holds the highest id, and a producer
+    /// minting ascending leaves it on the last one. A split or a select answers
+    /// with pieces in document order, and the front of that is where the user
+    /// left off, so those producers move the primary there.
+    ///
+    /// Ids are re-minted from a fresh block rather than shuffled, so no piece
+    /// ends up sharing an id with another and being taken for the same
+    /// selection.
+    pub(crate) fn make_first_primary(&mut self) {
+        let base = self.next_selection_id;
+        let last = self.disjoint.len().saturating_sub(1);
+        let renumbered: Vec<Selection<Anchor>> = self
+            .disjoint
+            .iter()
+            .enumerate()
+            .map(|(i, sel)| Selection {
+                id: base + (last - i),
+                ..sel.clone()
+            })
+            .collect();
+        self.next_selection_id = base + self.disjoint.len();
+        self.install(renumbered.into());
+    }
+
     /// The selection set as a handle that outlives the borrow.
     ///
     /// For a caller that has to keep the set rather than read it, such as an
