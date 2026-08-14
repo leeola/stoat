@@ -360,6 +360,58 @@ fn vertical_motion_returns_to_the_visual_column_it_left() {
     );
 }
 
+/// Collapsing ends the run of vertical motion the goal belongs to, so the
+/// column the cursor came from stops following it.
+#[test]
+fn collapsing_drops_the_column_a_vertical_motion_was_holding() {
+    let mut h = TestHarness::with_size(40, 12);
+    let path = h.write_file("s.txt", "aaaaaaaa\nbb\ncccccccc\n");
+    h.open_file(&path);
+    {
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        place_cursor(editor, 0, 7);
+    }
+
+    move_vertical(&mut h.stoat, 1, false);
+    assert_eq!(
+        focused_cursor_point(&mut h.stoat),
+        Point::new(1, 2),
+        "the short line clamps to its break",
+    );
+
+    dispatch(&mut h.stoat, &CollapseSelection);
+    move_vertical(&mut h.stoat, 1, false);
+    assert_eq!(
+        focused_cursor_point(&mut h.stoat),
+        Point::new(2, 2),
+        "the next row is entered at the cursor's own column, not the old goal",
+    );
+}
+
+/// Two cursors that clamp onto the same cell become one selection. The goal
+/// each one held describes a span that no longer exists.
+#[test]
+fn merging_two_cursors_drops_the_column_they_were_holding() {
+    let mut h = TestHarness::with_size(40, 12);
+    let path = h.write_file("s.txt", "aaaaaaaa\nbb\ncccccccc\n");
+    h.open_file(&path);
+    set_selections(&mut h, &[(6, 7), (7, 8)]);
+
+    move_vertical(&mut h.stoat, 1, false);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(11, 12, false)],
+        "both clamp onto the line break and merge",
+    );
+
+    move_vertical(&mut h.stoat, 1, false);
+    assert_eq!(
+        focused_cursor_point(&mut h.stoat),
+        Point::new(2, 2),
+        "the survivor holds no column of its own",
+    );
+}
+
 /// A goal column that overruns the landing line clamps onto that line's
 /// break, and extending covers the same cell as moving does.
 ///

@@ -960,6 +960,12 @@ pub(super) fn goto_file_start(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Shrink each selection to a block cursor on its head.
+///
+/// The vertical goal drops with the rest of the selection. A goal outlives the
+/// motion that set it, so that `j` through a short line returns to the column
+/// it started from. A collapse ends that run, because the user places a cursor
+/// rather than travels down a column.
 pub(super) fn collapse_selection(stoat: &mut Stoat) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
@@ -968,7 +974,10 @@ pub(super) fn collapse_selection(stoat: &mut Stoat) -> UpdateEffect {
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
     let landings = block_cursor_landings(&editor.selections, buffer_snapshot, |read| {
-        Some((cursor_offset(rope, read.tail, read.head), read.goal))
+        Some((
+            cursor_offset(rope, read.tail, read.head),
+            SelectionGoal::None,
+        ))
     });
     editor
         .selections

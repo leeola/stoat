@@ -605,12 +605,18 @@ impl SelectionsCollection {
                 // Which way the merged span faces is a property of what went
                 // into it, not of which input was minted later. `prev` already
                 // carries the answer for everything merged into it so far.
+                //
+                // The vertical goal survives neither input. It is a column
+                // measured against a span that no longer exists, so the union
+                // takes no goal at all and the next `j` starts over from where
+                // the cursor sits.
                 let reversed = prev.selection.reversed && entry.selection.reversed;
                 if entry.selection.id > prev.selection.id {
                     prev.selection = entry.selection;
                 }
 
                 prev.end = end;
+                prev.selection.goal = SelectionGoal::None;
                 prev.selection.reversed = reversed;
                 prev.selection.start = start_anchor;
                 prev.selection.end = end_anchor;
@@ -820,12 +826,13 @@ impl SelectionsCollection {
 
                 // As in `replace_with`'s merge, the direction follows the inputs
                 // rather than whichever is newest, so the same overlap lands the
-                // cursor on the same end however the ids fall.
+                // cursor on the same end however the ids fall. The vertical goal
+                // is dropped there for the same reason it is dropped here.
                 let reversed = prev.reversed && entry.reversed;
                 if entry.id > prev.id {
                     prev.id = entry.id;
-                    prev.goal = entry.goal;
                 }
+                prev.goal = SelectionGoal::None;
                 prev.reversed = reversed;
 
                 prev.start = start;
@@ -1914,6 +1921,28 @@ mod tests {
             vec![(0, 3), (3, 6)],
             "abutting selections cover disjoint text and are not one selection",
         );
+    }
+
+    /// A goal column belongs to the span it was measured against. The union
+    /// covers different text, so neither input's column describes it and the
+    /// next vertical motion starts over from where the cursor sits.
+    #[test]
+    fn a_merge_drops_the_goal_column_of_both_inputs() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+
+        let span = |id: usize, start: usize, end: usize, column: u32| Selection {
+            id,
+            start: snapshot.anchor_at(start, Bias::Right),
+            end: snapshot.anchor_at(end, Bias::Left),
+            reversed: false,
+            goal: SelectionGoal::Column(column),
+        };
+        collection.replace_with(vec![span(1, 0, 4, 3), span(2, 2, 6, 5)], &snapshot);
+
+        let goals: Vec<SelectionGoal> = collection.all_anchors().iter().map(|s| s.goal).collect();
+        assert_eq!(goals, vec![SelectionGoal::None], "one merged, goal-less");
     }
 
     #[test]
