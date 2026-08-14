@@ -4706,6 +4706,31 @@ fn count_prefix_expand_selection_clamps_at_root() {
     );
 }
 
+/// A node at the end of its parent's children climbs out to the enclosing
+/// construct's sibling rather than stopping at the block's edge.
+///
+/// The cursor sits on the statement inside the first function's body, which
+/// has nothing after it there. The step carries on to the second function.
+#[test]
+fn next_sibling_climbs_to_parent_sibling_at_last_child() {
+    let mut h = TestHarness::with_size(60, 5);
+    let path = h.write_file("s.rs", "fn a() { let x = 1; }\nfn b() {}\n");
+    h.open_file(&path);
+    set_range(&mut h, 9, 19);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(9, 19, false)],
+        "the let statement, last in its block",
+    );
+
+    dispatch(&mut h.stoat, &stoat_action::SelectNextSibling);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(22, 31, false)],
+        "the second function item, reached by climbing out of the body",
+    );
+}
+
 #[test]
 fn select_next_sibling_jumps_to_next_named_node() {
     let mut h = TestHarness::with_size(40, 5);

@@ -3201,11 +3201,7 @@ fn sibling_range(
 
     let mut moved = false;
     for _ in 0..count {
-        let next = match dir {
-            SiblingDir::Next => current.next_named_sibling(),
-            SiblingDir::Prev => current.prev_named_sibling(),
-        };
-        match next {
+        match sibling_of_self_or_ancestor(current, dir) {
             Some(s) => {
                 current = s;
                 moved = true;
@@ -3214,6 +3210,32 @@ fn sibling_range(
         }
     }
     moved.then(|| current.byte_range())
+}
+
+/// The next named sibling of `node`, or of the nearest ancestor that has one.
+///
+/// A node at the end of its parent's children has nowhere to go on its own,
+/// but the construct enclosing it usually does. Climbing is what carries the
+/// walk out of a nested block and on through the file rather than stopping at
+/// the block's edge.
+///
+/// `None` once the climb reaches the tree's root, where there is no enclosing
+/// construct left to ask.
+fn sibling_of_self_or_ancestor<'t>(
+    node: stoat_language::Node<'t>,
+    dir: SiblingDir,
+) -> Option<stoat_language::Node<'t>> {
+    let mut current = node;
+    loop {
+        let sibling = match dir {
+            SiblingDir::Next => current.next_named_sibling(),
+            SiblingDir::Prev => current.prev_named_sibling(),
+        };
+        if let Some(sibling) = sibling {
+            return Some(sibling);
+        }
+        current = current.parent()?;
+    }
 }
 
 pub(crate) fn select_all_siblings(stoat: &mut Stoat) -> UpdateEffect {
