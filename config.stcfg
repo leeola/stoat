@@ -584,6 +584,16 @@ on key {
         Alt-J -> JoinSelectionsSpace();
         * -> SearchSelectionDetectWordBoundaries();
         Alt-* -> SearchSelection();
+        # A search in select mode collects rather than moves, so n and N add
+        # the match to the set instead of replacing the primary. The / prompt
+        # remembers the mode it opened in and appends at submit too.
+        / -> OpenSearchInput();
+        n -> ExtendSearchNext();
+        N -> ExtendSearchPrev();
+        % -> SelectAll();
+        _ -> TrimSelections();
+        Alt-k -> KeepSelections();
+        Alt-K -> RemoveSelections();
         Alt-Minus -> MergeSelections();
         Alt-_ -> MergeConsecutiveSelections();
         Q -> RecordMacro();

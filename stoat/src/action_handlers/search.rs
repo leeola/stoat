@@ -33,6 +33,13 @@ impl SearchDirection {
 pub(crate) struct SearchInputState {
     pub(crate) input: InputView,
     pub(crate) direction: SearchDirection,
+    /// Whether the submitted match joins the selection set rather than
+    /// replacing the primary, decided by the mode the prompt opened in.
+    ///
+    /// Recorded at open rather than read at submit, so the same keystrokes
+    /// behave the same way whether or not the user left select mode while
+    /// typing the pattern.
+    extend: bool,
 }
 
 /// Persisted query + direction from the most recent submitted search.
@@ -78,10 +85,15 @@ fn open_input(stoat: &mut Stoat, direction: SearchDirection) -> UpdateEffect {
     if stoat.search_input.is_some() {
         return UpdateEffect::None;
     }
+    let extend = stoat.focused_mode() == "select";
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let input = InputView::create(ws, executor, SubmitTarget::Search, "", "insert", 1);
-    stoat.search_input = Some(SearchInputState { input, direction });
+    stoat.search_input = Some(SearchInputState {
+        input,
+        direction,
+        extend,
+    });
     UpdateEffect::Redraw
 }
 
@@ -95,6 +107,7 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     };
     let query = state.input.text(stoat.active_workspace());
     let direction = state.direction;
+    let extend = state.extend;
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
 
@@ -105,7 +118,7 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     let last = LastSearch::new(query, direction, smart_case(stoat));
     let origin = super::jump::live_entry(stoat);
     if let Some(regex) = last.regex.as_ref()
-        && jump_to_match(stoat, regex, direction).moved()
+        && jump_to_match(stoat, regex, direction, extend).moved()
         && let Some(entry) = origin
     {
         super::jump::push_entry(stoat, entry);
@@ -132,11 +145,19 @@ pub(crate) fn search_cancel(stoat: &mut Stoat) -> bool {
 }
 
 pub(super) fn search_next(stoat: &mut Stoat) -> UpdateEffect {
-    repeat_search(stoat, |direction| direction)
+    repeat_search(stoat, |direction| direction, false)
 }
 
 pub(super) fn search_prev(stoat: &mut Stoat) -> UpdateEffect {
-    repeat_search(stoat, SearchDirection::flipped)
+    repeat_search(stoat, SearchDirection::flipped, false)
+}
+
+pub(super) fn extend_search_next(stoat: &mut Stoat) -> UpdateEffect {
+    repeat_search(stoat, |direction| direction, true)
+}
+
+pub(super) fn extend_search_prev(stoat: &mut Stoat) -> UpdateEffect {
+    repeat_search(stoat, SearchDirection::flipped, true)
 }
 
 /// Repeat the stored search once per pending count, walking the direction
@@ -157,6 +178,7 @@ pub(super) fn search_prev(stoat: &mut Stoat) -> UpdateEffect {
 fn repeat_search(
     stoat: &mut Stoat,
     resolve: impl Fn(SearchDirection) -> SearchDirection,
+    extend: bool,
 ) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1).max(1);
     // Redraw either way, since a stored pattern that never compiled reports
@@ -169,7 +191,7 @@ fn repeat_search(
 
     let mut outcome = SearchOutcome::NoMatch;
     for _ in 0..count {
-        outcome = jump_to_match(stoat, &regex, direction);
+        outcome = jump_to_match(stoat, &regex, direction, extend);
         if !outcome.moved() {
             break;
         }
@@ -318,6 +340,11 @@ impl SearchOutcome {
 /// on the matched text. The primary's direction carries over, and every other
 /// selection is left alone.
 ///
+/// With `extend`, the match joins the set as an additional range instead, so
+/// select mode collects every match walked through rather than moving one
+/// selection over them. The added range takes the primary, so the next press
+/// walks on from it.
+///
 /// The search starts at the edge of the primary range the walk moves away from,
 /// its end going forward and its start going back. A start taken from the
 /// cursor instead puts a reverse repeat inside the match it just landed on,
@@ -329,6 +356,7 @@ fn jump_to_match(
     stoat: &mut Stoat,
     regex: &CursorRegex,
     direction: SearchDirection,
+    extend: bool,
 ) -> SearchOutcome {
     use crate::pane::View;
 
@@ -362,9 +390,14 @@ fn jump_to_match(
         return SearchOutcome::NoMatch;
     }
 
-    editor
-        .selections
-        .replace_primary(hit.start..hit.end, reversed, buffer_snapshot);
+    match extend {
+        true => editor
+            .selections
+            .add_range(hit.start..hit.end, reversed, buffer_snapshot),
+        false => editor
+            .selections
+            .replace_primary(hit.start..hit.end, reversed, buffer_snapshot),
+    }
     match hit.wrapped {
         true => SearchOutcome::Wrapped,
         false => SearchOutcome::Landed,
@@ -712,6 +745,70 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
         assert_eq!(h.stoat.pending_message.as_deref(), Some("No more matches"),);
+    }
+
+    /// In select mode a repeat collects, so the set grows by one per press and
+    /// every earlier range stays.
+    ///
+    /// Moving one selection over the matches instead loses everything walked
+    /// past, which is the point of searching from select mode at all.
+    #[test]
+    fn a_select_mode_repeat_adds_the_match_to_the_set() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc xyz abc\n");
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+        assert_eq!(h.selection_spans(), vec![(8, 11, false)]);
+
+        h.type_keys("v");
+        h.type_keys("n");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(8, 11, false), (16, 19, false)],
+            "the match joined the set rather than replacing it",
+        );
+
+        h.type_keys("n");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 3, false), (8, 11, false), (16, 19, false)],
+            "and the walk carried on from the one just added, wrapping",
+        );
+    }
+
+    /// A normal-mode repeat still moves one selection rather than collecting.
+    #[test]
+    fn a_normal_mode_repeat_still_replaces_the_primary() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc xyz abc\n");
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
+        assert_eq!(h.selection_spans(), vec![(16, 19, false)]);
+    }
+
+    /// A prompt opened in select mode appends at submit, whatever mode the
+    /// user is in by the time they press enter.
+    ///
+    /// Reading the mode at submit instead makes the same keystrokes behave
+    /// differently depending on when the pattern was finished.
+    #[test]
+    fn a_select_mode_prompt_appends_at_submit() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc\n");
+        h.type_keys("v l l");
+        assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
+
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 3, false), (8, 11, false)],
+            "the original selection survives beside the match",
+        );
     }
 
     /// A lowercase pattern carries no evidence the case matters, so it finds

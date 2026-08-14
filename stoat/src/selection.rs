@@ -255,6 +255,32 @@ impl SelectionsCollection {
         self.replace_with(replaced, snapshot);
     }
 
+    /// Add `range` to the set, keeping every selection already there.
+    ///
+    /// For a command that grows the set rather than moving it, such as a search
+    /// extending in select mode. The added range takes the highest id, so it
+    /// becomes the primary and the next command starts from it.
+    ///
+    /// `reversed` decides which end its cursor sits on, which a caller carries
+    /// over from the selection it grew out of.
+    pub(crate) fn add_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        reversed: bool,
+        snapshot: &MultiBufferSnapshot,
+    ) {
+        self.extend_with_fresh_ids(
+            vec![Selection {
+                id: 0,
+                start: snapshot.anchor_at(range.start, Bias::Left),
+                end: snapshot.anchor_at(range.end, Bias::Right),
+                reversed,
+                goal: SelectionGoal::None,
+            }],
+            snapshot,
+        );
+    }
+
     pub(crate) fn set_single_range(&mut self, start: Anchor, end: Anchor, goal: SelectionGoal) {
         let id = self.next_selection_id;
         self.next_selection_id += 1;

@@ -22,10 +22,10 @@ use crate::{
             ExtendGotoWindowBottom, ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft,
             ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart, ExtendNextWordEnd,
             ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
-            ExtendSelectNextSibling, ExtendSelectPrevSibling, ExtendTillNextChar,
-            ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine, ExtendToLineBounds,
-            ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar,
-            FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
+            ExtendSearchNext, ExtendSearchPrev, ExtendSelectNextSibling, ExtendSelectPrevSibling,
+            ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine,
+            ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar,
+            FindPrevChar, FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
             GotoDiffCallerUp, GotoFileStart, GotoFirstNonwhitespace, GotoImplementors,
             GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact,
             GotoNextChange, GotoNextClass, GotoNextFunction, GotoNextParagraph, GotoPrevChange,
@@ -711,6 +711,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(SearchNext::DEF, |_| Ok(Box::new(SearchNext)));
     add(SearchPrev::DEF, |_| Ok(Box::new(SearchPrev)));
+    add(ExtendSearchNext::DEF, |_| Ok(Box::new(ExtendSearchNext)));
+    add(ExtendSearchPrev::DEF, |_| Ok(Box::new(ExtendSearchPrev)));
     add(SearchSelection::DEF, |_| Ok(Box::new(SearchSelection)));
     add(SearchSelectionDetectWordBoundaries::DEF, |_| {
         Ok(Box::new(SearchSelectionDetectWordBoundaries))
@@ -1272,6 +1274,8 @@ mod tests {
         "OpenReverseSearchInput",
         "SearchNext",
         "SearchPrev",
+        "ExtendSearchNext",
+        "ExtendSearchPrev",
         "SearchSelection",
         "SearchSelectionDetectWordBoundaries",
         "Yank",
@@ -1880,7 +1884,8 @@ mod tests {
         // + 2 CommitPickerNextBranch/CommitPickerPrevBranch.
         // + 2 MergeSelections/MergeConsecutiveSelections.
         // + 2 SearchSelection/SearchSelectionDetectWordBoundaries.
-        assert_eq!(all().count(), 439);
+        // + 2 ExtendSearchNext/ExtendSearchPrev.
+        assert_eq!(all().count(), 441);
     }
 
     #[test]

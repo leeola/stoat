@@ -227,6 +227,8 @@ action_kinds! {
     OpenReverseSearchInput,
     SearchNext,
     SearchPrev,
+    ExtendSearchNext,
+    ExtendSearchPrev,
     SearchSelection,
     SearchSelectionDetectWordBoundaries,
     Yank,

@@ -1009,6 +1009,26 @@ define_action!(
 );
 
 define_action!(
+    ExtendSearchNextDef,
+    ExtendSearchNext,
+    "ExtendSearchNext",
+    ActionKind::ExtendSearchNext,
+    "add the next match to the selections",
+    "Find the next match of the last submitted search and add it to the selections, keeping every selection already there. The added match becomes the primary, so a further press walks on from it. Bound in select mode, where repeating the search collects every match walked through.",
+    ActionPriority::Common
+);
+
+define_action!(
+    ExtendSearchPrevDef,
+    ExtendSearchPrev,
+    "ExtendSearchPrev",
+    ActionKind::ExtendSearchPrev,
+    "add the previous match to the selections",
+    "Find the next match in the direction opposite to the last submitted search and add it to the selections, keeping every selection already there. The added match becomes the primary, so a further press walks on from it.",
+    ActionPriority::Common
+);
+
+define_action!(
     SearchSelectionDetectWordBoundariesDef,
     SearchSelectionDetectWordBoundaries,
     "SearchSelectionDetectWordBoundaries",
