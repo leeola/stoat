@@ -1009,6 +1009,26 @@ define_action!(
 );
 
 define_action!(
+    SearchSelectionDetectWordBoundariesDef,
+    SearchSelectionDetectWordBoundaries,
+    "SearchSelectionDetectWordBoundaries",
+    ActionKind::SearchSelectionDetectWordBoundaries,
+    "search for the selections, on word boundaries",
+    "Set the search pattern to the current selections, so `n` walks the other places they occur. Each selection is escaped and the alternatives are joined with `|`, dropping duplicates. A selection whose edge falls on a word boundary is anchored there with `\\b`, so selecting a whole word finds that word rather than every occurrence inside a longer one.",
+    ActionPriority::Common
+);
+
+define_action!(
+    SearchSelectionDef,
+    SearchSelection,
+    "SearchSelection",
+    ActionKind::SearchSelection,
+    "search for the selections",
+    "Set the search pattern to the current selections, so `n` walks the other places they occur. Each selection is escaped and the alternatives are joined with `|`, dropping duplicates. The pattern matches anywhere the text occurs, including inside a longer word.",
+    ActionPriority::Common
+);
+
+define_action!(
     YankDef,
     Yank,
     "Yank",

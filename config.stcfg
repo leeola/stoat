@@ -441,6 +441,8 @@ on key {
         # Alt-j, keeping it paired with the join-with-space on Alt-J.
         Alt-j -> JoinSelections();
         Alt-J -> JoinSelectionsSpace();
+        * -> SearchSelectionDetectWordBoundaries();
+        Alt-* -> SearchSelection();
         Alt-Minus -> MergeSelections();
         Alt-_ -> MergeConsecutiveSelections();
         _ -> TrimSelections();
@@ -571,6 +573,8 @@ on key {
         Alt-) -> RotateSelectionContentsForward();
         Alt-j -> JoinSelections();
         Alt-J -> JoinSelectionsSpace();
+        * -> SearchSelectionDetectWordBoundaries();
+        Alt-* -> SearchSelection();
         Alt-Minus -> MergeSelections();
         Alt-_ -> MergeConsecutiveSelections();
         Q -> RecordMacro();

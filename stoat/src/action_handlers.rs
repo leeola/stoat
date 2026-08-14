@@ -640,6 +640,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::OpenReverseSearchInput => search::open_reverse_search_input(stoat),
         ActionKind::SearchNext => search::search_next(stoat),
         ActionKind::SearchPrev => search::search_prev(stoat),
+        ActionKind::SearchSelection => search::search_selection(stoat, false),
+        ActionKind::SearchSelectionDetectWordBoundaries => search::search_selection(stoat, true),
         ActionKind::Yank => yank::yank(stoat),
         ActionKind::PasteAfter => yank::paste_after(stoat),
         ActionKind::PasteBefore => yank::paste_before(stoat),

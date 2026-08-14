@@ -43,15 +43,16 @@ use crate::{
             RecordMacro, Redo, RemovePrimarySelection, RemoveSelections, RepeatLastMotion,
             ReplaceChar, ReplaceWithYanked, ReplayMacro, RotateSelectionContentsBackward,
             RotateSelectionContentsForward, RotateSelectionsBackward, RotateSelectionsForward,
-            SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll,
-            SelectAllChildren, SelectAllSiblings, SelectLineBelow, SelectNextSibling,
-            SelectPrevSibling, SelectRegex, SelectRegister, SelectTextobjectAround,
-            SelectTextobjectInner, SetMark, ShellAppendOutput, ShellInsertOutput, ShellKeepPipe,
-            ShellPipe, ShellPipeTo, ShrinkSelection, ShrinkToLineBounds, SmartTab, SplitSelection,
-            SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
-            SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
-            ToggleInlayHints, ToggleLspStatus, ToggleSyntaxHighlight, TrailClear, TrailNext,
-            TrailPrev, TriggerCompletion, TrimSelections, Undo, UnindentSelection, WriteQuit, Yank,
+            SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev,
+            SearchSelection, SearchSelectionDetectWordBoundaries, SelectAll, SelectAllChildren,
+            SelectAllSiblings, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegex,
+            SelectRegister, SelectTextobjectAround, SelectTextobjectInner, SetMark,
+            ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
+            ShrinkSelection, ShrinkToLineBounds, SmartTab, SplitSelection, SplitSelectionOnNewline,
+            SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase,
+            SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints,
+            ToggleLspStatus, ToggleSyntaxHighlight, TrailClear, TrailNext, TrailPrev,
+            TriggerCompletion, TrimSelections, Undo, UnindentSelection, WriteQuit, Yank,
             YankMainToClipboard, YankToClipboard,
         },
         file::{
@@ -710,6 +711,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(SearchNext::DEF, |_| Ok(Box::new(SearchNext)));
     add(SearchPrev::DEF, |_| Ok(Box::new(SearchPrev)));
+    add(SearchSelection::DEF, |_| Ok(Box::new(SearchSelection)));
+    add(SearchSelectionDetectWordBoundaries::DEF, |_| {
+        Ok(Box::new(SearchSelectionDetectWordBoundaries))
+    });
     add(Yank::DEF, |_| Ok(Box::new(Yank)));
     add(PasteAfter::DEF, |_| Ok(Box::new(PasteAfter)));
     add(PasteBefore::DEF, |_| Ok(Box::new(PasteBefore)));
@@ -1267,6 +1272,8 @@ mod tests {
         "OpenReverseSearchInput",
         "SearchNext",
         "SearchPrev",
+        "SearchSelection",
+        "SearchSelectionDetectWordBoundaries",
         "Yank",
         "DeleteSelectionNoYank",
         "ChangeSelection",
@@ -1872,7 +1879,8 @@ mod tests {
         // + 2 CommitPickerDrillIn/CommitPickerBack.
         // + 2 CommitPickerNextBranch/CommitPickerPrevBranch.
         // + 2 MergeSelections/MergeConsecutiveSelections.
-        assert_eq!(all().count(), 437);
+        // + 2 SearchSelection/SearchSelectionDetectWordBoundaries.
+        assert_eq!(all().count(), 439);
     }
 
     #[test]

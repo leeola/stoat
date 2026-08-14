@@ -3,7 +3,8 @@ use crate::{
     input_view::{InputView, SubmitTarget},
 };
 use regex_cursor::{engines::meta, regex_automata::util::syntax};
-use stoat_text::Rope;
+use std::collections::HashSet;
+use stoat_text::{char_is_word, Rope};
 
 /// The search pattern compiled for the engine that matches over a rope.
 pub(crate) type CursorRegex = meta::Regex;
@@ -180,6 +181,88 @@ fn repeat_search(
         SearchOutcome::NoMatch => stoat.set_status("No more matches"),
     }
     UpdateEffect::Redraw
+}
+
+/// Set the search pattern to what the selections hold, so `n` walks the other
+/// places that text occurs.
+///
+/// Each selection is escaped and the alternatives are joined with `|`.
+/// Duplicates collapse, so selecting the same word twice searches for it once.
+///
+/// With `detect_word_boundaries`, a selection edge that sits on a word boundary
+/// is anchored there with `\b`. Selecting a whole word then finds that word
+/// rather than every occurrence inside a longer one, while a selection cut
+/// mid-word stays unanchored and matches anywhere.
+pub(super) fn search_selection(stoat: &mut Stoat, detect_word_boundaries: bool) -> UpdateEffect {
+    let Some(editor) = super::focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+
+    // Dedup keeping the order the selections arrived in. A set alone answers
+    // membership but hands back no order, which leaves nothing for a test to
+    // pin and no reason for the user to expect one alternative before another.
+    let mut seen = HashSet::new();
+    let mut alternatives: Vec<String> = Vec::new();
+    for sel in editor.selections.all_anchors() {
+        let from = buffer_snapshot.resolve_anchor(&sel.start);
+        let to = buffer_snapshot.resolve_anchor(&sel.end);
+
+        let prefix = match detect_word_boundaries && is_at_word_start(rope, from) {
+            true => "\\b",
+            false => "",
+        };
+        let suffix = match detect_word_boundaries && is_at_word_end(rope, to) {
+            true => "\\b",
+            false => "",
+        };
+        let word = regex::escape(&rope.slice(from..to).to_string());
+
+        let alternative = format!("{prefix}{word}{suffix}");
+        if seen.insert(alternative.clone()) {
+            alternatives.push(alternative);
+        }
+    }
+
+    let pattern = alternatives.join("|");
+    stoat.set_status(format!("search pattern set to '{pattern}'"));
+    stoat.last_search = Some(LastSearch::new(pattern, SearchDirection::Forward));
+    // The highlight pass reads the stored query straight off the app, so
+    // nothing else reports that a different set of matches now lights up.
+    stoat.paint_generation += 1;
+    UpdateEffect::Redraw
+}
+
+/// Whether a word starts at `index`, which is where a `\b` before the selection
+/// means something.
+///
+/// The rope end starts no word. At offset 0 the character alone decides, since
+/// nothing precedes it to break against.
+fn is_at_word_start(rope: &Rope, index: usize) -> bool {
+    let Some(ch) = rope.chars_at(index).next() else {
+        return false;
+    };
+    let Some(prev) = rope.reversed_chars_at(index).next() else {
+        return char_is_word(ch);
+    };
+    !char_is_word(prev) && char_is_word(ch)
+}
+
+/// Whether a word ends at `index`, which is where a `\b` after the selection
+/// means something.
+///
+/// Neither end of the rope ends a word. At offset 0 nothing precedes the
+/// boundary, and at the rope end nothing follows it.
+fn is_at_word_end(rope: &Rope, index: usize) -> bool {
+    let Some(ch) = rope.chars_at(index).next() else {
+        return false;
+    };
+    let Some(prev) = rope.reversed_chars_at(index).next() else {
+        return false;
+    };
+    char_is_word(prev) && !char_is_word(ch)
 }
 
 /// The pattern and direction a repeat press searches with, or `None` when
@@ -596,6 +679,91 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
         assert_eq!(h.stoat.pending_message.as_deref(), Some("No more matches"),);
+    }
+
+    /// The stored pattern, or `None` when nothing has been searched for.
+    fn stored_pattern(h: &TestHarness) -> Option<&str> {
+        h.stoat.last_search.as_ref().map(|s| s.query.as_str())
+    }
+
+    fn select_ranges(h: &mut TestHarness, ranges: &[(usize, usize)]) {
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let pieces = ranges.to_vec();
+        editor
+            .selections
+            .split_each(buf_snap, stoat_text::Bias::Right, |_| pieces.clone());
+    }
+
+    /// A selection covering a whole word is anchored at both edges, so the
+    /// pattern finds that word rather than every occurrence inside a longer
+    /// one.
+    #[test]
+    fn a_word_selection_gets_boundary_anchors() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "foo foobar\n");
+        h.type_keys("v l l");
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &action::SearchSelectionDetectWordBoundaries,
+        );
+        assert_eq!(stored_pattern(&h), Some("\\bfoo\\b"));
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("search pattern set to '\\bfoo\\b'"),
+        );
+    }
+
+    /// A selection cut mid-word is anchored at neither edge, since no word
+    /// boundary sits there to anchor to.
+    #[test]
+    fn a_mid_word_selection_gets_no_anchors() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "foobar\n");
+        h.type_keys("l");
+        h.type_keys("v l");
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &action::SearchSelectionDetectWordBoundaries,
+        );
+        assert_eq!(stored_pattern(&h), Some("oo"));
+    }
+
+    /// The plain form never anchors, whatever the selection's edges sit on.
+    #[test]
+    fn the_plain_form_never_anchors() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "foo foobar\n");
+        h.type_keys("v l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchSelection);
+        assert_eq!(stored_pattern(&h), Some("foo"));
+    }
+
+    /// Distinct selections join as alternatives, and identical ones collapse,
+    /// so selecting the same word twice searches for it once.
+    #[test]
+    fn selections_join_as_alternatives_and_duplicates_collapse() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "ab cd ab\n");
+        select_ranges(&mut h, &[(0, 2), (3, 5), (6, 8)]);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchSelection);
+        assert_eq!(stored_pattern(&h), Some("ab|cd"));
+    }
+
+    /// A selection holding regex syntax is escaped, so it searches for the
+    /// text rather than compiling as a pattern of its own.
+    #[test]
+    fn a_selection_holding_regex_syntax_is_escaped() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "a.c\n");
+        h.type_keys("v l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchSelection);
+        assert_eq!(stored_pattern(&h), Some("a\\.c"));
+
+        // The stored pattern drives n, so it has to find the literal text.
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
+        assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
     }
 
     /// A count walks that many matches in one press, rather than one.
