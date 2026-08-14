@@ -720,6 +720,49 @@ fn rotating_contents_by_a_count_moves_each_fragment_that_far() {
     );
 }
 
+/// The selections hold still while the text moves through them. A primary that
+/// stays put therefore ends up over a fragment the user never chose, so it
+/// travels with its own text instead.
+///
+/// `set_selections` mints ascending and the collection reads the primary off
+/// the highest id, so the range listed last is the primary.
+#[test]
+fn rotating_contents_forward_carries_the_primary_with_its_text() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\n");
+    h.open_file(&path);
+    set_selections(&mut h, &[(2, 3), (1, 2), (0, 1)]);
+
+    dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsForward);
+    assert_eq!(buffer_string(&mut h), "cab\n");
+
+    dispatch(&mut h.stoat, &stoat_action::KeepPrimarySelection);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(1, 2, false)],
+        "the primary held a, which the rotation moved one place on",
+    );
+}
+
+/// Rotating the other way carries the primary the other way.
+#[test]
+fn rotating_contents_backward_carries_the_primary_with_its_text() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\n");
+    h.open_file(&path);
+    set_three_single_char_selections(&mut h);
+
+    dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsBackward);
+    assert_eq!(buffer_string(&mut h), "bca\n");
+
+    dispatch(&mut h.stoat, &stoat_action::KeepPrimarySelection);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(1, 2, false)],
+        "the primary held c, which the rotation moved one place back",
+    );
+}
+
 #[test]
 fn join_selections_space_joins_two_lines_and_selects_space() {
     let mut h = TestHarness::with_size(20, 5);

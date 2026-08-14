@@ -68,17 +68,47 @@ impl SelectionsCollection {
     /// ends up sharing an id with another and being taken for the same
     /// selection.
     pub(crate) fn make_first_primary(&mut self) {
+        self.make_primary_at(0);
+    }
+
+    /// Hand the primary to the selection carrying `id`.
+    ///
+    /// For a command that moves text between selections and wants the primary
+    /// to travel with it. The caller knows the id it started from, not where
+    /// that selection now sits in the list.
+    ///
+    /// An `id` naming no selection leaves the primary where it is.
+    pub(crate) fn make_primary(&mut self, id: usize) {
+        if let Some(index) = self.disjoint.iter().position(|sel| sel.id == id) {
+            self.make_primary_at(index);
+        }
+    }
+
+    /// Re-mint every id so the selection at `index` holds the highest.
+    ///
+    /// The others take the rest of the fresh block in list order. No reader
+    /// depends on that order, because only the maximum decides the primary.
+    fn make_primary_at(&mut self, index: usize) {
         let base = self.next_selection_id;
-        let last = self.disjoint.len().saturating_sub(1);
+        let top = base + self.disjoint.len().saturating_sub(1);
+
+        let mut next = base;
         let renumbered: Vec<Selection<Anchor>> = self
             .disjoint
             .iter()
             .enumerate()
-            .map(|(i, sel)| Selection {
-                id: base + (last - i),
-                ..sel.clone()
+            .map(|(i, sel)| {
+                let id = if i == index {
+                    top
+                } else {
+                    let id = next;
+                    next += 1;
+                    id
+                };
+                Selection { id, ..sel.clone() }
             })
             .collect();
+
         self.next_selection_id = base + self.disjoint.len();
         self.install(renumbered.into());
     }

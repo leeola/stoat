@@ -1017,9 +1017,10 @@ pub(super) fn rotate_selection_contents_backward(stoat: &mut Stoat) -> UpdateEff
 /// Cyclically move the text of each selection into the next (`forward`) or
 /// previous selection's range, following Helix's `reorder_selection_contents`.
 ///
-/// The selections stay in place and re-cover their new text. Fewer than two
-/// non-empty selections is a no-op. Unlike `(`/`)`, which rotate only which
-/// selection is primary, this rewrites the buffer.
+/// The selections stay in place and re-cover their new text, and the primary
+/// travels with the fragment it held. Fewer than two non-empty selections is a
+/// no-op. Unlike `(`/`)`, which rotate only which selection is primary, this
+/// rewrites the buffer.
 fn rotate_selection_contents(stoat: &mut Stoat, forward: bool) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
     let ws = stoat.active_workspace_mut();
@@ -1061,6 +1062,30 @@ fn rotate_selection_contents(stoat: &mut Stoat, forward: bool) -> UpdateEffect {
         rotated.rotate_left(rotate_by);
     }
 
+    // The primary travels with the text it held. `rotate_right(n)` carries the
+    // fragment at index `i` to `i + n`, so the primary moves the same way.
+    let new_primary = {
+        let primary_id = ws
+            .editors
+            .get(editor_id)
+            .expect("editor")
+            .selections
+            .newest_anchor()
+            .id;
+        entries
+            .iter()
+            .position(|(id, _, _, _)| *id == primary_id)
+            .map(|index| {
+                let len = entries.len();
+                let shifted = if forward {
+                    index + rotate_by
+                } else {
+                    index + len - rotate_by
+                };
+                entries[shifted % len].0
+            })
+    };
+
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
@@ -1097,6 +1122,11 @@ fn rotate_selection_contents(stoat: &mut Stoat, forward: bool) -> UpdateEffect {
         }
         new
     });
+
+    if let Some(id) = new_primary {
+        editor.selections.make_primary(id);
+    }
+
     UpdateEffect::Redraw
 }
 
