@@ -4268,14 +4268,27 @@ fn count_prefix_undo_redo_round_trip_with_huge_count() {
 }
 
 fn install_diff_hunks(h: &mut TestHarness, line_starts: &[u32]) {
+    let rows: Vec<Range<u32>> = line_starts.iter().map(|&s| s..(s + 1)).collect();
+    install_diff_hunk_rows(h, &rows);
+}
+
+/// Install hunks spanning whole line ranges.
+///
+/// A one-line hunk leaves two cases indistinguishable. One is a span wider than
+/// its first row. The other is a deletion, whose range is empty.
+fn install_diff_hunk_rows(h: &mut TestHarness, rows: &[Range<u32>]) {
     use crate::diff_map::{DiffHunk, DiffHunkStatus, DiffMap};
-    let hunks: Vec<DiffHunk> = line_starts
+    let hunks: Vec<DiffHunk> = rows
         .iter()
-        .map(|&start| DiffHunk {
-            status: DiffHunkStatus::Added,
-            unstaged_lines: std::iter::once(start..(start + 1)).collect(),
-            buffer_start_line: start,
-            buffer_line_range: start..(start + 1),
+        .map(|range| DiffHunk {
+            status: if range.is_empty() {
+                DiffHunkStatus::Deleted
+            } else {
+                DiffHunkStatus::Added
+            },
+            unstaged_lines: std::iter::once(range.clone()).collect(),
+            buffer_start_line: range.start,
+            buffer_line_range: range.clone(),
             base_byte_range: 0..0,
             anchor_range: None,
             token_detail: None,
@@ -4302,11 +4315,15 @@ fn goto_next_change_jumps_forward() {
     install_diff_hunks(&mut h, &[2, 5]);
 
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
-    assert_eq!(h.primary_head_offset(), 4);
+    assert_eq!(h.selection_spans(), vec![(4, 6, false)]);
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
-    assert_eq!(h.primary_head_offset(), 10);
+    assert_eq!(h.selection_spans(), vec![(10, 12, false)]);
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
-    assert_eq!(h.primary_head_offset(), 10);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(10, 12, false)],
+        "the last hunk holds when there is no next one",
+    );
 }
 
 /// Alt-. after a change jump repeats that jump, not whatever find preceded it.
@@ -4323,12 +4340,12 @@ fn repeat_last_motion_replays_a_change_jump() {
     h.type_keys("f c");
     assert_eq!(h.primary_head_offset(), 4, "the find lands first");
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
-    assert_eq!(h.primary_head_offset(), 10);
+    assert_eq!(h.selection_spans(), vec![(10, 12, false)]);
 
     dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
     assert_eq!(
-        h.primary_head_offset(),
-        12,
+        h.selection_spans(),
+        vec![(12, 14, false)],
         "the next hunk, not the c the earlier find would have reached",
     );
 }
@@ -4343,8 +4360,8 @@ fn goto_next_change_uses_a_background_populated_diff_map() {
 
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
     assert_eq!(
-        h.primary_head_offset(),
-        2,
+        h.selection_spans(),
+        vec![(2, 4, false)],
         "the background-populated diff map drives GotoNextChange to the modified row",
     );
 }
@@ -4358,11 +4375,15 @@ fn goto_prev_change_jumps_backward() {
     h.type_keys("g j");
 
     dispatch(&mut h.stoat, &stoat_action::GotoPrevChange);
-    assert_eq!(h.primary_head_offset(), 10);
+    assert_eq!(h.selection_spans(), vec![(10, 12, true)]);
     dispatch(&mut h.stoat, &stoat_action::GotoPrevChange);
-    assert_eq!(h.primary_head_offset(), 4);
+    assert_eq!(h.selection_spans(), vec![(4, 6, true)]);
     dispatch(&mut h.stoat, &stoat_action::GotoPrevChange);
-    assert_eq!(h.primary_head_offset(), 4);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(4, 6, true)],
+        "the first hunk holds when there is no earlier one",
+    );
 }
 
 /// A count of zero steps one hunk instead of indexing off the end of the
@@ -4392,7 +4413,7 @@ fn count_prefix_goto_next_change_jumps_n_changes() {
     h.open_file(&path);
     install_diff_hunks(&mut h, &[2, 5, 8]);
     h.type_keys("2 ] g");
-    assert_eq!(h.primary_head_offset(), 10);
+    assert_eq!(h.selection_spans(), vec![(10, 12, false)]);
 }
 
 /// `]c` means comment, where change keeps `]g` to itself.
@@ -4434,7 +4455,7 @@ fn count_prefix_goto_prev_change_jumps_back_n_changes() {
     install_diff_hunks(&mut h, &[2, 5, 8]);
     h.type_keys("g j");
     h.type_keys("2 [ g");
-    assert_eq!(h.primary_head_offset(), 10);
+    assert_eq!(h.selection_spans(), vec![(10, 12, true)]);
 }
 
 #[test]
@@ -4444,7 +4465,99 @@ fn count_prefix_goto_next_change_clamps_at_last() {
     h.open_file(&path);
     install_diff_hunks(&mut h, &[2, 5, 8]);
     h.type_keys("9 ] g");
-    assert_eq!(h.primary_head_offset(), 16);
+    assert_eq!(h.selection_spans(), vec![(16, 18, false)]);
+}
+
+#[test]
+fn goto_next_change_selects_a_multi_line_hunk_whole() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    h.open_file(&path);
+    install_diff_hunk_rows(&mut h, &[2..5, 6..7]);
+
+    h.type_keys("] g");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(4, 10, false)],
+        "rows 2 through 4, not the first row alone",
+    );
+}
+
+/// A deletion removed the rows it covers, so it holds none of its own.
+#[test]
+fn goto_next_change_selects_one_cell_at_a_deletion() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    h.open_file(&path);
+    install_diff_hunk_rows(&mut h, &[3..3, 6..7]);
+
+    h.type_keys("] g");
+    assert_eq!(h.selection_spans(), vec![(6, 7, false)]);
+}
+
+/// The backward step leaves the hunk the cursor is inside rather than
+/// re-selecting it.
+///
+/// A hunk taller than one row puts the cursor past its own first row, so a
+/// predicate reading that first row reports the hunk as behind the cursor and
+/// the motion never gets out of it.
+#[test]
+fn goto_prev_change_steps_out_of_the_hunk_it_sits_in() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    h.open_file(&path);
+    install_diff_hunk_rows(&mut h, &[0..1, 2..5]);
+    set_range(&mut h, 6, 7);
+
+    h.type_keys("[ g");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 2, true)],
+        "the earlier hunk, not the one row 3 is inside",
+    );
+}
+
+#[test]
+fn select_mode_next_change_extends_to_the_hunk() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    h.open_file(&path);
+    install_diff_hunks(&mut h, &[5]);
+
+    h.type_keys("v ] g");
+    assert_eq!(h.selection_spans(), vec![(0, 12, false)]);
+}
+
+/// Extending backward holds the anchor where it was and reaches back to the
+/// hunk's first row.
+#[test]
+fn select_mode_prev_change_extends_back_to_the_hunk() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    h.open_file(&path);
+    install_diff_hunks(&mut h, &[1]);
+    set_range(&mut h, 10, 11);
+
+    h.type_keys("v [ g");
+    assert_eq!(h.selection_spans(), vec![(2, 10, true)]);
+}
+
+/// Each cursor reads its own row, so a multi-cursor set walks to one hunk each
+/// rather than collapsing onto whichever cursor happened to be newest.
+#[test]
+fn goto_next_change_walks_every_cursor_to_its_own_hunk() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    h.open_file(&path);
+    install_diff_hunks(&mut h, &[1, 5]);
+    dispatch(&mut h.stoat, &AddSelectionBelow);
+
+    dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(2, 4, false), (10, 12, false)],
+        "row 0 reaches the first hunk, row 1 the second",
+    );
 }
 
 #[test]

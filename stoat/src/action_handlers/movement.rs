@@ -3707,6 +3707,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     }
 
     let count = count as usize;
+    let extend = stoat.in_select_mode();
     let origin = super::jump::live_entry(stoat);
     let current_path = stoat.focused_editor_ids().and_then(|(_, buffer_id)| {
         stoat
@@ -3721,58 +3722,127 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     let source_diff_view = editor.diff_view;
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
-
-    let sel = editor.selections.newest_anchor().clone();
     let rope = buffer_snapshot.rope();
-    let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
-    let head_off = buffer_snapshot.resolve_anchor(&sel.head());
-    let cursor = cursor_offset(rope, tail_off, head_off);
-    let cursor_row = rope.offset_to_point(cursor).row;
 
-    let target_row = display_snapshot.diff_map().and_then(|diff_map| match dir {
-        ChangeDir::Next => {
-            let next: Vec<_> = diff_map
-                .hunks_in_range(cursor_row.saturating_add(1)..u32::MAX)
-                .into_iter()
-                .filter(|h| h.buffer_start_line > cursor_row)
-                .collect();
-            (!next.is_empty()).then(|| {
-                let idx = (count.saturating_sub(1)).min(next.len() - 1);
-                next[idx].buffer_start_line
-            })
-        },
-        ChangeDir::Prev => {
-            let prev: Vec<_> = diff_map
-                .hunks_in_range(0..cursor_row)
-                .into_iter()
-                .filter(|h| h.buffer_start_line < cursor_row)
-                .collect();
-            (!prev.is_empty()).then(|| {
-                let idx = prev.len().saturating_sub(count);
-                prev[idx].buffer_start_line
-            })
-        },
-    });
-    let Some(target_row) = target_row else {
+    // One walk over the hunks feeds every selection, since each one picks its
+    // own target out of the same sorted list.
+    let hunk_rows: Vec<Range<u32>> = display_snapshot
+        .diff_map()
+        .map(|diff_map| {
+            diff_map
+                .hunks()
+                .map(|h| h.buffer_line_range.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Every selection steps from its own cursor, so a multi-cursor set walks to
+    // one hunk each rather than sharing whichever cursor happened to be newest.
+    let landings: Vec<(usize, Range<usize>)> = editor
+        .selections
+        .all_anchors()
+        .iter()
+        .filter_map(|sel| {
+            let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
+            let head_off = buffer_snapshot.resolve_anchor(&sel.head());
+            let cursor_row = rope
+                .offset_to_point(cursor_offset(rope, tail_off, head_off))
+                .row;
+            let rows = nth_hunk_rows(&hunk_rows, cursor_row, dir, count)?;
+            Some((sel.id, hunk_span(rope, rows)))
+        })
+        .collect();
+
+    if landings.is_empty() {
         return goto_change_across_files(stoat, dir, current_path, source_diff_view, origin);
-    };
+    }
 
-    let target_offset = buffer_snapshot
-        .rope()
-        .point_to_offset(Point::new(target_row, 0));
-    editor.selections.transform(buffer_snapshot, |sel| {
-        land_block_cursor(
-            sel.id,
-            target_offset,
-            SelectionGoal::None,
-            buffer_snapshot.rope(),
-            buffer_snapshot,
-        )
-    });
+    editor
+        .selections
+        .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
+            let Some((_, target)) = landings.iter().find(|(id, _)| *id == sel.id) else {
+                return sel.clone();
+            };
+
+            // Extending holds the anchor and reaches out to whichever end of the
+            // hunk lies further from it, so a backward step in select mode grows
+            // the selection rather than turning it inside out.
+            let (start, end, reversed) = if extend {
+                if target.end < tail_offset {
+                    (target.start, tail_offset, true)
+                } else {
+                    (tail_offset.min(head_offset), target.end, false)
+                }
+            } else {
+                // The walk sets the direction, so a forward step leaves its
+                // cursor on the hunk's last row and a backward step on its
+                // first. A repeat then carries on the way it went.
+                (target.start, target.end, matches!(dir, ChangeDir::Prev))
+            };
+
+            Selection {
+                id: sel.id,
+                start: buffer_snapshot.anchor_at(start, Bias::Right),
+                end: buffer_snapshot.anchor_at(end, Bias::Left),
+                reversed,
+                goal: SelectionGoal::None,
+            }
+        });
     if let Some(entry) = origin {
         super::jump::push_entry(stoat, entry);
     }
     UpdateEffect::Redraw
+}
+
+/// Buffer rows of the hunk `count` steps from `cursor_row`, or `None` when the
+/// walk runs out of hunks before its first step.
+///
+/// The backward walk compares each hunk's end against the cursor rather than
+/// its start, which is what steps out of the hunk the cursor is already inside
+/// instead of landing on that one again. A deletion hunk stores no rows at all,
+/// so the row it sits on counts as inside it and the walk passes over it.
+fn nth_hunk_rows(
+    hunk_rows: &[Range<u32>],
+    cursor_row: u32,
+    dir: ChangeDir,
+    count: usize,
+) -> Option<Range<u32>> {
+    match dir {
+        ChangeDir::Next => {
+            let next: Vec<_> = hunk_rows.iter().filter(|r| r.start > cursor_row).collect();
+            let idx = (count.saturating_sub(1)).min(next.len().checked_sub(1)?);
+            Some(next[idx].clone())
+        },
+        ChangeDir::Prev => {
+            let prev: Vec<_> = hunk_rows
+                .iter()
+                .filter(|r| {
+                    if r.is_empty() {
+                        r.end < cursor_row
+                    } else {
+                        r.end <= cursor_row
+                    }
+                })
+                .collect();
+            let idx = prev.len().checked_sub(count.max(1))?.min(prev.len() - 1);
+            Some(prev[idx].clone())
+        },
+    }
+}
+
+/// Byte span a hunk's rows cover, from the first row through the start of the
+/// row after the last.
+///
+/// A deletion hunk holds no rows, so it gets the one cell where the removed
+/// text was. The block cursor has no place to sit in an empty span.
+fn hunk_span(rope: &Rope, rows: Range<u32>) -> Range<usize> {
+    let start = rope.point_to_offset(Point::new(rows.start, 0));
+    let end = if rows.is_empty() {
+        rope.next_grapheme_boundary(start)
+    } else {
+        rope.point_to_offset(Point::new(rows.end, 0))
+    };
+    start..end
 }
 
 /// A cross-file changed hop whose scan has not landed yet.
