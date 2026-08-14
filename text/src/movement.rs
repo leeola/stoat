@@ -1,4 +1,5 @@
 use crate::Rope;
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CharCategory {
@@ -13,16 +14,8 @@ pub enum CharCategory {
 /// motions and the word text objects both break on wherever two neighbours
 /// differ.
 ///
-/// Punctuation here is the ASCII set only, so a non-ASCII mark like an em dash
-/// or an ideographic full stop falls to `Unknown` and forms a class of its own.
-/// Helix reads Unicode general categories instead, which put those in
-/// `Punctuation` alongside their ASCII counterparts, so a full stop, an em
-/// dash, and a full stop are three spans here and one there.
-///
-/// The ASCII reading is deliberate. Following Helix needs a Unicode
-/// general-category table, a dependency nothing else in this crate wants, and
-/// the divergence only widens a `w` stop across runs of non-ASCII punctuation.
-/// Motions over ordinary text land in the same places either way.
+/// `Unknown` is the class nothing else claimed, so a run of such characters
+/// still groups together and a `w` stops where it meets anything named.
 pub fn categorize_char(ch: char) -> CharCategory {
     if char_is_line_ending(ch) {
         CharCategory::Eol
@@ -30,11 +23,38 @@ pub fn categorize_char(ch: char) -> CharCategory {
         CharCategory::Whitespace
     } else if char_is_word(ch) {
         CharCategory::Word
-    } else if ch.is_ascii_punctuation() {
+    } else if char_is_punctuation(ch) {
         CharCategory::Punctuation
     } else {
         CharCategory::Unknown
     }
+}
+
+/// Whether `ch` is punctuation for the purpose of word motions.
+///
+/// The Unicode general categories for punctuation, plus the math, currency, and
+/// modifier symbols. Reading the category rather than testing the ASCII range
+/// is what puts an em dash, guillemets, and an ideographic full stop in the same
+/// class as their ASCII counterparts, so a run of mixed punctuation is one `w`
+/// stop instead of one per script. Every ASCII punctuation character falls in
+/// this set, so ASCII text classes exactly as a range test leaves it.
+///
+/// The symbol categories are here because a `+` or a `$` reads as punctuation
+/// between words even though neither is punctuation in the typographic sense.
+fn char_is_punctuation(ch: char) -> bool {
+    matches!(
+        get_general_category(ch),
+        GeneralCategory::OtherPunctuation
+            | GeneralCategory::OpenPunctuation
+            | GeneralCategory::ClosePunctuation
+            | GeneralCategory::InitialPunctuation
+            | GeneralCategory::FinalPunctuation
+            | GeneralCategory::ConnectorPunctuation
+            | GeneralCategory::DashPunctuation
+            | GeneralCategory::MathSymbol
+            | GeneralCategory::CurrencySymbol
+            | GeneralCategory::ModifierSymbol
+    )
 }
 
 fn char_is_line_ending(ch: char) -> bool {
@@ -773,15 +793,62 @@ mod tests {
         assert_eq!(categorize_char('\n'), CharCategory::Eol);
         assert_eq!(categorize_char('.'), CharCategory::Punctuation);
         assert_eq!(categorize_char(','), CharCategory::Punctuation);
+        for ch in ['!', '"', '#', '(', ')', '-', '/', '@', '[', '\\', '{', '~'] {
+            assert_eq!(
+                categorize_char(ch),
+                CharCategory::Punctuation,
+                "ASCII punctuation classes as it always did: {ch}",
+            );
+        }
         assert_eq!(
             categorize_char('\u{2014}'),
-            CharCategory::Unknown,
-            "an em dash is not ASCII punctuation, so it classes on its own",
+            CharCategory::Punctuation,
+            "an em dash carries a punctuation category, so it joins the class",
         );
         assert_eq!(
             categorize_char('\u{3002}'),
+            CharCategory::Punctuation,
+            "and so does an ideographic full stop",
+        );
+        assert_eq!(
+            categorize_char('\u{00AB}'),
+            CharCategory::Punctuation,
+            "and a guillemet, which is initial punctuation",
+        );
+        assert_eq!(
+            categorize_char('+'),
+            CharCategory::Punctuation,
+            "a math symbol counts, reading as punctuation between words",
+        );
+        assert_eq!(
+            categorize_char('\u{00A3}'),
+            CharCategory::Punctuation,
+            "as does a currency symbol",
+        );
+        assert_eq!(
+            categorize_char('\u{2192}'),
+            CharCategory::Punctuation,
+            "an arrow is a math symbol, so it joins them",
+        );
+        assert_eq!(
+            categorize_char('\u{00A9}'),
             CharCategory::Unknown,
-            "and neither is an ideographic full stop",
+            "a copyright sign is an other-symbol, outside the ten categories",
+        );
+    }
+
+    /// A run of mixed punctuation is one `w` stop, not one per script.
+    ///
+    /// Classing by ASCII range put an em dash in its own class, so `w` broke
+    /// between it and the full stop beside it. Reading the Unicode category puts
+    /// both in `Punctuation`, and the run travels together.
+    #[test]
+    fn a_word_motion_takes_mixed_punctuation_as_one_span() {
+        let rope = Rope::from("a\u{2014}.b");
+        assert_eq!(
+            next_word_start_range(&rope, 0, 1),
+            (1, 5),
+            "the em dash and the full stop are one span",
         );
     }
 
