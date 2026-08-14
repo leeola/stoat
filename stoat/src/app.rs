@@ -14944,6 +14944,23 @@ mod tests {
         assert_eq!(focused_buffer_string(&h), "// bar\n// foo\n");
     }
 
+    /// Changing a commented line opens a bare one, where o and O continue the
+    /// comment.
+    ///
+    /// The two share the open, but they mean different things. `o` writes a
+    /// second line of a comment, while `c` deleted the commented line already
+    /// and opens its replacement, so a token there prefixes text the user
+    /// never asked to comment.
+    #[test]
+    fn change_opens_a_line_without_continuing_the_comment() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"// foo\n// bar\n");
+        h.type_keys("x");
+        h.type_keys("c");
+        h.type_text("baz");
+        assert_eq!(focused_buffer_string(&h), "baz\n// bar\n");
+    }
+
     #[test]
     fn insert_enter_continues_line_comment() {
         let mut h = Stoat::test();

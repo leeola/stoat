@@ -1812,7 +1812,7 @@ pub(super) fn change_selection(stoat: &mut Stoat) -> UpdateEffect {
     let whole_lines = selections_are_whole_lines(stoat);
     let deleted = delete_selection_impl(stoat, true);
     if whole_lines {
-        open_line(stoat, OpenDir::Above)
+        open_line(stoat, OpenDir::Above, CommentContinuation::Disabled)
     } else {
         deleted
     }
@@ -1859,6 +1859,18 @@ pub(super) enum OpenDir {
     Below,
 }
 
+/// Whether an opened line carries the current line's comment token forward.
+///
+/// `o` and `O` continue the comment, which is what writing a second line of
+/// one wants. A change has already deleted the commented line and opens a
+/// replacement for it, so continuing there puts a token in front of text the
+/// user never asked to comment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CommentContinuation {
+    Enabled,
+    Disabled,
+}
+
 /// One selection's open site, resolved before indentation is computed.
 ///
 /// `continued` holds the comment token the opened line carries on, per site
@@ -1890,7 +1902,11 @@ struct OpenUnit {
     cursor_within: usize,
 }
 
-pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
+pub(super) fn open_line(
+    stoat: &mut Stoat,
+    dir: OpenDir,
+    continuation: CommentContinuation,
+) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
 
     let editor_id = {
@@ -1904,10 +1920,15 @@ pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
     let (buffer_id, sites) = {
         let ws = stoat.active_workspace_mut();
         let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
-        let comment_tokens = ws
-            .buffers
-            .language_for(buffer_id)
-            .map_or(&[][..], |lang| lang.line_comments);
+        // No tokens means no line continues one, which is the same shape a
+        // language without line comments already takes.
+        let comment_tokens = match continuation {
+            CommentContinuation::Enabled => ws
+                .buffers
+                .language_for(buffer_id)
+                .map_or(&[][..], |lang| lang.line_comments),
+            CommentContinuation::Disabled => &[][..],
+        };
         let editor = ws.editors.get_mut(editor_id).expect("editor");
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
