@@ -3840,6 +3840,7 @@ fn toggle_comments_rust_two_selections_reaching_a_row_comment_it_once() {
         editor.selections.set_single_range(
             buf_snap.anchor_at(0, Bias::Left),
             buf_snap.anchor_at(5, Bias::Right),
+            false,
             SelectionGoal::None,
         );
         editor.selections.extend_with_fresh_ids(

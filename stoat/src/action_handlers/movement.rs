@@ -2588,7 +2588,7 @@ pub(super) fn select_all(stoat: &mut Stoat) -> UpdateEffect {
     let end_anchor = buffer_snapshot.anchor_at(end_offset, Bias::Right);
     editor
         .selections
-        .set_single_range(start_anchor, end_anchor, SelectionGoal::None);
+        .set_single_range(start_anchor, end_anchor, false, SelectionGoal::None);
     UpdateEffect::Redraw
 }
 

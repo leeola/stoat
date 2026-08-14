@@ -13877,7 +13877,7 @@ mod tests {
         };
         editor
             .selections
-            .set_single_range(start, end, SelectionGoal::None);
+            .set_single_range(start, end, false, SelectionGoal::None);
     }
 
     /// Add a second 1-wide block cursor at `offset` in the focused editor,

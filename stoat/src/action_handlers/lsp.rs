@@ -40,7 +40,7 @@ use std::{
     time::Duration,
 };
 use stoat_scheduler::Task;
-use stoat_text::{Anchor, Bias, Point, Rope};
+use stoat_text::{Anchor, Bias, Point, Rope, SelectionGoal};
 
 /// Direction for [`goto_diagnostic`]. `Next` searches forward from
 /// the cursor's byte offset; `Prev` searches backward. Neither
@@ -84,27 +84,50 @@ pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection)
     };
     let buffer_snapshot = snapshot.buffer_snapshot();
     let buffer_id = buffer_snapshot.buffer_id();
-    let starts: Vec<Anchor> = stoat
+    // Both ends travel together through the one batch resolve, so the pair the
+    // selection needs survives the trip rather than only where each span opens.
+    let ends: Vec<Anchor> = stoat
         .diagnostics
         .spans(&path)
         .iter()
         .filter_map(|span| span.anchors)
         .filter(|(start, _)| start.buffer_id == Some(buffer_id))
-        .map(|(start, _)| start)
+        .flat_map(|(start, end)| [start, end])
         .collect();
-    let mut offsets = buffer_snapshot.resolve_anchors_batch(&starts);
-    offsets.sort_unstable();
+    let offsets = buffer_snapshot.resolve_anchors_batch(&ends);
+    let mut spans: Vec<(usize, usize)> = offsets.chunks_exact(2).map(|p| (p[0], p[1])).collect();
+    spans.sort_unstable();
 
+    // Both directions compare where the diagnostic opens, so stepping back from
+    // inside one leaves it rather than selecting it again.
     let target = match direction {
-        DiagnosticDirection::Next => offsets.into_iter().find(|&o| o > cursor_offset),
-        DiagnosticDirection::Prev => offsets.into_iter().rev().find(|&o| o < cursor_offset),
+        DiagnosticDirection::Next => spans.into_iter().find(|&(start, _)| start > cursor_offset),
+        DiagnosticDirection::Prev => spans
+            .into_iter()
+            .rev()
+            .find(|&(start, _)| start < cursor_offset),
     };
 
-    let Some(target) = target else {
+    let Some((start, end)) = target else {
         return UpdateEffect::None;
     };
 
-    crate::action_handlers::movement::jump_to_offset(stoat, target)
+    // The origin goes on the jumplist before the motion lands, so the jump back
+    // returns to the reading position rather than to the diagnostic.
+    crate::action_handlers::jump::push_jump(stoat);
+
+    let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    editor.selections.set_single_range(
+        buffer_snapshot.anchor_at(start, Bias::Right),
+        buffer_snapshot.anchor_at(end, Bias::Left),
+        matches!(direction, DiagnosticDirection::Prev),
+        SelectionGoal::None,
+    );
+    UpdateEffect::Redraw
 }
 
 /// Discriminator for the goto-style LSP requests that all return
@@ -2774,6 +2797,70 @@ mod tests {
         h.type_keys("space l w");
         assert_eq!(cursor_offset(&mut h), 4);
         assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
+    /// A diagnostic several columns wide, since the shared one-column helper
+    /// leaves a span a bare block cursor reads the same as.
+    fn wide_diag(line: u32, col: u32, width: u32) -> lsp_types::Diagnostic {
+        lsp_types::Diagnostic {
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(line, col),
+                lsp_types::Position::new(line, col + width),
+            ),
+            severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+            ..Default::default()
+        }
+    }
+
+    /// Stepping to a diagnostic selects its whole span rather than landing a
+    /// bare cursor where it opens.
+    #[test]
+    fn goto_next_diagnostic_selects_the_span() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abcdef\nghijkl\nmnopqr\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.seed_diagnostics(path, vec![wide_diag(1, 1, 3), wide_diag(2, 2, 3)]);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
+        assert_eq!(
+            h.selection_spans(),
+            vec![(8, 11, false)],
+            "the first diagnostic's span, forward",
+        );
+    }
+
+    /// Stepping back leaves the span reversed, which puts the cursor on its
+    /// start so a repeat carries on the way it went.
+    #[test]
+    fn goto_prev_diagnostic_selects_reversed() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abcdef\nghijkl\nmnopqr\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.seed_diagnostics(path, vec![wide_diag(1, 1, 3), wide_diag(2, 2, 3)]);
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 20);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevDiagnostic);
+        assert_eq!(h.selection_spans(), vec![(16, 19, true)]);
+    }
+
+    /// The motion records where it left, so a jump back returns to the reading
+    /// position rather than to the diagnostic.
+    #[test]
+    fn goto_next_diagnostic_pushes_a_jump() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abcdef\nghijkl\nmnopqr\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.seed_diagnostics(path, vec![wide_diag(1, 1, 3)]);
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 2);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
+        assert_eq!(cursor_offset(&mut h), 10, "the span's last cell");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(cursor_offset(&mut h), 2);
     }
 
     /// Alt-. after a diagnostic jump repeats the jump, not the find before it.

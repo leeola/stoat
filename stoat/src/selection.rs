@@ -281,14 +281,25 @@ impl SelectionsCollection {
         );
     }
 
-    pub(crate) fn set_single_range(&mut self, start: Anchor, end: Anchor, goal: SelectionGoal) {
+    /// Replace the collection with one selection spanning `start` to `end`.
+    ///
+    /// `reversed` puts the cursor on the start rather than the end, which a
+    /// motion that arrived from below sets so a repeat carries on the way it
+    /// went.
+    pub(crate) fn set_single_range(
+        &mut self,
+        start: Anchor,
+        end: Anchor,
+        reversed: bool,
+        goal: SelectionGoal,
+    ) {
         let id = self.next_selection_id;
         self.next_selection_id += 1;
         self.install(Arc::from([Selection {
             id,
             start,
             end,
-            reversed: false,
+            reversed,
             goal,
         }]));
     }
@@ -1229,6 +1240,7 @@ mod tests {
                 c.set_single_range(
                     s.anchor_at(1, Bias::Right),
                     s.anchor_at(3, Bias::Right),
+                    false,
                     SelectionGoal::None,
                 )
             }),
@@ -2320,6 +2332,7 @@ mod tests {
         collection.set_single_range(
             snapshot.anchor_at(0, Bias::Right),
             snapshot.anchor_at(10, Bias::Right),
+            false,
             SelectionGoal::None,
         );
         let before_ids: Vec<usize> = collection.all_anchors().iter().map(|s| s.id).collect();
