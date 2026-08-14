@@ -5535,13 +5535,112 @@ fn count_survives_setmode_chord() {
     );
 }
 
+/// Span a paragraph motion leaves, starting from a bare cursor at `cursor`.
+///
+/// Drives the oracle tables below, which are transcribed from the reference
+/// editor's own paragraph tests.
+fn paragraph_span(text: &str, cursor: usize, keys: &str) -> (usize, usize, bool) {
+    let mut h = TestHarness::with_size(30, 20);
+    let path = h.write_file("s.txt", text);
+    h.open_file(&path);
+
+    {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        editor
+            .selections
+            .set_block_cursor(cursor, snapshot.buffer_snapshot());
+    }
+    assert_eq!(
+        h.primary_head_offset(),
+        cursor,
+        "the fixture starts from one cursor at the offset the case names",
+    );
+
+    h.type_keys(keys);
+    assert_eq!(h.selection_spans().len(), 1, "the motion leaves one span");
+    h.selection_spans()[0]
+}
+
+/// `]p` lands on the start of the next paragraph, selecting from the cursor to
+/// it, and reaches the buffer's end rather than stopping at the last one.
+#[test]
+fn goto_next_paragraph_matches_the_reference_landings() {
+    let cases = [
+        ("", 0, (0, 0, false)),
+        ("start at\nfirst char\n", 0, (0, 20, false)),
+        ("start at\nlast char\n", 18, (18, 19, false)),
+        ("a\nb\n\ngoto\nthird\n\nparagraph", 5, (5, 17, false)),
+        ("a\nb\n\ngoto\nthird\n\nparagraph", 4, (5, 17, false)),
+        ("a\nb\n\n\ngoto\nsecond\n\nparagraph", 3, (3, 6, false)),
+        (
+            "here\n\nhave\nmultiple\nparagraph\n\n\n\n\n",
+            11,
+            (11, 34, false),
+        ),
+        (
+            "text\n\n\nafter two blank lines\n\nmore text\n",
+            0,
+            (0, 7, false),
+        ),
+    ];
+
+    for (text, cursor, expected) in cases {
+        assert_eq!(
+            paragraph_span(text, cursor, "] p"),
+            expected,
+            "text {text:?} from {cursor}",
+        );
+    }
+}
+
+/// Running it again starts from where the last one left off, rather than
+/// finding the boundary it already sits on.
+#[test]
+fn goto_next_paragraph_run_again_advances_a_paragraph() {
+    let mut h = TestHarness::with_size(30, 20);
+    let path = h.write_file("s.txt", "text\n\n\nafter two blank lines\n\nmore text\n");
+    h.open_file(&path);
+
+    h.type_keys("] p");
+    assert_eq!(h.selection_spans(), vec![(0, 7, false)]);
+    h.type_keys("] p");
+    assert_eq!(h.selection_spans(), vec![(7, 30, false)]);
+}
+
+/// `[p` runs backward, so the span it leaves is reversed.
+#[test]
+fn goto_prev_paragraph_matches_the_reference_landings() {
+    let cases = [
+        ("", 0, (0, 0, false)),
+        ("start at\nfirst char\n", 0, (0, 1, true)),
+        ("start at\nlast char\n", 18, (0, 19, true)),
+        ("goto\nfirst\n\nparagraph", 12, (0, 12, true)),
+        ("goto\nfirst\n\nparagraph", 11, (0, 12, true)),
+        ("goto\nsecond\n\nparagraph", 14, (13, 15, true)),
+        (
+            "here\n\nhave\nmultiple\nparagraph\n\n\n\n\n",
+            34,
+            (6, 34, true),
+        ),
+    ];
+
+    for (text, cursor, expected) in cases {
+        assert_eq!(
+            paragraph_span(text, cursor, "[ p"),
+            expected,
+            "text {text:?} from {cursor}",
+        );
+    }
+}
+
 #[test]
 fn goto_next_paragraph_jumps_from_paragraph_start() {
     let mut h = TestHarness::with_size(20, 10);
     let path = h.write_file("s.txt", "alpha\nbeta\n\ngamma\ndelta\n");
     h.open_file(&path);
     h.type_keys("] p");
-    assert_eq!(h.cursor_display_positions(), vec![(3, 0)]);
+    assert_eq!(h.selection_spans(), vec![(0, 12, false)]);
 }
 
 #[test]
@@ -5550,16 +5649,17 @@ fn goto_next_paragraph_jumps_from_middle_of_paragraph() {
     let path = h.write_file("s.txt", "alpha\nbeta\n\ngamma\ndelta\n");
     h.open_file(&path);
     h.type_keys("j ] p");
-    assert_eq!(h.cursor_display_positions(), vec![(3, 0)]);
+    assert_eq!(h.selection_spans(), vec![(6, 12, false)]);
 }
 
+/// The last paragraph is not a wall. The motion runs on to the buffer's end.
 #[test]
-fn goto_next_paragraph_no_op_at_buffer_end() {
+fn goto_next_paragraph_reaches_the_buffer_end() {
     let mut h = TestHarness::with_size(20, 10);
     let path = h.write_file("s.txt", "alpha\nbeta\n");
     h.open_file(&path);
     h.type_keys("j ] p");
-    assert_eq!(h.cursor_display_positions(), vec![(1, 0)]);
+    assert_eq!(h.selection_spans(), vec![(6, 11, false)]);
 }
 
 #[test]
@@ -5568,7 +5668,7 @@ fn goto_next_paragraph_walks_through_multiple_blanks() {
     let path = h.write_file("s.txt", "alpha\n\n\n\nbeta\n");
     h.open_file(&path);
     h.type_keys("] p");
-    assert_eq!(h.cursor_display_positions(), vec![(4, 0)]);
+    assert_eq!(h.selection_spans(), vec![(0, 9, false)]);
 }
 
 #[test]
@@ -5604,7 +5704,11 @@ fn goto_next_paragraph_from_empty_line_lands_on_following_paragraph() {
     let path = h.write_file("s.txt", "alpha\n\nbeta\n");
     h.open_file(&path);
     h.type_keys("j ] p");
-    assert_eq!(h.cursor_display_positions(), vec![(2, 0)]);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(7, 12, false)],
+        "the blank row's own ending is left out, so a repeat advances",
+    );
 }
 
 #[test]
@@ -5613,7 +5717,7 @@ fn count_prefix_goto_next_paragraph_jumps_n_paragraphs() {
     let path = h.write_file("s.txt", "a\n\nb\n\nc\n\nd\n");
     h.open_file(&path);
     h.type_keys("3 ] p");
-    assert_eq!(h.cursor_display_positions(), vec![(6, 0)]);
+    assert_eq!(h.selection_spans(), vec![(0, 9, false)]);
 }
 
 #[test]
@@ -5633,7 +5737,7 @@ fn count_prefix_goto_next_paragraph_clamps_at_last_paragraph() {
     let path = h.write_file("s.txt", "a\n\nb\n");
     h.open_file(&path);
     h.type_keys("9 ] p");
-    assert_eq!(h.cursor_display_positions(), vec![(2, 0)]);
+    assert_eq!(h.selection_spans(), vec![(0, 5, false)]);
 }
 
 #[test]

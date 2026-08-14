@@ -3223,8 +3223,9 @@ pub(crate) fn execute_find(
 ) -> UpdateEffect {
     let count = count.max(1);
     stoat.last_find = Some((kind, ch, count, extend));
-    move_to_find_target(stoat, extend, |rope, cursor| {
-        find_target(rope, cursor, kind, ch, count)
+    move_to_motion_range(stoat, extend, |rope, cursor| {
+        let target = find_target(rope, cursor, kind, ch, count)?;
+        Some(landing_range(rope, cursor, target))
     })
 }
 
@@ -3243,20 +3244,52 @@ pub(crate) fn execute_find_line_ending(
     count: u32,
 ) -> UpdateEffect {
     let count = count.max(1);
-    move_to_find_target(stoat, extend, |rope, cursor| {
-        line_ending_target(rope, cursor, kind, count)
+    move_to_motion_range(stoat, extend, |rope, cursor| {
+        let target = line_ending_target(rope, cursor, kind, count)?;
+        Some(landing_range(rope, cursor, target))
     })
 }
 
-/// Move each selection's cursor to the offset `target_of` picks for it.
+/// The `(anchor, head)` pair that lands a block cursor on `target`.
 ///
-/// Every find shares this, so the two entry points differ only in where they
-/// look. A selection `target_of` returns `None` for holds its place rather than
-/// being dragged onto another selection's target.
-fn move_to_find_target(
+/// A find names the character it means to land on, where a paragraph motion
+/// names the gap it stops at. This converts the first into the second, reaching
+/// one grapheme past whichever end the cursor is not on, so the target's own
+/// cell stays covered whichever way the motion ran.
+fn landing_range(rope: &Rope, cursor: usize, target: usize) -> (usize, usize) {
+    if target >= cursor {
+        (cursor, rope.next_grapheme_boundary(target))
+    } else {
+        (rope.next_grapheme_boundary(cursor), target)
+    }
+}
+
+/// The cell a block cursor covers when its range's head reaches `head`.
+///
+/// The inverse of [`landing_range`], for the extend path, which holds the
+/// anchor it already has and asks only which cell to cover. A head reached
+/// going forward sits one past its cell, where one reached going backward sits
+/// on it.
+fn landing_cell(rope: &Rope, cursor: usize, head: usize) -> usize {
+    if head > cursor {
+        rope.prev_grapheme_boundary(head)
+    } else {
+        head
+    }
+}
+
+/// Move each selection to the `(anchor, head)` pair `range_of` picks for it.
+///
+/// The finds and the paragraph motions share this, so they differ only in where
+/// they look. A selection `range_of` returns `None` for holds its place rather
+/// than being dragged onto another selection's target.
+///
+/// Extending ignores the anchor and holds the one the selection already has,
+/// which is what makes a run of these grow one selection rather than restart it.
+fn move_to_motion_range(
     stoat: &mut Stoat,
     extend: bool,
-    target_of: impl Fn(&Rope, usize) -> Option<usize>,
+    range_of: impl Fn(&Rope, usize) -> Option<(usize, usize)>,
 ) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
@@ -3266,16 +3299,16 @@ fn move_to_find_target(
     let rope = buffer_snapshot.rope();
 
     if extend {
-        // A find is horizontal, so it drops any column a prior vertical move was
-        // holding. Carrying it would send the next vertical move back to the
-        // column the find started from.
+        // These are horizontal, so they drop any column a prior vertical move
+        // held. A carried column sends the next vertical move back to where this
+        // one started from.
         move_cursors(&mut editor.selections, buffer_snapshot, true, |read| {
             // Each selection reads from its own cursor. Reading once and
             // stamping the result on all of them makes every span identical, and
             // identical spans merge, so the set collapses to one cursor.
             let cursor = cursor_offset(rope, read.tail, read.head);
-            let target = target_of(rope, cursor)?;
-            Some((target, SelectionGoal::None))
+            let (_, head) = range_of(rope, cursor)?;
+            Some((landing_cell(rope, cursor, head), SelectionGoal::None))
         });
         return UpdateEffect::Redraw;
     }
@@ -3287,20 +3320,20 @@ fn move_to_find_target(
             // Each selection reads from its own cursor. Reading once and
             // stamping the result on all of them makes every span identical,
             // and identical spans merge, so the set collapses to one cursor.
-            let Some(target) = target_of(rope, cursor) else {
+            let Some((anchor, head)) = range_of(rope, cursor) else {
                 return sel.clone();
             };
 
-            // Select from the block cursor to the target rather than collapsing
-            // there, so `dfx`/`yfx` operate on the whole span like Helix.
+            // Span the pair rather than collapsing onto the head, so `dfx`/`yfx`
+            // operate on the whole reach like Helix.
             let landed = Selection {
                 id: sel.id,
-                start: cursor,
-                end: cursor,
-                reversed: false,
+                start: anchor.min(head),
+                end: anchor.max(head),
+                reversed: head < anchor,
                 goal: SelectionGoal::None,
             }
-            .put_cursor(rope, target, true);
+            .min_width_1(rope);
             Selection {
                 id: sel.id,
                 start: buffer_snapshot.anchor_at(landed.start, Bias::Right),
@@ -3836,85 +3869,103 @@ impl<'a> BlankRows<'a> {
     }
 }
 
-pub(super) fn goto_paragraph(stoat: &mut Stoat, dir: ParaDir) -> UpdateEffect {
-    let count = stoat.take_pending_count().unwrap_or(1);
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
-    let display_snapshot = editor.display_map.snapshot();
-    let buffer_snapshot = display_snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope();
-
-    let sel = editor.selections.newest_anchor().clone();
-    let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
-    let head_off = buffer_snapshot.resolve_anchor(&sel.head());
-    let cursor = cursor_offset(rope, tail_off, head_off);
-    let cursor_row = rope.offset_to_point(cursor).row;
-    let mut blanks = BlankRows::new(rope);
-    let mut last_content_row = rope.max_point().row;
-    if last_content_row > 0 && blanks.is_blank(last_content_row) {
-        last_content_row -= 1;
-    }
-
-    let step = |blanks: &mut BlankRows<'_>, current: u32| -> Option<u32> {
-        match dir {
-            ParaDir::Next => {
-                if current >= last_content_row {
-                    return None;
-                }
-                let mut row = current;
-                while row <= last_content_row && !blanks.is_blank(row) {
-                    row += 1;
-                }
-                if row > last_content_row {
-                    return None;
-                }
-                while row <= last_content_row && blanks.is_blank(row) {
-                    row += 1;
-                }
-                if row > last_content_row {
-                    return None;
-                }
-                Some(row)
-            },
-            ParaDir::Prev => {
-                if current == 0 {
-                    return None;
-                }
-                let mut row = current - 1;
-                while row > 0 && blanks.is_blank(row) {
-                    row -= 1;
-                }
-                while row > 0 && !blanks.is_blank(row) {
-                    row -= 1;
-                }
-                if blanks.is_blank(row) && row < last_content_row {
-                    row += 1;
-                }
-                if row == current {
-                    return None;
-                }
-                Some(row)
-            },
-        }
-    };
-
-    let mut target_row = cursor_row;
-    for _ in 0..count {
-        match step(&mut blanks, target_row) {
-            Some(next) => target_row = next,
-            None => break,
-        }
-    }
-    if target_row == cursor_row {
-        return UpdateEffect::None;
-    }
-
-    let target_offset = rope.point_to_offset(Point::new(target_row, 0));
-    apply_primary_range(editor, target_offset..target_offset);
-    UpdateEffect::Redraw
+/// Move each selection to the start of the next or previous paragraph.
+///
+/// Backs `]p` and `[p`. Each selection runs its own scan from its own cursor,
+/// and the result reaches from that cursor to the boundary rather than
+/// collapsing onto it, so an operator after the motion has the paragraph to
+/// work on.
+pub(super) fn goto_paragraph(stoat: &mut Stoat, dir: ParaDir, extend: bool) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1).max(1);
+    move_to_motion_range(stoat, extend, |rope, cursor| {
+        let mut blanks = BlankRows::new(rope);
+        Some(paragraph_range(rope, &mut blanks, cursor, dir, count))
+    })
 }
 
+/// The `(anchor, head)` a paragraph motion leaves, as byte offsets.
+///
+/// The head is the start of the row the scan stops on, or the buffer's end when
+/// the scan runs off it, so the motion always reaches the edge rather than
+/// giving up short of it.
+///
+/// A cursor already on the character that divides two paragraphs starts the
+/// scan a row further along, or the scan finds the boundary it is already on
+/// and stands still. That same condition moves the anchor one grapheme, in
+/// opposite directions for the two: going forward it drops the blank row's own
+/// ending out of the result, and going backward it keeps the cursor's cell
+/// covered.
+fn paragraph_range(
+    rope: &Rope,
+    blanks: &mut BlankRows<'_>,
+    cursor: usize,
+    dir: ParaDir,
+    count: u32,
+) -> (usize, usize) {
+    let max_row = rope.max_point().row;
+    let rope_len = rope.len();
+    let row = rope.offset_to_point(cursor).row;
+    let line_start = |row: u32| line_start_offset(rope, row, max_row, rope_len);
+
+    match dir {
+        ParaDir::Next => {
+            let on_last_char = rope.prev_grapheme_boundary(line_start(row + 1)) == cursor;
+            let opens_a_paragraph =
+                blanks.is_blank(row) && !blanks.is_blank((row + 1).min(max_row));
+            let adjust = opens_a_paragraph && on_last_char;
+
+            let mut row = row + u32::from(adjust);
+            let mut last_row = row;
+            for _ in 0..count {
+                while row <= max_row && !blanks.is_blank(row) {
+                    row += 1;
+                }
+                while row <= max_row && blanks.is_blank(row) {
+                    row += 1;
+                }
+                if row == last_row {
+                    break;
+                }
+                last_row = row;
+            }
+
+            let anchor = if adjust {
+                rope.next_grapheme_boundary(cursor)
+            } else {
+                cursor
+            };
+            (anchor, line_start(row))
+        },
+        ParaDir::Prev => {
+            let on_first_char = line_start(row) == cursor;
+            let follows_a_paragraph =
+                blanks.is_blank(row.saturating_sub(1)) && !blanks.is_blank(row);
+            let adjust = follows_a_paragraph && !on_first_char;
+
+            let mut row = row + u32::from(adjust);
+            let mut last_row = row;
+            for _ in 0..count {
+                while row > 0 && blanks.is_blank(row - 1) {
+                    row -= 1;
+                }
+                while row > 0 && !blanks.is_blank(row - 1) {
+                    row -= 1;
+                }
+                if row == last_row {
+                    break;
+                }
+                last_row = row;
+            }
+
+            let anchor = if follows_a_paragraph && on_first_char {
+                cursor
+            } else {
+                rope.next_grapheme_boundary(cursor)
+            };
+            (anchor, line_start(row))
+        },
+    }
+}
 pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
