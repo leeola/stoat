@@ -33,25 +33,25 @@ use crate::{
             GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp, Increment,
             IndentSelection, InsertAtLineEnd, InsertAtLineStart, InsertRegister, InsertTab,
             JoinSelections, JoinSelectionsSpace, JumpBackward, JumpForward, KeepPrimarySelection,
-            KeepSelections, MarkTrailEnd, MarkTrailStart, MatchBrackets, MoveDown, MoveLeft,
-            MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
-            MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
-            MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow,
-            OpenCodeSearch, OpenJumplistPicker, OpenLastPicker, OpenReverseSearchInput,
-            OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore, PasteClipboardAfter,
-            PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection, RemoveSelections,
-            RepeatLastMotion, ReplaceChar, ReplaceWithYanked, ReplayMacro,
-            RotateSelectionContentsBackward, RotateSelectionContentsForward,
-            RotateSelectionsBackward, RotateSelectionsForward, SaveBuffer, SaveSelection,
-            ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll, SelectAllChildren,
-            SelectAllSiblings, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegex,
-            SelectRegister, SelectTextobjectAround, SelectTextobjectInner, SetMark,
-            ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
-            ShrinkSelection, ShrinkToLineBounds, SmartTab, SplitSelection, SplitSelectionOnNewline,
-            SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase,
-            SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints,
-            ToggleLspStatus, ToggleSyntaxHighlight, TrailClear, TrailNext, TrailPrev,
-            TriggerCompletion, TrimSelections, Undo, UnindentSelection, WriteQuit, Yank,
+            KeepSelections, MarkTrailEnd, MarkTrailStart, MatchBrackets,
+            MergeConsecutiveSelections, MergeSelections, MoveDown, MoveLeft, MoveNextLongWordEnd,
+            MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd,
+            MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd,
+            MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow, OpenCodeSearch,
+            OpenJumplistPicker, OpenLastPicker, OpenReverseSearchInput, OpenSearchInput, PageDown,
+            PageUp, PasteAfter, PasteBefore, PasteClipboardAfter, PasteClipboardBefore,
+            RecordMacro, Redo, RemovePrimarySelection, RemoveSelections, RepeatLastMotion,
+            ReplaceChar, ReplaceWithYanked, ReplayMacro, RotateSelectionContentsBackward,
+            RotateSelectionContentsForward, RotateSelectionsBackward, RotateSelectionsForward,
+            SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll,
+            SelectAllChildren, SelectAllSiblings, SelectLineBelow, SelectNextSibling,
+            SelectPrevSibling, SelectRegex, SelectRegister, SelectTextobjectAround,
+            SelectTextobjectInner, SetMark, ShellAppendOutput, ShellInsertOutput, ShellKeepPipe,
+            ShellPipe, ShellPipeTo, ShrinkSelection, ShrinkToLineBounds, SmartTab, SplitSelection,
+            SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
+            SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
+            ToggleInlayHints, ToggleLspStatus, ToggleSyntaxHighlight, TrailClear, TrailNext,
+            TrailPrev, TriggerCompletion, TrimSelections, Undo, UnindentSelection, WriteQuit, Yank,
             YankMainToClipboard, YankToClipboard,
         },
         file::{
@@ -868,6 +868,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(RemovePrimarySelection::DEF, |_| {
         Ok(Box::new(RemovePrimarySelection))
     });
+    add(MergeSelections::DEF, |_| Ok(Box::new(MergeSelections)));
+    add(MergeConsecutiveSelections::DEF, |_| {
+        Ok(Box::new(MergeConsecutiveSelections))
+    });
     add(RotateSelectionsForward::DEF, |_| {
         Ok(Box::new(RotateSelectionsForward))
     });
@@ -1298,6 +1302,8 @@ mod tests {
         "SelectLineBelow",
         "KeepPrimarySelection",
         "RemovePrimarySelection",
+        "MergeSelections",
+        "MergeConsecutiveSelections",
         "RotateSelectionsForward",
         "RotateSelectionsBackward",
         "TrimSelections",
@@ -1865,7 +1871,8 @@ mod tests {
         // + 8 Jumplist/Diagnostics/Location/WorkspacePicker PageDown/PageUp.
         // + 2 CommitPickerDrillIn/CommitPickerBack.
         // + 2 CommitPickerNextBranch/CommitPickerPrevBranch.
-        assert_eq!(all().count(), 435);
+        // + 2 MergeSelections/MergeConsecutiveSelections.
+        assert_eq!(all().count(), 437);
     }
 
     #[test]

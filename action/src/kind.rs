@@ -305,6 +305,8 @@ action_kinds! {
     ShrinkToLineBounds,
     KeepPrimarySelection,
     RemovePrimarySelection,
+    MergeSelections,
+    MergeConsecutiveSelections,
     RotateSelectionsForward,
     RotateSelectionsBackward,
     RotateSelectionContentsForward,

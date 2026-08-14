@@ -686,6 +686,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ShrinkToLineBounds => movement::shrink_to_line_bounds(stoat),
         ActionKind::KeepPrimarySelection => movement::keep_primary_selection(stoat),
         ActionKind::RemovePrimarySelection => movement::remove_primary_selection(stoat),
+        ActionKind::MergeSelections => movement::merge_selections(stoat),
+        ActionKind::MergeConsecutiveSelections => movement::merge_consecutive_selections(stoat),
         ActionKind::RotateSelectionsForward => movement::rotate_selections_forward(stoat),
         ActionKind::RotateSelectionsBackward => movement::rotate_selections_backward(stoat),
         ActionKind::RotateSelectionContentsForward => {

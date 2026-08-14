@@ -1649,6 +1649,26 @@ define_action!(
 );
 
 define_action!(
+    MergeSelectionsDef,
+    MergeSelections,
+    "MergeSelections",
+    ActionKind::MergeSelections,
+    "merge selections",
+    "Replace every selection with the single span running from the first selection's start to the last one's end, swallowing the text between them.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    MergeConsecutiveSelectionsDef,
+    MergeConsecutiveSelections,
+    "MergeConsecutiveSelections",
+    ActionKind::MergeConsecutiveSelections,
+    "merge consecutive selections",
+    "Join each run of selections that touch end to start into one selection, leaving selections with a gap between them alone.",
+    ActionPriority::Rare
+);
+
+define_action!(
     RotateSelectionsForwardDef,
     RotateSelectionsForward,
     "RotateSelectionsForward",

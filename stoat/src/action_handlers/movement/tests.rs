@@ -885,6 +885,49 @@ fn removing_the_only_selection_reports_instead_of_doing_nothing() {
     );
 }
 
+/// The span covers the text between the selections too, which is what tells
+/// this apart from merging only what was selected.
+#[test]
+fn alt_minus_merges_every_selection_into_one_span() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abcdefghij\n");
+    h.open_file(&path);
+    set_selections(&mut h, &[(0, 2), (5, 7)]);
+
+    h.type_keys("Alt-minus");
+    assert_eq!(h.selection_spans(), vec![(0, 7, false)]);
+}
+
+/// Overlapping selections merge on the way in, so what reaches this command is
+/// selections that abut and selections with a gap. Only the first kind joins.
+#[test]
+fn alt_underscore_joins_only_the_touching_selections() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abcdefghij\n");
+    h.open_file(&path);
+    set_selections(&mut h, &[(0, 2), (2, 4), (6, 8)]);
+
+    h.type_keys("Alt-_");
+    assert_eq!(h.selection_spans(), vec![(0, 4, false), (6, 8, false)]);
+}
+
+/// Both merges are bound in select mode as well, where a user building a
+/// multi-selection is most likely to want them.
+#[test]
+fn the_merges_are_reachable_from_select_mode() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abcdefghij\n");
+    h.open_file(&path);
+
+    h.type_keys("v");
+    set_selections(&mut h, &[(0, 2), (2, 4), (6, 8)]);
+    h.type_keys("Alt-_");
+    assert_eq!(h.selection_spans(), vec![(0, 4, false), (6, 8, false)]);
+
+    h.type_keys("Alt-minus");
+    assert_eq!(h.selection_spans(), vec![(0, 8, false)]);
+}
+
 #[test]
 fn join_selections_space_single_line_joins_with_next() {
     let mut h = TestHarness::with_size(20, 5);

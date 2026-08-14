@@ -289,6 +289,58 @@ impl SelectionsCollection {
         true
     }
 
+    /// Collapse every selection into the one span that covers them all.
+    ///
+    /// The span runs from the first selection's start to the last one's end,
+    /// which is the union because the list is sorted by start and holds no
+    /// overlaps. The text between two selections is swallowed along with them.
+    ///
+    /// The result reads backwards only when the first and last selection both
+    /// did. A mixed set has no one direction to inherit, so it faces forward.
+    pub(crate) fn merge_all(&mut self) {
+        let first = &self.disjoint[0];
+        let last = &self.disjoint[self.disjoint.len() - 1];
+
+        let merged = Selection {
+            id: self.newest_anchor().id,
+            start: first.start,
+            end: last.end,
+            reversed: first.reversed && last.reversed,
+            goal: SelectionGoal::None,
+        };
+        self.install(Arc::from([merged]));
+    }
+
+    /// Collapse each run of selections that touch end to start.
+    ///
+    /// Overlapping selections never reach here, because every producer merges
+    /// those on the way in. Abutting ones survive as separate selections, and
+    /// this is what joins them.
+    ///
+    /// Each survivor takes its run's highest id, so the primary lands on
+    /// whichever run absorbed it.
+    pub(crate) fn merge_consecutive(&mut self, snapshot: &MultiBufferSnapshot) {
+        let mut merged: Vec<Selection<Anchor>> = Vec::with_capacity(self.disjoint.len());
+
+        for sel in self.disjoint.iter() {
+            let touches_previous = merged.last().is_some_and(|prev| {
+                snapshot.resolve_anchor(&prev.end) == snapshot.resolve_anchor(&sel.start)
+            });
+
+            let Some(prev) = merged.last_mut().filter(|_| touches_previous) else {
+                merged.push(sel.clone());
+                continue;
+            };
+
+            prev.id = prev.id.max(sel.id);
+            prev.end = sel.end;
+            prev.reversed = prev.reversed && sel.reversed;
+            prev.goal = SelectionGoal::None;
+        }
+
+        self.install(merged.into());
+    }
+
     pub(crate) fn rotate_primary_by(&mut self, forward: bool, count: u32) {
         if self.disjoint.len() < 2 || count == 0 {
             return;
@@ -1928,6 +1980,122 @@ mod tests {
             spans,
             vec![(0, 3), (3, 6)],
             "abutting selections cover disjoint text and are not one selection",
+        );
+    }
+
+    /// One selection per `(start, end, reversed, id)`. Ids are spelled out
+    /// rather than taken from the position, because they are minted in creation
+    /// order and the merge commands read them to decide the primary.
+    fn seeded(
+        snapshot: &MultiBufferSnapshot,
+        spans: &[(usize, usize, bool, usize)],
+    ) -> SelectionsCollection {
+        let mut collection = SelectionsCollection::new();
+        let seeds: Vec<Selection<Anchor>> = spans
+            .iter()
+            .map(|&(start, end, reversed, id)| Selection {
+                id,
+                start: snapshot.anchor_at(start, Bias::Right),
+                end: snapshot.anchor_at(end, Bias::Left),
+                reversed,
+                goal: SelectionGoal::None,
+            })
+            .collect();
+        collection.replace_with(seeds, snapshot);
+        collection
+    }
+
+    fn spans_of(
+        snapshot: &MultiBufferSnapshot,
+        collection: &SelectionsCollection,
+    ) -> Vec<(usize, usize, bool)> {
+        collection
+            .all_anchors()
+            .iter()
+            .map(|s| {
+                (
+                    snapshot.resolve_anchor(&s.start),
+                    snapshot.resolve_anchor(&s.end),
+                    s.reversed,
+                )
+            })
+            .collect()
+    }
+
+    /// The merged span reads backwards only when the selections at both ends
+    /// did. A set facing two ways has no one direction to inherit, so it faces
+    /// forward and the cursor lands at the far end.
+    #[test]
+    fn merge_all_reads_backwards_only_when_both_ends_did() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+
+        let mut both = seeded(&snapshot, &[(0, 2, true, 0), (5, 7, true, 1)]);
+        both.merge_all();
+        assert_eq!(spans_of(&snapshot, &both), vec![(0, 7, true)]);
+
+        let mut mixed = seeded(&snapshot, &[(0, 2, true, 0), (5, 7, false, 1)]);
+        mixed.merge_all();
+        assert_eq!(spans_of(&snapshot, &mixed), vec![(0, 7, false)]);
+    }
+
+    /// A run reads backwards only when every selection in it did, so one
+    /// forward selection anywhere in the run turns the whole run forward.
+    #[test]
+    fn a_merged_run_reads_backwards_only_when_all_of_it_did() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+
+        let mut all_back = seeded(
+            &snapshot,
+            &[(0, 2, true, 0), (2, 4, true, 1), (4, 6, true, 2)],
+        );
+        all_back.merge_consecutive(&snapshot);
+        assert_eq!(spans_of(&snapshot, &all_back), vec![(0, 6, true)]);
+
+        let mut one_forward = seeded(
+            &snapshot,
+            &[(0, 2, true, 0), (2, 4, false, 1), (4, 6, true, 2)],
+        );
+        one_forward.merge_consecutive(&snapshot);
+        assert_eq!(spans_of(&snapshot, &one_forward), vec![(0, 6, false)]);
+    }
+
+    /// The primary is the highest id, so a run that absorbs it has to come out
+    /// holding it. Otherwise merging quietly moves the primary to whichever
+    /// run happens to end last.
+    #[test]
+    fn a_merged_run_carries_the_primary_it_absorbed() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+
+        let mut absorbed = seeded(
+            &snapshot,
+            &[(0, 2, false, 1), (2, 4, false, 5), (6, 8, false, 3)],
+        );
+        absorbed.merge_consecutive(&snapshot);
+        assert_eq!(
+            spans_of(&snapshot, &absorbed),
+            vec![(0, 4, false), (6, 8, false)],
+        );
+
+        absorbed.keep_primary();
+        assert_eq!(
+            spans_of(&snapshot, &absorbed),
+            vec![(0, 4, false)],
+            "the run took id 5 with it, so the run is the primary",
+        );
+
+        let mut outside = seeded(
+            &snapshot,
+            &[(0, 2, false, 1), (2, 4, false, 2), (6, 8, false, 9)],
+        );
+        outside.merge_consecutive(&snapshot);
+        outside.keep_primary();
+        assert_eq!(
+            spans_of(&snapshot, &outside),
+            vec![(6, 8, false)],
+            "a primary no run touched stays where it is",
         );
     }
 

@@ -438,6 +438,8 @@ on key {
         Alt-( -> RotateSelectionContentsBackward();
         Alt-) -> RotateSelectionContentsForward();
         Alt-J -> JoinSelectionsSpace();
+        Alt-Minus -> MergeSelections();
+        Alt-_ -> MergeConsecutiveSelections();
         _ -> TrimSelections();
         ~ -> SwitchCase();
         ` -> SwitchToLowercase();
@@ -565,6 +567,8 @@ on key {
         Alt-( -> RotateSelectionContentsBackward();
         Alt-) -> RotateSelectionContentsForward();
         Alt-J -> JoinSelectionsSpace();
+        Alt-Minus -> MergeSelections();
+        Alt-_ -> MergeConsecutiveSelections();
         Q -> RecordMacro();
         > -> IndentSelection();
         < -> UnindentSelection();

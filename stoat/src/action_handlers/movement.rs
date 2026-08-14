@@ -2646,6 +2646,25 @@ pub(super) fn keep_primary_selection(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn merge_selections(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    editor.selections.merge_all();
+    UpdateEffect::Redraw
+}
+
+pub(super) fn merge_consecutive_selections(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    editor
+        .selections
+        .merge_consecutive(display_snapshot.buffer_snapshot());
+    UpdateEffect::Redraw
+}
+
 /// Drop the primary selection, reporting when it is the only one left.
 pub(super) fn remove_primary_selection(stoat: &mut Stoat) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
