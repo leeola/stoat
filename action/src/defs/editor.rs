@@ -1444,7 +1444,7 @@ define_action!(
     "MatchBrackets",
     ActionKind::MatchBrackets,
     "match brackets",
-    "Move the primary cursor to the bracket that matches the one under the cursor. Supports `()`, `[]`, and `{}`; `<>` is excluded due to ambiguity with comparison operators. Scans forward from an open bracket or backward from a close bracket, tracking nesting depth to find the pair. No-op when the cursor is not on a recognised bracket or when no balanced match exists in the buffer. Naive scan -- a future tree-sitter-aware variant could exclude brackets inside strings and comments. Primary-cursor only.",
+    "Move every cursor to the bracket that matches the one it sits on. A buffer whose language ships a brackets query answers from its syntax tree. Any other buffer scans forward from an open bracket or backward from a close bracket, tracking nesting depth, over nine pairs: `()`, `{}`, `[]`, `<>`, both curly quote pairs, guillemets, corner brackets, and full-width parens. That scan skips brackets inside strings and comments where a tree is available to name them. No-op for a cursor that is not on a recognised bracket or whose bracket has no balanced match.",
     ActionPriority::Rare
 );
 

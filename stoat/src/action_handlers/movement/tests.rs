@@ -6008,6 +6008,39 @@ fn match_brackets_jumps_open_to_close() {
     assert_eq!(h.primary_head_offset(), 4);
 }
 
+/// A plaintext buffer matches all nine pairs, not only the three ASCII ones.
+///
+/// Each case puts the cursor on the opening delimiter and names the byte the
+/// closing one starts at, which the multi-byte pairs push past the character
+/// count.
+#[test]
+fn match_brackets_covers_every_plaintext_pair() {
+    let cases = [
+        ("a<b>c\n", 1, 3),
+        ("a\u{2018}b\u{2019}c\n", 1, 5),
+        ("a\u{201c}b\u{201d}c\n", 1, 5),
+        ("a\u{ab}b\u{bb}c\n", 1, 4),
+        ("a\u{300c}b\u{300d}c\n", 1, 5),
+        ("a\u{ff08}b\u{ff09}c\n", 1, 5),
+    ];
+
+    for (text, start, expected) in cases {
+        let mut h = TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", text);
+        h.open_file(&path);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+            let snapshot = editor.display_map.snapshot();
+            editor
+                .selections
+                .set_block_cursor(start, snapshot.buffer_snapshot());
+        }
+
+        h.type_keys("m m");
+        assert_eq!(h.primary_head_offset(), expected, "text {text:?}");
+    }
+}
+
 #[test]
 fn match_brackets_jumps_close_to_open() {
     let mut h = TestHarness::with_size(20, 5);

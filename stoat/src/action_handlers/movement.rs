@@ -4110,16 +4110,31 @@ fn bracket_partner(
 /// about and far short of what makes the walk noticeable.
 pub(crate) const MAX_PAIR_SCAN: usize = 10_000;
 
+/// Pairs a bracket match walks for in text with no syntax tree to consult.
+///
+/// Their delimiters are distinct characters, so a character under the cursor
+/// names at most one pair and says which end of it the cursor is on. That is
+/// what a plaintext walk needs. It is also what keeps quotes out, since `"`
+/// opens and closes alike and only a tree tells the two apart.
+const BRACKET_PAIRS: [(char, char); 9] = [
+    ('(', ')'),
+    ('{', '}'),
+    ('[', ']'),
+    ('<', '>'),
+    ('\u{2018}', '\u{2019}'),
+    ('\u{201c}', '\u{201d}'),
+    ('\u{ab}', '\u{bb}'),
+    ('\u{300c}', '\u{300d}'),
+    ('\u{ff08}', '\u{ff09}'),
+];
+
+/// The pair `ch` belongs to and whether it opens one, or `None` when it is no
+/// bracket at all.
 fn bracket_pair(ch: char) -> Option<(char, char, bool)> {
-    match ch {
-        '(' => Some(('(', ')', true)),
-        ')' => Some(('(', ')', false)),
-        '[' => Some(('[', ']', true)),
-        ']' => Some(('[', ']', false)),
-        '{' => Some(('{', '}', true)),
-        '}' => Some(('{', '}', false)),
-        _ => None,
-    }
+    BRACKET_PAIRS
+        .into_iter()
+        .find(|&(open, close)| ch == open || ch == close)
+        .map(|(open, close)| (open, close, ch == open))
 }
 
 /// How far either side of a cursor a pair scan can reach, in bytes.
