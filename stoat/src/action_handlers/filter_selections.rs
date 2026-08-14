@@ -39,9 +39,9 @@ fn open_with(stoat: &mut Stoat, remove: bool) -> UpdateEffect {
 }
 
 /// Submit the keep / remove regex. Filters every selection by
-/// `regex.is_match(selection_text) XOR remove`. Empty filter result
-/// or invalid regex leaves the selections unchanged. Returns `true`
-/// when the input modal was open.
+/// `regex.is_match(selection_text) XOR remove`. A filter that keeps nothing
+/// leaves the selections unchanged and reports it. An invalid regex leaves
+/// them unchanged in silence. Returns `true` when the input modal was open.
 pub(crate) fn submit(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.filter_selections_input.take() else {
         return false;
@@ -73,7 +73,11 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
         })
         .cloned()
         .collect();
+    // Keeping nothing leaves no cursor at all, so the filter is refused. In
+    // silence that press is indistinguishable from one that dropped nothing
+    // because every selection already matched.
     if kept.is_empty() {
+        stoat.set_status("no selections remaining");
         return true;
     }
     editor.selections.replace_with(kept, buffer_snapshot);
@@ -152,6 +156,11 @@ mod tests {
         assert_eq!(editor::selection_spans(&mut h.stoat), vec![(0, 3, false)]);
     }
 
+    /// A filter that keeps nothing is refused, and says so.
+    ///
+    /// The set has to hold at least one selection, so the refusal is the only
+    /// option. Without the message it looks the same as a filter that dropped
+    /// nothing because every selection already matched.
     #[test]
     fn keep_with_no_matches_leaves_selections_unchanged() {
         let mut h = Stoat::test();
@@ -162,6 +171,10 @@ mod tests {
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         let spans = editor::selection_spans(&mut h.stoat);
         assert_eq!(spans, vec![(0, 3, false), (8, 11, false)]);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("no selections remaining"),
+        );
     }
 
     #[test]
@@ -174,6 +187,10 @@ mod tests {
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         let spans = editor::selection_spans(&mut h.stoat);
         assert_eq!(spans, vec![(0, 3, false), (4, 7, false)]);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("no selections remaining"),
+        );
     }
 
     #[test]

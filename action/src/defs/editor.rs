@@ -611,7 +611,7 @@ define_action!(
     "KeepSelections",
     ActionKind::KeepSelections,
     "keep selections matching regex",
-    "Open an input modal for a regex pattern. On submit, keep only the selections whose contents match the pattern; drop the rest. If the filter would empty the selection set, leave selections unchanged. Invalid regex is a silent no-op.",
+    "Open an input modal for a regex pattern. On submit, keep only the selections whose contents match the pattern; drop the rest. A filter that empties the selection set is refused: the selections stay as they are and a message is shown. Invalid regex is a silent no-op.",
     ActionPriority::Common
 );
 
@@ -621,7 +621,7 @@ define_action!(
     "RemoveSelections",
     ActionKind::RemoveSelections,
     "remove selections matching regex",
-    "Open an input modal for a regex pattern. On submit, drop every selection whose contents match the pattern; keep the rest. If the filter would empty the selection set, leave selections unchanged. Invalid regex is a silent no-op.",
+    "Open an input modal for a regex pattern. On submit, drop every selection whose contents match the pattern; keep the rest. A filter that empties the selection set is refused: the selections stay as they are and a message is shown. Invalid regex is a silent no-op.",
     ActionPriority::Common
 );
 
