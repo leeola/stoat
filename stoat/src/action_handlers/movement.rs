@@ -603,32 +603,61 @@ pub(super) fn enter_insert_mode(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Position each cursor to append after its selection, at an insert point past
-/// the selection's last character.
+/// Extend each selection one grapheme past its end, so typing appends after it.
 ///
-/// The min-width-1 counterpart to Helix's `a`. It lands via
-/// [`forward_block_cursor`] so the insert point can sit after the buffer's last
-/// character (where a backward-widening block cursor cannot reach), keeping
-/// appended text after the selection rather than before its final cell.
+/// Helix's `a`. The anchor stays where it was, so the selection survives the
+/// round trip. Esc steps the head back and leaves what was selected before,
+/// where a collapse to a cursor loses it.
+///
+/// A selection ending at the buffer's end has nothing to extend over, so a
+/// line ending is inserted there first to make the room. That inserted ending
+/// is `"\n"` whatever the file uses, since a buffer holds its text in LF and
+/// the file's own ending is restored only on write.
 pub(super) fn append_mode(stoat: &mut Stoat) -> UpdateEffect {
     stoat.restore_cursor = true;
-    let Some(editor) = focused_editor_mut(stoat) else {
+    let Some((editor_id, buffer_id)) = stoat.focused_editor_ids() else {
         return UpdateEffect::None;
     };
+
+    let needs_room = {
+        let Some(editor) = focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        // Helix asks the last range alone, which is the only one that reaches
+        // the buffer's end once the set is sorted and disjoint.
+        editor.selections.all_anchors().last().is_some_and(|sel| {
+            let start = buffer_snapshot.resolve_anchor(&sel.start);
+            let end = buffer_snapshot.resolve_anchor(&sel.end);
+            start != end && end == buffer_snapshot.rope().len()
+        })
+    };
+
+    if needs_room {
+        let ws = stoat.active_workspace_mut();
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        let at = guard.rope().len();
+        guard.edit_batch(&[(at..at, "\n")]);
+    }
+
+    let ws = stoat.active_workspace_mut();
+    let editor = ws.editors.get_mut(editor_id).expect("editor");
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
     editor
         .selections
         .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
-            // The later of the two ends, whichever way round the selection is.
-            forward_block_cursor(
-                sel.id,
-                head_offset.max(tail_offset),
-                SelectionGoal::None,
-                rope,
-                buffer_snapshot,
-            )
+            let (from, to) = (head_offset.min(tail_offset), head_offset.max(tail_offset));
+            Selection {
+                id: sel.id,
+                start: buffer_snapshot.anchor_at(from, Bias::Right),
+                end: buffer_snapshot.anchor_at(rope.next_grapheme_boundary(to), Bias::Right),
+                reversed: false,
+                goal: SelectionGoal::None,
+            }
         });
     UpdateEffect::Redraw
 }

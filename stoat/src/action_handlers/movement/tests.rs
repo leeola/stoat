@@ -1136,6 +1136,50 @@ fn move_right_advances_one_grapheme() {
     assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
 }
 
+/// `a` reaches past the selection without throwing it away, so Esc leaves
+/// what was selected before still selected.
+///
+/// Collapsing to a cursor instead loses the selection on every append, which
+/// makes `a` unusable for extending a range the user built up.
+#[test]
+fn append_then_escape_keeps_the_selection() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abcdef\n");
+    h.open_file(&path);
+    set_range(&mut h, 0, 3);
+    assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
+
+    h.type_keys("a");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 4, false)],
+        "the head reaches one grapheme past, so typing lands after the selection",
+    );
+
+    h.type_keys("escape");
+    assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
+}
+
+/// A selection ending at an unterminated buffer's end has nothing to reach
+/// over, so `a` opens the line it needs first.
+#[test]
+fn append_at_an_unterminated_end_opens_a_line() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc");
+    h.open_file(&path);
+    set_range(&mut h, 0, 3);
+
+    h.type_keys("a");
+    assert_eq!(buffer_string(&mut h), "abc\n", "the room is made first");
+
+    h.type_keys("X");
+    assert_eq!(
+        buffer_string(&mut h),
+        "abcX\n",
+        "and the typing lands after the selection, not past the new line ending",
+    );
+}
+
 /// `l` reaches the position past the last character, then stops.
 ///
 /// That position is the buffer end, where the cursor is zero-width. Stopping

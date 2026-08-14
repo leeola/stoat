@@ -5009,11 +5009,16 @@ impl Stoat {
         Some((buffer_id, editor.selections.shared_anchors()))
     }
 
-    /// Move each block cursor in the focused editor back one grapheme, landing
-    /// it 1-wide, so leaving an append-style insert lands on the last typed
-    /// char rather than one cell past it.
+    /// Step each selection's head back one grapheme, undoing the reach
+    /// [`action_handlers::movement::append_mode`] added so leaving the insert
+    /// lands on the last typed character rather than one cell past it.
     ///
-    /// A cursor at a line start stays put, since retreating across the newline
+    /// The anchor stays put, so what was selected before `a` comes back rather
+    /// than collapsing to a cursor. Only a forward range steps back, which
+    /// leaves the empty range at the buffer's end alone. Nothing was added to
+    /// that one, so it has nothing to give back.
+    ///
+    /// A head at a line start stays put, since retreating across the newline
     /// would land it on the previous line. This covers the buffer start and an
     /// empty line whose auto-indent was stripped on the same transition.
     fn restore_cursor_after_append(&mut self) {
@@ -5023,17 +5028,41 @@ impl Stoat {
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
         let rope = buf_snap.rope();
-        action_handlers::movement::move_cursors(&mut editor.selections, buf_snap, false, |read| {
-            let cursor = stoat_text::cursor_offset(rope, read.tail, read.head);
-            // The guard peeks at the preceding scalar rather than the cluster,
-            // since only a literal newline pins the cursor in place. Any other
-            // cluster is stepped over whole.
-            let back = match rope.reversed_chars_at(cursor).next() {
-                Some(ch) if ch != '\n' => rope.prev_grapheme_boundary(cursor),
-                _ => cursor,
-            };
-            Some((back, SelectionGoal::None))
-        });
+        editor
+            .selections
+            .transform_resolved(buf_snap, |sel, head_offset, tail_offset| {
+                let (from, to) = (head_offset.min(tail_offset), head_offset.max(tail_offset));
+                let back = rope.prev_grapheme_boundary(to);
+                if from < back {
+                    return Selection {
+                        id: sel.id,
+                        start: buf_snap.anchor_at(from, Bias::Right),
+                        end: buf_snap.anchor_at(back, Bias::Right),
+                        reversed: false,
+                        goal: SelectionGoal::None,
+                    };
+                }
+
+                // Stepping the head back empties this one, so it is a bare
+                // cursor rather than a selection `a` reached out of. A cursor
+                // covers a cell in this model, so the whole cell moves back.
+                //
+                // The guard peeks at the preceding scalar rather than the
+                // cluster, since only a literal newline pins the cursor in
+                // place. Any other cluster is stepped over whole.
+                let cursor = stoat_text::cursor_offset(rope, tail_offset, head_offset);
+                let landed = match rope.reversed_chars_at(cursor).next() {
+                    Some(ch) if ch != '\n' => rope.prev_grapheme_boundary(cursor),
+                    _ => cursor,
+                };
+                crate::selection::land_block_cursor(
+                    sel.id,
+                    landed,
+                    SelectionGoal::None,
+                    rope,
+                    buf_snap,
+                )
+            });
     }
 
     /// Strip the untouched auto-indent from each recorded cursor's line, leaving
