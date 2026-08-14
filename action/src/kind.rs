@@ -270,6 +270,7 @@ action_kinds! {
     ExtendGotoNextParagraph,
     ExtendGotoPrevParagraph,
     MatchBrackets,
+    ExtendMatchBrackets,
     GotoWindowTop,
     GotoWindowCenter,
     GotoWindowBottom,

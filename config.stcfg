@@ -549,6 +549,18 @@ on key {
         a -> [SelectTextobjectAround(), SetMode(normal)];
         i -> [SelectTextobjectInner(), SetMode(normal)];
     }
+    # The match menu's select-mode flavor. The three arms that leave a
+    # selection the user is still building return to select; the surround
+    # arms rewrite the text around it and hand back normal mode.
+    mode == select_match {
+        Escape -> SetMode(select);
+        m -> [ExtendMatchBrackets(), SetMode(select)];
+        s -> [SurroundAdd(), SetMode(normal)];
+        r -> [SurroundReplace(), SetMode(normal)];
+        d -> [SurroundDelete(), SetMode(normal)];
+        a -> [SelectTextobjectAround(), SetMode(select)];
+        i -> [SelectTextobjectInner(), SetMode(select)];
+    }
     mode == select {
         Escape -> SetMode(normal);
         v -> SetMode(normal);
@@ -581,6 +593,7 @@ on key {
         End -> ExtendToLineEnd();
         G -> ExtendToLastLine();
         g -> SetMode(select_goto);
+        m -> SetMode(select_match);
         ] -> SetMode(select_bracket_next);
         [ -> SetMode(select_bracket_prev);
         ; -> CollapseSelection();

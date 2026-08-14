@@ -21,20 +21,20 @@ use crate::{
             ExtendGotoFileStart, ExtendGotoFirstNonwhitespace, ExtendGotoLastLine,
             ExtendGotoNextParagraph, ExtendGotoPrevParagraph, ExtendGotoWindowBottom,
             ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft, ExtendLineDown, ExtendLineUp,
-            ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart, ExtendNextWordEnd,
-            ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
-            ExtendSearchNext, ExtendSearchPrev, ExtendSelectNextSibling, ExtendSelectPrevSibling,
-            ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine,
-            ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar,
-            FindPrevChar, FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
-            GotoDiffCallerUp, GotoFileStart, GotoFirstNonwhitespace, GotoImplementors,
-            GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact,
-            GotoNextChange, GotoNextClass, GotoNextFunction, GotoNextParagraph, GotoPrevChange,
-            GotoPrevClass, GotoPrevFunction, GotoPrevParagraph, GotoReferences, GotoWindowBottom,
-            GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp, Increment,
-            IndentSelection, InsertAtLineEnd, InsertAtLineStart, InsertRegister, InsertTab,
-            JoinSelections, JoinSelectionsSpace, JumpBackward, JumpForward, KeepPrimarySelection,
-            KeepSelections, MarkTrailEnd, MarkTrailStart, MatchBrackets,
+            ExtendMatchBrackets, ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart,
+            ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart,
+            ExtendRight, ExtendSearchNext, ExtendSearchPrev, ExtendSelectNextSibling,
+            ExtendSelectPrevSibling, ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart,
+            ExtendToLastLine, ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
+            FindNextChar, FindPrevChar, FlipSelections, GotoCallee, GotoCaller, GotoColumn,
+            GotoDiffCalleeDown, GotoDiffCallerUp, GotoFileStart, GotoFirstNonwhitespace,
+            GotoImplementors, GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark,
+            GotoMarkExact, GotoNextChange, GotoNextClass, GotoNextFunction, GotoNextParagraph,
+            GotoPrevChange, GotoPrevClass, GotoPrevFunction, GotoPrevParagraph, GotoReferences,
+            GotoWindowBottom, GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp,
+            Increment, IndentSelection, InsertAtLineEnd, InsertAtLineStart, InsertRegister,
+            InsertTab, JoinSelections, JoinSelectionsSpace, JumpBackward, JumpForward,
+            KeepPrimarySelection, KeepSelections, MarkTrailEnd, MarkTrailStart, MatchBrackets,
             MergeConsecutiveSelections, MergeSelections, MoveDown, MoveLeft, MoveLineDown,
             MoveLineUp, MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd,
             MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd,
@@ -814,6 +814,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoNextClass::DEF, |_| Ok(Box::new(GotoNextClass)));
     add(GotoPrevClass::DEF, |_| Ok(Box::new(GotoPrevClass)));
     add(MatchBrackets::DEF, |_| Ok(Box::new(MatchBrackets)));
+    add(ExtendMatchBrackets::DEF, |_| {
+        Ok(Box::new(ExtendMatchBrackets))
+    });
     add(GotoWindowTop::DEF, |_| Ok(Box::new(GotoWindowTop)));
     add(GotoWindowCenter::DEF, |_| Ok(Box::new(GotoWindowCenter)));
     add(GotoWindowBottom::DEF, |_| Ok(Box::new(GotoWindowBottom)));
@@ -1904,7 +1907,8 @@ mod tests {
         // + 2 SearchSelection/SearchSelectionDetectWordBoundaries.
         // + 2 ExtendSearchNext/ExtendSearchPrev.
         // + 4 MoveLineUp/MoveLineDown and their extend variants.
-        assert_eq!(all().count(), 448);
+        // + 1 ExtendMatchBrackets.
+        assert_eq!(all().count(), 449);
     }
 
     #[test]

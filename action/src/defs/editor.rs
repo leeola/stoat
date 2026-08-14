@@ -1444,7 +1444,17 @@ define_action!(
     "MatchBrackets",
     ActionKind::MatchBrackets,
     "match brackets",
-    "Move every cursor to the bracket that matches the one it sits on. A buffer whose language ships a brackets query answers from its syntax tree. Any other buffer scans forward from an open bracket or backward from a close bracket, tracking nesting depth, over nine pairs: `()`, `{}`, `[]`, `<>`, both curly quote pairs, guillemets, corner brackets, and full-width parens. That scan skips brackets inside strings and comments where a tree is available to name them. No-op for a cursor that is not on a recognised bracket or whose bracket has no balanced match.",
+    "Move every cursor to the bracket that matches the one it sits on. A buffer with a syntax tree answers from the tree, which also matches from inside a construct rather than only from a delimiter. Text with no tree scans forward from an open bracket or backward from a close bracket, tracking nesting depth, over nine pairs: `()`, `{}`, `[]`, `<>`, both curly quote pairs, guillemets, corner brackets, and full-width parens. No-op for a cursor that is in no pair or whose bracket has no balanced match.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendMatchBracketsDef,
+    ExtendMatchBrackets,
+    "ExtendMatchBrackets",
+    ActionKind::ExtendMatchBrackets,
+    "extend to matching bracket",
+    "Like `MatchBrackets` but extends each selection rather than replacing it, so the span grows out to the partner delimiter instead of collapsing onto it.",
     ActionPriority::Rare
 );
 

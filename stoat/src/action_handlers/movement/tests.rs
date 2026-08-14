@@ -6259,6 +6259,38 @@ fn match_brackets_char_literal_paren_resolves_to_enclosing() {
     );
 }
 
+/// The match menu is reachable from select mode, and mm there extends the
+/// selection out to the partner rather than collapsing onto it.
+#[test]
+fn select_mode_match_brackets_extends_to_the_partner() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "{abc}\n");
+    h.open_file(&path);
+
+    h.type_keys("v");
+    h.type_keys("m m");
+    assert_eq!(h.stoat.focused_mode(), "select", "and it returns to select");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 5, false)],
+        "the span reaches from the open brace through the close",
+    );
+}
+
+/// The textobject arms of the menu return to select too, since each leaves a
+/// selection the user is still building.
+#[test]
+fn select_mode_textobject_chord_returns_to_select() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "alpha beta\n");
+    h.open_file(&path);
+
+    h.type_keys("v");
+    h.type_keys("m i w");
+    assert_eq!(h.stoat.focused_mode(), "select");
+    assert_eq!(h.selection_spans(), vec![(0, 5, false)], "the word");
+}
+
 /// A language with a grammar but no brackets query still matches from inside a
 /// construct, since the tree names the construct without a query to read.
 ///

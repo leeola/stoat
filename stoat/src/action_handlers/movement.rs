@@ -4031,7 +4031,7 @@ fn paragraph_range(
         },
     }
 }
-pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
+pub(super) fn match_brackets(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -4054,7 +4054,7 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
 
-    move_cursors(&mut editor.selections, buffer_snapshot, false, |read| {
+    move_cursors(&mut editor.selections, buffer_snapshot, extend, |read| {
         // Every cursor pairs its own bracket. Resolving one partner and landing
         // it on all of them makes every span identical, and identical spans
         // merge, so the set collapses to one cursor. A cursor sitting in no pair
