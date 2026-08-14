@@ -131,7 +131,7 @@ fn prepare_file(
     let rel_path = crate::paths::display_relative(path, git_root);
 
     let ws = stoat.active_workspace_mut();
-    let (buffer_id, buffer) = ws.buffers.new_scratch_preview_unseeded();
+    let (buffer_id, buffer) = ws.buffers.new_scratch_preview();
     {
         let mut guard = buffer.write().expect("buffer poisoned");
         guard.edit(0..0, &center_text);

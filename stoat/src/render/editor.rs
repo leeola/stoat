@@ -4347,14 +4347,13 @@ mod tests {
     }
 
     #[test]
-    fn scratch_gutter_numbers_the_line_after_the_trailing_newline() {
+    fn scratch_gutter_numbers_its_one_line() {
         let mut h = Stoat::test();
-        // A bare scratch is a seeded "\n", so it holds two lines: the empty
-        // first one and the empty one the newline opens. The cursor reaches
-        // both, so both number.
+        // A bare scratch holds an empty rope, which is one line with nothing
+        // on it. The row below is past the buffer and carries no number.
         assert_eq!(
             rendered_gutter(&mut h.stoat, true, false, LineNumbers::Relative, 2),
-            ["1", "1"],
+            ["1", ""],
         );
     }
 

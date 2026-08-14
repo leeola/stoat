@@ -8946,8 +8946,8 @@ mod tests {
         let buffer = ws.buffers.get(buffer_id).expect("scratch buffer is live");
         assert_eq!(
             buffer.read().expect("buffer lock").rope().to_string(),
-            "\n",
-            "restored scratch buffer holds the seeded newline",
+            "",
+            "a restored scratch holds an empty rope",
         );
         assert_eq!(
             h.stoat.focused_mode(),
@@ -15740,8 +15740,8 @@ mod tests {
         ));
         assert_eq!(
             focused_primary_offsets(&mut h),
-            (1, 1),
-            "a click past the content clamps to the end, zero-width past the newline"
+            (0, 0),
+            "a click past the content clamps to the end of the empty scratch"
         );
     }
 

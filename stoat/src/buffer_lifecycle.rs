@@ -837,10 +837,7 @@ mod tests {
             .buffers
             .get(new_id)
             .expect("scratch buffer exists");
-        assert_eq!(
-            new_buffer.read().expect("poisoned").rope().to_string(),
-            "\n"
-        );
+        assert_eq!(new_buffer.read().expect("poisoned").rope().to_string(), "");
     }
 
     #[test]

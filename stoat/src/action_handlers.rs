@@ -2052,7 +2052,7 @@ mod tests {
 
         let new_buffer = ws.buffers.get(new_buffer_id).expect("buffer exists");
         let guard = new_buffer.read().expect("buffer poisoned");
-        assert_eq!(guard.snapshot.visible_text.to_string(), "\n");
+        assert_eq!(guard.snapshot.visible_text.to_string(), "");
 
         let original_buffer = ws.buffers.get(original_buffer_id).expect("buffer exists");
         let original_guard = original_buffer.read().expect("buffer poisoned");

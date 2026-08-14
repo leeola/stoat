@@ -1703,11 +1703,13 @@ fn select_all_replaces_all_selections() {
     assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 8, false)]);
 }
 
+/// A fresh scratch holds an empty rope, so selecting all of it selects
+/// nothing and the cursor stays zero-width where it is.
 #[test]
 fn select_all_on_empty_buffer() {
     let mut stoat = stoat();
     dispatch(&mut stoat, &SelectAll);
-    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 1, false)]);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 0, false)]);
 }
 
 #[test]
