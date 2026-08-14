@@ -269,9 +269,14 @@ impl SelectionsCollection {
         self.install(Arc::from([primary]));
     }
 
-    pub(crate) fn remove_primary(&mut self) {
+    /// Drop the primary selection, answering whether one went.
+    ///
+    /// The collection always holds at least one selection, so a lone selection
+    /// stays and the answer is `false`. The caller reports that refusal, which
+    /// is otherwise indistinguishable from a keypress that never arrived.
+    pub(crate) fn remove_primary(&mut self) -> bool {
         if self.disjoint.len() < 2 {
-            return;
+            return false;
         }
         let primary_id = self.newest_anchor().id;
         let kept = self
@@ -281,6 +286,7 @@ impl SelectionsCollection {
             .cloned()
             .collect();
         self.install(kept);
+        true
     }
 
     pub(crate) fn rotate_primary_by(&mut self, forward: bool, count: u32) {
@@ -1124,7 +1130,9 @@ mod tests {
                 }]))
             }),
             ("keep_primary", |c, _| c.keep_primary()),
-            ("remove_primary", |c, _| c.remove_primary()),
+            ("remove_primary", |c, _| {
+                c.remove_primary();
+            }),
             ("rotate_primary_by", |c, _| c.rotate_primary_by(true, 1)),
             ("transform", |c, s| c.transform(s, |sel| sel.clone())),
             ("land_block_cursors", |c, s| {
@@ -1665,7 +1673,7 @@ mod tests {
         assert_eq!(collection.all_anchors().len(), 3);
         let dropped_id = collection.newest_anchor().id;
 
-        collection.remove_primary();
+        assert!(collection.remove_primary(), "one selection went");
 
         let remaining_ids: Vec<usize> = collection.all_anchors().iter().map(|s| s.id).collect();
         assert_eq!(remaining_ids, vec![0, 1]);
@@ -1679,7 +1687,7 @@ mod tests {
         let mut collection = SelectionsCollection::new();
 
         let before_id = collection.newest_anchor().id;
-        collection.remove_primary();
+        assert!(!collection.remove_primary(), "nothing went");
         assert_eq!(collection.all_anchors().len(), 1);
         assert_eq!(collection.newest_anchor().id, before_id);
     }

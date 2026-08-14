@@ -2646,11 +2646,14 @@ pub(super) fn keep_primary_selection(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Drop the primary selection, reporting when it is the only one left.
 pub(super) fn remove_primary_selection(stoat: &mut Stoat) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
-    editor.selections.remove_primary();
+    if !editor.selections.remove_primary() {
+        stoat.set_status("no selections remaining");
+    }
     UpdateEffect::Redraw
 }
 

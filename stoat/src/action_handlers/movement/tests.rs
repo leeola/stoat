@@ -856,6 +856,35 @@ fn joined_spaces_survive_removing_the_primary_selection() {
     );
 }
 
+/// The collection must hold a selection at all times, so the last one stays.
+/// A refusal without a word looks the same as a keypress that never arrived,
+/// so the refusal reaches the status line.
+#[test]
+fn removing_the_only_selection_reports_instead_of_doing_nothing() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\n");
+    h.open_file(&path);
+    set_selections(&mut h, &[(0, 1), (2, 3)]);
+
+    dispatch(&mut h.stoat, &stoat_action::RemovePrimarySelection);
+    assert_eq!(h.selection_spans(), vec![(0, 1, false)]);
+    assert_eq!(
+        h.stoat.pending_message, None,
+        "a removal that happens says nothing",
+    );
+
+    dispatch(&mut h.stoat, &stoat_action::RemovePrimarySelection);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 1, false)],
+        "the last selection stays",
+    );
+    assert_eq!(
+        h.stoat.pending_message.as_deref(),
+        Some("no selections remaining"),
+    );
+}
+
 #[test]
 fn join_selections_space_single_line_joins_with_next() {
     let mut h = TestHarness::with_size(20, 5);
