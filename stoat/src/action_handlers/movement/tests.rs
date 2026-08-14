@@ -3917,6 +3917,11 @@ fn align_selections_single_selection_is_noop() {
     assert_eq!(focused_buffer_text(&mut h), before);
 }
 
+/// A selection spanning two rows abandons the align, and says so.
+///
+/// Without the message the key reads as dead. The buffer is untouched and
+/// nothing else moves, so nothing tells a refused align apart from one that
+/// found nothing to pad.
 #[test]
 fn align_selections_skips_multi_line_selection() {
     let mut h = TestHarness::with_size(20, 5);
@@ -3926,6 +3931,10 @@ fn align_selections_skips_multi_line_selection() {
     let before = focused_buffer_text(&mut h);
     dispatch(&mut h.stoat, &stoat_action::AlignSelections);
     assert_eq!(focused_buffer_text(&mut h), before);
+    assert_eq!(
+        h.stoat.pending_message.as_deref(),
+        Some("align cannot work with multi line selections"),
+    );
 }
 
 #[test]

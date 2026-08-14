@@ -1304,6 +1304,10 @@ pub(super) fn align_selections(stoat: &mut Stoat) -> UpdateEffect {
         _ => return UpdateEffect::None,
     };
 
+    // A selection spanning two rows has no single column to align, so one of
+    // them abandons the whole align. Reporting it has to wait for the block to
+    // release the workspace, which the edit below borrows again.
+    let mut multi_line = false;
     let entries: Vec<AlignEntry> = {
         let editor = ws.editors.get_mut(editor_id).expect("editor");
         let display_snapshot = editor.display_map.snapshot();
@@ -1317,7 +1321,8 @@ pub(super) fn align_selections(stoat: &mut Stoat) -> UpdateEffect {
             let start_pt = rope.offset_to_point(start_offset);
             let end_pt = rope.offset_to_point(end_offset);
             if start_pt.row != end_pt.row {
-                return UpdateEffect::None;
+                multi_line = true;
+                break;
             }
             let head_pt = if sel.reversed { start_pt } else { end_pt };
             let head_display = display_snapshot.buffer_to_display(head_pt);
@@ -1329,6 +1334,11 @@ pub(super) fn align_selections(stoat: &mut Stoat) -> UpdateEffect {
         }
         out
     };
+
+    if multi_line {
+        stoat.set_status("align cannot work with multi line selections");
+        return UpdateEffect::Redraw;
+    }
 
     if entries.is_empty() {
         return UpdateEffect::None;
