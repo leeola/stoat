@@ -85,7 +85,7 @@ fn open_input(stoat: &mut Stoat, direction: SearchDirection) -> UpdateEffect {
     if stoat.search_input.is_some() {
         return UpdateEffect::None;
     }
-    let extend = stoat.focused_mode() == "select";
+    let extend = stoat.in_select_mode();
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let input = InputView::create(ws, executor, SubmitTarget::Search, "", "insert", 1);

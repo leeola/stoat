@@ -33,7 +33,7 @@ pub(super) enum PageDir {
 pub(crate) const DEFAULT_VIEWPORT_ROWS: u32 = 20;
 
 pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> UpdateEffect {
-    let extend = stoat.focused_mode() == "select";
+    let extend = stoat.in_select_mode();
     let count = stoat.take_pending_count().unwrap_or(1);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

@@ -4782,6 +4782,19 @@ impl Stoat {
         &self.fallback_mode
     }
 
+    /// Whether the focused pane builds a selection, which a motion reads to
+    /// decide between growing one and replacing it.
+    ///
+    /// True for `select` and for the submodes a key reaches from it. Those are
+    /// named `select_*` by convention, so a chord like `]f` still answers yes
+    /// while it sits in `select_bracket_next` waiting for its second key. A
+    /// bare comparison against `select` says no there, which turns a motion the
+    /// user asked to extend into one that replaces.
+    pub(crate) fn in_select_mode(&self) -> bool {
+        let mode = self.focused_mode();
+        mode == "select" || mode.starts_with("select_")
+    }
+
     /// Settle [`Self::frame_mode`] onto what [`Self::focused_mode`] answers now.
     ///
     /// Separate from reading it, the way [`Self::refresh_chrome`] is, so a

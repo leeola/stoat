@@ -542,11 +542,29 @@ on key {
     # selection and the mode the way the normal-mode arms do.
     mode == select_bracket_next {
         Escape -> SetMode(select);
+        g -> [GotoNextChange(), SetMode(select)];
         p -> [ExtendGotoNextParagraph(), SetMode(select)];
+        d -> [GotoNextDiagnostic(), SetMode(select)];
+        f -> [GotoNextFunction(), SetMode(select)];
+        t -> [GotoNextClass(), SetMode(select)];
+        a -> [GotoNextParameter(), SetMode(select)];
+        c -> [GotoNextComment(), SetMode(select)];
+        T -> [GotoNextTest(), SetMode(select)];
+        e -> [GotoNextEntry(), SetMode(select)];
+        x -> [GotoNextXmlElement(), SetMode(select)];
     }
     mode == select_bracket_prev {
         Escape -> SetMode(select);
+        g -> [GotoPrevChange(), SetMode(select)];
         p -> [ExtendGotoPrevParagraph(), SetMode(select)];
+        d -> [GotoPrevDiagnostic(), SetMode(select)];
+        f -> [GotoPrevFunction(), SetMode(select)];
+        t -> [GotoPrevClass(), SetMode(select)];
+        a -> [GotoPrevParameter(), SetMode(select)];
+        c -> [GotoPrevComment(), SetMode(select)];
+        T -> [GotoPrevTest(), SetMode(select)];
+        e -> [GotoPrevEntry(), SetMode(select)];
+        x -> [GotoPrevXmlElement(), SetMode(select)];
     }
     mode == match {
         Escape -> SetMode(normal);

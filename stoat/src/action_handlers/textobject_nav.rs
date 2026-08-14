@@ -74,7 +74,7 @@ pub(crate) fn goto_textobject_impl(
         dir: direction,
         count,
     });
-    let extend = stoat.focused_mode() == "select";
+    let extend = stoat.in_select_mode();
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -389,6 +389,30 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &GotoNextXmlElement);
         assert_eq!(cursor_offset(&mut h), before);
+    }
+
+    /// The whole menu is reachable from select mode, and a motion reached that
+    /// way extends.
+    ///
+    /// The chord sits in a bracket submode when its second key arrives, so the
+    /// motion asks whether the pane builds a selection rather than comparing
+    /// the mode against `select` by name.
+    #[test]
+    fn the_select_bracket_menu_reaches_the_object_motions() {
+        let src = "fn a() {}\nfn b() {}\n";
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        jump(&mut h, 0);
+
+        h.type_keys("v");
+        h.type_keys("] f");
+        assert_eq!(h.stoat.focused_mode(), "select", "and it returns to select");
+        assert_eq!(
+            selected(&mut h, src),
+            "fn a() {}\nfn b() {}",
+            "the span grew out to the object rather than replacing the selection",
+        );
     }
 
     /// A count steps that many objects in one press.
