@@ -69,7 +69,7 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
         .filter(|sel| {
             let start = buffer_snapshot.resolve_anchor(&sel.start);
             let end = buffer_snapshot.resolve_anchor(&sel.end);
-            regex.is_match(rope.regex_slice_input(start..end)) ^ remove
+            regex.is_match(rope.regex_input(start..end)) ^ remove
         })
         .cloned()
         .collect();
@@ -134,6 +134,22 @@ mod tests {
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         let spans = editor::selection_spans(&mut h.stoat);
         assert_eq!(spans, vec![(0, 3, false)]);
+    }
+
+    /// An anchor is answered against the buffer, so where a selection sits
+    /// decides it, even for two selections holding the same text.
+    ///
+    /// Matching each as a detached string makes every selection start count as
+    /// a line start, which keeps both and leaves the anchor saying nothing.
+    #[test]
+    fn an_anchor_keeps_only_the_selection_at_a_line_start() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("foo\nbar foo\n");
+        select_two_ranges(&mut h, (0, 3), (8, 11));
+        dispatch(&mut h.stoat, &action::KeepSelections);
+        h.type_text("^foo");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert_eq!(editor::selection_spans(&mut h.stoat), vec![(0, 3, false)]);
     }
 
     #[test]

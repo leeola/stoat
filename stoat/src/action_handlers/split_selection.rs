@@ -94,12 +94,12 @@ fn split_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
             }
             let mut pieces: Vec<(usize, usize)> = Vec::new();
             let mut piece_start = start;
-            for m in regex.find_iter(rope.regex_slice_input(start..end)) {
+            for m in regex.find_iter(rope.regex_input(start..end)) {
                 // Two matches touching leave nothing between them, and that gap
                 // is still a position the user split at, so it becomes a cursor
                 // rather than disappearing.
-                pieces.push((piece_start, start + m.start()));
-                piece_start = start + m.end();
+                pieces.push((piece_start, m.start()));
+                piece_start = m.end();
             }
             if piece_start < end {
                 pieces.push((piece_start, end));
@@ -135,13 +135,13 @@ fn select_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
                 }
 
                 let matched = regex
-                    .find_iter(rope.regex_slice_input(start..end))
+                    .find_iter(rope.regex_input(start..end))
                     // A zero-width match on the selection's own end sits just
                     // outside what was searched, which is what an anchor like
                     // `$` produces. Every other empty match names a position
                     // inside it and becomes a cursor there.
-                    .filter(|m| start + m.start() != end || m.start() != m.end())
-                    .map(|m| (start + m.start(), start + m.end()))
+                    .filter(|m| m.start() != end || m.start() != m.end())
+                    .map(|m| (m.start(), m.end()))
                     .collect();
                 widen_pieces(rope, matched)
             })
@@ -455,12 +455,15 @@ mod tests {
         assert_eq!(h.stoat.pending_message.as_deref(), Some("nothing selected"));
     }
 
-    /// A selection is matched as though it were the whole text, which is what
-    /// copying it into a string used to give. Searching it as a range of the
-    /// buffer instead would let `^` see the line it was cut from, and it would
-    /// not match part-way along one.
+    /// A selection is matched where it sits in the buffer, so `^` asks whether
+    /// a line really starts there.
+    ///
+    /// Matching it as a detached string makes the selection's own start count
+    /// as a line start, and an anchor then means something different depending
+    /// on where the user happened to cut. The search is bounded to the range
+    /// with the rest of the buffer still around it.
     #[test]
-    fn an_anchor_matches_at_a_selection_starting_mid_line() {
+    fn an_anchor_does_not_match_part_way_along_a_line() {
         let mut h = Stoat::test();
         h.seed_focused_buffer("abcdef\n");
         select_range(&mut h, 3, 6);
@@ -471,9 +474,30 @@ mod tests {
 
         assert_eq!(
             editor::selection_spans(&mut h.stoat),
-            vec![(3, 4, false)],
-            "the selection's own start counts as the start of the text"
+            vec![(3, 6, false)],
+            "no line starts at the selection, so nothing matched"
         );
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("nothing selected"));
+    }
+
+    /// A word boundary at the selection's edge consults the character outside
+    /// it, which is the other half of matching in place.
+    #[test]
+    fn a_word_boundary_sees_the_character_before_the_selection() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("abcdef ghi\n");
+        select_range(&mut h, 3, 10);
+
+        dispatch(&mut h.stoat, &action::SelectRegex);
+        h.type_text("\\bdef");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(3, 10, false)],
+            "the c before the cut is a word character, so no boundary sits there"
+        );
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("nothing selected"));
     }
 
     #[test]
