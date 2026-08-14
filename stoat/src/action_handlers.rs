@@ -105,6 +105,7 @@ pub(crate) enum LastMotion {
     TsObject {
         kind: textobject_nav::NavKind,
         dir: textobject_nav::NavDirection,
+        count: u32,
     },
     ExpandSelection {
         count: u32,
@@ -151,7 +152,9 @@ pub(crate) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
             LastMotion::TsSibling { dir, count } => {
                 movement::select_sibling_impl(stoat, dir, count)
             },
-            LastMotion::TsObject { kind, dir } => textobject_nav::goto_textobject(stoat, kind, dir),
+            LastMotion::TsObject { kind, dir, count } => {
+                textobject_nav::goto_textobject_impl(stoat, kind, dir, count)
+            },
             LastMotion::ExpandSelection { count } => movement::expand_selection_impl(stoat, count),
             LastMotion::ShrinkSelection { count } => movement::shrink_selection_impl(stoat, count),
             LastMotion::SelectAllSiblings => movement::select_all_siblings(stoat),

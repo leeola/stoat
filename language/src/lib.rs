@@ -21,5 +21,5 @@ pub use symbols::{extract_references, extract_symbols, RefKind, RefSite, SymbolD
 pub use syntax_map::{
     LayerKey, LayerSummary, SyntaxLayer, SyntaxMap, SyntaxMapCapture, SyntaxSnapshot,
 };
-pub use textobject::{collect_capture_starts, find_smallest_capture_at};
+pub use textobject::{collect_capture_ranges, collect_capture_starts, find_smallest_capture_at};
 pub use tree_sitter::{Node, Query, Tree};

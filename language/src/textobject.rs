@@ -15,16 +15,65 @@ use std::ops::Range;
 use stoat_text::Rope;
 use tree_sitter::{Node, Query, StreamingIterator};
 
+/// Sorted, deduplicated byte ranges of every match's `capture_name` union
+/// range, over the matches within `bytes`.
+///
+/// Backs goto-next/prev navigation (`] f` / `[ f` / `] t` / `[ t`), which
+/// selects the whole object it lands on rather than only its opening keyword.
+/// A caller seeking one direction passes only the bytes that direction
+/// answers from. The range bounds which matches are visited, and each still
+/// reports its own extents.
+///
+/// Returns an empty vector when `capture_name` is unknown to `query` or no
+/// match yields a capture under that name.
+pub fn collect_capture_ranges(
+    query: &Query,
+    root: Node<'_>,
+    rope: &Rope,
+    capture_name: &str,
+    bytes: Range<usize>,
+) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    let Some(cap_idx) = query.capture_index_for_name(capture_name) else {
+        return out;
+    };
+    let provider = RopeTextProvider { rope };
+    let mut cursor_h = QueryCursorHandle::new();
+    cursor_h.set_byte_range(bytes);
+    let mut matches = cursor_h.matches(query, root, provider);
+    while let Some(m) = matches.next() {
+        let mut union: Option<Range<usize>> = None;
+        for cap in m.captures {
+            if cap.index != cap_idx {
+                continue;
+            }
+            let r = cap.node.byte_range();
+            union = Some(match union {
+                None => r,
+                Some(u) => u.start.min(r.start)..u.end.max(r.end),
+            });
+        }
+        if let Some(u) = union {
+            out.push(u);
+        }
+    }
+    out.sort_unstable_by_key(|r| (r.start, r.end));
+    out.dedup();
+    out
+}
+
 /// Sorted, deduplicated start byte offsets of every match's
 /// `capture_name` union range, over the matches within `bytes`.
 ///
-/// Used by goto-next/prev navigation (`] f` / `[ f` / `] t` / `[ t`)
-/// to land on the keyword that opens each function or class. A caller
-/// seeking one direction passes only the bytes that direction can
-/// answer from. The range bounds which matches are visited, and each
+/// A caller seeking one direction passes only the bytes that direction
+/// answers from. The range bounds which matches are visited, and each
 /// still reports its own extents. Returns an empty vector when
 /// `capture_name` is unknown to `query` or no match yields a
 /// capture under that name.
+///
+/// See also:
+/// - [`collect_capture_ranges`] for a caller that needs each match's extent rather than only where
+///   it opens.
 pub fn collect_capture_starts(
     query: &Query,
     root: Node<'_>,
