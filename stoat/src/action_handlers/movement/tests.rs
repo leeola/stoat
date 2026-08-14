@@ -4916,6 +4916,105 @@ fn find_next_char_jumps_forward() {
     assert_eq!(h.primary_head_offset(), 2);
 }
 
+/// Tab names a tab as the find target.
+///
+/// The terminal reports Tab as its own key rather than as the character it
+/// stands for, so the find has to translate it or lose the target.
+#[test]
+fn find_next_char_accepts_tab_as_its_target() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "ab\tcd\n");
+    h.open_file(&path);
+    h.type_keys("f tab");
+    assert_eq!(h.primary_head_offset(), 2, "the cursor rests on the tab");
+}
+
+/// Enter names a line ending, which f lands on.
+#[test]
+fn find_next_char_accepts_enter_for_the_line_ending() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\ndef\n");
+    h.open_file(&path);
+    h.type_keys("f enter");
+    assert_eq!(
+        h.primary_head_offset(),
+        3,
+        "the cursor rests on the newline"
+    );
+}
+
+/// Running it again advances a line rather than holding on the ending it
+/// already found.
+///
+/// The motion counts a cursor already on its target as one line consumed, which
+/// is what makes the repeat move.
+#[test]
+fn find_enter_run_again_advances_a_line() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\ndef\nghi\n");
+    h.open_file(&path);
+    h.type_keys("f enter");
+    assert_eq!(h.primary_head_offset(), 3);
+    h.type_keys("f enter");
+    assert_eq!(h.primary_head_offset(), 7, "the second row's ending");
+}
+
+/// A count crosses that many line endings in one motion.
+#[test]
+fn find_enter_with_a_count_crosses_that_many_lines() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\ndef\nghi\n");
+    h.open_file(&path);
+    h.type_keys("2 f enter");
+    assert_eq!(h.primary_head_offset(), 7, "the second row's ending");
+}
+
+/// t stops one short of the ending, where f lands on it.
+#[test]
+fn till_next_char_with_enter_stops_before_the_line_ending() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\ndef\n");
+    h.open_file(&path);
+    h.type_keys("t enter");
+    assert_eq!(h.primary_head_offset(), 2, "the cursor rests on the c");
+}
+
+/// F reaches the ending of the line above.
+#[test]
+fn find_prev_char_with_enter_lands_on_the_ending_above() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\ndef\n");
+    h.open_file(&path);
+    h.type_keys("j l");
+    assert_eq!(h.primary_head_offset(), 5, "the cursor starts on the e");
+    h.type_keys("F enter");
+    assert_eq!(h.primary_head_offset(), 3, "the first row's ending");
+}
+
+/// T stops one short of the ending above, which is its own line's start.
+#[test]
+fn till_prev_char_with_enter_lands_on_the_line_start() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\ndef\n");
+    h.open_file(&path);
+    h.type_keys("j l");
+    h.type_keys("T enter");
+    assert_eq!(h.primary_head_offset(), 4, "the second row's start");
+}
+
+/// A target line off the buffer's end holds the cursor rather than clamping it
+/// to the last ending.
+#[test]
+fn find_enter_past_the_last_line_holds_the_cursor() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\ndef\n");
+    h.open_file(&path);
+    h.type_keys("j");
+    let before = h.primary_head_offset();
+    h.type_keys("9 f enter");
+    assert_eq!(h.primary_head_offset(), before);
+}
+
 /// A find reaches a target on a later line rather than stopping at the line
 /// end, and the selection it leaves spans the newline it crossed.
 #[test]

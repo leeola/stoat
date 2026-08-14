@@ -3211,25 +3211,59 @@ pub(crate) fn execute_find(
     count: u32,
 ) -> UpdateEffect {
     stoat.last_find = Some((kind, ch));
+    let count = count.max(1);
+    move_to_find_target(stoat, extend, |rope, cursor| {
+        find_target(rope, cursor, kind, ch, count)
+    })
+}
+
+/// Run a find whose target is the end of a line rather than a character.
+///
+/// Backs `f`/`t`/`F`/`T` followed by Enter. A line ending is not a character
+/// the caller names in advance, since one line ends in LF where the next ends
+/// in CRLF, so the target comes from the cursor's row instead of a scan.
+///
+/// Records no repeatable motion, so `Alt-.` replays whatever find came before
+/// it rather than this one.
+pub(crate) fn execute_find_line_ending(
+    stoat: &mut Stoat,
+    kind: FindKind,
+    extend: bool,
+    count: u32,
+) -> UpdateEffect {
+    let count = count.max(1);
+    move_to_find_target(stoat, extend, |rope, cursor| {
+        line_ending_target(rope, cursor, kind, count)
+    })
+}
+
+/// Move each selection's cursor to the offset `target_of` picks for it.
+///
+/// Every find shares this, so the two entry points differ only in where they
+/// look. A selection `target_of` returns `None` for holds its place rather than
+/// being dragged onto another selection's target.
+fn move_to_find_target(
+    stoat: &mut Stoat,
+    extend: bool,
+    target_of: impl Fn(&Rope, usize) -> Option<usize>,
+) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
-    let count = count.max(1);
 
     if extend {
         // A find is horizontal, so it drops any column a prior vertical move was
         // holding. Carrying it would send the next vertical move back to the
         // column the find started from.
         move_cursors(&mut editor.selections, buffer_snapshot, true, |read| {
-            // Each selection scans from its own cursor. Scanning once and
+            // Each selection reads from its own cursor. Reading once and
             // stamping the result on all of them makes every span identical, and
-            // identical spans merge, so the set collapses to one cursor. A
-            // selection whose line holds no match holds its place.
+            // identical spans merge, so the set collapses to one cursor.
             let cursor = cursor_offset(rope, read.tail, read.head);
-            let target = find_target(rope, cursor, kind, ch, count)?;
+            let target = target_of(rope, cursor)?;
             Some((target, SelectionGoal::None))
         });
         return UpdateEffect::Redraw;
@@ -3239,12 +3273,10 @@ pub(crate) fn execute_find(
         .selections
         .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
             let cursor = cursor_offset(rope, tail_offset, head_offset);
-            // Each selection scans from its own cursor. Scanning once and
+            // Each selection reads from its own cursor. Reading once and
             // stamping the result on all of them makes every span identical,
             // and identical spans merge, so the set collapses to one cursor.
-            let Some(target) = find_target(rope, cursor, kind, ch, count) else {
-                // A selection whose line holds no match holds its place rather
-                // than being dragged onto another selection's target.
+            let Some(target) = target_of(rope, cursor) else {
                 return sel.clone();
             };
 
@@ -3267,6 +3299,72 @@ pub(crate) fn execute_find(
             }
         });
     UpdateEffect::Redraw
+}
+
+/// Offset the block cursor lands on for a find or till motion aimed at a line
+/// ending, or `None` when the target line falls outside the buffer.
+///
+/// The target is a row away from the cursor's own, so a count crosses that many
+/// lines. A cursor already sitting on the edge it is aimed at counts as one line
+/// consumed, which is what lets the same keys run again and advance rather than
+/// hold still.
+///
+/// The last row is unreachable going forward. It carries no ending, since a
+/// buffer that ends in one has an empty row after it.
+fn line_ending_target(rope: &Rope, cursor: usize, kind: FindKind, count: u32) -> Option<usize> {
+    let row = rope.offset_to_point(cursor).row;
+    let max_row = rope.max_point().row;
+    let count = count as i64;
+
+    match kind {
+        FindKind::NextChar | FindKind::TillNextChar => {
+            let this_end = line_end_offset(rope, row, max_row);
+            let on_edge = match kind {
+                FindKind::TillNextChar => {
+                    this_end == cursor || this_end == rope.next_grapheme_boundary(cursor)
+                },
+                _ => this_end == cursor,
+            };
+
+            let target_row = row as i64 + count - 1 + i64::from(on_edge);
+            if target_row >= i64::from(max_row) {
+                return None;
+            }
+
+            let end = line_end_offset(rope, target_row as u32, max_row);
+            match kind {
+                FindKind::TillNextChar => Some(rope.prev_grapheme_boundary(end)),
+                _ => Some(end),
+            }
+        },
+        FindKind::PrevChar => {
+            let target_row = row as i64 - count;
+            if target_row < 0 {
+                return None;
+            }
+            Some(line_end_offset(rope, target_row as u32, max_row))
+        },
+        FindKind::TillPrevChar => {
+            let on_edge = rope.point_to_offset(Point::new(row, 0)) == cursor;
+            let target_row = row as i64 - count + 1 - i64::from(on_edge);
+            if target_row <= 0 {
+                return None;
+            }
+            Some(rope.point_to_offset(Point::new(target_row as u32, 0)))
+        },
+    }
+}
+
+/// Offset of `row`'s last character, before the line ending that follows it.
+///
+/// The final row has no ending to sit before, so it reports the buffer's end.
+fn line_end_offset(rope: &Rope, row: u32, max_row: u32) -> usize {
+    if row >= max_row {
+        rope.len()
+    } else {
+        rope.point_to_offset(Point::new(row + 1, 0))
+            .saturating_sub(1)
+    }
 }
 
 /// Offset the block cursor lands on for a find or till motion starting at

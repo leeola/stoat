@@ -4035,7 +4035,22 @@ impl Stoat {
         }
 
         if takes_pending && self.pending_find.is_some() {
-            if let KeyCode::Char(ch) = key.code {
+            // Enter names a line ending rather than a character to search for.
+            // One line ends in LF where the next ends in CRLF, so the target is
+            // computed from the row. Tab is an ordinary target that the terminal
+            // reports as its own key rather than as the character it stands for.
+            if matches!(key.code, KeyCode::Enter) {
+                let (kind, extend, count) = self.pending_find.take().expect("checked above");
+                return action_handlers::movement::execute_find_line_ending(
+                    self, kind, extend, count,
+                );
+            }
+            let target = match key.code {
+                KeyCode::Tab => Some('\t'),
+                KeyCode::Char(ch) => Some(ch),
+                _ => None,
+            };
+            if let Some(ch) = target {
                 let (kind, extend, count) = self.pending_find.take().expect("checked above");
                 return action_handlers::movement::execute_find(self, kind, ch, extend, count);
             }
