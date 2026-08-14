@@ -3,7 +3,7 @@ use crate::{
     action_handlers::focused_editor_mut,
     app::{Stoat, UpdateEffect},
     diff_map,
-    display_map::DisplaySnapshot,
+    display_map::{DisplayPoint, DisplaySnapshot},
     editor_state::EditorState,
     host::{FsHost, GitHost, GitRepo},
     jumplist::JumpEntry,
@@ -280,42 +280,38 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
     // middle of a buffer owns its own newline, so this never catches one.
     let empty_final_row = (max_point.column == 0 && max_row > 0).then_some(max_row);
 
+    let max_display_row = display_snapshot.max_point().row;
+
     // Where a cursor at `head`/`tail` carrying `goal` lands, with the goal
     // column it takes along. Both arms land on the same cell. Extending decides
     // whether the anchor is left behind, never where the cursor ends up.
     let landing_for = |head: usize, tail: usize, goal: SelectionGoal| {
         let cursor = cursor_offset(rope, tail, head);
         let cursor_pt = rope.offset_to_point(cursor);
-        // Cells from the line start, not bytes. The two agree only while every
-        // character is one byte and one cell, so carrying bytes between lines
-        // drifts across wide glyphs and tabs.
+        let cursor_display = display_snapshot.buffer_to_display(cursor_pt);
+        // Cells from the display row's start, not bytes. The two agree only
+        // while every character is one byte and one cell, so carrying bytes
+        // between rows drifts across wide glyphs and tabs.
         let goal_col = match goal {
             SelectionGoal::Column(c) => c,
-            SelectionGoal::None => display_snapshot.visual_column(cursor_pt),
+            SelectionGoal::None => cursor_display.column,
         };
-        let new_row = (cursor_pt.row as i64)
+        let new_row = (cursor_display.row as i64)
             .saturating_add(delta)
-            .clamp(0, max_row as i64) as u32;
+            .clamp(0, max_display_row as i64) as u32;
         // A plain j/k at the file edge stays a no-op. An overshooting count jump
         // lands on the clamped edge row rather than doing nothing.
-        if new_row == cursor_pt.row {
+        if new_row == cursor_display.row {
             return None;
         }
-        if extend && Some(new_row) == empty_final_row {
-            return None;
-        }
-        // Back to a byte column on the landing line, which leaves the display
-        // round-trip below to place it across wraps and folds. A display point
-        // built from the goal directly would clip against one wrapped segment's
-        // width rather than the whole line's.
-        let col = display_snapshot.buffer_column_at_visual(new_row, goal_col, Bias::Left);
-        // The target is the same column of the target buffer line. Snap it
-        // through display space so a row hidden in a fold or beside a diff block
-        // row lands on the next visible buffer row in the travel direction
-        // rather than inside the hidden region.
-        let target = display_snapshot.buffer_to_display(Point::new(new_row, col));
-        let clipped = display_snapshot.clip_point(target, clip_bias);
+        // Snapping through the clip is what carries the cursor off a row that
+        // holds no text, a fold placeholder or a diff block row, onto the next
+        // one in the travel direction.
+        let clipped = display_snapshot.clip_point(DisplayPoint::new(new_row, goal_col), clip_bias);
         let buffer_pt = display_snapshot.display_to_buffer(clipped)?;
+        if extend && Some(buffer_pt.row) == empty_final_row {
+            return None;
+        }
         Some((
             rope.point_to_offset(buffer_pt),
             SelectionGoal::Column(goal_col),

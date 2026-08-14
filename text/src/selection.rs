@@ -12,9 +12,10 @@ pub enum SelectionGoal {
     /// in, one for most, two for a wide glyph, and as many as the next tab stop
     /// for a tab.
     ///
-    /// Measured along the whole buffer line rather than along a display row, so
-    /// a vertical motion lands at the same place whatever soft wrap or folds do
-    /// to the rows in between.
+    /// Measured along the display row rather than the whole buffer line, since
+    /// a vertical motion steps display rows. A soft-wrapped line therefore
+    /// restarts its columns at each wrap, and the goal names a position on the
+    /// screen rather than in the text.
     Column(u32),
 }
 

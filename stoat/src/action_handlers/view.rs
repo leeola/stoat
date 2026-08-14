@@ -19,7 +19,7 @@ use crate::{
     display_map::DisplayPoint,
     editor_state::{EditorState, ScrollGlide},
 };
-use stoat_text::{cursor_offset, Bias, Point, SelectionGoal};
+use stoat_text::{cursor_offset, Bias, SelectionGoal};
 
 #[derive(Copy, Clone, Debug)]
 pub(super) enum PageDir {
@@ -432,28 +432,19 @@ pub(crate) fn clamp_cursor_to_view(editor: &mut EditorState, scrolloff: u32) -> 
         let sel_cursor = cursor_offset(rope, read.tail, read.head);
         let cursor_pt = rope.offset_to_point(sel_cursor);
         let cursor_display = snapshot.buffer_to_display(cursor_pt);
-        // Cells along the whole buffer line, which is what a vertical motion
-        // carries. Measuring along a display row would land the cursor elsewhere
-        // under wrap and leave the wrong kind of goal for the next motion to
-        // read.
+        // Cells along the display row, which is what a vertical motion carries.
+        // The band is one of display rows too, so the row and the column are
+        // counted in the same space and the clamp needs no conversion.
         let goal_col = match read.goal {
             SelectionGoal::Column(c) => c,
-            SelectionGoal::None => snapshot.visual_column(cursor_pt),
+            SelectionGoal::None => cursor_display.column,
         };
-        // The rows stay in display space, the band being one of display rows, so
-        // the target row converts back to the buffer line whose cells the goal is
-        // counted in.
         let new_row_i = (cursor_display.row as i64).saturating_add(row_delta);
         let new_row = new_row_i.clamp(0, max_row as i64) as u32;
         if new_row == cursor_display.row {
             return None;
         }
-        let target_line = snapshot.display_to_buffer(DisplayPoint::new(new_row, 0))?;
-        let col = snapshot.buffer_column_at_visual(target_line.row, goal_col, Bias::Left);
-        let clipped = snapshot.clip_point(
-            snapshot.buffer_to_display(Point::new(target_line.row, col)),
-            clip_bias,
-        );
+        let clipped = snapshot.clip_point(DisplayPoint::new(new_row, goal_col), clip_bias);
         let buffer_pt = snapshot.display_to_buffer(clipped)?;
         Some((
             rope.point_to_offset(buffer_pt),
@@ -507,6 +498,7 @@ mod tests {
     };
     use std::sync::Arc;
     use stoat_action::{AddSelectionBelow, HalfPageDown, PageDown, PageUp};
+    use stoat_text::Point;
 
     #[test]
     fn ensure_cursor_in_view_follows_cursor_and_noops_when_visible() {
@@ -977,29 +969,41 @@ mod tests {
     #[test]
     fn a_scroll_clamp_keeps_the_cursor_column_under_wrap() {
         // Lines long enough to wrap at this width, so a display row covers only
-        // part of a buffer line and the two column spaces come apart. Every line
-        // is the same length, so a vertical move has no short line to clamp to
-        // and the column is preserved exactly.
-        let body: String = (0..60)
-            .map(|i| format!("{i:02} {}\n", "x".repeat(60)))
-            .collect();
+        // part of a buffer line and the two column spaces come apart.
+        //
+        // No spaces in them, since a wrap breaking at a word boundary leaves a
+        // display row too narrow to hold the goal column. The rows this gives
+        // are all wide enough, so nothing clips and the column is preserved
+        // exactly.
+        let body: String = (0..60).map(|_| format!("{}\n", "x".repeat(63))).collect();
 
         let mut h = TestHarness::with_size(40, 12);
         let path = h.write_file("wrapped.rs", &body);
         h.open_file(&path);
 
+        // Cells along the display row, which is the unit a vertical motion's
+        // goal is counted in. A buffer-line column is a different number under
+        // wrap, and is not what the clamp undertakes to hold.
         let visual_column = |h: &mut TestHarness| {
             let point = focused_cursor_point(&mut h.stoat);
             let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
-            editor.display_map.snapshot().visual_column(point)
+            editor
+                .display_map
+                .snapshot()
+                .buffer_to_display(point)
+                .column
         };
 
         {
             let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.viewport_rows = Some(10);
-            place_cursor(editor, 0, 40);
+            place_cursor(editor, 0, 47);
         }
-        assert_eq!(visual_column(&mut h), 40, "the cursor starts mid-line");
+        assert_eq!(
+            visual_column(&mut h),
+            11,
+            "the cursor starts part way along a wrapped row",
+        );
 
         {
             let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
@@ -1009,14 +1013,14 @@ mod tests {
         }
         assert_eq!(
             visual_column(&mut h),
-            40,
+            11,
             "the clamp moves the cursor down its rows, not across its columns",
         );
 
         dispatch(&mut h.stoat, &stoat_action::MoveDown);
         assert_eq!(
             visual_column(&mut h),
-            40,
+            11,
             "and the goal it left behind is the one a motion reads",
         );
     }
