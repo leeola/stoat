@@ -980,6 +980,33 @@ fn join_selections_joins_without_selecting_the_space() {
     assert_ne!(h.selection_spans(), vec![(2, 3, false)]);
 }
 
+/// The plain join reaches a key, not just the palette.
+///
+/// A shifted key extends in this scheme, which takes J away from the join.
+/// Alt-j carries it instead, beside the join-with-space on Alt-J.
+#[test]
+fn alt_j_joins_selections() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "ab\ncd\n");
+    h.open_file(&path);
+    set_range(&mut h, 0, 5);
+    h.type_keys("Alt-j");
+    assert_eq!(buffer_string(&mut h), "ab cd\n");
+    assert_ne!(h.selection_spans(), vec![(2, 3, false)]);
+}
+
+#[test]
+fn alt_j_joins_selections_in_select_mode() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "ab\ncd\n");
+    h.open_file(&path);
+    h.type_keys("v");
+    set_range(&mut h, 0, 5);
+    h.type_keys("Alt-j");
+    assert_eq!(buffer_string(&mut h), "ab cd\n");
+    assert_ne!(h.selection_spans(), vec![(2, 3, false)]);
+}
+
 /// `(` then `filler` then `)`, so a scan from either bracket has the whole
 /// filler to cross before reaching its partner.
 fn spaced_brackets(filler: usize) -> (Rope, usize) {
