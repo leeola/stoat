@@ -998,10 +998,13 @@ pub struct Stoat {
     /// equivalent), `None` outside. Committed to
     /// [`Self::last_insert_text`] on insert-mode exit.
     pub(crate) current_insert_run: Option<String>,
-    /// Set by append-style insert entries (`a`/`A`) so leaving insert moves
-    /// each block cursor back one grapheme, landing on the last typed (or
-    /// appended-over) char rather than one cell past it. It is cleared on the
-    /// insert-to-normal transition. Other insert entries never set it.
+    /// Set by `a` so leaving insert moves each block cursor back one grapheme,
+    /// landing on the last typed (or appended-over) char rather than one cell
+    /// past it. It is cleared on the insert-to-normal transition.
+    ///
+    /// `a` is the only entry that sets it. It is the one that reaches a cursor
+    /// out past where it started, so it is the one with something to give back.
+    /// `A` and `I` move a cursor without extending it.
     pub(crate) restore_cursor: bool,
     /// Set while dispatching a key whose action list switches to insert mode,
     /// so an editing action in that list leaves its undo group open for the
@@ -14171,16 +14174,24 @@ mod tests {
         assert_eq!(h.head_offsets(), vec![0]);
     }
 
+    /// The step back off `a` measures a grapheme, not a byte.
+    ///
+    /// The delete builds the fixture. It clears the line's tail and leaves a
+    /// zero-width cursor at the rope end, which is the one place `a` has nothing
+    /// to reach over. Its selection stays empty through the insert, so leaving
+    /// insert steps the whole cell back rather than shrinking a range. A step
+    /// measured in bytes lands inside the typed sequence.
     #[test]
     fn esc_from_append_steps_back_onto_a_cluster_start() {
         let mut h = Stoat::test();
-        open_scratch_file(&mut h, "");
-        h.type_keys("A");
+        open_scratch_file(&mut h, "abc");
+        h.type_keys("l v l d");
+        h.type_keys("a");
         h.type_text(FAMILY);
         h.type_keys("escape");
         assert_eq!(
-            h.head_offsets(),
-            vec![0],
+            h.selection_spans(),
+            vec![(1, 19, false)],
             "the cursor lands on the sequence's first byte, not inside it",
         );
     }
@@ -15166,15 +15177,21 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "Xfoo\n");
     }
 
+    /// A leaves the cursor where the insert ended, past the last typed
+    /// character.
+    ///
+    /// Only `a` steps a cursor back on the way out, since only `a` reached one
+    /// out in the first place. `A` moves a cursor to the line end without
+    /// extending it, so nothing is owed back and it stays where it was left.
     #[test]
-    fn append_then_escape_lands_on_last_typed_char() {
+    fn shift_a_then_escape_rests_past_the_last_typed_char() {
         let mut h = Stoat::test();
         let path = open_scratch_file(&mut h, "abc\n");
         h.type_keys("A");
         h.type_keys("X");
         h.type_keys("escape");
         assert_eq!(buffer_text(&h, &path), "abcX\n");
-        assert_eq!(h.selection_spans(), vec![(3, 4, false)]);
+        assert_eq!(h.selection_spans(), vec![(4, 5, false)]);
     }
 
     #[test]

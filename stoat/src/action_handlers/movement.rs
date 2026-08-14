@@ -719,13 +719,6 @@ struct IndentInsert {
 /// insert on a blank line inside a block starts at the block's indent. A
 /// non-empty line inserts nothing and moves the cursor to the fallback position.
 fn insert_with_indent(stoat: &mut Stoat, fallback: IndentFallback) -> UpdateEffect {
-    // Appending past a line's last character (LineEnd) leaves the block cursor
-    // one cell beyond the content, so leaving insert must step it back. LineStart
-    // inserts before its target and needs no restore.
-    if matches!(fallback, IndentFallback::LineEnd) {
-        stoat.restore_cursor = true;
-    }
-
     let editor_id = {
         let ws = stoat.active_workspace();
         match ws.panes.pane(ws.panes.focus()).view {
