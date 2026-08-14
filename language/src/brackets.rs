@@ -90,6 +90,172 @@ fn matching_bracket_scanning(
     enclosing.map(|(_, close_start)| close_start)
 }
 
+/// Delimiter pairs the query-free walk recognizes.
+///
+/// Wider than the plaintext set by the three quotes and `|`, since a tree names
+/// which side of a symmetric delimiter is which where a character scan sees only
+/// the character.
+/// Rust writes closure parameters as `|a, b|`, whose node holds both bars as its
+/// first and last children, so the walk tells them from a bitwise or.
+const TREE_PAIRS: [(char, char); 13] = [
+    ('(', ')'),
+    ('{', '}'),
+    ('[', ']'),
+    ('<', '>'),
+    ('\u{2018}', '\u{2019}'),
+    ('\u{201c}', '\u{201d}'),
+    ('\u{ab}', '\u{bb}'),
+    ('\u{300c}', '\u{300d}'),
+    ('\u{ff08}', '\u{ff09}'),
+    ('"', '"'),
+    ('\'', '\''),
+    ('`', '`'),
+    ('|', '|'),
+];
+
+/// Sibling nodes either sibling walk visits before giving up.
+///
+/// A node's sibling list runs as long as its parent's children, which for a
+/// source file's top level is every item in it. Walking that whole list to
+/// conclude a press matched nothing is the cost this bounds.
+const SIBLING_LIMIT: usize = 16;
+
+/// Byte offset of the bracket matching the cursor at `offset`, read from the
+/// syntax tree without a `brackets.scm` query.
+///
+/// Backs the languages that ship a grammar but no query, which is most of them.
+/// The tree names the construct the cursor is in, so this matches from inside
+/// one and not only from a delimiter.
+///
+/// Returns `None` when no construct around the cursor is delimited by a pair,
+/// which leaves a caller free to fall back to a character scan.
+///
+/// Only a single-byte node counts as a delimiter. A multi-byte one occupies a
+/// node whose range is longer, and reading its first byte as the whole
+/// character is what that restriction avoids.
+///
+/// See also:
+/// - [`matching_bracket`] for the query path, which a language shipping a `brackets.scm` takes
+///   instead.
+pub fn matching_bracket_from_tree(root: Node<'_>, rope: &Rope, offset: usize) -> Option<usize> {
+    let mut node = root.descendant_for_byte_range(offset, offset)?;
+
+    loop {
+        if let Some(found) = pair_within(&node, rope, offset) {
+            return Some(found);
+        }
+        if let Some(found) = pair_across_siblings(&node, rope) {
+            return Some(found);
+        }
+        if let Some(found) = enclosing_close_ahead(&node, rope) {
+            return Some(found);
+        }
+        node = node.parent()?;
+    }
+}
+
+/// The delimiter answering a cursor inside a node whose first and last children
+/// are a pair.
+///
+/// The cursor sitting on the closing one answers with the opening one, and
+/// anywhere else inside answers with the closing one, so a repeat leaves the
+/// construct rather than bouncing between its ends.
+fn pair_within(node: &Node<'_>, rope: &Rope, offset: usize) -> Option<usize> {
+    if !node.is_named() || node.child_count() < 2 {
+        return None;
+    }
+    let (open_at, open) = single_char(&node.child(0)?, rope)?;
+    let (close_at, close) = single_char(&node.child((node.child_count() - 1) as u32)?, rope)?;
+    if !TREE_PAIRS.contains(&(open, close)) || offset < open_at || offset > close_at {
+        return None;
+    }
+    Some(if close_at == offset {
+        open_at
+    } else {
+        close_at
+    })
+}
+
+/// The partner of a node that is itself a delimiter, found among its siblings.
+fn pair_across_siblings(node: &Node<'_>, rope: &Rope) -> Option<usize> {
+    let (_, ch) = single_char(node, rope)?;
+
+    if let Some(&(open, _)) = TREE_PAIRS.iter().find(|&&(_, close)| close == ch)
+        && let Some(found) = walk_siblings(node.prev_sibling(), rope, ch, open, false)
+    {
+        return Some(found);
+    }
+    if let Some(&(_, close)) = TREE_PAIRS.iter().find(|&&(open, _)| open == ch)
+        && let Some(found) = walk_siblings(node.next_sibling(), rope, ch, close, true)
+    {
+        return Some(found);
+    }
+    None
+}
+
+/// The closing delimiter of a construct the node sits inside, found by looking
+/// ahead for one whose own opening delimiter lies behind it.
+///
+/// This is what answers a cursor between two delimiters that are siblings of it
+/// rather than children of a node enclosing it.
+fn enclosing_close_ahead(node: &Node<'_>, rope: &Rope) -> Option<usize> {
+    let mut sibling = node.next_sibling();
+    for _ in 0..SIBLING_LIMIT {
+        let current = sibling?;
+        if let Some((_, ch)) = single_char(&current, rope)
+            && let Some(&(open, _)) = TREE_PAIRS.iter().find(|&&(_, close)| close == ch)
+            && walk_siblings(current.prev_sibling(), rope, ch, open, false).is_some()
+        {
+            return Some(current.start_byte());
+        }
+        sibling = current.next_sibling();
+    }
+    None
+}
+
+/// Offset of the first `wanted` delimiter among the siblings from `start`, with
+/// nested `nested` delimiters consumed on the way.
+fn walk_siblings(
+    start: Option<Node<'_>>,
+    rope: &Rope,
+    nested: char,
+    wanted: char,
+    forward: bool,
+) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut node = start;
+    for _ in 0..SIBLING_LIMIT {
+        let current = node?;
+        if let Some((at, ch)) = single_char(&current, rope) {
+            if ch == wanted {
+                if depth == 0 {
+                    return Some(at);
+                }
+                depth -= 1;
+            } else if ch == nested {
+                depth += 1;
+            }
+        }
+        node = if forward {
+            current.next_sibling()
+        } else {
+            current.prev_sibling()
+        };
+    }
+    None
+}
+
+/// The character a node holds, when it holds exactly one byte of it.
+fn single_char(node: &Node<'_>, rope: &Rope) -> Option<(usize, char)> {
+    let range = node.byte_range();
+    if range.len() != 1 {
+        return None;
+    }
+    rope.chars_at(range.start)
+        .next()
+        .map(|ch| (range.start, ch))
+}
+
 #[cfg(test)]
 mod tests {
     use super::matching_bracket;

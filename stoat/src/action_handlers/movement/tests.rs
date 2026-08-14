@@ -6259,6 +6259,29 @@ fn match_brackets_char_literal_paren_resolves_to_enclosing() {
     );
 }
 
+/// A language with a grammar but no brackets query still matches from inside a
+/// construct, since the tree names the construct without a query to read.
+///
+/// The cursor sits on the `1`, which is no delimiter at all, so the character
+/// scan the fallback used to end at has nothing to answer with.
+#[test]
+fn match_brackets_from_within_without_a_query() {
+    let mut h = TestHarness::with_size(60, 5);
+    let path = h.write_file("t.toml", "key = [1, 2]\n");
+    h.open_file(&path);
+    h.settle();
+
+    {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        editor
+            .selections
+            .set_block_cursor(7, snapshot.buffer_snapshot());
+    }
+    h.type_keys("m m");
+    assert_eq!(h.primary_head_offset(), 11, "the array's closing bracket");
+}
+
 #[test]
 fn match_brackets_scanner_fallback_without_query() {
     let mut h = TestHarness::with_size(60, 5);

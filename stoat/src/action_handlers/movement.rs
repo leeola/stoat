@@ -4069,27 +4069,36 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
 /// Offset of the bracket partnering the one the cursor sits in, or `None` when
 /// it sits in no pair.
 ///
+/// Three paths answer, narrowing as less is known about the buffer.
+///
 /// A brackets query captures only structural delimiters, so a bracket inside a
 /// string, char, or comment literal resolves to no pair instead of
-/// false-matching. When the language ships one it is authoritative and matches
-/// from within a pair, not only on a delimiter, so the char under the cursor
-/// does not gate the query path.
+/// false-matching. Where the language ships one it is authoritative.
 ///
-/// The text scan below only runs for languages without a query (e.g. toml), and
-/// matches only when the cursor is on a delimiter, which is the plaintext
-/// behavior. From-within matching is a syntax-path feature.
+/// A language with a grammar but no query reads the tree directly, which still
+/// names the construct the cursor is in. Both syntax paths therefore match from
+/// within a pair and not only on a delimiter.
+///
+/// Text with no tree at all falls to the character scan, which matches only a
+/// cursor already on a delimiter. Nothing there says which side of a quote
+/// opens, or whether a bracket is inside a comment.
 fn bracket_partner(
     rope: &Rope,
     cursor: usize,
     query: Option<&stoat_language::Query>,
     tree: Option<&stoat_language::Tree>,
 ) -> Option<usize> {
-    let ch = rope.chars_at(cursor).next()?;
-
     if let (Some(query), Some(tree)) = (query, tree) {
         return stoat_language::matching_bracket(query, tree.root_node(), rope, cursor);
     }
+    if let Some(tree) = tree
+        && let Some(found) =
+            stoat_language::matching_bracket_from_tree(tree.root_node(), rope, cursor)
+    {
+        return Some(found);
+    }
 
+    let ch = rope.chars_at(cursor).next()?;
     let (open, close, forward) = bracket_pair(ch)?;
     let scan = PairScan::around(tree, cursor);
     if scan.skips(cursor) {
