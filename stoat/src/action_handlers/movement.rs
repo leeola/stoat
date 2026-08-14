@@ -3324,7 +3324,7 @@ pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
 
-    let count = stoat.take_pending_count().unwrap_or(1) as usize;
+    let count = stoat.take_pending_count().unwrap_or(1).max(1) as usize;
     let origin = super::jump::live_entry(stoat);
     let current_path = stoat.focused_editor_ids().and_then(|(_, buffer_id)| {
         stoat

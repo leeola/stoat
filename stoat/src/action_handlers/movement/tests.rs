@@ -4158,6 +4158,26 @@ fn goto_prev_change_jumps_backward() {
     assert_eq!(h.primary_head_offset(), 4);
 }
 
+/// A count of zero steps one hunk instead of indexing off the end of the
+/// list.
+///
+/// Any digit the focused keymap leaves unbound becomes a pending count, so a
+/// keymap that frees 0 sends `0 [c` here with a count of zero. The backward
+/// arm subtracts the count from the hunk count to index, which puts a zero
+/// count one past the last hunk.
+#[test]
+fn goto_prev_change_with_a_zero_count_steps_one_hunk() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    h.open_file(&path);
+    install_diff_hunks(&mut h, &[2, 5]);
+    h.type_keys("g j");
+    h.stoat.pending_count = Some(0);
+
+    dispatch(&mut h.stoat, &stoat_action::GotoPrevChange);
+    assert_eq!(h.primary_head_offset(), 10);
+}
+
 #[test]
 fn count_prefix_goto_next_change_jumps_n_changes() {
     let mut h = TestHarness::with_size(20, 15);
