@@ -454,8 +454,7 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
         // the offset that opens a fresh line in a terminated buffer is the end
         // of this one's last line instead. The entry landing there carries the
         // separator its line needs.
-        let unterminated =
-            rope_len > 0 && rope.chars_at(rope_len - 1).next().is_none_or(|c| c != '\n');
+        let unterminated = rope_len > 0 && !rope.ends_with("\n");
         let mut open_line = false;
         let entries: Vec<(usize, usize, bool)> = editor
             .selections
@@ -1007,6 +1006,28 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
         assert_eq!(buffer_text(&h, &path), "abc\nX\n");
+    }
+
+    /// The probe for a missing final line ending reads the buffer's end
+    /// safely, whatever character sits there.
+    ///
+    /// Rope offsets are byte offsets, so a multibyte final character puts the
+    /// last byte inside it. A probe that reads a character at that offset
+    /// slices mid-character and panics. The crash reaches every paste in such
+    /// a buffer, linewise or not, because the probe runs before the paste
+    /// shape decides anything.
+    #[test]
+    fn paste_into_a_buffer_that_ends_in_a_multibyte_character() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "café");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["x".to_string()]);
+        for _ in 0..3 {
+            crate::action_handlers::dispatch(&mut h.stoat, &action::MoveRight);
+        }
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(buffer_text(&h, &path), "caféx");
     }
 
     #[test]
