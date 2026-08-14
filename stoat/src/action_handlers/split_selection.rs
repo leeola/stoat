@@ -3,7 +3,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     input_view::{InputView, SubmitTarget},
 };
-use stoat_text::Bias;
+use stoat_text::{next_char_boundary, Bias, Rope};
 
 /// Whether the regex modal splits selections at matches or replaces them with
 /// the matches. The modal, input state, and submit path are shared. Only the
@@ -58,6 +58,24 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
     true
 }
 
+/// Widen every zero-width piece over one grapheme, so a split lands cursors
+/// rather than positions.
+///
+/// A split names positions as much as spans. Two touching separators, an empty
+/// line, and a pattern matching the empty string all pick out somewhere with
+/// nothing between. Each is a place the user asked for a cursor, and stoat's
+/// cursors cover a cell, so each piece takes the character after it. At the rope
+/// end no character follows and the piece stays as it is.
+pub(super) fn widen_pieces(rope: &Rope, pieces: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    pieces
+        .into_iter()
+        .map(|(start, end)| match start == end {
+            true => (start, next_char_boundary(rope, start)),
+            false => (start, end),
+        })
+        .collect()
+}
+
 /// Split every selection at each match, keeping the gaps between matches.
 fn split_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
     let Some(editor) = focused_editor_mut(stoat) else {
@@ -77,17 +95,16 @@ fn split_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
             let mut pieces: Vec<(usize, usize)> = Vec::new();
             let mut piece_start = start;
             for m in regex.find_iter(rope.regex_slice_input(start..end)) {
-                // Two matches touching leave nothing between them, and a selection
-                // of no width is not one, so the gap contributes no piece.
-                if start + m.start() > piece_start {
-                    pieces.push((piece_start, start + m.start()));
-                }
+                // Two matches touching leave nothing between them, and that gap
+                // is still a position the user split at, so it becomes a cursor
+                // rather than disappearing.
+                pieces.push((piece_start, start + m.start()));
                 piece_start = start + m.end();
             }
             if piece_start < end {
                 pieces.push((piece_start, end));
             }
-            pieces
+            widen_pieces(rope, pieces)
         });
 }
 
@@ -116,15 +133,16 @@ fn select_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
                     return Vec::new();
                 }
 
-                regex
+                let matched = regex
                     .find_iter(rope.regex_slice_input(start..end))
-                    // An empty match names a position rather than a span, and
-                    // there is no width to give it. A pattern that only ever
-                    // matches empty therefore selects nothing, which the
-                    // all-empty branch below reports.
-                    .filter(|m| m.start() != m.end())
+                    // A zero-width match on the selection's own end sits just
+                    // outside what was searched, which is what an anchor like
+                    // `$` produces. Every other empty match names a position
+                    // inside it and becomes a cursor there.
+                    .filter(|m| start + m.start() != end || m.start() != m.end())
                     .map(|m| (start + m.start(), start + m.end()))
-                    .collect()
+                    .collect();
+                widen_pieces(rope, matched)
             })
             .collect()
     };
@@ -216,13 +234,13 @@ mod tests {
         assert_eq!(spans, vec![(0, 4, false), (7, 11, false)]);
     }
 
-    /// Splitting on adjacent separators leaves no empty piece behind.
+    /// Splitting on adjacent separators leaves a cursor between them.
     ///
-    /// The gap between two touching matches has no width, and a selection with
-    /// no width is not something the rest of the editor knows how to carry. It
-    /// paints nothing and every motion widens it back.
+    /// The gap between two touching matches is a position the user split at as
+    /// much as any other, so it becomes a cursor rather than vanishing. Dropping
+    /// it loses a piece the split asked for.
     #[test]
-    fn splitting_on_adjacent_matches_emits_no_empty_piece() {
+    fn splitting_on_adjacent_matches_leaves_a_cursor_between_them() {
         let mut h = Stoat::test();
         h.seed_focused_buffer("a,,b");
         select_range(&mut h, 0, 4);
@@ -231,15 +249,18 @@ mod tests {
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         assert_eq!(
             editor::selection_spans(&mut h.stoat),
-            vec![(0, 1, false), (3, 4, false)],
-            "the two letters, and nothing for the gap between the commas",
+            vec![(0, 1, false), (2, 3, false), (3, 4, false)],
+            "the two letters, and a cursor for the gap between the commas",
         );
     }
 
-    /// A pattern that matches empty selects nothing rather than minting
-    /// zero-width selections at every position it matches.
+    /// A pattern matching the empty string selects each position it names.
+    ///
+    /// Every empty match picks out somewhere inside the selection, and each
+    /// becomes a cursor there. The one exception is a match on the selection's
+    /// own end, which sits outside what was searched.
     #[test]
-    fn selecting_an_empty_matching_pattern_selects_nothing() {
+    fn selecting_an_empty_matching_pattern_lands_a_cursor_per_position() {
         let mut h = Stoat::test();
         h.seed_focused_buffer("abc");
         select_range(&mut h, 0, 3);
@@ -248,8 +269,22 @@ mod tests {
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         assert_eq!(
             editor::selection_spans(&mut h.stoat),
-            vec![(0, 3, false)],
-            "the selection is kept whole rather than cut into empty pieces",
+            vec![(0, 1, false), (1, 2, false), (2, 3, false)],
+            "one cursor per position, the match on the end excluded",
+        );
+    }
+
+    /// An empty line is a line, so splitting on newlines leaves a cursor on it.
+    #[test]
+    fn splitting_on_newlines_keeps_a_cursor_on_an_empty_line() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("a\n\nb");
+        select_range(&mut h, 0, 4);
+        dispatch(&mut h.stoat, &action::SplitSelectionOnNewline);
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(0, 1, false), (2, 3, false), (3, 4, false)],
+            "the two letters, and a cursor for the line between them",
         );
     }
 

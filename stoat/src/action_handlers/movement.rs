@@ -1,4 +1,4 @@
-use super::view;
+use super::{split_selection, view};
 use crate::{
     action_handlers::focused_editor_mut,
     app::{Stoat, UpdateEffect},
@@ -1424,15 +1424,15 @@ pub(super) fn split_selection_on_newline(stoat: &mut Stoat) -> UpdateEffect {
             let mut pieces: Vec<(usize, usize)> = Vec::with_capacity(newline_positions.len() + 1);
             let mut prev = start_offset;
             for nl in &newline_positions {
-                if *nl > prev {
-                    pieces.push((prev, *nl));
-                }
+                // An empty line still carries a cursor, so it contributes a
+                // piece like any other line rather than being skipped over.
+                pieces.push((prev, *nl));
                 prev = nl + 1;
             }
             if prev < end_offset {
                 pieces.push((prev, end_offset));
             }
-            pieces
+            split_selection::widen_pieces(rope, pieces)
         });
     UpdateEffect::Redraw
 }
