@@ -1909,14 +1909,20 @@ pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
             .all_anchors()
             .iter()
             .map(|sel| {
-                // Open relative to the block-cursor cell's row: a 1-wide cursor
-                // at a line's end has its head on the next line.
-                let cursor = cursor_offset(
-                    rope,
-                    buffer_snapshot.resolve_anchor(&sel.tail()),
-                    buffer_snapshot.resolve_anchor(&sel.head()),
-                );
-                let row = rope.offset_to_point(cursor).row;
+                // Each direction opens from the end it moves away from, so a
+                // multi-line selection opens above its first line and below its
+                // last whichever way round it faces. Reading the cursor instead
+                // puts both openings at whichever end the head happens to sit.
+                let from = buffer_snapshot.resolve_anchor(&sel.start);
+                let to = buffer_snapshot.resolve_anchor(&sel.end);
+                let anchor_offset = match dir {
+                    OpenDir::Above => from,
+                    // A 1-wide cursor at a line's end has its boundary on the
+                    // next line, so the step back lands on the cell it draws.
+                    // The rope end draws no cell at all and stays put.
+                    OpenDir::Below => cursor_offset(rope, from, to),
+                };
+                let row = rope.offset_to_point(anchor_offset).row;
                 let line_start = rope.point_to_offset(Point::new(row, 0));
                 let line_end = rope.point_to_offset(Point::new(row, rope.line_len(row)));
                 let insert_offset = match dir {

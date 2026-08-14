@@ -584,6 +584,62 @@ fn set_range(h: &mut TestHarness, start: usize, end: usize) {
     });
 }
 
+/// Set the sole selection to `start..end` facing backward.
+fn set_reversed_range(h: &mut TestHarness, start: usize, end: usize) {
+    let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+    let snapshot = editor.display_map.snapshot();
+    let buf = snapshot.buffer_snapshot();
+    let start_anchor = buf.anchor_at(start, Bias::Right);
+    let end_anchor = buf.anchor_at(end, Bias::Right);
+    editor.selections.transform(buf, |sel| Selection {
+        id: sel.id,
+        start: start_anchor,
+        end: end_anchor,
+        reversed: true,
+        goal: SelectionGoal::None,
+    });
+}
+
+/// Each direction opens from the end it moves away from, so a multi-line
+/// selection opens above its first line and below its last.
+///
+/// Reading the block cursor instead puts both openings at whichever end the
+/// head happens to sit on, which lands `O` at the bottom of a forward
+/// selection.
+#[test]
+fn open_line_opens_from_the_end_each_direction_moves_away_from() {
+    let opened = |dir_key: &str, reversed: bool| {
+        let mut h = TestHarness::with_size(20, 8);
+        let path = h.write_file("s.txt", "aaa\nbbb\nccc\n");
+        h.open_file(&path);
+        match reversed {
+            true => set_reversed_range(&mut h, 0, 11),
+            false => set_range(&mut h, 0, 11),
+        }
+        h.type_keys(dir_key);
+        h.type_text("X");
+        buffer_string(&mut h)
+    };
+
+    assert_eq!(
+        opened("O", false),
+        "X\naaa\nbbb\nccc\n",
+        "O opens above the selection's first line",
+    );
+    assert_eq!(
+        opened("o", false),
+        "aaa\nbbb\nccc\nX\n",
+        "o opens below its last",
+    );
+
+    assert_eq!(
+        opened("O", true),
+        "X\naaa\nbbb\nccc\n",
+        "and the same ends whichever way the selection faces",
+    );
+    assert_eq!(opened("o", true), "aaa\nbbb\nccc\nX\n");
+}
+
 #[test]
 fn extend_to_line_bounds_covers_full_lines() {
     let mut h = TestHarness::with_size(20, 5);
