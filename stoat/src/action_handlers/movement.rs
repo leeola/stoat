@@ -1868,6 +1868,14 @@ struct OpenSite {
     id: usize,
     insert_offset: usize,
     row: u32,
+    /// Offset the indent query is asked about, being the end of the line the
+    /// opened one follows.
+    ///
+    /// That is the current line's end going down and the previous line's end
+    /// going up, so both directions ask about the line the new one continues
+    /// from. It differs from `insert_offset`, which for an upward open is the
+    /// current line's start.
+    indent_at: usize,
     continued: Option<&'static str>,
 }
 
@@ -1929,12 +1937,20 @@ pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
                     OpenDir::Above => line_start,
                     OpenDir::Below => line_end,
                 };
+                let indent_at = match dir {
+                    // The previous line's end, which the newline before this
+                    // line sits on. The first row has no previous line, so the
+                    // query is asked about the buffer's start.
+                    OpenDir::Above => line_start.saturating_sub(1),
+                    OpenDir::Below => line_end,
+                };
                 let continued = line_comment_continues(rope, line_start, line_end, comment_tokens)
                     .map(|(_, token)| token);
                 OpenSite {
                     id: sel.id,
                     insert_offset,
                     row,
+                    indent_at,
                     continued,
                 }
             })
@@ -1946,20 +1962,17 @@ pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
         return UpdateEffect::None;
     }
 
-    // A line opened below inherits the freshly opened block through the indents
-    // query. One opened above copies the current line's indentation. A comment
-    // continuation aligns to the line's own leading whitespace and carries the
-    // token forward.
+    // Both directions read the indents query, each asked about the line the
+    // opened one follows, so opening above a block's closing line indents the
+    // same as opening below its opening line. A comment continuation instead
+    // aligns to the line's own leading whitespace and carries the token
+    // forward, which is the one case the query does not answer.
     let mut units: Vec<OpenUnit> = sites
         .iter()
         .map(|site| {
-            let indent = if site.continued.is_some() {
-                stoat.line_indent_string(buffer_id, site.row)
-            } else {
-                match dir {
-                    OpenDir::Below => stoat.newline_indent_string(buffer_id, site.insert_offset),
-                    OpenDir::Above => stoat.line_indent_string(buffer_id, site.row),
-                }
+            let indent = match site.continued.is_some() {
+                true => stoat.line_indent_string(buffer_id, site.row),
+                false => stoat.newline_indent_string(buffer_id, site.indent_at),
             };
             let prefix = match site.continued {
                 Some(token) => format!("{indent}{token} "),

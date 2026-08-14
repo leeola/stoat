@@ -10717,6 +10717,38 @@ mod tests {
         assert_eq!(focused_buffer_string(&h), "{\n  \"a\": {\n    1\n  }\n}\n");
     }
 
+    /// Opening a line above reads the indents query too, so the two directions
+    /// agree about the same position in the same block.
+    ///
+    /// Copying the current line's leading whitespace instead makes `O` on a
+    /// block's closing line open flush left, where `o` on its opening line
+    /// opens a level in. The query is asked about the line the new one
+    /// follows, which for an upward open is the line before the current one.
+    #[test]
+    fn open_above_indents_by_the_query_like_open_below() {
+        let opened = |dir_key: &str, down: usize| {
+            let mut h = Stoat::test();
+            open_indent_buffer(&mut h, "a.rs", b"fn a() {\n}\n");
+            for _ in 0..down {
+                h.type_keys("j");
+            }
+            h.type_keys(dir_key);
+            h.type_text("x");
+            focused_buffer_string(&h)
+        };
+
+        assert_eq!(
+            opened("O", 1),
+            "fn a() {\n\tx\n}\n",
+            "O on the closing line opens one level in",
+        );
+        assert_eq!(
+            opened("o", 0),
+            "fn a() {\n\tx\n}\n",
+            "which is where o on the opening line lands too",
+        );
+    }
+
     /// Re-indenting an existing row reads it too, which is the other entry
     /// point and the other query.
     #[test]
