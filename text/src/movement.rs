@@ -67,22 +67,27 @@ pub fn char_is_word(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
 
-/// Category for the long-word (`W`/`B`) motions, where everything that is not
-/// whitespace is one class.
+/// Whether the short-word (`w`/`b`/`e`) motions break between `a` and `b`,
+/// which is wherever their classes differ.
+fn is_word_boundary(a: char, b: char) -> bool {
+    categorize_char(a) != categorize_char(b)
+}
+
+/// Whether the long-word (`W`/`B`) motions break between `a` and `b`.
 ///
-/// This is vim's WORD, so `W` runs straight through a symbol like `foo→bar` and
-/// treats it as a single word. Helix instead breaks at symbols outside the word
-/// and punctuation classes, so the two disagree on such text. The vim reading is
-/// deliberate. The point of `W` is to ignore the fine-grained classes `w` uses,
-/// and a third class that only some symbols fall into makes the motion harder to
-/// predict than either rule alone.
-fn long_word_category(ch: char) -> CharCategory {
-    if char_is_line_ending(ch) {
-        CharCategory::Eol
-    } else if ch.is_whitespace() {
-        CharCategory::Whitespace
-    } else {
-        CharCategory::Word
+/// Every class change except the one between a word and punctuation, so `W`
+/// runs through `foo.bar` and `foo→bar` as one word while still stopping at
+/// whitespace and at a line ending.
+///
+/// What it does not run through is `Unknown`, the class nothing else claimed. A
+/// copyright sign or an emoji breaks a long word where a full stop does not,
+/// since the point of `W` is to ignore the punctuation `w` stops at rather than
+/// to ignore every distinction the text makes.
+fn is_long_word_boundary(a: char, b: char) -> bool {
+    match (categorize_char(a), categorize_char(b)) {
+        (CharCategory::Word, CharCategory::Punctuation)
+        | (CharCategory::Punctuation, CharCategory::Word) => false,
+        (a, b) => a != b,
     }
 }
 
@@ -100,45 +105,49 @@ fn forward_scan_start(rope: &Rope, from: usize) -> usize {
 /// leading newline run and onto each new span start, so a counted motion selects
 /// only the final word span rather than accumulating every word it crosses.
 pub fn next_word_start_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
-    next_word_start_with(rope, anchor, head, categorize_char)
+    next_word_start_with(rope, anchor, head, is_word_boundary)
 }
 
 pub fn next_long_word_start_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
-    next_word_start_with(rope, anchor, head, long_word_category)
+    next_word_start_with(rope, anchor, head, is_long_word_boundary)
 }
 
-fn next_word_start_with<F: Fn(char) -> CharCategory>(
+fn next_word_start_with<F: Fn(char, char) -> bool>(
     rope: &Rope,
     anchor_in: usize,
     from: usize,
-    category: F,
+    is_boundary: F,
 ) -> (usize, usize) {
-    forward_word_range(rope, anchor_in, from, &category, |_prev, ch, boundary| {
-        boundary && (char_is_line_ending(ch) || !ch.is_whitespace())
-    })
+    forward_word_range(
+        rope,
+        anchor_in,
+        from,
+        &is_boundary,
+        |_prev, ch, boundary| boundary && (char_is_line_ending(ch) || !ch.is_whitespace()),
+    )
 }
 
 /// End of the next word after the block-cursor cell at `from`.
 pub fn next_word_end(rope: &Rope, from: usize) -> usize {
     let from = forward_scan_start(rope, from);
-    next_word_end_with(rope, from, from, categorize_char).1
+    next_word_end_with(rope, from, from, is_word_boundary).1
 }
 
 pub fn next_word_end_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
-    next_word_end_with(rope, anchor, head, categorize_char)
+    next_word_end_with(rope, anchor, head, is_word_boundary)
 }
 
 pub fn next_long_word_end_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
-    next_word_end_with(rope, anchor, head, long_word_category)
+    next_word_end_with(rope, anchor, head, is_long_word_boundary)
 }
 
-fn next_word_end_with<F: Fn(char) -> CharCategory>(
+fn next_word_end_with<F: Fn(char, char) -> bool>(
     rope: &Rope,
     anchor_in: usize,
     from: usize,
-    category: F,
+    is_boundary: F,
 ) -> (usize, usize) {
-    forward_word_range(rope, anchor_in, from, &category, |prev, ch, boundary| {
+    forward_word_range(rope, anchor_in, from, &is_boundary, |prev, ch, boundary| {
         boundary && (!prev.is_whitespace() || char_is_line_ending(ch))
     })
 }
@@ -161,11 +170,11 @@ fn forward_word_range<C, T>(
     rope: &Rope,
     anchor_in: usize,
     from: usize,
-    category: C,
+    is_boundary: C,
     is_target: T,
 ) -> (usize, usize)
 where
-    C: Fn(char) -> CharCategory,
+    C: Fn(char, char) -> bool,
     T: Fn(char, char, bool) -> bool,
 {
     let mut anchor = anchor_in;
@@ -192,7 +201,7 @@ where
         };
         let reached = match prev_ch {
             None => true,
-            Some(prev) => is_target(prev, ch, category(prev) != category(ch)),
+            Some(prev) => is_target(prev, ch, is_boundary(prev, ch)),
         };
         if reached {
             if head == head_start {
@@ -207,7 +216,7 @@ where
 }
 
 pub fn prev_word_start(rope: &Rope, from: usize) -> usize {
-    prev_word_start_with(rope, from, from, categorize_char).1
+    prev_word_start_with(rope, from, from, is_word_boundary).1
 }
 
 /// [`prev_word_start`] as a range_to_target step: given the origin
@@ -216,20 +225,20 @@ pub fn prev_word_start(rope: &Rope, from: usize) -> usize {
 /// backward word motion from whitespace or after a boundary does not keep the
 /// gap in the selection.
 pub fn prev_word_start_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
-    prev_word_start_with(rope, anchor, head, categorize_char)
+    prev_word_start_with(rope, anchor, head, is_word_boundary)
 }
 
 pub fn prev_long_word_start_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
-    prev_word_start_with(rope, anchor, head, long_word_category)
+    prev_word_start_with(rope, anchor, head, is_long_word_boundary)
 }
 
-fn prev_word_start_with<F: Fn(char) -> CharCategory>(
+fn prev_word_start_with<F: Fn(char, char) -> bool>(
     rope: &Rope,
     anchor_in: usize,
     from: usize,
-    category: F,
+    is_boundary: F,
 ) -> (usize, usize) {
-    backward_word_range(rope, anchor_in, from, &category, |prev, ch, boundary| {
+    backward_word_range(rope, anchor_in, from, &is_boundary, |prev, ch, boundary| {
         boundary && (!prev.is_whitespace() || char_is_line_ending(ch))
     })
 }
@@ -246,11 +255,11 @@ fn backward_word_range<C, T>(
     rope: &Rope,
     anchor_in: usize,
     from: usize,
-    category: C,
+    is_boundary: C,
     is_target: T,
 ) -> (usize, usize)
 where
-    C: Fn(char) -> CharCategory,
+    C: Fn(char, char) -> bool,
     T: Fn(char, char, bool) -> bool,
 {
     if from == 0 {
@@ -284,7 +293,7 @@ where
         let Some(ch) = iter.next() else {
             return (anchor, head);
         };
-        let boundary = category(prev_ch) != category(ch);
+        let boundary = is_boundary(prev_ch, ch);
         if is_target(prev_ch, ch, boundary) {
             if head == head_start {
                 anchor = head;
@@ -298,22 +307,26 @@ where
 }
 
 pub fn prev_word_end_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
-    prev_word_end_with(rope, anchor, head, categorize_char)
+    prev_word_end_with(rope, anchor, head, is_word_boundary)
 }
 
 pub fn prev_long_word_end_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
-    prev_word_end_with(rope, anchor, head, long_word_category)
+    prev_word_end_with(rope, anchor, head, is_long_word_boundary)
 }
 
-fn prev_word_end_with<F: Fn(char) -> CharCategory>(
+fn prev_word_end_with<F: Fn(char, char) -> bool>(
     rope: &Rope,
     anchor_in: usize,
     from: usize,
-    category: F,
+    is_boundary: F,
 ) -> (usize, usize) {
-    backward_word_range(rope, anchor_in, from, &category, |_prev, ch, boundary| {
-        boundary && (!ch.is_whitespace() || char_is_line_ending(ch))
-    })
+    backward_word_range(
+        rope,
+        anchor_in,
+        from,
+        &is_boundary,
+        |_prev, ch, boundary| boundary && (!ch.is_whitespace() || char_is_line_ending(ch)),
+    )
 }
 
 /// Like [`find_decimal_number_at`], but when the byte at `offset` is not a
@@ -1500,13 +1513,46 @@ mod tests {
         assert_eq!(find_number_seeking(&r, 0), None);
     }
 
+    /// `W` ignores the word/punctuation split `w` stops at, and nothing else.
     #[test]
-    fn long_word_category_collapses_word_and_punctuation() {
-        assert_eq!(long_word_category('a'), CharCategory::Word);
-        assert_eq!(long_word_category('.'), CharCategory::Word);
-        assert_eq!(long_word_category('!'), CharCategory::Word);
-        assert_eq!(long_word_category(' '), CharCategory::Whitespace);
-        assert_eq!(long_word_category('\n'), CharCategory::Eol);
+    fn a_long_word_runs_through_punctuation_but_not_through_unknown() {
+        assert!(!is_long_word_boundary('a', '.'), "foo.bar is one long word");
+        assert!(!is_long_word_boundary('.', 'a'), "and so is .foo");
+        assert!(
+            !is_long_word_boundary('a', '\u{2192}'),
+            "an arrow is a math symbol, so it counts as punctuation here",
+        );
+        assert!(!is_long_word_boundary('a', 'b'), "nor does a word break");
+        assert!(!is_long_word_boundary('.', '!'), "nor does punctuation");
+
+        assert!(
+            is_long_word_boundary('a', ' '),
+            "whitespace still breaks it"
+        );
+        assert!(
+            is_long_word_boundary('a', '\n'),
+            "and so does a line ending"
+        );
+        assert!(
+            is_long_word_boundary('a', '\u{00A9}'),
+            "a copyright sign is Unknown, which W does not run through",
+        );
+        assert!(
+            is_long_word_boundary('.', '\u{00A9}'),
+            "the exception is word-to-punctuation alone, not any pair",
+        );
+    }
+
+    /// The divergence from vim's WORD, which folds every non-whitespace
+    /// character into one class and so runs straight past the sign.
+    #[test]
+    fn a_long_word_start_stops_at_an_other_symbol() {
+        let rope = Rope::from("foo\u{00A9}bar baz");
+        assert_eq!(
+            next_long_word_start_range(&rope, 0, 1).1,
+            3,
+            "the motion lands on the copyright sign, not the space after bar",
+        );
     }
 
     /// A decimal written with a leading zero is a fixed-width field, so it
