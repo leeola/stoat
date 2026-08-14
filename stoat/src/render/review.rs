@@ -1,6 +1,7 @@
 use super::{
     paint::{
-        dim_rgb, fill_line_tint, render_empty_num, render_side_num, render_side_text, style_rgb,
+        dim_rgb, fill_line_tint, paint_style_runs, render_empty_num, render_side_num,
+        render_side_text, style_rgb,
     },
     TEXT_SCALE_COMPACT,
 };
@@ -807,15 +808,7 @@ fn paint_base_row(
 
     let mut token_cursor = 0;
     let mut span_cursor = 0;
-    for (col, (byte_idx, ch)) in text.char_indices().enumerate() {
-        if col >= max_cols {
-            break;
-        }
-        let x = start_x + col as u16;
-        if x >= buf.area.x + buf.area.width {
-            break;
-        }
-
+    paint_style_runs(buf, start_x, y, text, max_cols, |byte_idx| {
         while token_spans
             .get(token_cursor)
             .is_some_and(|(r, _)| r.end <= byte_idx)
@@ -839,8 +832,8 @@ fn paint_base_row(
             style = apply_span_tint(style, kind, side_span_tint, moved_span_tint);
         }
 
-        buf[(x, y)].set_char(ch).set_style(style);
-    }
+        style
+    });
 }
 
 /// Paint the diff view's two-cell status column for a hunk row.
