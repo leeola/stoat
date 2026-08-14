@@ -88,8 +88,18 @@ fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEff
     let sources = editor.selections.all_anchors().to_vec();
     let mut copies: Vec<Selection<usize>> = Vec::new();
     for source in &sources {
-        let anchor_off = buffer.resolve_anchor(&source.tail());
-        let head_off = cursor_offset(rope, anchor_off, buffer.resolve_anchor(&source.head()));
+        // Both ends read as the cells the source covers, never the boundary
+        // past one. Whichever end faces forward is the exclusive one, so a
+        // forward selection steps its head back and a reversed one its tail.
+        // Reading an unstepped tail makes a reversed copy a cell too wide, and
+        // where that tail sits on the next row it inflates the height too, so
+        // the copy lands a whole selection further than its source.
+        let tail_off = buffer.resolve_anchor(&source.tail());
+        let head_raw = buffer.resolve_anchor(&source.head());
+        let (anchor_off, head_off) = match source.reversed {
+            true => (rope.prev_grapheme_boundary(tail_off), head_raw),
+            false => (tail_off, cursor_offset(rope, tail_off, head_raw)),
+        };
         let anchor_pt = rope.offset_to_point(anchor_off);
         let head_pt = rope.offset_to_point(head_off);
         // Columns travel as visual cells, which is what a vertical motion

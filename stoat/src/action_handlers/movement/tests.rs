@@ -1337,6 +1337,66 @@ fn add_selection_below_at_last_row_is_noop() {
     assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 0)]);
 }
 
+/// Seed the focused editor with one selection over `start..end`, facing
+/// backward so its head is at `start`.
+fn set_reversed_selection(stoat: &mut Stoat, start: usize, end: usize) {
+    let editor = focused_editor_mut(stoat).expect("editor");
+    let snapshot = editor.display_map.snapshot();
+    let buf = snapshot.buffer_snapshot();
+    editor.selections.transform(buf, |sel| Selection {
+        id: sel.id,
+        start: buf.anchor_at(start, Bias::Right),
+        end: buf.anchor_at(end, Bias::Right),
+        reversed: true,
+        goal: SelectionGoal::None,
+    });
+}
+
+/// A copy keeps the source's width whichever way the source faces.
+///
+/// A reversed selection's tail is its exclusive end, so reading it as the copy's
+/// anchor without stepping back spans one cell more than the source covers.
+#[test]
+fn add_selection_below_copies_a_reversed_selection_at_its_own_width() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abcdef\nghijkl\n");
+    set_reversed_selection(&mut stoat, 1, 4);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 4, true)]);
+
+    assert_eq!(
+        dispatch(&mut stoat, &AddSelectionBelow),
+        UpdateEffect::Redraw
+    );
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(1, 4, true), (8, 11, true)],
+        "the copy covers three cells facing backward, like its source",
+    );
+}
+
+/// A reversed selection ending at a line start copies one row down, not two.
+///
+/// Its tail sits on the next row, so leaving it unstepped counts that row into
+/// the height and throws the copy a full selection further than the shape it
+/// came from.
+#[test]
+fn add_selection_below_copies_a_reversed_selection_ending_at_a_line_start() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\njkl\n");
+    set_reversed_selection(&mut stoat, 1, 4);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 4, true)]);
+
+    assert_eq!(
+        dispatch(&mut stoat, &AddSelectionBelow),
+        UpdateEffect::Redraw
+    );
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(1, 4, true), (5, 8, true)],
+        "the copy lands on the next row, keeping the source's height",
+    );
+}
+
 #[test]
 fn add_selection_below_copies_each_selection_skipping_short_lines() {
     let mut stoat = stoat();
