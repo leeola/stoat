@@ -4916,6 +4916,34 @@ fn find_next_char_jumps_forward() {
     assert_eq!(h.primary_head_offset(), 2);
 }
 
+/// A find reaches a target on a later line rather than stopping at the line
+/// end, and the selection it leaves spans the newline it crossed.
+#[test]
+fn find_next_char_crosses_into_a_later_line() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\ndef\n");
+    h.open_file(&path);
+    h.type_keys("f e");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 6, false)],
+        "the selection runs from the cursor to the e on the second row",
+    );
+    assert_eq!(h.primary_head_offset(), 5, "the cursor rests on the e");
+}
+
+/// The backward find reaches an earlier line the same way.
+#[test]
+fn find_prev_char_crosses_into_an_earlier_line() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\ndef\n");
+    h.open_file(&path);
+    h.type_keys("j l l");
+    assert_eq!(h.primary_head_offset(), 6, "the cursor starts on the f");
+    h.type_keys("F b");
+    assert_eq!(h.primary_head_offset(), 1, "the cursor rests on the b");
+}
+
 /// Each cursor scans from itself, so a find keeps a multi-cursor set.
 ///
 /// Scanning once from the primary and stamping the result on every
@@ -4941,20 +4969,24 @@ fn find_next_char_scans_from_each_cursor() {
     );
 }
 
-/// A cursor whose row holds no match stays where it is rather than being
+/// A cursor with no match ahead of it stays where it is rather than being
 /// dragged onto another cursor's target.
+///
+/// The scan reaches past its own line, so the only cursor without a match is
+/// one sitting after every occurrence. That puts the target on the first row
+/// and the held cursor on the second.
 #[test]
 fn find_next_char_leaves_unmatched_cursors_alone() {
     let mut h = TestHarness::with_size(20, 5);
-    let path = h.write_file("s.txt", "abb\naxb\n");
+    let path = h.write_file("s.txt", "axb\nabb\n");
     h.open_file(&path);
     dispatch(&mut h.stoat, &AddSelectionBelow);
 
     h.type_keys("f x");
     assert_eq!(
         h.selection_spans(),
-        vec![(0, 1, false), (4, 6, false)],
-        "row 0 has no x so its cursor holds, row 1 covers up to its x",
+        vec![(0, 2, false), (4, 5, false)],
+        "row 0 covers up to its x, row 1 has none ahead so its cursor holds",
     );
 }
 

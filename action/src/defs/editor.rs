@@ -783,8 +783,8 @@ define_action!(
     FindNextChar,
     "FindNextChar",
     ActionKind::FindNextChar,
-    "find next char on line",
-    "Wait for the next char keypress, then jump the primary cursor forward to the next occurrence of that char on the current line. Cursor lands on the matched char. No-op when the char does not appear after the cursor.",
+    "find next char",
+    "Wait for the next char keypress, then jump the primary cursor forward to the next occurrence of that char, crossing into later lines to reach it. Cursor lands on the matched char. No-op when the char does not appear after the cursor.",
     ActionPriority::Rare
 );
 
@@ -793,8 +793,8 @@ define_action!(
     FindPrevChar,
     "FindPrevChar",
     ActionKind::FindPrevChar,
-    "find previous char on line",
-    "Wait for the next char keypress, then jump the primary cursor backward to the previous occurrence of that char on the current line. Cursor lands on the matched char. No-op when the char does not appear before the cursor.",
+    "find previous char",
+    "Wait for the next char keypress, then jump the primary cursor backward to the previous occurrence of that char, crossing into earlier lines to reach it. Cursor lands on the matched char. No-op when the char does not appear before the cursor.",
     ActionPriority::Rare
 );
 
@@ -803,8 +803,8 @@ define_action!(
     TillNextChar,
     "TillNextChar",
     ActionKind::TillNextChar,
-    "till next char on line",
-    "Wait for the next char keypress, then jump the primary cursor forward to one position before the next occurrence of that char on the current line. No-op when the char does not appear after the cursor.",
+    "till next char",
+    "Wait for the next char keypress, then jump the primary cursor forward to one position before the next occurrence of that char, crossing into later lines to reach it. No-op when the char does not appear after the cursor.",
     ActionPriority::Rare
 );
 
@@ -813,8 +813,8 @@ define_action!(
     TillPrevChar,
     "TillPrevChar",
     ActionKind::TillPrevChar,
-    "till previous char on line",
-    "Wait for the next char keypress, then jump the primary cursor backward to one position after the previous occurrence of that char on the current line. No-op when the char does not appear before the cursor.",
+    "till previous char",
+    "Wait for the next char keypress, then jump the primary cursor backward to one position after the previous occurrence of that char, crossing into earlier lines to reach it. No-op when the char does not appear before the cursor.",
     ActionPriority::Rare
 );
 
@@ -823,7 +823,7 @@ define_action!(
     ExtendFindNextChar,
     "ExtendFindNextChar",
     ActionKind::ExtendFindNextChar,
-    "extend to next char on line",
+    "extend to next char",
     "Like `FindNextChar` but extends the primary selection rather than collapsing it. The selection's tail stays put while the head moves to the matched char.",
     ActionPriority::Rare
 );
@@ -833,7 +833,7 @@ define_action!(
     ExtendFindPrevChar,
     "ExtendFindPrevChar",
     ActionKind::ExtendFindPrevChar,
-    "extend to previous char on line",
+    "extend to previous char",
     "Like `FindPrevChar` but extends the primary selection rather than collapsing it.",
     ActionPriority::Rare
 );
@@ -843,7 +843,7 @@ define_action!(
     ExtendTillNextChar,
     "ExtendTillNextChar",
     ActionKind::ExtendTillNextChar,
-    "extend till next char on line",
+    "extend till next char",
     "Like `TillNextChar` but extends the primary selection rather than collapsing it.",
     ActionPriority::Rare
 );
@@ -853,7 +853,7 @@ define_action!(
     ExtendTillPrevChar,
     "ExtendTillPrevChar",
     ActionKind::ExtendTillPrevChar,
-    "extend till previous char on line",
+    "extend till previous char",
     "Like `TillPrevChar` but extends the primary selection rather than collapsing it.",
     ActionPriority::Rare
 );

@@ -3270,21 +3270,12 @@ pub(crate) fn execute_find(
 }
 
 /// Offset the block cursor lands on for a find or till motion starting at
-/// `cursor`, or `None` when `ch` does not occur on the rest of that line.
+/// `cursor`, or `None` when `ch` does not occur in the rest of the buffer.
 ///
-/// The scan never leaves the cursor's own line, which is what keeps `f` and its
-/// siblings within-line motions.
+/// The scan runs to the buffer's edge rather than the line's, so `f` and its
+/// siblings reach a target on any later line. A newline is an ordinary
+/// character to the scan, and matches `ch` when `ch` is one.
 fn find_target(rope: &Rope, cursor: usize, kind: FindKind, ch: char, count: u32) -> Option<usize> {
-    let head_point = rope.offset_to_point(cursor);
-    let line_start = rope.point_to_offset(Point::new(head_point.row, 0));
-    let max_row = rope.max_point().row;
-    let line_end = if head_point.row >= max_row {
-        rope.len()
-    } else {
-        rope.point_to_offset(Point::new(head_point.row + 1, 0))
-            .saturating_sub(1)
-    };
-
     // A till motion whose target sits immediately next to the cursor would land
     // where the cursor already is, so bump the count to skip that adjacent
     // grapheme like Helix. Find motions land on the target and are unaffected.
@@ -3315,9 +3306,6 @@ fn find_target(rope: &Rope, cursor: usize, kind: FindKind, ch: char, count: u32)
             let mut found = None;
             let mut remaining = count;
             for c in rope.chars_at(scan_start) {
-                if offset >= line_end || c == '\n' {
-                    break;
-                }
                 if c == ch {
                     remaining -= 1;
                     if remaining == 0 {
@@ -3348,9 +3336,6 @@ fn find_target(rope: &Rope, cursor: usize, kind: FindKind, ch: char, count: u32)
                     break;
                 }
                 offset -= c.len_utf8();
-                if offset < line_start || c == '\n' {
-                    break;
-                }
                 if c == ch {
                     remaining -= 1;
                     if remaining == 0 {
