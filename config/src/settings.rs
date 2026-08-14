@@ -74,6 +74,15 @@ pub struct Settings {
     /// `format_on_save = true;` in stcfg. A format that errors or exceeds the
     /// save-time budget saves the buffer unchanged.
     pub format_on_save: Option<bool>,
+    /// Whether a buffer search reads the pattern's own case as the request.
+    /// `None` falls back to enabled. Set `search.smart_case = false;` in stcfg
+    /// to search case-sensitively whatever the pattern looks like.
+    ///
+    /// Enabled, a pattern typed without any uppercase character matches any
+    /// case, and one uppercase character makes the whole pattern
+    /// case-sensitive. Typing a lowercase pattern is the common case and
+    /// rarely means the case matters, while reaching for shift is deliberate.
+    pub search_smart_case: Option<bool>,
     /// Whether saving a config file re-applies it immediately. `None` falls
     /// back to enabled. Set `config.auto_reload = false;` in stcfg to require a
     /// restart instead.
@@ -243,6 +252,7 @@ impl Settings {
         Settings {
             text_proto_log: other.text_proto_log.or(self.text_proto_log),
             format_on_save: other.format_on_save.or(self.format_on_save),
+            search_smart_case: other.search_smart_case.or(self.search_smart_case),
             config_auto_reload: other.config_auto_reload.or(self.config_auto_reload),
             review_follow: other.review_follow.or(self.review_follow),
             review_rebase_head: other.review_rebase_head.or(self.review_rebase_head),
@@ -284,6 +294,11 @@ impl Settings {
             ["format_on_save"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.format_on_save = Some(b);
+                }
+            },
+            ["search", "smart_case"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.search_smart_case = Some(b);
                 }
             },
             ["config", "auto_reload"] => {
@@ -529,6 +544,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(true),
                 format_on_save: None,
+                search_smart_case: None,
                 config_auto_reload: None,
                 review_follow: None,
                 review_rebase_head: None,
@@ -801,6 +817,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(false),
                 format_on_save: None,
+                search_smart_case: None,
                 config_auto_reload: None,
                 review_follow: None,
                 review_rebase_head: None,
@@ -840,6 +857,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(true),
                 format_on_save: None,
+                search_smart_case: None,
                 config_auto_reload: None,
                 review_follow: None,
                 review_rebase_head: None,
@@ -888,6 +906,7 @@ mod tests {
         let left = Settings {
             text_proto_log: Some(false),
             format_on_save: None,
+            search_smart_case: None,
             config_auto_reload: None,
             review_follow: None,
             review_rebase_head: None,
@@ -919,6 +938,7 @@ mod tests {
         let right = Settings {
             text_proto_log: Some(true),
             format_on_save: None,
+            search_smart_case: None,
             config_auto_reload: None,
             review_follow: None,
             review_rebase_head: None,
@@ -952,6 +972,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(true),
                 format_on_save: None,
+                search_smart_case: None,
                 config_auto_reload: None,
                 review_follow: None,
                 review_rebase_head: None,
@@ -988,6 +1009,7 @@ mod tests {
         let left = Settings {
             text_proto_log: Some(true),
             format_on_save: None,
+            search_smart_case: None,
             config_auto_reload: None,
             review_follow: None,
             review_rebase_head: None,
@@ -1022,6 +1044,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(true),
                 format_on_save: None,
+                search_smart_case: None,
                 config_auto_reload: None,
                 review_follow: None,
                 review_rebase_head: None,
@@ -1069,6 +1092,7 @@ mod tests {
             Settings {
                 text_proto_log: None,
                 format_on_save: None,
+                search_smart_case: None,
                 config_auto_reload: None,
                 review_follow: None,
                 review_rebase_head: None,
@@ -1108,6 +1132,7 @@ mod tests {
             Settings {
                 text_proto_log: None,
                 format_on_save: None,
+                search_smart_case: None,
                 config_auto_reload: None,
                 review_follow: None,
                 review_rebase_head: None,
@@ -1144,6 +1169,7 @@ mod tests {
         let left = Settings {
             text_proto_log: None,
             format_on_save: None,
+            search_smart_case: None,
             config_auto_reload: None,
             review_follow: None,
             review_rebase_head: None,
@@ -1175,6 +1201,7 @@ mod tests {
         let right = Settings {
             text_proto_log: None,
             format_on_save: None,
+            search_smart_case: None,
             config_auto_reload: None,
             review_follow: None,
             review_rebase_head: None,

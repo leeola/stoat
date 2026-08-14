@@ -178,6 +178,12 @@ on init {
     # least-recently-shown are evicted. 0 drops state as soon as a buffer hides.
     editor.highlight_retention = 64;
 
+    # Read a search pattern's own case as the request: one typed without any
+    # uppercase character matches any case, and one uppercase character makes
+    # the whole pattern case-sensitive. On by default. Set false to search
+    # case-sensitively whatever the pattern looks like.
+    search.smart_case = true;
+
     # Log the LSP text-protocol transcript. Off by default.
     text_proto_log = false;
 

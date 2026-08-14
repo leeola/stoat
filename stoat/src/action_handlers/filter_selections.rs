@@ -53,7 +53,8 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
     if query.is_empty() {
         return true;
     }
-    let Some(regex) = super::search::compile_cursor_regex(&query) else {
+    let smart_case = super::search::smart_case(stoat);
+    let Some(regex) = super::search::compile_cursor_regex(&query, smart_case) else {
         stoat.set_status(format!("invalid regex: {query}"));
         return true;
     };

@@ -274,6 +274,11 @@ pub(crate) struct FrameCtx<'a> {
     /// every editor pane paints visible matches with the
     /// `ui.search.match` style so users see all hits at once.
     pub(crate) search_query: Option<&'a str>,
+    /// Whether [`Self::search_query`] compiles under smart case, resolved from
+    /// `search.smart_case` (default on). It travels with the query because the
+    /// paint compiles its own regex, and a highlight disagreeing with the jump
+    /// lights up a different set of matches than `n` walks.
+    pub(crate) search_smart_case: bool,
     /// How document editor panes number the gutter, resolved from
     /// `editor.line_numbers` (default [`LineNumbers::Relative`]).
     /// [`LineNumbers::Off`] keeps the diagnostic-only gutter column.
@@ -560,6 +565,9 @@ pub(crate) fn frame(
     // the end of the function. Nothing between here and the chain opens or closes
     // a modal, so the value still holds there.
     let painted_modal = active_modal(stoat);
+    // Resolved here for the same reason. It reads the whole &Stoat, where the
+    // search query it travels with is read below through a disjoint field.
+    let search_smart_case = crate::action_handlers::search::smart_case(stoat);
 
     let ws = &mut stoat.workspaces[stoat.active_workspace];
 
@@ -638,6 +646,7 @@ pub(crate) fn frame(
         mode_label: pane::mode_segment(mode, &stoat.theme, &stoat.settings.mode_badges),
         diagnostics: &stoat.diagnostics,
         search_query: stoat.last_search.as_ref().map(|s| s.query.as_str()),
+        search_smart_case,
         line_numbers: stoat
             .settings
             .editor_line_numbers

@@ -276,6 +276,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
         ),
         diagnostics: &stoat.diagnostics,
         search_query: None,
+        search_smart_case: true,
         line_numbers: LineNumbers::Relative,
         wrap_mode: WrapMode::EditorWidth,
         wrap_column: 80,

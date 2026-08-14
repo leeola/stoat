@@ -1505,6 +1505,7 @@ mod tests {
         h.stoat.last_search = Some(crate::action_handlers::search::LastSearch::new(
             "needle".into(),
             crate::action_handlers::search::SearchDirection::Forward,
+            true,
         ));
         h.type_keys("escape");
         h.type_keys("\" / p");

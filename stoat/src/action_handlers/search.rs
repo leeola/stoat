@@ -57,9 +57,9 @@ pub(crate) struct LastSearch {
 }
 
 impl LastSearch {
-    pub(crate) fn new(query: String, direction: SearchDirection) -> Self {
+    pub(crate) fn new(query: String, direction: SearchDirection, smart_case: bool) -> Self {
         Self {
-            regex: compile_cursor_regex(&query),
+            regex: compile_cursor_regex(&query, smart_case),
             query,
             direction,
         }
@@ -102,7 +102,7 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
         return true;
     }
 
-    let last = LastSearch::new(query, direction);
+    let last = LastSearch::new(query, direction, smart_case(stoat));
     let origin = super::jump::live_entry(stoat);
     if let Some(regex) = last.regex.as_ref()
         && jump_to_match(stoat, regex, direction).moved()
@@ -227,8 +227,13 @@ pub(super) fn search_selection(stoat: &mut Stoat, detect_word_boundaries: bool) 
     }
 
     let pattern = alternatives.join("|");
+    let smart_case = smart_case(stoat);
     stoat.set_status(format!("search pattern set to '{pattern}'"));
-    stoat.last_search = Some(LastSearch::new(pattern, SearchDirection::Forward));
+    stoat.last_search = Some(LastSearch::new(
+        pattern,
+        SearchDirection::Forward,
+        smart_case,
+    ));
     // The highlight pass reads the stored query straight off the app, so
     // nothing else reports that a different set of matches now lights up.
     stoat.paint_generation += 1;
@@ -453,21 +458,49 @@ fn next_match_at_or_after(regex: &CursorRegex, rope: &Rope, at: usize) -> Option
     }
 }
 
+/// The smart-case setting, defaulting to enabled.
+pub(crate) fn smart_case(stoat: &Stoat) -> bool {
+    stoat.settings.search_smart_case.unwrap_or(true)
+}
+
+/// Whether `pattern` matches any case, given the smart-case setting.
+///
+/// A pattern typed without any uppercase character carries no evidence the case
+/// matters, and lowercase is what a hurried search looks like. One uppercase
+/// character is a deliberate reach for shift, so the whole pattern turns
+/// case-sensitive.
+///
+/// The rule lives here rather than at each call site so both compile paths
+/// answer the same way, and the jump and the highlight agree about what matched.
+fn case_insensitive(pattern: &str, smart_case: bool) -> bool {
+    smart_case && !pattern.chars().any(char::is_uppercase)
+}
+
 /// Compile `pattern` into a [`regex::Regex`] with multiline mode on,
 /// so `^` and `$` match line boundaries inside the buffer text.
-pub(crate) fn compile_search_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
-    regex::RegexBuilder::new(pattern).multi_line(true).build()
+pub(crate) fn compile_search_regex(
+    pattern: &str,
+    smart_case: bool,
+) -> Result<regex::Regex, regex::Error> {
+    regex::RegexBuilder::new(pattern)
+        .multi_line(true)
+        .case_insensitive(case_insensitive(pattern, smart_case))
+        .build()
 }
 
 /// Compile `pattern` for the engine that matches over a rope's chunks, with the
-/// same multiline mode [`compile_search_regex`] uses.
+/// same multiline and case modes [`compile_search_regex`] uses.
 ///
 /// The two exist side by side because they suit different haystacks. This one
 /// searches the buffer without flattening it. The plain one is what the
 /// highlight pass runs over the window it has already built as a string.
-pub(crate) fn compile_cursor_regex(pattern: &str) -> Option<CursorRegex> {
+pub(crate) fn compile_cursor_regex(pattern: &str, smart_case: bool) -> Option<CursorRegex> {
     CursorRegex::builder()
-        .syntax(syntax::Config::new().multi_line(true))
+        .syntax(
+            syntax::Config::new()
+                .multi_line(true)
+                .case_insensitive(case_insensitive(pattern, smart_case)),
+        )
         .build(pattern)
         .ok()
 }
@@ -681,6 +714,47 @@ mod tests {
         assert_eq!(h.stoat.pending_message.as_deref(), Some("No more matches"),);
     }
 
+    /// A lowercase pattern carries no evidence the case matters, so it finds
+    /// text in any case.
+    #[test]
+    fn a_lowercase_pattern_matches_any_case() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "xx ABC\n");
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+        assert_eq!(h.selection_spans(), vec![(3, 6, false)]);
+    }
+
+    /// One uppercase character is a deliberate reach for shift, so the whole
+    /// pattern turns case-sensitive.
+    #[test]
+    fn an_uppercase_character_makes_the_pattern_case_sensitive() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "xx abc\n");
+        h.type_keys("/");
+        h.type_text("Abc");
+        h.type_keys("enter");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 1, false)],
+            "nothing matched, so the cursor stayed where it was",
+        );
+    }
+
+    /// Turning the setting off searches case-sensitively whatever the pattern
+    /// looks like.
+    #[test]
+    fn smart_case_off_keeps_a_lowercase_pattern_case_sensitive() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "xx ABC\n");
+        h.stoat.settings.search_smart_case = Some(false);
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+        assert_eq!(h.selection_spans(), vec![(0, 1, false)]);
+    }
+
     /// The stored pattern, or `None` when nothing has been searched for.
     fn stored_pattern(h: &TestHarness) -> Option<&str> {
         h.stoat.last_search.as_ref().map(|s| s.query.as_str())
@@ -850,7 +924,7 @@ mod tests {
     #[test]
     fn find_forward_resumes_from_inside_a_multibyte_character() {
         let text = stoat_text::Rope::from("\u{FC}ber \u{FC}ber");
-        let regex = super::compile_cursor_regex("\u{FC}ber").expect("valid regex");
+        let regex = super::compile_cursor_regex("\u{FC}ber", false).expect("valid regex");
 
         // A selection covering the umlaut at 0 ends at 2, so the scan starts
         // there. The bound lands mid-character whenever a caller hands over an
@@ -868,7 +942,7 @@ mod tests {
 
         // Four bytes wide, so a start one byte in falls inside the character.
         let wide = stoat_text::Rope::from("\u{1F600}x\u{1F600}x");
-        let regex = super::compile_cursor_regex("x").expect("valid regex");
+        let regex = super::compile_cursor_regex("x", false).expect("valid regex");
         assert_eq!(super::find_forward(&regex, &wide, 1), hit(4, 5));
         assert_eq!(super::find_forward(&regex, &wide, 6), hit(9, 10));
     }
@@ -877,14 +951,14 @@ mod tests {
     #[test]
     fn find_forward_folds_non_ascii_case() {
         let text = stoat_text::Rope::from("a\u{FC}b");
-        let regex = super::compile_cursor_regex("(?i)\u{DC}").expect("valid regex");
+        let regex = super::compile_cursor_regex("(?i)\u{DC}", false).expect("valid regex");
         assert_eq!(
             super::find_forward(&regex, &text, 0),
             hit(1, 3),
             "an uppercase umlaut pattern matches the lowercase one",
         );
 
-        let sensitive = super::compile_cursor_regex("\u{DC}").expect("valid regex");
+        let sensitive = super::compile_cursor_regex("\u{DC}", false).expect("valid regex");
         assert_eq!(
             super::find_forward(&sensitive, &text, 0),
             None,
@@ -902,7 +976,7 @@ mod tests {
     #[test]
     fn find_forward_with_an_empty_pattern_reports_a_boundary() {
         let text = stoat_text::Rope::from("\u{FC}ber \u{FC}ber");
-        let regex = super::compile_cursor_regex("").expect("valid regex");
+        let regex = super::compile_cursor_regex("", false).expect("valid regex");
         assert_eq!(
             super::find_forward(&regex, &text, 1),
             hit(2, 2),
@@ -915,7 +989,7 @@ mod tests {
     /// the cursor.
     #[test]
     fn find_reverse_picks_the_last_match_before_the_cursor() {
-        let regex = super::compile_cursor_regex("ab").expect("valid regex");
+        let regex = super::compile_cursor_regex("ab", false).expect("valid regex");
         let text = stoat_text::Rope::from("ab..ab..ab");
 
         assert_eq!(
@@ -953,7 +1027,7 @@ mod tests {
 
         let rope = stoat_text::Rope::from(text.as_str());
         let needle = "needle_in_a_haystack";
-        let regex = super::compile_cursor_regex(needle).expect("valid regex");
+        let regex = super::compile_cursor_regex(needle, false).expect("valid regex");
         let target = at + "the ".len();
         let end = target + needle.len();
 

@@ -102,6 +102,7 @@ pub(crate) fn render_editor(
         None,
         None,
         None,
+        false,
         None,
         None,
         None,
@@ -126,6 +127,7 @@ pub(crate) fn render_editor_with_overlay(
     hover_cell: Option<(u16, u16)>,
     goto_word_labels: Option<&BTreeMap<String, usize>>,
     search_query: Option<&str>,
+    search_smart_case: bool,
     diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet)>,
     mut scene: Option<&mut ApcScene>,
     undercurls: Option<&mut UndercurlBatch>,
@@ -426,11 +428,13 @@ pub(crate) fn render_editor_with_overlay(
                 Some(cache) if cache.query == query => (cache.window, cache.regex),
                 Some(cache) => (
                     cache.window,
-                    crate::action_handlers::search::compile_search_regex(query).ok(),
+                    crate::action_handlers::search::compile_search_regex(query, search_smart_case)
+                        .ok(),
                 ),
                 None => (
                     String::new(),
-                    crate::action_handlers::search::compile_search_regex(query).ok(),
+                    crate::action_handlers::search::compile_search_regex(query, search_smart_case)
+                        .ok(),
                 ),
             };
             window.clear();
@@ -2630,6 +2634,7 @@ mod tests {
             None,
             None,
             Some(query),
+            false,
             None,
             None,
             None,
@@ -2665,7 +2670,7 @@ mod tests {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
             let cache = editor.search_match_cache.as_mut().expect("cache set");
             cache.regex =
-                Some(action_handlers::search::compile_search_regex("bar").expect("valid"));
+                Some(action_handlers::search::compile_search_regex("bar", false).expect("valid"));
             cache.version = cache.version.wrapping_sub(1);
         }
 
@@ -2730,6 +2735,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             None,
             None,
             None,
@@ -2804,6 +2810,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
                 None,
                 None,
                 None,
@@ -2898,6 +2905,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
                 None,
                 None,
                 None,
@@ -3267,6 +3275,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             None,
             None,
             None,
@@ -3353,6 +3362,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             None,
             None,
             None,
@@ -3391,6 +3401,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             None,
             None,
             None,
@@ -3526,6 +3537,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             None,
             None,
             None,
@@ -3661,6 +3673,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
                 None,
                 None,
                 None,
@@ -3705,6 +3718,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             None,
             None,
             None,
@@ -3800,6 +3814,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             None,
             Some(&mut scene),
             None,
@@ -3879,6 +3894,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             None,
             Some(&mut scene),
             None,
@@ -3980,6 +3996,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             None,
             None,
             None,
@@ -4028,6 +4045,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             None,
             None,
             None,
@@ -4139,6 +4157,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             None,
             None,
             None,
@@ -4326,6 +4345,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             None,
             None,
             None,

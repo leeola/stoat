@@ -1635,6 +1635,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(false),
                 format_on_save: Some(false),
+                search_smart_case: Some(true),
                 config_auto_reload: Some(true),
                 review_follow: Some(true),
                 review_rebase_head: Some(true),

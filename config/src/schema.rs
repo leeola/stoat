@@ -63,6 +63,13 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "false",
         },
         SettingDef {
+            path: &[Lit("search"), Lit("smart_case")],
+            shape: ValueShape::Bool,
+            doc: "Search case-insensitively for a pattern typed without any \
+                  uppercase character, and case-sensitively for one with.",
+            default: "true",
+        },
+        SettingDef {
             path: &[Lit("config"), Lit("auto_reload")],
             shape: ValueShape::Bool,
             doc: "Re-apply a config file as soon as it is saved, rather than \
