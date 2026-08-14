@@ -128,24 +128,45 @@ pub(crate) fn search_cancel(stoat: &mut Stoat) -> bool {
 }
 
 pub(super) fn search_next(stoat: &mut Stoat) -> UpdateEffect {
-    let Some((regex, direction)) = repeat_target(stoat) else {
-        return UpdateEffect::None;
-    };
-    if jump_to_match(stoat, &regex, direction) {
-        UpdateEffect::Redraw
-    } else {
-        UpdateEffect::None
-    }
+    repeat_search(stoat, |direction| direction)
 }
 
 pub(super) fn search_prev(stoat: &mut Stoat) -> UpdateEffect {
+    repeat_search(stoat, SearchDirection::flipped)
+}
+
+/// Repeat the stored search once per pending count, walking the direction
+/// `resolve` answers for the one the search was submitted in.
+///
+/// A step that finds nothing ends the walk rather than failing the press, so
+/// the steps before it keep their landing. Only a buffer holding no match at
+/// all reaches that, since the search wraps.
+///
+/// The count is taken before the pattern is read, so a press with nothing
+/// stored still consumes it. A count of zero clamps to one: an unbound digit
+/// becomes a pending count, so a keymap that frees 0 otherwise sends `0 n`
+/// here as a walk of no steps.
+fn repeat_search(
+    stoat: &mut Stoat,
+    resolve: impl Fn(SearchDirection) -> SearchDirection,
+) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1).max(1);
     let Some((regex, direction)) = repeat_target(stoat) else {
         return UpdateEffect::None;
     };
-    if jump_to_match(stoat, &regex, direction.flipped()) {
-        UpdateEffect::Redraw
-    } else {
-        UpdateEffect::None
+    let direction = resolve(direction);
+
+    let mut moved = false;
+    for _ in 0..count {
+        if !jump_to_match(stoat, &regex, direction) {
+            break;
+        }
+        moved = true;
+    }
+
+    match moved {
+        true => UpdateEffect::Redraw,
+        false => UpdateEffect::None,
     }
 }
 
@@ -425,6 +446,33 @@ mod tests {
             h.selection_spans(),
             vec![(0, 1, false), (4, 7, false)],
             "the non-primary keeps its own span while the primary takes the match",
+        );
+    }
+
+    /// A count walks that many matches in one press, rather than one.
+    #[test]
+    fn a_count_repeats_the_search_that_many_times() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc x abc y abc z abc w abc\n");
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+        assert_eq!(h.selection_spans(), vec![(6, 9, false)]);
+
+        h.stoat.pending_count = Some(3);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
+        assert_eq!(
+            h.selection_spans(),
+            vec![(24, 27, false)],
+            "three matches on, not one",
+        );
+
+        h.stoat.pending_count = Some(3);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchPrev);
+        assert_eq!(
+            h.selection_spans(),
+            vec![(6, 9, false)],
+            "and the same three back",
         );
     }
 
