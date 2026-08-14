@@ -1153,8 +1153,8 @@ fn move_prev_word_end_over_forward_selection_keeps_trailing_char() {
     }
     dispatch(&mut stoat, &MoveNextWordEnd);
     dispatch(&mut stoat, &MovePrevWordEnd);
-    assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 7, true)]);
-    assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(3, 7, true)]);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
 }
 
 #[test]
@@ -1165,8 +1165,15 @@ fn move_prev_word_start_at_start_is_noop() {
     assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 1, false)]);
 }
 
+/// `gE` stops on the boundary past the previous word's last character, not on
+/// the character itself.
+///
+/// From the `r` of "foo bar" the scan crosses back over "bar" and the space,
+/// stopping where "foo" ended, so the cursor sits on the space at 3. Stepping
+/// one further back onto the `o` is what used to make the short-word `gE`
+/// disagree with the long-word one.
 #[test]
-fn move_prev_word_end_lands_on_last_char_of_prev_word() {
+fn move_prev_word_end_lands_past_the_prev_word() {
     let mut stoat = stoat();
     editor::seed_focused_buffer(&mut stoat, "foo bar");
     for _ in 0..6 {
@@ -1174,8 +1181,8 @@ fn move_prev_word_end_lands_on_last_char_of_prev_word() {
     }
     assert_eq!(editor::head_offsets(&mut stoat), vec![6]);
     dispatch(&mut stoat, &MovePrevWordEnd);
-    assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 7, true)]);
-    assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(3, 7, true)]);
+    assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
 }
 
 #[test]
@@ -1565,7 +1572,7 @@ fn extend_prev_word_end_keeps_tail_at_cursor() {
     dispatch(&mut stoat, &ExtendPrevWordEnd);
     assert_eq!(
         editor::selection_spans(&mut stoat),
-        vec![(2, 7, true)],
+        vec![(3, 7, true)],
         "crossing the tail keeps the r the cursor was on covered"
     );
 }

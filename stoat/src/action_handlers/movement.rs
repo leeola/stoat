@@ -360,21 +360,13 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
         ((anchor, head) != origin).then_some((anchor, head))
     };
 
-    // A word end is the last character of the word, so the head steps back off
-    // the boundary it stopped on. By whole characters, since a codepoint step
-    // lands inside one made of several.
-    let word_end_cell = |head: usize| rope.prev_grapheme_boundary(head);
-
     if extend {
         // The extend wants the cell to land the block cursor on, not the scan's
         // head. Forward the head sits one past the last cell, so it steps back.
-        // Backward it is already on the cell, except at a word end, where it
-        // stopped on the boundary after it.
+        // Backward it is already on the cell.
         move_cursors(&mut editor.selections, buffer_snapshot, true, |read| {
             let (anchor, head) = scan_from(read)?;
-            let target_cursor = if matches!(target, WordTarget::PrevEnd) {
-                word_end_cell(head)
-            } else if is_prev {
+            let target_cursor = if is_prev {
                 head
             } else {
                 cursor_offset(rope, anchor, head)
@@ -405,10 +397,7 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
             },
             true => Selection {
                 id: read.id,
-                start: match matches!(target, WordTarget::PrevEnd) {
-                    true => word_end_cell(head),
-                    false => head,
-                },
+                start: head,
                 end: anchor,
                 reversed: true,
                 goal: SelectionGoal::None,
