@@ -4262,6 +4262,30 @@ fn goto_next_change_jumps_forward() {
     assert_eq!(h.primary_head_offset(), 10);
 }
 
+/// Alt-. after a change jump repeats that jump, not whatever find preceded it.
+///
+/// The fixture puts the next hunk and the next find target on different rows,
+/// so replaying the wrong one of the two lands somewhere else.
+#[test]
+fn repeat_last_motion_replays_a_change_jump() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nc\n");
+    h.open_file(&path);
+    install_diff_hunks(&mut h, &[2, 5, 6]);
+
+    h.type_keys("f c");
+    assert_eq!(h.primary_head_offset(), 4, "the find lands first");
+    dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+    assert_eq!(h.primary_head_offset(), 10);
+
+    dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
+    assert_eq!(
+        h.primary_head_offset(),
+        12,
+        "the next hunk, not the c the earlier find would have reached",
+    );
+}
+
 #[test]
 fn goto_next_change_uses_a_background_populated_diff_map() {
     let mut h = TestHarness::with_size(20, 10);
@@ -5624,6 +5648,47 @@ fn select_mode_prev_paragraph_extends_backward() {
         paragraph_span("a\n\nb\n\nc\n", 6, "v [ p"),
         (3, 7, true),
         "the head crosses the tail, which keeps the cell it started on covered",
+    );
+}
+
+/// Alt-. after a paragraph motion repeats that motion with the count it was
+/// made with, not the find that preceded it.
+#[test]
+fn repeat_last_motion_replays_a_paragraph_motion() {
+    let mut h = TestHarness::with_size(30, 20);
+    let path = h.write_file("s.txt", "a\n\nb\n\nc\n\nd\n");
+    h.open_file(&path);
+
+    h.type_keys("f b");
+    assert_eq!(h.primary_head_offset(), 3, "the find lands first");
+    h.type_keys("2 ] p");
+    assert_eq!(h.selection_spans(), vec![(3, 9, false)]);
+
+    h.type_keys("alt-.");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(9, 11, false)],
+        "the paragraph motion runs again, where replaying the find would hold",
+    );
+}
+
+/// Alt-. after a sibling jump repeats the jump rather than the find before it.
+#[test]
+fn repeat_last_motion_replays_a_sibling_jump() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\nfn c() {}\n");
+    h.open_file(&path);
+    h.type_keys("l l l");
+
+    dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+    dispatch(&mut h.stoat, &stoat_action::SelectNextSibling);
+    let on_second = h.selection_spans();
+
+    dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
+    let on_third = h.selection_spans();
+    assert!(
+        on_third[0].0 >= on_second[0].1,
+        "the replay steps to the next sibling ({on_second:?} -> {on_third:?})",
     );
 }
 

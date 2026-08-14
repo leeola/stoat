@@ -56,6 +56,7 @@ pub(crate) enum DiagnosticDirection {
 /// not an editor, the buffer has no path, or no diagnostic lies in
 /// the requested direction.
 pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection) -> UpdateEffect {
+    stoat.last_motion = Some(crate::action_handlers::LastMotion::Diagnostic { dir: direction });
     let (cursor_offset, buffer_id, _rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -2773,6 +2774,28 @@ mod tests {
         h.type_keys("space l w");
         assert_eq!(cursor_offset(&mut h), 4);
         assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
+    /// Alt-. after a diagnostic jump repeats the jump, not the find before it.
+    #[test]
+    fn repeat_last_motion_replays_a_diagnostic_jump() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.seed_diagnostics(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
+
+        h.type_keys("f b");
+        assert_eq!(cursor_offset(&mut h), 1, "the find lands first");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
+        assert_eq!(cursor_offset(&mut h), 4);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
+        assert_eq!(
+            cursor_offset(&mut h),
+            8,
+            "the second diagnostic, where replaying the find would hold",
+        );
     }
 
     #[test]

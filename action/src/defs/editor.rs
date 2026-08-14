@@ -1163,8 +1163,8 @@ define_action!(
     RepeatLastMotion,
     "RepeatLastMotion",
     ActionKind::RepeatLastMotion,
-    "repeat last find motion",
-    "Replay the most recent f/F/t/T find against the same target char. No-op when no find has been executed in this session.",
+    "repeat last motion",
+    "Replay the most recent recorded motion: an f/F/t/T find, a paragraph or change or diagnostic jump, or a tree-sitter sibling or object jump. The motion keeps the count and extend flag it was made with, so a replay repeats what the user did rather than reshaping it to the current mode. A count on this key repeats the whole motion that many times. No-op when no such motion has run in this session.",
     ActionPriority::Rare
 );
 

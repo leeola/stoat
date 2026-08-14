@@ -1154,14 +1154,10 @@ pub struct Stoat {
     /// [`Self::drain_lsp_notifications`]; surfaced by the status bar
     /// for the focused buffer.
     pub(crate) diagnostics: crate::diagnostics::DiagnosticSet,
-    /// Most recent find consumed by `execute_find`, as its kind, target
-    /// char, count, and extend flag. `RepeatLastMotion` (Alt-.) replays it
-    /// without reading another keypress.
-    ///
-    /// The count and extend flag travel with the motion rather than being
-    /// re-read at replay time, so a find keeps the reach and the mode it was
-    /// made with however the editor has moved on since.
-    pub(crate) last_find: Option<(action_handlers::movement::FindKind, char, u32, bool)>,
+    /// Most recent motion worth stepping through, recorded by the handler that
+    /// ran it. `RepeatLastMotion` (Alt-.) replays it without reading another
+    /// keypress.
+    pub(crate) last_motion: Option<action_handlers::LastMotion>,
     /// Filesystem the UI layer reads through. Swapped to
     /// [`crate::host::FakeFs`] in tests; all IO outside the host module
     /// itself must route through this field.
@@ -1993,7 +1989,7 @@ impl Stoat {
                 std::collections::HashMap::new(),
             )),
             diagnostics: crate::diagnostics::DiagnosticSet::new(),
-            last_find: None,
+            last_motion: None,
             fs_host: Arc::new(LocalFs),
             fs_watch_host: Arc::new(NoopFsWatcher::new()),
             review_pending_external_edits: std::collections::HashMap::new(),

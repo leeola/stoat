@@ -67,6 +67,82 @@ use stoat_action::{
 use stoat_text::{Anchor, BufferId, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
 
+/// A motion `RepeatLastMotion` (Alt-.) plays back.
+///
+/// Each variant carries everything its handler reads from outside its
+/// arguments, so a replay runs the motion the user made rather than a fresh
+/// one shaped by whatever state it lands in. That means the count for the
+/// motions that take one, and the extend flag for the motions that have one,
+/// since both come from the keypress and neither survives it.
+///
+/// Only motions worth stepping through repeatedly are recorded. A motion that
+/// records nothing leaves the previous one in place, which is what makes Alt-.
+/// after an unrecorded key repeat the last motion rather than do nothing.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LastMotion {
+    Find {
+        kind: movement::FindKind,
+        ch: char,
+        count: u32,
+        extend: bool,
+    },
+    Paragraph {
+        dir: movement::ParaDir,
+        count: u32,
+        extend: bool,
+    },
+    Change {
+        dir: movement::ChangeDir,
+        count: u32,
+    },
+    Diagnostic {
+        dir: lsp::DiagnosticDirection,
+    },
+    TsSibling {
+        dir: movement::SiblingDir,
+        count: u32,
+        extend: bool,
+    },
+    TsObject {
+        kind: textobject_nav::NavKind,
+        dir: textobject_nav::NavDirection,
+    },
+}
+
+/// Run the last recorded motion again, this key's count deciding how many
+/// times.
+///
+/// The count repeats the whole motion rather than widening its reach, so a
+/// motion made with its own count carries that count into each repeat.
+pub(crate) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(motion) = stoat.last_motion else {
+        return UpdateEffect::None;
+    };
+    let repeat = stoat.take_pending_count().unwrap_or(1).max(1);
+
+    let mut effect = UpdateEffect::None;
+    for _ in 0..repeat {
+        effect = match motion {
+            LastMotion::Find {
+                kind,
+                ch,
+                count,
+                extend,
+            } => movement::execute_find(stoat, kind, ch, extend, count),
+            LastMotion::Paragraph { dir, count, extend } => {
+                movement::goto_paragraph_impl(stoat, dir, extend, count)
+            },
+            LastMotion::Change { dir, count } => movement::goto_change_impl(stoat, dir, count),
+            LastMotion::Diagnostic { dir } => lsp::goto_diagnostic(stoat, dir),
+            LastMotion::TsSibling { dir, count, extend } => {
+                movement::select_sibling_impl(stoat, dir, extend, count)
+            },
+            LastMotion::TsObject { kind, dir } => textobject_nav::goto_textobject(stoat, kind, dir),
+        };
+    }
+    effect
+}
+
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     conflict_view::disarm_clobber_unless_pick(stoat, action.kind());
 
@@ -673,7 +749,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PasteClipboardBefore => yank::paste_clipboard_before(stoat),
         ActionKind::SelectRegister => yank::select_register(stoat),
         ActionKind::InsertRegister => yank::insert_register(stoat),
-        ActionKind::RepeatLastMotion => movement::repeat_last_motion(stoat),
+        ActionKind::RepeatLastMotion => repeat_last_motion(stoat),
         ActionKind::GotoWindowTop => view::goto_window(stoat, view::WindowAlign::Top, false),
         ActionKind::GotoWindowCenter => view::goto_window(stoat, view::WindowAlign::Center, false),
         ActionKind::GotoWindowBottom => view::goto_window(stoat, view::WindowAlign::Bottom, false),

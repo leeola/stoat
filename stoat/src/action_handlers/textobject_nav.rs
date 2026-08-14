@@ -42,6 +42,10 @@ pub(crate) fn goto_textobject(
     kind: NavKind,
     direction: NavDirection,
 ) -> UpdateEffect {
+    stoat.last_motion = Some(crate::action_handlers::LastMotion::TsObject {
+        kind,
+        dir: direction,
+    });
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -181,6 +185,22 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
         let second = cursor_offset(&mut h);
         assert_eq!(&src[second..second + 9], "fn gamma(");
+    }
+
+    /// Alt-. after a function jump repeats the jump, since the motion records
+    /// itself the way a find does.
+    #[test]
+    fn repeat_last_motion_replays_a_function_jump() {
+        let src = "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n";
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        jump(&mut h, 0);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
+        let landed = cursor_offset(&mut h);
+        assert_eq!(&src[landed..landed + 9], "fn gamma(");
     }
 
     #[test]

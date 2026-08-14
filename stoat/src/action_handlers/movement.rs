@@ -1,4 +1,4 @@
-use super::{split_selection, view};
+use super::{split_selection, view, LastMotion};
 use crate::{
     action_handlers::focused_editor_mut,
     app::{Stoat, UpdateEffect},
@@ -2837,7 +2837,7 @@ fn trim_whitespace(rope: &Rope, start: usize, end: usize) -> Option<(usize, usiz
 }
 
 #[derive(Copy, Clone, Debug)]
-pub(super) enum ChangeDir {
+pub(crate) enum ChangeDir {
     Next,
     Prev,
 }
@@ -2953,13 +2953,25 @@ pub(super) fn shrink_selection(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 #[derive(Copy, Clone, Debug)]
-pub(super) enum SiblingDir {
+pub(crate) enum SiblingDir {
     Next,
     Prev,
 }
 
 pub(super) fn select_sibling(stoat: &mut Stoat, dir: SiblingDir, extend: bool) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
+    select_sibling_impl(stoat, dir, extend, count)
+}
+
+/// [`select_sibling`] with its count supplied rather than read from the pending
+/// keypress, so a replay repeats the count the motion was made with.
+pub(crate) fn select_sibling_impl(
+    stoat: &mut Stoat,
+    dir: SiblingDir,
+    extend: bool,
+    count: u32,
+) -> UpdateEffect {
+    stoat.last_motion = Some(LastMotion::TsSibling { dir, count, extend });
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -3194,26 +3206,6 @@ pub(super) fn set_pending_find(stoat: &mut Stoat, kind: FindKind, extend: bool) 
     UpdateEffect::Redraw
 }
 
-/// Run the last find again, this key's count deciding how many times.
-///
-/// The count repeats the whole motion rather than widening its reach, so a
-/// find made with its own count carries that count into each repeat. A repeat
-/// that finds nothing leaves its selection where the one before it landed,
-/// which is what keeps a run of them from throwing away the ground already
-/// covered.
-pub(super) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
-    let Some((kind, ch, count, extend)) = stoat.last_find else {
-        return UpdateEffect::None;
-    };
-    let repeat = stoat.take_pending_count().unwrap_or(1).max(1);
-
-    let mut effect = UpdateEffect::None;
-    for _ in 0..repeat {
-        effect = execute_find(stoat, kind, ch, extend, count);
-    }
-    effect
-}
-
 pub(crate) fn execute_find(
     stoat: &mut Stoat,
     kind: FindKind,
@@ -3222,7 +3214,12 @@ pub(crate) fn execute_find(
     count: u32,
 ) -> UpdateEffect {
     let count = count.max(1);
-    stoat.last_find = Some((kind, ch, count, extend));
+    stoat.last_motion = Some(LastMotion::Find {
+        kind,
+        ch,
+        count,
+        extend,
+    });
     move_to_motion_range(stoat, extend, |rope, cursor| {
         let target = find_target(rope, cursor, kind, ch, count)?;
         Some(landing_range(rope, cursor, target))
@@ -3521,6 +3518,15 @@ fn apply_primary_range(editor: &mut EditorState, target: Range<usize>) {
 }
 
 pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1).max(1);
+    goto_change_impl(stoat, dir, count)
+}
+
+/// [`goto_change`] with its count supplied rather than read from the pending
+/// keypress, so a replay repeats the count the motion was made with.
+pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) -> UpdateEffect {
+    stoat.last_motion = Some(LastMotion::Change { dir, count });
+
     // In the conflict view the standard change-navigation chords step between
     // conflict chunks. The center is a pathless scratch buffer with no diff map,
     // so the hunk walk below would find nothing. Redirecting to the chunk walk
@@ -3532,7 +3538,7 @@ pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
 
-    let count = stoat.take_pending_count().unwrap_or(1).max(1) as usize;
+    let count = count as usize;
     let origin = super::jump::live_entry(stoat);
     let current_path = stoat.focused_editor_ids().and_then(|(_, buffer_id)| {
         stoat
@@ -3813,7 +3819,7 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
 }
 
 #[derive(Copy, Clone, Debug)]
-pub(super) enum ParaDir {
+pub(crate) enum ParaDir {
     Next,
     Prev,
 }
@@ -3877,6 +3883,18 @@ impl<'a> BlankRows<'a> {
 /// work on.
 pub(super) fn goto_paragraph(stoat: &mut Stoat, dir: ParaDir, extend: bool) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1).max(1);
+    goto_paragraph_impl(stoat, dir, extend, count)
+}
+
+/// [`goto_paragraph`] with its count supplied rather than read from the
+/// pending keypress, so a replay repeats the count the motion was made with.
+pub(crate) fn goto_paragraph_impl(
+    stoat: &mut Stoat,
+    dir: ParaDir,
+    extend: bool,
+    count: u32,
+) -> UpdateEffect {
+    stoat.last_motion = Some(LastMotion::Paragraph { dir, count, extend });
     move_to_motion_range(stoat, extend, |rope, cursor| {
         let mut blanks = BlankRows::new(rope);
         Some(paragraph_range(rope, &mut blanks, cursor, dir, count))
