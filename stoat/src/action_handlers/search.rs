@@ -159,16 +159,23 @@ fn repeat_target(stoat: &Stoat) -> Option<(CursorRegex, SearchDirection)> {
     Some((last.regex.clone()?, last.direction))
 }
 
-/// Find the next match of `regex` in the focused editor's buffer,
-/// starting from the primary cursor and walking in `direction` with
-/// wrap-around, then move every selection's primary cursor to the match
-/// start. Returns true when a match was found and the cursor moved.
+/// Find the next match of `regex` in the focused editor's buffer, walking in
+/// `direction` with wrap-around, and give it to the primary selection as its
+/// new range. Returns true when a match was found.
+///
+/// The whole match becomes the selection, so the operation after a search acts
+/// on the matched text. The primary's direction carries over, and every other
+/// selection is left alone.
+///
+/// The search starts at the edge of the primary range the walk moves away from,
+/// its end going forward and its start going back. A start taken from the
+/// cursor instead puts a reverse repeat inside the match it just landed on,
+/// which finds that same match again.
 ///
 /// Takes the pattern already compiled, since `n` and `N` repeat one that
 /// [`LastSearch`] built when it was submitted.
 fn jump_to_match(stoat: &mut Stoat, regex: &CursorRegex, direction: SearchDirection) -> bool {
     use crate::pane::View;
-    use stoat_text::SelectionGoal;
 
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
@@ -181,46 +188,57 @@ fn jump_to_match(stoat: &mut Stoat, regex: &CursorRegex, direction: SearchDirect
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
     let sel = editor.selections.newest_anchor();
-    let cursor = stoat_text::cursor_offset(
-        rope,
-        buffer_snapshot.resolve_anchor(&sel.tail()),
-        buffer_snapshot.resolve_anchor(&sel.head()),
-    );
+    let reversed = sel.reversed;
+    let from = match direction {
+        SearchDirection::Forward => buffer_snapshot.resolve_anchor(&sel.end),
+        SearchDirection::Reverse => buffer_snapshot.resolve_anchor(&sel.start),
+    };
 
     let target = match direction {
-        SearchDirection::Forward => find_forward(regex, rope, cursor),
-        SearchDirection::Reverse => find_reverse(regex, rope, cursor),
+        SearchDirection::Forward => find_forward(regex, rope, from),
+        SearchDirection::Reverse => find_reverse(regex, rope, from),
     };
-    let Some(target) = target else { return false };
+    let Some((start, end)) = target else {
+        return false;
+    };
+    // An empty match at the very start of the buffer selects nothing and lands
+    // nowhere, so there is no jump to make.
+    if end == 0 {
+        return false;
+    }
 
-    super::movement::move_cursors(&mut editor.selections, buffer_snapshot, false, |_| {
-        Some((target, SelectionGoal::None))
-    });
+    editor
+        .selections
+        .replace_primary(start..end, reversed, buffer_snapshot);
     true
 }
 
-fn find_forward(regex: &CursorRegex, rope: &Rope, head: usize) -> Option<usize> {
-    let start = head.saturating_add(1).min(rope.len());
-    if let Some(m) = next_match_at_or_after(regex, rope, start) {
+/// The span of the first match at or after `from`, wrapping to the start of the
+/// buffer when nothing lies ahead.
+///
+/// `from` is the primary selection's end, so the match it currently covers is
+/// already behind the bound and a repeat advances.
+fn find_forward(regex: &CursorRegex, rope: &Rope, from: usize) -> Option<(usize, usize)> {
+    if let Some(m) = next_match_at_or_after(regex, rope, from.min(rope.len())) {
         return Some(m);
     }
     next_match_at_or_after(regex, rope, 0)
 }
 
-/// The last match starting before `head`, or the last in the file when there is
-/// none, so a reverse search wraps around.
+/// The span of the last match starting before `from`, or the last in the file
+/// when there is none, so a reverse search wraps around.
 ///
 /// One forward pass, stopping at the first match the cursor has already passed.
-/// `find_iter` is lazy, so an ordinary reverse search reads `head` bytes rather
+/// `find_iter` is lazy, so an ordinary reverse search reads `from` bytes rather
 /// than the file. Only a search with nothing behind the cursor, which is the
 /// one that has to wrap, reads to the end.
-fn find_reverse(regex: &CursorRegex, rope: &Rope, head: usize) -> Option<usize> {
+fn find_reverse(regex: &CursorRegex, rope: &Rope, from: usize) -> Option<(usize, usize)> {
     let mut matches = regex.find_iter(rope.regex_input(0..rope.len()));
     let mut before = None;
 
     let at_or_after = loop {
         match matches.next() {
-            Some(m) if m.start() < head => before = Some(m.start()),
+            Some(m) if m.start() < from => before = Some((m.start(), m.end())),
             other => break other,
         }
     };
@@ -229,21 +247,25 @@ fn find_reverse(regex: &CursorRegex, rope: &Rope, head: usize) -> Option<usize> 
         return before;
     }
     let first = at_or_after?;
-    Some(matches.last().map_or(first.start(), |m| m.start()))
+    Some(
+        matches
+            .last()
+            .map_or((first.start(), first.end()), |m| (m.start(), m.end())),
+    )
 }
 
-/// Finds the first regex match whose start is at or after `at`.
+/// The span of the first regex match whose start is at or after `at`.
 ///
 /// The scan is bounded to `at..` on the input rather than by slicing, so the
-/// offset it reports is a buffer offset. A zero-width pattern can still report
-/// a match before the bound, which is why the start is checked.
-fn next_match_at_or_after(regex: &CursorRegex, rope: &Rope, at: usize) -> Option<usize> {
+/// offsets it reports are buffer offsets. A zero-width pattern still reports a
+/// match before the bound, which is why the start is checked.
+fn next_match_at_or_after(regex: &CursorRegex, rope: &Rope, at: usize) -> Option<(usize, usize)> {
     if at > rope.len() {
         return None;
     }
     let m = regex.find(rope.regex_input(at..rope.len()))?;
     if m.start() >= at {
-        Some(m.start())
+        Some((m.start(), m.end()))
     } else {
         None
     }
@@ -307,15 +329,17 @@ mod tests {
             .len()
     }
 
+    /// The match becomes the selection, not a cursor parked at its start, so
+    /// the operation after a search acts on the matched text.
     #[test]
-    fn forward_search_jumps_to_first_match_after_cursor() {
+    fn forward_search_selects_the_first_match_after_the_cursor() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc def abc\n");
         crate::action_handlers::dispatch(&mut h.stoat, &action::OpenSearchInput);
         assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_text("abc");
         h.type_keys("enter");
-        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(h.selection_spans(), vec![(8, 11, false)]);
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
@@ -327,18 +351,18 @@ mod tests {
         h.type_keys("/");
         h.type_text("abc");
         h.type_keys("enter");
-        assert_eq!(cursor_offset(&mut h), 0);
+        assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
     }
 
     #[test]
-    fn reverse_search_jumps_to_first_match_before_cursor() {
+    fn reverse_search_selects_the_first_match_before_the_cursor() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc def abc\n");
         h.type_keys("l l l l l l l l l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::OpenReverseSearchInput);
         h.type_text("abc");
         h.type_keys("enter");
-        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(h.selection_spans(), vec![(8, 11, false)]);
     }
 
     #[test]
@@ -348,7 +372,60 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::OpenReverseSearchInput);
         h.type_text("abc");
         h.type_keys("enter");
-        assert_eq!(cursor_offset(&mut h), 0);
+        assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
+    }
+
+    /// A variable-length pattern selects what it actually matched, which is
+    /// what a fixed-width landing at the match start hides.
+    #[test]
+    fn a_variable_length_match_selects_its_whole_span() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "ab 1 22 333\n");
+        h.type_keys("/");
+        h.type_text("\\d+");
+        h.type_keys("enter");
+        assert_eq!(h.selection_spans(), vec![(3, 4, false)]);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
+        assert_eq!(h.selection_spans(), vec![(5, 7, false)]);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
+        assert_eq!(h.selection_spans(), vec![(8, 11, false)]);
+    }
+
+    /// A reversed primary keeps facing backward through a search, so the set
+    /// does not silently flip under the user.
+    #[test]
+    fn a_search_keeps_the_primary_facing_the_way_it_did() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc\n");
+        h.type_keys("v l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::FlipSelections);
+        assert!(h.selection_spans()[0].2, "the fixture starts reversed");
+
+        h.type_keys("escape");
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+        assert_eq!(h.selection_spans(), vec![(8, 11, true)]);
+    }
+
+    /// Only the primary takes the match. Landing it on every selection makes
+    /// the spans identical, and identical spans merge, which collapses the set
+    /// to one on the first press.
+    #[test]
+    fn a_search_leaves_the_other_selections_alone() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc\n");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
+        h.type_keys("/");
+        h.type_text("def");
+        h.type_keys("enter");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 1, false), (4, 7, false)],
+            "the non-primary keeps its own span while the primary takes the match",
+        );
     }
 
     #[test]
@@ -358,19 +435,21 @@ mod tests {
         h.type_keys("/");
         h.type_text("abc");
         h.type_keys("enter");
-        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(h.selection_spans(), vec![(8, 11, false)]);
         crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
-        assert_eq!(cursor_offset(&mut h), 0);
+        assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
     }
 
-    /// The buffer text from the cursor onward, which says whether a jump landed
-    /// on a match rather than at an offset the match used to be at.
-    fn text_at_cursor(h: &mut TestHarness) -> String {
-        let at = cursor_offset(h);
+    /// The text the primary selection covers, which says whether a jump landed
+    /// on a match rather than where a match used to be.
+    fn selected_text(h: &mut TestHarness) -> String {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let snapshot = editor.display_map.snapshot();
-        let rope = snapshot.buffer_snapshot().rope();
-        rope.slice(at..rope.len()).to_string()
+        let buf_snap = snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor();
+        let start = buf_snap.resolve_anchor(&sel.start);
+        let end = buf_snap.resolve_anchor(&sel.end);
+        buf_snap.rope().slice(start..end).to_string()
     }
 
     #[test]
@@ -388,8 +467,9 @@ mod tests {
         h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
 
-        assert!(
-            text_at_cursor(&mut h).starts_with("abc"),
+        assert_eq!(
+            selected_text(&mut h),
+            "abc",
             "the repeat landed on a match in the edited buffer, not where one used to be"
         );
     }
@@ -407,23 +487,25 @@ mod tests {
         let text = stoat_text::Rope::from("\u{FC}ber \u{FC}ber");
         let regex = super::compile_cursor_regex("\u{FC}ber").expect("valid regex");
 
-        // The cursor is on the two-byte umlaut at 0, so the scan starts at 1.
+        // A selection covering the umlaut at 0 ends at 2, so the scan starts
+        // there. The bound lands mid-character whenever a caller hands over an
+        // offset the buffer clipped differently.
         assert_eq!(
-            super::find_forward(&regex, &text, 0),
-            Some(6),
+            super::find_forward(&regex, &text, 1),
+            Some((6, 11)),
             "a start inside the umlaut still reaches the next match",
         );
         assert_eq!(
-            super::find_forward(&regex, &text, 6),
-            Some(0),
+            super::find_forward(&regex, &text, 11),
+            Some((0, 5)),
             "and with nothing after it, wraps rather than stalling there",
         );
 
-        // Four bytes wide, so the scan starts three bytes into the character.
+        // Four bytes wide, so a start one byte in falls inside the character.
         let wide = stoat_text::Rope::from("\u{1F600}x\u{1F600}x");
         let regex = super::compile_cursor_regex("x").expect("valid regex");
-        assert_eq!(super::find_forward(&regex, &wide, 0), Some(4));
-        assert_eq!(super::find_forward(&regex, &wide, 5), Some(9));
+        assert_eq!(super::find_forward(&regex, &wide, 1), Some((4, 5)));
+        assert_eq!(super::find_forward(&regex, &wide, 6), Some((9, 10)));
     }
 
     /// Case-insensitive search folds non-ASCII pairs, not just ASCII ones.
@@ -433,7 +515,7 @@ mod tests {
         let regex = super::compile_cursor_regex("(?i)\u{DC}").expect("valid regex");
         assert_eq!(
             super::find_forward(&regex, &text, 0),
-            Some(1),
+            Some((1, 3)),
             "an uppercase umlaut pattern matches the lowercase one",
         );
 
@@ -457,8 +539,8 @@ mod tests {
         let text = stoat_text::Rope::from("\u{FC}ber \u{FC}ber");
         let regex = super::compile_cursor_regex("").expect("valid regex");
         assert_eq!(
-            super::find_forward(&regex, &text, 0),
-            Some(2),
+            super::find_forward(&regex, &text, 1),
+            Some((2, 2)),
             "the boundary after the umlaut, not the byte inside it",
         );
     }
@@ -473,14 +555,14 @@ mod tests {
 
         assert_eq!(
             super::find_reverse(&regex, &text, 8),
-            Some(4),
+            Some((4, 6)),
             "the nearest match before the cursor wins, not the first or last",
         );
-        assert_eq!(super::find_reverse(&regex, &text, 9), Some(8));
-        assert_eq!(super::find_reverse(&regex, &text, 5), Some(4));
+        assert_eq!(super::find_reverse(&regex, &text, 9), Some((8, 10)));
+        assert_eq!(super::find_reverse(&regex, &text, 5), Some((4, 6)));
         assert_eq!(
             super::find_reverse(&regex, &text, 0),
-            Some(8),
+            Some((8, 10)),
             "with nothing before the cursor it wraps to the last match",
         );
         assert_eq!(
@@ -505,8 +587,10 @@ mod tests {
         }
 
         let rope = stoat_text::Rope::from(text.as_str());
-        let regex = super::compile_cursor_regex("needle_in_a_haystack").expect("valid regex");
+        let needle = "needle_in_a_haystack";
+        let regex = super::compile_cursor_regex(needle).expect("valid regex");
         let target = at + "the ".len();
+        let span = (target, target + needle.len());
 
         assert!(
             rope.chunks().count() > 1,
@@ -514,18 +598,18 @@ mod tests {
         );
         assert_eq!(
             super::find_forward(&regex, &rope, 0),
-            Some(target),
+            Some(span),
             "found walking forward from the start"
         );
         assert_eq!(
             super::find_reverse(&regex, &rope, rope.len()),
-            Some(target),
+            Some(span),
             "and walking back from the end"
         );
         assert_eq!(
-            super::find_forward(&regex, &rope, target),
-            Some(target),
-            "and wrapping round when the cursor sits on it"
+            super::find_forward(&regex, &rope, span.1),
+            Some(span),
+            "and wrapping round when the selection covers it"
         );
     }
 
@@ -536,9 +620,13 @@ mod tests {
         h.type_keys("/");
         h.type_text("abc");
         h.type_keys("enter");
-        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(h.selection_spans(), vec![(8, 11, false)]);
         crate::action_handlers::dispatch(&mut h.stoat, &action::SearchPrev);
-        assert_eq!(cursor_offset(&mut h), 0);
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 3, false)],
+            "the reverse walk starts at the selection's start, so it leaves the match it is on",
+        );
     }
 
     /// A reverse repeat with nothing behind the cursor wraps to the file's last
@@ -551,15 +639,19 @@ mod tests {
         h.type_keys("/");
         h.type_text("abc");
         h.type_keys("enter");
-        assert_eq!(cursor_offset(&mut h), 8);
-
-        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchPrev);
-        assert_eq!(cursor_offset(&mut h), 0, "back to the first match");
+        assert_eq!(h.selection_spans(), vec![(8, 11, false)]);
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::SearchPrev);
         assert_eq!(
-            cursor_offset(&mut h),
-            16,
+            h.selection_spans(),
+            vec![(0, 3, false)],
+            "back to the first match",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchPrev);
+        assert_eq!(
+            h.selection_spans(),
+            vec![(16, 19, false)],
             "nothing lies before the top, so it wraps to the last match",
         );
     }
@@ -682,7 +774,7 @@ mod tests {
         h.type_keys("/");
         h.type_text("\\d+");
         h.type_keys("enter");
-        assert_eq!(cursor_offset(&mut h), 4);
+        assert_eq!(h.selection_spans(), vec![(4, 7, false)]);
     }
 
     #[test]
@@ -692,7 +784,7 @@ mod tests {
         h.type_keys("/");
         h.type_text("^foo");
         h.type_keys("enter");
-        assert_eq!(cursor_offset(&mut h), 5);
+        assert_eq!(h.selection_spans(), vec![(5, 8, false)]);
     }
 
     #[test]

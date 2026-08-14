@@ -220,6 +220,41 @@ impl SelectionsCollection {
         self.next_selection_id = 1;
     }
 
+    /// Give the primary selection the span `range`, leaving every other
+    /// selection where it is.
+    ///
+    /// For a command that acts on one selection rather than the set, such as a
+    /// search landing its match. Stamping the result on every selection instead
+    /// makes the spans identical, and identical spans merge, so a
+    /// multi-selection set collapses to one on the first press.
+    ///
+    /// `reversed` decides which end the cursor sits on. A caller carries it
+    /// over from the selection it replaces, so the set keeps facing the way the
+    /// user pointed it.
+    pub(crate) fn replace_primary(
+        &mut self,
+        range: std::ops::Range<usize>,
+        reversed: bool,
+        snapshot: &MultiBufferSnapshot,
+    ) {
+        let primary_id = self.newest_anchor().id;
+        let replaced: Vec<Selection<Anchor>> = self
+            .disjoint
+            .iter()
+            .map(|sel| match sel.id == primary_id {
+                true => Selection {
+                    id: sel.id,
+                    start: snapshot.anchor_at(range.start, Bias::Left),
+                    end: snapshot.anchor_at(range.end, Bias::Right),
+                    reversed,
+                    goal: SelectionGoal::None,
+                },
+                false => sel.clone(),
+            })
+            .collect();
+        self.replace_with(replaced, snapshot);
+    }
+
     pub(crate) fn set_single_range(&mut self, start: Anchor, end: Anchor, goal: SelectionGoal) {
         let id = self.next_selection_id;
         self.next_selection_id += 1;
