@@ -16,10 +16,20 @@ use crate::{
 };
 use stoat_text::{Bias, Selection, SelectionGoal};
 
+/// Object kinds the unimpaired menu steps between.
+///
+/// Each names a capture prefix in a language's textobjects query. A language
+/// whose query lacks one answers no matches, so its motion is a no-op there
+/// rather than an error.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum NavKind {
     Function,
     Class,
+    Parameter,
+    Comment,
+    Test,
+    Entry,
+    XmlElement,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -33,6 +43,11 @@ impl NavKind {
         match self {
             NavKind::Function => "function.around",
             NavKind::Class => "class.around",
+            NavKind::Parameter => "parameter.around",
+            NavKind::Comment => "comment.around",
+            NavKind::Test => "test.around",
+            NavKind::Entry => "entry.around",
+            NavKind::XmlElement => "xml-element.around",
         }
     }
 }
@@ -237,7 +252,8 @@ mod tests {
     use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
     use std::path::PathBuf;
     use stoat_action::{
-        GotoNextClass, GotoNextFunction, GotoPrevClass, GotoPrevFunction, OpenFile,
+        GotoNextClass, GotoNextComment, GotoNextEntry, GotoNextFunction, GotoNextParameter,
+        GotoNextTest, GotoNextXmlElement, GotoPrevClass, GotoPrevFunction, OpenFile,
     };
 
     fn seed(h: &mut TestHarness, name: &str, contents: &str) -> PathBuf {
@@ -334,6 +350,45 @@ mod tests {
             "fn alpha() {}\nfn beta() {}",
             "the span reaches from where it started through the object",
         );
+    }
+
+    /// Each new object kind names a capture prefix the query already knows, so
+    /// the menu reaches parameters, comments, tests, and entries.
+    #[test]
+    fn the_object_motions_reach_each_kind() {
+        let src = "fn a() {}\n// note\n#[test]\nfn t(alpha: u8) { [77, 88]; }\n";
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "main.rs", src);
+        h.settle();
+
+        for (action, expected) in [
+            (&GotoNextComment as &dyn stoat_action::Action, "// note"),
+            (&GotoNextParameter, "alpha: u8"),
+            (&GotoNextEntry, "77"),
+            (&GotoNextTest, "fn t(alpha: u8) { [77, 88]; }"),
+        ] {
+            jump(&mut h, 0);
+            crate::action_handlers::dispatch(&mut h.stoat, action);
+            assert_eq!(selected(&mut h, src), expected);
+        }
+    }
+
+    /// A kind no shipped query captures answers nothing, which leaves its key a
+    /// no-op rather than an error.
+    ///
+    /// The buffer holds objects a captured kind reaches, so the motion standing
+    /// still says the capture is absent rather than the file is empty.
+    #[test]
+    fn an_uncaptured_object_kind_is_a_noop() {
+        let src = "fn a() {}\nfn b() {}\n";
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        jump(&mut h, 0);
+        let before = cursor_offset(&mut h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &GotoNextXmlElement);
+        assert_eq!(cursor_offset(&mut h), before);
     }
 
     /// A count steps that many objects in one press.

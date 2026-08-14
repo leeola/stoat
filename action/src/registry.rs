@@ -29,8 +29,10 @@ use crate::{
             FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
             GotoDiffCallerUp, GotoFileStart, GotoFirstNonwhitespace, GotoImplementors,
             GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact,
-            GotoNextChange, GotoNextClass, GotoNextFunction, GotoNextParagraph, GotoPrevChange,
-            GotoPrevClass, GotoPrevFunction, GotoPrevParagraph, GotoReferences, GotoWindowBottom,
+            GotoNextChange, GotoNextClass, GotoNextComment, GotoNextEntry, GotoNextFunction,
+            GotoNextParagraph, GotoNextParameter, GotoNextTest, GotoNextXmlElement, GotoPrevChange,
+            GotoPrevClass, GotoPrevComment, GotoPrevEntry, GotoPrevFunction, GotoPrevParagraph,
+            GotoPrevParameter, GotoPrevTest, GotoPrevXmlElement, GotoReferences, GotoWindowBottom,
             GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp, Increment,
             IndentSelection, InsertAtLineEnd, InsertAtLineStart, InsertRegister, InsertTab,
             JoinSelections, JoinSelectionsSpace, JumpBackward, JumpForward, KeepPrimarySelection,
@@ -807,6 +809,20 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoPrevFunction::DEF, |_| Ok(Box::new(GotoPrevFunction)));
     add(GotoNextClass::DEF, |_| Ok(Box::new(GotoNextClass)));
     add(GotoPrevClass::DEF, |_| Ok(Box::new(GotoPrevClass)));
+    add(GotoNextParameter::DEF, |_| Ok(Box::new(GotoNextParameter)));
+    add(GotoPrevParameter::DEF, |_| Ok(Box::new(GotoPrevParameter)));
+    add(GotoNextComment::DEF, |_| Ok(Box::new(GotoNextComment)));
+    add(GotoPrevComment::DEF, |_| Ok(Box::new(GotoPrevComment)));
+    add(GotoNextTest::DEF, |_| Ok(Box::new(GotoNextTest)));
+    add(GotoPrevTest::DEF, |_| Ok(Box::new(GotoPrevTest)));
+    add(GotoNextEntry::DEF, |_| Ok(Box::new(GotoNextEntry)));
+    add(GotoPrevEntry::DEF, |_| Ok(Box::new(GotoPrevEntry)));
+    add(GotoNextXmlElement::DEF, |_| {
+        Ok(Box::new(GotoNextXmlElement))
+    });
+    add(GotoPrevXmlElement::DEF, |_| {
+        Ok(Box::new(GotoPrevXmlElement))
+    });
     add(MatchBrackets::DEF, |_| Ok(Box::new(MatchBrackets)));
     add(ExtendMatchBrackets::DEF, |_| {
         Ok(Box::new(ExtendMatchBrackets))
@@ -1822,6 +1838,7 @@ mod tests {
         // + 2 SurroundReplace, SurroundDelete.
         // + 2 SelectTextobjectAround, SelectTextobjectInner.
         // + 4 GotoNextFunction, GotoPrevFunction, GotoNextClass, GotoPrevClass.
+        // + 10 the unimpaired object motions (parameter, comment, test, entry, xml element).
         // + 4 OpenSearchInput, OpenReverseSearchInput, SearchNext, SearchPrev.
         // + 3 Yank, PasteAfter, PasteBefore.
         // + 4 YankToClipboard, YankMainToClipboard, PasteClipboardAfter, PasteClipboardBefore.
@@ -1901,7 +1918,7 @@ mod tests {
         // + 2 ExtendSearchNext/ExtendSearchPrev.
         // + 4 MoveLineUp/MoveLineDown and their extend variants.
         // + 1 ExtendMatchBrackets.
-        assert_eq!(all().count(), 447);
+        assert_eq!(all().count(), 457);
     }
 
     #[test]

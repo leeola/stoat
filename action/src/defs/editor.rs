@@ -964,7 +964,7 @@ define_action!(
     "GotoNextFunction",
     ActionKind::GotoNextFunction,
     "goto next function",
-    "Move the primary cursor to the start of the next function definition in the buffer, looking up `function.around` captures via the language's `textobjects.scm`. No-op for languages without a textobjects query (json, markdown) or when no function lies after the cursor.",
+    "Select the next function definition from each cursor, resolved from the language's `textobjects.scm` `function.around` captures. The whole object is selected rather than only where it opens. A count steps that many objects, select mode grows the selection out to the object instead of replacing it, and the origin goes on the jumplist. No-op for a language whose textobjects query captures no `function.around`, or when no function lies after the cursor.",
     ActionPriority::Rare
 );
 
@@ -974,7 +974,7 @@ define_action!(
     "GotoPrevFunction",
     ActionKind::GotoPrevFunction,
     "goto previous function",
-    "Move the primary cursor to the start of the previous function definition in the buffer, looking up `function.around` captures via the language's `textobjects.scm`. No-op for languages without a textobjects query (json, markdown) or when no function lies before the cursor.",
+    "Select the previous function definition from each cursor, resolved from the language's `textobjects.scm` `function.around` captures. The whole object is selected rather than only where it opens. A count steps that many objects, select mode grows the selection out to the object instead of replacing it, and the origin goes on the jumplist. No-op for a language whose textobjects query captures no `function.around`, or when no function lies before the cursor.",
     ActionPriority::Rare
 );
 
@@ -984,7 +984,7 @@ define_action!(
     "GotoNextClass",
     ActionKind::GotoNextClass,
     "goto next class or type",
-    "Move the primary cursor to the start of the next class / struct / enum / trait / impl definition in the buffer, looking up `class.around` captures via the language's `textobjects.scm`. No-op for languages without a textobjects query (json, markdown) or when no class lies after the cursor.",
+    "Select the next class, struct, enum, trait, or impl definition from each cursor, resolved from the language's `textobjects.scm` `class.around` captures. The whole object is selected rather than only where it opens. A count steps that many objects, select mode grows the selection out to the object instead of replacing it, and the origin goes on the jumplist. No-op for a language whose textobjects query captures no `class.around`, or when no class lies after the cursor.",
     ActionPriority::Rare
 );
 
@@ -994,7 +994,107 @@ define_action!(
     "GotoPrevClass",
     ActionKind::GotoPrevClass,
     "goto previous class or type",
-    "Move the primary cursor to the start of the previous class / struct / enum / trait / impl definition in the buffer, looking up `class.around` captures via the language's `textobjects.scm`. No-op for languages without a textobjects query (json, markdown) or when no class lies before the cursor.",
+    "Select the previous class, struct, enum, trait, or impl definition from each cursor, resolved from the language's `textobjects.scm` `class.around` captures. The whole object is selected rather than only where it opens. A count steps that many objects, select mode grows the selection out to the object instead of replacing it, and the origin goes on the jumplist. No-op for a language whose textobjects query captures no `class.around`, or when no class lies before the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoNextParameterDef,
+    GotoNextParameter,
+    "GotoNextParameter",
+    ActionKind::GotoNextParameter,
+    "goto next parameter",
+    "Select the next parameter from each cursor, resolved from the language's `textobjects.scm` `parameter.around` captures. The whole object is selected rather than only where it opens. A count steps that many objects, select mode grows the selection out to the object instead of replacing it, and the origin goes on the jumplist. No-op for a language whose textobjects query captures no `parameter.around`, or when no parameter lies after the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoPrevParameterDef,
+    GotoPrevParameter,
+    "GotoPrevParameter",
+    ActionKind::GotoPrevParameter,
+    "goto previous parameter",
+    "Select the previous parameter from each cursor, resolved from the language's `textobjects.scm` `parameter.around` captures. The whole object is selected rather than only where it opens. A count steps that many objects, select mode grows the selection out to the object instead of replacing it, and the origin goes on the jumplist. No-op for a language whose textobjects query captures no `parameter.around`, or when no parameter lies before the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoNextCommentDef,
+    GotoNextComment,
+    "GotoNextComment",
+    ActionKind::GotoNextComment,
+    "goto next comment",
+    "Select the next comment from each cursor, resolved from the language's `textobjects.scm` `comment.around` captures. The whole object is selected rather than only where it opens. A count steps that many objects, select mode grows the selection out to the object instead of replacing it, and the origin goes on the jumplist. No-op for a language whose textobjects query captures no `comment.around`, or when no comment lies after the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoPrevCommentDef,
+    GotoPrevComment,
+    "GotoPrevComment",
+    ActionKind::GotoPrevComment,
+    "goto previous comment",
+    "Select the previous comment from each cursor, resolved from the language's `textobjects.scm` `comment.around` captures. The whole object is selected rather than only where it opens. A count steps that many objects, select mode grows the selection out to the object instead of replacing it, and the origin goes on the jumplist. No-op for a language whose textobjects query captures no `comment.around`, or when no comment lies before the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoNextTestDef,
+    GotoNextTest,
+    "GotoNextTest",
+    ActionKind::GotoNextTest,
+    "goto next test",
+    "Select the next test from each cursor, resolved from the language's `textobjects.scm` `test.around` captures. The whole object is selected rather than only where it opens. A count steps that many objects, select mode grows the selection out to the object instead of replacing it, and the origin goes on the jumplist. No-op for a language whose textobjects query captures no `test.around`, or when no test lies after the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoPrevTestDef,
+    GotoPrevTest,
+    "GotoPrevTest",
+    ActionKind::GotoPrevTest,
+    "goto previous test",
+    "Select the previous test from each cursor, resolved from the language's `textobjects.scm` `test.around` captures. The whole object is selected rather than only where it opens. A count steps that many objects, select mode grows the selection out to the object instead of replacing it, and the origin goes on the jumplist. No-op for a language whose textobjects query captures no `test.around`, or when no test lies before the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoNextEntryDef,
+    GotoNextEntry,
+    "GotoNextEntry",
+    ActionKind::GotoNextEntry,
+    "goto next entry",
+    "Select the next entry from each cursor, resolved from the language's `textobjects.scm` `entry.around` captures. The whole object is selected rather than only where it opens. A count steps that many objects, select mode grows the selection out to the object instead of replacing it, and the origin goes on the jumplist. No-op for a language whose textobjects query captures no `entry.around`, or when no entry lies after the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoPrevEntryDef,
+    GotoPrevEntry,
+    "GotoPrevEntry",
+    ActionKind::GotoPrevEntry,
+    "goto previous entry",
+    "Select the previous entry from each cursor, resolved from the language's `textobjects.scm` `entry.around` captures. The whole object is selected rather than only where it opens. A count steps that many objects, select mode grows the selection out to the object instead of replacing it, and the origin goes on the jumplist. No-op for a language whose textobjects query captures no `entry.around`, or when no entry lies before the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoNextXmlElementDef,
+    GotoNextXmlElement,
+    "GotoNextXmlElement",
+    ActionKind::GotoNextXmlElement,
+    "goto next XML element",
+    "Select the next XML element from each cursor, resolved from the language's `textobjects.scm` `xml-element.around` captures. The whole object is selected rather than only where it opens. A count steps that many objects, select mode grows the selection out to the object instead of replacing it, and the origin goes on the jumplist. No-op for a language whose textobjects query captures no `xml-element.around`, or when no XML element lies after the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoPrevXmlElementDef,
+    GotoPrevXmlElement,
+    "GotoPrevXmlElement",
+    ActionKind::GotoPrevXmlElement,
+    "goto previous XML element",
+    "Select the previous XML element from each cursor, resolved from the language's `textobjects.scm` `xml-element.around` captures. The whole object is selected rather than only where it opens. A count steps that many objects, select mode grows the selection out to the object instead of replacing it, and the origin goes on the jumplist. No-op for a language whose textobjects query captures no `xml-element.around`, or when no XML element lies before the cursor.",
     ActionPriority::Rare
 );
 

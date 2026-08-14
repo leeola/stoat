@@ -754,6 +754,56 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             textobject_nav::NavKind::Class,
             textobject_nav::NavDirection::Prev,
         ),
+        ActionKind::GotoNextParameter => textobject_nav::goto_textobject(
+            stoat,
+            textobject_nav::NavKind::Parameter,
+            textobject_nav::NavDirection::Next,
+        ),
+        ActionKind::GotoPrevParameter => textobject_nav::goto_textobject(
+            stoat,
+            textobject_nav::NavKind::Parameter,
+            textobject_nav::NavDirection::Prev,
+        ),
+        ActionKind::GotoNextComment => textobject_nav::goto_textobject(
+            stoat,
+            textobject_nav::NavKind::Comment,
+            textobject_nav::NavDirection::Next,
+        ),
+        ActionKind::GotoPrevComment => textobject_nav::goto_textobject(
+            stoat,
+            textobject_nav::NavKind::Comment,
+            textobject_nav::NavDirection::Prev,
+        ),
+        ActionKind::GotoNextTest => textobject_nav::goto_textobject(
+            stoat,
+            textobject_nav::NavKind::Test,
+            textobject_nav::NavDirection::Next,
+        ),
+        ActionKind::GotoPrevTest => textobject_nav::goto_textobject(
+            stoat,
+            textobject_nav::NavKind::Test,
+            textobject_nav::NavDirection::Prev,
+        ),
+        ActionKind::GotoNextEntry => textobject_nav::goto_textobject(
+            stoat,
+            textobject_nav::NavKind::Entry,
+            textobject_nav::NavDirection::Next,
+        ),
+        ActionKind::GotoPrevEntry => textobject_nav::goto_textobject(
+            stoat,
+            textobject_nav::NavKind::Entry,
+            textobject_nav::NavDirection::Prev,
+        ),
+        ActionKind::GotoNextXmlElement => textobject_nav::goto_textobject(
+            stoat,
+            textobject_nav::NavKind::XmlElement,
+            textobject_nav::NavDirection::Next,
+        ),
+        ActionKind::GotoPrevXmlElement => textobject_nav::goto_textobject(
+            stoat,
+            textobject_nav::NavKind::XmlElement,
+            textobject_nav::NavDirection::Prev,
+        ),
         ActionKind::OpenSearchInput => search::open_search_input(stoat),
         ActionKind::OpenReverseSearchInput => search::open_reverse_search_input(stoat),
         ActionKind::SearchNext => search::search_next(stoat),

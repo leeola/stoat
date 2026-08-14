@@ -4394,25 +4394,35 @@ fn count_prefix_goto_next_change_jumps_n_changes() {
     assert_eq!(h.primary_head_offset(), 10);
 }
 
+/// `]c` means comment, where change keeps `]g` to itself.
+///
+/// The two used to share the change motion, which left the menu one key short
+/// of the object motions and gave change a binding it did not need.
 #[test]
-fn helix_bracket_c_jumps_to_next_change() {
-    let mut h = TestHarness::with_size(20, 15);
-    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
+fn helix_bracket_c_jumps_to_next_comment() {
+    let mut h = TestHarness::with_size(30, 15);
+    let path = h.write_file("s.rs", "// one\nfn a() {}\n// two\nfn b() {}\n");
     h.open_file(&path);
-    install_diff_hunks(&mut h, &[2, 5, 8]);
+    h.settle();
+
     h.type_keys("] c");
-    assert_eq!(h.primary_head_offset(), 4);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(17, 23, false)],
+        "the second comment, selected whole",
+    );
 }
 
 #[test]
-fn helix_bracket_c_jumps_to_prev_change() {
-    let mut h = TestHarness::with_size(20, 15);
-    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
+fn helix_bracket_c_jumps_to_prev_comment() {
+    let mut h = TestHarness::with_size(30, 15);
+    let path = h.write_file("s.rs", "// one\nfn a() {}\n// two\nfn b() {}\n");
     h.open_file(&path);
-    install_diff_hunks(&mut h, &[2, 5, 8]);
-    h.type_keys("g j");
+    h.settle();
+    set_range(&mut h, 18, 19);
+
     h.type_keys("[ c");
-    assert_eq!(h.primary_head_offset(), 16);
+    assert_eq!(h.selection_spans(), vec![(0, 6, true)], "the first comment");
 }
 
 #[test]
