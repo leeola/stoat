@@ -4528,6 +4528,36 @@ fn select_mode_next_change_extends_to_the_hunk() {
     assert_eq!(h.selection_spans(), vec![(0, 12, false)]);
 }
 
+#[test]
+fn extend_span_holds_the_anchor_and_reaches_the_target() {
+    let rope = Rope::from("abcdefghij");
+    assert_eq!(extend_span(&rope, 2, &(5..8)), (2, 8, false), "forward");
+    assert_eq!(extend_span(&rope, 8, &(1..4)), (1, 8, true), "backward");
+    assert_eq!(
+        extend_span(&rope, 5, &(2..5)),
+        (5, 6, false),
+        "a target ending on the anchor widens rather than emptying",
+    );
+}
+
+/// The anchor of a reversed selection is its right end, so extending forward
+/// releases everything to the left of it.
+#[test]
+fn select_mode_next_change_extends_from_a_reversed_anchor() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    h.open_file(&path);
+    install_diff_hunks(&mut h, &[5]);
+    set_reversed_range(&mut h, 4, 7);
+
+    h.type_keys("v ] g");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(7, 12, false)],
+        "the span starts at the anchor, not at the head it just left",
+    );
+}
+
 /// Extending backward holds the anchor where it was and reaches back to the
 /// hunk's first row.
 #[test]

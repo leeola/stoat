@@ -11,6 +11,7 @@
 //! directional cousin (jump rather than expand-around).
 
 use crate::{
+    action_handlers::movement,
     app::{Stoat, UpdateEffect},
     pane::View,
 };
@@ -124,21 +125,13 @@ pub(crate) fn goto_textobject_impl(
     let buffer_snapshot = snapshot.buffer_snapshot();
     editor
         .selections
-        .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
+        .transform_resolved(buffer_snapshot, |sel, _head_offset, tail_offset| {
             let Some((_, target)) = landings.iter().find(|(id, _)| *id == sel.id) else {
                 return sel.clone();
             };
 
-            // Extending keeps the anchor and reaches out to whichever end of the
-            // object lies further from it, so a backward step in select mode
-            // grows the selection rather than turning it inside out.
             let (start, end, reversed) = if extend {
-                let anchor = tail_offset.min(head_offset);
-                if target.end <= anchor {
-                    (target.start, tail_offset.max(head_offset), true)
-                } else {
-                    (anchor, target.end, false)
-                }
+                movement::extend_span(buffer_snapshot.rope(), tail_offset, target)
             } else {
                 // The walk sets the direction, so a forward step leaves its
                 // cursor at the object's end and a backward step at its start.
@@ -349,6 +342,26 @@ mod tests {
             selected(&mut h, src),
             "fn alpha() {}\nfn beta() {}",
             "the span reaches from where it started through the object",
+        );
+    }
+
+    /// The anchor of a reversed selection is its right end, so extending
+    /// forward releases everything to the left of it.
+    #[test]
+    fn select_mode_next_function_extends_from_a_reversed_anchor() {
+        let src = "fn alpha() {}\nfn beta() {}\n";
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        jump(&mut h, 6);
+        h.type_keys("v h h h");
+        assert_eq!(h.selection_spans(), vec![(3, 7, true)], "reversed to start");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
+        assert_eq!(
+            h.selection_spans(),
+            vec![(7, 26, false)],
+            "the span starts at the anchor, not at the head it just left",
         );
     }
 

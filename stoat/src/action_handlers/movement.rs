@@ -3443,6 +3443,32 @@ fn landing_cell(rope: &Rope, anchor: usize, head: usize) -> usize {
     }
 }
 
+/// The `(start, end, reversed)` span an extend produces when its motion lands
+/// on `target`.
+///
+/// For the motions that land on a whole span rather than a single cell, where
+/// [`landing_cell`] answers for the rest. The anchor stays put and the head
+/// reaches whichever end of the target lies further from it, so a step back
+/// grows the selection rather than turning it inside out.
+///
+/// The anchor is the selection's tail, never the lesser of its two ends. A
+/// reversed selection anchors on its right end, so extending it forward
+/// releases everything to the left of that.
+pub(super) fn extend_span(
+    rope: &Rope,
+    anchor: usize,
+    target: &Range<usize>,
+) -> (usize, usize, bool) {
+    if target.end < anchor {
+        (target.start, anchor, true)
+    } else if target.end == anchor {
+        // An empty span belongs to the rope's end alone, so widen this one.
+        (anchor, rope.next_grapheme_boundary(anchor), false)
+    } else {
+        (anchor, target.end, false)
+    }
+}
+
 /// Move each selection to the `(anchor, head)` pair `range_of` picks for it.
 ///
 /// The finds and the paragraph motions share this, so they differ only in where
@@ -3759,20 +3785,13 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
 
     editor
         .selections
-        .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
+        .transform_resolved(buffer_snapshot, |sel, _head_offset, tail_offset| {
             let Some((_, target)) = landings.iter().find(|(id, _)| *id == sel.id) else {
                 return sel.clone();
             };
 
-            // Extending holds the anchor and reaches out to whichever end of the
-            // hunk lies further from it, so a backward step in select mode grows
-            // the selection rather than turning it inside out.
             let (start, end, reversed) = if extend {
-                if target.end < tail_offset {
-                    (target.start, tail_offset, true)
-                } else {
-                    (tail_offset.min(head_offset), target.end, false)
-                }
+                extend_span(rope, tail_offset, target)
             } else {
                 // The walk sets the direction, so a forward step leaves its
                 // cursor on the hunk's last row and a backward step on its
