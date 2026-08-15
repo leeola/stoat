@@ -2887,6 +2887,45 @@ fn increment_keeps_a_selection_that_spells_no_integer() {
     );
 }
 
+/// A date the integer arithmetic turned down reaches the date arithmetic
+/// behind it, which counts in days.
+#[test]
+fn increment_moves_a_selected_date_by_a_day() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "due 2021-02-28 ok\n");
+    h.open_file(&path);
+    set_selections(&mut h, &[(4, 14)]);
+
+    dispatch(&mut h.stoat, &stoat_action::Increment);
+    assert_eq!(focused_buffer_text(&mut h), "due 2021-03-01 ok\n");
+}
+
+/// A bare time counts in minutes rather than days, and wraps at midnight
+/// rather than reaching a date the text never carried.
+#[test]
+fn decrement_wraps_a_selected_time_at_midnight() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "at 00:00\n");
+    h.open_file(&path);
+    set_selections(&mut h, &[(3, 8)]);
+
+    dispatch(&mut h.stoat, &stoat_action::Decrement);
+    assert_eq!(focused_buffer_text(&mut h), "at 23:59\n");
+}
+
+/// The integer arithmetic goes first, so a plain number never reaches the
+/// date arithmetic behind it.
+#[test]
+fn increment_reads_a_bare_number_as_a_number() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "2021\n");
+    h.open_file(&path);
+    set_selections(&mut h, &[(0, 4)]);
+
+    dispatch(&mut h.stoat, &stoat_action::Increment);
+    assert_eq!(focused_buffer_text(&mut h), "2022\n");
+}
+
 #[test]
 fn increment_leaves_select_mode_once_an_edit_lands() {
     let mut h = TestHarness::with_size(30, 5);

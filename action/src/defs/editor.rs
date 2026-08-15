@@ -46,7 +46,7 @@ define_action!(
     "Increment",
     ActionKind::Increment,
     "increment the selected number",
-    "Increment the number each selection covers by one, or by the count. The selection's whole text must be the number, so a selection holding anything else stays where it is and its neighbours still move. Reads decimal with no prefix, and base 2, 8, and 16 behind `0b`, `0o`, and `0x`. The written form survives: a leading zero keeps its width, hex keeps its case, and `_` separators go back where they were. A decimal goes negative where a radix literal stops at zero. Select mode ends once an edit lands.",
+    "Increment the number each selection covers by one, or by the count. The selection's whole text must be the number, so a selection holding anything else stays where it is and its neighbours still move. Reads decimal with no prefix, and base 2, 8, and 16 behind `0b`, `0o`, and `0x`. The written form survives: a leading zero keeps its width, hex keeps its case, and `_` separators go back where they were. A decimal goes negative where a radix literal stops at zero. A selection spelling no number is read as a date or a time instead, where a date counts in days and anything carrying a time counts in minutes. Select mode ends once an edit lands.",
     ActionPriority::Rare
 );
 
@@ -56,7 +56,7 @@ define_action!(
     "Decrement",
     ActionKind::Decrement,
     "decrement the selected number",
-    "Decrement the number each selection covers by one, or by the count. The selection's whole text must be the number, so a selection holding anything else stays where it is and its neighbours still move. Reads decimal with no prefix, and base 2, 8, and 16 behind `0b`, `0o`, and `0x`. The written form survives: a leading zero keeps its width, hex keeps its case, and `_` separators go back where they were. A decimal goes negative where a radix literal stops at zero. Select mode ends once an edit lands.",
+    "Decrement the number each selection covers by one, or by the count. The selection's whole text must be the number, so a selection holding anything else stays where it is and its neighbours still move. Reads decimal with no prefix, and base 2, 8, and 16 behind `0b`, `0o`, and `0x`. The written form survives: a leading zero keeps its width, hex keeps its case, and `_` separators go back where they were. A decimal goes negative where a radix literal stops at zero. A selection spelling no number is read as a date or a time instead, where a date counts in days and anything carrying a time counts in minutes. Select mode ends once an edit lands.",
     ActionPriority::Rare
 );
 

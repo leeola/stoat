@@ -1,5 +1,6 @@
 mod anchor;
 mod buffer_id;
+mod date_time;
 mod fragment;
 mod indent;
 mod line_ending;
@@ -16,6 +17,7 @@ mod undo_map;
 
 pub use anchor::{Anchor, AnchorRangeExt};
 pub use buffer_id::BufferId;
+pub use date_time::date_time_increment;
 pub use fragment::{
     Fragment, FragmentSummary, FragmentTextSummary, InsertionFragment, InsertionFragmentKey,
 };

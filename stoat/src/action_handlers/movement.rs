@@ -23,10 +23,11 @@ use std::{
 use stoat_language::structural_diff;
 use stoat_scheduler::Task;
 use stoat_text::{
-    cursor_offset, integer_increment, next_char_boundary, next_long_word_end_range,
-    next_long_word_start_range, next_word_end_range, next_word_start_range,
-    prev_long_word_end_range, prev_long_word_start_range, prev_word_end_range,
-    prev_word_start_range, Anchor, Bias, Point, Rope, Selection, SelectionGoal,
+    cursor_offset, date_time_increment, integer_increment, next_char_boundary,
+    next_long_word_end_range, next_long_word_start_range, next_word_end_range,
+    next_word_start_range, prev_long_word_end_range, prev_long_word_start_range,
+    prev_word_end_range, prev_word_start_range, Anchor, Bias, Point, Rope, Selection,
+    SelectionGoal,
 };
 
 pub(crate) fn set_cursor_row(editor: &mut EditorState, row: u32) {
@@ -1674,7 +1675,8 @@ fn apply_number_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
                 let start = buffer_snapshot.resolve_anchor(&sel.start);
                 let end = buffer_snapshot.resolve_anchor(&sel.end);
                 let text = rope.slice(start..end).to_string();
-                let new_text = integer_increment(&text, delta)?;
+                let new_text = integer_increment(&text, delta)
+                    .or_else(|| date_time_increment(&text, delta))?;
                 if new_text == text {
                     return None;
                 }

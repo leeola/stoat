@@ -4122,6 +4122,7 @@ dependencies = [
  "regex-cursor",
  "serde",
  "smallvec",
+ "time",
  "unicode-general-category",
  "unicode-segmentation",
 ]
