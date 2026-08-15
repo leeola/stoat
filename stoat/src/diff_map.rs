@@ -329,6 +329,12 @@ impl DiffMap {
     ///
     /// `snapshot` must be the text the diff was computed against. Anchoring
     /// against a later one would pin rows the diff never looked at.
+    ///
+    /// A hunk covering the last line of a file with no trailing newline ends at
+    /// the end of the text. The only anchor there follows every later append.
+    /// Text typed at the end of such a file joins the hunk until the next diff
+    /// redraws the boundary. The alternative loses the hunk's mark on that line
+    /// entirely, so the drift is the better trade.
     pub fn anchor_hunks(&mut self, snapshot: &TextBufferSnapshot) {
         if self.hunks.is_empty() {
             return;
@@ -336,24 +342,42 @@ impl DiffMap {
 
         let rope = &snapshot.visible_text;
         let max_row = rope.max_point().row;
-        let offsets: Vec<usize> = self
+        let start_offsets: Vec<usize> = self
             .hunks
             .iter()
-            .flat_map(|hunk| [hunk.buffer_line_range.start, hunk.buffer_line_range.end])
-            .map(|row| rope.point_to_offset(Point::new(row.min(max_row), 0)))
+            .map(|hunk| {
+                rope.point_to_offset(Point::new(hunk.buffer_line_range.start.min(max_row), 0))
+            })
+            .collect();
+        let end_offsets: Vec<usize> = self
+            .hunks
+            .iter()
+            .zip(&start_offsets)
+            .map(|(hunk, &start)| {
+                if hunk.buffer_line_range.is_empty() {
+                    // A zero-width deletion or move hunk covers no rows, and its
+                    // row is clamped into the text where the start already sits.
+                    // An end of its own reaches the end of the text instead, and
+                    // gives the hunk a row the diff never found.
+                    return start;
+                }
+                // A row past the last one answers the rope's length, which is
+                // how an end reaches past an unterminated final line.
+                rope.point_to_offset(Point::new(hunk.buffer_line_range.end, 0))
+            })
             .collect();
 
         // Left for the start and right for the end, so text inserted at either
         // edge falls outside the hunk rather than silently joining it.
-        let starts = snapshot.anchors_at_batch(&offsets[..], Bias::Left);
-        let ends = snapshot.anchors_at_batch(&offsets[..], Bias::Right);
+        let starts = snapshot.anchors_at_batch(&start_offsets[..], Bias::Left);
+        let ends = snapshot.anchors_at_batch(&end_offsets[..], Bias::Right);
 
         let anchored: Vec<DiffHunk> = self
             .hunks
             .iter()
             .enumerate()
             .map(|(i, hunk)| DiffHunk {
-                anchor_range: Some(starts[i * 2]..ends[i * 2 + 1]),
+                anchor_range: Some(starts[i]..ends[i]),
                 ..hunk.clone()
             })
             .collect();
@@ -453,7 +477,12 @@ impl DiffMap {
             let offsets = buffer.resolve_anchors_batch(&anchors);
             let points = buffer.rope().offsets_to_points_batch(&offsets);
             for (slot, &i) in anchored.iter().enumerate() {
-                live[i].1 = points[slot * 2].row..points[slot * 2 + 1].row;
+                let start = points[slot * 2];
+                let end = points[slot * 2 + 1];
+                // An end resting inside a row covers that row. The last line of
+                // a file with no trailing newline has no row start after it to
+                // hold an exclusive end.
+                live[i].1 = start.row..end.row + u32::from(end.column > 0);
             }
         }
 
@@ -1360,6 +1389,119 @@ mod tests {
         assert!(
             dm.gutter_mark_for_line(3).is_some(),
             "while the stored rows still name where the diff ran",
+        );
+    }
+
+    /// A file with no trailing newline has no row start after its last line. An
+    /// exclusive end anchored at a row start therefore lands on the last line
+    /// itself, and leaves the hunk covering nothing.
+    #[test]
+    fn a_hunk_on_an_unterminated_last_line_keeps_its_gutter_mark() {
+        use crate::{
+            buffer::{BufferId, TextBuffer},
+            multi_buffer::MultiBuffer,
+        };
+        use std::sync::RwLock;
+
+        // The base holds "a\n" and the buffer appended "b" without a newline.
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), "a\nb")));
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+        let mut dm = DiffMap::from_hunks([added_hunk(1..2)], None);
+        dm.anchor_hunks(&shared.read().expect("poisoned").snapshot);
+
+        let live = dm.live_hunks(&multi.snapshot());
+        assert_eq!(
+            live.gutter_mark_for_line(1),
+            Some((DiffHunkStatus::Added, false)),
+            "the added last line is marked with no newline after it",
+        );
+        assert_eq!(
+            live.gutter_mark_for_line(0),
+            None,
+            "the unchanged line above"
+        );
+    }
+
+    /// Reaching an end past an unterminated last line widens any end resting
+    /// inside a row. Both ends of a zero-width hunk rest at one point.
+    #[test]
+    fn anchored_deletion_and_move_seams_stay_empty() {
+        use crate::{
+            buffer::{BufferId, TextBuffer},
+            multi_buffer::MultiBuffer,
+        };
+        use std::sync::RwLock;
+
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "l0\nl1\nl2\nl3\nl4\nl5\n",
+        )));
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+        let moved = DiffHunk {
+            status: DiffHunkStatus::Moved,
+            unstaged_lines: std::iter::once(5..5).collect(),
+            buffer_start_line: 5,
+            buffer_line_range: 5..5,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: None,
+        };
+        let mut dm = DiffMap::from_hunks([deleted_hunk(2, 0..10), moved], None);
+        dm.anchor_hunks(&shared.read().expect("poisoned").snapshot);
+
+        let live = dm.live_hunks(&multi.snapshot());
+        assert_eq!(
+            live.in_range(0..10)
+                .map(|(_, rows)| rows)
+                .collect::<Vec<_>>(),
+            vec![3..3, 5..5],
+            "both seams still cover no rows",
+        );
+        assert_eq!(
+            live.gutter_mark_for_line(3),
+            Some((DiffHunkStatus::Deleted, false)),
+            "and the deletion seam keeps its mark",
+        );
+        assert_eq!(
+            live.gutter_mark_for_line(5),
+            Some((DiffHunkStatus::Moved, false)),
+            "as does the move seam",
+        );
+    }
+
+    /// Lines deleted from the end of a file with no trailing newline leave a
+    /// seam on a row that does not exist. That is where a clamped start and an
+    /// end reaching the end of the text come apart.
+    #[test]
+    fn a_deletion_seam_past_an_unterminated_last_line_covers_no_rows() {
+        use crate::{
+            buffer::{BufferId, TextBuffer},
+            multi_buffer::MultiBuffer,
+        };
+        use std::sync::RwLock;
+
+        // The base held "a\nb\nc" and the buffer dropped "c". The seam sits at
+        // row 2, one past the buffer's last row.
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), "a\nb")));
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+        let mut dm = DiffMap::from_hunks([deleted_hunk(1, 4..6)], None);
+        dm.anchor_hunks(&shared.read().expect("poisoned").snapshot);
+
+        let live = dm.live_hunks(&multi.snapshot());
+        assert_eq!(
+            live.in_range(0..10)
+                .map(|(_, rows)| rows)
+                .collect::<Vec<_>>(),
+            vec![1..1],
+            "the seam falls back onto the last row and covers none of it",
+        );
+        assert_eq!(
+            live.gutter_mark_for_line(1),
+            Some((DiffHunkStatus::Deleted, false)),
+            "and paints the deletion mark there",
         );
     }
 
