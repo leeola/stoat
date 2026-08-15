@@ -987,16 +987,13 @@ pub struct Stoat {
     /// Persisted query + direction from the most recent submitted
     /// search. Drives `SearchNext` / `SearchPrev` repeats.
     pub(crate) last_search: Option<action_handlers::search::LastSearch>,
-    /// Most recent text inserted during a complete insert-mode
-    /// session, accumulated across every [`Self::editor_insert`]
-    /// call between entering and leaving insert mode. Backs the
-    /// `.` special register so paste/insert-register can surface
-    /// the last typed run.
-    pub(crate) last_insert_text: Option<String>,
     /// Buffer accumulating text typed during the current
     /// insert-mode session. `Some` while `mode == "insert"` (or
-    /// equivalent), `None` outside. Committed to
-    /// [`Self::last_insert_text`] on insert-mode exit.
+    /// equivalent), `None` outside.
+    ///
+    /// Read on insert-mode exit to tell a session that typed nothing from one
+    /// that did, which is what decides whether an auto-indent the reader never
+    /// filled in is left behind.
     pub(crate) current_insert_run: Option<String>,
     /// Set by `a` so leaving insert moves each block cursor back one grapheme,
     /// landing on the last typed (or appended-over) char rather than one cell
@@ -1962,7 +1959,6 @@ impl Stoat {
             pending_textobject_select: None,
             search_input: None,
             last_search: None,
-            last_insert_text: None,
             current_insert_run: None,
             restore_cursor: false,
             group_held_for_insert: false,
@@ -4999,27 +4995,19 @@ impl Stoat {
     }
 
     /// Switch the focused target's mode to `next`, opening or closing the
-    /// insert-run buffer that backs the `.` register. Entering
-    /// any insert-like mode (`insert`, `reword_insert`) starts a
-    /// fresh run. Leaving commits the run's text into
-    /// [`Self::last_insert_text`] (when non-empty) and clears the
-    /// scratch buffer.
+    /// insert-run buffer. Entering any insert-like mode (`insert`,
+    /// `reword_insert`) starts a fresh run, and leaving discards it, having
+    /// read whether it holds anything.
     pub(crate) fn transition_mode(&mut self, next: String) {
         let was_insert = is_insert_run_mode(self.focused_mode());
         let now_insert = is_insert_run_mode(&next);
         let leaving_insert = was_insert && !now_insert;
 
-        let typed_nothing = if leaving_insert {
-            let run = self.current_insert_run.take().unwrap_or_default();
-            if run.is_empty() {
-                true
-            } else {
-                self.last_insert_text = Some(run);
-                false
-            }
-        } else {
-            false
-        };
+        let typed_nothing = leaving_insert
+            && self
+                .current_insert_run
+                .take()
+                .is_none_or(|run| run.is_empty());
 
         if leaving_insert {
             let auto_indent_cursors = std::mem::take(&mut self.auto_indent_cursors);

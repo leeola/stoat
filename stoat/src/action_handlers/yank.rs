@@ -69,7 +69,7 @@ pub(crate) fn write_fragments_to_register(
             stoat.set_status("register # does not support writing");
             return false;
         },
-        Register::LastInsert => {
+        Register::SelectionContents => {
             stoat.set_status("register . does not support writing");
             return false;
         },
@@ -113,7 +113,7 @@ pub(crate) fn register_for_char(ch: char) -> Register {
         '/' => Register::Search,
         '_' => Register::Blackhole,
         '#' => Register::SelectionIndex,
-        '.' => Register::LastInsert,
+        '.' => Register::SelectionContents,
         _ => Register::Named(ch),
     }
 }
@@ -370,14 +370,14 @@ fn paste(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
 }
 
 /// Resolve `register` to its per-selection fragments. Named and unnamed
-/// registers read from the in-memory store. Clipboard, search, and
-/// last-insert come from host services and each hold a single value, so
-/// they resolve to a one-element vec. `SelectionIndex` reads the active
-/// selection set, one index per selection.
+/// registers read from the in-memory store. Clipboard and search each hold a
+/// single value, so they resolve to a one-element vec. `SelectionIndex` and
+/// `SelectionContents` read the active selection set, one index or one
+/// fragment per selection.
 ///
 /// Returns `None` for blackhole, for read-only registers whose backing
-/// is empty, and for `SelectionIndex` when the focused pane has no
-/// selections.
+/// is empty, and for the selection-derived ones when the focused pane is not
+/// an editor.
 pub(crate) fn read_register_fragments(
     stoat: &mut Stoat,
     register: Register,
@@ -399,7 +399,7 @@ pub(crate) fn read_register_fragments(
         },
         Register::Search => stoat.last_search.as_ref().map(|s| vec![s.query.clone()]),
         Register::Blackhole => None,
-        Register::LastInsert => stoat.last_insert_text.clone().map(|t| vec![t]),
+        Register::SelectionContents => selection_fragments(stoat),
         Register::SelectionIndex => selection_index_fragments(stoat),
     }
 }
@@ -1434,7 +1434,7 @@ mod tests {
     }
 
     #[test]
-    fn yank_to_last_insert_register_reports_an_error() {
+    fn yank_to_selection_contents_register_reports_an_error() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");
         h.type_keys("v l l");
@@ -1673,26 +1673,6 @@ mod tests {
     }
 
     #[test]
-    fn insert_register_records_the_newest_cursor_for_repeat() {
-        let mut h = TestHarness::with_size(40, 10);
-        seed(&mut h, "xy\nzw\n");
-        h.stoat.registers.write(
-            crate::register::Register::Unnamed,
-            vec!["A".to_string(), "B".to_string()],
-        );
-        h.type_keys("C");
-        h.type_keys("i");
-        h.type_keys("Ctrl-r");
-        h.type_keys("\"");
-        h.type_keys("escape");
-        assert_eq!(
-            h.stoat.last_insert_text.as_deref(),
-            Some("B"),
-            "repeat replays one string, so it is one a cursor actually received"
-        );
-    }
-
-    #[test]
     fn insert_register_with_empty_register_is_noop() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
@@ -1788,16 +1768,34 @@ mod tests {
     }
 
     #[test]
-    fn paste_last_insert_register_pastes_recent_insert() {
+    fn paste_selection_contents_duplicates_each_selection() {
         let mut h = TestHarness::with_size(40, 10);
-        let path = seed(&mut h, "abc\n");
-        h.type_keys("a");
-        h.type_text("hi");
+        let path = seed(&mut h, "ab\ncd\n");
+        h.type_keys("v l");
         h.type_keys("escape");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
         h.type_keys("\" . p");
-        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert!(buffer_text(&h, &path).contains("hi"));
-        assert_eq!(h.stoat.last_insert_text.as_deref(), Some("hi"));
+        assert_eq!(
+            buffer_text(&h, &path),
+            "abab\ncdcd\n",
+            "each selection received its own text, not the other's",
+        );
+    }
+
+    /// Replacing with the selection-contents register leaves every selection
+    /// holding what it already held.
+    ///
+    /// One shared value puts the first selection's text into both, so the
+    /// buffer standing still is what says the register answered per selection.
+    #[test]
+    fn replace_with_selection_contents_leaves_the_buffer_alone() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "ab\ncd\n");
+        h.type_keys("v l");
+        h.type_keys("escape");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
+        h.type_keys("\" . R");
+        assert_eq!(buffer_text(&h, &path), "ab\ncd\n");
     }
 
     #[test]

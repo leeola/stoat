@@ -26,9 +26,10 @@ pub(crate) enum Register {
     /// Selection index. Writes are no-ops; pastes expand to one
     /// "1", "2", ... per selection in start-offset order.
     SelectionIndex,
-    /// Last inserted text recorded by [`crate::app::Stoat::editor_insert`].
-    /// Writes are no-ops; reads return the most recent insert.
-    LastInsert,
+    /// Selection contents. Reads yield one fragment per selection, the text
+    /// that selection covers. Writes are refused, the text being the buffer's
+    /// rather than the register's to hold.
+    SelectionContents,
 }
 
 #[derive(Debug, Default)]
@@ -44,7 +45,7 @@ impl RegisterStore {
 
     /// Write `fragments` to the unnamed or a named register, one entry
     /// per selection like Helix. Special registers (clipboard, search,
-    /// blackhole, selection index, last insert) are filtered by the
+    /// blackhole, selection index, selection contents) are filtered by the
     /// action layer before reaching this store and silently no-op when
     /// passed through.
     pub(crate) fn write(&mut self, register: Register, fragments: Vec<String>) {
@@ -57,7 +58,7 @@ impl RegisterStore {
             | Register::Search
             | Register::Blackhole
             | Register::SelectionIndex
-            | Register::LastInsert => {},
+            | Register::SelectionContents => {},
         }
     }
 
@@ -73,7 +74,7 @@ impl RegisterStore {
             | Register::Search
             | Register::Blackhole
             | Register::SelectionIndex
-            | Register::LastInsert => None,
+            | Register::SelectionContents => None,
         }
     }
 }
