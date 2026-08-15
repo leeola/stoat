@@ -1387,4 +1387,34 @@ mod tests {
             "changing the query recomputes the cache: 'a' matches three times",
         );
     }
+
+    /// The painted matches follow the setting, not just the query text.
+    ///
+    /// Smart case decides what the query compiles to, and the cache carries its
+    /// compiled regex across rebuilds. A config reload moves the setting while
+    /// the query and the buffer hold still, which is the one way the two get
+    /// out of step. The jump path recompiles per press, so a cache that misses
+    /// the flip paints matches the next n never lands on.
+    #[test]
+    fn search_match_cache_recomputes_when_smart_case_flips() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc ABC\n");
+
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+        assert_eq!(
+            cached_match_count(&mut h),
+            2,
+            "a lowercase query under smart case matches both spellings",
+        );
+
+        h.stoat.settings.search_smart_case = Some(false);
+        let _ = h.render_composited();
+        assert_eq!(
+            cached_match_count(&mut h),
+            1,
+            "turning smart case off leaves only the exact-case match",
+        );
+    }
 }

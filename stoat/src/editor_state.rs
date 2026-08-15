@@ -35,6 +35,10 @@ pub(crate) struct SearchMatchCache {
     /// Visible buffer byte span the matches were scanned over. Part of the key
     /// because a scroll moves it without bumping `version`.
     pub(crate) visible: std::ops::Range<usize>,
+    /// Smart-case mode the `regex` was compiled under. Part of the key because
+    /// a config reload flips the setting while the query text holds, and the
+    /// two together decide whether the pattern compiled case-insensitive.
+    pub(crate) smart_case: bool,
     /// Byte ranges `[start, end)` of each non-empty match within `visible`,
     /// stored as absolute buffer offsets.
     pub(crate) matches: Vec<(usize, usize)>,

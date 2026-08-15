@@ -417,16 +417,22 @@ pub(crate) fn render_editor_with_overlay(
         let rope = buffer_snapshot.rope();
         let stale = match &editor.search_match_cache {
             Some(cache) => {
-                cache.version != version || cache.query != query || cache.visible != visible
+                cache.version != version
+                    || cache.query != query
+                    || cache.visible != visible
+                    || cache.smart_case != search_smart_case
             },
             None => true,
         };
         if stale {
-            // Reuse the compiled regex while the query text holds, so only a new
-            // query pays a fresh compile. A cached None from a failed compile is
-            // reused too, so an invalid query does not recompile every frame.
+            // Reuse the compiled regex while the query text and the case mode
+            // both hold, so only a new query or a flipped setting pays a fresh
+            // compile. A cached None from a failed compile is reused too, so an
+            // invalid query does not recompile every frame.
             let (mut window, regex) = match editor.search_match_cache.take() {
-                Some(cache) if cache.query == query => (cache.window, cache.regex),
+                Some(cache) if cache.query == query && cache.smart_case == search_smart_case => {
+                    (cache.window, cache.regex)
+                },
                 Some(cache) => (
                     cache.window,
                     crate::action_handlers::search::compile_search_regex(query, search_smart_case)
@@ -454,6 +460,7 @@ pub(crate) fn render_editor_with_overlay(
                 version,
                 query: query.to_string(),
                 visible: visible.clone(),
+                smart_case: search_smart_case,
                 matches,
                 window,
                 regex,
