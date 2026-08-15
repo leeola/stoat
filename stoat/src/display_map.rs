@@ -25,7 +25,7 @@ pub use crease_map::{
     Crease, CreaseId, CreaseMap, CreaseMetadata, CreaseSnapshot, RenderToggleFn, RenderTrailerFn,
 };
 pub use fold_map::{FoldMap, FoldMetadata, FoldOffset, FoldPlaceholder, FoldPoint, FoldSnapshot};
-use highlights::AnchorResolver;
+use highlights::{AnchorResolver, HighlightVersions};
 pub use highlights::{
     BufferSemanticTokens, CachedHighlightEndpoints, Chunk, ChunkRenderer, ChunkRendererId,
     ChunkReplacement, HighlightKey, HighlightLayer, HighlightStyle, HighlightStyleId,
@@ -584,6 +584,7 @@ impl DisplayMap {
 
         Arc::make_mut(&mut self.text_highlights).insert(key, Arc::new((style, sorted_ranges)));
         self.highlights_dirty = true;
+        self.settings_generation += 1;
     }
 
     /// Remove `key`'s ranges, reporting whether anything was there to remove.
@@ -607,6 +608,7 @@ impl DisplayMap {
 
         if cleared {
             self.highlights_dirty = true;
+            self.settings_generation += 1;
         }
         cleared
     }
@@ -658,6 +660,7 @@ impl DisplayMap {
     pub fn invalidate_semantic_highlights(&mut self, buffer_id: BufferId) {
         Arc::make_mut(&mut self.semantic_token_highlights).remove(&buffer_id);
         self.highlights_dirty = true;
+        self.settings_generation += 1;
     }
 
     /// Install LSP semantic tokens for `buffer_id`. They render on a higher layer
@@ -1348,7 +1351,10 @@ impl DisplaySnapshot {
             many: &resolve_batch,
         };
         highlights::create_highlight_endpoints_cached(
-            buffer.version(),
+            HighlightVersions {
+                buffer: buffer.version(),
+                settings: self.settings_generation,
+            },
             &range,
             text_highlights_ref,
             semantic_ref,
@@ -1772,9 +1778,22 @@ mod tests {
         dm.set_lsp_token_highlights(buffer_id, tokens, interner);
         assert_moved_once(&dm, &mut seen, "set_lsp_token_highlights");
 
+        dm.invalidate_semantic_highlights(buffer_id);
+        assert_moved_once(&dm, &mut seen, "invalidate_semantic_highlights");
+
         let snap = dm.multi_buffer.snapshot();
         let range =
             snap.anchor_at(0, stoat_text::Bias::Right)..snap.anchor_at(5, stoat_text::Bias::Left);
+
+        let key = super::highlights::HighlightKey::layer(
+            super::highlights::HighlightLayer::DocumentHighlightRead,
+        );
+        dm.highlight_text(key, vec![range.clone()], HighlightStyle::default());
+        assert_moved_once(&dm, &mut seen, "highlight_text");
+
+        assert!(dm.clear_highlights(key), "the key was just installed");
+        assert_moved_once(&dm, &mut seen, "clear_highlights");
+
         dm.set_lsp_folding_ranges(buffer_id, vec![(range, None)]);
         assert_moved_once(&dm, &mut seen, "set_lsp_folding_ranges");
     }
@@ -3881,6 +3900,75 @@ mod tests {
             painted(&mut display_map, &mut cache),
             vec![Color::Blue],
             "the cached endpoints are rebuilt against the new interner"
+        );
+    }
+
+    /// A token install that finds no second reference to the channel map
+    /// changes no pointer, so a pointer check alone never sees it.
+    ///
+    /// The second reference is the map's own cached snapshot, and several
+    /// setters drop it without moving any version. An install landing in that
+    /// window mutates the channel map in place, leaving every pointer the cache
+    /// compares equal to what it stored, so the fresh tokens go unpainted until
+    /// an edit or a scroll moves the buffer version or the visible range.
+    #[test]
+    fn a_token_install_holding_the_only_reference_still_repaints() {
+        use crate::display_map::highlights::{
+            HighlightStyle, HighlightStyleInterner, SemanticTokenHighlight,
+        };
+        use ratatui::style::Color;
+
+        let interner_with = |color: Color| {
+            let mut interner = HighlightStyleInterner::default();
+            interner.push(HighlightStyle {
+                foreground: Some(color),
+                ..Default::default()
+            });
+            Arc::new(interner)
+        };
+
+        let mut display_map = create_display_map("let x = 1\n");
+        let style_id = {
+            let mut probe = HighlightStyleInterner::default();
+            probe.push(HighlightStyle::default())
+        };
+        let token = {
+            let snap = display_map.multi_buffer.snapshot();
+            SemanticTokenHighlight {
+                range: snap.anchor_at(0, stoat_text::Bias::Right)
+                    ..snap.anchor_at(3, stoat_text::Bias::Left),
+                style: style_id,
+            }
+        };
+        let install = |display_map: &mut DisplayMap, color: Color| {
+            display_map.set_semantic_token_highlights(
+                BufferId::new(0),
+                Arc::from(vec![token.clone()]),
+                interner_with(color),
+            );
+        };
+
+        let mut cache = None;
+        let painted = |display_map: &mut DisplayMap, cache: &mut Option<_>| {
+            let snapshot = display_map.snapshot();
+            snapshot
+                .highlighted_chunks_cached(0..1, cache)
+                .filter_map(|chunk| chunk.highlight_style?.foreground)
+                .collect::<Vec<_>>()
+        };
+
+        install(&mut display_map, Color::Red);
+        assert_eq!(painted(&mut display_map, &mut cache), vec![Color::Red]);
+
+        // Drops the cached snapshot and moves no version, which is what leaves
+        // the install below holding the only reference to the channel map.
+        display_map.insert_blocks(Vec::new());
+        install(&mut display_map, Color::Blue);
+
+        assert_eq!(
+            painted(&mut display_map, &mut cache),
+            vec![Color::Blue],
+            "the install is newer than the cached endpoints however the Arc behaved"
         );
     }
 

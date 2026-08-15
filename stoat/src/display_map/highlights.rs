@@ -647,14 +647,31 @@ impl RowHighlightCursor {
     }
 }
 
-/// Visible-range highlight endpoints memoized across repaints.
+/// The counters a cached endpoint list is checked against, beside the `Arc`
+/// pointers and the range.
 ///
-/// The key carries the buffer content `version` because an in-place edit shifts
-/// the anchors these endpoints resolved from without necessarily swapping the
-/// highlight `Arc`s, so the pointer checks alone would return stale offsets.
+/// Both exist because a pointer comparison answers a narrower question than it
+/// looks like it does, each in its own direction.
+///
+/// `buffer` is the buffer content version. An in-place edit shifts the anchors
+/// the endpoints resolved from without necessarily swapping the highlight
+/// `Arc`s, so the pointers alone leave stale offsets in place.
+///
+/// `settings` is the display map's settings generation. The highlight setters
+/// install through `Arc::make_mut`, which allocates only while a second
+/// reference exists, so an install that finds none mutates in place and leaves
+/// every pointer equal to what the cache stored. The generation moves on each
+/// install whatever the refcount did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HighlightVersions {
+    pub buffer: u64,
+    pub settings: u64,
+}
+
+/// Visible-range highlight endpoints memoized across repaints.
 #[derive(Clone, Debug)]
 pub struct CachedHighlightEndpoints {
-    version: u64,
+    versions: HighlightVersions,
     text_ptr: usize,
     semantic_ptr: Option<usize>,
     lsp_ptr: Option<usize>,
@@ -665,13 +682,13 @@ pub struct CachedHighlightEndpoints {
 impl CachedHighlightEndpoints {
     fn is_valid(
         &self,
-        version: u64,
+        versions: HighlightVersions,
         highlights: &TextHighlights,
         semantic: Option<&SemanticTokensHighlights>,
         lsp: Option<&SemanticTokensHighlights>,
         range: &Range<usize>,
     ) -> bool {
-        self.version == version
+        self.versions == versions
             && self.text_ptr == Arc::as_ptr(highlights) as usize
             && self.semantic_ptr == semantic.map(|s| Arc::as_ptr(s) as usize)
             && self.lsp_ptr == lsp.map(|s| Arc::as_ptr(s) as usize)
@@ -695,7 +712,7 @@ pub struct AnchorResolver<'a> {
 }
 
 pub fn create_highlight_endpoints_cached(
-    version: u64,
+    versions: HighlightVersions,
     range: &Range<usize>,
     highlights: &TextHighlights,
     semantic_highlights: Option<&SemanticTokensHighlights>,
@@ -705,7 +722,7 @@ pub fn create_highlight_endpoints_cached(
 ) -> Arc<[HighlightEndpoint]> {
     if let &mut Some(ref cached) = cache
         && cached.is_valid(
-            version,
+            versions,
             highlights,
             semantic_highlights,
             lsp_highlights,
@@ -723,7 +740,7 @@ pub fn create_highlight_endpoints_cached(
     );
     let arc: Arc<[HighlightEndpoint]> = Arc::from(endpoints);
     *cache = Some(CachedHighlightEndpoints {
-        version,
+        versions,
         text_ptr: Arc::as_ptr(highlights) as usize,
         semantic_ptr: semantic_highlights.map(|s| Arc::as_ptr(s) as usize),
         lsp_ptr: lsp_highlights.map(|s| Arc::as_ptr(s) as usize),
