@@ -38,6 +38,31 @@ pub(crate) enum Register {
     Command,
 }
 
+impl Register {
+    /// The char that names this register in a chord and in a status message.
+    ///
+    /// The inverse of
+    /// [`register_for_char`](crate::action_handlers::yank::register_for_char),
+    /// and it has to stay in step with it. A reader who sees a register named
+    /// in the status row types that same char to address it again.
+    ///
+    /// [`Self::Clipboard`] is the one variant two chars reach. It names itself
+    /// `+`, the system clipboard, since that is the host it reads and writes.
+    pub(crate) fn name(self) -> char {
+        match self {
+            Register::Unnamed => '"',
+            Register::Named(c) => c,
+            Register::Clipboard => '+',
+            Register::Search => '/',
+            Register::Blackhole => '_',
+            Register::SelectionIndex => '#',
+            Register::SelectionContents => '.',
+            Register::DocumentPath => '%',
+            Register::Command => ':',
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct RegisterStore {
     unnamed: Option<Vec<String>>,

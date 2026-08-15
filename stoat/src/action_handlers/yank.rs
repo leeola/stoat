@@ -28,7 +28,11 @@ pub(super) fn yank(stoat: &mut Stoat) -> UpdateEffect {
     }
     let count = fragments.len();
     if write_fragments_to_register(stoat, target, fragments) {
-        stoat.set_status(format!("yanked {count} selection(s)"));
+        let plural = if count == 1 { "" } else { "s" };
+        stoat.set_status(format!(
+            "yanked {count} selection{plural} to register {}",
+            target.name()
+        ));
     }
     UpdateEffect::Redraw
 }
@@ -618,7 +622,11 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
 
 #[cfg(test)]
 mod tests {
-    use crate::{host::ClipboardHost, test_harness::TestHarness};
+    use crate::{
+        host::ClipboardHost,
+        test_harness::{keys, TestHarness},
+    };
+    use crossterm::event::{Event, KeyCode};
     use std::path::PathBuf;
     use stoat_action::{self as action, OpenFile};
     use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
@@ -954,7 +962,31 @@ mod tests {
         assert_eq!(stored, Some(vec!["abc".to_string(), "def".to_string()]));
         assert_eq!(
             h.stoat.pending_message,
-            Some("yanked 2 selection(s)".to_string())
+            Some("yanked 2 selections to register \"".to_string())
+        );
+    }
+
+    /// The status names where the text went, so two yanks into different
+    /// registers read differently, and it counts in plain English.
+    #[test]
+    fn the_yank_status_names_its_register_and_counts_one_selection() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\ndef\n");
+        h.type_keys("v l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        assert_eq!(
+            h.stoat.pending_message,
+            Some("yanked 1 selection to register \"".to_string()),
+            "one selection reads as one, and an unnamed yank names the unnamed register",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SelectRegister);
+        h.stoat.update(Event::Key(keys::key(KeyCode::Char('a'))));
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        assert_eq!(
+            h.stoat.pending_message,
+            Some("yanked 1 selection to register a".to_string()),
+            "and a chord-selected register names itself",
         );
     }
 
