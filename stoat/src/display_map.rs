@@ -1039,12 +1039,13 @@ pub struct DisplaySnapshot {
 /// Everything that decides a snapshot's painted text, gathered so two frames
 /// can be compared in one step.
 ///
-/// Only equality is defined. There is no sense in which one of these is later
-/// than another, since the parts count different things, so ordering is left
-/// out rather than left to be misread.
+/// Only equality is defined, along with the hash that agrees with it for a
+/// cache keyed on a single scalar. There is no sense in which one of these is
+/// later than another, since the parts count different things, so ordering is
+/// left out rather than left to be misread.
 /// The [`Default`] is what a freshly built map answers with, before any layer
 /// has synced or any setter has fired.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct PaintVersion {
     fold: usize,
     inlay: usize,

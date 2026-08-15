@@ -6565,9 +6565,12 @@ mod tests {
     use crate::{
         action_handlers::lsp::RenameInputState,
         agent_status::AgentHookEvent,
-        apc_emit::{editor_page_content_version, osc_default_colors, window_content_version},
+        apc_emit::{
+            display_map_stamp, editor_page_content_version, osc_default_colors,
+            window_content_version,
+        },
         debounce::{INDEX_EDIT_DEBOUNCE, REVIEW_EXTERNAL_EDIT_DEBOUNCE},
-        display_map::DisplayPoint,
+        display_map::{DisplayPoint, PaintVersion},
         host::FsEventKind,
         input_view::{InputView, SubmitTarget},
         run::GridSelection,
@@ -15635,46 +15638,125 @@ mod tests {
 
     #[test]
     fn editor_page_content_version_tracks_the_cursor_line() {
-        let base = editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0, 0);
+        let paint = PaintVersion::default();
+        let base =
+            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0, paint, 0);
         assert_eq!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0, 0),
+            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0, paint, 0),
             "identical inputs keep a buffered page cached"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(11), 0, false, 0, 0.0, 0, 0),
+            editor_page_content_version(true, 3, None, Some(11), 0, false, 0, 0.0, 0, paint, 0),
             "a cursor-line move refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, None, 0, false, 0, 0.0, 0, 0),
+            editor_page_content_version(true, 3, None, None, 0, false, 0, 0.0, 0, paint, 0),
             "switching to absolute numbering refills"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, Some(72), Some(10), 0, false, 0, 0.0, 0, 0),
+            editor_page_content_version(true, 3, Some(72), Some(10), 0, false, 0, 0.0, 0, paint, 0),
             "a wrap-width change refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, true, 7, 0.0, 0, 0),
+            editor_page_content_version(true, 3, None, Some(10), 0, true, 7, 0.0, 0, paint, 0),
             "a diff-view hunk change refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.25, 0, 0),
+            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.25, 0, paint, 0),
             "a focus change to a dimmed pane refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 1, 0),
-            "a buffer edit (snapshot version bump) refills buffered pages"
+            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 1, paint, 0),
+            "a buffer edit refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0, 1),
+            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0, paint, 1),
             "a theme switch refills buffered pages"
+        );
+    }
+
+    /// A pooled page and the minimap thumb both hold cached work against the
+    /// display map, so anything that relaid the rows has to move what they key
+    /// on.
+    ///
+    /// The file is deliberately plain, outside git and with no diagnostics, so
+    /// the diff and severity versions the page hash also carries stay at rest.
+    /// That leaves the mapping as the only input left to catch the change,
+    /// which is the case a glide over an edited file composited stale text in.
+    #[test]
+    fn an_edit_or_a_fold_refills_pooled_pages_and_the_minimap_window() {
+        use crate::{display_map::DisplayMap, test_harness::TestHarness};
+        use stoat_text::Point;
+
+        fn focused_display_map(h: &mut TestHarness) -> &mut DisplayMap {
+            let (editor_id, _) = h.stoat.focused_editor_ids().expect("focused editor");
+            &mut h
+                .stoat
+                .active_workspace_mut()
+                .editors
+                .get_mut(editor_id)
+                .expect("editor exists")
+                .display_map
+        }
+
+        /// The page content version and the minimap window stamp, read the way
+        /// `emit_smooth_scroll` reads them. Every other page input is held
+        /// still, so only the mapping is under test.
+        fn keys(h: &mut TestHarness) -> (u64, u64) {
+            let map = focused_display_map(h);
+            let buffer_version = map.buffer_snapshot().version();
+            let paint_version = map.snapshot().paint_version();
+            (
+                editor_page_content_version(
+                    true,
+                    3,
+                    None,
+                    None,
+                    0,
+                    false,
+                    0,
+                    0.0,
+                    buffer_version,
+                    paint_version,
+                    0,
+                ),
+                display_map_stamp(buffer_version, paint_version),
+            )
+        }
+
+        let mut h = TestHarness::with_size(40, 10);
+        let path = h.write_file("plain.txt", "one\ntwo\nthree\nfour\n");
+        h.open_file(&path);
+
+        let (page_at_open, window_at_open) = keys(&mut h);
+        h.seed_focused_buffer("x");
+        let (page_after_edit, window_after_edit) = keys(&mut h);
+        assert_ne!(
+            page_at_open, page_after_edit,
+            "a typed character refills the buffered pages"
+        );
+        assert_ne!(
+            window_at_open, window_after_edit,
+            "and re-derives the minimap window"
+        );
+
+        focused_display_map(&mut h).fold(vec![Point::new(0, 0)..Point::new(2, 0)]);
+        let (page_after_fold, window_after_fold) = keys(&mut h);
+        assert_ne!(
+            page_after_edit, page_after_fold,
+            "and a fold still refills them"
+        );
+        assert_ne!(
+            window_after_edit, window_after_fold,
+            "and re-derives the window too"
         );
     }
 

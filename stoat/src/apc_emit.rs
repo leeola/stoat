@@ -14,7 +14,7 @@
 use crate::{
     action_handlers::view,
     app::{modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
-    display_map::DisplaySnapshot,
+    display_map::{DisplaySnapshot, PaintVersion},
     editor_state::{EditorId, ScrollGlide},
     input_view::InputView,
     minimap::emit::minimap_view_window,
@@ -795,9 +795,10 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             line
         };
 
-        // Version-cached, so the extra query is cheap. Its fold-chain version
-        // carries buffer edits into the content hash below.
-        let snapshot_version = editor.display_map.snapshot().version();
+        // Version-cached, so the extra query is cheap. The pair carries every
+        // edit and every layer reflow into the content hash below.
+        let buffer_version = editor.display_map.buffer_snapshot().version();
+        let paint_version = editor.display_map.snapshot().paint_version();
         let content_version = match editor.review_view.as_ref() {
             Some(view) => view.session_version,
             None => editor_page_content_version(
@@ -812,7 +813,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 editor.diff_view,
                 editor.display_map.diff_version(),
                 dim,
-                snapshot_version,
+                buffer_version,
+                paint_version,
                 theme_epoch,
             ),
         };
@@ -848,7 +850,11 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             // has nothing to convert that the last one did not.
             let snapshot = editor.display_map.snapshot();
             let rows = region.height as u32;
-            let inputs = MinimapWindowInputs::new(scroll_offset, snapshot.version(), rows);
+            let inputs = MinimapWindowInputs::new(
+                scroll_offset,
+                display_map_stamp(buffer_version, paint_version),
+                rows,
+            );
             stoat
                 .smooth_scroll
                 .emit_minimap_view(&mut out, strip_id, region.pool, inputs, || {
@@ -1748,6 +1754,20 @@ fn input_view_version(input: &InputView, ws: &Workspace, hasher: &mut DefaultHas
     Some(())
 }
 
+/// One scalar standing for the text a frame paints, for the caches that compare
+/// numbers rather than snapshots.
+///
+/// The buffer version alone misses the display layers, which reflow the same
+/// text into different rows, and the paint version alone misses the edits that
+/// reach no layer. Together they answer what a page cache asks: whether this
+/// frame lays the rows out the way the held one did.
+pub(crate) fn display_map_stamp(buffer_version: u64, paint_version: PaintVersion) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    buffer_version.hash(&mut hasher);
+    paint_version.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Content version of a pooled editor page, hashing the inputs whose change
 /// forces a buffered page to refill.
 ///
@@ -1766,7 +1786,8 @@ pub(crate) fn editor_page_content_version(
     diff_view: bool,
     diff_version: usize,
     dim: f32,
-    snapshot_version: usize,
+    buffer_version: u64,
+    paint_version: PaintVersion,
     theme_epoch: u64,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -1778,11 +1799,10 @@ pub(crate) fn editor_page_content_version(
     diff_view.hash(&mut hasher);
     diff_version.hash(&mut hasher);
     ((dim * 1000.0) as u32).hash(&mut hasher);
-    // The display snapshot version bumps on buffer edits, folds, and inlay
-    // splices -- all of which change page pixels but reach nothing else here, so
-    // a file outside git (diff_version stuck at 0) would glide stale text
-    // without it.
-    snapshot_version.hash(&mut hasher);
+    // A typed character and a fold both change page pixels and reach nothing
+    // else here, so without the mapping stamp a file outside git (diff_version
+    // stuck at 0) with no diagnostics glides pre-edit text.
+    display_map_stamp(buffer_version, paint_version).hash(&mut hasher);
     theme_epoch.hash(&mut hasher);
     hasher.finish()
 }

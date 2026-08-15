@@ -73,12 +73,12 @@ struct MinimapView {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct MinimapWindowInputs {
     scroll_offset_bits: u32,
-    map_version: usize,
+    map_version: u64,
     viewport_rows: u32,
 }
 
 impl MinimapWindowInputs {
-    pub fn new(scroll_offset: f32, map_version: usize, viewport_rows: u32) -> Self {
+    pub fn new(scroll_offset: f32, map_version: u64, viewport_rows: u32) -> Self {
         Self {
             scroll_offset_bits: scroll_offset.to_bits(),
             map_version,
