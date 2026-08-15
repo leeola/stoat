@@ -6,6 +6,7 @@ use crate::{
     buffer_registry::AutoReloadMode,
     editor_state::{EditorId, EditorState},
     host::LanguageServerFeature,
+    lsp::sync,
 };
 use lsp_types::{
     DidSaveTextDocumentParams, DocumentFormattingParams, TextDocumentIdentifier, TextEdit, Uri,
@@ -154,6 +155,10 @@ pub(crate) struct FormatOnSaveOutcome {
     path: PathBuf,
     uri: Uri,
     edits: Option<Vec<TextEdit>>,
+    /// The buffer version the edits were computed against. The editor stays
+    /// interactive for the whole request, so an edit inside the budget shifts
+    /// every offset the edits name and [`pump_format_on_save`] discards them.
+    version: u64,
     /// The units the formatting server reads positions in.
     encoding: crate::host::OffsetEncoding,
     /// Whether the save that armed this was a forced one, which the write needs
@@ -186,6 +191,11 @@ fn format_on_save_host(
 /// and park the outcome in [`Stoat::pending_format_on_save`] for
 /// [`pump_format_on_save`]. Writes immediately without formatting when the path
 /// has no `file:` URI.
+///
+/// The request goes out only after the buffer's pending `did_change` reaches the
+/// server, so the server formats the text being saved rather than whatever the
+/// 50ms debounce is still holding. The buffer version read here rides along on
+/// the outcome and gates the edits at the pump.
 fn arm_format_on_save(
     stoat: &mut Stoat,
     host: Arc<dyn crate::host::LspHost>,
@@ -204,9 +214,16 @@ fn arm_format_on_save(
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
 
+    let version = buffer_version(stoat, buffer_id).unwrap_or_default();
+    let pending_change = sync::flush_pending_did_change(stoat, buffer_id);
+
     let executor = stoat.executor.clone();
     let encoding = host.offset_encoding();
     let task = stoat.executor.spawn(async move {
+        if let Some(pending_change) = pending_change {
+            pending_change.await;
+        }
+
         let format = std::pin::pin!(host.formatting(params));
         let timer = std::pin::pin!(executor.timer(FORMAT_ON_SAVE_BUDGET));
         let edits = match futures::future::select(format, timer).await {
@@ -218,6 +235,7 @@ fn arm_format_on_save(
             path,
             uri,
             edits,
+            version,
             encoding,
             force,
         }
@@ -225,9 +243,21 @@ fn arm_format_on_save(
     stoat.pending_format_on_save = Some(task);
 }
 
+/// The buffer's edit counter, or `None` when the buffer is gone.
+fn buffer_version(stoat: &Stoat, buffer_id: BufferId) -> Option<u64> {
+    let buffer = stoat.active_workspace().buffers.get(buffer_id)?;
+    let version = buffer.read().expect("buffer poisoned").version();
+    Some(version)
+}
+
 /// Poll the in-flight format-on-save request. On completion, apply any formatting
 /// edits as a single-document [`WorkspaceEdit`] and then write the buffer.
 /// Returns true when state changed so the caller can request a redraw.
+///
+/// Edits computed against a buffer that has since changed are discarded and the
+/// buffer is written as it stands. Their offsets name text that moved, and the
+/// `changes` carrier they travel in has no version gate of its own, so applying
+/// them corrupts what the user typed inside the save window.
 pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
     let Some(mut task) = stoat.pending_format_on_save.take() else {
         return false;
@@ -236,22 +266,32 @@ pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(outcome) => {
+            let current = buffer_version(stoat, outcome.buffer_id);
             if let Some(edits) = outcome.edits {
-                #[allow(clippy::mutable_key_type)]
-                let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-                changes.insert(outcome.uri, edits);
-                let edit = WorkspaceEdit {
-                    changes: Some(changes),
-                    document_changes: None,
-                    change_annotations: None,
-                };
-                if let Err(err) =
-                    crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, outcome.encoding)
-                {
-                    tracing::warn!(
+                if current == Some(outcome.version) {
+                    #[allow(clippy::mutable_key_type)]
+                    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+                    changes.insert(outcome.uri, edits);
+                    let edit = WorkspaceEdit {
+                        changes: Some(changes),
+                        document_changes: None,
+                        change_annotations: None,
+                    };
+                    if let Err(err) =
+                        crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, outcome.encoding)
+                    {
+                        tracing::warn!(
+                            target: "stoat::lsp",
+                            ?err,
+                            "format-on-save edit failed to apply",
+                        );
+                    }
+                } else {
+                    tracing::info!(
                         target: "stoat::lsp",
-                        ?err,
-                        "format-on-save edit failed to apply",
+                        formatted = outcome.version,
+                        ?current,
+                        "format-on-save edits discarded; the buffer changed while formatting",
                     );
                 }
             }
@@ -644,7 +684,7 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
     }
 
     if changed {
-        crate::lsp::sync::notify_buffer_changes_pending(stoat);
+        sync::notify_buffer_changes_pending(stoat);
     }
     changed || status_set
 }
@@ -689,7 +729,7 @@ pub(super) fn reload_focused(stoat: &mut Stoat, force: bool) -> UpdateEffect {
         ReloadOutcome::Unchanged => stoat.set_status("already up to date"),
         ReloadOutcome::Reloaded => {
             stoat.set_status(format!("reloaded {}", display_name(&path)));
-            crate::lsp::sync::notify_buffer_changes_pending(stoat);
+            sync::notify_buffer_changes_pending(stoat);
         },
     }
     UpdateEffect::Redraw
@@ -737,7 +777,7 @@ pub(super) fn reload_all(stoat: &mut Stoat, force: bool) -> UpdateEffect {
     }
 
     if reloaded > 0 {
-        crate::lsp::sync::notify_buffer_changes_pending(stoat);
+        sync::notify_buffer_changes_pending(stoat);
     }
 
     let mut parts: Vec<String> = Vec::new();
@@ -1133,6 +1173,7 @@ mod tests {
         buffer::BufferId,
         buffer_registry::AutoReloadMode,
         host::{FakeFsOp, FsHost},
+        lsp::sync,
         test_harness::{editor, TestHarness},
         Stoat,
     };
@@ -2497,6 +2538,73 @@ mod tests {
         h.settle();
 
         assert_eq!(on_disk(&h, &path), b"fn  main (){}\n");
+    }
+
+    #[test]
+    fn format_on_save_discards_edits_computed_before_a_keystroke() {
+        // The editor stays interactive while the request runs, so a keystroke
+        // inside the budget moves every offset the parked edits name.
+        use std::time::Duration;
+        let mut h = Stoat::test();
+        enable_format_on_save(&mut h);
+        let root = PathBuf::from("/fos-stale");
+        let path = open_rs(&mut h, &root, "a.rs", b"fn  main (){}\n");
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![whole_file_edit("fn main() {}\n")],
+        );
+        h.fake_lsp()
+            .set_request_delay("textDocument/formatting", Duration::from_millis(100));
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.edit_focused(0..0, "// typed\n");
+        h.advance_clock(Duration::from_millis(200));
+
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        assert_eq!(
+            buffer_text(&h, buffer_id),
+            "// typed\nfn  main (){}\n",
+            "the stale format must not rewrite what the user typed",
+        );
+        assert_eq!(
+            on_disk(&h, &path),
+            b"// typed\nfn  main (){}\n",
+            "the write must land the buffer as it stands",
+        );
+    }
+
+    #[test]
+    fn format_on_save_flushes_the_pending_did_change_first() {
+        // Without the flush the edit sits in the 50ms debounce and the server
+        // formats the text it was told about last, which is one edit behind.
+        use lsp_types::TextDocumentSyncKind;
+        let mut h = Stoat::test();
+        enable_format_on_save(&mut h);
+        h.fake_lsp()
+            .set_text_document_sync(TextDocumentSyncKind::FULL);
+        let root = PathBuf::from("/fos-flush");
+        let path = open_rs(&mut h, &root, "a.rs", b"fn  main (){}\n");
+        h.edit_focused(0..0, "// typed\n");
+        sync::notify_buffer_changes_pending(&mut h.stoat);
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.settle();
+
+        let texts: Vec<String> = h
+            .fake_lsp()
+            .observed_changes()
+            .into_iter()
+            .flat_map(|change| change.content_changes)
+            .map(|content| content.text)
+            .collect();
+        assert_eq!(
+            texts,
+            ["// typed\nfn  main (){}\n"],
+            "the save must deliver the edit before it asks the server to format",
+        );
+        assert_eq!(on_disk(&h, &path), b"// typed\nfn  main (){}\n");
     }
 
     #[test]
