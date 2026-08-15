@@ -593,6 +593,8 @@ struct FakeLspState {
     observed_replies: Vec<(NumberOrString, Result<Value, LspResponseError>)>,
     observed_opens: Vec<DidOpenTextDocumentParams>,
     observed_changes: Vec<DidChangeTextDocumentParams>,
+    observed_saves: Vec<DidSaveTextDocumentParams>,
+    observed_closes: Vec<DidCloseTextDocumentParams>,
     observed_completions: Vec<CompletionParams>,
     observed_formatting: Vec<DocumentFormattingParams>,
     observed_range_formatting: Vec<DocumentRangeFormattingParams>,
@@ -678,6 +680,8 @@ impl FakeLsp {
                 observed_replies: Vec::new(),
                 observed_opens: Vec::new(),
                 observed_changes: Vec::new(),
+                observed_saves: Vec::new(),
+                observed_closes: Vec::new(),
                 observed_completions: Vec::new(),
                 observed_formatting: Vec::new(),
                 observed_range_formatting: Vec::new(),
@@ -1076,6 +1080,21 @@ impl FakeLsp {
     /// quiet window with the latest text and a monotonic version.
     pub fn observed_changes(&self) -> Vec<DidChangeTextDocumentParams> {
         self.state.lock().unwrap().observed_changes.clone()
+    }
+
+    /// Snapshot of every [`DidSaveTextDocumentParams`] received via
+    /// [`LspHost::did_save`] in call order. Tests assert the editor named the
+    /// document a save fired for by the same URI it opened it under.
+    pub fn observed_saves(&self) -> Vec<DidSaveTextDocumentParams> {
+        self.state.lock().unwrap().observed_saves.clone()
+    }
+
+    /// Snapshot of every [`DidCloseTextDocumentParams`] received via
+    /// [`LspHost::did_close`] in call order. Tests assert a closed buffer
+    /// released the document the server holds, which needs the URI to match
+    /// the one the open registered.
+    pub fn observed_closes(&self) -> Vec<DidCloseTextDocumentParams> {
+        self.state.lock().unwrap().observed_closes.clone()
     }
 
     /// Snapshot of every [`CompletionParams`] received via
@@ -1936,16 +1955,15 @@ impl LspHost for FakeLsp {
         Ok(())
     }
 
-    async fn did_save(&self, _params: DidSaveTextDocumentParams) -> io::Result<()> {
+    async fn did_save(&self, params: DidSaveTextDocumentParams) -> io::Result<()> {
+        self.state.lock().unwrap().observed_saves.push(params);
         Ok(())
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) -> io::Result<()> {
-        self.state
-            .lock()
-            .unwrap()
-            .open_documents
-            .remove(&params.text_document.uri);
+        let mut state = self.state.lock().unwrap();
+        state.open_documents.remove(&params.text_document.uri);
+        state.observed_closes.push(params);
         Ok(())
     }
 

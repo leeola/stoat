@@ -18,7 +18,6 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     pin::Pin,
-    str::FromStr,
     sync::Arc,
     task::{Context, Poll},
     time::Duration,
@@ -387,10 +386,7 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, for
         crate::paths::user_config_path().as_deref(),
         crate::paths::stoatty_config_path().as_deref(),
     );
-    let Some(path_str) = path.to_str() else {
-        return true;
-    };
-    let Ok(uri) = Uri::from_str(&format!("file://{path_str}")) else {
+    let Some(uri) = super::lsp::path_to_uri(path) else {
         return true;
     };
     let params = DidSaveTextDocumentParams {
@@ -3163,6 +3159,37 @@ mod tests {
 
         dispatch(&mut h.stoat, &SaveBuffer);
         assert!(!editor::focused_dirty(&h.stoat));
+    }
+
+    /// A raw path holding a space parses as no URI at all. A notification built
+    /// that way reaches no server, and the work a save drives never fires.
+    #[test]
+    fn a_save_names_the_document_by_the_uri_the_open_registered() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/save uri");
+        let path = root.join("my file.txt");
+        h.fake_fs().insert_file(&path, b"x");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.settle();
+
+        let saved: Vec<String> = h
+            .fake_lsp()
+            .observed_saves()
+            .iter()
+            .map(|params| params.text_document.uri.as_str().to_string())
+            .collect();
+        let opened: Vec<String> = h
+            .fake_lsp()
+            .observed_opens()
+            .iter()
+            .map(|params| params.text_document.uri.as_str().to_string())
+            .collect();
+        assert_eq!(opened, ["file:///save%20uri/my%20file.txt"]);
+        assert_eq!(saved, opened);
     }
 
     #[test]

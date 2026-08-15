@@ -21,10 +21,9 @@ use crate::{
     pane::{PaneId, View},
     workspace::WorkspaceId,
 };
-use lsp_types::{DidCloseTextDocumentParams, TextDocumentIdentifier, Uri};
+use lsp_types::{DidCloseTextDocumentParams, TextDocumentIdentifier};
 use std::{
     path::{Path, PathBuf},
-    str::FromStr,
     sync::{Arc, Mutex},
     time::SystemTime,
 };
@@ -377,8 +376,7 @@ pub(crate) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
         .remove(&buffer_id);
 
     if let Some(path) = path
-        && let Some(path_str) = path.to_str()
-        && let Ok(uri) = Uri::from_str(&format!("file://{path_str}"))
+        && let Some(uri) = crate::action_handlers::lsp::path_to_uri(&path)
     {
         let params = DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier { uri },
@@ -868,6 +866,38 @@ mod tests {
             h.stoat.active_workspace().buffers.get(buffer_id).is_some(),
             "dirty buffer should not be closed",
         );
+    }
+
+    /// A raw path holding a space parses as no URI at all. A notification built
+    /// that way reaches no server, and the document leaks open there for a
+    /// buffer that no longer exists.
+    #[test]
+    fn a_close_releases_the_document_by_the_uri_the_open_registered() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/close uri");
+        let path = root.join("my file.txt");
+        h.fake_fs().insert_file(&path, b"hello\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        dispatch(&mut h.stoat, &CloseBuffer);
+        h.settle();
+
+        let closed: Vec<String> = h
+            .fake_lsp()
+            .observed_closes()
+            .iter()
+            .map(|params| params.text_document.uri.as_str().to_string())
+            .collect();
+        let opened: Vec<String> = h
+            .fake_lsp()
+            .observed_opens()
+            .iter()
+            .map(|params| params.text_document.uri.as_str().to_string())
+            .collect();
+        assert_eq!(opened, ["file:///close%20uri/my%20file.txt"]);
+        assert_eq!(closed, opened);
     }
 
     #[test]
