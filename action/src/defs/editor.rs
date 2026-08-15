@@ -1219,6 +1219,16 @@ define_action!(
 );
 
 define_action!(
+    ReplaceWithClipboardDef,
+    ReplaceWithClipboard,
+    "ReplaceWithClipboard",
+    ActionKind::ReplaceWithClipboard,
+    "replace selections with clipboard",
+    "Replace every non-empty selection with the system clipboard's content, read via the active `ClipboardHost`. The clipboard holds a single value, so every selection receives the same text, repeated by the pending count. The inserted text is left selected. No-op when the clipboard is empty or unavailable.",
+    ActionPriority::Common
+);
+
+define_action!(
     YankToClipboardDef,
     YankToClipboard,
     "YankToClipboard",

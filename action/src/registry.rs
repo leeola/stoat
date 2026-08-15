@@ -44,20 +44,20 @@ use crate::{
             OpenAbove, OpenBelow, OpenCodeSearch, OpenJumplistPicker, OpenLastPicker,
             OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore,
             PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection,
-            RemoveSelections, RepeatLastMotion, ReplaceChar, ReplaceWithYanked, ReplayMacro,
-            RotateSelectionContentsBackward, RotateSelectionContentsForward,
-            RotateSelectionsBackward, RotateSelectionsForward, SaveBuffer, SaveSelection,
-            ScrollDown, ScrollUp, SearchNext, SearchPrev, SearchSelection,
-            SearchSelectionDetectWordBoundaries, SelectAll, SelectAllChildren, SelectAllSiblings,
-            SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegex, SelectRegister,
-            SelectTextobjectAround, SelectTextobjectInner, SetMark, ShellAppendOutput,
-            ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo, ShrinkSelection,
-            ShrinkToLineBounds, SmartTab, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
-            SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
-            TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints, ToggleLspStatus,
-            ToggleSyntaxHighlight, TrailClear, TrailNext, TrailPrev, TriggerCompletion,
-            TrimSelections, Undo, UnindentSelection, WriteQuit, Yank, YankMainToClipboard,
-            YankToClipboard,
+            RemoveSelections, RepeatLastMotion, ReplaceChar, ReplaceWithClipboard,
+            ReplaceWithYanked, ReplayMacro, RotateSelectionContentsBackward,
+            RotateSelectionContentsForward, RotateSelectionsBackward, RotateSelectionsForward,
+            SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev,
+            SearchSelection, SearchSelectionDetectWordBoundaries, SelectAll, SelectAllChildren,
+            SelectAllSiblings, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegex,
+            SelectRegister, SelectTextobjectAround, SelectTextobjectInner, SetMark,
+            ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
+            ShrinkSelection, ShrinkToLineBounds, SmartTab, SplitSelection, SplitSelectionOnNewline,
+            SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase,
+            SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints,
+            ToggleLspStatus, ToggleSyntaxHighlight, TrailClear, TrailNext, TrailPrev,
+            TriggerCompletion, TrimSelections, Undo, UnindentSelection, WriteQuit, Yank,
+            YankMainToClipboard, YankToClipboard,
         },
         file::{
             AutoReload, AutoReloadConfig, FontSizeDec, FontSizeInc, ForceReloadAll,
@@ -723,6 +723,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(PasteAfter::DEF, |_| Ok(Box::new(PasteAfter)));
     add(PasteBefore::DEF, |_| Ok(Box::new(PasteBefore)));
     add(ReplaceWithYanked::DEF, |_| Ok(Box::new(ReplaceWithYanked)));
+    add(ReplaceWithClipboard::DEF, |_| {
+        Ok(Box::new(ReplaceWithClipboard))
+    });
     add(YankToClipboard::DEF, |_| Ok(Box::new(YankToClipboard)));
     add(YankMainToClipboard::DEF, |_| {
         Ok(Box::new(YankMainToClipboard))
@@ -1918,7 +1921,8 @@ mod tests {
         // + 2 ExtendSearchNext/ExtendSearchPrev.
         // + 4 MoveLineUp/MoveLineDown and their extend variants.
         // + 1 ExtendMatchBrackets.
-        assert_eq!(all().count(), 457);
+        // + 1 ReplaceWithClipboard.
+        assert_eq!(all().count(), 458);
     }
 
     #[test]

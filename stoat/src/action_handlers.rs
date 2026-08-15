@@ -820,6 +820,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PasteAfter => yank::paste_after(stoat),
         ActionKind::PasteBefore => yank::paste_before(stoat),
         ActionKind::ReplaceWithYanked => yank::replace_with_yanked(stoat),
+        ActionKind::ReplaceWithClipboard => yank::replace_with_clipboard(stoat),
         ActionKind::YankToClipboard => yank::yank_to_clipboard(stoat),
         ActionKind::YankMainToClipboard => yank::yank_main_to_clipboard(stoat),
         ActionKind::PasteClipboardAfter => yank::paste_clipboard_after(stoat),

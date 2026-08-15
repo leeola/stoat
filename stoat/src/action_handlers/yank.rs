@@ -154,7 +154,23 @@ pub(super) fn paste_before(stoat: &mut Stoat) -> UpdateEffect {
 pub(super) fn replace_with_yanked(stoat: &mut Stoat) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1).max(1) as usize;
     let source = stoat.active_register();
-    let Some(fragments) = read_register_fragments(stoat, source) else {
+    replace_selections_with(stoat, source, count)
+}
+
+/// Replace every non-empty selection with the system clipboard's content,
+/// following Helix's `replace_selections_with_clipboard`.
+///
+/// The clipboard twin of [`replace_with_yanked`], distributing and repeating
+/// the same way. The clipboard holds one value, so every selection receives it.
+pub(super) fn replace_with_clipboard(stoat: &mut Stoat) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1).max(1) as usize;
+    replace_selections_with(stoat, Register::Clipboard, count)
+}
+
+/// Replace every non-empty selection with `register`'s fragments, each repeated
+/// `count` times.
+fn replace_selections_with(stoat: &mut Stoat, register: Register, count: usize) -> UpdateEffect {
+    let Some(fragments) = read_register_fragments(stoat, register) else {
         return UpdateEffect::None;
     };
     if fragments.is_empty() {
@@ -2098,6 +2114,34 @@ mod tests {
             .write(crate::register::Register::Unnamed, vec!["xyz".to_string()]);
         h.type_keys("R");
         assert_eq!(buffer_text(&h, &path), "xyzbc\n");
+    }
+
+    /// The clipboard menu's R is the clipboard twin of the normal-mode R, so
+    /// it reads the host rather than whichever register the chord last named.
+    ///
+    /// Driven through the real key sequence, since a direct dispatch skips the
+    /// binding, which is half of what makes the menu entry work.
+    #[test]
+    fn space_quote_r_replaces_from_clipboard() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.fake_clipboard().set("xyz").unwrap();
+        h.stoat.registers.write(
+            crate::register::Register::Unnamed,
+            vec!["unnamed".to_string()],
+        );
+
+        // The space menu opens from normal mode only, and Escape leaves the
+        // selection standing, so this is how a user reaches the entry.
+        h.type_keys("v l l escape");
+        h.type_keys("space \" R");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "xyz\n",
+            "the clipboard text replaced the selection, not the unnamed register's",
+        );
+        assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]

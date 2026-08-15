@@ -247,6 +247,7 @@ action_kinds! {
     PasteAfter,
     PasteBefore,
     ReplaceWithYanked,
+    ReplaceWithClipboard,
     YankToClipboard,
     YankMainToClipboard,
     PasteClipboardAfter,

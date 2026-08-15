@@ -917,6 +917,7 @@ on key {
         Y -> [YankMainToClipboard(), SetMode(normal)];
         p -> [PasteClipboardAfter(), SetMode(normal)];
         P -> [PasteClipboardBefore(), SetMode(normal)];
+        R -> [ReplaceWithClipboard(), SetMode(normal)];
     }
     mode == space_buffer {
         Escape -> SetMode(normal);
