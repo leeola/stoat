@@ -2800,116 +2800,115 @@ fn switch_case_passes_through_non_letters() {
     assert_eq!(focused_buffer_text(&mut h), "ABC 123!\n");
 }
 
+/// The selection is the number. Nothing scans the line for one nearby, so
+/// what the reader picked out is exactly what the arithmetic reads.
 #[test]
-fn increment_seeks_forward_to_next_digit_on_line() {
+fn increment_reads_the_selections_own_fragment() {
     let mut h = TestHarness::with_size(30, 5);
     let path = h.write_file("s.txt", "let x = 42\n");
     h.open_file(&path);
+    set_selections(&mut h, &[(8, 10)]);
+
     dispatch(&mut h.stoat, &stoat_action::Increment);
     assert_eq!(focused_buffer_text(&mut h), "let x = 43\n");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(8, 10, false)],
+        "the selection covers the number it wrote",
+    );
+}
+
+/// A cursor covers one cell, so it reads one digit and leaves the rest of
+/// the number where it is.
+#[test]
+fn increment_on_part_of_a_number_reads_only_that_part() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "let x = 42\n");
+    h.open_file(&path);
+    set_selections(&mut h, &[(8, 9)]);
+
+    dispatch(&mut h.stoat, &stoat_action::Increment);
+    assert_eq!(focused_buffer_text(&mut h), "let x = 52\n");
 }
 
 #[test]
-fn increment_no_op_when_line_has_no_digit() {
+fn increment_off_a_number_is_a_no_op() {
     let mut h = TestHarness::with_size(30, 5);
-    let path = h.write_file("s.txt", "abc\n42\n");
+    let path = h.write_file("s.txt", "let x = 42\n");
     h.open_file(&path);
+
     dispatch(&mut h.stoat, &stoat_action::Increment);
     assert_eq!(
         focused_buffer_text(&mut h),
-        "abc\n42\n",
-        "seek should not cross newline"
+        "let x = 42\n",
+        "the cursor sits on l, which spells no integer",
     );
 }
 
 #[test]
-fn increment_hex_preserves_lowercase_and_width() {
+fn increment_over_a_word_is_a_no_op() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "abc\n42\n");
+    h.open_file(&path);
+    set_selections(&mut h, &[(0, 3)]);
+
+    dispatch(&mut h.stoat, &stoat_action::Increment);
+    assert_eq!(focused_buffer_text(&mut h), "abc\n42\n");
+}
+
+/// Radix literals reach the same arithmetic decimals do. The formats each
+/// one keeps are pinned where that arithmetic lives.
+#[test]
+fn increment_reads_a_radix_literal_the_selection_covers() {
     let mut h = TestHarness::with_size(30, 5);
     let path = h.write_file("s.txt", "let x = 0x0f\n");
     h.open_file(&path);
+    set_selections(&mut h, &[(8, 12)]);
+
     dispatch(&mut h.stoat, &stoat_action::Increment);
     assert_eq!(focused_buffer_text(&mut h), "let x = 0x10\n");
 }
 
+/// A selection spelling no integer keeps its place while its neighbours
+/// move, so one bad range does not cost the others their edit.
 #[test]
-fn increment_hex_grows_width_on_overflow() {
+fn increment_keeps_a_selection_that_spells_no_integer() {
     let mut h = TestHarness::with_size(30, 5);
-    let path = h.write_file("s.txt", "let x = 0xff\n");
+    let path = h.write_file("s.txt", "99 zz 99\n");
     h.open_file(&path);
+    set_selections(&mut h, &[(0, 2), (3, 5), (6, 8)]);
+
     dispatch(&mut h.stoat, &stoat_action::Increment);
-    assert_eq!(focused_buffer_text(&mut h), "let x = 0x100\n");
+    assert_eq!(focused_buffer_text(&mut h), "100 zz 100\n");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 3, false), (4, 6, false), (7, 10, false)],
+        "zz rode the first edit's shift without changing",
+    );
 }
 
 #[test]
-fn increment_hex_uses_uppercase_when_input_was_uppercase() {
+fn increment_leaves_select_mode_once_an_edit_lands() {
     let mut h = TestHarness::with_size(30, 5);
-    let path = h.write_file("s.txt", "let x = 0xFE\n");
+    let path = h.write_file("s.txt", "42\n");
     h.open_file(&path);
+    h.type_keys("v l");
+    assert_eq!(h.stoat.focused_mode(), "select");
+
     dispatch(&mut h.stoat, &stoat_action::Increment);
-    assert_eq!(focused_buffer_text(&mut h), "let x = 0xFF\n");
+    assert_eq!(focused_buffer_text(&mut h), "43\n");
+    assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
 #[test]
-fn decrement_binary_preserves_width() {
+fn increment_holds_select_mode_when_nothing_changed() {
     let mut h = TestHarness::with_size(30, 5);
-    let path = h.write_file("s.txt", "let x = 0b1010\n");
+    let path = h.write_file("s.txt", "zz\n");
     h.open_file(&path);
-    dispatch(&mut h.stoat, &stoat_action::Decrement);
-    assert_eq!(focused_buffer_text(&mut h), "let x = 0b1001\n");
-}
+    h.type_keys("v l");
 
-#[test]
-fn increment_octal_preserves_width() {
-    let mut h = TestHarness::with_size(30, 5);
-    let path = h.write_file("s.txt", "let x = 0o17\n");
-    h.open_file(&path);
     dispatch(&mut h.stoat, &stoat_action::Increment);
-    assert_eq!(focused_buffer_text(&mut h), "let x = 0o20\n");
-}
-
-#[test]
-fn decrement_hex_saturates_at_zero() {
-    let mut h = TestHarness::with_size(30, 5);
-    let path = h.write_file("s.txt", "let x = 0x00\n");
-    h.open_file(&path);
-    dispatch(&mut h.stoat, &stoat_action::Decrement);
-    assert_eq!(focused_buffer_text(&mut h), "let x = 0x00\n");
-}
-
-#[test]
-fn increment_hex_underscored_no_width_change() {
-    let mut h = TestHarness::with_size(30, 5);
-    let path = h.write_file("s.txt", "let x = 0xab_cd\n");
-    h.open_file(&path);
-    dispatch(&mut h.stoat, &stoat_action::Increment);
-    assert_eq!(focused_buffer_text(&mut h), "let x = 0xab_ce\n");
-}
-
-#[test]
-fn increment_hex_underscored_overflow_regroups_right() {
-    let mut h = TestHarness::with_size(30, 5);
-    let path = h.write_file("s.txt", "let x = 0xff_ff\n");
-    h.open_file(&path);
-    dispatch(&mut h.stoat, &stoat_action::Increment);
-    assert_eq!(focused_buffer_text(&mut h), "let x = 0x1_00_00\n");
-}
-
-#[test]
-fn decrement_binary_underscored_preserves_width() {
-    let mut h = TestHarness::with_size(30, 5);
-    let path = h.write_file("s.txt", "let x = 0b1010_1010\n");
-    h.open_file(&path);
-    dispatch(&mut h.stoat, &stoat_action::Decrement);
-    assert_eq!(focused_buffer_text(&mut h), "let x = 0b1010_1001\n");
-}
-
-#[test]
-fn decrement_hex_underscored_borrow_pads_left() {
-    let mut h = TestHarness::with_size(30, 5);
-    let path = h.write_file("s.txt", "let x = 0x10_00_00_00\n");
-    h.open_file(&path);
-    dispatch(&mut h.stoat, &stoat_action::Decrement);
-    assert_eq!(focused_buffer_text(&mut h), "let x = 0x0f_ff_ff_ff\n");
+    assert_eq!(h.stoat.focused_mode(), "select");
 }
 
 #[test]
@@ -2917,6 +2916,7 @@ fn count_prefix_increment_adds_count() {
     let mut h = TestHarness::with_size(30, 5);
     let path = h.write_file("s.txt", "let x = 10\n");
     h.open_file(&path);
+    set_selections(&mut h, &[(8, 10)]);
     h.type_keys("5 plus");
     assert_eq!(focused_buffer_text(&mut h), "let x = 15\n");
 }
@@ -2926,6 +2926,7 @@ fn count_prefix_decrement_subtracts_count() {
     let mut h = TestHarness::with_size(30, 5);
     let path = h.write_file("s.txt", "let x = 10\n");
     h.open_file(&path);
+    set_selections(&mut h, &[(8, 10)]);
     h.type_keys("3 minus");
     assert_eq!(focused_buffer_text(&mut h), "let x = 7\n");
 }
@@ -2935,6 +2936,7 @@ fn count_prefix_increment_hex_uses_count() {
     let mut h = TestHarness::with_size(30, 5);
     let path = h.write_file("s.txt", "let x = 0x10\n");
     h.open_file(&path);
+    set_selections(&mut h, &[(8, 12)]);
     h.type_keys("4 plus");
     assert_eq!(focused_buffer_text(&mut h), "let x = 0x14\n");
 }

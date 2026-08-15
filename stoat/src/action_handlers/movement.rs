@@ -23,11 +23,10 @@ use std::{
 use stoat_language::structural_diff;
 use stoat_scheduler::Task;
 use stoat_text::{
-    compute_number_delta, cursor_offset, find_number_seeking, next_char_boundary,
-    next_long_word_end_range, next_long_word_start_range, next_word_end_range,
-    next_word_start_range, prev_long_word_end_range, prev_long_word_start_range,
-    prev_word_end_range, prev_word_start_range, Anchor, Bias, Point, Rope, Selection,
-    SelectionGoal,
+    cursor_offset, integer_increment, next_char_boundary, next_long_word_end_range,
+    next_long_word_start_range, next_word_end_range, next_word_start_range,
+    prev_long_word_end_range, prev_long_word_start_range, prev_word_end_range,
+    prev_word_start_range, Anchor, Bias, Point, Rope, Selection, SelectionGoal,
 };
 
 pub(crate) fn set_cursor_row(editor: &mut EditorState, row: u32) {
@@ -1650,6 +1649,7 @@ pub(super) fn decrement(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 fn apply_number_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
+    let in_select = stoat.in_select_mode();
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -1663,30 +1663,22 @@ fn apply_number_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
         let rope = buffer_snapshot.rope();
-        let mut seen = std::collections::HashSet::<(usize, usize)>::new();
+        // The selection's own text is the number. A selection covering anything
+        // else spells no integer and stays where it is, so the arithmetic
+        // follows what the reader picked out rather than an invisible scan.
         let edits: Vec<(usize, usize, usize, String)> = editor
             .selections
             .all_anchors()
             .iter()
             .filter_map(|sel| {
-                let cursor = cursor_offset(
-                    rope,
-                    buffer_snapshot.resolve_anchor(&sel.tail()),
-                    buffer_snapshot.resolve_anchor(&sel.head()),
-                );
-                let num_match = find_number_seeking(rope, cursor)?;
-                let key = (num_match.range.start, num_match.range.end);
-                if !seen.insert(key) {
-                    return None;
-                }
-                let text = rope
-                    .slice(num_match.range.start..num_match.range.end)
-                    .to_string();
-                let new_text = compute_number_delta(&text, num_match.kind, delta)?;
+                let start = buffer_snapshot.resolve_anchor(&sel.start);
+                let end = buffer_snapshot.resolve_anchor(&sel.end);
+                let text = rope.slice(start..end).to_string();
+                let new_text = integer_increment(&text, delta)?;
                 if new_text == text {
                     return None;
                 }
-                Some((sel.id, num_match.range.start, num_match.range.end, new_text))
+                Some((sel.id, start, end, new_text))
             })
             .collect();
         (buffer_id, edits)
@@ -1722,6 +1714,12 @@ fn apply_number_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
         }
         new
     });
+
+    // The span the reader picked out is what the arithmetic consumed, so once
+    // an edit lands the selection has served its purpose and select mode ends.
+    if in_select {
+        stoat.set_focused_mode("normal".into());
+    }
     UpdateEffect::Redraw
 }
 

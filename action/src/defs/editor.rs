@@ -45,8 +45,8 @@ define_action!(
     Increment,
     "Increment",
     ActionKind::Increment,
-    "increment number under cursor",
-    "Increment the decimal number at or after each cursor on its current line by one. When a cursor is on a digit the run of digits there is the target; otherwise the search walks forward to the first digit on the same line and uses the run that begins there. The scan never crosses a line ending. A leading `-` is included only when the dash is preceded by whitespace, line start, or non-word punctuation. Two cursors that find the same number share a single edit.",
+    "increment the selected number",
+    "Increment the number each selection covers by one, or by the count. The selection's whole text must be the number, so a selection holding anything else stays where it is and its neighbours still move. Reads decimal with no prefix, and base 2, 8, and 16 behind `0b`, `0o`, and `0x`. The written form survives: a leading zero keeps its width, hex keeps its case, and `_` separators go back where they were. A decimal goes negative where a radix literal stops at zero. Select mode ends once an edit lands.",
     ActionPriority::Rare
 );
 
@@ -55,8 +55,8 @@ define_action!(
     Decrement,
     "Decrement",
     ActionKind::Decrement,
-    "decrement number under cursor",
-    "Decrement the decimal number at or after each cursor on its current line by one. When a cursor is on a digit the run of digits there is the target; otherwise the search walks forward to the first digit on the same line and uses the run that begins there. The scan never crosses a line ending. A leading `-` is included only when the dash is preceded by whitespace, line start, or non-word punctuation. Two cursors that find the same number share a single edit.",
+    "decrement the selected number",
+    "Decrement the number each selection covers by one, or by the count. The selection's whole text must be the number, so a selection holding anything else stays where it is and its neighbours still move. Reads decimal with no prefix, and base 2, 8, and 16 behind `0b`, `0o`, and `0x`. The written form survives: a leading zero keeps its width, hex keeps its case, and `_` separators go back where they were. A decimal goes negative where a radix literal stops at zero. Select mode ends once an edit lands.",
     ActionPriority::Rare
 );
 

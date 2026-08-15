@@ -23,12 +23,10 @@ pub use indent::{detect_indent_style, IndentStyle};
 pub use line_ending::LineEnding;
 pub use locator::Locator;
 pub use movement::{
-    categorize_char, char_is_word, compute_number_delta, find_decimal_number_at,
-    find_decimal_number_seeking, find_number_at, find_number_seeking, integer_increment,
-    next_long_word_end_range, next_long_word_start_range, next_word_end, next_word_end_range,
-    next_word_start_range, prev_long_word_end_range, prev_long_word_start_range,
-    prev_word_end_range, prev_word_start, prev_word_start_range, CharCategory, NumberKind,
-    NumberMatch,
+    categorize_char, char_is_word, integer_increment, next_long_word_end_range,
+    next_long_word_start_range, next_word_end, next_word_end_range, next_word_start_range,
+    prev_long_word_end_range, prev_long_word_start_range, prev_word_end_range, prev_word_start,
+    prev_word_start_range, CharCategory,
 };
 pub use offset_utf16::OffsetUtf16;
 pub use point::{Point, PointUtf16};
