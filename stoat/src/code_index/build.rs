@@ -29,7 +29,7 @@ use stoat_language::{
     extract_references, extract_symbols, parse_rope, Language, LanguageRegistry, Tree,
 };
 use stoat_scheduler::{Executor, Task};
-use stoat_text::Rope;
+use stoat_text::{LineEnding, Rope};
 use tokio::sync::{mpsc::UnboundedSender, Notify};
 
 /// A unit of index progress delivered from the build job to the event loop.
@@ -426,15 +426,21 @@ pub(crate) fn current_fingerprint(fs: &dyn FsHost, path: &Path) -> Option<[u8; 3
     Some(fingerprint_bytes(&read_utf8(fs, path)?))
 }
 
-/// A file's contents, or `None` when the read fails or the bytes are not UTF-8.
+/// A file's contents with line terminators normalized to bare `\n`, or `None`
+/// when the read fails or the bytes are not UTF-8.
 ///
 /// The two failures are deliberately one answer. A caller deciding whether a
 /// file is still indexable treats a binary file exactly as it treats a missing
 /// one.
+///
+/// Normalizing here puts extracted symbol offsets in the same coordinate space
+/// as an open buffer, which holds its text normalized. A CRLF file otherwise
+/// indexes at offsets one byte per preceding line ahead of the buffer's.
 fn read_utf8(fs: &dyn FsHost, path: &Path) -> Option<String> {
     let mut bytes = Vec::new();
     fs.read(path, &mut bytes).ok()?;
-    String::from_utf8(bytes).ok()
+    let text = String::from_utf8(bytes).ok()?;
+    Some(LineEnding::normalize(&text).into_owned())
 }
 
 /// Extract one file's shard, or `None` when the file is not an indexable
@@ -719,6 +725,44 @@ mod tests {
             .filter(|e| e.kind == codegraph::EdgeKind::Calls)
             .count();
         assert_eq!(calls, 1);
+    }
+
+    /// A buffer holds its text with the carriage returns stripped. A shard
+    /// extracted from the raw disk bytes instead places every symbol past the
+    /// first line one byte per preceding line ahead of the buffer's offset.
+    #[test]
+    fn an_indexed_crlf_file_carries_offsets_into_the_normalized_text() {
+        let fs = FakeFs::new();
+        let source = "fn helper() {}\r\n\r\nfn main() {\r\n    helper();\r\n}\r\n";
+        fs.write(Path::new("/repo/src/a.rs"), source.as_bytes())
+            .unwrap();
+
+        let registry = LanguageRegistry::standard();
+        let (_rel_path, shard) = index_file(
+            &fs,
+            &registry,
+            Path::new("/repo"),
+            Path::new("/repo/src/a.rs"),
+        )
+        .unwrap();
+
+        let normalized = "fn helper() {}\n\nfn main() {\n    helper();\n}\n";
+        let mut located: Vec<(&str, &str)> = shard
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), &normalized[s.name_range.clone()]))
+            .collect();
+        located.sort_unstable();
+        assert_eq!(
+            located,
+            vec![("helper", "helper"), ("main", "main")],
+            "each symbol's range slices its own name out of the normalized text",
+        );
+        assert_eq!(
+            shard.content_hash,
+            fingerprint_bytes(normalized),
+            "and the staleness fingerprint covers the text a buffer would hold",
+        );
     }
 
     /// Handing extraction the tree the parse pipeline already built produces the

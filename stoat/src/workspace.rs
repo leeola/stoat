@@ -2318,6 +2318,42 @@ mod tests {
     }
 
     #[test]
+    fn a_crlf_head_leaves_an_lf_buffer_of_equal_content_unchanged() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\r\nb\r\n", "a\nb\n")]);
+        h.open_file(Path::new("/repo/a.txt"));
+
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        let git_host = h.stoat.git_host.clone();
+        let language_registry = h.stoat.language_registry.clone();
+        let syntax_styles = h.stoat.syntax_styles.clone();
+        let base_cache = h.stoat.base_highlights_cache.clone();
+        h.stoat.active_workspace_mut().install_diff_map_now(
+            &git_host,
+            &language_registry,
+            &syntax_styles,
+            &base_cache,
+            buffer_id,
+        );
+
+        let ws = h.stoat.active_workspace();
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        let dm = guard.diff_map.as_ref().expect("diff map populated");
+        let starts: Vec<u32> = dm
+            .hunks_in_range(0..u32::MAX)
+            .iter()
+            .map(|hunk| hunk.buffer_start_line)
+            .collect();
+        assert_eq!(
+            starts,
+            Vec::<u32>::new(),
+            "a HEAD blob differing from the buffer only in its line terminators \
+             carries no change",
+        );
+    }
+
+    #[test]
     fn diff_job_highlights_the_base_text() {
         let mut h = TestHarness::with_size(80, 24);
         h.stage_review_scenario("/repo", &[("a.rs", "fn main() {}\n", "fn other() {}\n")]);

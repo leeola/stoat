@@ -15,6 +15,7 @@ use std::{
     sync::Arc,
 };
 use stoat_language::LanguageRegistry;
+use stoat_text::LineEnding;
 
 /// Discover the git repo at `git_root`, list its working-tree changes,
 /// and build the [`ReviewFileInput`] vector that
@@ -78,8 +79,43 @@ pub fn scan_working_tree(
     Some((workdir, inputs))
 }
 
+/// A file's disk contents with line terminators normalized to bare `\n`.
+///
+/// The normalization matches how a buffer holds its text, so a diff run over
+/// disk bytes lands the same hunks as one run over the open buffer.
 pub(crate) fn read_utf8(fs: &dyn FsHost, path: &Path) -> std::io::Result<String> {
     let mut buf = Vec::new();
     fs.read(path, &mut buf)?;
-    String::from_utf8(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    let text = String::from_utf8(buf)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok(LineEnding::normalize(&text).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_review_hunks_changeset, scan_working_tree};
+    use crate::host::fake::{FakeFs, FakeGit};
+    use std::path::Path;
+    use stoat_language::LanguageRegistry;
+
+    #[test]
+    fn a_crlf_working_tree_over_an_lf_blob_reports_no_hunks() {
+        let fs = FakeFs::new();
+        let git = FakeGit::new();
+        git.add_repo("/repo")
+            .with_fs(&fs)
+            .modified("a.txt", "a\nb\n", "a\r\nb\r\n");
+
+        let langs = LanguageRegistry::standard();
+        let (_workdir, inputs) =
+            scan_working_tree(&git, &fs, &langs, Path::new("/repo")).expect("the repo has changes");
+
+        let hunks = extract_review_hunks_changeset(&inputs, 3, None);
+        assert_eq!(
+            hunks.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![0],
+            "disk bytes differing from the blob only in their line terminators \
+             carry no change",
+        );
+    }
 }

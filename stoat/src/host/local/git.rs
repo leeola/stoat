@@ -15,6 +15,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
+use stoat_text::LineEnding;
 
 /// Production [`GitHost`] wrapping libgit2.
 pub struct LocalGit;
@@ -166,7 +167,9 @@ impl GitRepo for LocalGitRepo {
                 let rel = path.strip_prefix(workdir).ok()?;
                 let entry = tree.get_path(rel).ok()?;
                 let blob = entry.to_object(&repo).ok()?.peel_to_blob().ok()?;
-                std::str::from_utf8(blob.content()).ok().map(String::from)
+                std::str::from_utf8(blob.content())
+                    .ok()
+                    .map(|text| LineEnding::normalize(text).into_owned())
             })
             .collect()
     }
@@ -175,7 +178,8 @@ impl GitRepo for LocalGitRepo {
         let repo = self.repo.lock().expect("git repo lock");
         let workdir = repo.workdir()?;
         let rel = path.strip_prefix(workdir).ok()?;
-        index_blob_text(&repo, rel)
+        let text = index_blob_text(&repo, rel)?;
+        Some(LineEnding::normalize(&text).into_owned())
     }
 
     fn conflicted_paths(&self) -> Vec<PathBuf> {
@@ -900,6 +904,11 @@ fn quoted_line(text: &str) -> String {
 /// Takes the [`Repository`] directly rather than going through
 /// [`GitRepo::index_content`], because the apply path already holds the repo
 /// mutex and it is not reentrant.
+///
+/// Line terminators stay as the blob carries them, unlike
+/// [`GitRepo::index_content`], which normalizes what it gets from here. The
+/// apply path quotes this text back in a rejected-patch reason, so it must
+/// describe the blob git applies against rather than the buffer's view of it.
 fn index_blob_text(repo: &Repository, rel: &Path) -> Option<String> {
     let entry = repo.index().ok()?.get_path(rel, 0)?;
     let blob = repo.find_blob(entry.id).ok()?;

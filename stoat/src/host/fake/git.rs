@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
+use stoat_text::LineEnding;
 
 /// In-memory [`GitHost`] for tests.
 ///
@@ -831,7 +832,8 @@ impl GitRepo for FakeGitRepo {
             .iter()
             .map(|path| {
                 let rel = path.strip_prefix(&self.workdir).ok()?;
-                state.head_contents.get(rel).cloned()
+                let text = state.head_contents.get(rel)?;
+                Some(LineEnding::normalize(text).into_owned())
             })
             .collect()
     }
@@ -840,11 +842,11 @@ impl GitRepo for FakeGitRepo {
         let mut state = self.state.lock().unwrap();
         state.blob_reads += 1;
         let rel = path.strip_prefix(&self.workdir).ok()?;
-        state
+        let text = state
             .index_contents
             .get(rel)
-            .or_else(|| state.head_contents.get(rel))
-            .cloned()
+            .or_else(|| state.head_contents.get(rel))?;
+        Some(LineEnding::normalize(text).into_owned())
     }
 
     fn conflicted_paths(&self) -> Vec<PathBuf> {
@@ -1449,6 +1451,27 @@ mod tests {
                 None,
                 Some("content b".to_string()),
             ],
+        );
+    }
+
+    #[test]
+    fn blob_text_arrives_with_normalized_line_endings() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .head_file("a.rs", "one\r\ntwo\r\n")
+            .index_file("a.rs", "one\r\nTWO\r\n");
+        let repo = host.discover(&workdir()).unwrap();
+        let path = workdir().join("a.rs");
+
+        assert_eq!(
+            repo.head_content(&path).as_deref(),
+            Some("one\ntwo\n"),
+            "a CRLF HEAD blob reads back as the buffer holds it"
+        );
+        assert_eq!(
+            repo.index_content(&path).as_deref(),
+            Some("one\nTWO\n"),
+            "a CRLF index blob reads back as the buffer holds it"
         );
     }
 

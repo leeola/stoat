@@ -220,6 +220,25 @@ fn head_content_reads_blob() {
 }
 
 #[test]
+fn blob_text_arrives_with_normalized_line_endings() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "one\r\ntwo\r\n");
+    tr.write_and_stage("a.rs", "one\r\nTWO\r\n");
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+
+    assert_eq!(
+        repo.head_content(&tr.join("a.rs")).as_deref(),
+        Some("one\ntwo\n"),
+        "a CRLF HEAD blob reads back as the buffer holds it"
+    );
+    assert_eq!(
+        repo.index_content(&tr.join("a.rs")).as_deref(),
+        Some("one\nTWO\n"),
+        "a CRLF index blob reads back as the buffer holds it"
+    );
+}
+
+#[test]
 fn head_content_none_for_new_file() {
     let tr = TestRepo::new();
     tr.commit_file("a.rs", "v1");

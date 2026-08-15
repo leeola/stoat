@@ -141,10 +141,18 @@ pub trait GitRepo: Send + Sync {
     /// input order. An entry is `None` for an orphan branch, a path not in HEAD,
     /// or a binary blob. Resolves HEAD's tree once for the whole batch so a
     /// many-file review does not re-peel it per file.
+    ///
+    /// Line terminators arrive normalized to bare `\n`, as buffers hold them.
+    /// Without this, a blob committed with CRLF differs from an unedited
+    /// buffer on every line, and each diff over it reports the whole file
+    /// changed.
     fn head_contents(&self, paths: &[&Path]) -> Vec<Option<String>>;
 
     /// Read the UTF-8 content of `path` as it appears in HEAD. Returns
     /// `None` for orphan branches, paths not in HEAD, or binary blobs.
+    ///
+    /// Line terminators arrive normalized to bare `\n`, per
+    /// [`Self::head_contents`].
     fn head_content(&self, path: &Path) -> Option<String> {
         self.head_contents(&[path]).into_iter().next().flatten()
     }
@@ -155,6 +163,9 @@ pub trait GitRepo: Send + Sync {
     /// Returns `None` when `path` is not in the index, is a binary blob, or
     /// lies outside the workdir. A caller wanting HEAD when a path is
     /// unstaged falls back to [`Self::head_content`] itself.
+    ///
+    /// Line terminators arrive normalized to bare `\n`, per
+    /// [`Self::head_contents`].
     fn index_content(&self, path: &Path) -> Option<String>;
 
     /// Absolute paths of every file left unmerged in the on-disk index, i.e.
