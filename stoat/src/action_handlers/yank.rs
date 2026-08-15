@@ -411,14 +411,32 @@ fn selection_index_fragments(stoat: &mut Stoat) -> Option<Vec<String>> {
     Some((1..=count).map(|i| i.to_string()).collect())
 }
 
+/// One selection's share of a paste, from the selection that named it through
+/// to the span it leaves behind.
+///
+/// The fields are filled in selection order and the entries are then sorted by
+/// [`Self::insert_at`], which is why [`Self::payload`] travels here rather than
+/// alongside.
+struct PasteEntry {
+    /// The selection this came from, which is how the pasted span finds its way
+    /// back to a selection after the sort.
+    id: usize,
+    insert_at: usize,
+    /// Whether the payload opens a line the buffer does not have, which happens
+    /// only at the end of a buffer with no final line ending.
+    open_line: bool,
+    payload: String,
+}
+
 /// Insert each fragment at every selection and leave the inserted text
 /// selected.
 ///
 /// Each fragment lands at its selection's `start` (Before) or `end` (After),
 /// repeated by the pending count. Fragments distribute across selections in
-/// start-offset order, and the last fragment repeats when the selections
-/// outnumber them, so a single fragment lands at every selection. Each
-/// affected selection ends as a forward range over the text it inserted.
+/// selection order, and the last fragment repeats when the selections
+/// outnumber them, so a single fragment lands at every selection. Each affected
+/// selection ends as a range over the text it inserted, facing the way it faced
+/// before.
 ///
 /// No-op when every fragment is empty or the focused pane is not an editor.
 fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> UpdateEffect {
@@ -456,11 +474,15 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
         // separator its line needs.
         let unterminated = rope_len > 0 && !rope.ends_with("\n");
         let mut open_line = false;
-        let entries: Vec<(usize, usize, bool)> = editor
+        // Each selection takes its fragment here, where the set is still in
+        // selection order, rather than after the sort below. Selections beyond
+        // the fragment count reuse the last fragment.
+        let entries: Vec<PasteEntry> = editor
             .selections
             .all_anchors()
             .iter()
-            .map(|sel| {
+            .enumerate()
+            .map(|(idx, sel)| {
                 let start = buf_snap.resolve_anchor(&sel.start);
                 let end = buf_snap.resolve_anchor(&sel.end);
                 let (lo, hi) = if start <= end {
@@ -501,7 +523,20 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
                         }
                     },
                 };
-                (sel.id, insert_at, open_line)
+                // An entry opening a line at an unterminated end carries the
+                // separator on its payload rather than as an edit of its own.
+                // A separate edit shifts the offsets the entries before it were
+                // computed against.
+                let text = fragments[idx.min(fragments.len() - 1)].repeat(count);
+                PasteEntry {
+                    id: sel.id,
+                    insert_at,
+                    open_line,
+                    payload: match open_line {
+                        true => format!("\n{text}"),
+                        false => text,
+                    },
+                }
             })
             .collect();
         (buffer_id, entries)
@@ -511,33 +546,15 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
         return UpdateEffect::None;
     }
 
-    entries.sort_by_key(|(_, off, _)| *off);
-
-    // Each selection receives its fragment in start-offset order, repeated by
-    // the pending count. Selections beyond the fragment count reuse the last
-    // fragment. An entry opening a line at an unterminated end carries the
-    // separator on its payload rather than as an edit of its own, which would
-    // shift the offsets the entries before it were computed against.
-    let payloads: Vec<String> = entries
-        .iter()
-        .enumerate()
-        .map(|(idx, (_, _, open_line))| {
-            let text = fragments[idx.min(fragments.len() - 1)].repeat(count);
-            match open_line {
-                true => format!("\n{text}"),
-                false => text,
-            }
-        })
-        .collect();
+    entries.sort_by_key(|entry| entry.insert_at);
 
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
         let batch: Vec<(Range<usize>, &str)> = entries
             .iter()
-            .enumerate()
             .rev()
-            .map(|(idx, (_, off, _))| (*off..*off, payloads[idx].as_str()))
+            .map(|entry| (entry.insert_at..entry.insert_at, entry.payload.as_str()))
             .collect();
         guard.edit_batch(&batch);
     }
@@ -545,13 +562,13 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
     let mut id_to_range: std::collections::HashMap<usize, (usize, usize)> =
         std::collections::HashMap::with_capacity(entries.len());
     let mut shift: i64 = 0;
-    for (idx, (id, off, open_line)) in entries.iter().enumerate() {
-        let payload_len = payloads[idx].len();
+    for entry in &entries {
+        let payload_len = entry.payload.len();
         // The separator belongs to the previous line's ending rather than to
         // what was pasted, so the selection starts past it.
-        let opened = usize::from(*open_line);
-        let start = (*off as i64 + shift) as usize + opened;
-        id_to_range.insert(*id, (start, start + payload_len - opened));
+        let opened = usize::from(entry.open_line);
+        let start = (entry.insert_at as i64 + shift) as usize + opened;
+        id_to_range.insert(entry.id, (start, start + payload_len - opened));
         shift += payload_len as i64;
     }
 
@@ -563,7 +580,8 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
         if let Some(&(start, end)) = id_to_range.get(&sel.id) {
             new.start = new_buf.anchor_at(start, Bias::Left);
             new.end = new_buf.anchor_at(end, Bias::Right);
-            new.reversed = false;
+            // The direction survives the paste, so a backward selection stays
+            // backward and the next extend carries on the way it went.
             new.goal = SelectionGoal::None;
         }
         new
@@ -576,6 +594,7 @@ mod tests {
     use crate::{host::ClipboardHost, test_harness::TestHarness};
     use std::path::PathBuf;
     use stoat_action::{self as action, OpenFile};
+    use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
 
     fn seed(h: &mut TestHarness, contents: &str) -> PathBuf {
         let root = PathBuf::from("/yank-test");
@@ -594,6 +613,26 @@ mod tests {
         let buf = ws.buffers.get(id).expect("buffer present");
         let guard = buf.read().expect("buffer lock");
         guard.rope().to_string()
+    }
+
+    /// Install `ranges` as the whole selection set, each `(start, end,
+    /// reversed)`.
+    fn set_selections(h: &mut TestHarness, ranges: &[(usize, usize, bool)]) {
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf = snapshot.buffer_snapshot();
+        let built: Vec<Selection<Anchor>> = ranges
+            .iter()
+            .enumerate()
+            .map(|(id, &(start, end, reversed))| Selection {
+                id,
+                start: buf.anchor_at(start, Bias::Right),
+                end: buf.anchor_at(end, Bias::Right),
+                reversed,
+                goal: SelectionGoal::None,
+            })
+            .collect();
+        editor.selections.replace_with(built, buf);
     }
 
     fn cursor_offset(h: &mut TestHarness) -> usize {
@@ -660,6 +699,61 @@ mod tests {
         assert_eq!(
             h.stoat.pending_message, None,
             "and does not report a yank that did not happen",
+        );
+    }
+
+    /// A paste leaves the span facing the way the selection it replaced faced,
+    /// so a reader extending backward carries on that way afterward.
+    #[test]
+    fn paste_keeps_a_reversed_selections_direction() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abcdef\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["XY".to_string()]);
+        set_selections(&mut h, &[(1, 3, true)]);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(
+            h.selection_spans(),
+            vec![(3, 5, true)],
+            "the pasted span faces the way the replaced one did",
+        );
+    }
+
+    #[test]
+    fn paste_keeps_a_forward_selections_direction() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abcdef\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["XY".to_string()]);
+        set_selections(&mut h, &[(1, 3, false)]);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(h.selection_spans(), vec![(3, 5, false)]);
+    }
+
+    /// Each selection takes the fragment at its own place in the set.
+    ///
+    /// Two selections on one line land their pastes at the same offset, so
+    /// nothing about where the text goes distinguishes them. Only the order
+    /// they were paired in does.
+    #[test]
+    fn paste_hands_fragments_out_in_selection_order() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "ab cd\n");
+        h.stoat.registers.write(
+            crate::register::Register::Unnamed,
+            vec!["one\n".to_string(), "two\n".to_string()],
+        );
+        set_selections(&mut h, &[(0, 2, false), (3, 5, false)]);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(
+            buffer_text(&h, &path),
+            "ab cd\none\ntwo\n",
+            "the first selection's fragment precedes the second's",
         );
     }
 

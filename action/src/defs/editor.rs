@@ -1194,7 +1194,7 @@ define_action!(
     "PasteAfter",
     ActionKind::PasteAfter,
     "paste register after selection",
-    "Insert the unnamed register's content immediately after every selection's end offset. Each affected selection collapses to a cursor at the end of the inserted text. No-op when the register is empty.",
+    "Insert the unnamed register's content immediately after every selection's end offset. Each affected selection covers the text it received, facing the way it faced before. Fragments distribute across the selections in selection order, the last one repeating when the selections outnumber them. No-op when the register is empty.",
     ActionPriority::Common
 );
 
@@ -1204,7 +1204,7 @@ define_action!(
     "PasteBefore",
     ActionKind::PasteBefore,
     "paste register before selection",
-    "Insert the unnamed register's content immediately before every selection's start offset. Each affected selection collapses to a cursor at the end of the inserted text. No-op when the register is empty.",
+    "Insert the unnamed register's content immediately before every selection's start offset. Each affected selection covers the text it received, facing the way it faced before. Fragments distribute across the selections in selection order, the last one repeating when the selections outnumber them. No-op when the register is empty.",
     ActionPriority::Common
 );
 
