@@ -30,6 +30,12 @@ pub(crate) enum Register {
     /// that selection covers. Writes are refused, the text being the buffer's
     /// rather than the register's to hold.
     SelectionContents,
+    /// The focused buffer's name, as the status row shows it. Writes are
+    /// refused, since renaming a file is not something a paste does.
+    DocumentPath,
+    /// Command palette lines already run, newest first. Writes are refused,
+    /// history being a record of what happened rather than a list to set.
+    Command,
 }
 
 #[derive(Debug, Default)]
@@ -58,7 +64,9 @@ impl RegisterStore {
             | Register::Search
             | Register::Blackhole
             | Register::SelectionIndex
-            | Register::SelectionContents => {},
+            | Register::SelectionContents
+            | Register::DocumentPath
+            | Register::Command => {},
         }
     }
 
@@ -74,7 +82,9 @@ impl RegisterStore {
             | Register::Search
             | Register::Blackhole
             | Register::SelectionIndex
-            | Register::SelectionContents => None,
+            | Register::SelectionContents
+            | Register::DocumentPath
+            | Register::Command => None,
         }
     }
 }

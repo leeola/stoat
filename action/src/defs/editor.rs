@@ -1264,7 +1264,7 @@ define_action!(
     "SelectRegister",
     ActionKind::SelectRegister,
     "select register for next yank/paste",
-    "Wait for the next char keypress; the captured char names a register for the next `Yank` / `PasteAfter` / `PasteBefore` operation. Every char names one, digits and punctuation included, except `\"` for the unnamed register and the special chars (`*`/`+`/`/`/`_`/`#`/`.`). Escape and the other non-char keys cancel the chord. The selection is consumed by the next yank or paste and reverts to the unnamed register.",
+    "Wait for the next char keypress; the captured char names a register for the next `Yank` / `PasteAfter` / `PasteBefore` operation. Every char names one, digits and punctuation included, except `\"` for the unnamed register and the special chars (`*`/`+`/`/`/`_`/`#`/`.`/`%`/`:`). Escape and the other non-char keys cancel the chord. The selection is consumed by the next yank or paste and reverts to the unnamed register.",
     ActionPriority::Rare
 );
 
@@ -1274,7 +1274,7 @@ define_action!(
     "InsertRegister",
     ActionKind::InsertRegister,
     "insert register at cursor",
-    "Wait for the next char keypress in insert mode; the captured char names a register whose contents are inserted at the focused editor's cursor. Every char names one, digits and punctuation included, except `\"` for the unnamed register and the special chars (`*`/`+`/`/`/`_`/`#`/`.`). No-op when the register is empty or unset.",
+    "Wait for the next char keypress in insert mode; the captured char names a register whose contents are inserted at the focused editor's cursor. Every char names one, digits and punctuation included, except `\"` for the unnamed register and the special chars (`*`/`+`/`/`/`_`/`#`/`.`/`%`/`:`). No-op when the register is empty or unset.",
     ActionPriority::Rare
 );
 

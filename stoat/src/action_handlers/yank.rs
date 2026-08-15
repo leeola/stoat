@@ -1,6 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     pane::View,
+    paths,
     register::Register,
 };
 use std::ops::Range;
@@ -73,6 +74,14 @@ pub(crate) fn write_fragments_to_register(
             stoat.set_status("register . does not support writing");
             return false;
         },
+        Register::DocumentPath => {
+            stoat.set_status("register % does not support writing");
+            return false;
+        },
+        Register::Command => {
+            stoat.set_status("register : does not support writing");
+            return false;
+        },
     }
     true
 }
@@ -114,6 +123,8 @@ pub(crate) fn register_for_char(ch: char) -> Register {
         '_' => Register::Blackhole,
         '#' => Register::SelectionIndex,
         '.' => Register::SelectionContents,
+        '%' => Register::DocumentPath,
+        ':' => Register::Command,
         _ => Register::Named(ch),
     }
 }
@@ -401,6 +412,30 @@ pub(crate) fn read_register_fragments(
         Register::Blackhole => None,
         Register::SelectionContents => selection_fragments(stoat),
         Register::SelectionIndex => selection_index_fragments(stoat),
+        Register::DocumentPath => Some(vec![focused_document_name(stoat)]),
+        Register::Command => {
+            let history = stoat.active_workspace().palette_history.entries();
+            // The history grows oldest-first where a register reads newest
+            // first, so the line just run is the one a bare paste lands.
+            let lines: Vec<String> = history.iter().rev().cloned().collect();
+            (!lines.is_empty()).then_some(lines)
+        },
+    }
+}
+
+/// The focused buffer's name, as the status row above it shows it.
+///
+/// A buffer with no path is `[scratch]`, which is what the row shows too. What
+/// pastes is therefore what the reader sees named, rather than an absolute path
+/// they never looked at.
+fn focused_document_name(stoat: &Stoat) -> String {
+    let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
+        return "[scratch]".to_string();
+    };
+    let ws = stoat.active_workspace();
+    match ws.buffers.path_for(buffer_id) {
+        Some(path) => paths::display_relative(path, &ws.git_root),
+        None => "[scratch]".to_string(),
     }
 }
 
@@ -1779,6 +1814,78 @@ mod tests {
             buffer_text(&h, &path),
             "abab\ncdcd\n",
             "each selection received its own text, not the other's",
+        );
+    }
+
+    /// The document register pastes the buffer's name as the status row shows
+    /// it, relative to the workspace root rather than absolute.
+    #[test]
+    fn paste_document_path_register() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "x\n");
+        h.type_keys("\" % p");
+        assert_eq!(buffer_text(&h, &path), "xbuf.txt\n");
+    }
+
+    /// A buffer with no path names itself the way the status row does.
+    #[test]
+    fn document_path_register_names_a_pathless_buffer() {
+        let mut h = TestHarness::with_size(40, 10);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/nowhere");
+        assert_eq!(
+            super::read_register_fragments(&mut h.stoat, crate::register::Register::DocumentPath),
+            Some(vec!["[scratch]".to_string()]),
+        );
+    }
+
+    /// The command register holds the palette lines already run, newest first,
+    /// so a bare paste lands the one just used.
+    #[test]
+    fn command_register_holds_recent_commands() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "x\n");
+        {
+            let history = &mut h.stoat.active_workspace_mut().palette_history;
+            history.push("older".to_string());
+            history.push("newer".to_string());
+        }
+
+        assert_eq!(
+            super::read_register_fragments(&mut h.stoat, crate::register::Register::Command),
+            Some(vec!["newer".to_string(), "older".to_string()]),
+        );
+
+        h.type_keys("\" : p");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "xnewer\n",
+            "one cursor takes the first fragment, which is the line just run",
+        );
+    }
+
+    #[test]
+    fn yank_to_document_path_register_reports_an_error() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        h.type_keys("v l l");
+        h.type_keys("escape");
+        h.type_keys("\" % y");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("register % does not support writing"),
+        );
+    }
+
+    #[test]
+    fn yank_to_command_register_reports_an_error() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        h.type_keys("v l l");
+        h.type_keys("escape");
+        h.type_keys("\" : y");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("register : does not support writing"),
         );
     }
 
