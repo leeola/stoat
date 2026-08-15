@@ -1741,7 +1741,7 @@ fn delete_selection_impl(stoat: &mut Stoat, yank: bool) -> UpdateEffect {
         && let Some(fragments) = crate::action_handlers::yank::selection_fragments(stoat)
         && fragments.iter().any(|f| !f.is_empty())
     {
-        let target = stoat.consume_selected_register();
+        let target = stoat.active_register();
         crate::action_handlers::yank::write_fragments_to_register(stoat, target, fragments);
     }
 

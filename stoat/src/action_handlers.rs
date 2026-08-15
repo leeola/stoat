@@ -168,6 +168,10 @@ pub(crate) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
+    // The command that runs is the command that spends the register selection,
+    // whether or not it had any use for one. Otherwise a selection the reader
+    // made and then moved on from waits to surprise a later yank.
+    stoat.take_selected_register();
     conflict_view::disarm_clobber_unless_pick(stoat, action.kind());
 
     let group_buffer = if manages_own_undo_group(action.kind()) {

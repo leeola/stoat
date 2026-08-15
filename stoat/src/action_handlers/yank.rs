@@ -18,7 +18,7 @@ use stoat_text::{Bias, LineEnding, Point, SelectionGoal};
 /// through the in-memory store. No-op when every selection is
 /// collapsed or the focused pane is not an editor.
 pub(super) fn yank(stoat: &mut Stoat) -> UpdateEffect {
-    let target = stoat.consume_selected_register();
+    let target = stoat.active_register();
     if matches!(
         target,
         Register::Search | Register::SelectionIndex | Register::LastInsert
@@ -128,7 +128,7 @@ pub(super) fn paste_before(stoat: &mut Stoat) -> UpdateEffect {
 /// No-op when the register is empty or the focused pane is not an editor.
 pub(super) fn replace_with_yanked(stoat: &mut Stoat) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1).max(1) as usize;
-    let source = stoat.consume_selected_register();
+    let source = stoat.active_register();
     let Some(fragments) = read_register_fragments(stoat, source) else {
         return UpdateEffect::None;
     };
@@ -352,7 +352,7 @@ pub(super) fn selection_fragments(stoat: &mut Stoat) -> Option<Vec<String>> {
 /// selection, either at each selection's `start` (Before) or
 /// `end` (After).
 fn paste(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
-    let source = stoat.consume_selected_register();
+    let source = stoat.active_register();
     let Some(fragments) = read_register_fragments(stoat, source) else {
         return UpdateEffect::None;
     };
@@ -1406,6 +1406,42 @@ mod tests {
         h.type_keys("escape");
         h.type_keys("\" a p");
         assert_eq!(buffer_text(&h, &path), "abcxyz\n");
+    }
+
+    /// A command with no use for a register still spends the selection, so the
+    /// yank after it reaches the unnamed register.
+    ///
+    /// A selection that outlived the command the reader made it for waits to
+    /// send a later yank somewhere they stopped expecting.
+    #[test]
+    fn register_selection_is_dropped_by_an_unrelated_command() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        h.type_keys("v l l");
+        h.type_keys("escape");
+        h.type_keys("\" a");
+        assert_eq!(
+            h.stoat.selected_register,
+            Some(crate::register::Register::Named('a')),
+            "the chord armed the register",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::FlipSelections);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        assert_eq!(
+            h.stoat
+                .registers
+                .read(crate::register::Register::Named('a')),
+            None,
+            "the command between them spent the selection",
+        );
+        assert_eq!(
+            h.stoat
+                .registers
+                .read(crate::register::Register::Unnamed)
+                .map(|f| f.join("\n")),
+            Some("abc".to_string()),
+        );
     }
 
     /// A digit names a register of its own, so a yank into one and a paste out

@@ -20,7 +20,7 @@ pub(super) fn toggle_record(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(rec) = stoat.macro_recording.take() {
         stoat.macros.insert(rec.register, rec.keys);
     } else {
-        let register = stoat.consume_selected_register();
+        let register = stoat.active_register();
         stoat.macro_recording = Some(MacroRecording {
             register,
             keys: Vec::new(),

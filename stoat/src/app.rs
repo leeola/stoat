@@ -1034,12 +1034,18 @@ pub struct Stoat {
     /// printable char in normal/select mode is captured as the
     /// register name and stored in [`Self::selected_register`].
     pub(crate) pending_register_select: bool,
-    /// Register selected via `SelectRegister` for the next yank
-    /// or paste operation. `None` means the unnamed register is
-    /// the implicit target. Cleared by
-    /// [`Self::consume_selected_register`] which yank/paste call
-    /// before reading the chosen register.
+    /// Register named by `SelectRegister`, waiting for the command that spends
+    /// it. `None` means the unnamed register is the implicit target.
+    ///
+    /// Moved into [`Self::command_register`] by the next dispatch, so whatever
+    /// command ran next is what spent the selection.
     pub(crate) selected_register: Option<register::Register>,
+    /// Register the command being dispatched right now reads, taken off
+    /// [`Self::selected_register`] before its handler runs.
+    ///
+    /// Every command takes it, so a command with no use for a register still
+    /// spends the selection and the one after it starts clean.
+    command_register: Option<register::Register>,
     /// Set after `InsertRegister` arms the chord in insert mode.
     /// The next char keypress is captured as the register name;
     /// that register's content is inserted at the cursor and the
@@ -1964,6 +1970,7 @@ impl Stoat {
             registers: register::RegisterStore::new(),
             pending_register_select: false,
             selected_register: None,
+            command_register: None,
             pending_insert_register: false,
             replaying_registers: Vec::new(),
             editor_drag: None,
@@ -4021,7 +4028,11 @@ impl Stoat {
                     .unwrap_or_default();
                 if !text.is_empty() {
                     let fragments = text.split('\n').map(String::from).collect();
-                    let target = self.consume_selected_register();
+                    // This yank is intercepted ahead of the dispatch that
+                    // spends the selection for every other command, so it
+                    // spends its own.
+                    self.take_selected_register();
+                    let target = self.active_register();
                     action_handlers::yank::write_fragments_to_register(self, target, fragments);
                     self.set_status("yanked hover selection");
                     return UpdateEffect::Redraw;
@@ -4384,14 +4395,22 @@ impl Stoat {
         self.pending_count.take()
     }
 
-    /// Returns the register selected via [`SelectRegister`] and
-    /// clears the field. Yank / paste call this once each so the
-    /// selection is consumed by exactly one operation; subsequent
-    /// ops fall back to the unnamed register.
-    pub(crate) fn consume_selected_register(&mut self) -> register::Register {
-        self.selected_register
-            .take()
-            .unwrap_or(register::Register::Unnamed)
+    /// Move any armed register selection onto the command about to run.
+    ///
+    /// Called once per dispatch, before the handler, so the selection belongs
+    /// to exactly one command and the command after it reads the unnamed
+    /// register again.
+    pub(crate) fn take_selected_register(&mut self) {
+        self.command_register = self.selected_register.take();
+    }
+
+    /// The register the running command reads, which is the unnamed one unless
+    /// `SelectRegister` named another.
+    ///
+    /// A handler asking twice gets the same answer, since the dispatch that
+    /// called it already spent the selection on its behalf.
+    pub(crate) fn active_register(&self) -> register::Register {
+        self.command_register.unwrap_or(register::Register::Unnamed)
     }
 
     /// The focused document editor's buffer and primary cursor offset, or `None`
@@ -11127,6 +11146,42 @@ mod tests {
         assert!(
             h.stoat.pending_hover.is_some(),
             "the popup and selection stay open after a yank",
+        );
+    }
+
+    /// The hover yank reads no register a command before it already spent.
+    ///
+    /// It is intercepted ahead of the dispatch that spends the selection for
+    /// every other command, so without spending its own it reads whatever the
+    /// last command left behind.
+    #[test]
+    fn hover_y_does_not_reuse_a_spent_register() {
+        use crate::{register::Register, render::hover::HoverSelection};
+
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "x\n");
+        h.stoat.selected_register = Some(Register::Named('a'));
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::FlipSelections);
+
+        h.stoat.pending_hover = Some(hover_sel_popup(&["hello world"], 0));
+        if let Some(popup) = h.stoat.pending_hover.as_mut() {
+            popup.selection = Some(HoverSelection {
+                anchor: (0, 0),
+                head: (0, 5),
+                dragging: false,
+            });
+        }
+
+        h.type_keys("y");
+
+        assert_eq!(
+            h.stoat.registers.read(Register::Named('a')),
+            None,
+            "the command between them spent the selection",
+        );
+        assert_eq!(
+            h.stoat.registers.read(Register::Unnamed),
+            Some(["hello".to_string()].as_slice()),
         );
     }
 
