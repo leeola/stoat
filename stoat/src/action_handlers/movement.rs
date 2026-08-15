@@ -3750,14 +3750,17 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
 
-    // One walk over the hunks feeds every selection, since each one picks its
-    // own target out of the same sorted list.
+    // Where the hunks sit now, not where the last diff job left them, so the
+    // jump reaches the row the gutter paints its mark on. One walk over them
+    // feeds every selection, since each one picks its own target out of the
+    // same sorted list.
     let hunk_rows: Vec<Range<u32>> = display_snapshot
         .diff_map()
         .map(|diff_map| {
             diff_map
-                .hunks()
-                .map(|h| h.buffer_line_range.clone())
+                .live_hunks(buffer_snapshot)
+                .in_range(0..u32::MAX)
+                .map(|(_, rows)| rows)
                 .collect()
         })
         .unwrap_or_default();

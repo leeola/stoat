@@ -4317,6 +4317,11 @@ fn install_diff_hunks(h: &mut TestHarness, line_starts: &[u32]) {
 ///
 /// A one-line hunk leaves two cases indistinguishable. One is a span wider than
 /// its first row. The other is a deletion, whose range is empty.
+///
+/// The hunks are anchored to the buffer as it stands, which is what the diff job
+/// does with every map it computes. Without that the rows never move, and a
+/// reader who types between the diff and the keypress looks the same as one who
+/// does not.
 fn install_diff_hunk_rows(h: &mut TestHarness, rows: &[Range<u32>]) {
     use crate::diff_map::{DiffHunk, DiffHunkStatus, DiffMap};
     let hunks: Vec<DiffHunk> = rows
@@ -4335,7 +4340,7 @@ fn install_diff_hunk_rows(h: &mut TestHarness, rows: &[Range<u32>]) {
             token_detail: None,
         })
         .collect();
-    let dm = DiffMap::from_hunks(hunks, None);
+    let mut dm = DiffMap::from_hunks(hunks, None);
     let ws = h.stoat.active_workspace();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -4345,6 +4350,7 @@ fn install_diff_hunk_rows(h: &mut TestHarness, rows: &[Range<u32>]) {
     let buffer_id = ws.editors[editor_id].buffer_id;
     let buffer = ws.buffers.get(buffer_id).expect("buffer");
     let mut guard = buffer.write().expect("poisoned");
+    dm.anchor_hunks(&guard.snapshot);
     guard.diff_map = Some(dm);
 }
 
@@ -4364,6 +4370,43 @@ fn goto_next_change_jumps_forward() {
         h.selection_spans(),
         vec![(10, 12, false)],
         "the last hunk holds when there is no next one",
+    );
+}
+
+/// The gutter resolves the hunk anchors every frame, while the diff job behind
+/// them waits out a settle window before it even starts. The two disagree
+/// through any typing burst, and the jump has to reach the row that carries the
+/// mark rather than the row the last diff recorded.
+#[test]
+fn goto_next_change_lands_on_the_gutter_row_after_an_insert_above() {
+    let mut h = TestHarness::with_size(20, 12);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    h.open_file(&path);
+    install_diff_hunks(&mut h, &[5]);
+
+    // Two rows above the hunk, with no diff job driven afterwards, so the map
+    // still holds the rows it was built with.
+    h.type_keys("O");
+    h.type_text("X");
+    h.type_keys("enter");
+    h.type_text("Y");
+    h.type_keys("escape");
+
+    let marked: Vec<u32> = {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let folded: Vec<(u32, u16)> = (1..=10).map(|number| (number, 1)).collect();
+        crate::render::editor::gutter_diff_marks(&snapshot, &folded)
+            .into_keys()
+            .collect()
+    };
+    assert_eq!(marked, vec![7], "the gutter paints the hunk two rows down");
+
+    dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(14, 16, false)],
+        "and the jump lands on that row, not the one the diff recorded",
     );
 }
 
