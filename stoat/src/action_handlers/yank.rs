@@ -233,7 +233,6 @@ pub(super) fn replace_with_yanked(stoat: &mut Stoat) -> UpdateEffect {
         if let Some(&(start, end)) = new_ranges.get(&sel.id) {
             new.start = new_buf.anchor_at(start, Bias::Right);
             new.end = new_buf.anchor_at(end, Bias::Right);
-            new.reversed = false;
             new.goal = SelectionGoal::None;
         }
         new
@@ -1960,6 +1959,31 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
         assert_eq!(buffer_text(&h, &path), "xyz\n");
         assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
+    }
+
+    /// Direction decides which end the cursor rests on, so a replace that
+    /// flips it sends the next motion the wrong way.
+    ///
+    /// Nothing about swapping the covered text for other text says anything
+    /// about which way the selection points, so the incoming direction is what
+    /// the replacement keeps.
+    #[test]
+    fn replace_with_yanked_keeps_a_backward_selection_backward() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["xyz".to_string()]);
+        h.type_keys("l l v h h");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 3, true)],
+            "extending left builds the backward selection under test",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
+        assert_eq!(buffer_text(&h, &path), "xyz\n");
+        assert_eq!(h.selection_spans(), vec![(0, 3, true)]);
     }
 
     #[test]
