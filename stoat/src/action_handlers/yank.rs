@@ -422,9 +422,6 @@ struct PasteEntry {
     /// back to a selection after the sort.
     id: usize,
     insert_at: usize,
-    /// Whether the payload opens a line the buffer does not have, which happens
-    /// only at the end of a buffer with no final line ending.
-    open_line: bool,
     payload: String,
 }
 
@@ -468,12 +465,6 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
         let rope = buf_snap.rope();
         let max_row = rope.max_point().row;
         let rope_len = rope.len();
-        // A buffer with no final line ending has no row after its last one, so
-        // the offset that opens a fresh line in a terminated buffer is the end
-        // of this one's last line instead. The entry landing there carries the
-        // separator its line needs.
-        let unterminated = rope_len > 0 && !rope.ends_with("\n");
-        let mut open_line = false;
         // Each selection takes its fragment here, where the set is still in
         // selection order, rather than after the sort below. Selections beyond
         // the fragment count reuse the last fragment.
@@ -490,7 +481,6 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
                 } else {
                     (end, start)
                 };
-                open_line = false;
                 let insert_at = match (side, linewise) {
                     (PasteSide::Before, true) => {
                         let row = rope.offset_to_point(lo).row;
@@ -507,8 +497,10 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
                             hi_point.row
                         };
                         let next = last_line + 1;
+                        // A buffer with no final line ending has no row after
+                        // its last one, so the paste splices onto the end of
+                        // that line and the two run together.
                         if next > max_row {
-                            open_line = unterminated;
                             rope_len
                         } else {
                             rope.point_to_offset(Point::new(next, 0))
@@ -523,19 +515,10 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
                         }
                     },
                 };
-                // An entry opening a line at an unterminated end carries the
-                // separator on its payload rather than as an edit of its own.
-                // A separate edit shifts the offsets the entries before it were
-                // computed against.
-                let text = fragments[idx.min(fragments.len() - 1)].repeat(count);
                 PasteEntry {
                     id: sel.id,
                     insert_at,
-                    open_line,
-                    payload: match open_line {
-                        true => format!("\n{text}"),
-                        false => text,
-                    },
+                    payload: fragments[idx.min(fragments.len() - 1)].repeat(count),
                 }
             })
             .collect();
@@ -564,11 +547,8 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
     let mut shift: i64 = 0;
     for entry in &entries {
         let payload_len = entry.payload.len();
-        // The separator belongs to the previous line's ending rather than to
-        // what was pasted, so the selection starts past it.
-        let opened = usize::from(entry.open_line);
-        let start = (entry.insert_at as i64 + shift) as usize + opened;
-        id_to_range.insert(entry.id, (start, start + payload_len - opened));
+        let start = (entry.insert_at as i64 + shift) as usize;
+        id_to_range.insert(entry.id, (start, start + payload_len));
         shift += payload_len as i64;
     }
 
@@ -1065,15 +1045,15 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "X\nY\nZ\nX\n");
     }
 
-    /// Pasting a line below the last line of a buffer that has no final newline
-    /// opens a line rather than splicing onto the one that is there.
+    /// Pasting a line below the last line of a buffer with no final newline
+    /// splices onto that line rather than opening one.
     ///
     /// The rope reports a row after a trailing line ending and none without
-    /// one, so the offset that means "the start of a fresh line" for a
-    /// newline-terminated buffer means "the end of the last line's text" for
-    /// this one. Files opened without a final newline are ordinary.
+    /// one, so the offset that means "the start of a fresh line" in a buffer
+    /// that ends in a newline means "the end of the last line's text" here.
+    /// The paste lands there as it stands, and the two lines join.
     #[test]
-    fn linewise_paste_after_opens_a_line_at_an_unterminated_end() {
+    fn linewise_paste_after_splices_at_an_unterminated_end() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\ndef");
         h.stoat
@@ -1081,15 +1061,15 @@ mod tests {
             .write(crate::register::Register::Unnamed, vec!["X\n".to_string()]);
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "abc\ndef\nX\n");
+        assert_eq!(buffer_text(&h, &path), "abc\ndefX\n");
     }
 
     /// A buffer that does end in a newline already has the row to paste into,
-    /// so pasting past its last line adds no separator of its own.
+    /// so pasting past its last line leaves the pasted line on its own.
     ///
-    /// Reaching that branch needs the cursor on the row after the final line
-    /// ending, which only a terminated buffer has. Without this the opening
-    /// newline could be added unconditionally and nothing would notice.
+    /// The sibling case above lands at the same offset from a buffer with no
+    /// final ending, where the result runs together. This is what tells the two
+    /// endings apart.
     #[test]
     fn linewise_paste_past_the_last_line_adds_no_blank_line() {
         let mut h = TestHarness::with_size(40, 10);
@@ -1102,14 +1082,13 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "abc\nX\n");
     }
 
-    /// The probe for a missing final line ending reads the buffer's end
-    /// safely, whatever character sits there.
+    /// A paste answers on a buffer whose last character is multibyte.
     ///
     /// Rope offsets are byte offsets, so a multibyte final character puts the
-    /// last byte inside it. A probe that reads a character at that offset
-    /// slices mid-character and panics. The crash reaches every paste in such
-    /// a buffer, linewise or not, because the probe runs before the paste
-    /// shape decides anything.
+    /// buffer's last byte inside it. Anything on the paste path that reads a
+    /// character at an offset it computed slices mid-character and panics,
+    /// which takes out every paste in such a buffer rather than the one shape
+    /// that went wrong.
     #[test]
     fn paste_into_a_buffer_that_ends_in_a_multibyte_character() {
         let mut h = TestHarness::with_size(40, 10);
