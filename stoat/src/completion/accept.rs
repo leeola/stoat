@@ -6,11 +6,12 @@
 //! insert mode via the arbitration arm in
 //! [`crate::app::Stoat::handle_insert_key`].
 //!
-//! The popup's `replace_range` is in buffer byte offsets captured at
-//! trigger time. LSP items widen this beyond the typed prefix when
-//! the server returns a `text_edit.range`; non-LSP items scope it to
-//! the prefix range. Acceptance reads the range from the chosen
-//! item, so both shapes work uniformly.
+//! An item's `replace_range` is anchored against the text its source
+//! read, so it still names that text after the keystrokes the popup
+//! outlived. LSP items widen it beyond the typed prefix when the
+//! server returns a `text_edit.range`. Non-LSP items scope it to the
+//! prefix range. Acceptance resolves the range against the live
+//! buffer, so both shapes work uniformly.
 
 use crate::{
     app::{Stoat, UpdateEffect},
@@ -65,10 +66,14 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
         None => return UpdateEffect::None,
     };
 
-    let rope_len = buffer.read().expect("poisoned").rope().len();
-    let start = item.replace_range.start.min(rope_len);
-    let end = item.replace_range.end.min(rope_len);
-    let edit_range = start..end;
+    // Resolved against the buffer as it is now, not as the source read it. An
+    // edit that collapsed the text between the two ends also crosses them.
+    let edit_range = {
+        let guard = buffer.read().expect("poisoned");
+        let start = guard.resolve_anchor(&item.replace_range.start);
+        let end = guard.resolve_anchor(&item.replace_range.end);
+        start.min(end)..start.max(end)
+    };
 
     let snippet_rendered = if item.is_snippet {
         Some(crate::completion::snippet::parse(&item.insert_text).render())
@@ -236,11 +241,12 @@ mod tests {
     use super::*;
     use crate::{
         action_handlers::dispatch,
-        completion::{CompletionItem, CompletionPopup, CompletionSource},
+        completion::{anchor_range_in_focused, CompletionItem, CompletionPopup, CompletionSource},
         test_harness::TestHarness,
     };
-    use std::path::PathBuf;
+    use std::{ops::Range, path::PathBuf};
     use stoat_action::{AcceptCompletion, OpenFile};
+    use stoat_text::Anchor;
 
     fn open_scratch(h: &mut TestHarness, contents: &str) -> PathBuf {
         let path = PathBuf::from("/ws/buf.rs");
@@ -276,11 +282,13 @@ mod tests {
         buf_snapshot.resolve_anchor(&head)
     }
 
-    fn install_popup(
-        h: &mut TestHarness,
-        items: Vec<CompletionItem>,
-        prefix_range: std::ops::Range<usize>,
-    ) {
+    /// The range a source mints for `range`, for tests that install a popup
+    /// rather than driving the request pipeline for one.
+    fn anchors(h: &TestHarness, range: Range<usize>) -> Range<Anchor> {
+        anchor_range_in_focused(&h.stoat, range)
+    }
+
+    fn install_popup(h: &mut TestHarness, items: Vec<CompletionItem>, prefix_range: Range<usize>) {
         h.stoat.pending_completion = Some(CompletionPopup {
             items,
             selected_idx: 0,
@@ -297,22 +305,19 @@ mod tests {
         let path = open_scratch(&mut h, "");
         h.type_keys("i");
         h.type_text("foo");
-        install_popup(
-            &mut h,
-            vec![CompletionItem {
-                label: "foobar".into(),
-                source: CompletionSource::Word,
-                kind: None,
-                detail: None,
-                replace_range: 0..3,
-                insert_text: "foobar".into(),
-                is_snippet: false,
-                documentation: None,
-                lsp_item: None,
-                server: None,
-            }],
-            0..3,
-        );
+        let items = vec![CompletionItem {
+            label: "foobar".into(),
+            source: CompletionSource::Word,
+            kind: None,
+            detail: None,
+            replace_range: anchors(&h, 0..3),
+            insert_text: "foobar".into(),
+            is_snippet: false,
+            documentation: None,
+            lsp_item: None,
+            server: None,
+        }];
+        install_popup(&mut h, items, 0..3);
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
@@ -328,22 +333,19 @@ mod tests {
         let path = open_scratch(&mut h, "");
         h.type_keys("i");
         h.type_text("print");
-        install_popup(
-            &mut h,
-            vec![CompletionItem {
-                label: "println!".into(),
-                source: CompletionSource::Lsp,
-                kind: None,
-                detail: None,
-                replace_range: 0..5,
-                insert_text: "println!(\"\")".into(),
-                is_snippet: false,
-                documentation: None,
-                lsp_item: None,
-                server: None,
-            }],
-            0..5,
-        );
+        let items = vec![CompletionItem {
+            label: "println!".into(),
+            source: CompletionSource::Lsp,
+            kind: None,
+            detail: None,
+            replace_range: anchors(&h, 0..5),
+            insert_text: "println!(\"\")".into(),
+            is_snippet: false,
+            documentation: None,
+            lsp_item: None,
+            server: None,
+        }];
+        install_popup(&mut h, items, 0..5);
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
@@ -357,6 +359,7 @@ mod tests {
         let path = open_scratch(&mut h, "");
         h.type_keys("i");
         h.type_text("fo");
+        let replace_range = anchors(&h, 0..2);
         h.stoat.pending_completion = Some(CompletionPopup {
             items: vec![
                 CompletionItem {
@@ -364,7 +367,7 @@ mod tests {
                     source: CompletionSource::Word,
                     kind: None,
                     detail: None,
-                    replace_range: 0..2,
+                    replace_range: replace_range.clone(),
                     insert_text: "foo".into(),
                     is_snippet: false,
                     documentation: None,
@@ -376,7 +379,7 @@ mod tests {
                     source: CompletionSource::Word,
                     kind: None,
                     detail: None,
-                    replace_range: 0..2,
+                    replace_range,
                     insert_text: "foobar".into(),
                     is_snippet: false,
                     documentation: None,
@@ -415,22 +418,19 @@ mod tests {
         let path = open_scratch(&mut h, "");
         h.type_keys("i");
         h.type_text("pri");
-        install_popup(
-            &mut h,
-            vec![CompletionItem {
-                label: "println!".into(),
-                source: CompletionSource::Lsp,
-                kind: None,
-                detail: None,
-                replace_range: 0..3,
-                insert_text: "println!(${1:msg})$0".into(),
-                is_snippet: true,
-                documentation: None,
-                lsp_item: None,
-                server: None,
-            }],
-            0..3,
-        );
+        let items = vec![CompletionItem {
+            label: "println!".into(),
+            source: CompletionSource::Lsp,
+            kind: None,
+            detail: None,
+            replace_range: anchors(&h, 0..3),
+            insert_text: "println!(${1:msg})$0".into(),
+            is_snippet: true,
+            documentation: None,
+            lsp_item: None,
+            server: None,
+        }];
+        install_popup(&mut h, items, 0..3);
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
@@ -462,22 +462,19 @@ mod tests {
         let path = open_scratch(&mut h, "");
         h.type_keys("i");
         h.type_text("pri");
-        install_popup(
-            &mut h,
-            vec![CompletionItem {
-                label: "println!".into(),
-                source: CompletionSource::Lsp,
-                kind: None,
-                detail: None,
-                replace_range: 0..3,
-                insert_text: "println!()$0".into(),
-                is_snippet: true,
-                documentation: None,
-                lsp_item: None,
-                server: None,
-            }],
-            0..3,
-        );
+        let items = vec![CompletionItem {
+            label: "println!".into(),
+            source: CompletionSource::Lsp,
+            kind: None,
+            detail: None,
+            replace_range: anchors(&h, 0..3),
+            insert_text: "println!()$0".into(),
+            is_snippet: true,
+            documentation: None,
+            lsp_item: None,
+            server: None,
+        }];
+        install_popup(&mut h, items, 0..3);
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
@@ -491,22 +488,19 @@ mod tests {
         let path = open_scratch(&mut h, "");
         h.type_keys("i");
         h.type_text("foo");
-        install_popup(
-            &mut h,
-            vec![CompletionItem {
-                label: "linked".into(),
-                source: CompletionSource::Lsp,
-                kind: None,
-                detail: None,
-                replace_range: 0..3,
-                insert_text: "${1:x} = ${1}".into(),
-                is_snippet: true,
-                documentation: None,
-                lsp_item: None,
-                server: None,
-            }],
-            0..3,
-        );
+        let items = vec![CompletionItem {
+            label: "linked".into(),
+            source: CompletionSource::Lsp,
+            kind: None,
+            detail: None,
+            replace_range: anchors(&h, 0..3),
+            insert_text: "${1:x} = ${1}".into(),
+            is_snippet: true,
+            documentation: None,
+            lsp_item: None,
+            server: None,
+        }];
+        install_popup(&mut h, items, 0..3);
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
@@ -533,22 +527,19 @@ mod tests {
         let path = open_scratch(&mut h, "");
         h.type_keys("i");
         h.type_text("foo");
-        install_popup(
-            &mut h,
-            vec![CompletionItem {
-                label: "foobar".into(),
-                source: CompletionSource::Word,
-                kind: None,
-                detail: None,
-                replace_range: 0..3,
-                insert_text: "foobar".into(),
-                is_snippet: false,
-                documentation: None,
-                lsp_item: None,
-                server: None,
-            }],
-            0..3,
-        );
+        let items = vec![CompletionItem {
+            label: "foobar".into(),
+            source: CompletionSource::Word,
+            kind: None,
+            detail: None,
+            replace_range: anchors(&h, 0..3),
+            insert_text: "foobar".into(),
+            is_snippet: false,
+            documentation: None,
+            lsp_item: None,
+            server: None,
+        }];
+        install_popup(&mut h, items, 0..3);
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
@@ -567,13 +558,13 @@ mod tests {
         });
     }
 
-    fn lsp_row(label: &str, range: std::ops::Range<usize>) -> CompletionItem {
+    fn lsp_row(h: &TestHarness, label: &str, range: Range<usize>) -> CompletionItem {
         CompletionItem {
             label: label.into(),
             source: CompletionSource::Lsp,
             kind: None,
             detail: None,
-            replace_range: range,
+            replace_range: anchors(h, range),
             insert_text: label.into(),
             is_snippet: false,
             documentation: None,
@@ -608,7 +599,8 @@ mod tests {
             .set_completion_resolve("barbaz", resolved_with_import("barbaz", "use foo;\n"));
         h.type_keys("i");
         h.type_text("bar");
-        install_popup(&mut h, vec![lsp_row("barbaz", 0..3)], 0..3);
+        let items = vec![lsp_row(&h, "barbaz", 0..3)];
+        install_popup(&mut h, items, 0..3);
 
         dispatch(&mut h.stoat, &AcceptCompletion);
         assert_eq!(
@@ -634,7 +626,8 @@ mod tests {
             .set_completion_resolve("barbaz", resolved_with_import("barbaz", "use foo;\n"));
         h.type_keys("i");
         h.type_text("bar");
-        install_popup(&mut h, vec![lsp_row("barbaz", 0..3)], 0..3);
+        let items = vec![lsp_row(&h, "barbaz", 0..3)];
+        install_popup(&mut h, items, 0..3);
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
@@ -670,7 +663,8 @@ mod tests {
             .set_completion_resolve("barbaz", resolved_with_import("barbaz", "use foo;\n"));
         h.type_keys("i");
         h.type_text("bar");
-        install_popup(&mut h, vec![lsp_row("barbaz", 0..3)], 0..3);
+        let items = vec![lsp_row(&h, "barbaz", 0..3)];
+        install_popup(&mut h, items, 0..3);
 
         dispatch(&mut h.stoat, &AcceptCompletion);
         // The resolve is delayed past the 300ms timeout, which fires first.
@@ -686,22 +680,19 @@ mod tests {
         enable_resolve(&h);
         h.type_keys("i");
         h.type_text("foo");
-        install_popup(
-            &mut h,
-            vec![CompletionItem {
-                label: "foobar".into(),
-                source: CompletionSource::Word,
-                kind: None,
-                detail: None,
-                replace_range: 0..3,
-                insert_text: "foobar".into(),
-                is_snippet: false,
-                documentation: None,
-                lsp_item: None,
-                server: None,
-            }],
-            0..3,
-        );
+        let items = vec![CompletionItem {
+            label: "foobar".into(),
+            source: CompletionSource::Word,
+            kind: None,
+            detail: None,
+            replace_range: anchors(&h, 0..3),
+            insert_text: "foobar".into(),
+            is_snippet: false,
+            documentation: None,
+            lsp_item: None,
+            server: None,
+        }];
+        install_popup(&mut h, items, 0..3);
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
@@ -710,5 +701,98 @@ mod tests {
             !h.stoat.pending_completion_accept.is_pending(),
             "a word accept issues no resolve",
         );
+    }
+
+    /// The popup outlives the keystroke that shifted every offset past the
+    /// cursor, and the debounce leaves it reachable while a fresh request is
+    /// still in flight. A range frozen at fetch time then names the middle of
+    /// the multibyte character the deletion pulled under it.
+    #[test]
+    fn accept_after_backspacing_beside_a_multibyte_character_replaces_live_text() {
+        let mut h = TestHarness::default();
+        let path = open_scratch(&mut h, "éxx");
+        h.type_keys("i");
+        h.type_text("foo");
+        let items = vec![CompletionItem {
+            label: "foobar".into(),
+            source: CompletionSource::Word,
+            kind: None,
+            detail: None,
+            replace_range: anchors(&h, 0..3),
+            insert_text: "foobar".into(),
+            is_snippet: false,
+            documentation: None,
+            lsp_item: None,
+            server: None,
+        }];
+        install_popup(&mut h, items, 0..3);
+
+        h.type_keys("backspace");
+        dispatch(&mut h.stoat, &AcceptCompletion);
+
+        assert_eq!(buffer_text(&h, &path), "foobaréxx");
+    }
+
+    /// The refine path carries an item across a keystroke rather than fetching
+    /// again, so the item has to answer for the prefix as it stands now.
+    #[test]
+    fn a_character_typed_after_the_popup_opened_joins_what_accept_replaces() {
+        let mut h = TestHarness::default();
+        let path = open_scratch(&mut h, "");
+        h.type_keys("i");
+        h.type_text("pri");
+        h.stoat.pending_completion = Some(CompletionPopup {
+            items: vec![CompletionItem {
+                label: "println!".into(),
+                source: CompletionSource::Lsp,
+                kind: None,
+                detail: None,
+                replace_range: anchors(&h, 0..3),
+                insert_text: "println!()".into(),
+                is_snippet: false,
+                documentation: None,
+                lsp_item: None,
+                server: None,
+            }],
+            selected_idx: 0,
+            anchor_offset: 0,
+            prefix_range: 0..3,
+            prefix: "pri".into(),
+            incomplete: Vec::new(),
+        });
+
+        h.type_text("n");
+        dispatch(&mut h.stoat, &AcceptCompletion);
+
+        assert_eq!(buffer_text(&h, &path), "println!()");
+    }
+
+    /// The same rule through the real pipeline, where the word source mints the
+    /// range off the snapshot its scan read.
+    #[test]
+    fn a_word_item_replaces_the_prefix_typed_after_it_was_fetched() {
+        let mut h = TestHarness::default();
+        let contents = "foobar\n";
+        let path = open_scratch(&mut h, contents);
+        // Typed past the word, so the scan finds it as a token of its own
+        // rather than as part of the prefix.
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, contents.len());
+        h.type_keys("i");
+        h.type_text("fo");
+        h.advance_clock(crate::completion::request::COMPLETION_DEBOUNCE);
+        let popup = h.stoat.pending_completion.as_ref().expect("popup armed");
+        assert_eq!(
+            popup
+                .items
+                .iter()
+                .map(|item| (item.label.as_str(), item.source))
+                .collect::<Vec<_>>(),
+            [("foobar", CompletionSource::Word)],
+        );
+
+        h.type_text("o");
+        dispatch(&mut h.stoat, &AcceptCompletion);
+
+        assert_eq!(buffer_text(&h, &path), "foobar\nfoobar");
     }
 }

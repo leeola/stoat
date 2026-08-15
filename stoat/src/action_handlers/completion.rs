@@ -220,13 +220,14 @@ mod tests {
         let path = h.write_file("a.rs", "fo\n");
         h.open_file(&path);
         h.type_keys("l l i");
+        let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..2);
         h.stoat.pending_completion = Some(CompletionPopup {
             items: vec![CompletionItem {
                 label: "foo".into(),
                 source: CompletionSource::Word,
                 kind: None,
                 detail: None,
-                replace_range: 0..2,
+                replace_range,
                 insert_text: "foo".into(),
                 is_snippet: false,
                 documentation: None,
@@ -279,7 +280,7 @@ mod tests {
             kind: None,
             detail: None,
             documentation: None,
-            replace_range: 0..0,
+            replace_range: crate::completion::unused_replace_range(),
             insert_text: label.to_string(),
             is_snippet: false,
             lsp_item: Some(Box::new(lsp_types::CompletionItem {

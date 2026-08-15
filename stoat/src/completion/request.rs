@@ -27,7 +27,7 @@
 
 use crate::{
     app::Stoat,
-    buffer::BufferId,
+    buffer::{BufferId, TextBufferSnapshot},
     completion::{
         applicable_sources, CompletionContext, CompletionItem, CompletionPopup, CompletionSource,
     },
@@ -193,7 +193,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         None => return,
     };
 
-    let owned = compute_context(&snapshot.rope, snapshot.cursor_offset);
+    let owned = compute_context(&snapshot.buffer.visible_text, snapshot.cursor_offset);
     // Signature help asks the same question on this same event, so it reads
     // this rather than walking the rope again.
     stoat.completion_context = Some((
@@ -304,7 +304,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         sources,
         completion_hosts,
         fs_host,
-        snapshot.rope,
+        snapshot.buffer,
         base_dir,
         home_dir,
         lsp_request,
@@ -502,7 +502,7 @@ fn ask_again(
     };
 
     let executor = stoat.executor.clone();
-    let rope = snapshot.rope.clone();
+    let buffer = snapshot.buffer.clone();
     let task = stoat.spawn_woken(async move {
         executor.timer(COMPLETION_DEBOUNCE).await;
 
@@ -514,7 +514,7 @@ fn ask_again(
                 let encoding = host.offset_encoding();
                 let Some(params) = build_lsp_params(
                     request.source_path.as_deref(),
-                    &rope,
+                    &buffer.visible_text,
                     request.cursor_offset,
                     encoding,
                     Some(request.context.clone()),
@@ -526,7 +526,7 @@ fn ask_again(
                     name,
                     host.as_ref(),
                     params,
-                    &rope,
+                    &buffer,
                     encoding,
                 )
                 .await;
@@ -625,7 +625,9 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
 }
 
 struct EditorSnapshot {
-    rope: Rope,
+    /// The whole snapshot rather than its rope, since the sources anchor their
+    /// replace ranges against the fragment tree they read them off.
+    buffer: TextBufferSnapshot,
     cursor_offset: usize,
     buffer_id: BufferId,
     buffer_version: u64,
@@ -669,12 +671,12 @@ fn focused_editor_snapshot(stoat: &Stoat) -> Option<EditorSnapshot> {
     let tail_off = guard.resolve_anchor(&sel.tail());
     let head_off = guard.resolve_anchor(&sel.head());
     let cursor_offset = stoat_text::cursor_offset(guard.rope(), tail_off, head_off);
-    let rope = guard.rope().clone();
+    let buffer_snapshot = guard.snapshot.clone();
     let buffer_version = guard.version();
     drop(guard);
     let source_path = ws.buffers.path_for(buffer_id).map(Path::to_path_buf);
     Some(EditorSnapshot {
-        rope,
+        buffer: buffer_snapshot,
         cursor_offset,
         buffer_id,
         buffer_version,
@@ -788,7 +790,7 @@ async fn run_request(
     sources: Vec<CompletionSource>,
     completion_hosts: Vec<(String, Arc<dyn LspHost>)>,
     fs_host: Arc<dyn FsHost>,
-    rope: Rope,
+    buffer: TextBufferSnapshot,
     base_dir: PathBuf,
     home_dir: Option<PathBuf>,
     lsp_request: Option<LspRequest>,
@@ -820,10 +822,10 @@ async fn run_request(
     let words = sources.contains(&CompletionSource::Word).then(|| {
         executor.spawn_blocking({
             let owned = owned.clone();
-            let rope = rope.clone();
+            let buffer = buffer.clone();
             move || {
                 let ctx = owned.as_borrowed();
-                crate::completion::word::fetch(&ctx, &rope)
+                crate::completion::word::fetch(&ctx, &buffer)
             }
         })
     });
@@ -836,6 +838,7 @@ async fn run_request(
             CompletionSource::Path => {
                 items.extend(crate::completion::path::fetch(
                     &ctx,
+                    &buffer,
                     fs_host.as_ref(),
                     &base_dir,
                     home_dir.as_deref(),
@@ -849,7 +852,7 @@ async fn run_request(
                         let encoding = host.offset_encoding();
                         let Some(params) = build_lsp_params(
                             request.source_path.as_deref(),
-                            &rope,
+                            &buffer.visible_text,
                             request.cursor_offset,
                             encoding,
                             Some(request.context.clone()),
@@ -861,7 +864,7 @@ async fn run_request(
                             name,
                             host.as_ref(),
                             params,
-                            &rope,
+                            &buffer,
                             encoding,
                         )
                         .await;
@@ -1614,7 +1617,7 @@ mod harness_tests {
             kind: None,
             detail: None,
             documentation: None,
-            replace_range: 0..0,
+            replace_range: crate::completion::unused_replace_range(),
             insert_text: label.to_string(),
             is_snippet: false,
             lsp_item: None,

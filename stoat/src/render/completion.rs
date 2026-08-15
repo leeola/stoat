@@ -404,7 +404,7 @@ mod tests {
             source: CompletionSource::Lsp,
             kind: None,
             detail: None,
-            replace_range: 0..0,
+            replace_range: crate::completion::unused_replace_range(),
             insert_text: label.into(),
             is_snippet: false,
             documentation: None,

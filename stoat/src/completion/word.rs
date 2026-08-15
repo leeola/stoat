@@ -4,9 +4,12 @@
 //! the LSP source nor the path source fires (plain-text buffers,
 //! files without an LSP).
 
-use crate::completion::{CompletionContext, CompletionItem, CompletionSource};
+use crate::{
+    buffer::TextBufferSnapshot,
+    completion::{anchor_range, CompletionContext, CompletionItem, CompletionSource},
+};
 use std::collections::BTreeSet;
-use stoat_text::{char_is_word, Rope};
+use stoat_text::char_is_word;
 
 /// Unique matches one fetch keeps before it stops walking the buffer.
 ///
@@ -20,7 +23,7 @@ use stoat_text::{char_is_word, Rope};
 /// alphabetical either way.
 const MAX_MATCHES: usize = 500;
 
-/// Collect every word-shaped token in `rope` whose label starts
+/// Collect every word-shaped token in `buffer` whose label starts
 /// with `ctx.prefix`. Skips the prefix itself (no point suggesting
 /// what is already typed) and dedupes repeats.
 ///
@@ -29,7 +32,7 @@ const MAX_MATCHES: usize = 500;
 /// Returns empty when `ctx.prefix` is empty -- the fallback source
 /// only fires once the user has typed at least one identifier
 /// character.
-pub fn fetch(ctx: &CompletionContext<'_>, rope: &Rope) -> Vec<CompletionItem> {
+pub fn fetch(ctx: &CompletionContext<'_>, buffer: &TextBufferSnapshot) -> Vec<CompletionItem> {
     if ctx.prefix.is_empty() {
         return Vec::new();
     }
@@ -37,7 +40,7 @@ pub fn fetch(ctx: &CompletionContext<'_>, rope: &Rope) -> Vec<CompletionItem> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut current: String = String::new();
 
-    for ch in rope.chars() {
+    for ch in buffer.visible_text.chars() {
         if char_is_word(ch) {
             current.push(ch);
         } else if !current.is_empty() {
@@ -52,13 +55,14 @@ pub fn fetch(ctx: &CompletionContext<'_>, rope: &Rope) -> Vec<CompletionItem> {
         collect(&mut current, ctx.prefix, &mut seen);
     }
 
+    let replace_range = anchor_range(buffer, ctx.prefix_range.clone());
     seen.into_iter()
         .map(|label| CompletionItem {
             label: label.clone(),
             source: CompletionSource::Word,
             kind: None,
             detail: None,
-            replace_range: ctx.prefix_range.clone(),
+            replace_range: replace_range.clone(),
             insert_text: label,
             is_snippet: false,
             documentation: None,
@@ -81,6 +85,10 @@ fn collect(current: &mut String, prefix: &str, seen: &mut BTreeSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        buffer::{BufferId, TextBuffer},
+        completion::replace_offsets,
+    };
 
     fn ctx<'a>(prefix: &'a str) -> CompletionContext<'a> {
         let len = prefix.len();
@@ -92,84 +100,89 @@ mod tests {
         }
     }
 
+    fn snapshot(text: &str) -> TextBufferSnapshot {
+        TextBuffer::with_text(BufferId::new(1), text).snapshot
+    }
+
     fn labels(items: &[CompletionItem]) -> Vec<String> {
         items.iter().map(|i| i.label.clone()).collect()
     }
 
     #[test]
     fn empty_prefix_returns_empty() {
-        let rope = Rope::from("foo bar baz");
-        let items = fetch(&ctx(""), &rope);
+        let buffer = snapshot("foo bar baz");
+        let items = fetch(&ctx(""), &buffer);
         assert_eq!(items, Vec::new());
     }
 
     #[test]
     fn prefix_without_matches_returns_empty() {
-        let rope = Rope::from("alpha beta gamma");
-        let items = fetch(&ctx("xy"), &rope);
+        let buffer = snapshot("alpha beta gamma");
+        let items = fetch(&ctx("xy"), &buffer);
         assert_eq!(items, Vec::new());
     }
 
     #[test]
     fn single_match_returns_one_item() {
-        let rope = Rope::from("println foo");
-        let items = fetch(&ctx("pr"), &rope);
+        let buffer = snapshot("println foo");
+        let items = fetch(&ctx("pr"), &buffer);
         assert_eq!(labels(&items), vec!["println"]);
     }
 
     #[test]
     fn duplicates_are_deduped() {
-        let rope = Rope::from("foo bar foo baz foo");
-        let items = fetch(&ctx("fo"), &rope);
+        let buffer = snapshot("foo bar foo baz foo");
+        let items = fetch(&ctx("fo"), &buffer);
         assert_eq!(labels(&items), vec!["foo"]);
     }
 
     #[test]
     fn prefix_itself_not_suggested() {
-        let rope = Rope::from("foo bar");
-        let items = fetch(&ctx("foo"), &rope);
+        let buffer = snapshot("foo bar");
+        let items = fetch(&ctx("foo"), &buffer);
         assert_eq!(items, Vec::new());
     }
 
     #[test]
     fn multiple_matches_returned_sorted() {
-        let rope = Rope::from("foo foobar foobaz qux");
-        let items = fetch(&ctx("foo"), &rope);
+        let buffer = snapshot("foo foobar foobaz qux");
+        let items = fetch(&ctx("foo"), &buffer);
         assert_eq!(labels(&items), vec!["foobar", "foobaz"]);
     }
 
     #[test]
     fn punctuation_separates_tokens() {
-        let rope = Rope::from("foo,bar.baz;qux");
-        let items = fetch(&ctx("ba"), &rope);
+        let buffer = snapshot("foo,bar.baz;qux");
+        let items = fetch(&ctx("ba"), &buffer);
         assert_eq!(labels(&items), vec!["bar", "baz"]);
     }
 
     #[test]
     fn underscore_is_part_of_token() {
-        let rope = Rope::from("_foo bar_baz hello");
-        let items_underscore = fetch(&ctx("_f"), &rope);
+        let buffer = snapshot("_foo bar_baz hello");
+        let items_underscore = fetch(&ctx("_f"), &buffer);
         assert_eq!(labels(&items_underscore), vec!["_foo"]);
-        let items_bar = fetch(&ctx("bar"), &rope);
+        let items_bar = fetch(&ctx("bar"), &buffer);
         assert_eq!(labels(&items_bar), vec!["bar_baz"]);
     }
 
     #[test]
     fn final_token_at_buffer_end_is_collected() {
-        let rope = Rope::from("alpha beta foobar");
-        let items = fetch(&ctx("foo"), &rope);
+        let buffer = snapshot("alpha beta foobar");
+        let items = fetch(&ctx("foo"), &buffer);
         assert_eq!(labels(&items), vec!["foobar"]);
     }
 
     #[test]
     fn replace_range_mirrors_context_prefix_range() {
-        let rope = Rope::from("foobar");
+        // The prefix is the "foo" the word starts with, typed five bytes in.
+        let buffer = snapshot("     foobar");
         let mut c = ctx("foo");
         c.prefix_range = 5..8;
         c.cursor_offset = 8;
-        let items = fetch(&c, &rope);
+        let items = fetch(&c, &buffer);
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].replace_range, 5..8);
+        assert_eq!(replace_offsets(&buffer, &items[0]), 5..8);
     }
 
     /// A one-character prefix in a large buffer matches most of it, and the
@@ -177,16 +190,16 @@ mod tests {
     #[test]
     fn the_match_set_stops_at_the_cap() {
         let text: String = (0..MAX_MATCHES + 50).map(|i| format!("foo{i} ")).collect();
-        let rope = Rope::from(text.as_str());
+        let buffer = snapshot(text.as_str());
 
-        let items = fetch(&ctx("foo"), &rope);
+        let items = fetch(&ctx("foo"), &buffer);
         assert_eq!(items.len(), MAX_MATCHES);
     }
 
     #[test]
     fn case_sensitive_match() {
-        let rope = Rope::from("Foo foo FOO");
-        let items = fetch(&ctx("Fo"), &rope);
+        let buffer = snapshot("Foo foo FOO");
+        let items = fetch(&ctx("Fo"), &buffer);
         assert_eq!(labels(&items), vec!["Foo"]);
     }
 }

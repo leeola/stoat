@@ -6,7 +6,10 @@
 //! treat every source identically.
 
 use crate::{
-    completion::{CompletionContext, CompletionItem, CompletionItemKind, CompletionSource},
+    buffer::TextBufferSnapshot,
+    completion::{
+        anchor_range, CompletionContext, CompletionItem, CompletionItemKind, CompletionSource,
+    },
     host::{LspHost, OffsetEncoding},
     lsp::util,
 };
@@ -14,7 +17,6 @@ use lsp_types::{
     CompletionItem as LspCompletionItem, CompletionItemKind as LspCompletionItemKind,
     CompletionParams, CompletionResponse, CompletionTextEdit, Documentation,
 };
-use stoat_text::Rope;
 
 /// What one server offered, and whether that is all of it.
 #[derive(Default)]
@@ -28,10 +30,11 @@ pub struct Answer {
 
 /// Fetch LSP completions for the cursor described by `params`.
 ///
-/// `rope` and `encoding` are needed to convert any `text_edit`
-/// range the server returns back into byte offsets for the unified
-/// item's `replace_range`. Items without a `text_edit` fall back
-/// to `ctx.prefix_range` so acceptance rewrites the current prefix.
+/// `buffer` and `encoding` are needed to convert any `text_edit`
+/// range the server returns into a `replace_range` anchored against
+/// the text the request was measured on. Items without a `text_edit`
+/// fall back to `ctx.prefix_range` so acceptance rewrites the current
+/// prefix.
 ///
 /// A server that errors or answers `None` yields no items, and is reported
 /// incomplete so nothing is narrowed from an answer that never came.
@@ -40,7 +43,7 @@ pub async fn fetch(
     server: &str,
     lsp: &dyn LspHost,
     params: CompletionParams,
-    rope: &Rope,
+    buffer: &TextBufferSnapshot,
     encoding: OffsetEncoding,
 ) -> Answer {
     let (items, complete) = match lsp.completion(params).await {
@@ -51,7 +54,7 @@ pub async fn fetch(
     Answer {
         items: items
             .into_iter()
-            .map(|item| translate(item, server, ctx, rope, encoding))
+            .map(|item| translate(item, server, ctx, buffer, encoding))
             .collect(),
         complete,
     }
@@ -72,16 +75,16 @@ fn translate(
     lsp_item: LspCompletionItem,
     server: &str,
     ctx: &CompletionContext<'_>,
-    rope: &Rope,
+    buffer: &TextBufferSnapshot,
     encoding: OffsetEncoding,
 ) -> CompletionItem {
-    let (replace_range, edit_text) = match &lsp_item.text_edit {
+    let (byte_range, edit_text) = match &lsp_item.text_edit {
         Some(CompletionTextEdit::Edit(edit)) => (
-            util::lsp_range_to_byte_range(rope, edit.range, encoding),
+            util::lsp_range_to_byte_range(&buffer.visible_text, edit.range, encoding),
             Some(edit.new_text.clone()),
         ),
         Some(CompletionTextEdit::InsertAndReplace(edit)) => (
-            util::lsp_range_to_byte_range(rope, edit.replace, encoding),
+            util::lsp_range_to_byte_range(&buffer.visible_text, edit.replace, encoding),
             Some(edit.new_text.clone()),
         ),
         None => (ctx.prefix_range.clone(), None),
@@ -102,7 +105,7 @@ fn translate(
         kind: lsp_item.kind.and_then(map_kind),
         detail: lsp_item.detail.clone(),
         documentation: documentation_string(lsp_item.documentation.as_ref()),
-        replace_range,
+        replace_range: anchor_range(buffer, byte_range),
         insert_text,
         is_snippet,
         lsp_item: Some(Box::new(lsp_item)),
@@ -149,10 +152,13 @@ fn map_kind(kind: LspCompletionItemKind) -> Option<CompletionItemKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::{completion_params, FakeLsp};
+    use crate::{
+        buffer::{BufferId, TextBuffer},
+        completion::replace_offsets,
+        host::{completion_params, FakeLsp},
+    };
     use lsp_types::{Position, Range, TextEdit};
     use stoat_scheduler::TestScheduler;
-    use stoat_text::Rope;
 
     fn ctx_at(prefix_start: usize, prefix_end: usize) -> CompletionContext<'static> {
         CompletionContext {
@@ -163,6 +169,10 @@ mod tests {
         }
     }
 
+    fn snapshot(text: &str) -> TextBufferSnapshot {
+        TextBuffer::with_text(BufferId::new(1), text).snapshot
+    }
+
     fn run<F: Future<Output = T>, T>(future: F) -> T {
         TestScheduler::new().block_on(future)
     }
@@ -170,7 +180,7 @@ mod tests {
     #[test]
     fn empty_response_returns_no_items() {
         let lsp = FakeLsp::new();
-        let rope = Rope::from("fn main() {}\n");
+        let buffer = snapshot("fn main() {}\n");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
         let items = run(fetch(
@@ -178,7 +188,7 @@ mod tests {
             "test-server",
             &lsp,
             params,
-            &rope,
+            &buffer,
             OffsetEncoding::Utf16,
         ))
         .items;
@@ -189,7 +199,7 @@ mod tests {
     fn programmed_labels_translate_with_default_replace_range() {
         let lsp = FakeLsp::new();
         lsp.set_completions("/src/lib.rs", 0, 5, &["foo", "bar", "baz"]);
-        let rope = Rope::from("hello world\n");
+        let buffer = snapshot("hello world\n");
         let params = completion_params("/src/lib.rs", 0, 5);
         let ctx = ctx_at(2, 7);
         let items = run(fetch(
@@ -197,7 +207,7 @@ mod tests {
             "test-server",
             &lsp,
             params,
-            &rope,
+            &buffer,
             OffsetEncoding::Utf16,
         ))
         .items;
@@ -207,7 +217,7 @@ mod tests {
         for item in &items {
             assert_eq!(item.source, CompletionSource::Lsp);
             assert_eq!(item.kind, None);
-            assert_eq!(item.replace_range, 2..7);
+            assert_eq!(replace_offsets(&buffer, item), 2..7);
             assert_eq!(item.detail, None);
             assert_eq!(item.insert_text, item.label);
         }
@@ -229,7 +239,7 @@ mod tests {
                 ..LspCompletionItem::default()
             }],
         );
-        let rope = Rope::from("print\n");
+        let buffer = snapshot("print\n");
         let params = completion_params("/src/lib.rs", 0, 5);
         let ctx = ctx_at(0, 5);
         let items = run(fetch(
@@ -237,12 +247,12 @@ mod tests {
             "test-server",
             &lsp,
             params,
-            &rope,
+            &buffer,
             OffsetEncoding::Utf16,
         ))
         .items;
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].replace_range, 0..5);
+        assert_eq!(replace_offsets(&buffer, &items[0]), 0..5);
         assert_eq!(items[0].insert_text, "println!(\"\")");
     }
 
@@ -259,7 +269,7 @@ mod tests {
                 ..LspCompletionItem::default()
             }],
         );
-        let rope = Rope::from("");
+        let buffer = snapshot("");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
         let items = run(fetch(
@@ -267,7 +277,7 @@ mod tests {
             "test-server",
             &lsp,
             params,
-            &rope,
+            &buffer,
             OffsetEncoding::Utf16,
         ))
         .items;
@@ -290,7 +300,7 @@ mod tests {
                 ..LspCompletionItem::default()
             }],
         );
-        let rope = Rope::from("");
+        let buffer = snapshot("");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
         let items = run(fetch(
@@ -298,7 +308,7 @@ mod tests {
             "test-server",
             &lsp,
             params,
-            &rope,
+            &buffer,
             OffsetEncoding::Utf16,
         ))
         .items;
@@ -318,7 +328,7 @@ mod tests {
                 ..LspCompletionItem::default()
             }],
         );
-        let rope = Rope::from("");
+        let buffer = snapshot("");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
         let items = run(fetch(
@@ -326,7 +336,7 @@ mod tests {
             "test-server",
             &lsp,
             params,
-            &rope,
+            &buffer,
             OffsetEncoding::Utf16,
         ))
         .items;
@@ -337,7 +347,7 @@ mod tests {
     fn insert_text_falls_back_to_label_when_neither_text_edit_nor_insert_text() {
         let lsp = FakeLsp::new();
         lsp.set_completions("/src/lib.rs", 0, 0, &["bare_label"]);
-        let rope = Rope::from("");
+        let buffer = snapshot("");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
         let items = run(fetch(
@@ -345,7 +355,7 @@ mod tests {
             "test-server",
             &lsp,
             params,
-            &rope,
+            &buffer,
             OffsetEncoding::Utf16,
         ))
         .items;
@@ -365,7 +375,7 @@ mod tests {
                 ..LspCompletionItem::default()
             }],
         );
-        let rope = Rope::from("");
+        let buffer = snapshot("");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
         let items = run(fetch(
@@ -373,7 +383,7 @@ mod tests {
             "test-server",
             &lsp,
             params,
-            &rope,
+            &buffer,
             OffsetEncoding::Utf16,
         ))
         .items;

@@ -17,7 +17,9 @@ pub(crate) mod request;
 pub(crate) mod snippet;
 pub mod word;
 
+use crate::buffer::TextBufferSnapshot;
 use std::ops::Range;
+use stoat_text::{Anchor, Bias};
 
 /// Identifies which subsystem produced a completion item; consumed
 /// by the dispatch entry to decide whether the source applies in
@@ -80,10 +82,13 @@ pub struct CompletionItem {
     /// [`crate::host::LspHost::completion_resolve`]. Non-LSP sources
     /// never set it.
     pub documentation: Option<String>,
-    /// Byte-range in the source buffer that acceptance replaces.
-    /// Sources scope this to the current prefix at minimum; LSP
-    /// items widen it to the server's `text_edit.range`.
-    pub replace_range: Range<usize>,
+    /// The span of source-buffer text acceptance replaces, anchored so it
+    /// still names that text after the reader types on.
+    ///
+    /// Sources scope this to the current prefix at minimum; LSP items widen it
+    /// to the server's `text_edit.range`. Each source mints it via
+    /// [`anchor_range`] against the snapshot it read.
+    pub replace_range: Range<Anchor>,
     /// Text inserted into the buffer when the user accepts this
     /// row.
     pub insert_text: String,
@@ -196,6 +201,50 @@ pub fn applicable_sources(ctx: &CompletionContext<'_>) -> Vec<CompletionSource> 
         }
     }
     sources
+}
+
+/// Anchor the byte range a source measured against the snapshot it measured it
+/// on, giving [`CompletionItem::replace_range`].
+///
+/// The reader keeps typing while the request is in flight, and the popup then
+/// outlives several more keystrokes, so byte offsets frozen at fetch name the
+/// wrong text by the time `Tab` reaches them -- a mid-character offset at worst,
+/// and a span that misses what was typed since at best.
+///
+/// The start biases left and the end right, so text typed at either edge of the
+/// span joins what acceptance replaces rather than being left stranded beside
+/// it. A zero-width range (a server insert, a fresh path segment) grows the same
+/// way, which is what lets it swallow the characters typed after it opened.
+pub(crate) fn anchor_range(buffer: &TextBufferSnapshot, range: Range<usize>) -> Range<Anchor> {
+    buffer.anchor_at(range.start, Bias::Left)..buffer.anchor_at(range.end, Bias::Right)
+}
+
+/// A replace range for fixtures that never accept the item they build.
+#[cfg(test)]
+pub(crate) fn unused_replace_range() -> Range<Anchor> {
+    Anchor::min()..Anchor::min()
+}
+
+/// Where an item's replace range sits in the text it was minted against.
+#[cfg(test)]
+pub(crate) fn replace_offsets(buffer: &TextBufferSnapshot, item: &CompletionItem) -> Range<usize> {
+    buffer.resolve_anchor(&item.replace_range.start)..buffer.resolve_anchor(&item.replace_range.end)
+}
+
+/// The range a source mints for `range` in the focused buffer.
+///
+/// Tests that install a popup directly skip the request pipeline, so they have
+/// no snapshot of their own to mint against.
+#[cfg(test)]
+pub(crate) fn anchor_range_in_focused(
+    stoat: &crate::app::Stoat,
+    range: Range<usize>,
+) -> Range<Anchor> {
+    let (_, buffer_id) = stoat.focused_editor_ids().expect("focused editor");
+    let ws = stoat.active_workspace();
+    let buffer = ws.buffers.get(buffer_id).expect("buffer present");
+    let guard = buffer.read().expect("buffer lock");
+    anchor_range(&guard.snapshot, range)
 }
 
 /// Path-like prefix detection. Returns true when the prefix already
@@ -358,7 +407,7 @@ mod tests {
             source: CompletionSource::Lsp,
             kind: Some(CompletionItemKind::Function),
             detail: Some("fn open_file(path: &Path)".into()),
-            replace_range: 4..12,
+            replace_range: unused_replace_range(),
             insert_text: "open_file(${1:path})".into(),
             is_snippet: true,
             documentation: None,
@@ -384,7 +433,7 @@ mod tests {
             source: CompletionSource::Lsp,
             kind: Some(CompletionItemKind::Function),
             detail: None,
-            replace_range: 4..7,
+            replace_range: unused_replace_range(),
             insert_text: "open_file()".into(),
             is_snippet: false,
             documentation: None,
@@ -430,7 +479,7 @@ mod tests {
                 source: CompletionSource::Lsp,
                 kind: Some(kind),
                 detail: None,
-                replace_range: 0..0,
+                replace_range: unused_replace_range(),
                 insert_text: String::new(),
                 is_snippet: false,
                 documentation: None,

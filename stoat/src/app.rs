@@ -15323,7 +15323,7 @@ mod tests {
                 source: CompletionSource::Lsp,
                 kind: None,
                 detail: None,
-                replace_range: 0..0,
+                replace_range: crate::completion::unused_replace_range(),
                 insert_text: "foo".into(),
                 is_snippet: false,
                 documentation: None,
@@ -15374,13 +15374,14 @@ mod tests {
         let path = open_scratch_file(&mut h, "");
         h.type_keys("i");
         h.type_keys("f o o");
+        let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..3);
         h.stoat.pending_completion = Some(CompletionPopup {
             items: vec![CompletionItem {
                 label: "foobar".into(),
                 source: CompletionSource::Word,
                 kind: None,
                 detail: None,
-                replace_range: 0..3,
+                replace_range,
                 insert_text: "foobar".into(),
                 is_snippet: false,
                 documentation: None,
@@ -15417,7 +15418,7 @@ mod tests {
                     source: CompletionSource::Word,
                     kind: None,
                     detail: None,
-                    replace_range: 0..1,
+                    replace_range: crate::completion::unused_replace_range(),
                     insert_text: "foo".into(),
                     is_snippet: false,
                     documentation: None,
@@ -15429,7 +15430,7 @@ mod tests {
                     source: CompletionSource::Word,
                     kind: None,
                     detail: None,
-                    replace_range: 0..1,
+                    replace_range: crate::completion::unused_replace_range(),
                     insert_text: "foobar".into(),
                     is_snippet: false,
                     documentation: None,
@@ -15441,7 +15442,7 @@ mod tests {
                     source: CompletionSource::Word,
                     kind: None,
                     detail: None,
-                    replace_range: 0..1,
+                    replace_range: crate::completion::unused_replace_range(),
                     insert_text: "foobaz".into(),
                     is_snippet: false,
                     documentation: None,
@@ -15496,13 +15497,14 @@ mod tests {
         let path = open_scratch_file(&mut h, "");
         h.type_keys("i");
         h.type_keys("p r i");
+        let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..3);
         h.stoat.pending_completion = Some(CompletionPopup {
             items: vec![CompletionItem {
                 label: "fn".into(),
                 source: CompletionSource::Lsp,
                 kind: None,
                 detail: None,
-                replace_range: 0..3,
+                replace_range,
                 insert_text: "${1:name}(${2:arg})$0".into(),
                 is_snippet: true,
                 documentation: None,
@@ -15542,13 +15544,14 @@ mod tests {
         let _path = open_scratch_file(&mut h, "");
         h.type_keys("i");
         h.type_keys("f");
+        let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..1);
         h.stoat.pending_completion = Some(CompletionPopup {
             items: vec![CompletionItem {
                 label: "snippet".into(),
                 source: CompletionSource::Lsp,
                 kind: None,
                 detail: None,
-                replace_range: 0..1,
+                replace_range,
                 insert_text: "${1:a} ${2:b}".into(),
                 is_snippet: true,
                 documentation: None,

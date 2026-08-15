@@ -4,7 +4,10 @@
 //! trailing `/` on directories so chained completions feel natural.
 
 use crate::{
-    completion::{CompletionContext, CompletionItem, CompletionItemKind, CompletionSource},
+    buffer::TextBufferSnapshot,
+    completion::{
+        anchor_range, CompletionContext, CompletionItem, CompletionItemKind, CompletionSource,
+    },
     host::FsHost,
 };
 use std::path::{Path, PathBuf};
@@ -22,6 +25,7 @@ use std::path::{Path, PathBuf};
 /// `FakeFs`.
 pub fn fetch(
     ctx: &CompletionContext<'_>,
+    buffer: &TextBufferSnapshot,
     fs: &dyn FsHost,
     base_dir: &Path,
     home_dir: Option<&Path>,
@@ -44,7 +48,7 @@ pub fn fetch(
     let typed_lc = typed_name.to_lowercase();
     let typed_byte_len = typed_name.len();
     let cursor = ctx.cursor_offset;
-    let replace_start = cursor.saturating_sub(typed_byte_len);
+    let replace_range = anchor_range(buffer, cursor.saturating_sub(typed_byte_len)..cursor);
 
     let mut items = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -66,7 +70,7 @@ pub fn fetch(
                 CompletionItemKind::File
             }),
             detail: None,
-            replace_range: replace_start..cursor,
+            replace_range: replace_range.clone(),
             insert_text: label,
             is_snippet: false,
             documentation: None,
@@ -127,7 +131,11 @@ fn resolve_parent(parent_subpath: &str, base_dir: &Path, home_dir: Option<&Path>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::FakeFs;
+    use crate::{
+        buffer::{BufferId, TextBuffer},
+        completion::replace_offsets,
+        host::FakeFs,
+    };
 
     fn ctx<'a>(text: &'a str) -> CompletionContext<'a> {
         CompletionContext {
@@ -138,6 +146,22 @@ mod tests {
         }
     }
 
+    /// A buffer holding just the path being typed, so the cursor `ctx` reports
+    /// sits at its end.
+    fn snapshot(text: &str) -> TextBufferSnapshot {
+        TextBuffer::with_text(BufferId::new(1), text).snapshot
+    }
+
+    /// Fetch for a cursor at the end of `text` in a buffer holding only it.
+    fn fetch_at(
+        text: &str,
+        fs: &dyn FsHost,
+        base_dir: &Path,
+        home_dir: Option<&Path>,
+    ) -> Vec<CompletionItem> {
+        fetch(&ctx(text), &snapshot(text), fs, base_dir, home_dir)
+    }
+
     fn labels(items: &[CompletionItem]) -> Vec<String> {
         items.iter().map(|i| i.label.clone()).collect()
     }
@@ -145,7 +169,7 @@ mod tests {
     #[test]
     fn empty_text_returns_no_items() {
         let fs = FakeFs::new();
-        let items = fetch(&ctx(""), &fs, Path::new("/ws"), None);
+        let items = fetch_at("", &fs, Path::new("/ws"), None);
         assert_eq!(items, Vec::new());
     }
 
@@ -153,7 +177,7 @@ mod tests {
     fn bare_identifier_returns_no_items() {
         let fs = FakeFs::new();
         fs.insert_file("/ws/foo.txt", b"");
-        let items = fetch(&ctx("foo"), &fs, Path::new("/ws"), None);
+        let items = fetch_at("foo", &fs, Path::new("/ws"), None);
         assert_eq!(items, Vec::new());
     }
 
@@ -163,7 +187,7 @@ mod tests {
         fs.insert_file("/ws/main.rs", b"");
         fs.insert_file("/ws/lib.rs", b"");
         fs.insert_dir("/ws/src");
-        let items = fetch(&ctx("./"), &fs, Path::new("/ws"), None);
+        let items = fetch_at("./", &fs, Path::new("/ws"), None);
         let mut got = labels(&items);
         got.sort();
         assert_eq!(got, vec!["lib.rs", "main.rs", "src/"]);
@@ -173,9 +197,14 @@ mod tests {
     fn dot_slash_replace_range_is_zero_width_at_cursor() {
         let fs = FakeFs::new();
         fs.insert_file("/ws/lib.rs", b"");
-        let items = fetch(&ctx("./"), &fs, Path::new("/ws"), None);
+        let buffer = snapshot("./");
+        let items = fetch(&ctx("./"), &buffer, &fs, Path::new("/ws"), None);
         for item in &items {
-            assert_eq!(item.replace_range, 2..2, "replace range follows cursor");
+            assert_eq!(
+                replace_offsets(&buffer, item),
+                2..2,
+                "replace range follows cursor"
+            );
         }
     }
 
@@ -184,7 +213,7 @@ mod tests {
         let fs = FakeFs::new();
         fs.insert_file("/ws/sub/a.txt", b"");
         fs.insert_file("/ws/sub/b.txt", b"");
-        let items = fetch(&ctx("./sub/"), &fs, Path::new("/ws"), None);
+        let items = fetch_at("./sub/", &fs, Path::new("/ws"), None);
         let mut got = labels(&items);
         got.sort();
         assert_eq!(got, vec!["a.txt", "b.txt"]);
@@ -196,7 +225,7 @@ mod tests {
         fs.insert_file("/ws/sub/foo.txt", b"");
         fs.insert_file("/ws/sub/bar.txt", b"");
         fs.insert_file("/ws/sub/foobar.txt", b"");
-        let items = fetch(&ctx("./sub/fo"), &fs, Path::new("/ws"), None);
+        let items = fetch_at("./sub/fo", &fs, Path::new("/ws"), None);
         let mut got = labels(&items);
         got.sort();
         assert_eq!(got, vec!["foo.txt", "foobar.txt"]);
@@ -206,9 +235,14 @@ mod tests {
     fn typed_name_replace_range_covers_only_typed_segment() {
         let fs = FakeFs::new();
         fs.insert_file("/ws/sub/foo.txt", b"");
-        let items = fetch(&ctx("./sub/fo"), &fs, Path::new("/ws"), None);
+        let buffer = snapshot("./sub/fo");
+        let items = fetch(&ctx("./sub/fo"), &buffer, &fs, Path::new("/ws"), None);
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].replace_range, 6..8, "replace covers only `fo`");
+        assert_eq!(
+            replace_offsets(&buffer, &items[0]),
+            6..8,
+            "replace covers only `fo`"
+        );
     }
 
     #[test]
@@ -216,7 +250,7 @@ mod tests {
         let fs = FakeFs::new();
         fs.insert_file("/etc/hosts", b"");
         fs.insert_file("/etc/passwd", b"");
-        let items = fetch(&ctx("/etc/hos"), &fs, Path::new("/ws"), None);
+        let items = fetch_at("/etc/hos", &fs, Path::new("/ws"), None);
         let got = labels(&items);
         assert_eq!(got, vec!["hosts"]);
     }
@@ -226,12 +260,7 @@ mod tests {
         let fs = FakeFs::new();
         fs.insert_dir("/home/u/Documents");
         fs.insert_file("/home/u/Downloads/x", b"");
-        let items = fetch(
-            &ctx("~/Doc"),
-            &fs,
-            Path::new("/ws"),
-            Some(Path::new("/home/u")),
-        );
+        let items = fetch_at("~/Doc", &fs, Path::new("/ws"), Some(Path::new("/home/u")));
         let got = labels(&items);
         assert_eq!(got, vec!["Documents/"]);
     }
@@ -240,7 +269,7 @@ mod tests {
     fn home_path_without_home_dir_falls_through_to_base() {
         let fs = FakeFs::new();
         fs.insert_dir("/ws/~/foo");
-        let items = fetch(&ctx("~/fo"), &fs, Path::new("/ws"), None);
+        let items = fetch_at("~/fo", &fs, Path::new("/ws"), None);
         let got = labels(&items);
         assert_eq!(got, vec!["foo/"]);
     }
@@ -248,7 +277,7 @@ mod tests {
     #[test]
     fn missing_directory_returns_empty() {
         let fs = FakeFs::new();
-        let items = fetch(&ctx("./missing/"), &fs, Path::new("/ws"), None);
+        let items = fetch_at("./missing/", &fs, Path::new("/ws"), None);
         assert_eq!(items, Vec::new());
     }
 
@@ -257,7 +286,7 @@ mod tests {
         let fs = FakeFs::new();
         fs.insert_file("/ws/Main.rs", b"");
         fs.insert_file("/ws/main.toml", b"");
-        let items = fetch(&ctx("./MAIN"), &fs, Path::new("/ws"), None);
+        let items = fetch_at("./MAIN", &fs, Path::new("/ws"), None);
         let mut got = labels(&items);
         got.sort();
         assert_eq!(got, vec!["Main.rs", "main.toml"]);
