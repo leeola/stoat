@@ -249,8 +249,21 @@ pub(super) fn search_selection(stoat: &mut Stoat, detect_word_boundaries: bool) 
     }
 
     let pattern = alternatives.join("|");
-    let smart_case = smart_case(stoat);
     stoat.set_status(format!("search pattern set to '{pattern}'"));
+    set_pattern(stoat, pattern);
+    UpdateEffect::Redraw
+}
+
+/// Make `pattern` what the next repeat searches for.
+///
+/// For the paths that name a pattern outright rather than reading one from the
+/// search prompt. The direction is forward, since nothing about a named pattern
+/// says which way to read it.
+///
+/// Reports nothing of its own. A caller that wants the reader told says so in
+/// its own words.
+pub(crate) fn set_pattern(stoat: &mut Stoat, pattern: String) {
+    let smart_case = smart_case(stoat);
     stoat.last_search = Some(LastSearch::new(
         pattern,
         SearchDirection::Forward,
@@ -259,7 +272,6 @@ pub(super) fn search_selection(stoat: &mut Stoat, detect_word_boundaries: bool) 
     // The highlight pass reads the stored query straight off the app, so
     // nothing else reports that a different set of matches now lights up.
     stoat.paint_generation += 1;
-    UpdateEffect::Redraw
 }
 
 /// Whether a word starts at `index`, which is where a `\b` before the selection

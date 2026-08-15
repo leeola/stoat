@@ -11,20 +11,11 @@ use stoat_text::{Bias, LineEnding, Point, SelectionGoal};
 /// joined with newlines in start-offset order so a later paste
 /// can split back per-line.
 ///
-/// Routes by register variant: `Clipboard` writes to
-/// [`crate::host::ClipboardHost::set`]; `Blackhole` swallows the
-/// content silently; `Search`, `SelectionIndex`, and `LastInsert`
-/// are read-only and short-circuit; named/unnamed registers go
-/// through the in-memory store. No-op when every selection is
-/// collapsed or the focused pane is not an editor.
+/// [`write_fragments_to_register`] routes by variant and reports a register
+/// that refuses the write. No-op when every selection is collapsed or the
+/// focused pane is not an editor.
 pub(super) fn yank(stoat: &mut Stoat) -> UpdateEffect {
     let target = stoat.active_register();
-    if matches!(
-        target,
-        Register::Search | Register::SelectionIndex | Register::LastInsert
-    ) {
-        return UpdateEffect::None;
-    }
     let Some(fragments) = selection_fragments(stoat) else {
         return UpdateEffect::None;
     };
@@ -35,22 +26,27 @@ pub(super) fn yank(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     }
     let count = fragments.len();
-    write_fragments_to_register(stoat, target, fragments);
-    stoat.set_status(format!("yanked {count} selection(s)"));
+    if write_fragments_to_register(stoat, target, fragments) {
+        stoat.set_status(format!("yanked {count} selection(s)"));
+    }
     UpdateEffect::Redraw
 }
 
-/// Write per-selection `fragments` to `target`. The clipboard receives the
-/// fragments joined with newlines. Blackhole and the read-only registers
-/// (search, selection index, last insert) drop them.
+/// Write per-selection `fragments` to `target`, and report when the register
+/// refuses them. Returns whether the write landed.
+///
+/// The clipboard receives the fragments joined with newlines, and the search
+/// register takes the first as the pattern the next repeat looks for. The
+/// blackhole swallows them, which counts as landing: a reader who names it
+/// asked for the text to go nowhere.
 ///
 /// Shared by yank and by delete, which yanks the removed text before deleting
-/// it.
+/// it, so a refusal is reported once for either.
 pub(crate) fn write_fragments_to_register(
     stoat: &mut Stoat,
     target: Register,
     fragments: Vec<String>,
-) {
+) -> bool {
     match target {
         Register::Clipboard => {
             crate::host::clipboard_copy(
@@ -63,8 +59,22 @@ pub(crate) fn write_fragments_to_register(
         Register::Unnamed | Register::Named(_) => {
             stoat.registers.write(target, fragments);
         },
-        Register::Search | Register::SelectionIndex | Register::LastInsert => {},
+        // A search holds one pattern where a yank offers one fragment per
+        // selection, so the first is the one that counts.
+        Register::Search => {
+            let pattern = fragments.into_iter().next().unwrap_or_default();
+            super::search::set_pattern(stoat, pattern);
+        },
+        Register::SelectionIndex => {
+            stoat.set_status("register # does not support writing");
+            return false;
+        },
+        Register::LastInsert => {
+            stoat.set_status("register . does not support writing");
+            return false;
+        },
     }
+    true
 }
 
 pub(super) fn select_register(stoat: &mut Stoat) -> UpdateEffect {
@@ -1406,6 +1416,72 @@ mod tests {
         h.type_keys("escape");
         h.type_keys("\" a p");
         assert_eq!(buffer_text(&h, &path), "abcxyz\n");
+    }
+
+    /// A register that holds something derived refuses a write, and says so
+    /// rather than dropping the yank without a word.
+    #[test]
+    fn yank_to_selection_index_register_reports_an_error() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        h.type_keys("v l l");
+        h.type_keys("escape");
+        h.type_keys("\" # y");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("register # does not support writing"),
+        );
+    }
+
+    #[test]
+    fn yank_to_last_insert_register_reports_an_error() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        h.type_keys("v l l");
+        h.type_keys("escape");
+        h.type_keys("\" . y");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("register . does not support writing"),
+        );
+    }
+
+    /// Yanking into the search register makes the yanked text the pattern the
+    /// next repeat looks for.
+    #[test]
+    fn yank_to_search_register_sets_the_next_search() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "def abc def\n");
+        h.type_keys("v l l");
+        h.type_keys("escape");
+        h.type_keys("\" / y");
+        assert_eq!(
+            h.stoat.last_search.as_ref().map(|s| s.query.as_str()),
+            Some("def"),
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
+        assert_eq!(
+            h.selection_spans(),
+            vec![(8, 11, false)],
+            "the repeat found the second def, not the one it started on",
+        );
+    }
+
+    /// A yank of several selections offers a fragment each where the search
+    /// holds one pattern, so the first is the one that counts.
+    #[test]
+    fn yank_of_several_selections_to_search_takes_the_first() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "ab\ncd\n");
+        h.type_keys("v l");
+        h.type_keys("escape");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
+        h.type_keys("\" / y");
+        assert_eq!(
+            h.stoat.last_search.as_ref().map(|s| s.query.as_str()),
+            Some("ab"),
+        );
     }
 
     /// A command with no use for a register still spends the selection, so the
