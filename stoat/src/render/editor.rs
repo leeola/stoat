@@ -6,7 +6,8 @@ use crate::{
     },
     diff_map::DiffHunkStatus,
     display_map::{
-        display_width, tab_map, BlockChunks, BlockRowKind, DisplayPoint, DisplaySnapshot, TabPoint,
+        display_width, tab_map, BlockChunks, BlockRowKind, DisplayPoint, DisplaySnapshot,
+        PaintVersion, TabPoint,
     },
     editor_state::{EditorState, SearchMatchCache},
     minimap::color_to_rgb,
@@ -1167,7 +1168,7 @@ fn diagnostic_rows<'c>(
         inner.width,
         end_row.saturating_sub(scroll_row),
         snapshot.buffer_snapshot().version(),
-        snapshot.version(),
+        snapshot.paint_version(),
         snapshot.diff_map().map_or(0, |dm| dm.version()),
         severity_version,
     );
@@ -1443,12 +1444,18 @@ pub(crate) fn rich_gutter(
 /// of them reuses all three. The relative-numbering line and the resolved
 /// colors are deliberately absent, since none of the three collections reads
 /// either.
+///
+/// `paint_version` carries every display transform rather than the folds
+/// alone, because the rows the geometry counts are what the whole mapping
+/// produces. A background rewrap makes the distinction matter: it settles
+/// moving no version but its own, so a key without it serves the row mapping
+/// from before the file was wrapped.
 fn gutter_geometry_key(
     scroll_row: u32,
     width: u16,
     visible: u32,
     buffer_version: u64,
-    fold_version: usize,
+    paint_version: PaintVersion,
     diff_version: usize,
     severity_version: u64,
 ) -> u64 {
@@ -1457,7 +1464,7 @@ fn gutter_geometry_key(
     width.hash(&mut hasher);
     visible.hash(&mut hasher);
     buffer_version.hash(&mut hasher);
-    fold_version.hash(&mut hasher);
+    paint_version.hash(&mut hasher);
     diff_version.hash(&mut hasher);
     severity_version.hash(&mut hasher);
     hasher.finish()
@@ -1546,7 +1553,7 @@ fn draw_line_number_gutter(
         inner.width,
         visible,
         snapshot.buffer_snapshot().version(),
-        snapshot.version(),
+        snapshot.paint_version(),
         snapshot.diff_map().map_or(0, |dm| dm.version()),
         severity_version,
     );
@@ -3697,7 +3704,7 @@ mod tests {
 
     /// Paint the focused editor's line-number gutter and return its
     /// geometry-cache key.
-    fn paint_gutter_key(stoat: &mut Stoat, rows: u16) -> u64 {
+    fn paint_gutter_key(stoat: &mut Stoat, rows: u16, wrap: WrapMode) -> u64 {
         let theme = crate::theme::Theme::empty();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
         let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
@@ -3723,7 +3730,7 @@ mod tests {
             None,
             None,
             0.0,
-            WrapMode::None,
+            wrap,
             80,
         );
         editor
@@ -3759,11 +3766,11 @@ mod tests {
         dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
 
-        let key = paint_gutter_key(&mut h.stoat, 5);
+        let key = paint_gutter_key(&mut h.stoat, 5, WrapMode::None);
         cached_folded(&mut h.stoat).clear();
 
         assert_eq!(
-            paint_gutter_key(&mut h.stoat, 5),
+            paint_gutter_key(&mut h.stoat, 5, WrapMode::None),
             key,
             "an identical paint keeps the cache key"
         );
@@ -3777,13 +3784,78 @@ mod tests {
             .scroll_row = 1;
 
         assert_ne!(
-            paint_gutter_key(&mut h.stoat, 5),
+            paint_gutter_key(&mut h.stoat, 5, WrapMode::None),
             key,
             "a scroll changes the cache key"
         );
         assert!(
             !cached_folded(&mut h.stoat).is_empty(),
             "an invalidated cache rebuilds the geometry"
+        );
+
+        // The pane keeps its width, so the wrap version is the only part of the
+        // key this moves.
+        let unwrapped = paint_gutter_key(&mut h.stoat, 5, WrapMode::None);
+        assert_ne!(
+            paint_gutter_key(&mut h.stoat, 5, WrapMode::EditorWidth),
+            unwrapped,
+            "turning wrapping on changes the cache key"
+        );
+    }
+
+    /// A settled background rewrap is the one mapping change that announces
+    /// itself through no version the gutter used to watch.
+    ///
+    /// The first wrap of a file at or above the deferral threshold runs off the
+    /// paint thread, so the paint that requested it draws the unwrapped row
+    /// mapping. Nothing about the buffer, the folds, or the diff moves when the
+    /// real wrapping lands, so a key blind to it leaves the line numbers
+    /// numbering rows the text no longer occupies.
+    #[test]
+    fn a_settled_background_rewrap_rebuilds_the_gutter_geometry() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/gutter-rewrap");
+        let path = root.join("wide.txt");
+
+        // Lines long enough to wrap several times in a 12-column pane, and more
+        // of them than the threshold that sends the first wrap to the background.
+        let body = std::iter::repeat_n("the quick brown fox jumps over the lazy dog", 120)
+            .collect::<Vec<_>>()
+            .join("\n");
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        /// The display rows the focused editor's mapping currently spans, which
+        /// grows once the real wrapping replaces the interpolated pass-through.
+        fn display_rows(stoat: &mut Stoat) -> u32 {
+            action_handlers::focused_editor_mut(stoat)
+                .unwrap()
+                .display_map
+                .snapshot()
+                .max_point()
+                .row
+        }
+
+        let deferred = paint_gutter_key(&mut h.stoat, 5, WrapMode::EditorWidth);
+        let rows_deferred = display_rows(&mut h.stoat);
+        cached_folded(&mut h.stoat).clear();
+
+        h.settle();
+        assert!(
+            display_rows(&mut h.stoat) > rows_deferred,
+            "the paint deferred its wrap, so the settle is what lands the wrapped rows",
+        );
+
+        assert_ne!(
+            paint_gutter_key(&mut h.stoat, 5, WrapMode::EditorWidth),
+            deferred,
+            "the settled wrapping changes the cache key"
+        );
+        assert!(
+            !cached_folded(&mut h.stoat).is_empty(),
+            "so the gutter rebuilds its folded rows against the wrapped mapping"
         );
     }
 
