@@ -1,6 +1,10 @@
 use crate::Rope;
 use unicode_general_category::{get_general_category, GeneralCategory};
 
+/// Digit grouping mark a number literal carries, which
+/// [`integer_increment`] preserves rather than normalizes away.
+const SEPARATOR: char = '_';
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CharCategory {
     Whitespace,
@@ -658,6 +662,118 @@ fn regroup_right(digits: &str, group_size: usize) -> String {
         idx += group_size;
     }
     out
+}
+
+/// Returns `text` with `amount` added to the integer it spells, or [`None`]
+/// when it spells no integer.
+///
+/// The whole of `text` must be the number. A caller hands over the text a
+/// selection covers, so a selection holding anything else answers `None` and
+/// the caller leaves it alone.
+///
+/// Recognizes decimal with no prefix, and base 2, 8, and 16 behind `0b`, `0o`,
+/// and `0x`. A decimal goes negative where a radix literal saturates at zero,
+/// since a radix literal has no sign to write. Both ends saturate rather than
+/// wrap.
+///
+/// Incrementing a number in a source file must not reformat it, so the written
+/// form survives the arithmetic. A leading zero marks a fixed-width field and
+/// the width is kept, widening by one where a sign appears. Hex digits follow
+/// whichever case the original used more of. `_` separators are re-laid at the
+/// distances they arrived at, and a number that outgrows its width gains a
+/// separator at the same spacing.
+///
+/// A leading or trailing `_` answers `None`, since neither belongs to a number.
+pub fn integer_increment(text: &str, amount: i64) -> Option<String> {
+    if text.is_empty() || text.starts_with(SEPARATOR) || text.ends_with(SEPARATOR) {
+        return None;
+    }
+
+    let radix = match &text[..text.len().min(2)] {
+        "0x" => 16,
+        "0o" => 8,
+        "0b" => 2,
+        _ => 10,
+    };
+
+    // Right-to-left so the offsets survive a number that grows or shrinks a
+    // digit, which is what lets the separators go back where they were.
+    let separator_rtl_indexes: Vec<usize> = text
+        .chars()
+        .rev()
+        .enumerate()
+        .filter_map(|(i, c)| (c == SEPARATOR).then_some(i))
+        .collect();
+
+    let word: String = text.chars().filter(|&c| c != SEPARATOR).collect();
+
+    let mut new_text = if radix == 10 {
+        let value = i128::from_str_radix(&word, radix).ok()?;
+        let new_value = value.saturating_add(amount as i128);
+
+        let format_length = match (value.is_negative(), new_value.is_negative()) {
+            (true, false) => word.len() - 1,
+            (false, true) => word.len() + 1,
+            _ => word.len(),
+        } - separator_rtl_indexes.len();
+
+        if word.starts_with('0') || word.starts_with("-0") {
+            format!("{new_value:0format_length$}")
+        } else {
+            format!("{new_value}")
+        }
+    } else {
+        let body = &word[2..];
+        let value = u128::from_str_radix(body, radix).ok()?;
+        let new_value = (value as i128).saturating_add(amount as i128).max(0);
+        let format_length = text.len() - 2 - separator_rtl_indexes.len();
+
+        match radix {
+            2 => format!("0b{new_value:0format_length$b}"),
+            8 => format!("0o{new_value:0format_length$o}"),
+            _ => {
+                let (lower, upper) = body.chars().fold((0usize, 0usize), |(lo, up), c| {
+                    (
+                        lo + c.is_ascii_lowercase() as usize,
+                        up + c.is_ascii_uppercase() as usize,
+                    )
+                });
+                if upper > lower {
+                    format!("0x{new_value:0format_length$X}")
+                } else {
+                    format!("0x{new_value:0format_length$x}")
+                }
+            },
+        }
+    };
+
+    for &rtl_index in &separator_rtl_indexes {
+        if rtl_index < new_text.len() {
+            let new_index = new_text.len().saturating_sub(rtl_index);
+            if new_index > 0 {
+                new_text.insert(new_index, SEPARATOR);
+            }
+        }
+    }
+
+    // A number that outgrew its width has room the old offsets never covered,
+    // so keep laying separators leftward at the spacing they already hold.
+    if new_text.len() > text.len() && !separator_rtl_indexes.is_empty() {
+        let spacing = match separator_rtl_indexes.as_slice() {
+            [.., b, a] => a - b - 1,
+            _ => separator_rtl_indexes[0],
+        };
+
+        let prefix_length = if radix == 10 { 0 } else { 2 };
+        if let Some(mut index) = new_text.find(SEPARATOR) {
+            while index - prefix_length > spacing {
+                index -= spacing;
+                new_text.insert(index, SEPARATOR);
+            }
+        }
+    }
+
+    Some(new_text)
 }
 
 #[cfg(test)]
@@ -1637,5 +1753,112 @@ mod tests {
         assert_eq!(compute_number_delta("0x__", NumberKind::Hex, 1), None);
         assert_eq!(compute_number_delta("beef", NumberKind::Decimal, 1), None);
         assert_eq!(compute_number_delta("", NumberKind::Hex, 1), None);
+    }
+
+    fn incremented(cases: &[(&str, i64, &str)]) {
+        for &(original, amount, expected) in cases {
+            assert_eq!(
+                integer_increment(original, amount).as_deref(),
+                Some(expected),
+                "{original} by {amount}",
+            );
+        }
+    }
+
+    #[test]
+    fn integer_increment_walks_decimals_across_zero() {
+        incremented(&[
+            ("100", 1, "101"),
+            ("100", -1, "99"),
+            ("99", 1, "100"),
+            ("100", 1000, "1100"),
+            ("100", -1000, "-900"),
+            ("-1", 1, "0"),
+            ("-1", 2, "1"),
+            ("1", -1, "0"),
+            ("1", -2, "-1"),
+        ]);
+    }
+
+    #[test]
+    fn integer_increment_keeps_hexadecimal_case_and_width() {
+        incremented(&[
+            ("0x0100", 1, "0x0101"),
+            ("0x0100", -1, "0x00ff"),
+            ("0x0001", -1, "0x0000"),
+            ("0x0000", -1, "0x0000"),
+            ("0xffffffffffffffff", 1, "0x10000000000000000"),
+            ("0xffffffffffffffff", 2, "0x10000000000000001"),
+            ("0xffffffffffffffff", -1, "0xfffffffffffffffe"),
+            ("0xABCDEF1234567890", 1, "0xABCDEF1234567891"),
+            ("0xabcdef1234567890", 1, "0xabcdef1234567891"),
+        ]);
+    }
+
+    #[test]
+    fn integer_increment_carries_octal_literals() {
+        incremented(&[
+            ("0o0107", 1, "0o0110"),
+            ("0o0110", -1, "0o0107"),
+            ("0o0001", -1, "0o0000"),
+            ("0o7777", 1, "0o10000"),
+            ("0o1000", -1, "0o0777"),
+            ("0o0107", 10, "0o0121"),
+            ("0o0000", -1, "0o0000"),
+            ("0o1777777777777777777777", 1, "0o2000000000000000000000"),
+            ("0o1777777777777777777777", 2, "0o2000000000000000000001"),
+            ("0o1777777777777777777777", -1, "0o1777777777777777777776"),
+        ]);
+    }
+
+    #[test]
+    fn integer_increment_carries_binary_literals() {
+        incremented(&[
+            ("0b00000100", 1, "0b00000101"),
+            ("0b00000100", -1, "0b00000011"),
+            ("0b00000100", 2, "0b00000110"),
+            ("0b00000100", -2, "0b00000010"),
+            ("0b00000001", -1, "0b00000000"),
+            ("0b00111111", 10, "0b01001001"),
+            ("0b11111111", 1, "0b100000000"),
+            ("0b10000000", -1, "0b01111111"),
+            ("0b0000", -1, "0b0000"),
+            (
+                "0b1111111111111111111111111111111111111111111111111111111111111111",
+                1,
+                "0b10000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            (
+                "0b1111111111111111111111111111111111111111111111111111111111111111",
+                2,
+                "0b10000000000000000000000000000000000000000000000000000000000000001",
+            ),
+            (
+                "0b1111111111111111111111111111111111111111111111111111111111111111",
+                -1,
+                "0b1111111111111111111111111111111111111111111111111111111111111110",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn integer_increment_relays_the_separators() {
+        incremented(&[
+            ("999_999", 1, "1_000_000"),
+            ("1_000_000", -1, "999_999"),
+            ("-999_999", -1, "-1_000_000"),
+            ("0x0000_0000_0001", 0x1_ffff_0000, "0x0001_ffff_0001"),
+            ("0x0000_0000", -1, "0x0000_0000"),
+            ("0x0000_0000_0000", -1, "0x0000_0000_0000"),
+            ("0b01111111_11111111", 1, "0b10000000_00000000"),
+            ("0b11111111_11111111", 1, "0b1_00000000_00000000"),
+        ]);
+    }
+
+    #[test]
+    fn integer_increment_rejects_an_edge_separator() {
+        assert_eq!(integer_increment("9_", 1), None);
+        assert_eq!(integer_increment("_9", 1), None);
+        assert_eq!(integer_increment("_9_", 1), None);
     }
 }
