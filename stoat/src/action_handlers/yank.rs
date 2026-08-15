@@ -78,31 +78,33 @@ pub(super) fn insert_register(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 /// Apply the consumed-char keypress to the pending
-/// [`crate::app::Stoat::pending_register_select`] chord. Maps the
-/// char through [`register_for_char`] -- ASCII letters select a
-/// named register, `"` selects the unnamed register, and the
-/// helix special chars (`*`/`+`/`/`/`_`/`#`/`.`) select the
-/// matching special register variant. Any other char clears the
-/// pending state without selecting a register.
+/// [`crate::app::Stoat::pending_register_select`] chord.
+///
+/// The char names the register through [`register_for_char`], so every
+/// printable char reaches one. Escape and the other non-char keys cancel the
+/// chord before they get here.
 pub(crate) fn execute_select_register(stoat: &mut Stoat, ch: char) {
-    stoat.selected_register = register_for_char(ch);
+    stoat.selected_register = Some(register_for_char(ch));
 }
 
-/// Resolve [`Register`] from the consumed-char keypress for the
-/// pending [`crate::app::Stoat::pending_insert_register`] chord
-/// and the `SelectRegister` chord. `"` -> `Unnamed`; ASCII
-/// letter -> `Named`; helix special chars route to the matching
-/// special variant; any other char returns `None`.
-pub(crate) fn register_for_char(ch: char) -> Option<Register> {
+/// The register a consumed-char keypress names.
+///
+/// Backs the `SelectRegister` chord and the pending
+/// [`crate::app::Stoat::pending_insert_register`] chord.
+///
+/// `"` names the unnamed register and the special chars
+/// (`*`/`+`/`/`/`_`/`#`/`.`) name their own variants. Every other char names an
+/// ordinary register of its own, digits and punctuation included, so no
+/// keypress silently falls through to the unnamed register.
+pub(crate) fn register_for_char(ch: char) -> Register {
     match ch {
-        '"' => Some(Register::Unnamed),
-        '*' | '+' => Some(Register::Clipboard),
-        '/' => Some(Register::Search),
-        '_' => Some(Register::Blackhole),
-        '#' => Some(Register::SelectionIndex),
-        '.' => Some(Register::LastInsert),
-        _ if ch.is_ascii_alphabetic() => Some(Register::Named(ch)),
-        _ => None,
+        '"' => Register::Unnamed,
+        '*' | '+' => Register::Clipboard,
+        '/' => Register::Search,
+        '_' => Register::Blackhole,
+        '#' => Register::SelectionIndex,
+        '.' => Register::LastInsert,
+        _ => Register::Named(ch),
     }
 }
 
@@ -1404,6 +1406,82 @@ mod tests {
         h.type_keys("escape");
         h.type_keys("\" a p");
         assert_eq!(buffer_text(&h, &path), "abcxyz\n");
+    }
+
+    /// A digit names a register of its own, so a yank into one and a paste out
+    /// of it round-trip without ever touching the unnamed register.
+    ///
+    /// A char the selector turns down leaves nothing selected, and the yank
+    /// that follows reaches the unnamed register with no sign it went
+    /// somewhere the reader did not name. The unnamed assertion is what
+    /// catches that.
+    #[test]
+    fn digit_register_round_trip() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\ndef\n");
+        h.type_keys("v l l");
+        h.type_keys("escape");
+        h.type_keys("\" 1 y");
+        assert_eq!(
+            h.stoat
+                .registers
+                .read(crate::register::Register::Named('1'))
+                .map(|f| f.join("\n")),
+            Some("abc".to_string()),
+        );
+        assert_eq!(
+            h.stoat.registers.read(crate::register::Register::Unnamed),
+            None,
+            "the yank went to the digit, not past it to the unnamed register",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
+        h.type_keys("\" 1 p");
+        assert_eq!(buffer_text(&h, &path), "abc\ndefabc\n");
+    }
+
+    /// Punctuation the special chars do not claim names a register too.
+    #[test]
+    fn punctuation_register_holds_its_own_yank() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        h.type_keys("v l l");
+        h.type_keys("escape");
+        h.type_keys("\" @ y");
+        assert_eq!(
+            h.stoat
+                .registers
+                .read(crate::register::Register::Named('@'))
+                .map(|f| f.join("\n")),
+            Some("abc".to_string()),
+        );
+    }
+
+    /// Escape cancels the chord rather than naming a register.
+    ///
+    /// Every char now names one, so the cancel rests on Escape arriving as its
+    /// own key rather than as a char the selector turns down.
+    #[test]
+    fn escape_cancels_register_select() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        h.type_keys("v l l");
+        h.type_keys("escape");
+        h.type_keys("\" escape");
+        assert!(
+            h.stoat.selected_register.is_none(),
+            "the chord ended without naming a register",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        assert_eq!(
+            h.stoat
+                .registers
+                .read(crate::register::Register::Unnamed)
+                .map(|f| f.join("\n")),
+            Some("abc".to_string()),
+            "so the yank that follows goes to the unnamed register",
+        );
     }
 
     #[test]

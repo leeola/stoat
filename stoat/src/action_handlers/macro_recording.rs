@@ -44,9 +44,7 @@ pub(super) fn arm_replay(stoat: &mut Stoat) -> UpdateEffect {
 /// are re-fed through the path that started this one, so a macro naming itself,
 /// directly or through another, would otherwise never stop.
 pub(crate) fn execute_replay(stoat: &mut Stoat, ch: char) -> UpdateEffect {
-    let Some(register) = super::yank::register_for_char(ch) else {
-        return UpdateEffect::None;
-    };
+    let register = super::yank::register_for_char(ch);
     if stoat.replaying_registers.contains(&register) {
         return UpdateEffect::None;
     }

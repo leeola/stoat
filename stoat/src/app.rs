@@ -4620,9 +4620,10 @@ impl Stoat {
         if self.pending_insert_register {
             self.pending_insert_register = false;
             if let KeyCode::Char(ch) = key.code
-                && let Some(register) = action_handlers::yank::register_for_char(ch)
-                && let Some(fragments) =
-                    action_handlers::yank::read_register_fragments(self, register)
+                && let Some(fragments) = action_handlers::yank::read_register_fragments(
+                    self,
+                    action_handlers::yank::register_for_char(ch),
+                )
             {
                 self.editor_insert_register(editor_id, buffer_id, &fragments);
             }

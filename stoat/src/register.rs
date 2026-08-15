@@ -1,7 +1,7 @@
 //! In-process register store for yank/paste and (later) macros.
 //!
-//! Backs the unnamed register (`"`) plus helix-style named
-//! registers (`a-z`). System / primary clipboard variants are
+//! Backs the unnamed register (`"`) plus a named register for every
+//! char the special ones do not claim. System / primary clipboard variants are
 //! handled separately by [`crate::host::ClipboardHost`] -- the
 //! action layer routes those operations directly rather than
 //! going through this store.
