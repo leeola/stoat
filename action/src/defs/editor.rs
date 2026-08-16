@@ -1644,7 +1644,17 @@ define_action!(
     "GotoWord",
     ActionKind::GotoWord,
     "goto labelled word in viewport",
-    "Label every word start visible in the focused editor's viewport with a one- or two-character tag (single-char when there are <= 26 candidates, otherwise two-char). The next character keystrokes narrow to a unique label and jump the cursor to that word. Mirrors Helix's two-character interactive label jump.",
+    "Label every word start visible in the focused editor's viewport with a one- or two-character tag (single-char when there are <= 26 candidates, otherwise two-char). The next character keystrokes narrow to a unique label, and the selection lands over that whole word running forward. The origin goes on the jumplist.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendToWordDef,
+    ExtendToWord,
+    "ExtendToWord",
+    ActionKind::ExtendToWord,
+    "extend to labelled word in viewport",
+    "Labels the viewport's words as GotoWord does, then grows the selection to reach the one chosen rather than replacing it. A word ahead of the cursor extends forward from the selection's start, and one behind extends back from its end, so the edge the user came from is the one kept.",
     ActionPriority::Rare
 );
 

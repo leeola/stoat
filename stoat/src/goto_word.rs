@@ -164,6 +164,24 @@ mod tests {
         Rope::from(text)
     }
 
+    /// A harness over "alpha beta gamma", whose three words label as a/b/c and
+    /// span 0..5, 6..10 and 11..16.
+    fn word_buffer(root: &str) -> crate::test_harness::TestHarness {
+        use std::path::PathBuf;
+        let mut h = crate::Stoat::test();
+        let root = PathBuf::from(root);
+        h.fake_fs()
+            .insert_files([(root.join("buf.rs"), b"alpha beta gamma\n".as_ref())]);
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenFile {
+                path: root.join("buf.rs"),
+            },
+        );
+        h
+    }
+
     #[test]
     fn assign_labels_one_char_when_under_alphabet_size() {
         let targets = vec![(0, 2), (5, 7), (10, 12)];
@@ -321,6 +339,47 @@ mod tests {
             crate::test_harness::editor::selection_spans(&mut h.stoat),
             vec![(11, 16, false)],
             "the one selection covers gamma, running forward",
+        );
+    }
+
+    /// A label ahead of the selection grows it forward, keeping the start the
+    /// user came from rather than collapsing onto the word.
+    #[test]
+    fn select_g_w_extends_forward_to_the_label() {
+        let mut h = word_buffer("/extend-word-fwd");
+        h.type_keys("v l l");
+        assert_eq!(
+            crate::test_harness::editor::selection_spans(&mut h.stoat),
+            vec![(0, 3, false)],
+            "test setup: a forward selection over the first three characters",
+        );
+
+        h.type_keys("g w");
+        h.type_keys("c");
+        assert_eq!(
+            crate::test_harness::editor::selection_spans(&mut h.stoat),
+            vec![(0, 16, false)],
+            "the selection reaches gamma's end from where it started",
+        );
+    }
+
+    /// A label behind the selection grows it backward, keeping the end.
+    #[test]
+    fn select_g_w_extends_backward_to_the_label() {
+        let mut h = word_buffer("/extend-word-back");
+        h.type_keys("1 2 l v l l");
+        assert_eq!(
+            crate::test_harness::editor::selection_spans(&mut h.stoat),
+            vec![(12, 15, false)],
+            "test setup: a selection inside gamma",
+        );
+
+        h.type_keys("g w");
+        h.type_keys("a");
+        assert_eq!(
+            crate::test_harness::editor::selection_spans(&mut h.stoat),
+            vec![(0, 15, true)],
+            "the selection reaches back to alpha's start, keeping its own end",
         );
     }
 

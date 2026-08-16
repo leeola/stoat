@@ -4917,6 +4917,32 @@ pub(crate) fn jump_to_word_range(stoat: &mut Stoat, range: (usize, usize)) -> Up
 }
 
 pub(super) fn goto_word(stoat: &mut Stoat) -> UpdateEffect {
+    arm_word_labels(stoat, None)
+}
+
+/// Label the viewport's words, growing the selection to the one chosen rather
+/// than replacing it.
+///
+/// The primary's span is captured now rather than read when the label arrives,
+/// since the label keystrokes are what the extend measures from and none of
+/// them moves the cursor.
+pub(super) fn extend_to_word(stoat: &mut Stoat) -> UpdateEffect {
+    let anchor = {
+        let Some(editor) = focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let primary = editor.selections.newest_anchor();
+        (
+            buffer_snapshot.resolve_anchor(&primary.start),
+            buffer_snapshot.resolve_anchor(&primary.end),
+        )
+    };
+    arm_word_labels(stoat, Some(anchor))
+}
+
+fn arm_word_labels(stoat: &mut Stoat, extend_from: Option<(usize, usize)>) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -4944,7 +4970,41 @@ pub(super) fn goto_word(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     stoat.pending_goto_word = Some(labels);
+    stoat.pending_goto_word_extend = extend_from;
     stoat.pending_goto_word_input.clear();
+    UpdateEffect::Redraw
+}
+
+/// Grow the selection from `primary` to reach `label`, and record the origin.
+///
+/// A label ahead of the selection anchors at its start and a label behind
+/// anchors at its end, so the edge the user came from is the one kept. The
+/// pivot is the selection's own start, matching the cursor the labels were
+/// walked out from.
+pub(crate) fn extend_to_word_range(
+    stoat: &mut Stoat,
+    primary: (usize, usize),
+    label: (usize, usize),
+) -> UpdateEffect {
+    let behind = label.0 < primary.0;
+    let (from, to, reversed) = match behind {
+        true => (label.0, label.1.max(primary.1), true),
+        false => (label.0.min(primary.0), label.1, false),
+    };
+
+    super::jump::push_jump(stoat);
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let len = buffer_snapshot.rope().len();
+
+    let start = buffer_snapshot.anchor_at(from.min(len), Bias::Left);
+    let end = buffer_snapshot.anchor_at(to.min(len), Bias::Right);
+    editor
+        .selections
+        .set_single_range(start, end, reversed, SelectionGoal::None);
     UpdateEffect::Redraw
 }
 

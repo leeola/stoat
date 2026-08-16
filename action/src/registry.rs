@@ -26,12 +26,12 @@ use crate::{
             ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevLongWordEnd, ExtendPrevLongWordStart,
             ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight, ExtendSearchNext,
             ExtendSearchPrev, ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart,
-            ExtendToLastLine, ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
-            FindNextChar, FindPrevChar, FlipSelections, GotoCallee, GotoCaller, GotoColumn,
-            GotoDiffCalleeDown, GotoDiffCallerUp, GotoFileStart, GotoFirstNonwhitespace,
-            GotoImplementors, GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark,
-            GotoMarkExact, GotoNextChange, GotoNextClass, GotoNextComment, GotoNextEntry,
-            GotoNextFunction, GotoNextParagraph, GotoNextParameter, GotoNextTest,
+            ExtendToLastLine, ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart, ExtendToWord,
+            ExtendUp, FindNextChar, FindPrevChar, FlipSelections, GotoCallee, GotoCaller,
+            GotoColumn, GotoDiffCalleeDown, GotoDiffCallerUp, GotoFileStart,
+            GotoFirstNonwhitespace, GotoImplementors, GotoLastLine, GotoLineEnd, GotoLineNumber,
+            GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass, GotoNextComment,
+            GotoNextEntry, GotoNextFunction, GotoNextParagraph, GotoNextParameter, GotoNextTest,
             GotoNextXmlElement, GotoPrevChange, GotoPrevClass, GotoPrevComment, GotoPrevEntry,
             GotoPrevFunction, GotoPrevParagraph, GotoPrevParameter, GotoPrevTest,
             GotoPrevXmlElement, GotoReferences, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
@@ -847,6 +847,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoWindowCenter::DEF, |_| Ok(Box::new(GotoWindowCenter)));
     add(GotoWindowBottom::DEF, |_| Ok(Box::new(GotoWindowBottom)));
     add(GotoWord::DEF, |_| Ok(Box::new(GotoWord)));
+    add(ExtendToWord::DEF, |_| Ok(Box::new(ExtendToWord)));
     add(ExtendGotoFirstNonwhitespace::DEF, |_| {
         Ok(Box::new(ExtendGotoFirstNonwhitespace))
     });
@@ -1839,6 +1840,7 @@ mod tests {
         // + 1 OpenChangedFilePicker.
         // + 1 OpenBufferPicker.
         // + 1 GotoWord.
+        // + 1 ExtendToWord.
         // + 2 GotoNextDiagnostic / GotoPrevDiagnostic.
         // + 2 OpenBelow / OpenAbove.
         // + 1 ReplaceChar.
@@ -1949,7 +1951,7 @@ mod tests {
         // + 1 ReplaceWithClipboard.
         // + 2 ToggleLineComments/ToggleBlockComments.
         // + 4 the long-word extends.
-        assert_eq!(all().count(), 464);
+        assert_eq!(all().count(), 465);
     }
 
     #[test]

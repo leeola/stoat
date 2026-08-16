@@ -951,6 +951,10 @@ pub struct Stoat {
     /// label. Always paired with [`Self::pending_goto_word`]: when
     /// that field is `None` this is empty.
     pub(crate) pending_goto_word_input: String,
+    /// The primary's span when the labels went up, set only where the
+    /// arming was `ExtendToWord`. The landing grows from this rather
+    /// than replacing the selection, and `None` means it replaces.
+    pub(crate) pending_goto_word_extend: Option<(usize, usize)>,
     /// Set after a `ReplaceChar` action arms the one-shot prompt.
     /// While true, the next printable char keypress in normal/select
     /// mode replaces every character in every non-empty selection
@@ -1969,6 +1973,7 @@ impl Stoat {
             global_marks: std::collections::HashMap::new(),
             pending_goto_word: None,
             pending_goto_word_input: String::new(),
+            pending_goto_word_extend: None,
             pending_replace: false,
             pending_surround_add: false,
             pending_surround_replace: action_handlers::surround::SurroundReplaceStage::Idle,
@@ -4198,7 +4203,12 @@ impl Stoat {
                     crate::goto_word::JumpStep::Jump(range) => {
                         self.pending_goto_word = None;
                         self.pending_goto_word_input.clear();
-                        return action_handlers::movement::jump_to_word_range(self, range);
+                        return match self.pending_goto_word_extend.take() {
+                            Some(primary) => action_handlers::movement::extend_to_word_range(
+                                self, primary, range,
+                            ),
+                            None => action_handlers::movement::jump_to_word_range(self, range),
+                        };
                     },
                     crate::goto_word::JumpStep::Continue => {
                         self.pending_goto_word_input.push(ch);
@@ -4206,6 +4216,7 @@ impl Stoat {
                     },
                     crate::goto_word::JumpStep::Cancel => {
                         self.pending_goto_word = None;
+                        self.pending_goto_word_extend = None;
                         self.pending_goto_word_input.clear();
                         return UpdateEffect::Redraw;
                     },
@@ -4213,6 +4224,7 @@ impl Stoat {
             }
             // Consumed for the reason the textobject arm above gives.
             self.pending_goto_word = None;
+            self.pending_goto_word_extend = None;
             self.pending_goto_word_input.clear();
             return UpdateEffect::Redraw;
         }

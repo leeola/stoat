@@ -856,6 +856,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoWindowCenter => view::goto_window(stoat, view::WindowAlign::Center, false),
         ActionKind::GotoWindowBottom => view::goto_window(stoat, view::WindowAlign::Bottom, false),
         ActionKind::GotoWord => movement::goto_word(stoat),
+        ActionKind::ExtendToWord => movement::extend_to_word(stoat),
         ActionKind::ExtendGotoFirstNonwhitespace => movement::goto_first_nonwhitespace(stoat, true),
         ActionKind::ExtendGotoFileStart => movement::goto_file_start(stoat, true),
         ActionKind::ExtendGotoLastLine => movement::goto_last_line(stoat, true),

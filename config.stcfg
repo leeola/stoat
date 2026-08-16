@@ -752,6 +752,7 @@ on key {
         c -> [ExtendGotoWindowCenter(), SetMode(select)];
         b -> [ExtendGotoWindowBottom(), SetMode(select)];
         | -> [ExtendGotoColumn(), SetMode(select)];
+        w -> [ExtendToWord(), SetMode(select)];
     }
     view == commits && mode == normal {
         Escape -> CloseCommits();
