@@ -68,7 +68,7 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
         return UpdateEffect::None;
     };
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
-    let base_delta = if half { viewport.div_ceil(2) } else { viewport };
+    let base_delta = if half { viewport / 2 } else { viewport };
     let delta = base_delta.saturating_mul(count);
 
     let display_snapshot = editor.display_map.snapshot();
@@ -317,10 +317,14 @@ pub(super) fn align_view(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
         .buffer_to_display(rope.offset_to_point(cursor))
         .row;
 
+    // All three arms measure from the last visible row rather than the row
+    // count, so an even viewport centers one row above its geometric middle
+    // and `Bottom` reaches the last row instead of the one past it.
+    let last_row = viewport.saturating_sub(1);
     let desired_scroll = match align {
         ViewAlign::Top => cursor_row,
-        ViewAlign::Center => cursor_row.saturating_sub(viewport / 2),
-        ViewAlign::Bottom => cursor_row.saturating_sub(viewport.saturating_sub(1)),
+        ViewAlign::Center => cursor_row.saturating_sub(last_row / 2),
+        ViewAlign::Bottom => cursor_row.saturating_sub(last_row),
     };
     let max_scroll = max_scroll_row(display_snapshot.line_count(), viewport);
     editor.scroll_row = desired_scroll.min(max_scroll);
@@ -1401,13 +1405,33 @@ mod tests {
         );
     }
 
+    /// Half of a one-row viewport is no rows, so the key does nothing rather
+    /// than rounding itself up to a whole row of travel.
     #[test]
-    fn half_page_down_rounds_up_for_one_row_viewport() {
+    fn half_page_down_does_nothing_for_one_row_viewport() {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "a\nb\nc\n");
         set_focused_viewport_rows(&mut stoat, Some(1));
+        assert_eq!(
+            dispatch(&mut stoat, &HalfPageDown),
+            UpdateEffect::None,
+            "a zero-row delta moves neither the view nor the cursor"
+        );
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 0)]);
+        assert_eq!(editor::editor_scroll_rows(&stoat), vec![0]);
+    }
+
+    /// An odd viewport splits into a short half and a long one, and the half
+    /// page takes the short one.
+    #[test]
+    fn half_page_down_floors_an_odd_viewport() {
+        let mut stoat = stoat();
+        let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(9));
         dispatch(&mut stoat, &HalfPageDown);
-        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(1, 0)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(4, 0)]);
+        assert_eq!(editor::editor_scroll_rows(&stoat), vec![4]);
     }
 
     #[test]
@@ -1680,19 +1704,59 @@ mod tests {
         h.open_file(&path);
         h.type_keys("ctrl-f");
         let head_before = h.cursor_display_positions();
-        let cursor_row = head_before[0].0;
+
         dispatch(&mut h.stoat, &stoat_action::AlignViewCenter);
-        let scroll = h.editor_scroll_rows()[0];
-        let head_after = h.cursor_display_positions();
-        assert!(
-            scroll < cursor_row,
-            "scroll {scroll} should be above cursor {cursor_row}"
+        assert_eq!(
+            h.editor_scroll_rows(),
+            vec![8],
+            "the cursor sits on row 12, four rows down a nine-row view"
         );
-        assert!(
-            cursor_row - scroll <= 5,
-            "cursor at row {cursor_row}, scroll {scroll}: viewport midpoint should be roughly half a viewport up"
+        assert_eq!(
+            h.cursor_display_positions(),
+            head_before,
+            "cursor row must not move"
         );
-        assert_eq!(head_after, head_before, "cursor row must not move");
+    }
+
+    /// Centering measures from the last visible row, so an even viewport
+    /// leaves one more row below the cursor than above it.
+    #[test]
+    fn align_view_center_measures_from_the_last_row() {
+        let mut stoat = stoat();
+        let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+        for _ in 0..20 {
+            dispatch(&mut stoat, &stoat_action::MoveDown);
+        }
+
+        dispatch(&mut stoat, &stoat_action::AlignViewCenter);
+        assert_eq!(
+            editor::editor_scroll_rows(&stoat),
+            vec![16],
+            "rows 16 through 25, with the cursor fourth of ten"
+        );
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(20, 0)]);
+    }
+
+    /// An odd viewport has a true middle row, and the cursor lands on it.
+    #[test]
+    fn align_view_center_lands_on_the_middle_of_an_odd_viewport() {
+        let mut stoat = stoat();
+        let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(9));
+        for _ in 0..20 {
+            dispatch(&mut stoat, &stoat_action::MoveDown);
+        }
+
+        dispatch(&mut stoat, &stoat_action::AlignViewCenter);
+        assert_eq!(
+            editor::editor_scroll_rows(&stoat),
+            vec![16],
+            "rows 16 through 24, with the cursor fifth of nine"
+        );
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(20, 0)]);
     }
 
     #[test]
