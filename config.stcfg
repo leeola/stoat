@@ -669,6 +669,8 @@ on key {
         Alt-c -> [ChangeSelectionNoYank(), SetMode(insert)];
         r -> ReplaceChar();
         y -> [Yank(), SetMode(normal)];
+        p -> [PasteAfter(), SetMode(normal)];
+        P -> [PasteBefore(), SetMode(normal)];
         R -> [ReplaceWithYanked(), SetMode(normal)];
         ~ -> [SwitchCase(), SetMode(normal)];
         ` -> [SwitchToLowercase(), SetMode(normal)];

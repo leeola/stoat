@@ -943,6 +943,28 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "abcabc\n");
     }
 
+    /// Yank returns to normal mode, so the register is filled in one select
+    /// mode and spent in the next.
+    #[test]
+    fn paste_after_from_select_mode_returns_to_normal() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abcdef\n");
+        h.type_keys("v l l");
+        h.type_keys("y");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 0);
+
+        h.type_keys("v l l");
+        assert_eq!(h.selection_spans(), vec![(0, 3, false)], "abc selected");
+
+        h.type_keys("p");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "abcabcdef\n",
+            "the yanked text lands after the selection"
+        );
+        assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
     #[test]
     fn paste_before_via_capital_p_binding() {
         let mut h = TestHarness::with_size(40, 10);
