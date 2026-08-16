@@ -7207,3 +7207,49 @@ fn select_mode_plus_over_no_number_holds_select_mode() {
     assert_eq!(focused_buffer_text(&mut h), "zz\n");
     assert_eq!(h.stoat.focused_mode(), "select");
 }
+
+/// The view menu's select flavor hands back select mode, where the normal one
+/// hands back normal, so a scrolled selection is still being built.
+#[test]
+fn select_mode_zz_aligns_the_view_and_stays_in_select() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\n");
+    h.open_file(&path);
+    h.type_keys("j j j j j j v");
+    let before = h.selection_spans();
+
+    h.type_keys("z z");
+    assert_eq!(h.stoat.focused_mode(), "select");
+    assert_eq!(
+        h.selection_spans(),
+        before,
+        "a view align moves no selection"
+    );
+    assert_ne!(
+        h.editor_scroll_rows()[0],
+        0,
+        "and the view followed the cursor down"
+    );
+}
+
+#[test]
+fn select_mode_z_escape_returns_to_select() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\n");
+    h.open_file(&path);
+    h.type_keys("v l");
+
+    h.type_keys("z escape");
+    assert_eq!(h.stoat.focused_mode(), "select");
+}
+
+#[test]
+fn select_mode_alt_a_selects_all_siblings() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "fn a() {} fn b() {}\n");
+    h.open_file(&path);
+    h.type_keys("l l v");
+
+    h.type_keys("Alt-a");
+    assert_eq!(h.selection_spans(), vec![(0, 9, false), (10, 19, false)]);
+}

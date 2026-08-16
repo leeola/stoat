@@ -511,6 +511,17 @@ on key {
         j -> [ScrollDown(), SetMode(normal)];
         k -> [ScrollUp(), SetMode(normal)];
     }
+    # The view menu's select-mode flavor. Every arm here is a view operation
+    # that leaves the selection alone, so the two blocks differ only in the mode
+    # they hand back.
+    mode == select_z {
+        Escape -> SetMode(select);
+        z -> [AlignViewCenter(), SetMode(select)];
+        t -> [AlignViewTop(), SetMode(select)];
+        b -> [AlignViewBottom(), SetMode(select)];
+        j -> [ScrollDown(), SetMode(select)];
+        k -> [ScrollUp(), SetMode(select)];
+    }
     mode == bracket_next {
         Escape -> SetMode(normal);
         g -> [GotoNextChange(), SetMode(normal)];
@@ -622,6 +633,8 @@ on key {
         Alt-e -> ExtendMoveParentNodeEnd();
         Alt-n -> SelectNextSibling();
         Alt-p -> SelectPrevSibling();
+        Alt-a -> SelectAllSiblings();
+        Alt-I -> SelectAllChildren();
         Alt-o -> ExpandSelection();
         Alt-Up -> ExpandSelection();
         Alt-i -> ShrinkSelection();
@@ -633,6 +646,7 @@ on key {
         G -> ExtendToLastLine();
         g -> SetMode(select_goto);
         m -> SetMode(select_match);
+        z -> SetMode(select_z);
         ] -> SetMode(select_bracket_next);
         [ -> SetMode(select_bracket_prev);
         ; -> CollapseSelection();
