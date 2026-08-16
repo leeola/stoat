@@ -2301,7 +2301,14 @@ struct CommentRow {
     /// Leading whitespace counted in characters rather than display columns, so
     /// a tab counts once no matter how wide it renders.
     indent_chars: usize,
-    commented: bool,
+    /// The longest comment token this row starts with, `None` when the row is
+    /// not commented.
+    ///
+    /// Per row rather than per operation, for the same reason removal works off
+    /// each row's own prefix rather than a shared column. A doc comment starts
+    /// with the ordinary token too, so removing the operation's token leaves
+    /// the rest of the row's own token behind.
+    token: Option<&'static str>,
 }
 
 pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
@@ -2364,19 +2371,11 @@ pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
             continue;
         }
 
-        let after_prefix = content_start + prefix.len();
-        let commented = after_prefix <= line_end
-            && rope
-                .chars_at(content_start)
-                .take(prefix.chars().count())
-                .collect::<String>()
-                == prefix;
-
         commentable.push(CommentRow {
             line_start,
             content_start,
             indent_chars,
-            commented,
+            token: longest_token_at(rope, content_start, line_end, language.line_comments),
         });
     }
 
@@ -2387,7 +2386,7 @@ pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
     // One uncommented row commits the whole set to being commented, like Helix.
     // Deciding per row instead inverts each one, so a mixed block stays mixed
     // with its two halves swapped and no number of toggles ever unifies it.
-    let comment_all = commentable.iter().any(|r| !r.commented);
+    let comment_all = commentable.iter().any(|r| r.token.is_none());
 
     let mut edits: Vec<(usize, usize, String)> = Vec::with_capacity(commentable.len());
     if comment_all {
@@ -2407,12 +2406,16 @@ pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
             edits.push((insert_at, insert_at, format!("{prefix} ")));
         }
     } else {
-        // Removal stays at each row's own prefix rather than the shared column.
-        // Helix removes at the shared column, which eats indentation when the
+        // Removal stays at each row's own prefix rather than the shared column,
+        // and takes the row's own token rather than the operation's. Helix
+        // removes at the shared column, which eats indentation when the
         // commented rows are not equally indented, and removing what each row
         // actually has is what makes the round trip exact.
         for row in &commentable {
-            let after_prefix = row.content_start + prefix.len();
+            let token = row
+                .token
+                .expect("comment_all is false, so every row carries a token");
+            let after_prefix = row.content_start + token.len();
             let drop_trailing_space = matches!(rope.chars_at(after_prefix).next(), Some(' '));
             let remove_end = if drop_trailing_space {
                 after_prefix + 1

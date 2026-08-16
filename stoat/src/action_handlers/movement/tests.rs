@@ -3763,6 +3763,54 @@ fn toggle_comments_rust_single_line_inserts_prefix() {
     assert_eq!(focused_buffer_text(&mut h), "// let x = 42;\n");
 }
 
+/// A doc comment starts with the ordinary comment token, so removing that token
+/// leaves the extra slash behind and turns documentation into a syntax error.
+#[test]
+fn toggle_comments_rust_doc_comment_round_trips() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "/// docs\n");
+    h.open_file(&path);
+
+    dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "docs\n",
+        "the row's own token comes off whole",
+    );
+
+    dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "// docs\n",
+        "commenting writes the ordinary token, not the doc one",
+    );
+}
+
+/// The inner form is longer still, so the longest match has to win over both
+/// the plain token and the outer doc token.
+#[test]
+fn toggle_comments_rust_inner_doc_comment_round_trips() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "//! module docs\n");
+    h.open_file(&path);
+
+    dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+    assert_eq!(focused_buffer_text(&mut h), "module docs\n");
+}
+
+/// Each row gives up the token it carries, which is the same rule the removal
+/// path already follows for indentation.
+#[test]
+fn toggle_comments_rust_mixed_tokens_each_row_loses_its_own() {
+    let mut h = TestHarness::with_size(40, 6);
+    let path = h.write_file("s.rs", "// plain\n/// docs\n//! inner\n");
+    h.open_file(&path);
+
+    h.type_keys("v j j");
+    dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+    assert_eq!(focused_buffer_text(&mut h), "plain\ndocs\ninner\n");
+}
+
 /// The handler and its tests predate any key reaching them, so the binding is
 /// what the user actually has. Driving the key rather than the action is what
 /// tells the two apart.
