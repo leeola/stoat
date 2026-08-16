@@ -5804,6 +5804,80 @@ fn move_parent_node_end_collapses_to_parent_end() {
     );
 }
 
+/// The blank line goes under the selection's last line, and the selection keeps
+/// the text it was on rather than growing over the gap.
+#[test]
+fn add_newline_below_leaves_the_selection_where_it_was() {
+    let mut h = TestHarness::with_size(40, 8);
+    let path = h.write_file("s.txt", "aa\nbb\ncc\n");
+    h.open_file(&path);
+    h.type_keys("j");
+    let before = h.selection_spans();
+
+    dispatch(&mut h.stoat, &stoat_action::AddNewlineBelow);
+    assert_eq!(focused_buffer_text(&mut h), "aa\nbb\n\ncc\n");
+    assert_eq!(h.selection_spans(), before, "the selection did not move");
+}
+
+/// Above inserts before the selection's first line, which pushes the selection
+/// down without taking the new line into it.
+#[test]
+fn add_newline_above_inserts_before_the_first_line() {
+    let mut h = TestHarness::with_size(40, 8);
+    let path = h.write_file("s.txt", "aa\nbb\ncc\n");
+    h.open_file(&path);
+    h.type_keys("j");
+
+    dispatch(&mut h.stoat, &stoat_action::AddNewlineAbove);
+    assert_eq!(focused_buffer_text(&mut h), "aa\n\nbb\ncc\n");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(4, 5, false)],
+        "the selection followed its own line down",
+    );
+}
+
+/// A count asks for that many lines at once rather than one press apiece.
+#[test]
+fn count_prefix_add_newline_below_inserts_that_many() {
+    let mut h = TestHarness::with_size(40, 8);
+    let path = h.write_file("s.txt", "aa\nbb\n");
+    h.open_file(&path);
+
+    h.stoat.pending_count = Some(3);
+    dispatch(&mut h.stoat, &stoat_action::AddNewlineBelow);
+    assert_eq!(focused_buffer_text(&mut h), "aa\n\n\n\nbb\n");
+}
+
+/// Two selections on one line each ask for their own line, and both arrive.
+/// The two requests share an insert point, so they land as one run.
+#[test]
+fn two_selections_on_one_line_add_two_lines() {
+    let mut h = TestHarness::with_size(40, 8);
+    let path = h.write_file("s.txt", "abcd\nzz\n");
+    h.open_file(&path);
+    seed_two_cursors_on_row_zero(&mut h);
+
+    dispatch(&mut h.stoat, &stoat_action::AddNewlineBelow);
+    assert_eq!(focused_buffer_text(&mut h), "abcd\n\n\nzz\n");
+}
+
+/// Two cursors on row zero, at columns 0 and 2.
+fn seed_two_cursors_on_row_zero(h: &mut TestHarness) {
+    dispatch(&mut h.stoat, &AddSelectionBelow);
+    let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+    let display = editor.display_map.snapshot();
+    let buffer = display.buffer_snapshot();
+    editor.selections.transform(buffer, |sel| {
+        let mut new = sel.clone();
+        if buffer.resolve_anchor(&sel.start) > 0 {
+            new.start = buffer.anchor_at(2, Bias::Left);
+            new.end = buffer.anchor_at(3, Bias::Right);
+        }
+        new
+    });
+}
+
 /// The jump goes to where the edit finished, not where it started, so the
 /// cursor lands past what was typed rather than in front of it.
 #[test]

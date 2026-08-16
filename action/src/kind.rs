@@ -290,6 +290,8 @@ action_kinds! {
     GotoWord,
     ExtendToWord,
     GotoLastModification,
+    AddNewlineBelow,
+    AddNewlineAbove,
     ExtendGotoFirstNonwhitespace,
     ExtendGotoFileStart,
     ExtendGotoLastLine,

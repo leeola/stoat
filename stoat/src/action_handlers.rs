@@ -858,6 +858,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoWord => movement::goto_word(stoat),
         ActionKind::ExtendToWord => movement::extend_to_word(stoat),
         ActionKind::GotoLastModification => movement::goto_last_modification(stoat),
+        ActionKind::AddNewlineBelow => movement::add_newline_below(stoat),
+        ActionKind::AddNewlineAbove => movement::add_newline_above(stoat),
         ActionKind::ExtendGotoFirstNonwhitespace => movement::goto_first_nonwhitespace(stoat, true),
         ActionKind::ExtendGotoFileStart => movement::goto_file_start(stoat, true),
         ActionKind::ExtendGotoLastLine => movement::goto_last_line(stoat, true),

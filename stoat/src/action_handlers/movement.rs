@@ -4916,6 +4916,78 @@ pub(crate) fn jump_to_word_range(stoat: &mut Stoat, range: (usize, usize)) -> Up
     UpdateEffect::Redraw
 }
 
+pub(super) fn add_newline_below(stoat: &mut Stoat) -> UpdateEffect {
+    add_newline(stoat, false)
+}
+
+pub(super) fn add_newline_above(stoat: &mut Stoat) -> UpdateEffect {
+    add_newline(stoat, true)
+}
+
+/// Insert blank lines around the lines the selections touch.
+///
+/// A selection ending exactly at a line start does not reach the line below it,
+/// so its span steps back a grapheme first. Two selections on one line ask for
+/// the same insert point, and their two requests become one insert of both
+/// runs, which lands the text each of them asked for.
+fn add_newline(stoat: &mut Stoat, above: bool) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1) as usize;
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let buffer_id = editor.buffer_id;
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let max_row = rope.max_point().row;
+
+    let mut offsets: Vec<usize> = editor
+        .selections
+        .all_anchors()
+        .iter()
+        .map(|sel| {
+            let start = buffer_snapshot.resolve_anchor(&sel.start);
+            let end = buffer_snapshot.resolve_anchor(&sel.end);
+            let last = match end > start {
+                true => rope.prev_grapheme_boundary(end).max(start),
+                false => end,
+            };
+            match above {
+                true => rope.point_to_offset(Point::new(rope.offset_to_point(start).row, 0)),
+                false => match rope.offset_to_point(last).row {
+                    row if row >= max_row => rope.len(),
+                    row => rope.point_to_offset(Point::new(row + 1, 0)),
+                },
+            }
+        })
+        .collect();
+    offsets.sort_unstable_by(|a, b| b.cmp(a));
+
+    // Descending, so each insert lands before the offsets still to come move
+    // under it. Runs of one offset collapse into a single insert.
+    let mut batch: Vec<(usize, String)> = Vec::with_capacity(offsets.len());
+    for offset in offsets {
+        match batch.last_mut() {
+            Some((at, text)) if *at == offset => text.push_str(&"\n".repeat(count)),
+            _ => batch.push((offset, "\n".repeat(count))),
+        }
+    }
+    if batch.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) else {
+        return UpdateEffect::None;
+    };
+    let mut guard = buffer.write().expect("buffer poisoned");
+    let edits: Vec<(Range<usize>, &str)> = batch
+        .iter()
+        .map(|(at, text)| (*at..*at, text.as_str()))
+        .collect();
+    guard.edit_batch(&edits);
+    UpdateEffect::Redraw
+}
+
 /// Move every cursor to where the newest edit finished.
 ///
 /// A buffer with no edits does nothing at all, rather than moving cursors to

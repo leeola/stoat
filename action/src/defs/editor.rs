@@ -1649,6 +1649,26 @@ define_action!(
 );
 
 define_action!(
+    AddNewlineBelowDef,
+    AddNewlineBelow,
+    "AddNewlineBelow",
+    ActionKind::AddNewlineBelow,
+    "add a blank line below each selection",
+    "Insert a blank line after the last line every selection touches, count of them where a count is given. The selections keep the text they were on rather than growing over the new lines. Two selections on one line each add their own.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    AddNewlineAboveDef,
+    AddNewlineAbove,
+    "AddNewlineAbove",
+    ActionKind::AddNewlineAbove,
+    "add a blank line above each selection",
+    "Insert a blank line before the first line every selection touches, count of them where a count is given. The selections keep the text they were on rather than growing over the new lines. Two selections on one line each add their own.",
+    ActionPriority::Rare
+);
+
+define_action!(
     GotoLastModificationDef,
     GotoLastModification,
     "GotoLastModification",
