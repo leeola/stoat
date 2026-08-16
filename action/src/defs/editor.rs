@@ -298,8 +298,8 @@ define_action!(
     PageUp,
     "PageUp",
     ActionKind::PageUp,
-    "move cursor up one page",
-    "Move the cursor up by the focused editor's viewport height and scroll the view by the same amount, keeping the cursor at the same relative screen row.",
+    "scroll up one page",
+    "Scroll the view up by the focused editor's viewport height, leaving the cursor on its buffer row. A cursor the view scrolls away from follows only as far as the scrolloff margin above the new bottom edge.",
     ActionPriority::Rare
 );
 
@@ -308,8 +308,8 @@ define_action!(
     PageDown,
     "PageDown",
     ActionKind::PageDown,
-    "move cursor down one page",
-    "Move the cursor down by the focused editor's viewport height and scroll the view by the same amount, keeping the cursor at the same relative screen row.",
+    "scroll down one page",
+    "Scroll the view down by the focused editor's viewport height, leaving the cursor on its buffer row. A cursor the view scrolls away from follows only as far as the scrolloff margin below the new top edge.",
     ActionPriority::Rare
 );
 

@@ -391,8 +391,12 @@ on key {
         j -> MoveDown();
         k -> MoveUp();
         l -> MoveRight();
-        Ctrl-b -> HalfPageUp();
-        Ctrl-f -> HalfPageDown();
+        # Ctrl-f/Ctrl-b scroll a page and leave the cursor where it is,
+        # while Ctrl-u/Ctrl-d carry it along by half of one.
+        Ctrl-b -> PageUp();
+        Ctrl-f -> PageDown();
+        PageUp -> PageUp();
+        PageDown -> PageDown();
         Ctrl-u -> HalfPageUp();
         Ctrl-d -> HalfPageDown();
         w -> MoveNextWordStart();
@@ -618,8 +622,12 @@ on key {
         j -> ExtendDown();
         k -> ExtendUp();
         l -> ExtendRight();
-        Ctrl-b -> HalfPageUp();
-        Ctrl-f -> HalfPageDown();
+        # Ctrl-f/Ctrl-b scroll a page and leave the cursor where it is,
+        # while Ctrl-u/Ctrl-d carry it along by half of one.
+        Ctrl-b -> PageUp();
+        Ctrl-f -> PageDown();
+        PageUp -> PageUp();
+        PageDown -> PageDown();
         Ctrl-u -> HalfPageUp();
         Ctrl-d -> HalfPageDown();
         w -> ExtendNextWordStart();
@@ -811,8 +819,12 @@ on key {
         w -> MoveNextWordStart();
         e -> MoveNextWordEnd();
         b -> MovePrevWordStart();
-        Ctrl-b -> HalfPageUp();
-        Ctrl-f -> HalfPageDown();
+        # Ctrl-f/Ctrl-b scroll a page and leave the cursor where it is,
+        # while Ctrl-u/Ctrl-d carry it along by half of one.
+        Ctrl-b -> PageUp();
+        Ctrl-f -> PageDown();
+        PageUp -> PageUp();
+        PageDown -> PageDown();
         Ctrl-u -> HalfPageUp();
         Ctrl-d -> HalfPageDown();
         Home -> GotoLineStart();

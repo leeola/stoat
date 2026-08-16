@@ -32,9 +32,38 @@ pub(super) enum PageDir {
 /// without running a render pass).
 pub(crate) const DEFAULT_VIEWPORT_ROWS: u32 = 20;
 
+/// The display row a half page carries the cursor to, one row of travel per row
+/// of scroll.
+///
+/// A downward jump past the last display row lands on it, since the empty
+/// buffer row beyond has no display row of its own.
+fn cursor_row_by_delta(current: u32, delta: u32, dir: PageDir, max_row: u32) -> u32 {
+    match dir {
+        PageDir::Up => current.saturating_sub(delta),
+        PageDir::Down => current.saturating_add(delta).min(max_row),
+    }
+}
+
+/// The display row a full page leaves the cursor on, which is where it already
+/// was unless the scrolled view drags it past the scrolloff edge it recedes
+/// toward.
+///
+/// The pull works in one direction only. Scrolling down lifts a cursor off the
+/// top edge and scrolling up lifts one off the bottom. A cursor the view
+/// scrolls toward keeps its row, so a page up at the top of the buffer moves
+/// nothing.
+fn cursor_row_at_edge(current: u32, scroll_row: u32, viewport: u32, dir: PageDir, gap: u32) -> u32 {
+    let gap = gap.min(viewport.saturating_sub(1) / 2);
+    match dir {
+        PageDir::Up => current.min(scroll_row + viewport.saturating_sub(gap + 1)),
+        PageDir::Down => current.max(scroll_row + gap),
+    }
+}
+
 pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> UpdateEffect {
     let extend = stoat.in_select_mode();
     let count = stoat.take_pending_count().unwrap_or(1);
+    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -53,26 +82,39 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
     let cursor = cursor_offset(rope, tail_off, head_off);
     let current = display_snapshot.buffer_to_display(rope.offset_to_point(cursor));
 
+    let prev = editor.scroll_row;
+    let max_scroll = max_scroll_row(display_snapshot.line_count(), viewport);
+    let new_scroll = match dir {
+        PageDir::Up => editor.scroll_row.saturating_sub(delta),
+        PageDir::Down => editor.scroll_row.saturating_add(delta).min(max_scroll),
+    };
+
+    // The half-page keys carry the cursor with the view and the full-page keys
+    // leave it where it is, which is the split Helix draws between its two
+    // families rather than between the two distances.
+    let target_row = match half {
+        true => cursor_row_by_delta(current.row, delta, dir, max_point.row),
+        false => cursor_row_at_edge(current.row, new_scroll, viewport, dir, scrolloff),
+    };
+
     // Move the cursor in display rows so it tracks the scroll leg below one for
     // one across block rows. A downward jump past the last display row lands on
     // the final cell, since the empty buffer row beyond it has no display row of
     // its own. Otherwise clip toward the direction of travel so a block row
     // snaps to the buffer row past it rather than back to the one just left.
-    let target_point = match dir {
-        PageDir::Up => {
-            let raw = DisplayPoint::new(current.row.saturating_sub(delta), current.column);
-            display_snapshot.clip_point(raw, Bias::Left)
-        },
-        PageDir::Down => {
-            let row = current.row.saturating_add(delta);
-            if row >= max_point.row {
-                max_point
-            } else {
-                display_snapshot.clip_point(DisplayPoint::new(row, current.column), Bias::Right)
-            }
+    let target_point = match target_row >= max_point.row {
+        true => max_point,
+        false => {
+            let bias = match dir {
+                PageDir::Up => Bias::Left,
+                PageDir::Down => Bias::Right,
+            };
+            display_snapshot.clip_point(DisplayPoint::new(target_row, current.column), bias)
         },
     };
-    if target_point == current {
+    // A full page scrolls even where the cursor keeps its row, so the view
+    // moving is its own reason to go on.
+    if target_point == current && new_scroll == prev {
         return UpdateEffect::None;
     }
     let Some(target_buffer_pt) = display_snapshot.display_to_buffer(target_point) else {
@@ -80,12 +122,7 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
     };
     let target_offset = rope.point_to_offset(target_buffer_pt);
 
-    let prev = editor.scroll_row;
-    let max_scroll = max_scroll_row(display_snapshot.line_count(), viewport);
-    editor.scroll_row = match dir {
-        PageDir::Up => editor.scroll_row.saturating_sub(delta),
-        PageDir::Down => editor.scroll_row.saturating_add(delta).min(max_scroll),
-    };
+    editor.scroll_row = new_scroll;
     // In select mode the page motion grows the selection by holding the anchor
     // and moving the head to the target row like Helix.
     movement::move_cursors(&mut editor.selections, buffer_snapshot, extend, |_| {
@@ -1287,6 +1324,69 @@ mod tests {
         ws.editors[editor_id].viewport_rows = rows;
     }
 
+    /// A cursor the scrolled view still clears is left where it is, so a page
+    /// reads the file without dragging the edit point along.
+    ///
+    /// The last page of the buffer is where this shows, since only a clamped
+    /// scroll travels less than the distance to the cursor.
+    #[test]
+    fn page_down_leaves_a_cursor_the_clamped_scroll_clears() {
+        let mut stoat = stoat();
+        let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+        for _ in 0..25 {
+            dispatch(&mut stoat, &stoat_action::MoveDown);
+        }
+        // The view-follow runs in the key loop rather than the dispatch, so
+        // drive it here to reach the resting view of a real press.
+        ensure_cursor_in_view(focused_editor_mut(&mut stoat).expect("focused editor"), 3);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(25, 0)]);
+        assert_eq!(editor::editor_scroll_rows(&stoat), vec![19]);
+
+        // The scroll clamps at 21, two rows on, which leaves row 25 well below
+        // the top edge of 24.
+        dispatch(&mut stoat, &PageDown);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(25, 0)],
+            "the view moved and the cursor did not"
+        );
+        assert_eq!(editor::editor_scroll_rows(&stoat), vec![21]);
+    }
+
+    /// A page up at the top of the buffer moves nothing, since the pull only
+    /// works against the direction the view travels.
+    #[test]
+    fn page_up_at_the_top_leaves_the_cursor_alone() {
+        let mut stoat = stoat();
+        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+        for _ in 0..4 {
+            dispatch(&mut stoat, &stoat_action::MoveDown);
+        }
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(4, 0)]);
+
+        dispatch(&mut stoat, &PageUp);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(4, 0)]);
+        assert_eq!(editor::editor_scroll_rows(&stoat), vec![0]);
+    }
+
+    /// Half a page carries the cursor with it, which is the other family and
+    /// the reason both still exist.
+    #[test]
+    fn half_page_down_carries_the_cursor() {
+        let mut stoat = stoat();
+        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+
+        dispatch(&mut stoat, &HalfPageDown);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(5, 0)]);
+        assert_eq!(editor::editor_scroll_rows(&stoat), vec![5]);
+    }
+
     #[test]
     fn page_down_with_unrendered_editor_uses_default_viewport() {
         let mut stoat = stoat();
@@ -1294,7 +1394,11 @@ mod tests {
         editor::seed_focused_buffer(&mut stoat, &text);
         set_focused_viewport_rows(&mut stoat, None);
         dispatch(&mut stoat, &PageDown);
-        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(20, 0)]);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(14, 0)],
+            "a page of viewport 20, scroll clamped to 11, cursor to the edge at 14"
+        );
     }
 
     #[test]
@@ -1332,11 +1436,11 @@ mod tests {
         dispatch(&mut stoat, &AddSelectionBelow);
         assert_eq!(editor::head_offsets(&mut stoat).len(), 2);
         dispatch(&mut stoat, &PageDown);
-        // AddSelectionBelow makes row 1 the primary cursor; PageDown from
-        // row 1 with viewport=10 lands on row 11. Both cursors collapse to
-        // the same target via the transform dedupe.
+        // The view scrolls a page to row 10 and leaves both cursors above it,
+        // so both are pulled down to the top edge and collapse to the same
+        // target via the transform dedupe.
         assert_eq!(editor::head_offsets(&mut stoat).len(), 1);
-        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(11, 0)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(13, 0)]);
     }
 
     #[test]
@@ -1349,8 +1453,8 @@ mod tests {
         dispatch(&mut stoat, &PageDown);
         assert_eq!(
             editor::cursor_display_positions(&mut stoat),
-            vec![(30, 0)],
-            "3 Ctrl-f with viewport=10 should land at row 30"
+            vec![(33, 0)],
+            "three pages of scroll to row 30, and the cursor pulled to the edge at 33"
         );
     }
 
@@ -1406,15 +1510,15 @@ mod tests {
         dispatch(&mut stoat, &PageDown);
         assert_eq!(
             editor::cursor_display_positions(&mut stoat),
-            vec![(40, 0)],
-            "test setup: cursor at row 40 after four page-downs"
+            vec![(43, 0)],
+            "test setup: four pages of scroll to row 40, cursor at the top edge"
         );
         stoat.pending_count = Some(3);
         dispatch(&mut stoat, &PageUp);
         assert_eq!(
             editor::cursor_display_positions(&mut stoat),
-            vec![(10, 0)],
-            "3 Ctrl-b from row 40 with viewport=10 should land at row 10"
+            vec![(16, 0)],
+            "three pages back to row 10, and the cursor pulled to the bottom edge"
         );
     }
 
@@ -1428,8 +1532,8 @@ mod tests {
         dispatch(&mut stoat, &PageDown);
         assert_eq!(
             editor::cursor_display_positions(&mut stoat),
-            vec![(30, 0)],
-            "a huge count clamps to the buffer end, which is the empty final row"
+            vec![(24, 0)],
+            "a huge count clamps the scroll to the last page, the cursor to its edge"
         );
     }
 
