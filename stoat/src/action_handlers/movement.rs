@@ -4892,6 +4892,30 @@ pub(crate) fn jump_to_offset(stoat: &mut Stoat, offset: usize) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Land the one selection over `range`, running forward, and record the origin
+/// on the jumplist.
+///
+/// The label jump crosses the viewport in one press, so the place it left is
+/// worth getting back to. Replacing the whole set rather than moving each
+/// cursor is what makes the labelled word the thing selected. Moving each
+/// cursor instead stamps every one of them onto the same word.
+pub(crate) fn jump_to_word_range(stoat: &mut Stoat, range: (usize, usize)) -> UpdateEffect {
+    super::jump::push_jump(stoat);
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let len = buffer_snapshot.rope().len();
+
+    let start = buffer_snapshot.anchor_at(range.0.min(len), Bias::Left);
+    let end = buffer_snapshot.anchor_at(range.1.min(len), Bias::Right);
+    editor
+        .selections
+        .set_single_range(start, end, false, SelectionGoal::None);
+    UpdateEffect::Redraw
+}
+
 pub(super) fn goto_word(stoat: &mut Stoat) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

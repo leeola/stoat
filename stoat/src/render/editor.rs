@@ -126,7 +126,7 @@ pub(crate) fn render_editor_with_overlay(
     line_numbers: LineNumbers,
     insert_mode: bool,
     hover_cell: Option<(u16, u16)>,
-    goto_word_labels: Option<&BTreeMap<String, usize>>,
+    goto_word_labels: Option<&BTreeMap<String, (usize, usize)>>,
     search_query: Option<&str>,
     search_smart_case: bool,
     diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet)>,
@@ -717,12 +717,14 @@ pub(crate) fn render_editor_with_overlay(
 
     if let Some(labels) = goto_word_labels {
         let label_style = fallback_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
-        for (label, &offset) in labels {
+        // Drawn at the word's start, which is where the user reads the label
+        // against the word it names.
+        for (label, &(start, _)) in labels {
             let rope = buffer_snapshot.rope();
-            if offset > rope.len() {
+            if start > rope.len() {
                 continue;
             }
-            let point = rope.offset_to_point(offset);
+            let point = rope.offset_to_point(start);
             let display = snapshot.buffer_to_display(point);
             if display.row < editor.scroll_row || display.row >= end_row {
                 continue;

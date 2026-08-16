@@ -255,7 +255,7 @@ pub(crate) struct FrameCtx<'a> {
     /// Active labels for an in-progress `GotoWord` jump, keyed by label
     /// string with byte-offset values. Painted by the focused editor's
     /// render path; non-focused panes ignore this field.
-    pub(crate) goto_word_labels: Option<&'a std::collections::BTreeMap<String, usize>>,
+    pub(crate) goto_word_labels: Option<&'a std::collections::BTreeMap<String, (usize, usize)>>,
     /// [`Self::mode`]'s status-line label and colour, resolved once for the
     /// frame by [`pane::mode_segment`].
     ///

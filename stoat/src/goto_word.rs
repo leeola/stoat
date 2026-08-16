@@ -17,17 +17,19 @@ pub(crate) const ALPHABET: &[char] = &[
     't', 'u', 'v', 'w', 'x', 'y', 'z',
 ];
 
-/// Find byte offsets of word starts on rows in `[first_row, last_row]`
-/// (inclusive). A "word start" is the first char of a run of two or
-/// more word characters (alphanumerics or underscore), matching
-/// Helix's filter. The returned offsets are in document order, capped
-/// at `max` entries.
+/// Find the byte ranges of words on rows in `[first_row, last_row]`
+/// (inclusive). A word is a run of two or more word characters
+/// (alphanumerics or underscore), matching Helix's filter. The ranges
+/// are in document order, capped at `max` entries.
+///
+/// Each range runs from the word's first character to the byte past its
+/// last, so a jump lands over the whole word rather than at its start.
 pub(crate) fn find_word_starts(
     rope: &Rope,
     first_row: u32,
     last_row: u32,
     max: usize,
-) -> Vec<usize> {
+) -> Vec<(usize, usize)> {
     if max == 0 {
         return Vec::new();
     }
@@ -50,21 +52,31 @@ pub(crate) fn find_word_starts(
     targets
 }
 
-fn scan_line_word_starts(line: &str, row_offset: usize, max: usize, out: &mut Vec<usize>) {
-    let mut chars = line.char_indices().peekable();
-    let mut prev_was_word = false;
-    while let Some((byte_idx, ch)) = chars.next() {
-        let is_word = char_is_word(ch);
-        if is_word && !prev_was_word {
-            let next_is_word = chars.peek().is_some_and(|&(_, c)| char_is_word(c));
-            if next_is_word {
-                out.push(row_offset + byte_idx);
-                if out.len() >= max {
-                    return;
+fn scan_line_word_starts(line: &str, row_offset: usize, max: usize, out: &mut Vec<(usize, usize)>) {
+    let mut start: Option<usize> = None;
+    for (byte_idx, ch) in line.char_indices() {
+        match (char_is_word(ch), start) {
+            (true, None) => start = Some(byte_idx),
+            (true, Some(_)) => {},
+            // A run of one character is not a word here, matching the filter
+            // the labels are sized against.
+            (false, Some(from)) => {
+                start = None;
+                if line[from..byte_idx].chars().count() >= 2 {
+                    out.push((row_offset + from, row_offset + byte_idx));
+                    if out.len() >= max {
+                        return;
+                    }
                 }
-            }
+            },
+            (false, None) => {},
         }
-        prev_was_word = is_word;
+    }
+    // A word ending at the line's end has no non-word character to close it.
+    if let Some(from) = start
+        && line[from..].chars().count() >= 2
+    {
+        out.push((row_offset + from, row_offset + line.len()));
     }
 }
 
@@ -77,7 +89,13 @@ fn scan_line_word_starts(line: &str, row_offset: usize, max: usize, out: &mut Ve
 ///
 /// Returns a [`BTreeMap`] (rather than a [`HashMap`]) so iteration
 /// order is deterministic for snapshot tests and label rendering.
-pub(crate) fn assign_labels(targets: &[usize], alphabet: &[char]) -> BTreeMap<String, usize> {
+///
+/// A label maps to the whole word's range. Rendering keys off the start,
+/// which is where the label is drawn.
+pub(crate) fn assign_labels(
+    targets: &[(usize, usize)],
+    alphabet: &[char],
+) -> BTreeMap<String, (usize, usize)> {
     let mut map = BTreeMap::new();
     if alphabet.is_empty() || targets.is_empty() {
         return map;
@@ -108,8 +126,8 @@ pub(crate) fn assign_labels(targets: &[usize], alphabet: &[char]) -> BTreeMap<St
 
 /// Result of feeding one character into an in-progress jump.
 pub(crate) enum JumpStep {
-    /// Label fully typed; the cursor should jump to the byte offset.
-    Jump(usize),
+    /// Label fully typed. The jump lands over the word this range covers.
+    Jump((usize, usize)),
     /// Input prefix still has multiple matching labels - keep waiting.
     Continue,
     /// No labels match the new prefix - cancel the in-progress jump.
@@ -119,12 +137,16 @@ pub(crate) enum JumpStep {
 /// Step the in-progress jump: append `ch` to `input` and look up
 /// `input` in the label map. Caller is responsible for clearing /
 /// updating its own state based on the returned [`JumpStep`].
-pub(crate) fn step_jump(labels: &BTreeMap<String, usize>, input: &str, ch: char) -> JumpStep {
+pub(crate) fn step_jump(
+    labels: &BTreeMap<String, (usize, usize)>,
+    input: &str,
+    ch: char,
+) -> JumpStep {
     let mut next = String::with_capacity(input.len() + 1);
     next.push_str(input);
     next.push(ch);
-    if let Some(&offset) = labels.get(&next) {
-        return JumpStep::Jump(offset);
+    if let Some(&range) = labels.get(&next) {
+        return JumpStep::Jump(range);
     }
     let any_prefix_match = labels.keys().any(|k| k.starts_with(&next));
     if any_prefix_match {
@@ -144,28 +166,28 @@ mod tests {
 
     #[test]
     fn assign_labels_one_char_when_under_alphabet_size() {
-        let targets = vec![0, 5, 10];
+        let targets = vec![(0, 2), (5, 7), (10, 12)];
         let labels = assign_labels(&targets, ALPHABET);
-        let collected: Vec<(&String, &usize)> = labels.iter().collect();
+        let collected: Vec<(&String, &(usize, usize))> = labels.iter().collect();
         assert_eq!(collected.len(), 3);
         assert_eq!(*collected[0].0, "a");
         assert_eq!(*collected[1].0, "b");
         assert_eq!(*collected[2].0, "c");
-        assert_eq!(*collected[0].1, 0);
-        assert_eq!(*collected[1].1, 5);
-        assert_eq!(*collected[2].1, 10);
+        assert_eq!(*collected[0].1, (0, 2));
+        assert_eq!(*collected[1].1, (5, 7));
+        assert_eq!(*collected[2].1, (10, 12));
     }
 
     #[test]
     fn assign_labels_two_char_when_over_alphabet_size() {
-        let targets: Vec<usize> = (0..30).map(|i| i * 4).collect();
+        let targets: Vec<(usize, usize)> = (0..30).map(|i| (i * 4, i * 4 + 2)).collect();
         let labels = assign_labels(&targets, ALPHABET);
         assert_eq!(labels.len(), 30);
         // First target -> "aa", 26th -> "ba", 27th -> "bb".
-        assert_eq!(labels.get("aa"), Some(&0));
-        assert_eq!(labels.get("az"), Some(&(25 * 4)));
-        assert_eq!(labels.get("ba"), Some(&(26 * 4)));
-        assert_eq!(labels.get("bd"), Some(&(29 * 4)));
+        assert_eq!(labels.get("aa"), Some(&(0, 2)));
+        assert_eq!(labels.get("az"), Some(&(25 * 4, 25 * 4 + 2)));
+        assert_eq!(labels.get("ba"), Some(&(26 * 4, 26 * 4 + 2)));
+        assert_eq!(labels.get("bd"), Some(&(29 * 4, 29 * 4 + 2)));
         for label in labels.keys() {
             assert_eq!(label.len(), 2, "expected two-char label, got {label:?}");
         }
@@ -173,16 +195,17 @@ mod tests {
 
     #[test]
     fn assign_labels_caps_at_alphabet_squared() {
-        let targets: Vec<usize> = (0..1000).collect();
+        let targets: Vec<(usize, usize)> = (0..1000).map(|i| (i, i + 2)).collect();
         let labels = assign_labels(&targets, ALPHABET);
         assert_eq!(labels.len(), ALPHABET.len() * ALPHABET.len());
     }
 
     #[test]
     fn assign_labels_unique_strings_no_collisions() {
-        let targets: Vec<usize> = (0..200).collect();
+        let targets: Vec<(usize, usize)> = (0..200).map(|i| (i, i + 2)).collect();
         let labels = assign_labels(&targets, ALPHABET);
-        let unique_offsets: std::collections::BTreeSet<usize> = labels.values().copied().collect();
+        let unique_offsets: std::collections::BTreeSet<(usize, usize)> =
+            labels.values().copied().collect();
         assert_eq!(unique_offsets.len(), labels.len());
     }
 
@@ -192,7 +215,7 @@ mod tests {
         let starts = find_word_starts(&r, 0, 0, 100);
         // "a" is one char (skipped), "abc" starts at offset 2,
         // "d" is one char (skipped), "efgh" starts at offset 8.
-        assert_eq!(starts, vec![2, 8]);
+        assert_eq!(starts, vec![(2, 5), (8, 12)]);
     }
 
     #[test]
@@ -202,7 +225,7 @@ mod tests {
         // Only row 1 ("beta") is in scope.
         assert_eq!(starts.len(), 1);
         let beta_offset = "alpha\n".len();
-        assert_eq!(starts[0], beta_offset);
+        assert_eq!(starts[0], (beta_offset, beta_offset + 4));
     }
 
     #[test]
@@ -210,7 +233,7 @@ mod tests {
         let r = rope("aa bb cc dd ee ff gg\n");
         let starts = find_word_starts(&r, 0, 0, 3);
         assert_eq!(starts.len(), 3);
-        assert_eq!(starts, vec![0, 3, 6]);
+        assert_eq!(starts, vec![(0, 2), (3, 5), (6, 8)]);
     }
 
     #[test]
@@ -218,16 +241,16 @@ mod tests {
         let r = rope("foo.bar baz\n");
         let starts = find_word_starts(&r, 0, 0, 100);
         // foo, bar, baz are each separate runs; all 3+ chars qualify.
-        assert_eq!(starts, vec![0, 4, 8]);
+        assert_eq!(starts, vec![(0, 3), (4, 7), (8, 11)]);
     }
 
     #[test]
     fn step_jump_returns_jump_on_exact_match() {
         let mut labels = BTreeMap::new();
-        labels.insert("a".to_string(), 42);
-        labels.insert("b".to_string(), 7);
+        labels.insert("a".to_string(), (42, 45));
+        labels.insert("b".to_string(), (7, 10));
         match step_jump(&labels, "", 'a') {
-            JumpStep::Jump(off) => assert_eq!(off, 42),
+            JumpStep::Jump(range) => assert_eq!(range, (42, 45)),
             _ => panic!("expected Jump"),
         }
     }
@@ -235,30 +258,30 @@ mod tests {
     #[test]
     fn step_jump_returns_continue_on_partial_match() {
         let mut labels = BTreeMap::new();
-        labels.insert("aa".to_string(), 1);
-        labels.insert("ab".to_string(), 2);
-        labels.insert("ba".to_string(), 3);
+        labels.insert("aa".to_string(), (1, 3));
+        labels.insert("ab".to_string(), (2, 4));
+        labels.insert("ba".to_string(), (3, 5));
         assert!(matches!(step_jump(&labels, "", 'a'), JumpStep::Continue));
     }
 
     #[test]
     fn step_jump_returns_cancel_on_no_match() {
         let mut labels = BTreeMap::new();
-        labels.insert("aa".to_string(), 1);
-        labels.insert("bb".to_string(), 2);
+        labels.insert("aa".to_string(), (1, 3));
+        labels.insert("bb".to_string(), (2, 4));
         assert!(matches!(step_jump(&labels, "", 'z'), JumpStep::Cancel));
     }
 
     #[test]
     fn step_jump_two_char_path() {
         let mut labels = BTreeMap::new();
-        labels.insert("aa".to_string(), 10);
-        labels.insert("ab".to_string(), 20);
+        labels.insert("aa".to_string(), (10, 12));
+        labels.insert("ab".to_string(), (20, 22));
         // First char "a" -> Continue.
         assert!(matches!(step_jump(&labels, "", 'a'), JumpStep::Continue));
         // Then "ab" -> Jump.
         match step_jump(&labels, "a", 'b') {
-            JumpStep::Jump(off) => assert_eq!(off, 20),
+            JumpStep::Jump(range) => assert_eq!(range, (20, 22)),
             _ => panic!("expected Jump"),
         }
     }
@@ -285,27 +308,54 @@ mod tests {
             .as_ref()
             .expect("labels should be armed")
             .clone();
-        // Three words, all >= 2 chars, so all get labels at offsets 0/6/11.
+        // Three words, all two characters or more, each labelled over its whole
+        // span rather than at its start alone.
         assert_eq!(labels.len(), 3);
-        assert_eq!(labels.get("a"), Some(&0));
-        assert_eq!(labels.get("b"), Some(&6));
-        assert_eq!(labels.get("c"), Some(&11));
+        assert_eq!(labels.get("a"), Some(&(0, 5)));
+        assert_eq!(labels.get("b"), Some(&(6, 10)));
+        assert_eq!(labels.get("c"), Some(&(11, 16)));
 
         h.type_keys("c");
         assert!(h.stoat.pending_goto_word.is_none());
-        let cursor_offset = {
-            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat)
-                .expect("editor should be focused");
-            let snapshot = editor.display_map.snapshot();
-            let buffer_snapshot = snapshot.buffer_snapshot();
-            let sel = editor.selections.newest_anchor();
-            stoat_text::cursor_offset(
-                buffer_snapshot.rope(),
-                buffer_snapshot.resolve_anchor(&sel.tail()),
-                buffer_snapshot.resolve_anchor(&sel.head()),
-            )
-        };
-        assert_eq!(cursor_offset, 11, "cursor should jump to gamma's start");
+        assert_eq!(
+            crate::test_harness::editor::selection_spans(&mut h.stoat),
+            vec![(11, 16, false)],
+            "the one selection covers gamma, running forward",
+        );
+    }
+
+    /// The jump crosses the viewport in one press, so the place it left is on
+    /// the jumplist and one step back returns there.
+    #[test]
+    fn g_w_pushes_the_origin_onto_the_jumplist() {
+        use std::path::PathBuf;
+        let mut h = crate::Stoat::test();
+        let root = PathBuf::from("/goto-word-jumplist");
+        h.fake_fs()
+            .insert_files([(root.join("buf.rs"), b"alpha beta gamma\n".as_ref())]);
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenFile {
+                path: root.join("buf.rs"),
+            },
+        );
+        h.type_keys("l l");
+        let origin = crate::test_harness::editor::selection_spans(&mut h.stoat);
+
+        h.type_keys("g w");
+        h.type_keys("c");
+        assert_eq!(
+            crate::test_harness::editor::selection_spans(&mut h.stoat),
+            vec![(11, 16, false)],
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(
+            crate::test_harness::editor::selection_spans(&mut h.stoat),
+            origin,
+            "one step back returns to where the jump started",
+        );
     }
 
     /// The key that drops the labels reaches nothing else, so Escape does not

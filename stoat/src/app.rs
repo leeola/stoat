@@ -946,7 +946,7 @@ pub struct Stoat {
     /// after `GotoWord` is dispatched until the user types a unique
     /// label or types a non-matching prefix. Renderer overlays the
     /// label strings on their target positions while this is set.
-    pub(crate) pending_goto_word: Option<std::collections::BTreeMap<String, usize>>,
+    pub(crate) pending_goto_word: Option<std::collections::BTreeMap<String, (usize, usize)>>,
     /// Characters typed so far to disambiguate the active goto-word
     /// label. Always paired with [`Self::pending_goto_word`]: when
     /// that field is `None` this is empty.
@@ -4195,10 +4195,10 @@ impl Stoat {
             if let KeyCode::Char(ch) = key.code {
                 let labels = self.pending_goto_word.as_ref().expect("checked above");
                 match crate::goto_word::step_jump(labels, &self.pending_goto_word_input, ch) {
-                    crate::goto_word::JumpStep::Jump(offset) => {
+                    crate::goto_word::JumpStep::Jump(range) => {
                         self.pending_goto_word = None;
                         self.pending_goto_word_input.clear();
-                        return action_handlers::movement::jump_to_offset(self, offset);
+                        return action_handlers::movement::jump_to_word_range(self, range);
                     },
                     crate::goto_word::JumpStep::Continue => {
                         self.pending_goto_word_input.push(ch);
