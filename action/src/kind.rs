@@ -294,6 +294,8 @@ action_kinds! {
     AddNewlineAbove,
     GotoFirstDiagnostic,
     GotoLastDiagnostic,
+    GotoFirstChange,
+    GotoLastChange,
     ExtendGotoFirstNonwhitespace,
     ExtendGotoFileStart,
     ExtendGotoLastLine,

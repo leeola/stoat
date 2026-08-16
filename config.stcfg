@@ -535,6 +535,7 @@ on key {
         Escape -> SetMode(normal);
         Space -> [AddNewlineBelow(), SetMode(normal)];
         D -> [GotoLastDiagnostic(), SetMode(normal)];
+        G -> [GotoLastChange(), SetMode(normal)];
         g -> [GotoNextChange(), SetMode(normal)];
         p -> [GotoNextParagraph(), SetMode(normal)];
         d -> [GotoNextDiagnostic(), SetMode(normal)];
@@ -550,6 +551,7 @@ on key {
         Escape -> SetMode(normal);
         Space -> [AddNewlineAbove(), SetMode(normal)];
         D -> [GotoFirstDiagnostic(), SetMode(normal)];
+        G -> [GotoFirstChange(), SetMode(normal)];
         g -> [GotoPrevChange(), SetMode(normal)];
         p -> [GotoPrevParagraph(), SetMode(normal)];
         d -> [GotoPrevDiagnostic(), SetMode(normal)];
@@ -568,6 +570,7 @@ on key {
         Escape -> SetMode(select);
         Space -> [AddNewlineBelow(), SetMode(select)];
         D -> [GotoLastDiagnostic(), SetMode(select)];
+        G -> [GotoLastChange(), SetMode(select)];
         g -> [GotoNextChange(), SetMode(select)];
         p -> [ExtendGotoNextParagraph(), SetMode(select)];
         d -> [GotoNextDiagnostic(), SetMode(select)];
@@ -583,6 +586,7 @@ on key {
         Escape -> SetMode(select);
         Space -> [AddNewlineAbove(), SetMode(select)];
         D -> [GotoFirstDiagnostic(), SetMode(select)];
+        G -> [GotoFirstChange(), SetMode(select)];
         g -> [GotoPrevChange(), SetMode(select)];
         p -> [ExtendGotoPrevParagraph(), SetMode(select)];
         d -> [GotoPrevDiagnostic(), SetMode(select)];

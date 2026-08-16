@@ -4862,6 +4862,67 @@ fn install_diff_hunk_rows(h: &mut TestHarness, rows: &[Range<u32>]) {
     guard.diff_map = Some(dm);
 }
 
+/// The ends of the list are taken whatever the cursor is near, so a cursor on
+/// the first hunk still reaches the last.
+#[test]
+fn goto_last_change_reaches_the_end_past_the_cursor() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    h.open_file(&path);
+    install_diff_hunks(&mut h, &[2, 5]);
+    dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(4, 6, false)],
+        "test setup: on the first hunk",
+    );
+
+    dispatch(&mut h.stoat, &stoat_action::GotoLastChange);
+    assert_eq!(h.selection_spans(), vec![(10, 12, false)]);
+
+    dispatch(&mut h.stoat, &stoat_action::GotoFirstChange);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(4, 6, false)],
+        "and the first reaches back",
+    );
+
+    dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(10, 12, false)],
+        "the origin went on the jumplist before the landing",
+    );
+}
+
+/// An unchanged buffer has no hunk to go to, so the press moves nothing and
+/// leaves the jumplist as it was.
+#[test]
+fn goto_first_change_with_no_hunks_pushes_no_jump() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\n");
+    h.open_file(&path);
+    // A known entry to land on. A push by the no-op takes its place as what the
+    // jump back reaches.
+    h.type_keys("j");
+    dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+    h.type_keys("j");
+    let before = h.selection_spans();
+
+    assert_eq!(
+        dispatch(&mut h.stoat, &stoat_action::GotoFirstChange),
+        UpdateEffect::None,
+    );
+    assert_eq!(h.selection_spans(), before, "the selection stayed put");
+
+    dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(2, 3, false)],
+        "the jump back reaches the earlier entry, so the no-op pushed none",
+    );
+}
+
 #[test]
 fn goto_next_change_jumps_forward() {
     let mut h = TestHarness::with_size(20, 10);

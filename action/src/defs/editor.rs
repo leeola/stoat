@@ -1649,6 +1649,26 @@ define_action!(
 );
 
 define_action!(
+    GotoFirstChangeDef,
+    GotoFirstChange,
+    "GotoFirstChange",
+    ActionKind::GotoFirstChange,
+    "goto the first change in the buffer",
+    "Select the buffer's first change hunk, whatever the cursor is near, and record the origin on the jumplist. The whole selection set becomes that one span, and a deletion hunk selects the one character its rows were removed from. An unchanged buffer moves nothing and records nothing.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoLastChangeDef,
+    GotoLastChange,
+    "GotoLastChange",
+    ActionKind::GotoLastChange,
+    "goto the last change in the buffer",
+    "Select the buffer's last change hunk, whatever the cursor is near, and record the origin on the jumplist. The whole selection set becomes that one span, and a deletion hunk selects the one character its rows were removed from. An unchanged buffer moves nothing and records nothing.",
+    ActionPriority::Rare
+);
+
+define_action!(
     GotoFirstDiagnosticDef,
     GotoFirstDiagnostic,
     "GotoFirstDiagnostic",

@@ -29,12 +29,13 @@ use crate::{
             ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine, ExtendToLineBounds,
             ExtendToLineEnd, ExtendToLineStart, ExtendToWord, ExtendUp, FindNextChar, FindPrevChar,
             FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
-            GotoDiffCallerUp, GotoFileStart, GotoFirstDiagnostic, GotoFirstNonwhitespace,
-            GotoImplementors, GotoLastDiagnostic, GotoLastLine, GotoLastModification, GotoLineEnd,
-            GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass,
-            GotoNextComment, GotoNextEntry, GotoNextFunction, GotoNextParagraph, GotoNextParameter,
-            GotoNextTest, GotoNextXmlElement, GotoPrevChange, GotoPrevClass, GotoPrevComment,
-            GotoPrevEntry, GotoPrevFunction, GotoPrevParagraph, GotoPrevParameter, GotoPrevTest,
+            GotoDiffCallerUp, GotoFileStart, GotoFirstChange, GotoFirstDiagnostic,
+            GotoFirstNonwhitespace, GotoImplementors, GotoLastChange, GotoLastDiagnostic,
+            GotoLastLine, GotoLastModification, GotoLineEnd, GotoLineNumber, GotoLineStart,
+            GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass, GotoNextComment, GotoNextEntry,
+            GotoNextFunction, GotoNextParagraph, GotoNextParameter, GotoNextTest,
+            GotoNextXmlElement, GotoPrevChange, GotoPrevClass, GotoPrevComment, GotoPrevEntry,
+            GotoPrevFunction, GotoPrevParagraph, GotoPrevParameter, GotoPrevTest,
             GotoPrevXmlElement, GotoReferences, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
             GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection, InsertAtLineEnd,
             InsertAtLineStart, InsertRegister, InsertTab, JoinSelections, JoinSelectionsSpace,
@@ -860,6 +861,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoLastDiagnostic::DEF, |_| {
         Ok(Box::new(GotoLastDiagnostic))
     });
+    add(GotoFirstChange::DEF, |_| Ok(Box::new(GotoFirstChange)));
+    add(GotoLastChange::DEF, |_| Ok(Box::new(GotoLastChange)));
     add(ExtendGotoFirstNonwhitespace::DEF, |_| {
         Ok(Box::new(ExtendGotoFirstNonwhitespace))
     });
@@ -1856,6 +1859,7 @@ mod tests {
         // + 1 GotoLastModification.
         // + 2 AddNewlineBelow / AddNewlineAbove.
         // + 2 GotoFirstDiagnostic / GotoLastDiagnostic.
+        // + 2 GotoFirstChange / GotoLastChange.
         // + 2 GotoNextDiagnostic / GotoPrevDiagnostic.
         // + 2 OpenBelow / OpenAbove.
         // + 1 ReplaceChar.
@@ -1966,7 +1970,7 @@ mod tests {
         // + 1 ReplaceWithClipboard.
         // + 2 ToggleLineComments/ToggleBlockComments.
         // + 4 the long-word extends.
-        assert_eq!(all().count(), 470);
+        assert_eq!(all().count(), 472);
     }
 
     #[test]

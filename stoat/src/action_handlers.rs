@@ -979,6 +979,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoLastDiagnostic => {
             lsp::goto_diagnostic(stoat, lsp::DiagnosticDirection::Last)
         },
+        ActionKind::GotoFirstChange => movement::goto_first_change(stoat),
+        ActionKind::GotoLastChange => movement::goto_last_change(stoat),
         ActionKind::GotoDefinition => lsp::goto_definition(stoat),
         ActionKind::GotoDeclaration => lsp::goto_declaration(stoat),
         ActionKind::GotoTypeDefinition => lsp::goto_type_definition(stoat),

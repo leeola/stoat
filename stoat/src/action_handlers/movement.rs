@@ -3952,20 +3952,9 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
 
-    // Where the hunks sit now, not where the last diff job left them, so the
-    // jump reaches the row the gutter paints its mark on. One walk over them
-    // feeds every selection, since each one picks its own target out of the
-    // same sorted list.
-    let hunk_rows: Vec<Range<u32>> = display_snapshot
-        .diff_map()
-        .map(|diff_map| {
-            diff_map
-                .live_hunks(buffer_snapshot)
-                .in_range(0..u32::MAX)
-                .map(|(_, rows)| rows)
-                .collect()
-        })
-        .unwrap_or_default();
+    // One walk over them feeds every selection, since each one picks its own
+    // target out of the same sorted list.
+    let hunk_rows = live_hunk_rows(&display_snapshot, buffer_snapshot);
 
     // Every selection steps from its own cursor, so a multi-cursor set walks to
     // one hunk each rather than sharing whichever cursor happened to be newest.
@@ -4059,6 +4048,76 @@ fn nth_hunk_rows(
 ///
 /// A deletion hunk holds no rows, so it gets the one cell where the removed
 /// text was. The block cursor has no place to sit in an empty span.
+/// Row ranges of the buffer's change hunks, in document order.
+///
+/// Where the hunks sit now, not where the last diff job left them, so a jump
+/// reaches the row the gutter paints its mark on. A buffer with no diff map at
+/// all answers empty.
+fn live_hunk_rows(
+    display_snapshot: &DisplaySnapshot,
+    buffer_snapshot: &MultiBufferSnapshot,
+) -> Vec<Range<u32>> {
+    display_snapshot
+        .diff_map()
+        .map(|diff_map| {
+            diff_map
+                .live_hunks(buffer_snapshot)
+                .in_range(0..u32::MAX)
+                .map(|(_, rows)| rows)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(super) fn goto_first_change(stoat: &mut Stoat) -> UpdateEffect {
+    goto_edge_change(stoat, false)
+}
+
+pub(super) fn goto_last_change(stoat: &mut Stoat) -> UpdateEffect {
+    goto_edge_change(stoat, true)
+}
+
+/// Select the buffer's first or last change hunk.
+///
+/// Nothing at all happens where there is no hunk, the origin included, so a
+/// press in an unchanged buffer leaves the jumplist as it was.
+///
+/// This shares only the hunk collection with [`goto_change_impl`], not its
+/// walk. The per-selection stepping, the extend branch, the repeat record and
+/// the cross-file hop all answer questions an end of the list does not ask.
+fn goto_edge_change(stoat: &mut Stoat, last: bool) -> UpdateEffect {
+    let target = {
+        let Some(editor) = focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let rows = live_hunk_rows(&display_snapshot, buffer_snapshot);
+        let rows = match last {
+            true => rows.last().cloned(),
+            false => rows.first().cloned(),
+        };
+        rows.map(|rows| hunk_span(buffer_snapshot.rope(), rows))
+    };
+    let Some(target) = target else {
+        return UpdateEffect::None;
+    };
+
+    super::jump::push_jump(stoat);
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    editor.selections.set_single_range(
+        buffer_snapshot.anchor_at(target.start, Bias::Left),
+        buffer_snapshot.anchor_at(target.end, Bias::Right),
+        false,
+        SelectionGoal::None,
+    );
+    UpdateEffect::Redraw
+}
+
 fn hunk_span(rope: &Rope, rows: Range<u32>) -> Range<usize> {
     let start = rope.point_to_offset(Point::new(rows.start, 0));
     let end = if rows.is_empty() {
