@@ -3784,6 +3784,28 @@ fn switch_to_lowercase_mixed_selection_is_idempotent_for_lowers() {
     assert_eq!(focused_buffer_text(&mut h), "hello world!\n");
 }
 
+/// A selection with no newline to split on is still rebuilt, so it picks up
+/// the forward direction every split piece gets.
+#[test]
+fn alt_s_flips_a_reversed_single_line_selection_forward() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "hello world\n");
+    h.open_file(&path);
+    h.type_keys("l l l v h h");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(1, 4, true)],
+        "test setup: the selection runs backward within one line"
+    );
+
+    h.type_keys("alt-s");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(1, 4, false)],
+        "the same span comes back forward"
+    );
+}
+
 #[test]
 fn switch_case_applies_to_each_split_cursor_range() {
     let mut h = TestHarness::with_size(20, 5);

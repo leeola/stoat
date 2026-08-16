@@ -1533,8 +1533,11 @@ pub(super) fn split_selection_on_newline(stoat: &mut Stoat) -> UpdateEffect {
                 byte_pos += ch.len_utf8();
             }
 
+            // A selection with nothing to split still comes out rebuilt rather
+            // than passed through, so it picks up the forward direction every
+            // other piece gets.
             if newline_positions.is_empty() {
-                return Vec::new();
+                return split_selection::widen_pieces(rope, vec![(start_offset, end_offset)]);
             }
 
             let mut pieces: Vec<(usize, usize)> = Vec::with_capacity(newline_positions.len() + 1);
