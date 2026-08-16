@@ -54,10 +54,10 @@ use crate::{
             ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
             ShrinkSelection, ShrinkToLineBounds, SmartTab, SplitSelection, SplitSelectionOnNewline,
             SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase,
-            SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints,
-            ToggleLspStatus, ToggleSyntaxHighlight, TrailClear, TrailNext, TrailPrev,
-            TriggerCompletion, TrimSelections, Undo, UnindentSelection, WriteQuit, Yank,
-            YankMainToClipboard, YankToClipboard,
+            SwitchToUppercase, TillNextChar, TillPrevChar, ToggleBlockComments, ToggleComments,
+            ToggleInlayHints, ToggleLineComments, ToggleLspStatus, ToggleSyntaxHighlight,
+            TrailClear, TrailNext, TrailPrev, TriggerCompletion, TrimSelections, Undo,
+            UnindentSelection, WriteQuit, Yank, YankMainToClipboard, YankToClipboard,
         },
         file::{
             AutoReload, AutoReloadConfig, FontSizeDec, FontSizeInc, ForceReloadAll,
@@ -878,6 +878,18 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(IndentSelection::DEF, |_| Ok(Box::new(IndentSelection)));
     add(UnindentSelection::DEF, |_| Ok(Box::new(UnindentSelection)));
     add(ToggleComments::DEF, |_| Ok(Box::new(ToggleComments)));
+    add(ToggleLineComments::DEF, |_| {
+        Ok(Box::new(ToggleLineComments))
+    });
+    add(ToggleBlockComments::DEF, |_| {
+        Ok(Box::new(ToggleBlockComments))
+    });
+    add(ToggleLineComments::DEF, |_| {
+        Ok(Box::new(ToggleLineComments))
+    });
+    add(ToggleBlockComments::DEF, |_| {
+        Ok(Box::new(ToggleBlockComments))
+    });
     add(ToggleSyntaxHighlight::DEF, |_| {
         Ok(Box::new(ToggleSyntaxHighlight))
     });
@@ -1922,7 +1934,8 @@ mod tests {
         // + 4 MoveLineUp/MoveLineDown and their extend variants.
         // + 1 ExtendMatchBrackets.
         // + 1 ReplaceWithClipboard.
-        assert_eq!(all().count(), 458);
+        // + 2 ToggleLineComments/ToggleBlockComments.
+        assert_eq!(all().count(), 460);
     }
 
     #[test]

@@ -3763,6 +3763,65 @@ fn toggle_comments_rust_single_line_inserts_prefix() {
     assert_eq!(focused_buffer_text(&mut h), "// let x = 42;\n");
 }
 
+/// The block key wraps each row, even in a language whose default is lines.
+///
+/// One comment per row rather than one around the whole set, so each row stays
+/// legible as its own commented line.
+#[test]
+fn toggle_block_comments_wraps_selection() {
+    let mut h = TestHarness::with_size(40, 6);
+    let path = h.write_file("s.rs", "let x = 1;\nlet y = 2;\n");
+    h.open_file(&path);
+
+    h.type_keys("v j");
+    dispatch(&mut h.stoat, &stoat_action::ToggleBlockComments);
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "/* let x = 1; */\n/* let y = 2; */\n",
+    );
+}
+
+/// A rust file already carrying a block comment gives it up to the plain
+/// comment key, since the key that makes a comment is the key that undoes it.
+/// Without that step the ladder adds line comments on top instead.
+#[test]
+fn toggle_comments_uncomments_a_block_commented_rust_line() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "/* let x = 1; */\n");
+    h.open_file(&path);
+
+    dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+    assert_eq!(focused_buffer_text(&mut h), "let x = 1;\n");
+}
+
+/// Rust has both kinds, and the plain key picks lines. The block key is how a
+/// user asks for the other one.
+#[test]
+fn toggle_comments_prefers_line_tokens_where_a_language_has_both() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "let x = 1;\n");
+    h.open_file(&path);
+
+    dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+    assert_eq!(focused_buffer_text(&mut h), "// let x = 1;\n");
+}
+
+/// The line key never reaches for the block pair in a language that has line
+/// tokens, which is the whole of what separates it from the plain key.
+#[test]
+fn toggle_line_comments_ignores_a_block_commented_row() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "/* let x = 1; */\n");
+    h.open_file(&path);
+
+    dispatch(&mut h.stoat, &stoat_action::ToggleLineComments);
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "// /* let x = 1; */\n",
+        "the block comment is text like any other to the line key",
+    );
+}
+
 /// The margin is one decision for the whole set, not one per row.
 ///
 /// A row whose token carries no space forces every row to keep its own, so the
@@ -4035,15 +4094,23 @@ fn toggle_comments_toml_uses_hash() {
 }
 
 #[test]
-fn toggle_comments_json_no_op() {
+fn toggle_comments_json_uses_block_tokens() {
     let mut h = TestHarness::with_size(40, 5);
     let path = h.write_file("s.json", "{}\n");
     h.open_file(&path);
+
+    dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "/* {} */\n",
+        "json has no line tokens, so the block pair is what it comments with",
+    );
+
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
     assert_eq!(
         focused_buffer_text(&mut h),
         "{}\n",
-        "json has no line_comments, action no-ops"
+        "and the same key undoes it"
     );
 }
 

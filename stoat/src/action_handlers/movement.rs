@@ -4,7 +4,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     diff_map,
     display_map::{DisplayPoint, DisplaySnapshot},
-    editor_state::EditorState,
+    editor_state::{EditorId, EditorState},
     host::{FsHost, GitHost, GitRepo},
     jumplist::JumpEntry,
     multi_buffer::MultiBufferSnapshot,
@@ -13,6 +13,7 @@ use crate::{
         anchor_selection, forward_block_cursor, land_block_cursor, merge_overlapping_spans,
         ResolvedRead, SelectionsCollection, SpanLanding,
     },
+    workspace::Workspace,
 };
 use std::{
     cmp::Ordering,
@@ -2309,9 +2310,34 @@ struct CommentRow {
     /// with the ordinary token too, so removing the operation's token leaves
     /// the rest of the row's own token behind.
     token: Option<&'static str>,
+    /// End of the row's text, before its line ending. Paired with
+    /// [`Self::content_start`] it is the span a block comment wraps.
+    line_end: usize,
+}
+
+/// Which comment syntax a toggle uses when the language offers both.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CommentStyle {
+    /// Line tokens where the language has them, block tokens where it does not,
+    /// and block tokens either way when the rows are already block-commented.
+    Auto,
+    Line,
+    Block,
 }
 
 pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
+    toggle_comments_with(stoat, CommentStyle::Auto)
+}
+
+pub(super) fn toggle_line_comments(stoat: &mut Stoat) -> UpdateEffect {
+    toggle_comments_with(stoat, CommentStyle::Line)
+}
+
+pub(super) fn toggle_block_comments(stoat: &mut Stoat) -> UpdateEffect {
+    toggle_comments_with(stoat, CommentStyle::Block)
+}
+
+fn toggle_comments_with(stoat: &mut Stoat, style: CommentStyle) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -2323,9 +2349,8 @@ pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
     let Some(language) = ws.buffers.language_for(buffer_id) else {
         return UpdateEffect::None;
     };
-    let Some(prefix) = language.line_comments.first().copied() else {
-        return UpdateEffect::None;
-    };
+    let line_prefix = language.line_comments.first().copied();
+    let block_tokens = language.block_comments;
 
     let editor = ws.editors.get_mut(editor_id).expect("editor");
     let display_snapshot = editor.display_map.snapshot();
@@ -2376,12 +2401,35 @@ pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
             content_start,
             indent_chars,
             token: longest_token_at(rope, content_start, line_end, language.line_comments),
+            line_end,
         });
     }
 
     if commentable.is_empty() {
         return UpdateEffect::None;
     }
+
+    // Helix's ladder, with one block pair rather than several. Rows already
+    // block-commented come off whatever else the language offers, since the key
+    // that made them is the key that has to undo them. Otherwise line tokens
+    // win, and block tokens are the fallback for a language with none.
+    let block_commented = block_tokens.is_some_and(|tokens| {
+        commentable.iter().all(|row| {
+            stoat_text::is_block_commented(rope, row.content_start..row.line_end, tokens)
+        })
+    });
+    let use_block = match style {
+        CommentStyle::Line => line_prefix.is_none(),
+        CommentStyle::Block => block_tokens.is_some(),
+        CommentStyle::Auto => block_commented || line_prefix.is_none(),
+    };
+
+    if use_block && let Some(tokens) = block_tokens {
+        return apply_block_comments(ws, editor_id, buffer_id, &commentable, tokens);
+    }
+    let Some(prefix) = line_prefix else {
+        return UpdateEffect::None;
+    };
 
     // One uncommented row commits the whole set to being commented, like Helix.
     // Deciding per row instead inverts each one, so a mixed block stays mixed
@@ -2444,6 +2492,51 @@ pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
             .iter()
             .rev()
             .map(|(start, end, replacement)| (*start..*end, replacement.as_str()))
+            .collect();
+        guard.edit_batch(&batch);
+    }
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    let new_display = editor.display_map.snapshot();
+    let new_buf = new_display.buffer_snapshot();
+    editor.selections.transform(new_buf, |sel| sel.clone());
+    UpdateEffect::Redraw
+}
+
+/// Wrap each row's text in `tokens`, or unwrap the rows already wrapped.
+///
+/// One comment per row rather than one around the whole set, so a block-only
+/// language toggles the same shape a line-comment language does and a row is
+/// still legible as its own commented line.
+fn apply_block_comments(
+    ws: &mut Workspace,
+    editor_id: EditorId,
+    buffer_id: crate::buffer::BufferId,
+    commentable: &[CommentRow],
+    tokens: (&'static str, &'static str),
+) -> UpdateEffect {
+    let edits: Vec<(Range<usize>, String)> = {
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let rope = snapshot.buffer_snapshot().rope();
+        commentable
+            .iter()
+            .flat_map(|row| {
+                stoat_text::toggle_block_comment(rope, row.content_start..row.line_end, tokens)
+            })
+            .collect()
+    };
+    if edits.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    {
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        let batch: Vec<(Range<usize>, &str)> = edits
+            .iter()
+            .rev()
+            .map(|(range, replacement)| (range.clone(), replacement.as_str()))
             .collect();
         guard.edit_batch(&batch);
     }

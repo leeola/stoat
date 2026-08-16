@@ -505,6 +505,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::IndentSelection => movement::indent_selection(stoat),
         ActionKind::UnindentSelection => movement::unindent_selection(stoat),
         ActionKind::ToggleComments => movement::toggle_comments(stoat),
+        ActionKind::ToggleLineComments => movement::toggle_line_comments(stoat),
+        ActionKind::ToggleBlockComments => movement::toggle_block_comments(stoat),
         ActionKind::ToggleSyntaxHighlight => {
             stoat.syntax_highlight = !stoat.syntax_highlight;
             UpdateEffect::Redraw

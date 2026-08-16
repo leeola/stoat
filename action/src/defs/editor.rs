@@ -161,6 +161,26 @@ define_action!(
 );
 
 define_action!(
+    ToggleLineCommentsDef,
+    ToggleLineComments,
+    "ToggleLineComments",
+    ActionKind::ToggleLineComments,
+    "toggle line comments only",
+    "Like `ToggleComments`, but never chooses the block syntax for a language that has line tokens. A language with only block tokens still uses those, since it has nothing else to comment with.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ToggleBlockCommentsDef,
+    ToggleBlockComments,
+    "ToggleBlockComments",
+    ActionKind::ToggleBlockComments,
+    "toggle block comments only",
+    "Wrap each line touched by any selection in the language's block-comment pair, or unwrap the lines already wrapped. A language with no block tokens falls back to its line tokens, since it has nothing else to comment with.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ToggleSyntaxHighlightDef,
     ToggleSyntaxHighlight,
     "ToggleSyntaxHighlight",

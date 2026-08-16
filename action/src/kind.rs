@@ -310,6 +310,8 @@ action_kinds! {
     IndentSelection,
     UnindentSelection,
     ToggleComments,
+    ToggleLineComments,
+    ToggleBlockComments,
     ToggleSyntaxHighlight,
     ToggleLspStatus,
     ToggleInlayHints,
