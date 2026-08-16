@@ -6,16 +6,18 @@
 //! action layer routes those operations directly rather than
 //! going through this store.
 
+use crate::host::ClipboardKind;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Register {
     Unnamed,
     Named(char),
-    /// System clipboard, addressed by `*` or `+` in the register
-    /// chord. Writes route to [`crate::host::ClipboardHost::set`],
-    /// reads to [`crate::host::ClipboardHost::get`].
-    Clipboard,
+    /// One of the display server's two selections, `+` for the clipboard and
+    /// `*` for the primary selection. Writes route to
+    /// [`crate::host::ClipboardHost::set`], reads to
+    /// [`crate::host::ClipboardHost::get`].
+    Clipboard(ClipboardKind),
     /// Last search query. Writes are no-ops; reads return
     /// `Stoat::last_search.query`.
     Search,
@@ -45,14 +47,12 @@ impl Register {
     /// [`register_for_char`](crate::action_handlers::yank::register_for_char),
     /// and it has to stay in step with it. A reader who sees a register named
     /// in the status row types that same char to address it again.
-    ///
-    /// [`Self::Clipboard`] is the one variant two chars reach. It names itself
-    /// `+`, the system clipboard, since that is the host it reads and writes.
     pub(crate) fn name(self) -> char {
         match self {
             Register::Unnamed => '"',
             Register::Named(c) => c,
-            Register::Clipboard => '+',
+            Register::Clipboard(ClipboardKind::System) => '+',
+            Register::Clipboard(ClipboardKind::Primary) => '*',
             Register::Search => '/',
             Register::Blackhole => '_',
             Register::SelectionIndex => '#',
@@ -75,15 +75,19 @@ const CLIPBOARD_JOIN: &str = "\n";
 pub(crate) struct RegisterStore {
     unnamed: Option<Vec<String>>,
     named: HashMap<char, Vec<String>>,
-    /// Fragments last written to the system clipboard, kept so a multi-selection
-    /// yank pastes back one fragment per selection.
+    /// Fragments last written to each selection, kept so a multi-selection yank
+    /// pastes back one fragment per selection.
     ///
-    /// The system clipboard holds one string, which on its own flattens the
-    /// fragments into a blob that pastes whole at every cursor. This is only
-    /// ever an offer. [`Self::clipboard_shadow`] serves it while the host still
-    /// holds the text it was joined into, so anything that changes the clipboard
+    /// A selection holds one string, which on its own flattens the fragments
+    /// into a blob that pastes whole at every cursor. This is only ever an
+    /// offer. [`Self::clipboard_shadow`] serves it while the host still holds
+    /// the text it was joined into, so anything that changes the clipboard
     /// behind stoat's back falls back to that one string.
-    clipboard_shadow: Option<Vec<String>>,
+    ///
+    /// One slot per selection, since the two hold different text and a single
+    /// slot would answer for whichever was written last.
+    system_shadow: Option<Vec<String>>,
+    primary_shadow: Option<Vec<String>>,
 }
 
 impl RegisterStore {
@@ -91,15 +95,19 @@ impl RegisterStore {
         Self::default()
     }
 
-    /// Record `fragments` as what the system clipboard now holds, and return
-    /// the single string to put there.
+    /// Record `fragments` as what `kind` now holds, and return the single
+    /// string to put there.
     ///
     /// Returning the joined text rather than taking it keeps the two in step.
     /// The caller sends the host exactly the string [`Self::clipboard_shadow`]
     /// later compares against.
-    pub(crate) fn shadow_clipboard(&mut self, fragments: Vec<String>) -> String {
+    pub(crate) fn shadow_clipboard(
+        &mut self,
+        kind: ClipboardKind,
+        fragments: Vec<String>,
+    ) -> String {
         let joined = fragments.join(CLIPBOARD_JOIN);
-        self.clipboard_shadow = Some(fragments);
+        *self.shadow_mut(kind) = Some(fragments);
         joined
     }
 
@@ -115,11 +123,25 @@ impl RegisterStore {
     /// fragments a previous yank left. The clipboard carries no structure to
     /// tell them apart, and re-splitting text the user did put there is the
     /// milder of the two wrong answers.
-    pub(crate) fn clipboard_shadow(&self, contents: &str) -> Option<&[String]> {
-        self.clipboard_shadow
-            .as_ref()
-            .filter(|fragments| fragments.join(CLIPBOARD_JOIN) == contents)
-            .map(Vec::as_slice)
+    pub(crate) fn clipboard_shadow(
+        &self,
+        kind: ClipboardKind,
+        contents: &str,
+    ) -> Option<&[String]> {
+        match kind {
+            ClipboardKind::System => &self.system_shadow,
+            ClipboardKind::Primary => &self.primary_shadow,
+        }
+        .as_ref()
+        .filter(|fragments| fragments.join(CLIPBOARD_JOIN) == contents)
+        .map(Vec::as_slice)
+    }
+
+    fn shadow_mut(&mut self, kind: ClipboardKind) -> &mut Option<Vec<String>> {
+        match kind {
+            ClipboardKind::System => &mut self.system_shadow,
+            ClipboardKind::Primary => &mut self.primary_shadow,
+        }
     }
 
     /// Write `fragments` to the unnamed or a named register, one entry
@@ -133,7 +155,7 @@ impl RegisterStore {
             Register::Named(c) => {
                 self.named.insert(c, fragments);
             },
-            Register::Clipboard
+            Register::Clipboard(_)
             | Register::Search
             | Register::Blackhole
             | Register::SelectionIndex
@@ -151,7 +173,7 @@ impl RegisterStore {
         match register {
             Register::Unnamed => self.unnamed.as_deref(),
             Register::Named(c) => self.named.get(&c).map(Vec::as_slice),
-            Register::Clipboard
+            Register::Clipboard(_)
             | Register::Search
             | Register::Blackhole
             | Register::SelectionIndex

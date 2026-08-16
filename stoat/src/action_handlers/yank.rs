@@ -54,12 +54,12 @@ pub(crate) fn write_fragments_to_register(
     fragments: Vec<String>,
 ) -> bool {
     match target {
-        Register::Clipboard => {
-            let joined = stoat.registers.shadow_clipboard(fragments);
+        Register::Clipboard(kind) => {
+            let joined = stoat.registers.shadow_clipboard(kind, fragments);
             crate::host::clipboard_copy(
                 stoat.clipboard_host().as_ref(),
                 stoat.env_host().as_ref(),
-                ClipboardKind::System,
+                kind,
                 &joined,
             );
         },
@@ -125,7 +125,8 @@ pub(crate) fn execute_select_register(stoat: &mut Stoat, ch: char) {
 pub(crate) fn register_for_char(ch: char) -> Register {
     match ch {
         '"' => Register::Unnamed,
-        '*' | '+' => Register::Clipboard,
+        '+' => Register::Clipboard(ClipboardKind::System),
+        '*' => Register::Clipboard(ClipboardKind::Primary),
         '/' => Register::Search,
         '_' => Register::Blackhole,
         '#' => Register::SelectionIndex,
@@ -167,7 +168,7 @@ pub(super) fn replace_with_yanked(stoat: &mut Stoat) -> UpdateEffect {
 /// the same way. The clipboard holds one value, so every selection receives it.
 pub(super) fn replace_with_clipboard(stoat: &mut Stoat) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1).max(1) as usize;
-    replace_selections_with(stoat, Register::Clipboard, count)
+    replace_selections_with(stoat, Register::Clipboard(ClipboardKind::System), count)
 }
 
 /// Replace every non-empty selection with `register`'s fragments, each repeated
@@ -425,8 +426,8 @@ pub(crate) fn read_register_fragments(
         // other place clipboard text enters, and it feeds the insert-mode
         // register insert and `replace_with_yanked`. The in-memory registers
         // below hold buffer-sourced text, which is already LF.
-        Register::Clipboard => {
-            let text = match stoat.clipboard_host().get(ClipboardKind::System) {
+        Register::Clipboard(kind) => {
+            let text = match stoat.clipboard_host().get(kind) {
                 Ok(text) => text?,
                 Err(err) => {
                     tracing::warn!(target: "stoat::yank", ?err, "clipboard read failed");
@@ -436,7 +437,7 @@ pub(crate) fn read_register_fragments(
             let normalized = LineEnding::normalize(&text).into_owned();
             let shadowed = stoat
                 .registers
-                .clipboard_shadow(&normalized)
+                .clipboard_shadow(kind, &normalized)
                 .map(<[String]>::to_vec);
             Some(shadowed.unwrap_or_else(|| vec![normalized]))
         },
@@ -1398,7 +1399,7 @@ mod tests {
             .set(ClipboardKind::System, "x\r\ny\r\n")
             .unwrap();
         h.type_keys("escape");
-        h.type_keys("\" * p");
+        h.type_keys("\" + p");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
         assert!(
             !buffer_text(&h, &path).contains('\r'),
@@ -1807,7 +1808,7 @@ mod tests {
         seed(&mut h, "abc\n");
         h.type_keys("v l l");
         h.type_keys("escape");
-        h.type_keys("\" * y");
+        h.type_keys("\" + y");
         assert_eq!(h.fake_clipboard().writes(), vec!["abc".to_string()]);
         let unnamed = h
             .stoat
@@ -1825,9 +1826,46 @@ mod tests {
             .set(ClipboardKind::System, "xyz")
             .unwrap();
         h.type_keys("escape");
-        h.type_keys("\" * p");
+        h.type_keys("\" + p");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
         assert_eq!(buffer_text(&h, &path), "axyzbc\n");
+    }
+
+    /// The display server serves two selections at once, and a yank into one
+    /// leaves the other where it was.
+    ///
+    /// Folding both chars into one register made each yank clobber the other,
+    /// which costs the user the mouse selection every time they copy.
+    #[test]
+    fn star_and_plus_are_separate_clipboards() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc def\n");
+
+        h.type_keys("v l l");
+        h.type_keys("escape");
+        h.type_keys("\" + y");
+        h.type_keys("l l v l l");
+        h.type_keys("escape");
+        assert_eq!(h.selection_spans(), vec![(4, 7, false)], "def is selected");
+        h.type_keys("\" * y");
+
+        assert_eq!(
+            h.fake_clipboard().writes_for(ClipboardKind::System),
+            vec!["abc".to_string()],
+            "the plus yank reached the system clipboard and nothing else did",
+        );
+        assert_eq!(
+            h.fake_clipboard().writes_for(ClipboardKind::Primary),
+            vec!["def".to_string()],
+            "and the star yank reached the primary selection",
+        );
+
+        h.type_keys("\" + p");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "abc defabc\n",
+            "pasting plus brings back what plus holds, not the star yank that followed it",
+        );
     }
 
     /// The clipboard is the one register whose backing store holds a single
@@ -1846,7 +1884,10 @@ mod tests {
             "the host still receives the one string it holds",
         );
         assert_eq!(
-            super::read_register_fragments(&mut h.stoat, crate::register::Register::Clipboard),
+            super::read_register_fragments(
+                &mut h.stoat,
+                crate::register::Register::Clipboard(ClipboardKind::System)
+            ),
             Some(vec!["abc".to_string(), "def".to_string()]),
             "and the register answers with the fragments that went in",
         );
@@ -1872,7 +1913,10 @@ mod tests {
             .set(ClipboardKind::System, "from another app")
             .unwrap();
         assert_eq!(
-            super::read_register_fragments(&mut h.stoat, crate::register::Register::Clipboard),
+            super::read_register_fragments(
+                &mut h.stoat,
+                crate::register::Register::Clipboard(ClipboardKind::System)
+            ),
             Some(vec!["from another app".to_string()]),
             "the host no longer holds what the shadow was joined into",
         );
