@@ -876,6 +876,15 @@ fn status_segments(
                 right_anchor = start;
             }
         }
+        if let Some(register) = frame.recording_register {
+            let text = format!(" REC {register} ");
+            let width = text.chars().count() as u16;
+            let start = right_anchor.saturating_sub(width);
+            if start >= cursor {
+                right.push((text, base_style.add_modifier(Modifier::BOLD)));
+                right_anchor = start;
+            }
+        }
         if let Some((text, worst)) =
             focused_diagnostic_label(view, editors, buffers, frame.diagnostics)
         {
@@ -1772,6 +1781,51 @@ mod tests {
         assert!(
             rendered.replace('─', " ").contains("1 staged / 1 unstaged"),
             "statusline reports the hunk counts:\n{rendered}"
+        );
+    }
+
+    /// Recording takes every keypress until it is toggled off, and the status
+    /// bar is the only thing on screen that says so.
+    ///
+    /// The indicator has to leave with the recording too. One that stays
+    /// claims the editor still takes keys it no longer takes.
+    #[test]
+    fn the_status_bar_shows_which_register_is_recording() {
+        let mut h = crate::test_harness::TestHarness::with_size(100, 12);
+        h.seed_focused_buffer("hello");
+
+        let bar_text = |h: &mut crate::test_harness::TestHarness| -> String {
+            h.snapshot();
+            let buf = h.rendered_buffer();
+            (buf.area.y..buf.area.y + buf.area.height)
+                .map(|y| {
+                    (buf.area.x..buf.area.x + buf.area.width)
+                        .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                .replace('─', " ")
+        };
+
+        assert!(
+            !bar_text(&mut h).contains("REC"),
+            "nothing records yet, so nothing says so",
+        );
+
+        h.type_keys("\" a");
+        h.type_keys("Q");
+        let recording = bar_text(&mut h);
+        assert!(
+            recording.contains("REC a"),
+            "the bar names the register being recorded into:\n{recording}",
+        );
+
+        h.type_keys("Q");
+        let stopped = bar_text(&mut h);
+        assert!(
+            !stopped.contains("REC"),
+            "and the indicator leaves with the recording:\n{stopped}",
         );
     }
 

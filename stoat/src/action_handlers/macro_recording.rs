@@ -63,7 +63,8 @@ pub(super) fn arm_replay(stoat: &mut Stoat) -> UpdateEffect {
 pub(crate) fn execute_replay(stoat: &mut Stoat, ch: char, count: u32) -> UpdateEffect {
     let register = super::yank::register_for_char(ch);
     if stoat.replaying_registers.contains(&register) {
-        return UpdateEffect::None;
+        stoat.set_status(format!("register {} is already replaying", register.name()));
+        return UpdateEffect::Redraw;
     }
 
     // One value, since a macro is one key sequence. A multi-fragment register
@@ -303,6 +304,71 @@ mod tests {
             stored_macro(&mut h, '@'),
             Some("l".to_string()),
             "the macro is the one MoveRight, not the RecordMacro dispatches around it",
+        );
+    }
+
+    /// Recording is modal state with no other sign of itself, so both edges
+    /// name the register they use.
+    #[test]
+    fn recording_sets_a_status() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("hello");
+
+        h.type_keys("Q");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("recording to register @"),
+        );
+
+        h.type_keys("l");
+        h.type_keys("Q");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("recorded to register @"),
+        );
+    }
+
+    /// Each way a replay declines names the register and the reason, so the
+    /// keypress that did nothing does not look like a dropped key.
+    #[test]
+    fn a_replay_that_does_nothing_says_why() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("hello");
+
+        h.type_keys("q z");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("register z is empty"),
+            "an empty register",
+        );
+
+        h.stoat.registers.write(
+            crate::register::Register::Named('c'),
+            vec!["not keys at all".to_string()],
+        );
+        h.type_keys("q c");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("register c does not hold keys"),
+            "a register holding something else",
+        );
+    }
+
+    /// A macro that names itself is refused, and saying so is what separates a
+    /// guarded recursion from a keypress that vanished.
+    #[test]
+    fn a_re_entrant_replay_says_why() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("hello world");
+        h.stoat.registers.write(
+            crate::register::Register::Named('r'),
+            vec!["q r".to_string()],
+        );
+
+        h.type_keys("q r");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("register r is already replaying"),
         );
     }
 

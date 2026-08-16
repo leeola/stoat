@@ -217,6 +217,13 @@ pub(crate) struct FrameCtx<'a> {
     /// user knows a partial count is in flight; cleared after every
     /// action dispatch.
     pub(crate) pending_count: Option<u32>,
+    /// Register an in-progress macro recording captures into, `None` when no
+    /// recording runs.
+    ///
+    /// Recording is modal state that takes every keypress until it is toggled
+    /// off, so the status bar shows it. Without the sign, a user who looks away
+    /// has nothing to tell them their next edits go into a macro.
+    pub(crate) recording_register: Option<char>,
     /// Whether the detailed LSP status popout is open (pinned) above the focused
     /// pane's status bar. Drives whether the multi-row status card paints.
     pub(crate) lsp_status_open: bool,
@@ -631,6 +638,10 @@ pub(crate) fn frame(
             .expect("refresh_chrome ran at the top of the frame")
             .1,
         pending_count: stoat.pending_count,
+        recording_register: stoat
+            .macro_recording
+            .as_ref()
+            .map(|rec| rec.register.name()),
         lsp_status_open,
         lsp_progress_entries: &lsp_progress_entries,
         spinner_phase: app::spinner_phase(stoat.spinner_clock),

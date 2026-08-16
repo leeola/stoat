@@ -257,6 +257,10 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
         theme: &stoat.theme,
         chrome: &stoat.chrome.as_ref().expect("refresh_chrome ran above").1,
         pending_count: stoat.pending_count,
+        recording_register: stoat
+            .macro_recording
+            .as_ref()
+            .map(|rec| rec.register.name()),
         lsp_status_open: false,
         lsp_progress_entries: &[],
         spinner_phase: 0,
