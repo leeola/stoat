@@ -282,14 +282,17 @@ fn collect_surround_pairs(
         let buffer_id = editor.buffer_id;
         let snapshot = editor.display_map.snapshot();
         let buffer_snapshot = snapshot.buffer_snapshot();
-        let cursors: Vec<usize> = editor
+        let cursors: Vec<(usize, Range<usize>)> = editor
             .selections
             .all_anchors()
             .iter()
             .map(|sel| {
                 let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
                 let head_off = buffer_snapshot.resolve_anchor(&sel.head());
-                stoat_text::cursor_offset(buffer_snapshot.rope(), tail_off, head_off)
+                let cursor = stoat_text::cursor_offset(buffer_snapshot.rope(), tail_off, head_off);
+                let span = buffer_snapshot.resolve_anchor(&sel.start)
+                    ..buffer_snapshot.resolve_anchor(&sel.end);
+                (cursor, span)
             })
             .collect();
         (buffer_id, cursors)
@@ -305,8 +308,8 @@ fn collect_surround_pairs(
     // wider than any single cursor needs only adds zones nothing asks about.
     // Only the closest-pair walk reads zones, so only it pays for them.
     let window = {
-        let first = cursors.iter().copied().min().unwrap_or(0);
-        let last = cursors.iter().copied().max().unwrap_or(0);
+        let first = cursors.iter().map(|(head, _)| *head).min().unwrap_or(0);
+        let last = cursors.iter().map(|(head, _)| *head).max().unwrap_or(0);
         window_around(first).start..window_around(last).end
     };
 
@@ -316,7 +319,7 @@ fn collect_surround_pairs(
 
     let mut pairs: Vec<(usize, usize, char, char)> = Vec::with_capacity(cursors.len());
     let mut claimed: Vec<usize> = Vec::with_capacity(cursors.len() * 2);
-    for head in cursors {
+    for (head, span) in cursors {
         let tree = deepest_tree_at(snapshot, head);
 
         let found = match pair {
@@ -334,7 +337,7 @@ fn collect_surround_pairs(
                         scans.len() - 1
                     },
                 };
-                closest_surround_pair(&rope, head, &scans[idx].1, skip)
+                closest_surround_pair(&rope, head, &scans[idx].1, skip, span)
                     .map(|(open, close, open_off, close_off)| (open_off, close_off, open, close))
             },
         };
@@ -443,11 +446,18 @@ const SURROUND_PAIRS: [(char, char); BRACKET_PAIRS.len() + 4] = {
 ///
 /// `skip` reaches past that many enclosing pairs, and it counts them
 /// across types. A cursor in `([here])` resolves to the parens with `1`.
+///
+/// `span` is what the selection covers now. The answer has to cover it and be
+/// more than it, so a selection already running from an opener through its
+/// closer reaches the pair outside instead of naming its own again. That is
+/// what makes a second `m a m` grow. A selection between the delimiters is not
+/// the pair itself, so a second `m i m` keeps it.
 pub(crate) fn closest_surround_pair(
     rope: &Rope,
     cursor: usize,
     scan: &PairScan<'_>,
     skip: usize,
+    span: Range<usize>,
 ) -> Option<(char, char, usize, usize)> {
     let at_cursor = rope.chars_at(cursor).next();
 
@@ -467,8 +477,13 @@ pub(crate) fn closest_surround_pair(
     // so the nth pair overall is within the first n of the type it belongs to.
     // Running every type that far out therefore collects every candidate in
     // contention, and ordering them by opener says which one wins.
+    //
+    // One level further than that, because the span filter below drops the pair
+    // the selection already holds and there is only ever one of those. The extra
+    // level only adds candidates that sort after the ones already collected, so
+    // it changes nothing where the filter drops none.
     let mut candidates: Vec<(char, char, usize, usize)> = Vec::with_capacity(SURROUND_PAIRS.len());
-    for reach in 0..=skip {
+    for reach in 0..=skip + 1 {
         let opens = scan_left_for_opens(rope, cursor, at_cursor, &settled, scan, reach);
         let closes = scan_right_for_closes(rope, cursor, at_cursor, &settled, scan, reach);
         for (i, (open, close)) in SURROUND_PAIRS.into_iter().enumerate() {
@@ -486,7 +501,15 @@ pub(crate) fn closest_surround_pair(
     }
 
     candidates.sort_unstable_by_key(|&(_, _, open_off, _)| Reverse(open_off));
-    candidates.into_iter().nth(skip)
+    candidates
+        .into_iter()
+        .filter(|&(_, close, open_off, close_off)| {
+            let around_end = close_off + close.len_utf8();
+            let covers = open_off <= span.start && span.end <= around_end;
+            let already = open_off == span.start && span.end == around_end;
+            covers && !already
+        })
+        .nth(skip)
 }
 
 /// Which pair type `c` is a delimiter of, if any.
@@ -984,7 +1007,13 @@ mod tests {
                     continue;
                 }
                 assert_eq!(
-                    closest_surround_pair(&rope, cursor, &PairScan::around(None, cursor), 0),
+                    closest_surround_pair(
+                        &rope,
+                        cursor,
+                        &PairScan::around(None, cursor),
+                        0,
+                        cursor..cursor + 1
+                    ),
                     closest_by_type(&rope, cursor, None),
                     "seed {seed}, cursor {cursor}, in {text:?}"
                 );
@@ -1075,7 +1104,13 @@ mod tests {
         );
 
         let tree = deepest_tree_at(snapshot, cursor);
-        let found = closest_surround_pair(&rope, cursor, &PairScan::around(tree, cursor), 0);
+        let found = closest_surround_pair(
+            &rope,
+            cursor,
+            &PairScan::around(tree, cursor),
+            0,
+            cursor..cursor + 1,
+        );
         assert_eq!(
             found.map(|(open, _, open_off, _)| (open, open_off)),
             Some(('(', real_open)),
@@ -1113,7 +1148,13 @@ mod tests {
             let tree = deepest_tree_at(snapshot, cursor);
             assert!(tree.is_some(), "a covering layer at {cursor}");
             assert_eq!(
-                closest_surround_pair(&rope, cursor, &PairScan::around(tree, cursor), 0),
+                closest_surround_pair(
+                    &rope,
+                    cursor,
+                    &PairScan::around(tree, cursor),
+                    0,
+                    cursor..cursor + 1
+                ),
                 closest_by_type(&rope, cursor, tree),
                 "cursor {cursor}"
             );
@@ -1493,7 +1534,7 @@ mod tests {
     fn closest_pair_resolves_closure_bars() {
         let r = rope("|x|");
         assert_eq!(
-            closest_surround_pair(&r, 1, &PairScan::around(None, 1), 0),
+            closest_surround_pair(&r, 1, &PairScan::around(None, 1), 0, 1..2),
             Some(('|', '|', 0, 2)),
         );
     }

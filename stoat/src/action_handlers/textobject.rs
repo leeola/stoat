@@ -38,6 +38,17 @@ impl TextobjectMode {
     }
 }
 
+/// One selection, in the two forms an object resolves against.
+///
+/// `cursor` is the single offset most types resolve around, which for a wide
+/// selection is the character its head sits on. `span` is everything the
+/// selection covers, which only the closest-pair type reads, to reach past a
+/// pair the selection already holds.
+struct SelectionOffsets {
+    cursor: usize,
+    span: std::ops::Range<usize>,
+}
+
 /// Whether a resolved object comes out in the direction the selection had.
 ///
 /// A pair object keeps it. The object has an opening end and a closing end, and
@@ -94,7 +105,7 @@ pub(crate) fn execute_select_textobject(
         let buffer_id = editor.buffer_id;
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let cursors: Vec<(usize, usize)> = editor
+        let cursors: Vec<(usize, SelectionOffsets)> = editor
             .selections
             .all_anchors()
             .iter()
@@ -102,7 +113,9 @@ pub(crate) fn execute_select_textobject(
                 let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
                 let head_off = buffer_snapshot.resolve_anchor(&sel.head());
                 let cursor = stoat_text::cursor_offset(buffer_snapshot.rope(), tail_off, head_off);
-                (sel.id, cursor)
+                let span = buffer_snapshot.resolve_anchor(&sel.start)
+                    ..buffer_snapshot.resolve_anchor(&sel.end);
+                (sel.id, SelectionOffsets { cursor, span })
             })
             .collect();
 
@@ -133,8 +146,8 @@ pub(crate) fn execute_select_textobject(
 
     let targets: HashMap<usize, (std::ops::Range<usize>, ObjectDirection)> = cursors
         .into_iter()
-        .filter_map(|(id, cursor)| {
-            find_textobject(ws, buffer_id, cursor, mode, ch, count, &change_hunks)
+        .filter_map(|(id, at)| {
+            find_textobject(ws, buffer_id, &at, mode, ch, count, &change_hunks)
                 .map(|target| (id, target))
         })
         .collect();
@@ -173,17 +186,22 @@ pub(crate) fn execute_select_textobject(
 /// `change_hunks` carries the live diff rows the `g` type reads, and is empty
 /// for every other type. The caller resolves them once for the whole chord.
 ///
+/// `span` is what the selection covers now, which only the closest-pair type
+/// reads, to reach past a pair the selection already holds.
+///
 /// Each arm names the direction its object comes out in, so the rule stays with
 /// the type that decides it rather than in a second table beside this one.
 fn find_textobject(
     ws: &crate::workspace::Workspace,
     buffer_id: crate::buffer::BufferId,
-    cursor: usize,
+    at: &SelectionOffsets,
     mode: TextobjectMode,
     ch: char,
     count: usize,
     change_hunks: &[std::ops::Range<u32>],
 ) -> Option<(std::ops::Range<usize>, ObjectDirection)> {
+    let SelectionOffsets { cursor, span } = at;
+    let cursor = *cursor;
     let skip = count.saturating_sub(1);
     let forward = |range: std::ops::Range<usize>| (range, ObjectDirection::Forward);
     match ch {
@@ -218,7 +236,7 @@ fn find_textobject(
             let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
             let tree = super::surround::deepest_tree_at(snapshot, cursor);
             let scan = crate::action_handlers::movement::PairScan::around(tree, cursor);
-            super::surround::closest_surround_pair(&rope, cursor, &scan, skip).map(
+            super::surround::closest_surround_pair(&rope, cursor, &scan, skip, span.clone()).map(
                 |(open, close, open_off, close_off)| {
                     (
                         pair_to_range(open, close, open_off, close_off, mode),
@@ -1103,6 +1121,40 @@ mod tests {
             Some(1..1),
             "no word for the whitespace to sit around"
         );
+    }
+
+    /// Around leaves the whole pair selected, so the next press has nowhere to
+    /// go but outward.
+    #[test]
+    fn mam_twice_selects_the_enclosing_pair() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "((abc))\n");
+        jump(&mut h, 3);
+
+        h.type_keys("m a m");
+        assert_eq!(
+            primary_range(&mut h),
+            (1, 6),
+            "the inner pair, delimiters in"
+        );
+
+        h.type_keys("m a m");
+        assert_eq!(primary_range(&mut h), (0, 7));
+    }
+
+    /// Inside leaves the delimiters out, so the pair around the selection is
+    /// still the one it came from and the second press keeps it.
+    #[test]
+    fn mim_twice_keeps_the_inner_pair() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "((abc))\n");
+        jump(&mut h, 3);
+
+        h.type_keys("m i m");
+        assert_eq!(primary_range(&mut h), (2, 5));
+
+        h.type_keys("m i m");
+        assert_eq!(primary_range(&mut h), (2, 5));
     }
 
     /// The cursor sits on the opening delimiter of a backward selection and the
