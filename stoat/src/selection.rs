@@ -634,15 +634,49 @@ impl SelectionsCollection {
         added: Vec<Selection<Anchor>>,
         snapshot: &MultiBufferSnapshot,
     ) {
+        let last = added.len().saturating_sub(1);
+        self.extend_with_fresh_ids_primary(added, last, snapshot);
+    }
+
+    /// Add `added` to the set, each taking a fresh id, and hand the primary to
+    /// the one at `primary_index`.
+    ///
+    /// [`Self::replace_with_fresh_ids_primary`] for a producer that keeps the
+    /// selections it started from, such as a copy that leaves its sources in
+    /// place. To leave the primary on a selection that was already there,
+    /// follow the call with [`Self::make_primary`], since every added id
+    /// outranks the ones already held.
+    ///
+    /// An out-of-range `primary_index` names the last of `added`.
+    pub(crate) fn extend_with_fresh_ids_primary(
+        &mut self,
+        added: Vec<Selection<Anchor>>,
+        primary_index: usize,
+        snapshot: &MultiBufferSnapshot,
+    ) {
         if added.is_empty() {
             return;
         }
+        let last = added.len() - 1;
+        let primary_index = primary_index.min(last);
+
+        let base = self.next_selection_id;
+        let top = base + last;
+        let mut next = base;
         let mut new_disjoint = self.disjoint.to_vec();
-        new_disjoint.extend(added.into_iter().map(|mut selection| {
-            selection.id = self.next_selection_id;
-            self.next_selection_id += 1;
+        new_disjoint.extend(added.into_iter().enumerate().map(|(index, mut selection)| {
+            selection.id = match index == primary_index {
+                true => top,
+                false => {
+                    let id = next;
+                    next += 1;
+                    id
+                },
+            };
             selection
         }));
+        self.next_selection_id = top + 1;
+
         self.replace_with(new_disjoint, snapshot);
     }
 

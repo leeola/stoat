@@ -87,6 +87,11 @@ fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEff
     let max_row = rope.max_point().row;
 
     let sources = editor.selections.all_anchors().to_vec();
+    let primary_source_id = editor.selections.newest_anchor().id;
+    // Which copy the primary passes to. The last one made from the primary's
+    // own source, so the user keeps working down the column they started, and
+    // none when that source found nowhere to copy to.
+    let mut primary_copy: Option<usize> = None;
     let mut copies: Vec<Selection<usize>> = Vec::new();
     for source in &sources {
         // Both ends read as the cells the source covers, never the boundary
@@ -95,11 +100,16 @@ fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEff
         // Reading an unstepped tail makes a reversed copy a cell too wide, and
         // where that tail sits on the next row it inflates the height too, so
         // the copy lands a whole selection further than its source.
+        //
+        // A zero-width range has no forward end and steps its tail like a
+        // reversed one, which is why the test reads strictly-forward rather
+        // than reversed. At the buffer end that step reaches the row above, and
+        // the copy is two rows tall.
         let tail_off = buffer.resolve_anchor(&source.tail());
         let head_raw = buffer.resolve_anchor(&source.head());
-        let (anchor_off, head_off) = match source.reversed {
-            true => (rope.prev_grapheme_boundary(tail_off), head_raw),
-            false => (tail_off, cursor_offset(rope, tail_off, head_raw)),
+        let (anchor_off, head_off) = match tail_off < head_raw {
+            true => (tail_off, cursor_offset(rope, tail_off, head_raw)),
+            false => (rope.prev_grapheme_boundary(tail_off), head_raw),
         };
         let anchor_pt = rope.offset_to_point(anchor_off);
         let head_pt = rope.offset_to_point(head_off);
@@ -119,15 +129,13 @@ fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEff
             let offset = step * height;
             let (anchor_row, head_row) = match dir {
                 AddDirection::Below => (anchor_pt.row + offset, head_pt.row + offset),
-                AddDirection::Above => {
-                    match (
-                        anchor_pt.row.checked_sub(offset),
-                        head_pt.row.checked_sub(offset),
-                    ) {
-                        (Some(a), Some(h)) => (a, h),
-                        _ => break,
-                    }
-                },
+                // A step past the top of the buffer lands on row 0 rather than
+                // ending the walk, so a source two rows down still copies onto
+                // the first row. The row-0 break below is what stops it there.
+                AddDirection::Above => (
+                    anchor_pt.row.saturating_sub(offset),
+                    head_pt.row.saturating_sub(offset),
+                ),
             };
             if anchor_row > max_row || head_row > max_row {
                 break;
@@ -144,6 +152,9 @@ fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEff
                     reversed: false,
                     goal: SelectionGoal::None,
                 };
+                if source.id == primary_source_id {
+                    primary_copy = Some(copies.len());
+                }
                 copies.push(point.put_cursor(rope, new_head, true));
                 made += 1;
             }
@@ -193,7 +204,17 @@ fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEff
             goal: copy.goal,
         })
         .collect();
-    editor.selections.extend_with_fresh_ids(added, buffer);
+    match primary_copy {
+        Some(index) => editor
+            .selections
+            .extend_with_fresh_ids_primary(added, index, buffer),
+        // The primary's own source copied nowhere, so the primary stays on it
+        // rather than jumping to some other source's copy.
+        None => {
+            editor.selections.extend_with_fresh_ids(added, buffer);
+            editor.selections.make_primary(primary_source_id);
+        },
+    }
     UpdateEffect::Redraw
 }
 

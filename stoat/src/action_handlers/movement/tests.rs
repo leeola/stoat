@@ -1708,6 +1708,77 @@ fn add_selection_below_adds_cursor_on_next_display_row() {
     assert_eq!(positions, vec![(0, 0), (1, 0)]);
 }
 
+/// A step past the top of the buffer lands on row 0 rather than ending the
+/// walk, so a two-row source starting on row 1 still copies onto the first row.
+#[test]
+fn alt_c_from_rows_1_2_lands_a_row_0_copy() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abcd\nabcd\nabcd\n");
+    dispatch(&mut stoat, &MoveDown);
+    dispatch(&mut stoat, &ExtendDown);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(5, 11, false)],
+        "test setup: one selection spanning rows 1 and 2",
+    );
+
+    dispatch(&mut stoat, &stoat_action::AddSelectionAbove);
+    assert_eq!(
+        editor::cursor_display_positions(&mut stoat),
+        vec![(0, 0), (2, 0)],
+        "the copy lands on row 0, where two rows up runs off the top",
+    );
+}
+
+/// The primary passes to the last copy of its own source, so the user keeps
+/// working down the column they started rather than the document-last one.
+#[test]
+fn copy_keeps_the_primary_on_its_source() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abcd\nabcd\nabcd\nabcd\n");
+    dispatch(&mut stoat, &AddSelectionBelow);
+    dispatch(&mut stoat, &stoat_action::RotateSelectionsForward);
+    assert_eq!(
+        editor::cursor_display_positions(&mut stoat),
+        vec![(0, 0), (1, 0)],
+        "test setup: two cursors, with the primary rotated onto the first",
+    );
+
+    dispatch(&mut stoat, &AddSelectionBelow);
+    let primary_start = {
+        let editor = focused_editor_mut(&mut stoat).expect("focused editor");
+        let buffer = editor.display_map.snapshot();
+        let buffer = buffer.buffer_snapshot();
+        buffer.resolve_anchor(&editor.selections.newest_anchor().start)
+    };
+    assert_eq!(
+        primary_start, 5,
+        "the primary follows its own source's copy on row 1, not the copy on row 2",
+    );
+}
+
+/// A zero-width cursor at the buffer end steps its tail back a character, which
+/// reaches the row above and makes the copy two rows tall.
+#[test]
+fn copy_from_the_buffer_end_spans_two_rows() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abcd\nabcd\n");
+    dispatch(&mut stoat, &MoveDown);
+    dispatch(&mut stoat, &MoveDown);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(10, 10, false)],
+        "test setup: a zero-width cursor on the empty final row",
+    );
+
+    dispatch(&mut stoat, &stoat_action::AddSelectionAbove);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(0, 5, true), (10, 10, false)],
+        "the two-row shape reaches row 0, where a one-row read copies onto row 1",
+    );
+}
+
 #[test]
 fn add_selection_below_at_last_row_is_noop() {
     let mut stoat = stoat();
