@@ -468,8 +468,12 @@ fn find_textobject_word(
         _ => cursor,
     };
 
+    // The two ends meet only where there is no word to take, which is on
+    // whitespace or an end of line. The selection collapses to a cursor there.
+    // Around collapses as well, since it has no word for the whitespace to sit
+    // around.
     if word_start == word_end {
-        return None;
+        return Some(word_start..word_end);
     }
 
     match mode {
@@ -1045,12 +1049,27 @@ mod tests {
     }
 
     #[test]
-    fn word_on_whitespace_is_none() {
+    fn word_on_whitespace_collapses_to_a_cursor() {
         let r = rope_of("a b\n");
         assert_eq!(
             find_textobject_word(&r, 1, TextobjectMode::Inner, false),
-            None
+            Some(1..1)
         );
+        assert_eq!(
+            find_textobject_word(&r, 1, TextobjectMode::Around, false),
+            Some(1..1),
+            "no word for the whitespace to sit around"
+        );
+    }
+
+    #[test]
+    fn miw_on_whitespace_collapses_to_a_cursor() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "alpha beta\n");
+        jump(&mut h, 5);
+
+        h.type_keys("m i w");
+        assert_eq!(primary_range(&mut h), (5, 5));
     }
 
     #[test]
