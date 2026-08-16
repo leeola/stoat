@@ -1,5 +1,6 @@
 mod anchor;
 mod buffer_id;
+mod comment;
 mod date_time;
 mod fragment;
 mod indent;
@@ -17,6 +18,7 @@ mod undo_map;
 
 pub use anchor::{Anchor, AnchorRangeExt};
 pub use buffer_id::BufferId;
+pub use comment::{is_block_commented, toggle_block_comment, trimmed_range};
 pub use date_time::date_time_increment;
 pub use fragment::{
     Fragment, FragmentSummary, FragmentTextSummary, InsertionFragment, InsertionFragmentKey,
