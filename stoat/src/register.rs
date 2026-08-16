@@ -63,15 +63,63 @@ impl Register {
     }
 }
 
+/// What the clipboard's single string joins per-selection fragments with.
+///
+/// Both halves of the shadow read it, which keeps a write and the read that
+/// validates it in step. Buffer text is LF whatever the file uses, and the read
+/// side normalizes the host's answer before comparing, so a clipboard that
+/// hands back CRLF still matches what was put there.
+const CLIPBOARD_JOIN: &str = "\n";
+
 #[derive(Debug, Default)]
 pub(crate) struct RegisterStore {
     unnamed: Option<Vec<String>>,
     named: HashMap<char, Vec<String>>,
+    /// Fragments last written to the system clipboard, kept so a multi-selection
+    /// yank pastes back one fragment per selection.
+    ///
+    /// The system clipboard holds one string, which on its own flattens the
+    /// fragments into a blob that pastes whole at every cursor. This is only
+    /// ever an offer. [`Self::clipboard_shadow`] serves it while the host still
+    /// holds the text it was joined into, so anything that changes the clipboard
+    /// behind stoat's back falls back to that one string.
+    clipboard_shadow: Option<Vec<String>>,
 }
 
 impl RegisterStore {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Record `fragments` as what the system clipboard now holds, and return
+    /// the single string to put there.
+    ///
+    /// Returning the joined text rather than taking it keeps the two in step.
+    /// The caller sends the host exactly the string [`Self::clipboard_shadow`]
+    /// later compares against.
+    pub(crate) fn shadow_clipboard(&mut self, fragments: Vec<String>) -> String {
+        let joined = fragments.join(CLIPBOARD_JOIN);
+        self.clipboard_shadow = Some(fragments);
+        joined
+    }
+
+    /// The recorded fragments, while `contents` is still the text they were
+    /// joined into.
+    ///
+    /// `contents` is the host's current answer, normalized. A mismatch means
+    /// something replaced the clipboard since stoat wrote it, so the caller
+    /// falls back to that one string and the fragments are not offered again.
+    ///
+    /// Two different writes joining to the same string are indistinguishable
+    /// here, so a single selection holding "a\nb" reads back as the two
+    /// fragments a previous yank left. The clipboard carries no structure to
+    /// tell them apart, and re-splitting text the user did put there is the
+    /// milder of the two wrong answers.
+    pub(crate) fn clipboard_shadow(&self, contents: &str) -> Option<&[String]> {
+        self.clipboard_shadow
+            .as_ref()
+            .filter(|fragments| fragments.join(CLIPBOARD_JOIN) == contents)
+            .map(Vec::as_slice)
     }
 
     /// Write `fragments` to the unnamed or a named register, one entry

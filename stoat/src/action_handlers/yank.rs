@@ -54,10 +54,11 @@ pub(crate) fn write_fragments_to_register(
 ) -> bool {
     match target {
         Register::Clipboard => {
+            let joined = stoat.registers.shadow_clipboard(fragments);
             crate::host::clipboard_copy(
                 stoat.clipboard_host().as_ref(),
                 stoat.env_host().as_ref(),
-                &fragments.join("\n"),
+                &joined,
             );
         },
         Register::Blackhole => {},
@@ -420,12 +421,20 @@ pub(crate) fn read_register_fragments(
         // other place clipboard text enters, and it feeds the insert-mode
         // register insert and `replace_with_yanked`. The in-memory registers
         // below hold buffer-sourced text, which is already LF.
-        Register::Clipboard => match stoat.clipboard_host().get() {
-            Ok(text) => text.map(|t| vec![LineEnding::normalize(&t).into_owned()]),
-            Err(err) => {
-                tracing::warn!(target: "stoat::yank", ?err, "clipboard read failed");
-                None
-            },
+        Register::Clipboard => {
+            let text = match stoat.clipboard_host().get() {
+                Ok(text) => text?,
+                Err(err) => {
+                    tracing::warn!(target: "stoat::yank", ?err, "clipboard read failed");
+                    return None;
+                },
+            };
+            let normalized = LineEnding::normalize(&text).into_owned();
+            let shadowed = stoat
+                .registers
+                .clipboard_shadow(&normalized)
+                .map(<[String]>::to_vec);
+            Some(shadowed.unwrap_or_else(|| vec![normalized]))
         },
         Register::Search => stoat.last_search.as_ref().map(|s| vec![s.query.clone()]),
         Register::Blackhole => None,
@@ -1805,6 +1814,52 @@ mod tests {
         h.type_keys("\" * p");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
         assert_eq!(buffer_text(&h, &path), "axyzbc\n");
+    }
+
+    /// The clipboard is the one register whose backing store holds a single
+    /// string, so without help it flattens a multi-selection yank into a blob
+    /// that pastes whole at every cursor.
+    #[test]
+    fn clipboard_register_round_trips_per_selection_fragments() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
+        h.type_keys("\" + y");
+
+        assert_eq!(
+            h.fake_clipboard().get().unwrap(),
+            Some("abc\ndef".to_string()),
+            "the host still receives the one string it holds",
+        );
+        assert_eq!(
+            super::read_register_fragments(&mut h.stoat, crate::register::Register::Clipboard),
+            Some(vec!["abc".to_string(), "def".to_string()]),
+            "and the register answers with the fragments that went in",
+        );
+
+        h.type_keys("\" + p");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "abcabc\ndefdef\n",
+            "so each selection pastes its own fragment, not the joined blob",
+        );
+    }
+
+    /// The shadow is an offer, not a record of truth. Anything that replaces
+    /// the clipboard behind stoat's back has to win.
+    #[test]
+    fn external_clipboard_change_invalidates_the_shadow() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
+        h.type_keys("\" + y");
+
+        h.fake_clipboard().set("from another app").unwrap();
+        assert_eq!(
+            super::read_register_fragments(&mut h.stoat, crate::register::Register::Clipboard),
+            Some(vec!["from another app".to_string()]),
+            "the host no longer holds what the shadow was joined into",
+        );
     }
 
     #[test]
