@@ -1,5 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    keymap,
     register::Register,
 };
 use crossterm::event::{Event, KeyEvent};
@@ -13,14 +14,22 @@ pub(crate) struct MacroRecording {
 }
 
 /// Toggle recording. Off -> start recording into the most-recently
-/// selected register (or [`Register::Unnamed`] when none was set);
-/// on -> stop, store the captured key sequence on
-/// [`Stoat::macros`].
+/// selected register (or `@` when none was set); on -> stop and write the
+/// captured keys to that register as text.
+///
+/// The macro lands in an ordinary register rather than a store of its own, so
+/// a user pastes one to read it, edits the text, and writes a macro by hand
+/// without ever recording it.
 pub(super) fn toggle_record(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(rec) = stoat.macro_recording.take() {
-        stoat.macros.insert(rec.register, rec.keys);
+        let text = keymap::macro_to_text(&rec.keys);
+        let name = rec.register.name();
+        if super::yank::write_fragments_to_register(stoat, rec.register, vec![text]) {
+            stoat.set_status(format!("recorded to register {name}"));
+        }
     } else {
-        let register = stoat.active_register();
+        let register = stoat.macro_register();
+        stoat.set_status(format!("recording to register {}", register.name()));
         stoat.macro_recording = Some(MacroRecording {
             register,
             keys: Vec::new(),
@@ -56,8 +65,19 @@ pub(crate) fn execute_replay(stoat: &mut Stoat, ch: char, count: u32) -> UpdateE
     if stoat.replaying_registers.contains(&register) {
         return UpdateEffect::None;
     }
-    let Some(keys) = stoat.macros.get(&register).cloned() else {
-        return UpdateEffect::None;
+
+    // One value, since a macro is one key sequence. A multi-fragment register
+    // holds a multi-selection yank rather than something to replay.
+    let text = super::yank::read_register_fragments(stoat, register)
+        .filter(|fragments| fragments.len() == 1)
+        .map(|mut fragments| fragments.remove(0));
+    let Some(text) = text else {
+        stoat.set_status(format!("register {} is empty", register.name()));
+        return UpdateEffect::Redraw;
+    };
+    let Some(keys) = keymap::macro_from_text(&text) else {
+        stoat.set_status(format!("register {} does not hold keys", register.name()));
+        return UpdateEffect::Redraw;
     };
 
     stoat.replaying_registers.push(register);
@@ -128,7 +148,7 @@ mod tests {
 
         dispatch(&mut h.stoat, &action::ReplayMacro);
         assert_eq!(h.stoat.pending_macro_replay, Some(1));
-        h.stoat.update(Event::Key(keys::key(KeyCode::Char('"'))));
+        h.stoat.update(Event::Key(keys::key(KeyCode::Char('@'))));
         assert_eq!(h.stoat.pending_macro_replay, None);
         assert_eq!(primary_offset(&mut h), 6);
     }
@@ -146,7 +166,7 @@ mod tests {
 
         h.type_keys("3");
         dispatch(&mut h.stoat, &action::ReplayMacro);
-        h.stoat.update(Event::Key(keys::key(KeyCode::Char('"'))));
+        h.stoat.update(Event::Key(keys::key(KeyCode::Char('@'))));
         assert_eq!(
             primary_offset(&mut h),
             8,
@@ -171,7 +191,7 @@ mod tests {
             "the arming dispatch consumed the count, so only the chord still holds it",
         );
 
-        h.stoat.update(Event::Key(keys::key(KeyCode::Char('"'))));
+        h.stoat.update(Event::Key(keys::key(KeyCode::Char('@'))));
         assert_eq!(primary_offset(&mut h), 5, "one from the record, four more");
     }
 
@@ -214,7 +234,7 @@ mod tests {
 
     /// A macro in register `a` that moves two columns, left stored and not
     /// replayed. The register selection is consumed by the recording, so a
-    /// later recording goes to the unnamed register.
+    /// later recording goes to the default macro register.
     fn record_two_column_macro_in_a(h: &mut crate::test_harness::TestHarness) {
         h.type_keys("\" a");
         h.type_keys("Q");
@@ -232,15 +252,9 @@ mod tests {
         h.type_keys("q a");
         h.type_keys("Q");
 
-        let stored = h
-            .stoat
-            .macros
-            .get(&crate::register::Register::Unnamed)
-            .expect("macro stored");
-        let typed: Vec<KeyCode> = stored.iter().map(|k| k.code).collect();
         assert_eq!(
-            typed,
-            vec![KeyCode::Char('q'), KeyCode::Char('a')],
+            stored_macro(&mut h, '@'),
+            Some("q a".to_string()),
             "the replay was recorded as the inner macro's body"
         );
     }
@@ -256,7 +270,7 @@ mod tests {
         h.type_keys("Q");
         let after_recording = primary_offset(&mut h);
 
-        h.type_keys("q \"");
+        h.type_keys("q @");
         assert_eq!(
             primary_offset(&mut h) - after_recording,
             2,
@@ -285,13 +299,77 @@ mod tests {
         dispatch(&mut h.stoat, &action::RecordMacro);
         h.type_keys("l");
         dispatch(&mut h.stoat, &action::RecordMacro);
-        // Macro should be exactly one MoveRight (l), not the
-        // surrounding RecordMacro dispatches.
-        let stored = h
-            .stoat
-            .macros
-            .get(&crate::register::Register::Unnamed)
-            .expect("macro stored");
-        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored_macro(&mut h, '@'),
+            Some("l".to_string()),
+            "the macro is the one MoveRight, not the RecordMacro dispatches around it",
+        );
+    }
+
+    /// The text register `name` holds, which for a macro register is the
+    /// recorded key sequence.
+    fn stored_macro(h: &mut crate::test_harness::TestHarness, name: char) -> Option<String> {
+        let register = crate::action_handlers::yank::register_for_char(name);
+        crate::action_handlers::yank::read_register_fragments(&mut h.stoat, register)
+            .map(|fragments| fragments.join("\n"))
+    }
+
+    /// A macro is a register value, so it reads back as text to see, paste,
+    /// and edit.
+    #[test]
+    fn a_recorded_macro_is_readable_as_register_text() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("hello world");
+        h.type_keys("Q");
+        h.type_keys("l l escape");
+        h.type_keys("Q");
+
+        assert_eq!(
+            stored_macro(&mut h, '@'),
+            Some("l l escape".to_string()),
+            "the keys are spelled the way config.stcfg binds them",
+        );
+    }
+
+    /// Nothing distinguishes a macro register from any other, so text written
+    /// by hand replays exactly as a recorded one does.
+    #[test]
+    fn a_hand_written_register_replays() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("hello world");
+        h.stoat.registers.write(
+            crate::register::Register::Named('b'),
+            vec!["l l l".to_string()],
+        );
+
+        h.type_keys("q b");
+        assert_eq!(
+            primary_offset(&mut h),
+            3,
+            "three keys nobody recorded still replay",
+        );
+    }
+
+    /// Recording defaults to `@` rather than the unnamed register, so a yank
+    /// between recording and replaying leaves the macro alone.
+    #[test]
+    fn a_yank_does_not_clobber_the_default_macro_register() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("hello world");
+        h.type_keys("Q");
+        h.type_keys("l l");
+        h.type_keys("Q");
+
+        h.type_keys("v l l");
+        h.type_keys("y");
+        h.type_keys("escape");
+        let before = primary_offset(&mut h);
+
+        h.type_keys("q @");
+        assert_eq!(
+            primary_offset(&mut h) - before,
+            2,
+            "the yank landed in the unnamed register, not over the macro",
+        );
     }
 }

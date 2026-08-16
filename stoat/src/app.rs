@@ -682,9 +682,6 @@ pub struct Stoat {
     /// every key dispatched in the meantime is appended via
     /// [`action_handlers::macro_recording::capture`].
     pub(crate) macro_recording: Option<action_handlers::macro_recording::MacroRecording>,
-    /// Stored macros keyed by [`crate::register::Register`]. Filled
-    /// when `RecordMacro` toggles off; consumed by [`ReplayMacro`].
-    pub(crate) macros: std::collections::HashMap<register::Register, Vec<KeyEvent>>,
     /// How many times the armed replay chord runs its macro, `None` while no
     /// chord is armed.
     ///
@@ -1887,7 +1884,6 @@ impl Stoat {
             split_selection_input: None,
             filter_selections_input: None,
             macro_recording: None,
-            macros: std::collections::HashMap::new(),
             pending_macro_replay: None,
             shell_input: None,
             shell_host: Arc::new(crate::host::LocalShell),
@@ -4414,6 +4410,17 @@ impl Stoat {
     /// called it already spent the selection on its behalf.
     pub(crate) fn active_register(&self) -> register::Register {
         self.command_register.unwrap_or(register::Register::Unnamed)
+    }
+
+    /// The register a macro records into or replays from, `@` when the command
+    /// named none.
+    ///
+    /// Macros default away from the unnamed register because that one is where
+    /// every yank and delete lands. Sharing it lets any edit between recording
+    /// a macro and replaying it destroy the macro.
+    pub(crate) fn macro_register(&self) -> register::Register {
+        self.command_register
+            .unwrap_or(register::Register::Named('@'))
     }
 
     /// The focused document editor's buffer and primary cursor offset, or `None`
