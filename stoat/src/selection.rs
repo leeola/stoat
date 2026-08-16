@@ -558,13 +558,54 @@ impl SelectionsCollection {
     /// such as a motion carrying each selection's identity forward.
     pub(crate) fn replace_with_fresh_ids(
         &mut self,
-        mut new_disjoint: Vec<Selection<Anchor>>,
+        new_disjoint: Vec<Selection<Anchor>>,
         snapshot: &MultiBufferSnapshot,
     ) {
-        for selection in &mut new_disjoint {
-            selection.id = self.next_selection_id;
-            self.next_selection_id += 1;
+        let last = new_disjoint.len().saturating_sub(1);
+        self.replace_with_fresh_ids_primary(new_disjoint, last, snapshot);
+    }
+
+    /// Replace selections with `new_disjoint`, giving each a fresh id and the
+    /// one at `primary_index` the primary.
+    ///
+    /// For a producer that knows which of its pieces the user works from,
+    /// where [`Self::replace_with_fresh_ids`] offers only the last. The
+    /// choice has to be made here rather than afterward, since
+    /// [`Self::replace_with`] sorts by offset and merges overlaps, so an index
+    /// no longer names the same piece once it returns.
+    ///
+    /// A named piece that merges into a neighbour leaves the primary on the
+    /// survivor, since a merge keeps the higher of the two ids.
+    ///
+    /// An out-of-range `primary_index` names the last piece, matching what a
+    /// producer minting in list order already gets.
+    pub(crate) fn replace_with_fresh_ids_primary(
+        &mut self,
+        mut new_disjoint: Vec<Selection<Anchor>>,
+        primary_index: usize,
+        snapshot: &MultiBufferSnapshot,
+    ) {
+        let last = new_disjoint.len().saturating_sub(1);
+        let primary_index = primary_index.min(last);
+
+        // The named piece takes the top of the block and the rest fill in
+        // below it in list order, so every id stays distinct and the maximum
+        // lands where the caller asked.
+        let base = self.next_selection_id;
+        let top = base + last;
+        let mut next = base;
+        for (index, selection) in new_disjoint.iter_mut().enumerate() {
+            selection.id = match index == primary_index {
+                true => top,
+                false => {
+                    let id = next;
+                    next += 1;
+                    id
+                },
+            };
         }
+        self.next_selection_id = top + 1;
+
         self.replace_with(new_disjoint, snapshot);
     }
 
@@ -2024,6 +2065,91 @@ mod tests {
             .map(|s| snapshot.resolve_anchor(&s.start))
             .collect();
         assert_eq!(offsets, vec![5]);
+    }
+
+    /// The named piece takes the primary wherever it sits, so a producer that
+    /// knows where the user left off says so rather than reordering its output.
+    #[test]
+    fn replace_with_fresh_ids_primary_names_any_piece() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+
+        let span = |start: usize, end: usize| Selection {
+            id: 0,
+            start: snapshot.anchor_at(start, Bias::Right),
+            end: snapshot.anchor_at(end, Bias::Left),
+            reversed: false,
+            goal: SelectionGoal::None,
+        };
+        collection.replace_with_fresh_ids_primary(
+            vec![span(0, 2), span(4, 6), span(8, 10)],
+            1,
+            &snapshot,
+        );
+
+        assert_eq!(
+            snapshot.resolve_anchor(&collection.newest_anchor().start),
+            4,
+            "the middle piece is the primary, not the last",
+        );
+        assert_eq!(
+            spans_of(&snapshot, &collection),
+            vec![(0, 2, false), (4, 6, false), (8, 10, false)],
+            "and every piece survives",
+        );
+    }
+
+    /// Naming a piece that merges away leaves the primary on what absorbed it,
+    /// since a merge keeps the higher of the two ids.
+    #[test]
+    fn replace_with_fresh_ids_primary_follows_a_merged_piece() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+
+        let span = |start: usize, end: usize| Selection {
+            id: 0,
+            start: snapshot.anchor_at(start, Bias::Right),
+            end: snapshot.anchor_at(end, Bias::Left),
+            reversed: false,
+            goal: SelectionGoal::None,
+        };
+        collection.replace_with_fresh_ids_primary(vec![span(0, 6), span(2, 4)], 1, &snapshot);
+
+        assert_eq!(
+            spans_of(&snapshot, &collection),
+            vec![(0, 6, false)],
+            "the enclosed piece merges into the one covering it",
+        );
+        assert_eq!(
+            snapshot.resolve_anchor(&collection.newest_anchor().start),
+            0,
+            "and the primary lands on the survivor",
+        );
+    }
+
+    /// Numbering in list order is the same call naming the last piece, which is
+    /// what the plain form promises its callers.
+    #[test]
+    fn replace_with_fresh_ids_makes_the_last_piece_primary() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+
+        let span = |start: usize, end: usize| Selection {
+            id: 0,
+            start: snapshot.anchor_at(start, Bias::Right),
+            end: snapshot.anchor_at(end, Bias::Left),
+            reversed: false,
+            goal: SelectionGoal::None,
+        };
+        collection.replace_with_fresh_ids(vec![span(0, 2), span(4, 6), span(8, 10)], &snapshot);
+
+        assert_eq!(
+            snapshot.resolve_anchor(&collection.newest_anchor().start),
+            8,
+        );
     }
 
     /// The collection is ordered by where each selection starts, and the merge
