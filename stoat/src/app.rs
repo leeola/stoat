@@ -562,17 +562,19 @@ struct KeymapLookup(Option<Option<BoundActions>>);
 /// captured out of the key itself.
 type BoundActions = (Arc<[ResolvedAction]>, Option<f64>);
 
-/// One cursor's part of an insertion that differs per cursor.
-struct CursorInsert {
-    /// The selection this insertion belongs to, which is how it finds its
-    /// cursor again once the edit has moved every offset.
+/// One cursor's part of an edit that differs per cursor.
+struct CursorEdit {
+    /// The selection this edit belongs to, which is how it finds its cursor
+    /// again once the whole batch has moved every offset.
     id: usize,
-    offset: usize,
+    /// The bytes `text` replaces. Empty for an ordinary insertion, and wider
+    /// for one that takes something out on its way in.
+    range: Range<usize>,
     text: String,
-    /// Bytes past `offset` the cursor lands on once the text is written. The
-    /// text's own length for an ordinary insertion, shorter for a cursor
-    /// landing inside what it wrote, longer for one stepping over text that was
-    /// already there.
+    /// Bytes past `range.start` the cursor lands on once the edit is written.
+    /// The text's own length for an ordinary insertion, shorter for a cursor
+    /// landing inside what it wrote, longer for one stepping over text it left
+    /// alone.
     caret: usize,
 }
 
@@ -5445,21 +5447,21 @@ impl Stoat {
             .iter()
             .zip(&actions)
             .map(|(&(id, offset), action)| match action {
-                Some(PairAction::Close(pair)) => CursorInsert {
+                Some(PairAction::Close(pair)) => CursorEdit {
                     id,
-                    offset,
+                    range: offset..offset,
                     text: String::from_iter([pair.open, pair.close]),
                     caret: pair.open.len_utf8(),
                 },
-                Some(PairAction::Skip { width }) => CursorInsert {
+                Some(PairAction::Skip { width }) => CursorEdit {
                     id,
-                    offset,
+                    range: offset..offset,
                     text: String::new(),
                     caret: *width,
                 },
-                None => CursorInsert {
+                None => CursorEdit {
                     id,
-                    offset,
+                    range: offset..offset,
                     text: text.to_owned(),
                     caret: text.len(),
                 },
@@ -5473,7 +5475,7 @@ impl Stoat {
             run.push(ch);
         }
 
-        self.editor_insert_each_landing(editor_id, buffer_id, insertions);
+        self.editor_edit_each(editor_id, buffer_id, insertions);
     }
 
     /// The pair table for `buffer_id`, or `None` where nothing pairs.
@@ -5576,27 +5578,30 @@ impl Stoat {
     ) {
         let insertions = insertions
             .into_iter()
-            .map(|(id, offset, text)| CursorInsert {
+            .map(|(id, offset, text)| CursorEdit {
                 id,
                 caret: text.len(),
-                offset,
+                range: offset..offset,
                 text,
             })
             .collect();
-        self.editor_insert_each_landing(editor_id, buffer_id, insertions);
+        self.editor_edit_each(editor_id, buffer_id, insertions);
     }
 
-    /// Insert a string per cursor in one multi-edit, landing each cursor where
-    /// its own [`CursorInsert::caret`] names rather than after its text.
+    /// Write one edit per cursor in a single multi-edit, landing each cursor
+    /// where its own [`CursorEdit::caret`] names rather than after its text.
     ///
-    /// Auto-pairing needs both departures. A completed pair lands the cursor
-    /// between the halves it wrote, and a cursor stepping over a closer already
-    /// there writes nothing and still moves.
-    fn editor_insert_each_landing(
+    /// Both departures from a plain insertion have callers. Auto-pairing lands
+    /// the cursor between the halves it wrote, and steps a cursor over a closer
+    /// it left alone. Enter takes out the whitespace it breaks after.
+    ///
+    /// The ranges must be sorted and must not overlap, which is what lets one
+    /// running total carry every cursor's landing.
+    fn editor_edit_each(
         &mut self,
         editor_id: EditorId,
         buffer_id: BufferId,
-        insertions: Vec<CursorInsert>,
+        insertions: Vec<CursorEdit>,
     ) {
         if insertions.is_empty() {
             return;
@@ -5610,21 +5615,22 @@ impl Stoat {
             let edits: Vec<(Range<usize>, &str)> = insertions
                 .iter()
                 .rev()
-                .map(|insert| (insert.offset..insert.offset, insert.text.as_str()))
+                .map(|edit| (edit.range.clone(), edit.text.as_str()))
                 .collect();
             buffer.write().expect("poisoned").edit_batch(&edits);
         }
 
-        // Each cursor is shifted by everything inserted before it, then by its
-        // own caret. Lengths differ per cursor, so this is a running total where
-        // the uniform path multiplies one length by the insertion's index.
-        let mut inserted = 0usize;
+        // Each cursor is shifted by the net of everything written before it,
+        // then by its own caret. The net differs per cursor, so this is a
+        // running total where the uniform path multiplies one length by the
+        // insertion's index.
+        let mut shift = 0isize;
         let landings: Vec<(usize, usize)> = insertions
             .iter()
-            .map(|insert| {
-                let landing = insert.offset + inserted + insert.caret;
-                inserted += insert.text.len();
-                (insert.id, landing)
+            .map(|edit| {
+                let landing = (edit.range.start as isize + shift) as usize + edit.caret;
+                shift += edit.text.len() as isize - edit.range.len() as isize;
+                (edit.id, landing)
             })
             .collect();
 
@@ -5887,34 +5893,68 @@ impl Stoat {
     }
 
     fn editor_insert_newline(&mut self, editor_id: EditorId, buffer_id: BufferId) {
-        // Repeat replays one string, and there is no one string when every
-        // cursor continues its own line. The newest cursor's is what the
-        // uniform insertion recorded before the others had their own.
-        let newest_offset = self.newest_cursor_offset(editor_id);
-        let newest = match newest_offset {
-            Some(offset) => self.newline_continuation(buffer_id, offset),
-            None => "\n".to_string(),
-        };
-        if let Some(run) = self.current_insert_run.as_mut() {
-            run.push_str(&newest);
-        }
-
         let cursors = self.editor_cursor_offsets(editor_id);
-        let insertions: Vec<(usize, usize, String)> = cursors
-            .into_iter()
-            .map(|(id, offset)| {
-                // Deriving a continuation runs the indent query, and the newest
-                // cursor's was just derived above for the repeat record. The
-                // single-cursor case is every cursor.
-                let text = match newest_offset == Some(offset) {
-                    true => newest.clone(),
-                    false => self.newline_continuation(buffer_id, offset),
-                };
-                (id, offset, text)
+
+        let breaks = {
+            let ws = self.active_workspace();
+            let Some(buffer) = ws.buffers.get(buffer_id) else {
+                return;
+            };
+            let guard = buffer.read().expect("buffer poisoned");
+            let rope = guard.rope();
+
+            // A cursor whose break trims whitespace bounds the next cursor's
+            // trim, so two cursors on one line take the run between them once.
+            let mut floor = 0;
+            cursors
+                .iter()
+                .map(|&(_, cursor)| {
+                    let brk = line_break_at(rope, cursor, floor);
+                    if matches!(brk, LineBreak::Continue { .. }) {
+                        floor = cursor;
+                    }
+                    brk
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let edits: Vec<CursorEdit> = cursors
+            .iter()
+            .zip(&breaks)
+            .map(|(&(id, cursor), brk)| match *brk {
+                LineBreak::Continue { from } => {
+                    let text = self.newline_continuation(buffer_id, cursor);
+                    CursorEdit {
+                        id,
+                        range: from..cursor,
+                        caret: text.len(),
+                        text,
+                    }
+                },
+                LineBreak::PushDown { line_start } => CursorEdit {
+                    id,
+                    range: line_start..line_start,
+                    text: "\n".to_string(),
+                    caret: 1 + cursor - line_start,
+                },
             })
             .collect();
 
-        self.editor_insert_each(editor_id, buffer_id, insertions);
+        // Repeat replays one string, and there is no one string when every
+        // cursor continues its own line. The newest cursor's is what the
+        // uniform insertion recorded before the others had their own.
+        let newest = self.newest_cursor_offset(editor_id);
+        if let Some(text) = cursors
+            .iter()
+            .position(|&(_, offset)| Some(offset) == newest)
+            .and_then(|idx| edits.get(idx))
+            .map(|edit| edit.text.clone())
+            && let Some(run) = self.current_insert_run.as_mut()
+        {
+            run.push_str(&text);
+        }
+
+        self.editor_edit_each(editor_id, buffer_id, edits);
     }
 
     /// Delete a per-selection range at every cursor in one multi-edit, mirroring
@@ -6600,6 +6640,47 @@ fn is_insert_run_mode(mode: &str) -> bool {
 /// Visual columns a tab advances, for the column math in [`backspace_range`].
 /// Matches the editor's default render tab size.
 const TAB_WIDTH: usize = 4;
+
+/// Where one insert-mode Enter writes its line ending.
+enum LineBreak {
+    /// Break the line at the cursor, continuing it below. `from` is where the
+    /// line's trailing whitespace starts, and the continuation replaces it, so
+    /// breaking after `foo   ` leaves `foo` rather than a line ending in
+    /// spaces.
+    Continue { from: usize },
+    /// Write the line ending at `line_start` instead, which moves the whole
+    /// line down and leaves an empty one above it.
+    ///
+    /// The case is a cursor with nothing but whitespace behind it on its line.
+    /// Breaking there splits the indent and re-indents what follows, where what
+    /// a reader means is to open a line above the one they are on.
+    PushDown { line_start: usize },
+}
+
+/// Where one insert-mode Enter at `cursor` writes, given the `floor` a cursor
+/// earlier in the same batch already claimed.
+///
+/// `floor` is the previous trimming cursor's own offset. Without it, two
+/// cursors in one run of whitespace both claim the run and their edits overlap.
+fn line_break_at(rope: &Rope, cursor: usize, floor: usize) -> LineBreak {
+    let row = rope.offset_to_point(cursor).row;
+    let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
+
+    let mut from = cursor;
+    for ch in rope.reversed_chars_at(cursor) {
+        if from <= line_start || !ch.is_whitespace() {
+            break;
+        }
+        from -= ch.len_utf8();
+    }
+
+    match from > line_start {
+        true => LineBreak::Continue {
+            from: from.max(floor),
+        },
+        false => LineBreak::PushDown { line_start },
+    }
+}
 
 /// The backward-delete span for one insert-mode backspace at `cursor`.
 ///
@@ -15397,6 +15478,40 @@ mod tests {
     }
 
     #[test]
+    fn enter_after_trailing_spaces_trims_them() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text("foo   ");
+        h.type_keys("enter");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "foo\n",
+            "the line the break leaves behind keeps no trailing whitespace",
+        );
+    }
+
+    #[test]
+    fn enter_inside_leading_indent_pushes_the_line_down() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "    foo\n");
+        h.type_keys("l l i");
+        h.type_keys("enter");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "\n    foo\n",
+            "the whole line moves down with its indent rather than splitting",
+        );
+
+        h.type_text("X");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "\n  X  foo\n",
+            "the cursor keeps its column on the line it followed down",
+        );
+    }
+
+    #[test]
     fn append_advances_one_char_then_inserts() {
         let mut h = Stoat::test();
         let path = open_scratch_file(&mut h, "abc\n");
@@ -15614,8 +15729,8 @@ mod tests {
         h.type_keys("enter");
         assert_eq!(
             focused_buffer_string(&h),
-            "  \n      // foo\n",
-            "the split indent takes the plain-indent path, the same as any line",
+            "\n    // foo\n",
+            "the indent moves down whole, carrying neither a token nor a re-indent",
         );
     }
 
