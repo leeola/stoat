@@ -1005,8 +1005,17 @@ fn longest_token_at(
         .max_by_key(|token| token.len())
 }
 
+/// Land on the file's first character, or on the line a count names.
+///
+/// A count turns this into the same numbered-line jump `G` makes, which is
+/// what a user who typed one asked for. Without one it is the top of the file.
 pub(super) fn goto_file_start(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
+    let count = stoat.take_pending_count();
     super::jump::push_jump(stoat);
+    if let Some(count) = count {
+        return goto_line_row(stoat, count, extend);
+    }
+
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -4696,6 +4705,28 @@ fn last_addressable_row(rope: &Rope) -> u32 {
     }
 }
 
+/// Land every selection on the start of the line `count` names, one-indexed
+/// and clamped to [`last_addressable_row`].
+///
+/// Pushes no jump. The keys that reach a numbered line differ over what they do
+/// without a count, so each pushes its own before it gets here.
+fn goto_line_row(stoat: &mut Stoat, count: u32, extend: bool) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let zero_indexed = count.saturating_sub(1);
+    let target_row = (zero_indexed as u64).min(last_addressable_row(rope) as u64) as u32;
+    let target_offset = rope.point_to_offset(Point::new(target_row, 0));
+
+    move_cursors(&mut editor.selections, buffer_snapshot, extend, |_| {
+        Some((target_offset, SelectionGoal::None))
+    });
+    UpdateEffect::Redraw
+}
+
 /// Land on the line a count names, or on the last line without one.
 ///
 /// `extend` decides whether the selections grow to the target or collapse onto
@@ -4707,24 +4738,7 @@ pub(super) fn goto_line_number(stoat: &mut Stoat, extend: bool) -> UpdateEffect 
         return goto_last_line(stoat, extend);
     };
     super::jump::push_jump(stoat);
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
-    let display_snapshot = editor.display_map.snapshot();
-    let buffer_snapshot = display_snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope();
-    let zero_indexed = count.saturating_sub(1);
-    let target_row = (zero_indexed as u64).min(last_addressable_row(rope) as u64) as u32;
-    let target_offset = rope.point_to_offset(Point::new(target_row, 0));
-
-    if extend {
-        move_cursors(&mut editor.selections, buffer_snapshot, true, |_| {
-            Some((target_offset, SelectionGoal::None))
-        });
-    } else {
-        apply_primary_range(editor, target_offset..target_offset);
-    }
-    UpdateEffect::Redraw
+    goto_line_row(stoat, count, extend)
 }
 
 pub(super) fn goto_column(stoat: &mut Stoat, extend: bool) -> UpdateEffect {

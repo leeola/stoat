@@ -6185,6 +6185,54 @@ fn goto_line_number_clamps_at_last_line() {
     assert_eq!(positions, vec![(3, 0)]);
 }
 
+/// Every cursor lands on the one row the count names, and identical landings
+/// are one selection, so the set comes out collapsed however many went in.
+#[test]
+fn goto_line_number_with_many_cursors_leaves_one() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\n");
+    h.open_file(&path);
+    dispatch(&mut h.stoat, &AddSelectionBelow);
+    assert_eq!(h.selection_spans().len(), 2, "two cursors to start");
+
+    h.type_keys("3 G");
+    assert_eq!(h.selection_spans(), vec![(4, 5, false)]);
+}
+
+/// A count turns the top-of-file key into the numbered-line jump `G` makes.
+#[test]
+fn count_prefix_goto_file_start_jumps_to_line() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\n");
+    h.open_file(&path);
+    h.type_keys("l");
+
+    h.type_keys("3 g k");
+    assert_eq!(h.cursor_display_positions(), vec![(2, 0)]);
+}
+
+#[test]
+fn count_prefix_goto_file_start_extends_in_select() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\n");
+    h.open_file(&path);
+    h.type_keys("v");
+
+    h.type_keys("3 g k");
+    assert_eq!(h.selection_spans(), vec![(0, 5, false)]);
+}
+
+#[test]
+fn goto_file_start_without_count_still_reaches_the_top() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\n");
+    h.open_file(&path);
+    h.type_keys("j j");
+
+    h.type_keys("g k");
+    assert_eq!(h.cursor_display_positions(), vec![(0, 0)]);
+}
+
 #[test]
 fn goto_line_number_without_count_jumps_to_last_line() {
     let mut h = TestHarness::with_size(20, 10);
