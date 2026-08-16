@@ -116,12 +116,22 @@ pub(crate) enum LastMotion {
     SelectAllSiblings,
     SelectAllChildren,
     /// The `mi`/`ma` chord, whose mode and type char come from two keypresses.
-    /// Both ride along so a replay repeats the chord rather than stopping to
-    /// read the char again.
+    /// All three ride along so a replay repeats the chord rather than stopping
+    /// to read the char again.
     TextObject {
         mode: textobject::TextobjectMode,
         ch: char,
+        count: usize,
     },
+}
+
+/// The count typed in front of the chord that arms now, or one.
+///
+/// A chord reads its count here rather than where it runs, because dispatching
+/// the action that arms the chord already cleared the pending count. The chars
+/// completing the chord arrive over later keypresses with nothing left to read.
+pub(crate) fn arming_count(stoat: &mut Stoat) -> usize {
+    stoat.take_pending_count().unwrap_or(1).max(1) as usize
 }
 
 /// Run the last recorded motion again, this key's count deciding how many
@@ -159,8 +169,8 @@ pub(crate) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
             LastMotion::ShrinkSelection { count } => movement::shrink_selection_impl(stoat, count),
             LastMotion::SelectAllSiblings => movement::select_all_siblings(stoat),
             LastMotion::SelectAllChildren => movement::select_all_children(stoat),
-            LastMotion::TextObject { mode, ch } => {
-                textobject::execute_select_textobject(stoat, mode, ch)
+            LastMotion::TextObject { mode, ch, count } => {
+                textobject::execute_select_textobject(stoat, mode, ch, count)
             },
         };
     }

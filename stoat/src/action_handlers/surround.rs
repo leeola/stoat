@@ -25,24 +25,15 @@ pub(super) fn surround_add(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 pub(super) fn surround_replace(stoat: &mut Stoat) -> UpdateEffect {
-    stoat.pending_surround_count = arming_count(stoat);
+    stoat.pending_surround_count = super::arming_count(stoat);
     stoat.pending_surround_replace = SurroundReplaceStage::AwaitFrom;
     UpdateEffect::Redraw
 }
 
 pub(super) fn surround_delete(stoat: &mut Stoat) -> UpdateEffect {
-    stoat.pending_surround_count = arming_count(stoat);
+    stoat.pending_surround_count = super::arming_count(stoat);
     stoat.pending_surround_delete = true;
     UpdateEffect::Redraw
-}
-
-/// The count typed in front of the chord that arms now, or one.
-///
-/// The chord reads it here rather than where it runs, because dispatching the
-/// action that arms the chord already cleared the pending count. The chars
-/// completing the chord arrive over later keypresses with nothing left to read.
-fn arming_count(stoat: &mut Stoat) -> usize {
-    stoat.take_pending_count().unwrap_or(1).max(1) as usize
 }
 
 /// Wrap every non-empty selection in the focused editor with the pair
@@ -366,12 +357,16 @@ fn collect_surround_pairs(
 /// skipped. `None` when no enclosing pair exists. Shared by the
 /// surround delete/replace collection and the `m i`/`m a` pair-char
 /// textobjects.
+///
+/// `skip` reaches past that many enclosing pairs, so `1` gives the pair
+/// around the nearest one.
 pub(crate) fn surround_pair_at(
     ws: &crate::workspace::Workspace,
     buffer_id: crate::buffer::BufferId,
     cursor: usize,
     open: char,
     close: char,
+    skip: usize,
 ) -> Option<(usize, usize)> {
     let buffer = ws.buffers.get(buffer_id)?;
     let rope = buffer.read().expect("poisoned").rope().clone();
@@ -383,7 +378,7 @@ pub(crate) fn surround_pair_at(
         open,
         close,
         &PairScan::around(tree, cursor),
-        0,
+        skip,
     )
 }
 

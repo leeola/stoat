@@ -39,12 +39,14 @@ impl TextobjectMode {
 }
 
 pub(super) fn select_textobject_around(stoat: &mut Stoat) -> UpdateEffect {
-    stoat.pending_textobject_select = Some(TextobjectMode::Around);
+    let count = super::arming_count(stoat);
+    stoat.pending_textobject_select = Some((TextobjectMode::Around, count));
     UpdateEffect::Redraw
 }
 
 pub(super) fn select_textobject_inner(stoat: &mut Stoat) -> UpdateEffect {
-    stoat.pending_textobject_select = Some(TextobjectMode::Inner);
+    let count = super::arming_count(stoat);
+    stoat.pending_textobject_select = Some((TextobjectMode::Inner, count));
     UpdateEffect::Redraw
 }
 
@@ -55,14 +57,18 @@ pub(super) fn select_textobject_inner(stoat: &mut Stoat) -> UpdateEffect {
 /// resolve keeps the range it had. The chord is a no-op when the type char names
 /// no textobject, or when no cursor is inside one.
 ///
+/// `count` reaches the pair types alone, where it names the Nth enclosing pair.
+/// The word and tree-sitter types have no meaning to give it.
+///
 /// Cursors resolving to the same object end as one selection, the collection
 /// merging selections that overlap.
 pub(crate) fn execute_select_textobject(
     stoat: &mut Stoat,
     mode: TextobjectMode,
     ch: char,
+    count: usize,
 ) -> UpdateEffect {
-    stoat.last_motion = Some(crate::action_handlers::LastMotion::TextObject { mode, ch });
+    stoat.last_motion = Some(crate::action_handlers::LastMotion::TextObject { mode, ch, count });
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -70,7 +76,7 @@ pub(crate) fn execute_select_textobject(
         _ => return UpdateEffect::None,
     };
 
-    let (buffer_id, cursors) = {
+    let (buffer_id, cursors, change_hunks) = {
         let editor = ws.editors.get_mut(editor_id).expect("editor");
         let buffer_id = editor.buffer_id;
         let display_snapshot = editor.display_map.snapshot();
@@ -86,13 +92,37 @@ pub(crate) fn execute_select_textobject(
                 (sel.id, cursor)
             })
             .collect();
-        (buffer_id, cursors)
+
+        // Resolving every hunk's anchors is the work the gutter does per frame,
+        // so only the one chord that reads hunks pays for it. None here means
+        // the buffer has no diff at all, which the change object refuses over.
+        let change_hunks = (ch == 'g').then(|| {
+            display_snapshot.diff_map().map(|diff_map| {
+                diff_map
+                    .live_hunks(buffer_snapshot)
+                    .in_range(0..u32::MAX)
+                    .map(|(_, rows)| rows)
+                    .collect::<Vec<_>>()
+            })
+        });
+        (buffer_id, cursors, change_hunks)
     };
+
+    let change_hunks = match change_hunks {
+        Some(None) => {
+            stoat.set_status("no diff for this buffer");
+            return UpdateEffect::None;
+        },
+        Some(Some(hunks)) => hunks,
+        None => Vec::new(),
+    };
+    let ws = stoat.active_workspace_mut();
 
     let targets: HashMap<usize, std::ops::Range<usize>> = cursors
         .into_iter()
         .filter_map(|(id, cursor)| {
-            find_textobject(ws, buffer_id, cursor, mode, ch).map(|range| (id, range))
+            find_textobject(ws, buffer_id, cursor, mode, ch, count, &change_hunks)
+                .map(|range| (id, range))
         })
         .collect();
 
@@ -123,20 +153,26 @@ pub(crate) fn execute_select_textobject(
 /// Taking a single cursor is what lets every selection resolve its own object.
 /// The tree-sitter types therefore run their query once per cursor, which is
 /// the cost of the objects being per cursor at all.
+///
+/// `change_hunks` carries the live diff rows the `g` type reads, and is empty
+/// for every other type. The caller resolves them once for the whole chord.
 fn find_textobject(
     ws: &crate::workspace::Workspace,
     buffer_id: crate::buffer::BufferId,
     cursor: usize,
     mode: TextobjectMode,
     ch: char,
+    count: usize,
+    change_hunks: &[std::ops::Range<u32>],
 ) -> Option<std::ops::Range<usize>> {
+    let skip = count.saturating_sub(1);
     match ch {
         'p' => {
             let buffer = ws.buffers.get(buffer_id).expect("buffer");
             let guard = buffer.read().expect("poisoned");
             find_textobject_paragraph(guard.rope(), cursor, mode)
         },
-        'f' | 't' | 'a' | 'c' | 'T' | 'e' => {
+        'f' | 't' | 'a' | 'c' | 'T' | 'e' | 'x' => {
             let kind = match ch {
                 'f' => "function",
                 't' => "class",
@@ -144,9 +180,15 @@ fn find_textobject(
                 'c' => "comment",
                 'T' => "test",
                 'e' => "entry",
+                'x' => "xml-element",
                 _ => unreachable!(),
             };
             find_textobject_treesitter(ws, buffer_id, cursor, kind, mode)
+        },
+        'g' => {
+            let buffer = ws.buffers.get(buffer_id).expect("buffer");
+            let guard = buffer.read().expect("poisoned");
+            find_textobject_change(guard.rope(), cursor, change_hunks)
         },
         'm' => {
             let rope = {
@@ -156,7 +198,7 @@ fn find_textobject(
             let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
             let tree = super::surround::deepest_tree_at(snapshot, cursor);
             let scan = crate::action_handlers::movement::PairScan::around(tree, cursor);
-            super::surround::closest_surround_pair(&rope, cursor, &scan, 0).map(
+            super::surround::closest_surround_pair(&rope, cursor, &scan, skip).map(
                 |(open, close, open_off, close_off)| {
                     pair_to_range(open, close, open_off, close_off, mode)
                 },
@@ -169,11 +211,35 @@ fn find_textobject(
         },
         pair if !pair.is_ascii_alphanumeric() => {
             let (open, close) = super::surround::surround_pair_for(pair);
-            super::surround::surround_pair_at(ws, buffer_id, cursor, open, close)
+            super::surround::surround_pair_at(ws, buffer_id, cursor, open, close, skip)
                 .map(|(open_off, close_off)| pair_to_range(open, close, open_off, close_off, mode))
         },
         _ => None,
     }
+}
+
+/// The byte range of the diff hunk `cursor` sits on, as whole lines.
+///
+/// The range runs from the start of the hunk's first row to the start of the
+/// row after its last, so it carries the final row's line ending the way a
+/// linewise selection does.
+///
+/// A deletion or move seam covers no rows of the buffer, and answers `None`
+/// rather than a cursor-width range at the seam. Around and inside resolve
+/// alike, since a hunk has no delimiters to sit outside of.
+fn find_textobject_change(
+    rope: &Rope,
+    cursor: usize,
+    change_hunks: &[std::ops::Range<u32>],
+) -> Option<std::ops::Range<usize>> {
+    let row = rope.offset_to_point(cursor).row;
+    let rows = change_hunks
+        .iter()
+        .find(|rows| rows.start <= row && row < rows.end)?;
+
+    let start = rope.point_to_offset(Point::new(rows.start, 0));
+    let end = rope.point_to_offset(Point::new(rows.end, 0));
+    Some(start..end)
 }
 
 /// Byte range for a resolved surround pair, given the delimiter chars
@@ -561,6 +627,124 @@ mod tests {
         assert!(h.stoat.pending_textobject_select.is_some());
         h.type_keys("escape");
         assert!(h.stoat.pending_textobject_select.is_none());
+    }
+
+    /// Open `name` in a repo where its HEAD text differs from the buffer's, and
+    /// install the diff map on this turn so the hunks are there to select.
+    fn seed_with_diff(h: &mut TestHarness, name: &str, head: &str, working: &str) -> PathBuf {
+        let root = PathBuf::from("/textobject-diff");
+        h.stage_review_scenario(root.clone(), &[(name, head, working)]);
+        let path = root.join(name);
+        h.open_file(&path);
+        h.settle();
+
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        let git_host = h.stoat.git_host.clone();
+        let language_registry = h.stoat.language_registry.clone();
+        let syntax_styles = h.stoat.syntax_styles.clone();
+        let base_cache = h.stoat.base_highlights_cache.clone();
+        h.stoat.active_workspace_mut().install_diff_map_now(
+            &git_host,
+            &language_registry,
+            &syntax_styles,
+            &base_cache,
+            buffer_id,
+        );
+        path
+    }
+
+    #[test]
+    fn change_object_selects_the_hunk_rows() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed_with_diff(&mut h, "a.txt", "a\nb\nc\n", "a\nX\nc\n");
+        jump(&mut h, 2);
+
+        h.type_keys("m i g");
+        assert_eq!(
+            primary_range(&mut h),
+            (2, 4),
+            "the modified row, through its line ending"
+        );
+    }
+
+    /// A hunk has no delimiters to sit outside of, so both modes take the rows.
+    #[test]
+    fn change_object_around_matches_inside() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed_with_diff(&mut h, "a.txt", "a\nb\nc\n", "a\nX\nc\n");
+        jump(&mut h, 2);
+
+        h.type_keys("m a g");
+        assert_eq!(primary_range(&mut h), (2, 4));
+    }
+
+    #[test]
+    fn change_object_off_a_hunk_keeps_the_selection() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed_with_diff(&mut h, "a.txt", "a\nb\nc\n", "a\nX\nc\n");
+        jump(&mut h, 0);
+        let before = primary_range(&mut h);
+
+        h.type_keys("m i g");
+        assert_eq!(primary_range(&mut h), before);
+        assert_eq!(
+            h.stoat.pending_message, None,
+            "an unchanged row is no error"
+        );
+    }
+
+    #[test]
+    fn change_object_without_a_diff_map_reports_it() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "alpha\nbeta\n");
+        jump(&mut h, 2);
+        let before = primary_range(&mut h);
+
+        h.type_keys("m i g");
+        assert_eq!(primary_range(&mut h), before);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("no diff for this buffer"),
+        );
+    }
+
+    /// No grammar in this tree captures xml elements. The arm only puts `x` on
+    /// the tree-sitter path, where rust answers with nothing. This pin catches
+    /// the arm without its capture name, which panics the kind match.
+    #[test]
+    fn xml_element_object_no_ops_without_the_capture() {
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "main.rs", "fn alpha() {\n    let x = 1;\n}\n");
+        h.settle();
+        jump(&mut h, 17);
+        let before = primary_range(&mut h);
+
+        h.type_keys("m i x");
+        assert_eq!(primary_range(&mut h), before);
+    }
+
+    #[test]
+    fn count_prefix_pair_object_takes_the_outer_pair() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "((abc))\n");
+        jump(&mut h, 3);
+
+        h.type_keys("2 m i (");
+        assert_eq!(primary_range(&mut h), (1, 6));
+    }
+
+    #[test]
+    fn count_prefix_closest_pair_object_takes_the_outer_pair() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "([abc])\n");
+        jump(&mut h, 3);
+
+        h.type_keys("2 m a m");
+        assert_eq!(
+            primary_range(&mut h),
+            (0, 7),
+            "the parens, brackets and all"
+        );
     }
 
     #[test]

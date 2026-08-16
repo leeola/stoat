@@ -992,7 +992,11 @@ pub struct Stoat {
     /// resolved via
     /// [`action_handlers::textobject::execute_select_textobject`].
     /// Non-char keypresses also clear the state.
-    pub(crate) pending_textobject_select: Option<action_handlers::textobject::TextobjectMode>,
+    ///
+    /// The count rides along because dispatching the arming action consumes
+    /// the pending count, leaving the type char's keypress nothing to read.
+    pub(crate) pending_textobject_select:
+        Option<(action_handlers::textobject::TextobjectMode, usize)>,
     /// Active search input modal. Some while the user is typing a
     /// `/` (forward) or `?` (reverse) search query; cleared by
     /// [`action_handlers::search::search_submit`] or
@@ -4153,9 +4157,11 @@ impl Stoat {
 
         if takes_pending && self.pending_textobject_select.is_some() {
             if let KeyCode::Char(ch) = key.code {
-                let mode = self.pending_textobject_select.expect("checked above");
+                let (mode, count) = self.pending_textobject_select.expect("checked above");
                 self.pending_textobject_select = None;
-                return action_handlers::textobject::execute_select_textobject(self, mode, ch);
+                return action_handlers::textobject::execute_select_textobject(
+                    self, mode, ch, count,
+                );
             }
             self.pending_textobject_select = None;
         }
