@@ -1,5 +1,5 @@
 use crate::{
-    action_handlers::movement::{window_around, PairScan, BRACKET_PAIRS, MAX_PAIR_SCAN},
+    action_handlers::movement::{window_around, PairScan, BRACKET_PAIRS},
     app::{Stoat, UpdateEffect},
     buffer::TextBuffer,
     pane::View,
@@ -303,6 +303,7 @@ fn collect_surround_pairs(
     // One window covering every cursor's reach, so cursors in the same layer
     // collect their zones once between them rather than once each. A window
     // wider than any single cursor needs only adds zones nothing asks about.
+    // Only the closest-pair walk reads zones, so only it pays for them.
     let window = {
         let first = cursors.iter().copied().min().unwrap_or(0);
         let last = cursors.iter().copied().max().unwrap_or(0);
@@ -317,21 +318,25 @@ fn collect_surround_pairs(
     let mut claimed: Vec<usize> = Vec::with_capacity(cursors.len() * 2);
     for head in cursors {
         let tree = deepest_tree_at(snapshot, head);
-        let key = tree.map_or(std::ptr::null(), |t| t as *const _);
-        let idx = match scans.iter().position(|(seen, _)| *seen == key) {
-            Some(idx) => idx,
-            None => {
-                scans.push((key, PairScan::over(tree, window.clone())));
-                scans.len() - 1
-            },
-        };
-        let scan = &scans[idx].1;
 
         let found = match pair {
-            Some((open, close)) => find_surround_pair(&rope, head, open, close, scan, skip)
-                .map(|(open_off, close_off)| (open_off, close_off, open, close)),
-            None => closest_surround_pair(&rope, head, scan, skip)
-                .map(|(open, close, open_off, close_off)| (open_off, close_off, open, close)),
+            Some((open, close)) => {
+                let scan = PairScan::plaintext(tree);
+                find_surround_pair(&rope, head, open, close, &scan, skip)
+                    .map(|(open_off, close_off)| (open_off, close_off, open, close))
+            },
+            None => {
+                let key = tree.map_or(std::ptr::null(), |t| t as *const _);
+                let idx = match scans.iter().position(|(seen, _)| *seen == key) {
+                    Some(idx) => idx,
+                    None => {
+                        scans.push((key, PairScan::over(tree, window.clone())));
+                        scans.len() - 1
+                    },
+                };
+                closest_surround_pair(&rope, head, &scans[idx].1, skip)
+                    .map(|(open, close, open_off, close_off)| (open_off, close_off, open, close))
+            },
         };
         // Both misses abort the whole operation rather than dropping the
         // cursor. A partial edit across cursors is the one outcome the user has
@@ -374,14 +379,7 @@ pub(crate) fn surround_pair_at(
     let rope = buffer.read().expect("poisoned").rope().clone();
     let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
     let tree = deepest_tree_at(snapshot, cursor);
-    find_surround_pair(
-        &rope,
-        cursor,
-        open,
-        close,
-        &PairScan::around(tree, cursor),
-        skip,
-    )
+    find_surround_pair(&rope, cursor, open, close, &PairScan::plaintext(tree), skip)
 }
 
 /// The tree of the deepest syntax layer whose byte span covers
@@ -527,7 +525,7 @@ fn scan_left_for_opens(
     }
 
     let mut pos = cursor;
-    for c in rope.reversed_chars_at(cursor).take(MAX_PAIR_SCAN) {
+    for c in rope.reversed_chars_at(cursor).take(scan.reach) {
         let Some(next) = pos.checked_sub(c.len_utf8()) else {
             break;
         };
@@ -597,7 +595,7 @@ fn scan_right_for_closes(
     }
 
     let mut pos = cursor + at_cursor.map_or(0, char::len_utf8);
-    for c in rope.chars_at(pos).take(MAX_PAIR_SCAN) {
+    for c in rope.chars_at(pos).take(scan.reach) {
         if let Some(i) = pair_index(c)
             && !done[i]
             && !scan.skips(pos)
@@ -625,23 +623,20 @@ fn focused_buffer_id(stoat: &Stoat) -> Option<crate::buffer::BufferId> {
     }
 }
 
-/// Plain (non-tree-sitter) variant of Helix's `find_nth_pairs_pos`.
-/// Walks the rope outward from `cursor` (a byte offset) to find the
-/// nearest enclosing pair for `(open, close)`. Asymmetric pairs use
-/// depth tracking so nested pairs do not confuse the search;
-/// symmetric pairs (`open == close`) take the nearest occurrence in
-/// each direction. When the cursor sits exactly on a symmetric char
-/// the search bails because there is no way to know which side of
-/// the cursor is the open. Returns `(open_byte, close_byte)` --
-/// each is the byte offset of the corresponding pair char in the
-/// rope -- or `None` when no enclosing pair exists.
-/// When `tree` is `Some`, candidate brackets / quotes whose offset
-/// lies inside a string or comment node are skipped during the walk;
-/// the pair-depth counter does not advance for skipped chars. `None`
-/// keeps the plain non-tree-sitter behaviour for buffers without a
-/// syntax map. Used by `execute_surround_replace` and
-/// `execute_surround_delete` so `m r ( )` and `m d (` ignore
-/// brackets that happen to live inside string literals.
+/// The nearest enclosing `(open, close)` pair around `cursor`, as the byte
+/// offset of each delimiter, or `None` when none encloses it.
+///
+/// Asymmetric pairs use depth tracking so nested pairs do not confuse the
+/// search. Symmetric pairs (`open == close`) take the nearest occurrence in
+/// each direction. A cursor sitting exactly on a symmetric char has no answer
+/// in the text, since neither side says which one opens, so it is read off the
+/// string node the tree puts there and gives up when there is none.
+///
+/// `scan` decides how far the walk reaches and which delimiters it steps over.
+/// The chords that name a pair type hand it
+/// [`PairScan::plaintext`](crate::action_handlers::movement::PairScan::plaintext),
+/// which is what makes `m d (` reach a paren inside a string literal, and what
+/// Helix's own `find_nth_open_pair` does.
 ///
 /// `skip` reaches past that many enclosing pairs, so `1` gives the
 /// pair around the nearest one. A quote resolved from a string node
@@ -734,7 +729,7 @@ fn walk_right_for_close(
     // The tree is asked only where the answer is used. It is a descent from the
     // root plus an ancestor walk, and every character that is not a delimiter
     // discarded it.
-    for c in chars.take(MAX_PAIR_SCAN) {
+    for c in chars.take(scan.reach) {
         if c == open && !scan.skips(pos) {
             step_over += 1;
         } else if c == close && !scan.skips(pos) {
@@ -767,7 +762,7 @@ fn walk_left_for_open(
     }
     let mut pos = cursor;
     let mut step_over: usize = 0;
-    for c in rope.reversed_chars_at(cursor).take(MAX_PAIR_SCAN) {
+    for c in rope.reversed_chars_at(cursor).take(scan.reach) {
         pos = pos.checked_sub(c.len_utf8())?;
         if c == close && !scan.skips(pos) {
             step_over += 1;
@@ -792,7 +787,7 @@ fn walk_right_for_symmetric(
     mut skip: usize,
 ) -> Option<usize> {
     let mut pos = cursor;
-    for c in rope.chars_at(cursor).take(MAX_PAIR_SCAN) {
+    for c in rope.chars_at(cursor).take(scan.reach) {
         if c == ch && !scan.skips(pos) {
             if skip == 0 {
                 return Some(pos);
@@ -812,7 +807,7 @@ fn walk_left_for_symmetric(
     mut skip: usize,
 ) -> Option<usize> {
     let mut pos = cursor;
-    for c in rope.reversed_chars_at(cursor).take(MAX_PAIR_SCAN) {
+    for c in rope.reversed_chars_at(cursor).take(scan.reach) {
         pos = pos.checked_sub(c.len_utf8())?;
         if c == ch && !scan.skips(pos) {
             if skip == 0 {
@@ -827,7 +822,10 @@ fn walk_left_for_symmetric(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
+    use crate::{
+        action_handlers::{focused_editor_mut, movement::MAX_PAIR_SCAN},
+        test_harness::TestHarness,
+    };
     use std::path::PathBuf;
     use stoat_action::{self as action, OpenFile};
 
@@ -883,6 +881,22 @@ mod tests {
             walk_left_for_open(&rope, len - 1, '(', ')', &PairScan::around(None, 0), 0),
             None,
             "and so is the open, walking the other way"
+        );
+    }
+
+    /// The cap belongs to the windowed scan, whose zones are only collected for
+    /// the window it stops inside. A plaintext walk has no window to stay in.
+    #[test]
+    fn a_pair_further_apart_than_the_cap_is_found_by_a_plaintext_walk() {
+        let (rope, len) = spaced_pair(MAX_PAIR_SCAN + 100);
+
+        assert_eq!(
+            walk_right_for_close(&rope, 1, '(', ')', &PairScan::plaintext(None), 0),
+            Some(len - 1),
+        );
+        assert_eq!(
+            walk_left_for_open(&rope, len - 1, '(', ')', &PairScan::plaintext(None), 0),
+            Some(0),
         );
     }
 
@@ -1558,7 +1572,7 @@ mod tests {
     }
 
     #[test]
-    fn surround_delete_skips_brackets_inside_string() {
+    fn surround_delete_counts_a_balanced_pair_inside_a_string() {
         let mut h = TestHarness::with_size(60, 10);
         let src = "let _ = (\"outer (inner)\");\n";
         let path = seed_rs(&mut h, src);
@@ -1568,8 +1582,23 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "let _ = \"outer (inner)\";\n");
     }
 
+    /// The chord that names a pair type reads the text alone, so a delimiter
+    /// inside a string literal is a delimiter. Helix answers the same, and its
+    /// `m d m` counterpart is the one that consults the tree.
     #[test]
-    fn surround_replace_skips_brackets_inside_comment() {
+    fn surround_delete_reaches_a_bracket_inside_a_string() {
+        let mut h = TestHarness::with_size(60, 10);
+        let src = "let s = \"a (inner) b\";\n";
+        let path = seed_rs(&mut h, src);
+        let cursor = src.find("inner").expect("cursor target");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
+
+        h.type_keys("m d (");
+        assert_eq!(buffer_text(&h, &path), "let s = \"a inner b\";\n");
+    }
+
+    #[test]
+    fn surround_replace_counts_a_balanced_pair_inside_a_comment() {
         let mut h = TestHarness::with_size(60, 10);
         let src = "fn f() { /* (foo) */ let x = (bar); }\n";
         let path = seed_rs(&mut h, src);

@@ -4485,6 +4485,11 @@ pub(crate) struct SkipZones {
 }
 
 impl SkipZones {
+    /// Zones a walk that reads the text alone skips over, which is none.
+    pub(crate) fn none() -> Self {
+        Self { ranges: Vec::new() }
+    }
+
     /// Every string or comment node of `tree` intersecting `window`.
     ///
     /// A wider window is always safe. It only collects zones a scan never asks
@@ -4541,15 +4546,21 @@ impl SkipZones {
     }
 }
 
-/// A syntax tree together with the skip zones a pair scan reads off it.
+/// What a pair walk is allowed to read, and how far.
 ///
-/// The scans need the tree itself for the one question zones cannot answer,
-/// which is where the string node under a cursor begins and ends. Carrying both
-/// replaces the tree the scans already thread rather than adding a second
-/// parameter beside it.
+/// The walks need the tree itself for the one question zones leave open, which
+/// is where the string node under a cursor starts and ends. Carrying it
+/// alongside replaces the tree the walks already thread rather than adding a
+/// second parameter beside it.
+///
+/// `reach` and `zones` are the policy the caller picks. A structural walk reads
+/// both, so it stops at a bounded distance and steps over brackets that a
+/// string or a comment owns. A plaintext walk reads neither and answers from
+/// the characters alone.
 pub(crate) struct PairScan<'a> {
     pub(crate) tree: Option<&'a stoat_language::Tree>,
     pub(crate) zones: SkipZones,
+    pub(crate) reach: usize,
 }
 
 impl<'a> PairScan<'a> {
@@ -4562,6 +4573,26 @@ impl<'a> PairScan<'a> {
         Self {
             zones: SkipZones::collect(tree, window),
             tree,
+            reach: MAX_PAIR_SCAN,
+        }
+    }
+
+    /// A walk over the characters alone, to whichever end of the rope it
+    /// reaches first.
+    ///
+    /// `tree` still rides along, because a cursor sitting on a character that
+    /// opens and closes alike has no answer in the text and only the tree says
+    /// which side of it opens.
+    ///
+    /// The zones a structural walk collects are sized to the window
+    /// [`window_around`] gives it, so they are only ever valid for a walk that
+    /// stops inside that window. A walk with no such stop reads them and
+    /// classifies everything past the window as code.
+    pub(crate) fn plaintext(tree: Option<&'a stoat_language::Tree>) -> Self {
+        Self {
+            zones: SkipZones::none(),
+            tree,
+            reach: usize::MAX,
         }
     }
 
