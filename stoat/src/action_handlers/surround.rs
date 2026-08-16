@@ -297,6 +297,7 @@ fn collect_surround_pairs(
     let mut scans: Vec<(*const stoat_language::Tree, PairScan<'_>)> = Vec::new();
 
     let mut pairs: Vec<(usize, usize, char, char)> = Vec::with_capacity(cursors.len());
+    let mut claimed: Vec<usize> = Vec::with_capacity(cursors.len() * 2);
     for head in cursors {
         let tree = deepest_tree_at(snapshot, head);
         let key = tree.map_or(std::ptr::null(), |t| t as *const _);
@@ -315,11 +316,23 @@ fn collect_surround_pairs(
             None => closest_surround_pair(&rope, head, scan)
                 .map(|(open, close, open_off, close_off)| (open_off, close_off, open, close)),
         };
-        pairs.extend(found);
+        // Both misses abort the whole operation rather than dropping the
+        // cursor. A partial edit across cursors is the one outcome the user has
+        // no way to undo by eye, since which cursors landed is invisible once
+        // the text has changed.
+        let Some(found) = found else {
+            stoat.set_status("no surround pair around one of the cursors");
+            return None;
+        };
+        if claimed.contains(&found.0) || claimed.contains(&found.1) {
+            stoat.set_status("two cursors share a surround pair");
+            return None;
+        }
+        claimed.extend([found.0, found.1]);
+        pairs.push(found);
     }
 
     pairs.sort_unstable();
-    pairs.dedup();
     Some(pairs)
 }
 
@@ -1248,15 +1261,44 @@ mod tests {
     }
 
     #[test]
-    fn surround_delete_pairs_sharing_a_quote_removes_it_once() {
+    fn surround_delete_pairs_sharing_a_quote_aborts() {
         let mut h = TestHarness::with_size(40, 10);
-        // The middle quote closes the first pair and opens the second, so it
-        // reaches the edits twice.
+        // The middle quote closes the first pair and opens the second, so the
+        // two cursors name overlapping pairs.
         let path = seed(&mut h, "\"a\"b\"\n");
         nested_pairs_with_a_cursor_in_each(&mut h);
 
         h.type_keys("m d \"");
-        assert_eq!(buffer_text(&h, &path), "ab\n");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "\"a\"b\"\n",
+            "neither cursor edits, since the pairs overlap",
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("two cursors share a surround pair"),
+        );
+    }
+
+    /// One cursor without a pair stops the whole operation. Editing the
+    /// cursors that matched leaves the user unable to tell which those were.
+    #[test]
+    fn surround_delete_aborts_when_one_cursor_has_no_pair() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "(a)\nbcd\n");
+        h.type_keys("l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
+
+        h.type_keys("m d (");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "(a)\nbcd\n",
+            "the first cursor's pair survives because the second has none",
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("no surround pair around one of the cursors"),
+        );
     }
 
     #[test]
