@@ -7020,3 +7020,37 @@ fn select_sibling_walks_each_selection() {
         "each stepped one sibling on from where it was",
     );
 }
+
+/// The key that cancels a chord reaches nothing else. Normal mode binds Escape
+/// to dismissing the key hints, so the hints surviving is what says the press
+/// went no further than the chord it dropped.
+#[test]
+fn cancelling_the_replace_chord_leaves_the_key_hints_alone() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\n");
+    h.open_file(&path);
+    h.stoat.key_hints_visible = true;
+
+    h.type_keys("r");
+    assert!(h.stoat.pending_replace, "chord armed");
+
+    h.type_keys("escape");
+    assert!(!h.stoat.pending_replace, "chord dropped");
+    assert!(h.stoat.key_hints_visible, "and the hints are untouched");
+    assert_eq!(focused_buffer_text(&mut h), "abc\n");
+}
+
+#[test]
+fn cancelling_the_find_chord_leaves_the_key_hints_alone() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\n");
+    h.open_file(&path);
+    h.stoat.key_hints_visible = true;
+
+    h.type_keys("f");
+    assert!(h.stoat.pending_find.is_some(), "chord armed");
+
+    h.type_keys("escape");
+    assert!(h.stoat.pending_find.is_none(), "chord dropped");
+    assert!(h.stoat.key_hints_visible, "and the hints are untouched");
+}

@@ -4078,7 +4078,11 @@ impl Stoat {
                 let (kind, extend, count) = self.pending_find.take().expect("checked above");
                 return action_handlers::movement::execute_find(self, kind, ch, extend, count);
             }
+            // Cancelling costs the one press and nothing else, as it does for
+            // every chord below. The hover popup and the symbol picker above
+            // let the key through on purpose, being popups rather than chords.
             self.pending_find = None;
+            return UpdateEffect::Redraw;
         }
 
         if normal_mode && self.pending_mark.is_some() {
@@ -4087,6 +4091,7 @@ impl Stoat {
                 return action_handlers::marks::execute_mark(self, request, ch);
             }
             self.pending_mark = None;
+            return UpdateEffect::Redraw;
         }
 
         if takes_pending && self.pending_replace {
@@ -4095,6 +4100,7 @@ impl Stoat {
                 return action_handlers::movement::execute_replace(self, ch);
             }
             self.pending_replace = false;
+            return UpdateEffect::Redraw;
         }
 
         if takes_pending && self.pending_surround_add {
