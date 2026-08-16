@@ -1633,6 +1633,30 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "(abc)\n");
     }
 
+    /// The key that cancels the chord reaches nothing else.
+    ///
+    /// The mode shows it for the object chords, but not for this one. The
+    /// match menu's surround arms hand back normal mode as they arm, so a
+    /// chord armed from select mode has no select mode left to lose. What
+    /// normal mode binds Escape to shows it instead.
+    #[test]
+    fn cancelling_surround_delete_leaves_the_key_hints_alone() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "(abc)\n");
+        h.stoat.key_hints_visible = true;
+
+        h.type_keys("m d");
+        assert!(h.stoat.pending_surround_delete, "chord armed");
+
+        h.type_keys("escape");
+        assert!(!h.stoat.pending_surround_delete, "chord dropped");
+        assert!(
+            h.stoat.key_hints_visible,
+            "normal mode binds Escape to dismissing the hints, which this press never reached"
+        );
+        assert_eq!(buffer_text(&h, &path), "(abc)\n");
+    }
+
     fn seed_rs(h: &mut TestHarness, contents: &str) -> PathBuf {
         let root = PathBuf::from("/surround-test");
         let path = root.join("main.rs");

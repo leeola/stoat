@@ -4111,7 +4111,9 @@ impl Stoat {
                 KeyCode::Enter => {
                     return action_handlers::surround::execute_surround_add_pair(self, "\n", "\n");
                 },
-                _ => {},
+                // Cancelling costs the one press and nothing else, as it does
+                // for every chord below.
+                _ => return UpdateEffect::Redraw,
             }
         }
 
@@ -4122,6 +4124,7 @@ impl Stoat {
                 return UpdateEffect::Redraw;
             }
             self.pending_register_select = false;
+            return UpdateEffect::Redraw;
         }
 
         if takes_pending
@@ -4145,6 +4148,7 @@ impl Stoat {
                 }
             }
             self.pending_surround_replace = action_handlers::surround::SurroundReplaceStage::Idle;
+            return UpdateEffect::Redraw;
         }
 
         if takes_pending && self.pending_surround_delete {
@@ -4153,6 +4157,7 @@ impl Stoat {
                 return action_handlers::surround::execute_surround_delete(self, ch);
             }
             self.pending_surround_delete = false;
+            return UpdateEffect::Redraw;
         }
 
         if takes_pending && self.pending_textobject_select.is_some() {
