@@ -55,14 +55,23 @@ pub struct TextBuffer {
     pub diff_map: Option<DiffMap>,
     next_timestamp: u64,
     buffer_id: BufferId,
-    /// Stack of edit groups eligible to be the target of the next `undo()`.
-    /// One group is one logical undo step -- a whole dispatched action or a
-    /// whole insert-mode session. Extended by `edit()`, popped by `undo()`.
-    /// Independent of [`Self::ops`], which records every edit and undo for replay.
-    edit_history: Vec<UndoGroup>,
-    /// Stack of edit groups undone and eligible for the next `redo()`. Pushed on
-    /// `undo()`, popped on `redo()`, cleared on any new `edit()`.
-    redo_history: Vec<UndoGroup>,
+    /// Every edit group ever made, as a tree rooted at index 0.
+    ///
+    /// One group is one logical undo step, a whole dispatched action or a whole
+    /// insert-mode session. Index 0 is a root standing for the empty buffer and
+    /// holds no edits of its own, so every real group has a parent to undo to.
+    ///
+    /// A tree rather than a stack because undoing and then editing leaves the
+    /// first edit on a branch of its own. A stack has to throw that branch away
+    /// to make room. Here it keeps its index, which is what a walk back by
+    /// creation order reaches it through.
+    ///
+    /// Independent of [`Self::ops`], which records every edit and undo for
+    /// replay.
+    revisions: Vec<UndoGroup>,
+    /// Which revision the buffer's text currently reflects. Undo moves it to
+    /// the parent and redo to the last child.
+    current: usize,
     /// Count of leading [`Self::edit_history`] groups that seeded the buffer's
     /// initial content rather than being user edits. [`Self::undo`] refuses to
     /// pop below this floor, so undoing a freshly loaded file is a no-op instead
@@ -152,8 +161,14 @@ struct UndoGroup {
     /// Where the group's newest edit finished, for the jump back to it.
     ///
     /// An anchor rather than an offset, so later edits carry it along. Held per
-    /// group so undo and redo rewind it with the stack they already move.
+    /// group so undo and redo rewind it with the cursor they already move.
     last_edit: Option<Anchor>,
+    /// The revision this one was made from. The root's parent is itself, which
+    /// is what lets a walk upward stop without a special case.
+    parent: usize,
+    /// The most recently made revision branching from this one, which is where
+    /// redo goes. `None` on a revision nothing has been made from.
+    last_child: Option<usize>,
 }
 
 /// Serializable buffer state for persistence. Holds the op log plus the
@@ -253,8 +268,17 @@ impl TextBuffer {
             diff_map: None,
             next_timestamp: 1,
             buffer_id,
-            edit_history: Vec::new(),
-            redo_history: Vec::new(),
+            // The root stands for the empty buffer and holds no edits, so
+            // every real revision has somewhere to undo to.
+            revisions: vec![UndoGroup {
+                edits: Vec::new(),
+                selections_before: Arc::from([]),
+                selections_after: Arc::from([]),
+                last_edit: None,
+                parent: 0,
+                last_child: None,
+            }],
+            current: 0,
             undo_floor: 0,
             open_group: false,
             open_group_started: false,
@@ -287,7 +311,7 @@ impl TextBuffer {
         // answers false whenever there is nothing to compare against, so the
         // buffer would read modified while holding exactly the saved bytes.
         buf.mark_clean();
-        buf.undo_floor = buf.edit_history.len();
+        buf.undo_floor = buf.depth();
         buf.detect_indent_style();
         buf
     }
@@ -334,8 +358,6 @@ impl TextBuffer {
             self.edit(range.clone(), text);
             return;
         }
-
-        self.redo_history.clear();
 
         // Ops and timestamps follow the caller's descending order, so the
         // recorded history is byte-identical to the sequential calls.
@@ -453,7 +475,6 @@ impl TextBuffer {
         // Where this edit finishes once the splice lands, which the stamp below
         // needs after `range` is spent.
         let edit_end = range.start + text.len();
-        self.redo_history.clear();
         self.ops.push(BufferOp::Edit {
             old: range.clone(),
             text: text.to_owned(),
@@ -820,9 +841,7 @@ impl TextBuffer {
     /// group by then, so the newest group is the one the edit belongs to.
     fn stamp_last_edit(&mut self, end: usize) {
         let anchor = self.anchor_at(end, Bias::Right);
-        if let Some(group) = self.edit_history.last_mut() {
-            group.last_edit = Some(anchor);
-        }
+        self.revisions[self.current].last_edit = Some(anchor);
     }
 
     /// Where the newest edit of the current revision finished, or `None` when
@@ -836,37 +855,74 @@ impl TextBuffer {
     /// pop below it. Nobody has edited a freshly opened file.
     pub fn last_edit_pos(&self) -> Option<usize> {
         let anchor = self
-            .edit_history
-            .iter()
-            .skip(self.undo_floor)
-            .rev()
-            .find_map(|group| group.last_edit)?;
+            .walk_up()
+            .take(self.depth().saturating_sub(self.undo_floor))
+            .find_map(|rev| self.revisions[rev].last_edit)?;
         Some(self.snapshot.resolve_anchor(&anchor))
     }
 
     fn record_edit(&mut self, timestamp: u64) {
-        if self.open_group {
-            if self.open_group_started
-                && let Some(group) = self.edit_history.last_mut()
-            {
-                group.edits.push(timestamp);
-                return;
-            }
-            self.edit_history.push(UndoGroup {
-                edits: vec![timestamp],
-                selections_before: std::mem::take(&mut self.open_group_before),
-                selections_after: Arc::from([]),
-                last_edit: None,
-            });
-            self.open_group_started = true;
-        } else {
-            self.edit_history.push(UndoGroup {
-                edits: vec![timestamp],
-                selections_before: Arc::from([]),
-                selections_after: Arc::from([]),
-                last_edit: None,
-            });
+        if self.open_group && self.open_group_started {
+            self.revisions[self.current].edits.push(timestamp);
+            return;
         }
+
+        let selections_before = match self.open_group {
+            true => std::mem::take(&mut self.open_group_before),
+            false => Arc::from([]),
+        };
+        self.push_revision(timestamp, selections_before);
+        if self.open_group {
+            self.open_group_started = true;
+        }
+    }
+
+    /// Add a revision branching from the current one and move onto it.
+    ///
+    /// The parent's `last_child` points here, so a later redo follows this
+    /// branch. A branch it displaces keeps its own index and stays reachable.
+    fn push_revision(&mut self, timestamp: u64, selections_before: Arc<[Selection<Anchor>]>) {
+        let new = self.revisions.len();
+        self.revisions.push(UndoGroup {
+            edits: vec![timestamp],
+            selections_before,
+            selections_after: Arc::from([]),
+            last_edit: None,
+            parent: self.current,
+            last_child: None,
+        });
+        self.revisions[self.current].last_child = Some(new);
+        self.current = new;
+    }
+
+    /// The current revision and its ancestors, the root excluded.
+    ///
+    /// The root holds no edits of its own, so a walk looking for edits has
+    /// nothing to find there.
+    fn walk_up(&self) -> impl Iterator<Item = usize> {
+        let mut at = self.current;
+        std::iter::from_fn(move || {
+            if at == 0 {
+                return None;
+            }
+            let here = at;
+            at = self.revisions[at].parent;
+            Some(here)
+        })
+    }
+
+    /// Number of revisions between the root and the current one.
+    ///
+    /// The stack this replaced measured the same thing with its length, so the
+    /// floor and the depth still compare.
+    fn depth(&self) -> usize {
+        let mut depth = 0;
+        let mut at = self.current;
+        while at != 0 {
+            at = self.revisions[at].parent;
+            depth += 1;
+        }
+        depth
     }
 
     /// Open an undo group so the following [`Self::edit`] calls collapse into one
@@ -936,19 +992,15 @@ impl TextBuffer {
         self.open_group_before = Arc::from([]);
         if self.open_group_started {
             self.open_group_started = false;
-            if let Some(group) = self.edit_history.last_mut() {
-                group.selections_after = selections_after;
-            }
+            self.revisions[self.current].selections_after = selections_after;
         }
     }
 
     /// Timestamp of the most recent edit, skipping a transiently empty open
     /// group. `None` when nothing has been edited.
     fn frontier(&self) -> Option<u64> {
-        self.edit_history
-            .iter()
-            .rev()
-            .find_map(|group| group.edits.last())
+        self.walk_up()
+            .find_map(|rev| self.revisions[rev].edits.last())
             .copied()
     }
 
@@ -1077,13 +1129,14 @@ impl TextBuffer {
         // set here is not a value anything reads back.
         self.seal_group(Arc::from([]));
 
-        if self.edit_history.len() <= self.undo_floor {
+        if self.depth() <= self.undo_floor {
             return None;
         }
-        let group = self.edit_history.pop()?;
-        self.apply_undo_toggles(group.edits.iter().rev().copied().collect());
+        let group = &self.revisions[self.current];
+        let edits: Vec<u64> = group.edits.iter().rev().copied().collect();
         let selections = group.selections_before.clone();
-        self.redo_history.push(group);
+        self.current = group.parent;
+        self.apply_undo_toggles(edits);
         self.recompute_dirty();
         Some(selections)
     }
@@ -1099,10 +1152,12 @@ impl TextBuffer {
         // reasoned about separately.
         self.seal_group(Arc::from([]));
 
-        let group = self.redo_history.pop()?;
-        self.apply_undo_toggles(group.edits.clone());
+        let child = self.revisions[self.current].last_child?;
+        let group = &self.revisions[child];
+        let edits = group.edits.clone();
         let selections = group.selections_after.clone();
-        self.edit_history.push(group);
+        self.current = child;
+        self.apply_undo_toggles(edits);
         self.recompute_dirty();
         Some(selections)
     }
@@ -1130,12 +1185,13 @@ impl TextBuffer {
 
         for _ in 0..edits.len() {
             let moved = match redoing {
-                true => self.redo_history.pop().map(|g| self.edit_history.push(g)),
-                false => self.edit_history.pop().map(|g| self.redo_history.push(g)),
+                true => self.revisions[self.current].last_child,
+                false => (self.current != 0).then(|| self.revisions[self.current].parent),
             };
-            if moved.is_none() {
+            let Some(to) = moved else {
                 break;
-            }
+            };
+            self.current = to;
         }
 
         self.apply_undo_toggles(edits.to_vec());
