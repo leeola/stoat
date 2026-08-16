@@ -126,7 +126,7 @@ define_action!(
     "CommitUndoCheckpoint",
     ActionKind::CommitUndoCheckpoint,
     "place undo checkpoint",
-    "Place a named checkpoint marker at the current position on the focused buffer's op log. Subsequent checkpoint-navigation actions can target this marker. Stoat treats every edit as its own undo unit, so this records a label rather than committing in-progress changes.",
+    "Break the focused buffer's undo history at the current position. Edits made before the press and edits made after it undo as two separate steps rather than one, which lets a long insert run be undone in pieces. Outside an insert run there is nothing pending to break and the press leaves later edits undoing as they would anyway.",
     ActionPriority::Rare
 );
 
