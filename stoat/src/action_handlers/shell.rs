@@ -365,25 +365,46 @@ fn apply_keep_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, c
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
-    let kept: Vec<Selection<Anchor>> = editor
+    let old_primary = editor.selections.primary_index();
+    let kept: Vec<(usize, Selection<Anchor>)> = editor
         .selections
         .all_anchors()
         .iter()
+        .enumerate()
         // A selection survives whenever its run produced output, which a
         // command that exits non-zero but writes to stderr still does. The exit
         // code alone drops those, where the command did have something to say.
-        .filter(|sel| {
+        .filter(|(_, sel)| {
             let start = buffer_snapshot.resolve_anchor(&sel.start);
             let end = buffer_snapshot.resolve_anchor(&sel.end);
             let stdin: String = rope.chunks_in_range(start..end).collect();
             run_shell(shell_host, cmd, &stdin, &stdin, &diff).is_ok()
         })
-        .cloned()
+        .map(|(index, sel)| (index, sel.clone()))
         .collect();
-    if kept.is_empty() {
+
+    // Keeping nothing leaves no cursor at all, so the filter is refused. In
+    // silence that press is indistinguishable from one that dropped nothing
+    // because every selection survived.
+    let Some(last) = kept.last() else {
+        stoat.set_status("no selections remaining");
         return;
-    }
+    };
+
+    // The primary moves forward to the nearest survivor rather than back, so it
+    // stays near where the user left it. Where every survivor sits before the
+    // old primary there is nothing ahead to move to, and the last one is the
+    // nearest.
+    let promoted = kept
+        .iter()
+        .find(|(index, _)| *index >= old_primary)
+        .unwrap_or(last)
+        .1
+        .id;
+
+    let kept: Vec<Selection<Anchor>> = kept.into_iter().map(|(_, sel)| sel).collect();
     editor.selections.replace_with(kept, buffer_snapshot);
+    editor.selections.make_primary(promoted);
 }
 
 #[cfg(test)]
@@ -774,9 +795,13 @@ mod tests {
         dispatch(&mut h.stoat, &action::ShellKeepPipe);
         h.type_text("false");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
-        // Filter empty -> selections unchanged (silent no-op).
+        // Keeping nothing is refused, so the selection stays as it was.
         let spans = editor::selection_spans(&mut h.stoat);
         assert_eq!(spans, vec![(0, 3, false)]);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("no selections remaining"),
+        );
     }
 
     /// A command that fails with nothing to say aborts before any edit, so a
@@ -901,6 +926,80 @@ mod tests {
             editor::selection_spans(&mut h.stoat),
             vec![(0, 3, false)],
             "the stderr run survives and the silent failure does not",
+        );
+    }
+
+    /// Refusing an empty filter in silence reads the same as a filter that
+    /// dropped nothing, so the refusal says so.
+    #[test]
+    fn keep_pipe_reports_no_selections_remaining() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        fake.set_response(
+            "reject",
+            ShellOutput {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                exit_code: 1,
+            },
+        );
+        h.seed_focused_buffer("aa bb");
+        select_range(&mut h, 0, 2);
+        add_range(&mut h, 3, 5);
+
+        dispatch(&mut h.stoat, &action::ShellKeepPipe);
+        h.type_text("reject");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("no selections remaining"),
+        );
+        assert_eq!(selection_count(&mut h), 2, "and both selections stay");
+    }
+
+    /// The primary moves forward to the nearest survivor, so the user carries
+    /// on from near where they left off rather than from an end of the set.
+    #[test]
+    fn keep_pipe_promotes_the_survivor_after_the_primary() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        // The primary is the first selection and does not survive, so the
+        // promotion has two survivors ahead of it to choose between. Added
+        // last, so it holds the highest id and the two rules part company.
+        fake.set_response_for_stdin(
+            "check",
+            b"aa".to_vec(),
+            ShellOutput {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                exit_code: 1,
+            },
+        );
+        h.seed_focused_buffer("aa bb cc");
+        select_range(&mut h, 3, 5);
+        add_range(&mut h, 6, 8);
+        add_range(&mut h, 0, 2);
+        assert_eq!(selection_count(&mut h), 3, "test setup: three selections");
+
+        dispatch(&mut h.stoat, &action::ShellKeepPipe);
+        h.type_text("check");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(3, 5, false), (6, 8, false)],
+            "the primary selection went",
+        );
+        let primary_start = {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            let snapshot = editor.display_map.snapshot();
+            let buf = snapshot.buffer_snapshot();
+            buf.resolve_anchor(&editor.selections.newest_anchor().start)
+        };
+        assert_eq!(
+            primary_start, 3,
+            "the nearest survivor ahead takes it, not the last of the set",
         );
     }
 
