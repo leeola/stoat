@@ -428,6 +428,7 @@ on key {
         Alt-k -> KeepSelections();
         Alt-K -> RemoveSelections();
         Q -> RecordMacro();
+        | -> ShellPipe();
         Alt-| -> ShellPipeTo();
         ! -> ShellInsertOutput();
         Alt-! -> ShellAppendOutput();
@@ -697,6 +698,14 @@ on key {
         q -> ReplayMacro();
         " -> SelectRegister();
         Ctrl-s -> CommitUndoCheckpoint();
+        # The shell ops leave the mode alone, unlike the indent pair below.
+        # Each runs over the selections it is given and hands back selections,
+        # so there is more to do with them afterward.
+        | -> ShellPipe();
+        Alt-| -> ShellPipeTo();
+        ! -> ShellInsertOutput();
+        Alt-! -> ShellAppendOutput();
+        $ -> ShellKeepPipe();
         > -> [IndentSelection(), SetMode(normal)];
         < -> [UnindentSelection(), SetMode(normal)];
         = -> FormatSelections();

@@ -423,6 +423,7 @@ fn apply_keep_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, c
 
 #[cfg(test)]
 mod tests {
+    use super::ShellAction;
     use crate::{
         action_handlers::dispatch,
         host::{FakeShell, ShellOutput},
@@ -1059,6 +1060,73 @@ mod tests {
             vec![(0, 1, false), (2, 3, false)],
             "redo lands on the selections the op produced",
         );
+    }
+
+    /// The pipe action had no key at all, so the one command of the five that
+    /// rewrites text through a filter was unreachable.
+    #[test]
+    fn the_bar_arms_the_pipe_in_normal_mode() {
+        let mut h = Stoat::test();
+        install_fake(&mut h);
+        h.seed_focused_buffer("hello");
+
+        h.type_keys("|");
+        assert_eq!(
+            h.stoat.shell_input.as_ref().map(|state| state.action),
+            Some(ShellAction::Pipe),
+        );
+    }
+
+    /// All five reach select mode, where a selection set is what the user has
+    /// in hand and the ops run over exactly that.
+    #[test]
+    fn the_shell_family_arms_from_select_mode() {
+        for (keys, action) in [
+            ("|", ShellAction::Pipe),
+            ("alt-|", ShellAction::PipeTo),
+            ("!", ShellAction::InsertOutput),
+            ("alt-!", ShellAction::AppendOutput),
+            ("$", ShellAction::KeepPipe),
+        ] {
+            let mut h = Stoat::test();
+            install_fake(&mut h);
+            h.seed_focused_buffer("hello");
+            h.type_keys("v");
+            assert_eq!(h.stoat.focused_mode(), "select", "test setup: in select");
+
+            h.type_keys(keys);
+            assert_eq!(
+                h.stoat.shell_input.as_ref().map(|state| state.action),
+                Some(action),
+                "{keys} arms its op from select mode",
+            );
+        }
+    }
+
+    /// A shell op leaves the mode where it found it, so the selections it hands
+    /// back are there to work with.
+    #[test]
+    fn a_shell_op_stays_in_select_mode() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        fake.set_response(
+            "tr a-z A-Z",
+            ShellOutput {
+                stdout: b"HELLO".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.seed_focused_buffer("hello");
+        h.type_keys("v");
+        select_range(&mut h, 0, 5);
+
+        h.type_keys("|");
+        h.type_text("tr a-z A-Z");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        assert_eq!(buffer_text(&mut h), "HELLO");
+        assert_eq!(h.stoat.focused_mode(), "select");
     }
 
     #[test]
