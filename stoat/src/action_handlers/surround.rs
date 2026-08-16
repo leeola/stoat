@@ -1,5 +1,5 @@
 use crate::{
-    action_handlers::movement::{window_around, PairScan, MAX_PAIR_SCAN},
+    action_handlers::movement::{window_around, PairScan, BRACKET_PAIRS, MAX_PAIR_SCAN},
     app::{Stoat, UpdateEffect},
     buffer::TextBuffer,
     pane::View,
@@ -137,14 +137,16 @@ pub(crate) fn execute_surround_add_pair(
     UpdateEffect::Redraw
 }
 
+/// The pair `ch` names, whichever of its two ends the user typed.
+///
+/// A character that opens or closes a bracket names that bracket. Anything else
+/// names itself at both ends, which is what makes the quotes work and lets a
+/// user wrap a selection in any character at all.
 pub(crate) fn surround_pair_for(ch: char) -> (char, char) {
-    match ch {
-        '(' | ')' => ('(', ')'),
-        '[' | ']' => ('[', ']'),
-        '{' | '}' => ('{', '}'),
-        '<' | '>' => ('<', '>'),
-        other => (other, other),
-    }
+    BRACKET_PAIRS
+        .into_iter()
+        .find(|&(open, close)| ch == open || ch == close)
+        .unwrap_or((ch, ch))
 }
 
 /// Apply the consumed-char keypress to the pending surround_delete
@@ -409,17 +411,31 @@ pub(crate) fn deepest_tree_at(
 
 /// Every pair type the closest-pair textobject considers.
 ///
+/// The brackets come from [`BRACKET_PAIRS`], which a bracket match walks too, so
+/// the two stay one list. Four more pairs sit on top of them. Three are the
+/// quotes, whose two ends are the same character. The fourth is the bars a rust
+/// closure takes its parameters between.
+///
 /// Their delimiter characters are disjoint, so a character is a delimiter for
 /// at most one entry here. That is what lets one walk serve all of them.
-const SURROUND_PAIRS: [(char, char); 7] = [
-    ('(', ')'),
-    ('[', ']'),
-    ('{', '}'),
-    ('<', '>'),
-    ('"', '"'),
-    ('\'', '\''),
-    ('`', '`'),
-];
+///
+/// The bars are a known wrong answer waiting to happen. Nothing here tells a
+/// closure's bars from a bitwise or, so `a | b | c` reads as a pair around `b`.
+/// The syntax tree does know the difference, and consulting it is what the
+/// entry needs to be right.
+const SURROUND_PAIRS: [(char, char); BRACKET_PAIRS.len() + 4] = {
+    let mut pairs = [(' ', ' '); BRACKET_PAIRS.len() + 4];
+    let mut i = 0;
+    while i < BRACKET_PAIRS.len() {
+        pairs[i] = BRACKET_PAIRS[i];
+        i += 1;
+    }
+    pairs[i] = ('"', '"');
+    pairs[i + 1] = ('\'', '\'');
+    pairs[i + 2] = ('`', '`');
+    pairs[i + 3] = ('|', '|');
+    pairs
+};
 
 /// The innermost enclosing pair of any surround type around `cursor`,
 /// as `(open, close, open_off, close_off)`. Runs [`find_surround_pair`]
@@ -1410,6 +1426,27 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "[a[b]c]\n");
     }
 
+    /// Either end of a bracket names the whole bracket, so the closing quote
+    /// answers to the opening one the user typed.
+    #[test]
+    fn surround_delete_a_curly_quote_pair() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "\u{2018}abc\u{2019}\n");
+        h.type_keys("l l");
+
+        h.type_keys("m d \u{2018}");
+        assert_eq!(buffer_text(&h, &path), "abc\n");
+    }
+
+    #[test]
+    fn closest_pair_resolves_closure_bars() {
+        let r = rope("|x|");
+        assert_eq!(
+            closest_surround_pair(&r, 1, &PairScan::around(None, 1), 0),
+            Some(('|', '|', 0, 2)),
+        );
+    }
+
     #[test]
     fn surround_replace_nested_pairs_with_a_wider_delimiter() {
         let mut h = TestHarness::with_size(40, 10);
@@ -1418,7 +1455,7 @@ mod tests {
 
         // Two bytes replacing one, so every offset after the first edit moves.
         h.type_keys("m r ( \u{ab}");
-        assert_eq!(buffer_text(&h, &path), "\u{ab}a\u{ab}b\u{ab}c\u{ab}\n");
+        assert_eq!(buffer_text(&h, &path), "\u{ab}a\u{ab}b\u{bb}c\u{bb}\n");
     }
 
     #[test]

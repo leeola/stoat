@@ -4443,7 +4443,7 @@ pub(crate) const MAX_PAIR_SCAN: usize = 10_000;
 /// names at most one pair and says which end of it the cursor is on. That is
 /// what a plaintext walk needs. It is also what keeps quotes out, since `"`
 /// opens and closes alike and only a tree tells the two apart.
-const BRACKET_PAIRS: [(char, char); 9] = [
+pub(crate) const BRACKET_PAIRS: [(char, char); 9] = [
     ('(', ')'),
     ('{', '}'),
     ('[', ']'),
