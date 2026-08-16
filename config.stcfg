@@ -475,6 +475,10 @@ on key {
         Alt-d -> DeleteSelectionNoYank();
         u -> Undo();
         U -> Redo();
+        # The tree keeps a branch an edit displaced, so these reach a state
+        # undo alone cannot return to.
+        Alt-u -> Earlier();
+        Alt-U -> Later();
         Ctrl-s -> CommitUndoCheckpoint();
         G -> GotoLineNumber();
         > -> IndentSelection();
@@ -747,6 +751,10 @@ on key {
         Minus -> Decrement();
         u -> Undo();
         U -> Redo();
+        # The tree keeps a branch an edit displaced, so these reach a state
+        # undo alone cannot return to.
+        Alt-u -> Earlier();
+        Alt-U -> Later();
         : -> OpenCommandPalette();
         # The one space menu serves both modes. Its arms already end in normal
         # mode, which is where the clipboard ops leave a selection anyway, so

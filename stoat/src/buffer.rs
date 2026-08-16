@@ -916,10 +916,14 @@ impl TextBuffer {
     /// The stack this replaced measured the same thing with its length, so the
     /// floor and the depth still compare.
     fn depth(&self) -> usize {
+        self.depth_of(self.current)
+    }
+
+    /// Number of revisions between the root and `rev`.
+    fn depth_of(&self, mut rev: usize) -> usize {
         let mut depth = 0;
-        let mut at = self.current;
-        while at != 0 {
-            at = self.revisions[at].parent;
+        while rev != 0 {
+            rev = self.revisions[rev].parent;
             depth += 1;
         }
         depth
@@ -1160,6 +1164,85 @@ impl TextBuffer {
         self.apply_undo_toggles(edits);
         self.recompute_dirty();
         Some(selections)
+    }
+
+    /// Move to the revision made just before the current one, whatever branch
+    /// it sits on.
+    ///
+    /// Where undo walks the tree, this walks creation order, so a revision
+    /// undone away from and left on a branch is still reachable. Returns the
+    /// selections that go with the revision landed on, or `None` at the root.
+    pub fn earlier(&mut self) -> Option<Arc<[Selection<Anchor>]>> {
+        if self.current == 0 {
+            return None;
+        }
+        self.jump_to(self.current - 1)
+    }
+
+    /// Move to the revision made just after the current one.
+    ///
+    /// The counterpart of [`Self::earlier`], and `None` once the newest
+    /// revision is the one in hand.
+    pub fn later(&mut self) -> Option<Arc<[Selection<Anchor>]>> {
+        if self.current + 1 >= self.revisions.len() {
+            return None;
+        }
+        self.jump_to(self.current + 1)
+    }
+
+    /// Take the buffer to revision `to`, through the revision both share.
+    ///
+    /// The two paths meet at their lowest common ancestor. Everything from here
+    /// up to it comes off, and everything from it down to `to` goes on. The two
+    /// sides branch apart there, so no edit appears on both and one toggle pass
+    /// covers the move.
+    fn jump_to(&mut self, to: usize) -> Option<Arc<[Selection<Anchor>]>> {
+        self.seal_group(Arc::from([]));
+
+        let meet = self.common_ancestor(self.current, to);
+        let mut toggles: Vec<u64> = Vec::new();
+        for rev in self.path_to(self.current, meet) {
+            toggles.extend(self.revisions[rev].edits.iter().rev().copied());
+        }
+        for rev in self.path_to(to, meet).into_iter().rev() {
+            toggles.extend(self.revisions[rev].edits.iter().copied());
+        }
+
+        self.current = to;
+        self.apply_undo_toggles(toggles);
+        self.recompute_dirty();
+        Some(self.revisions[to].selections_after.clone())
+    }
+
+    /// The deepest revision both `a` and `b` descend from.
+    ///
+    /// Depths are levelled first so the two walks stay in step, which is what
+    /// makes them meet rather than pass each other.
+    fn common_ancestor(&self, mut a: usize, mut b: usize) -> usize {
+        let (mut da, mut db) = (self.depth_of(a), self.depth_of(b));
+        while da > db {
+            a = self.revisions[a].parent;
+            da -= 1;
+        }
+        while db > da {
+            b = self.revisions[b].parent;
+            db -= 1;
+        }
+        while a != b {
+            a = self.revisions[a].parent;
+            b = self.revisions[b].parent;
+        }
+        a
+    }
+
+    /// Revisions from `from` up to but not including `ancestor`, nearest first.
+    fn path_to(&self, mut from: usize, ancestor: usize) -> Vec<usize> {
+        let mut path = Vec::new();
+        while from != ancestor {
+            path.push(from);
+            from = self.revisions[from].parent;
+        }
+        path
     }
 
     /// Replay a [`BufferOp::UndoGroup`] from a persisted log.

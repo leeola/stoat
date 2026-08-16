@@ -2261,6 +2261,16 @@ pub(super) fn redo(stoat: &mut Stoat) -> UpdateEffect {
     apply_buffer_history(stoat, count, |buf| buf.redo())
 }
 
+pub(super) fn earlier(stoat: &mut Stoat) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
+    apply_buffer_history(stoat, count, |buf| buf.earlier())
+}
+
+pub(super) fn later(stoat: &mut Stoat) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
+    apply_buffer_history(stoat, count, |buf| buf.later())
+}
+
 pub(super) fn commit_undo_checkpoint(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();

@@ -16,7 +16,7 @@ use crate::{
             AcceptCompletion, AddNewlineAbove, AddNewlineBelow, AddSelectionAbove,
             AddSelectionBelow, AlignSelections, AlignViewBottom, AlignViewCenter, AlignViewTop,
             AppendMode, ChangeSelection, ChangeSelectionNoYank, CloseBuffer, CollapseSelection,
-            CommitUndoCheckpoint, Decrement, DeleteSelection, DeleteSelectionNoYank,
+            CommitUndoCheckpoint, Decrement, DeleteSelection, DeleteSelectionNoYank, Earlier,
             EnsureSelectionsForward, EnterInsertMode, ExpandSelection, ExtendDown,
             ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn, ExtendGotoFileStart,
             ExtendGotoFirstNonwhitespace, ExtendGotoLastLine, ExtendGotoNextParagraph,
@@ -39,7 +39,7 @@ use crate::{
             GotoPrevXmlElement, GotoReferences, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
             GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection, InsertAtLineEnd,
             InsertAtLineStart, InsertRegister, InsertTab, JoinSelections, JoinSelectionsSpace,
-            JumpBackward, JumpForward, KeepPrimarySelection, KeepSelections, MarkTrailEnd,
+            JumpBackward, JumpForward, KeepPrimarySelection, KeepSelections, Later, MarkTrailEnd,
             MarkTrailStart, MatchBrackets, MergeConsecutiveSelections, MergeSelections, MoveDown,
             MoveLeft, MoveLineDown, MoveLineUp, MoveNextLongWordEnd, MoveNextLongWordStart,
             MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart,
@@ -863,6 +863,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(GotoFirstChange::DEF, |_| Ok(Box::new(GotoFirstChange)));
     add(GotoLastChange::DEF, |_| Ok(Box::new(GotoLastChange)));
+    add(Earlier::DEF, |_| Ok(Box::new(Earlier)));
+    add(Later::DEF, |_| Ok(Box::new(Later)));
     add(ExtendGotoFirstNonwhitespace::DEF, |_| {
         Ok(Box::new(ExtendGotoFirstNonwhitespace))
     });
@@ -1860,6 +1862,7 @@ mod tests {
         // + 2 AddNewlineBelow / AddNewlineAbove.
         // + 2 GotoFirstDiagnostic / GotoLastDiagnostic.
         // + 2 GotoFirstChange / GotoLastChange.
+        // + 2 Earlier / Later.
         // + 2 GotoNextDiagnostic / GotoPrevDiagnostic.
         // + 2 OpenBelow / OpenAbove.
         // + 1 ReplaceChar.
@@ -1970,7 +1973,7 @@ mod tests {
         // + 1 ReplaceWithClipboard.
         // + 2 ToggleLineComments/ToggleBlockComments.
         // + 4 the long-word extends.
-        assert_eq!(all().count(), 472);
+        assert_eq!(all().count(), 474);
     }
 
     #[test]

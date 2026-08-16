@@ -511,6 +511,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ChangeSelectionNoYank => movement::change_selection_no_yank(stoat),
         ActionKind::Undo => movement::undo(stoat),
         ActionKind::Redo => movement::redo(stoat),
+        ActionKind::Earlier => movement::earlier(stoat),
+        ActionKind::Later => movement::later(stoat),
         ActionKind::CommitUndoCheckpoint => movement::commit_undo_checkpoint(stoat),
         ActionKind::IndentSelection => movement::indent_selection(stoat),
         ActionKind::UnindentSelection => movement::unindent_selection(stoat),
@@ -1217,7 +1219,11 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
 fn manages_own_undo_group(kind: ActionKind) -> bool {
     matches!(
         kind,
-        ActionKind::Undo | ActionKind::Redo | ActionKind::CommitUndoCheckpoint
+        ActionKind::Undo
+            | ActionKind::Redo
+            | ActionKind::Earlier
+            | ActionKind::Later
+            | ActionKind::CommitUndoCheckpoint
     )
 }
 

@@ -4688,6 +4688,87 @@ fn undo_consecutive_walks_history_back_to_origin() {
     assert_eq!(focused_buffer_text(&mut h), "abc\n");
 }
 
+/// A state undone away from and left behind by a later edit is still reachable,
+/// which is the whole reason the history is a tree.
+///
+/// Edit A, undo it, edit B. Undo alone reaches the state before B, and no
+/// further back to A, since A is on the branch B displaced. Walking by creation
+/// order goes there.
+#[test]
+fn earlier_reaches_a_state_on_the_abandoned_branch() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "x\n");
+    h.open_file(&path);
+
+    h.type_keys("i");
+    h.type_text("A");
+    h.type_keys("escape");
+    assert_eq!(focused_buffer_text(&mut h), "Ax\n");
+
+    dispatch(&mut h.stoat, &stoat_action::Undo);
+    assert_eq!(focused_buffer_text(&mut h), "x\n");
+
+    h.type_keys("i");
+    h.type_text("B");
+    h.type_keys("escape");
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "Bx\n",
+        "B is on its own branch"
+    );
+
+    dispatch(&mut h.stoat, &stoat_action::Undo);
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "x\n",
+        "undo reaches the state B was made from, and stops there",
+    );
+    dispatch(&mut h.stoat, &stoat_action::Redo);
+
+    // One step back in creation order is the revision made before B, which is
+    // A on the branch it displaced.
+    dispatch(&mut h.stoat, &stoat_action::Earlier);
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "Ax\n",
+        "the abandoned branch is reached, which undo cannot return to",
+    );
+
+    dispatch(&mut h.stoat, &stoat_action::Earlier);
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "x\n",
+        "and the next reaches the state before A",
+    );
+
+    dispatch(&mut h.stoat, &stoat_action::Later);
+    dispatch(&mut h.stoat, &stoat_action::Later);
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "Bx\n",
+        "walking forward returns along the B branch",
+    );
+}
+
+/// A count walks that many states at once rather than one press apiece.
+#[test]
+fn count_prefix_earlier_walks_back_n_steps() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abc\n");
+    h.open_file(&path);
+    h.type_keys("%");
+    dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+    h.type_keys("%");
+    dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+    h.type_keys("%");
+    dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+    assert_eq!(focused_buffer_text(&mut h), "ABC\n");
+
+    h.stoat.pending_count = Some(3);
+    dispatch(&mut h.stoat, &stoat_action::Earlier);
+    assert_eq!(focused_buffer_text(&mut h), "abc\n");
+}
+
 #[test]
 fn undo_past_end_of_history_is_noop() {
     let mut h = TestHarness::with_size(20, 5);

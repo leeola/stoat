@@ -296,6 +296,8 @@ action_kinds! {
     GotoLastDiagnostic,
     GotoFirstChange,
     GotoLastChange,
+    Earlier,
+    Later,
     ExtendGotoFirstNonwhitespace,
     ExtendGotoFileStart,
     ExtendGotoLastLine,

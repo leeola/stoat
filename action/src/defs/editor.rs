@@ -111,6 +111,26 @@ define_action!(
 );
 
 define_action!(
+    EarlierDef,
+    Earlier,
+    "Earlier",
+    ActionKind::Earlier,
+    "go to the previous buffer state",
+    "Take the buffer to the state it held before the newest one, in the order the states were made rather than up the undo history. A state undone away from and left behind by a later edit is reachable this way, where undo alone cannot return to it. Repeat, or give a count, to walk further back.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    LaterDef,
+    Later,
+    "Later",
+    ActionKind::Later,
+    "go to the next buffer state",
+    "Take the buffer to the state made after the current one, the counterpart of Earlier. Repeat, or give a count, to walk further forward. No-ops once the newest state is the one in hand.",
+    ActionPriority::Rare
+);
+
+define_action!(
     RedoDef,
     Redo,
     "Redo",
