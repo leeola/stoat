@@ -115,15 +115,16 @@ impl<T: Copy + Ord> Selection<T> {
 }
 
 impl Selection<usize> {
-    /// Move the block cursor to `target` under the 1-width-cursor model,
-    /// returning a selection whose ends stay at least one grapheme cluster
-    /// apart.
+    /// Move the block cursor to `target` under the 1-width-cursor model.
     ///
     /// Without `extend` the result is the one-cluster block at `target`,
-    /// discarding the old selection. At the rope end, where there is no next
-    /// cluster, that block covers the previous cluster instead. With `extend`
-    /// the tail is held and the head moves to `target`, and when the head
-    /// crosses the tail the tail steps one cluster so the range never
+    /// discarding the old selection. The rope end is the one target with no
+    /// next cluster to take, and the block stays zero-width there. That keeps
+    /// the position after the last character reachable, since a block widened
+    /// backward sits on the position before it instead.
+    ///
+    /// With `extend` the tail is held and the head moves to `target`. When the
+    /// head crosses the tail, the tail steps one cluster so the range never
     /// collapses onto the anchor.
     ///
     /// The vertical-movement goal is reset, since this is a horizontal move.
