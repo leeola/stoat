@@ -780,6 +780,28 @@ mod tests {
         assert!(h.stoat.pending_textobject_select.is_none());
     }
 
+    /// The key that cancels the chord reaches nothing else, so the Escape that
+    /// drops it does not also leave select mode.
+    #[test]
+    fn cancelling_the_chord_keeps_select_mode() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "alpha beta\n");
+        h.type_keys("v l l");
+        let before = h.selection_spans();
+
+        h.type_keys("m i");
+        assert!(h.stoat.pending_textobject_select.is_some(), "chord armed");
+
+        h.type_keys("escape");
+        assert!(h.stoat.pending_textobject_select.is_none(), "chord dropped");
+        assert_eq!(h.stoat.focused_mode(), "select");
+        assert_eq!(
+            h.selection_spans(),
+            before,
+            "and the selection is untouched"
+        );
+    }
+
     /// Open `name` in a repo where its HEAD text differs from the buffer's, and
     /// install the diff map on this turn so the hunks are there to select.
     fn seed_with_diff(h: &mut TestHarness, name: &str, head: &str, working: &str) -> PathBuf {

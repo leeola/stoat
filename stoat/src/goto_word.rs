@@ -307,4 +307,33 @@ mod tests {
         };
         assert_eq!(cursor_offset, 11, "cursor should jump to gamma's start");
     }
+
+    /// The key that drops the labels reaches nothing else, so Escape does not
+    /// also run what normal mode binds it to.
+    #[test]
+    fn escape_drops_the_labels_and_nothing_else() {
+        use std::path::PathBuf;
+        let mut h = crate::Stoat::test();
+        let root = PathBuf::from("/goto-word-cancel");
+        h.fake_fs()
+            .insert_files([(root.join("buf.rs"), b"alpha beta gamma\n".as_ref())]);
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenFile {
+                path: root.join("buf.rs"),
+            },
+        );
+        h.stoat.key_hints_visible = true;
+
+        h.type_keys("g w");
+        assert!(h.stoat.pending_goto_word.is_some(), "labels armed");
+
+        h.type_keys("escape");
+        assert!(h.stoat.pending_goto_word.is_none(), "labels dropped");
+        assert!(
+            h.stoat.key_hints_visible,
+            "normal mode binds Escape to dismissing the hints, which this press never reached"
+        );
+    }
 }

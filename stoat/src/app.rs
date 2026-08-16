@@ -4163,7 +4163,11 @@ impl Stoat {
                     self, mode, ch, count,
                 );
             }
+            // Cancelling costs the one press and nothing else. A fall-through
+            // runs the key's own binding as well, which drops the chord and
+            // leaves select mode on the same Escape.
             self.pending_textobject_select = None;
+            return UpdateEffect::Redraw;
         }
 
         if takes_pending && self.pending_goto_word.is_some() {
@@ -4186,8 +4190,10 @@ impl Stoat {
                     },
                 }
             }
+            // Consumed for the reason the textobject arm above gives.
             self.pending_goto_word = None;
             self.pending_goto_word_input.clear();
+            return UpdateEffect::Redraw;
         }
 
         // The guards above are read at the mode this press started in, which
