@@ -38,6 +38,18 @@ impl TextobjectMode {
     }
 }
 
+/// Whether a resolved object comes out in the direction the selection had.
+///
+/// A pair object keeps it. The object has an opening end and a closing end, and
+/// the direction is what says which of them the cursor sits on, so a backward
+/// selection over a pair means something a forward one does not. Every other
+/// object comes out forward, having no two ends to tell apart that way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ObjectDirection {
+    Keep,
+    Forward,
+}
+
 pub(super) fn select_textobject_around(stoat: &mut Stoat) -> UpdateEffect {
     let count = super::arming_count(stoat);
     stoat.pending_textobject_select = Some((TextobjectMode::Around, count));
@@ -119,11 +131,11 @@ pub(crate) fn execute_select_textobject(
     };
     let ws = stoat.active_workspace_mut();
 
-    let targets: HashMap<usize, std::ops::Range<usize>> = cursors
+    let targets: HashMap<usize, (std::ops::Range<usize>, ObjectDirection)> = cursors
         .into_iter()
         .filter_map(|(id, cursor)| {
             find_textobject(ws, buffer_id, cursor, mode, ch, count, &change_hunks)
-                .map(|range| (id, range))
+                .map(|target| (id, target))
         })
         .collect();
 
@@ -135,13 +147,16 @@ pub(crate) fn execute_select_textobject(
     let new_display = editor.display_map.snapshot();
     let new_buf = new_display.buffer_snapshot();
     editor.selections.transform(new_buf, |sel| {
-        let Some(range) = targets.get(&sel.id) else {
+        let Some((range, direction)) = targets.get(&sel.id) else {
             return sel.clone();
         };
         let mut new = sel.clone();
         new.start = new_buf.anchor_at(range.start, Bias::Right);
         new.end = new_buf.anchor_at(range.end, Bias::Left);
-        new.reversed = false;
+        new.reversed = match direction {
+            ObjectDirection::Keep => sel.reversed,
+            ObjectDirection::Forward => false,
+        };
         new.goal = SelectionGoal::None;
         new
     });
@@ -157,6 +172,9 @@ pub(crate) fn execute_select_textobject(
 ///
 /// `change_hunks` carries the live diff rows the `g` type reads, and is empty
 /// for every other type. The caller resolves them once for the whole chord.
+///
+/// Each arm names the direction its object comes out in, so the rule stays with
+/// the type that decides it rather than in a second table beside this one.
 fn find_textobject(
     ws: &crate::workspace::Workspace,
     buffer_id: crate::buffer::BufferId,
@@ -165,13 +183,14 @@ fn find_textobject(
     ch: char,
     count: usize,
     change_hunks: &[std::ops::Range<u32>],
-) -> Option<std::ops::Range<usize>> {
+) -> Option<(std::ops::Range<usize>, ObjectDirection)> {
     let skip = count.saturating_sub(1);
+    let forward = |range: std::ops::Range<usize>| (range, ObjectDirection::Forward);
     match ch {
         'p' => {
             let buffer = ws.buffers.get(buffer_id).expect("buffer");
             let guard = buffer.read().expect("poisoned");
-            find_textobject_paragraph(guard.rope(), cursor, mode, count)
+            find_textobject_paragraph(guard.rope(), cursor, mode, count).map(forward)
         },
         'f' | 't' | 'a' | 'c' | 'T' | 'e' | 'x' => {
             let kind = match ch {
@@ -184,12 +203,12 @@ fn find_textobject(
                 'x' => "xml-element",
                 _ => unreachable!(),
             };
-            find_textobject_treesitter(ws, buffer_id, cursor, kind, mode)
+            find_textobject_treesitter(ws, buffer_id, cursor, kind, mode).map(forward)
         },
         'g' => {
             let buffer = ws.buffers.get(buffer_id).expect("buffer");
             let guard = buffer.read().expect("poisoned");
-            find_textobject_change(guard.rope(), cursor, change_hunks)
+            find_textobject_change(guard.rope(), cursor, change_hunks).map(forward)
         },
         'm' => {
             let rope = {
@@ -201,19 +220,28 @@ fn find_textobject(
             let scan = crate::action_handlers::movement::PairScan::around(tree, cursor);
             super::surround::closest_surround_pair(&rope, cursor, &scan, skip).map(
                 |(open, close, open_off, close_off)| {
-                    pair_to_range(open, close, open_off, close_off, mode)
+                    (
+                        pair_to_range(open, close, open_off, close_off, mode),
+                        ObjectDirection::Keep,
+                    )
                 },
             )
         },
         'w' | 'W' => {
             let buffer = ws.buffers.get(buffer_id).expect("buffer");
             let guard = buffer.read().expect("poisoned");
-            find_textobject_word(guard.rope(), cursor, mode, ch == 'W')
+            find_textobject_word(guard.rope(), cursor, mode, ch == 'W').map(forward)
         },
         pair if !pair.is_ascii_alphanumeric() => {
             let (open, close) = super::surround::surround_pair_for(pair);
-            super::surround::surround_pair_at(ws, buffer_id, cursor, open, close, skip)
-                .map(|(open_off, close_off)| pair_to_range(open, close, open_off, close_off, mode))
+            super::surround::surround_pair_at(ws, buffer_id, cursor, open, close, skip).map(
+                |(open_off, close_off)| {
+                    (
+                        pair_to_range(open, close, open_off, close_off, mode),
+                        ObjectDirection::Keep,
+                    )
+                },
+            )
         },
         _ => None,
     }
@@ -1060,6 +1088,32 @@ mod tests {
             Some(1..1),
             "no word for the whitespace to sit around"
         );
+    }
+
+    /// The cursor sits on the opening delimiter of a backward selection and the
+    /// closing one of a forward selection, so the direction is worth keeping.
+    #[test]
+    fn pair_object_keeps_a_reversed_selection_reversed() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "(abcd)\n");
+        jump(&mut h, 4);
+        h.type_keys("v h h");
+        assert_eq!(h.selection_spans(), vec![(2, 5, true)], "reversed to start");
+
+        h.type_keys("m i (");
+        assert_eq!(h.selection_spans(), vec![(1, 5, true)]);
+    }
+
+    #[test]
+    fn word_object_comes_out_forward_from_a_reversed_selection() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "alpha beta\n");
+        jump(&mut h, 3);
+        h.type_keys("v h h");
+        assert_eq!(h.selection_spans(), vec![(1, 4, true)], "reversed to start");
+
+        h.type_keys("m i w");
+        assert_eq!(h.selection_spans(), vec![(0, 5, false)]);
     }
 
     #[test]
