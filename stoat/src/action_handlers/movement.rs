@@ -4916,6 +4916,37 @@ pub(crate) fn jump_to_word_range(stoat: &mut Stoat, range: (usize, usize)) -> Up
     UpdateEffect::Redraw
 }
 
+/// Move every cursor to where the newest edit finished.
+///
+/// A buffer with no edits does nothing at all, rather than moving cursors to
+/// some default, since there is no modification to go to.
+pub(super) fn goto_last_modification(stoat: &mut Stoat) -> UpdateEffect {
+    let extend = stoat.in_select_mode();
+    let ws = stoat.active_workspace();
+    let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
+        return UpdateEffect::None;
+    };
+    let Some(pos) = ws
+        .buffers
+        .get(buffer_id)
+        .and_then(|buffer| buffer.read().expect("poisoned").last_edit_pos())
+    else {
+        return UpdateEffect::None;
+    };
+
+    super::jump::push_jump(stoat);
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let target = pos.min(buffer_snapshot.rope().len());
+    move_cursors(&mut editor.selections, buffer_snapshot, extend, |_| {
+        Some((target, SelectionGoal::None))
+    });
+    UpdateEffect::Redraw
+}
+
 pub(super) fn goto_word(stoat: &mut Stoat) -> UpdateEffect {
     arm_word_labels(stoat, None)
 }

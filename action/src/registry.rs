@@ -29,28 +29,29 @@ use crate::{
             ExtendToLastLine, ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart, ExtendToWord,
             ExtendUp, FindNextChar, FindPrevChar, FlipSelections, GotoCallee, GotoCaller,
             GotoColumn, GotoDiffCalleeDown, GotoDiffCallerUp, GotoFileStart,
-            GotoFirstNonwhitespace, GotoImplementors, GotoLastLine, GotoLineEnd, GotoLineNumber,
-            GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass, GotoNextComment,
-            GotoNextEntry, GotoNextFunction, GotoNextParagraph, GotoNextParameter, GotoNextTest,
-            GotoNextXmlElement, GotoPrevChange, GotoPrevClass, GotoPrevComment, GotoPrevEntry,
-            GotoPrevFunction, GotoPrevParagraph, GotoPrevParameter, GotoPrevTest,
-            GotoPrevXmlElement, GotoReferences, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
-            GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection, InsertAtLineEnd,
-            InsertAtLineStart, InsertRegister, InsertTab, JoinSelections, JoinSelectionsSpace,
-            JumpBackward, JumpForward, KeepPrimarySelection, KeepSelections, MarkTrailEnd,
-            MarkTrailStart, MatchBrackets, MergeConsecutiveSelections, MergeSelections, MoveDown,
-            MoveLeft, MoveLineDown, MoveLineUp, MoveNextLongWordEnd, MoveNextLongWordStart,
-            MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart,
-            MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart,
-            MoveRight, MoveUp, OpenAbove, OpenBelow, OpenCodeSearch, OpenJumplistPicker,
-            OpenLastPicker, OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter,
-            PasteBefore, PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo,
-            RemovePrimarySelection, RemoveSelections, RepeatLastMotion, ReplaceChar,
-            ReplaceWithClipboard, ReplaceWithYanked, ReplayMacro, RotateSelectionContentsBackward,
-            RotateSelectionContentsForward, RotateSelectionsBackward, RotateSelectionsForward,
-            SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev,
-            SearchSelection, SearchSelectionDetectWordBoundaries, SelectAll, SelectAllChildren,
-            SelectAllSiblings, SelectNextSibling, SelectPrevSibling, SelectRegex, SelectRegister,
+            GotoFirstNonwhitespace, GotoImplementors, GotoLastLine, GotoLastModification,
+            GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange,
+            GotoNextClass, GotoNextComment, GotoNextEntry, GotoNextFunction, GotoNextParagraph,
+            GotoNextParameter, GotoNextTest, GotoNextXmlElement, GotoPrevChange, GotoPrevClass,
+            GotoPrevComment, GotoPrevEntry, GotoPrevFunction, GotoPrevParagraph, GotoPrevParameter,
+            GotoPrevTest, GotoPrevXmlElement, GotoReferences, GotoWindowBottom, GotoWindowCenter,
+            GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection,
+            InsertAtLineEnd, InsertAtLineStart, InsertRegister, InsertTab, JoinSelections,
+            JoinSelectionsSpace, JumpBackward, JumpForward, KeepPrimarySelection, KeepSelections,
+            MarkTrailEnd, MarkTrailStart, MatchBrackets, MergeConsecutiveSelections,
+            MergeSelections, MoveDown, MoveLeft, MoveLineDown, MoveLineUp, MoveNextLongWordEnd,
+            MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd,
+            MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd,
+            MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow, OpenCodeSearch,
+            OpenJumplistPicker, OpenLastPicker, OpenReverseSearchInput, OpenSearchInput, PageDown,
+            PageUp, PasteAfter, PasteBefore, PasteClipboardAfter, PasteClipboardBefore,
+            RecordMacro, Redo, RemovePrimarySelection, RemoveSelections, RepeatLastMotion,
+            ReplaceChar, ReplaceWithClipboard, ReplaceWithYanked, ReplayMacro,
+            RotateSelectionContentsBackward, RotateSelectionContentsForward,
+            RotateSelectionsBackward, RotateSelectionsForward, SaveBuffer, SaveSelection,
+            ScrollDown, ScrollUp, SearchNext, SearchPrev, SearchSelection,
+            SearchSelectionDetectWordBoundaries, SelectAll, SelectAllChildren, SelectAllSiblings,
+            SelectNextSibling, SelectPrevSibling, SelectRegex, SelectRegister,
             SelectTextobjectAround, SelectTextobjectInner, SetMark, ShellAppendOutput,
             ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo, ShrinkSelection,
             ShrinkToLineBounds, SmartTab, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
@@ -848,6 +849,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoWindowBottom::DEF, |_| Ok(Box::new(GotoWindowBottom)));
     add(GotoWord::DEF, |_| Ok(Box::new(GotoWord)));
     add(ExtendToWord::DEF, |_| Ok(Box::new(ExtendToWord)));
+    add(GotoLastModification::DEF, |_| {
+        Ok(Box::new(GotoLastModification))
+    });
     add(ExtendGotoFirstNonwhitespace::DEF, |_| {
         Ok(Box::new(ExtendGotoFirstNonwhitespace))
     });
@@ -1841,6 +1845,7 @@ mod tests {
         // + 1 OpenBufferPicker.
         // + 1 GotoWord.
         // + 1 ExtendToWord.
+        // + 1 GotoLastModification.
         // + 2 GotoNextDiagnostic / GotoPrevDiagnostic.
         // + 2 OpenBelow / OpenAbove.
         // + 1 ReplaceChar.
@@ -1951,7 +1956,7 @@ mod tests {
         // + 1 ReplaceWithClipboard.
         // + 2 ToggleLineComments/ToggleBlockComments.
         // + 4 the long-word extends.
-        assert_eq!(all().count(), 465);
+        assert_eq!(all().count(), 466);
     }
 
     #[test]

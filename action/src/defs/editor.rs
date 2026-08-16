@@ -1649,6 +1649,16 @@ define_action!(
 );
 
 define_action!(
+    GotoLastModificationDef,
+    GotoLastModification,
+    "GotoLastModification",
+    ActionKind::GotoLastModification,
+    "goto the last modification",
+    "Move every cursor to where the newest edit finished, extending each selection in select mode, and record the origin on the jumplist. Undo and redo walk this back with them, so it names the edit the buffer currently ends at rather than the last one ever made. A buffer with no edits does nothing.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendToWordDef,
     ExtendToWord,
     "ExtendToWord",

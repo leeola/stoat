@@ -5804,6 +5804,70 @@ fn move_parent_node_end_collapses_to_parent_end() {
     );
 }
 
+/// The jump goes to where the edit finished, not where it started, so the
+/// cursor lands past what was typed rather than in front of it.
+#[test]
+fn goto_last_modification_returns_to_the_edit_end() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.txt", "abcdefghij\n");
+    h.open_file(&path);
+    h.type_keys("l l l i");
+    h.type_text("XY");
+    h.type_keys("escape");
+    assert_eq!(focused_buffer_text(&mut h), "abcXYdefghij\n");
+
+    h.type_keys("g k");
+    assert_eq!(h.primary_head_offset(), 0, "test setup: away from the edit");
+
+    dispatch(&mut h.stoat, &stoat_action::GotoLastModification);
+    assert_eq!(
+        h.primary_head_offset(),
+        5,
+        "the cursor lands where XY finished",
+    );
+}
+
+/// The position rides the undo stack, so undoing an edit leaves the jump
+/// naming the one before it rather than the one that no longer exists.
+#[test]
+fn goto_last_modification_walks_back_with_undo() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.txt", "abcdefghij\n");
+    h.open_file(&path);
+    h.type_keys("i");
+    h.type_text("X");
+    h.type_keys("escape");
+    h.type_keys("5 l i");
+    h.type_text("Y");
+    h.type_keys("escape");
+    assert_eq!(focused_buffer_text(&mut h), "XabcdeYfghij\n");
+
+    dispatch(&mut h.stoat, &stoat_action::Undo);
+    h.type_keys("g k");
+    dispatch(&mut h.stoat, &stoat_action::GotoLastModification);
+    assert_eq!(
+        h.primary_head_offset(),
+        1,
+        "the surviving edit is X, which finished at offset 1",
+    );
+}
+
+/// A buffer nobody has edited has no modification to go to, so the press moves
+/// nothing rather than landing somewhere arbitrary.
+#[test]
+fn goto_last_modification_on_a_fresh_buffer_is_a_noop() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.txt", "abcdefghij\n");
+    h.open_file(&path);
+    h.type_keys("l l l");
+
+    assert_eq!(
+        dispatch(&mut h.stoat, &stoat_action::GotoLastModification),
+        UpdateEffect::None,
+    );
+    assert_eq!(h.primary_head_offset(), 3, "the cursor stayed put");
+}
+
 #[test]
 fn jump_backward_restores_saved_position() {
     let mut h = TestHarness::with_size(40, 5);

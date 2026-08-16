@@ -289,6 +289,7 @@ action_kinds! {
     GotoWindowBottom,
     GotoWord,
     ExtendToWord,
+    GotoLastModification,
     ExtendGotoFirstNonwhitespace,
     ExtendGotoFileStart,
     ExtendGotoLastLine,

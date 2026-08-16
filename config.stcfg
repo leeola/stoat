@@ -510,6 +510,7 @@ on key {
         b -> [GotoWindowBottom(), SetMode(normal)];
         w -> [GotoWord(), SetMode(normal)];
         | -> [GotoColumn(), SetMode(normal)];
+        . -> [GotoLastModification(), SetMode(normal)];
     }
     mode == z {
         Escape -> SetMode(normal);
@@ -753,6 +754,8 @@ on key {
         b -> [ExtendGotoWindowBottom(), SetMode(select)];
         | -> [ExtendGotoColumn(), SetMode(select)];
         w -> [ExtendToWord(), SetMode(select)];
+        # The handler reads the mode itself, so the same action extends here.
+        . -> [GotoLastModification(), SetMode(select)];
     }
     view == commits && mode == normal {
         Escape -> CloseCommits();

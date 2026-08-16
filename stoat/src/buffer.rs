@@ -149,6 +149,11 @@ struct UndoGroup {
     selections_before: Arc<[Selection<Anchor>]>,
     /// Editor selections captured when the group sealed, restored on redo.
     selections_after: Arc<[Selection<Anchor>]>,
+    /// Where the group's newest edit finished, for the jump back to it.
+    ///
+    /// An anchor rather than an offset, so later edits carry it along. Held per
+    /// group so undo and redo rewind it with the stack they already move.
+    last_edit: Option<Anchor>,
 }
 
 /// Serializable buffer state for persistence. Holds the op log plus the
@@ -436,10 +441,18 @@ impl TextBuffer {
         self.snapshot.fragments = new_fragments;
         self.snapshot.insertions = all_insertions;
         self.snapshot.version = self.next_timestamp - 1;
+        // The edits arrive descending, so the last recorded is the earliest in
+        // the document and no splice above it moved its end.
+        if let Some((range, text)) = edits.last() {
+            self.stamp_last_edit(range.start + text.len());
+        }
         self.recompute_dirty();
     }
 
     pub fn edit(&mut self, range: Range<usize>, text: &str) {
+        // Where this edit finishes once the splice lands, which the stamp below
+        // needs after `range` is spent.
+        let edit_end = range.start + text.len();
         self.redo_history.clear();
         self.ops.push(BufferOp::Edit {
             old: range.clone(),
@@ -493,6 +506,7 @@ impl TextBuffer {
         self.snapshot.insertions = all_insertions;
         self.snapshot.version = timestamp;
         self.record_edit(timestamp);
+        self.stamp_last_edit(edit_end);
         self.recompute_dirty();
     }
 }
@@ -799,6 +813,37 @@ fn split_at_boundaries(
 impl TextBuffer {
     /// Record `timestamp` in the open group, or as its own singleton group when
     /// no group is open (the from_history replay and any unwrapped edit).
+    /// Mark `end` as where the newest edit finished, on the group holding it.
+    ///
+    /// Called after the splice, since an anchor taken before it points into the
+    /// text the edit replaced. [`Self::record_edit`] has pushed or extended the
+    /// group by then, so the newest group is the one the edit belongs to.
+    fn stamp_last_edit(&mut self, end: usize) {
+        let anchor = self.anchor_at(end, Bias::Right);
+        if let Some(group) = self.edit_history.last_mut() {
+            group.last_edit = Some(anchor);
+        }
+    }
+
+    /// Where the newest edit of the current revision finished, or `None` when
+    /// nothing has been edited.
+    ///
+    /// A group carrying no position is passed over rather than ending the
+    /// walk, so a gap in the history stops nothing the search sees past.
+    ///
+    /// The seed groups that loaded the file are not modifications, so the walk
+    /// stops at [`Self::undo_floor`]. That is the same reason `undo` refuses to
+    /// pop below it. Nobody has edited a freshly opened file.
+    pub fn last_edit_pos(&self) -> Option<usize> {
+        let anchor = self
+            .edit_history
+            .iter()
+            .skip(self.undo_floor)
+            .rev()
+            .find_map(|group| group.last_edit)?;
+        Some(self.snapshot.resolve_anchor(&anchor))
+    }
+
     fn record_edit(&mut self, timestamp: u64) {
         if self.open_group {
             if self.open_group_started
@@ -811,6 +856,7 @@ impl TextBuffer {
                 edits: vec![timestamp],
                 selections_before: std::mem::take(&mut self.open_group_before),
                 selections_after: Arc::from([]),
+                last_edit: None,
             });
             self.open_group_started = true;
         } else {
@@ -818,6 +864,7 @@ impl TextBuffer {
                 edits: vec![timestamp],
                 selections_before: Arc::from([]),
                 selections_after: Arc::from([]),
+                last_edit: None,
             });
         }
     }
