@@ -718,6 +718,10 @@ on key {
         u -> Undo();
         U -> Redo();
         : -> OpenCommandPalette();
+        # The one space menu serves both modes. Its arms already end in normal
+        # mode, which is where the clipboard ops leave a selection anyway, so
+        # the arms that would rather come back to select give that up.
+        Space -> SetMode(space);
     }
     mode == select_goto {
         Escape -> SetMode(select);

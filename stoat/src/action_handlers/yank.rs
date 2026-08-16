@@ -1315,6 +1315,20 @@ mod tests {
         assert_eq!(h.fake_clipboard().writes(), vec!["abc\ndef".to_string()]);
     }
 
+    /// The space menu opens from select mode too, and its arms hand back normal
+    /// mode, which is where a clipboard yank leaves a selection anyway.
+    #[test]
+    fn select_mode_space_quote_y_yanks_to_the_clipboard() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abcdef\n");
+        h.type_keys("v l l");
+
+        h.type_keys("space \" y");
+        assert_eq!(h.fake_clipboard().writes(), vec!["abc".to_string()]);
+        assert_eq!(h.stoat.focused_mode(), "normal");
+        assert_eq!(buffer_text(&h, &path), "abcdef\n", "a yank edits nothing");
+    }
+
     #[test]
     fn yank_main_to_clipboard_writes_only_primary() {
         let mut h = TestHarness::with_size(40, 10);
