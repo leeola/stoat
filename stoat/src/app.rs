@@ -14869,7 +14869,7 @@ mod tests {
         h.type_keys("u");
         assert_eq!(buffer_text(&h, &path), "abcdef\n", "and undoes");
 
-        // A second edit, since x is SelectLineBelow here and would not make one.
+        // A second edit, since x is ExtendLineBelow here and would not make one.
         h.type_keys("d");
         assert_eq!(
             buffer_text(&h, &path),

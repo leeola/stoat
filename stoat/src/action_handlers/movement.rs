@@ -2754,7 +2754,7 @@ pub(super) fn select_all(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(super) fn select_line_below(stoat: &mut Stoat) -> UpdateEffect {
+pub(super) fn extend_line_below(stoat: &mut Stoat) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

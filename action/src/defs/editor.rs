@@ -1869,12 +1869,12 @@ define_action!(
 );
 
 define_action!(
-    SelectLineBelowDef,
-    SelectLineBelow,
-    "SelectLineBelow",
-    ActionKind::SelectLineBelow,
-    "select line below",
-    "Snap every selection to its containing lines; extend one line downward when the selection is already line-shaped.",
+    ExtendLineBelowDef,
+    ExtendLineBelow,
+    "ExtendLineBelow",
+    ActionKind::ExtendLineBelow,
+    "extend line below",
+    "Snap every selection to its containing lines. A selection already shaped to its lines grows one line downward instead. The result always runs forward, so a backward selection comes out anchored at its first line's start.",
     ActionPriority::Rare
 );
 
@@ -2216,8 +2216,8 @@ mod tests {
         assert_eq!(FlipSelections.def().name(), "FlipSelections");
         assert_eq!(SelectAll.kind(), ActionKind::SelectAll);
         assert_eq!(SelectAll.def().name(), "SelectAll");
-        assert_eq!(SelectLineBelow.kind(), ActionKind::SelectLineBelow);
-        assert_eq!(SelectLineBelow.def().name(), "SelectLineBelow");
+        assert_eq!(ExtendLineBelow.kind(), ActionKind::ExtendLineBelow);
+        assert_eq!(ExtendLineBelow.def().name(), "ExtendLineBelow");
         assert_eq!(
             KeepPrimarySelection.kind(),
             ActionKind::KeepPrimarySelection

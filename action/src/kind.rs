@@ -327,7 +327,7 @@ action_kinds! {
     FlipSelections,
     EnsureSelectionsForward,
     SelectAll,
-    SelectLineBelow,
+    ExtendLineBelow,
     ExtendToLineBounds,
     ShrinkToLineBounds,
     KeepPrimarySelection,

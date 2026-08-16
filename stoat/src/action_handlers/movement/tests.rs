@@ -2640,21 +2640,21 @@ fn snapshot_select_all() {
 }
 
 #[test]
-fn snapshot_select_line_below_snaps_to_line() {
+fn snapshot_extend_line_below_snaps_to_line() {
     let mut h = TestHarness::with_size(20, 6);
     let path = h.write_file("s.txt", "abc\ndef\nghi\n");
     h.open_file(&path);
     h.type_keys("x");
-    h.assert_snapshot("snapshot_select_line_below_snaps_to_line");
+    h.assert_snapshot("snapshot_extend_line_below_snaps_to_line");
 }
 
 #[test]
-fn snapshot_select_line_below_extends_on_repeat() {
+fn snapshot_extend_line_below_extends_on_repeat() {
     let mut h = TestHarness::with_size(20, 6);
     let path = h.write_file("s.txt", "abc\ndef\nghi\n");
     h.open_file(&path);
     h.type_keys("x x");
-    h.assert_snapshot("snapshot_select_line_below_extends_on_repeat");
+    h.assert_snapshot("snapshot_extend_line_below_extends_on_repeat");
 }
 
 #[test]
@@ -7070,7 +7070,7 @@ fn count_prefix_no_op_when_binding_exists() {
 }
 
 #[test]
-fn count_prefix_extends_select_line_below() {
+fn count_prefix_extends_extend_line_below() {
     let mut h = TestHarness::with_size(20, 10);
     let path = h.write_file("s.txt", "a\nb\nc\nd\ne\n");
     h.open_file(&path);
@@ -7107,7 +7107,7 @@ fn select_mode_x_selects_line_below() {
 }
 
 #[test]
-fn count_prefix_extends_already_line_shaped_select_line_below() {
+fn count_prefix_extends_already_line_shaped_extend_line_below() {
     let mut h = TestHarness::with_size(20, 10);
     let path = h.write_file("s.txt", "a\nb\nc\nd\ne\n");
     h.open_file(&path);
@@ -7123,8 +7123,31 @@ fn count_prefix_extends_already_line_shaped_select_line_below() {
     );
 }
 
+/// A backward selection comes out forward, which is what makes this the
+/// extending command rather than the direction-preserving one of the same
+/// shape.
 #[test]
-fn count_prefix_select_line_below_clamps_at_buffer_end() {
+fn extend_line_below_forces_a_reversed_selection_forward() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\n");
+    h.open_file(&path);
+    h.type_keys("j v k");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 3, true)],
+        "test setup: the selection runs backward from line 1 to line 0"
+    );
+
+    h.type_keys("x");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 4, false)],
+        "the two lines snap forward, anchored at the first line's start"
+    );
+}
+
+#[test]
+fn count_prefix_extend_line_below_clamps_at_buffer_end() {
     let mut h = TestHarness::with_size(20, 10);
     let path = h.write_file("s.txt", "a\nb\n");
     h.open_file(&path);

@@ -444,7 +444,7 @@ on key {
         Alt-e -> MoveParentNodeEnd();
         & -> AlignSelections();
         % -> SelectAll();
-        x -> SelectLineBelow();
+        x -> ExtendLineBelow();
         X -> ExtendToLineBounds();
         Alt-x -> ShrinkToLineBounds();
         , -> KeepPrimarySelection();
@@ -672,7 +672,7 @@ on key {
         S -> SplitSelection();
         Alt-s -> SplitSelectionOnNewline();
         s -> SelectRegex();
-        x -> SelectLineBelow();
+        x -> ExtendLineBelow();
         X -> ExtendToLineBounds();
         Alt-x -> ShrinkToLineBounds();
         Alt-( -> RotateSelectionContentsBackward();

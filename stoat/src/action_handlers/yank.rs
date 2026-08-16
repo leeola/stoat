@@ -1102,7 +1102,7 @@ mod tests {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "    a\n    b\n    c\n");
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
-        crate::action_handlers::dispatch(&mut h.stoat, &action::SelectLineBelow);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ExtendLineBelow);
         crate::action_handlers::dispatch(&mut h.stoat, &action::ChangeSelection);
         assert_eq!(buffer_text(&h, &path), "    a\n    \n    c\n");
     }
