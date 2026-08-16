@@ -22,7 +22,8 @@ use crate::{
             ExtendGotoNextParagraph, ExtendGotoPrevParagraph, ExtendGotoWindowBottom,
             ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft, ExtendLineDown, ExtendLineUp,
             ExtendMatchBrackets, ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart,
-            ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart,
+            ExtendNextLongWordEnd, ExtendNextLongWordStart, ExtendNextWordEnd, ExtendNextWordStart,
+            ExtendPrevLongWordEnd, ExtendPrevLongWordStart, ExtendPrevWordEnd, ExtendPrevWordStart,
             ExtendRight, ExtendSearchNext, ExtendSearchPrev, ExtendTillNextChar,
             ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine, ExtendToLineBounds,
             ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar,
@@ -743,6 +744,18 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(ExtendPrevWordStart))
     });
     add(ExtendPrevWordEnd::DEF, |_| Ok(Box::new(ExtendPrevWordEnd)));
+    add(ExtendNextLongWordStart::DEF, |_| {
+        Ok(Box::new(ExtendNextLongWordStart))
+    });
+    add(ExtendNextLongWordEnd::DEF, |_| {
+        Ok(Box::new(ExtendNextLongWordEnd))
+    });
+    add(ExtendPrevLongWordStart::DEF, |_| {
+        Ok(Box::new(ExtendPrevLongWordStart))
+    });
+    add(ExtendPrevLongWordEnd::DEF, |_| {
+        Ok(Box::new(ExtendPrevLongWordEnd))
+    });
     add(GotoLineStart::DEF, |_| Ok(Box::new(GotoLineStart)));
     add(GotoLineEnd::DEF, |_| Ok(Box::new(GotoLineEnd)));
     add(GotoFirstNonwhitespace::DEF, |_| {
@@ -1935,7 +1948,8 @@ mod tests {
         // + 1 ExtendMatchBrackets.
         // + 1 ReplaceWithClipboard.
         // + 2 ToggleLineComments/ToggleBlockComments.
-        assert_eq!(all().count(), 460);
+        // + 4 the long-word extends.
+        assert_eq!(all().count(), 464);
     }
 
     #[test]

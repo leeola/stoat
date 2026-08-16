@@ -1339,6 +1339,46 @@ define_action!(
 );
 
 define_action!(
+    ExtendNextLongWordStartDef,
+    ExtendNextLongWordStart,
+    "ExtendNextLongWordStart",
+    ActionKind::ExtendNextLongWordStart,
+    "extend selection to next long-word start",
+    "Extend each selection's head forward to the start of the next long word, keeping the tail fixed. Long words are runs of non-whitespace characters; punctuation does not split them.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendNextLongWordEndDef,
+    ExtendNextLongWordEnd,
+    "ExtendNextLongWordEnd",
+    ActionKind::ExtendNextLongWordEnd,
+    "extend selection to next long-word end",
+    "Extend each selection's head forward to the end of the next long word, keeping the tail fixed. Long words are runs of non-whitespace characters; punctuation does not split them.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendPrevLongWordStartDef,
+    ExtendPrevLongWordStart,
+    "ExtendPrevLongWordStart",
+    ActionKind::ExtendPrevLongWordStart,
+    "extend selection to previous long-word start",
+    "Extend each selection's head backward to the start of the previous long word, keeping the tail fixed. Long words are runs of non-whitespace characters; punctuation does not split them.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendPrevLongWordEndDef,
+    ExtendPrevLongWordEnd,
+    "ExtendPrevLongWordEnd",
+    ActionKind::ExtendPrevLongWordEnd,
+    "extend selection to previous long-word end",
+    "Extend each selection's head backward to the end of the previous long word, keeping the tail fixed. Long words are runs of non-whitespace characters; punctuation does not split them.",
+    ActionPriority::Rare
+);
+
+define_action!(
     GotoLineStartDef,
     GotoLineStart,
     "GotoLineStart",

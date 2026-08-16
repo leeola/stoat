@@ -589,6 +589,18 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ExtendPrevWordEnd => {
             movement::move_word(stoat, movement::WordTarget::PrevEnd, true)
         },
+        ActionKind::ExtendNextLongWordStart => {
+            movement::move_word(stoat, movement::WordTarget::NextLongStart, true)
+        },
+        ActionKind::ExtendNextLongWordEnd => {
+            movement::move_word(stoat, movement::WordTarget::NextLongEnd, true)
+        },
+        ActionKind::ExtendPrevLongWordStart => {
+            movement::move_word(stoat, movement::WordTarget::PrevLongStart, true)
+        },
+        ActionKind::ExtendPrevLongWordEnd => {
+            movement::move_word(stoat, movement::WordTarget::PrevLongEnd, true)
+        },
         ActionKind::GotoLineStart => movement::goto_line_start(stoat, false),
         ActionKind::GotoLineEnd => movement::goto_line_end(stoat, false),
         ActionKind::GotoFirstNonwhitespace => movement::goto_first_nonwhitespace(stoat, false),

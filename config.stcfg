@@ -611,6 +611,9 @@ on key {
         w -> ExtendNextWordStart();
         e -> ExtendNextWordEnd();
         b -> ExtendPrevWordStart();
+        W -> ExtendNextLongWordStart();
+        E -> ExtendNextLongWordEnd();
+        B -> ExtendPrevLongWordStart();
         f -> ExtendFindNextChar();
         F -> ExtendFindPrevChar();
         t -> ExtendTillNextChar();

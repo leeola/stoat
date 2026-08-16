@@ -7106,3 +7106,63 @@ fn select_mode_o_opens_below_and_enters_insert() {
     h.type_keys("X");
     assert_eq!(focused_buffer_text(&mut h), "abc\nX\ndef\n");
 }
+
+/// Punctuation splits a short word and not a long one, so the two disagree
+/// over `foo.bar` and that is what these fixtures turn on.
+#[test]
+fn extend_next_long_word_start_crosses_punctuation() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo.bar baz");
+    dispatch(&mut stoat, &stoat_action::ExtendNextLongWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 8, false)]);
+}
+
+#[test]
+fn extend_next_long_word_end_crosses_punctuation() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo.bar baz");
+    dispatch(&mut stoat, &stoat_action::ExtendNextLongWordEnd);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 7, false)]);
+}
+
+#[test]
+fn extend_prev_long_word_start_keeps_the_tail() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo.bar baz");
+    jump_to_offset(&mut stoat, 10);
+    dispatch(&mut stoat, &stoat_action::ExtendPrevLongWordStart);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(8, 11, true)]);
+
+    dispatch(&mut stoat, &stoat_action::ExtendPrevLongWordStart);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(0, 11, true)],
+        "the whole of foo.bar, punctuation and all"
+    );
+}
+
+#[test]
+fn extend_prev_long_word_end_keeps_the_tail() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "foo.bar baz");
+    jump_to_offset(&mut stoat, 10);
+    dispatch(&mut stoat, &stoat_action::ExtendPrevLongWordEnd);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(7, 11, true)],
+        "one past the end of foo.bar, where the short-word extend lands too"
+    );
+}
+
+/// Select mode reaches the long-word extends through the shifted keys, where
+/// the unshifted ones reach the short-word extends beside them.
+#[test]
+fn select_mode_capital_w_extends_by_long_word() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "foo.bar baz\n");
+    h.open_file(&path);
+    h.type_keys("v");
+
+    h.type_keys("W");
+    assert_eq!(h.selection_spans(), vec![(0, 8, false)], "past the dot");
+}
