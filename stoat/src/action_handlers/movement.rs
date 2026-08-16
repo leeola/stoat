@@ -2991,6 +2991,10 @@ pub(super) fn trim_selections(stoat: &mut Stoat) -> UpdateEffect {
             let mut new = sel.clone();
             new.start = buffer_snapshot.anchor_at(new_start, Bias::Left);
             new.end = buffer_snapshot.anchor_at(new_end, Bias::Right);
+            // The trim moves the cursor horizontally, so the column a later
+            // vertical motion aims for is the trimmed one rather than the one
+            // held before it.
+            new.goal = SelectionGoal::None;
             Some(new)
         })
         .collect();
@@ -3000,7 +3004,7 @@ pub(super) fn trim_selections(stoat: &mut Stoat) -> UpdateEffect {
             let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
             let tail_offset = buffer_snapshot.resolve_anchor(&sel.tail());
             let cursor = cursor_offset(rope, tail_offset, head_offset);
-            land_block_cursor(sel.id, cursor, sel.goal, rope, buffer_snapshot)
+            land_block_cursor(sel.id, cursor, SelectionGoal::None, rope, buffer_snapshot)
         });
         editor.selections.keep_primary();
     } else {

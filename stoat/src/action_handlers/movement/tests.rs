@@ -3366,6 +3366,61 @@ fn select_mode_find_clears_the_vertical_goal_column() {
     );
 }
 
+/// A trim moves the cursor horizontally, so the column a later `j` aims for
+/// is the trimmed one.
+///
+/// The goal only differs from the cursor's own column where a vertical move
+/// clamped, which is why the setup steps from a long line onto a short one.
+#[test]
+fn trim_selections_clears_the_vertical_goal_column() {
+    let mut h = TestHarness::with_size(30, 6);
+    let path = h.write_file("s.txt", "aaaaaaaa\n  b \ncccccccc\n");
+    h.open_file(&path);
+    h.type_keys("7 l v j");
+    assert_eq!(
+        h.cursor_display_positions(),
+        vec![(1, 4)],
+        "test setup: column 7 clamps onto the line ending, goal column 7",
+    );
+
+    h.type_keys("_");
+    assert_eq!(
+        h.cursor_display_positions(),
+        vec![(1, 2)],
+        "the trim drops the line ending and the trailing space, landing on the b",
+    );
+
+    h.type_keys("j");
+    assert_eq!(
+        h.cursor_display_positions(),
+        vec![(2, 2)],
+        "the next row is entered at the trimmed column, not the goal of 7",
+    );
+}
+
+/// A selection holding only whitespace collapses to its cursor, and that
+/// cursor drops the goal too.
+#[test]
+fn trim_selections_clears_the_goal_when_everything_trims_away() {
+    let mut h = TestHarness::with_size(30, 6);
+    let path = h.write_file("s.txt", "aaaaaaaa\n   \ncccccccc\n");
+    h.open_file(&path);
+    h.type_keys("7 l j");
+    assert_eq!(
+        h.cursor_display_positions(),
+        vec![(1, 3)],
+        "test setup: column 7 clamps onto the line ending, goal column 7",
+    );
+
+    h.type_keys("_");
+    h.type_keys("j");
+    assert_eq!(
+        h.cursor_display_positions(),
+        vec![(2, 3)],
+        "the collapse keeps the cursor's own column as the one to aim for",
+    );
+}
+
 #[test]
 fn select_mode_t_extends_till_next_char() {
     let mut h = TestHarness::with_size(30, 5);
