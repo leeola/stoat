@@ -166,11 +166,17 @@ struct EditSpan {
 /// `primary_index` names the span whose piece takes the primary, which keeps
 /// the primary on the same selection the user had rather than moving it to an
 /// end of the set.
+///
+/// The whole set of edits is one undo step, and undoing it puts back the
+/// selections the op ran over. The dispatch that opened the prompt grouped
+/// against the prompt's own scratch buffer, which is gone by the time this
+/// runs, so the group is opened here instead.
 fn reshape(stoat: &mut Stoat, spans: Vec<EditSpan>, outputs: Vec<String>, primary_index: usize) {
     let Some(editor) = super::focused_editor_mut(stoat) else {
         return;
     };
     let buffer_id = editor.buffer_id;
+    let before = editor.selections.shared_anchors();
     let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) else {
         return;
     };
@@ -179,6 +185,7 @@ fn reshape(stoat: &mut Stoat, spans: Vec<EditSpan>, outputs: Vec<String>, primar
         // Descending, so each edit lands before the offsets of the ones still
         // to come move under it.
         let mut guard = buffer.write().expect("buffer poisoned");
+        guard.begin_group(before);
         let batch: Vec<(Range<usize>, &str)> = spans
             .iter()
             .zip(&outputs)
@@ -217,6 +224,13 @@ fn reshape(stoat: &mut Stoat, spans: Vec<EditSpan>, outputs: Vec<String>, primar
     editor
         .selections
         .replace_with_fresh_ids_primary(pieces, primary_index, new_buf);
+
+    // Sealed after the pieces install, so a redo lands on the selections the op
+    // produced rather than the ones it started from.
+    let after = editor.selections.shared_anchors();
+    if let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) {
+        buffer.write().expect("buffer poisoned").seal_group(after);
+    }
 }
 
 fn apply_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
@@ -1000,6 +1014,50 @@ mod tests {
         assert_eq!(
             primary_start, 3,
             "the nearest survivor ahead takes it, not the last of the set",
+        );
+    }
+
+    /// A shell edit is one change to the user, so one undo takes all of it and
+    /// puts the selections back where they were.
+    #[test]
+    fn pipe_undoes_as_one_step_and_restores_the_selections() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        fake.set_response(
+            "tag",
+            ShellOutput {
+                stdout: b"X".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.seed_focused_buffer("aa bb");
+        select_range(&mut h, 0, 2);
+        add_range(&mut h, 3, 5);
+
+        dispatch(&mut h.stoat, &action::ShellPipe);
+        h.type_text("tag");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert_eq!(buffer_text(&mut h), "X X", "both selections were piped");
+
+        dispatch(&mut h.stoat, &action::Undo);
+        assert_eq!(
+            buffer_text(&mut h),
+            "aa bb",
+            "one undo takes the whole edit, not one selection's worth",
+        );
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(0, 2, false), (3, 5, false)],
+            "and the selections the op started from come back",
+        );
+
+        dispatch(&mut h.stoat, &action::Redo);
+        assert_eq!(buffer_text(&mut h), "X X");
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(0, 1, false), (2, 3, false)],
+            "redo lands on the selections the op produced",
         );
     }
 
