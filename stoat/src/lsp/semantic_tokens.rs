@@ -1274,10 +1274,24 @@ mod tests {
     fn stcfg_buffer_receives_semantic_tokens_from_the_in_process_server() {
         let mut h = TestHarness::with_size(80, 24);
         h.allow_host_swap();
-        open_stcfg_with_server(&mut h);
+        let path = open_stcfg_with_server(&mut h);
 
-        h.type_text("on init { format_on_save = true; }");
+        // The closing brace and the space before it are what typing `{` and
+        // then a space already wrote. Typing them again doubles them.
+        h.type_text("on init { format_on_save = true;");
         h.type_keys("escape");
+
+        let text = {
+            let ws = h.stoat.active_workspace();
+            let id = ws.buffers.id_for_path(&path).expect("buffer open");
+            let buffer = ws.buffers.get(id).expect("buffer");
+            let guard = buffer.read().expect("poisoned");
+            guard.rope().to_string()
+        };
+        assert_eq!(
+            text, "on init { format_on_save = true; }",
+            "the buffer the server reads is the whole config block",
+        );
 
         // did_change (50ms) syncs the buffer to the server before the semantic
         // tokens request (500ms debounce) reads it.

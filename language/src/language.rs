@@ -3,6 +3,7 @@ use std::{
     path::Path,
     sync::{Arc, Mutex, OnceLock},
 };
+use stoat_text::auto_pairs::DEFAULT_PAIRS;
 use tree_sitter::{Language as TsLanguage, Query};
 
 pub struct Language {
@@ -46,6 +47,13 @@ pub struct Language {
     /// matching the line, which is what keeps `/// x` continuing as `///`
     /// rather than degrading to the `//` that also matches it.
     pub line_comments: &'static [&'static str],
+    /// The brackets and quotes insert mode pairs, as `(open, close)`.
+    ///
+    /// Every bundled language takes [`DEFAULT_PAIRS`], the set common to
+    /// bracket syntax everywhere. The table is per-language because the right
+    /// answer differs by syntax. A language whose apostrophe marks a lifetime
+    /// rather than a string wants it dropped from the set.
+    pub pairs: &'static [(char, char)],
     /// The pair that opens and closes a block comment, for languages that have
     /// one.
     ///
@@ -388,6 +396,9 @@ struct AuxQuerySources {
     tags: Option<&'static str>,
     line_comments: &'static [&'static str],
     block_comments: Option<(&'static str, &'static str)>,
+    /// `None` takes [`DEFAULT_PAIRS`], which is what every bundled language
+    /// wants so far.
+    pairs: Option<&'static [(char, char)]>,
 }
 
 fn make_language(
@@ -416,6 +427,7 @@ fn make_language_with_injections(
         tags,
         line_comments,
         block_comments,
+        pairs,
     } = aux;
 
     // Only these two are read to paint, so only these two are compiled here.
@@ -442,6 +454,7 @@ fn make_language_with_injections(
         },
         line_comments,
         block_comments,
+        pairs: pairs.unwrap_or(DEFAULT_PAIRS),
         fence_candidates: OnceLock::new(),
     }
 }
@@ -518,6 +531,7 @@ fn make_rust() -> Language {
             tags: Some(include_str!("queries/rust/tags.scm")),
             line_comments: &["//", "///", "//!"],
             block_comments: Some(("/*", "*/")),
+            pairs: None,
         },
     )
 }
@@ -542,6 +556,7 @@ fn make_json() -> Language {
             tags: None,
             line_comments: &[],
             block_comments: Some(("/*", "*/")),
+            pairs: None,
         },
     )
 }
@@ -604,6 +619,7 @@ fn make_markdown() -> Language {
             tags: None,
             line_comments: &[],
             block_comments: None,
+            pairs: None,
         },
     )
 }

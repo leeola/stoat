@@ -130,6 +130,10 @@ pub struct Settings {
     /// Set `editor.wrap = none;` in stcfg to disable (`false` means `none`,
     /// `true` means `editor_width`).
     pub editor_wrap: Option<WrapMode>,
+    /// Whether typing a bracket or quote in insert mode writes its closing half
+    /// too. `None` falls back to enabled. Set `editor.auto_pairs = false;` in
+    /// stcfg to type every character as written.
+    pub editor_auto_pairs: Option<bool>,
     /// The column `bounded` wrap mode wraps at, clamped against the pane text
     /// width. `None` falls back at the consumer to 80. Set `editor.wrap_column =
     /// N;` in stcfg. Consulted only by [`WrapMode::Bounded`].
@@ -262,6 +266,7 @@ impl Settings {
             scrolloff: other.scrolloff.or(self.scrolloff),
             editor_line_numbers: other.editor_line_numbers.or(self.editor_line_numbers),
             editor_minimap: other.editor_minimap.or(self.editor_minimap),
+            editor_auto_pairs: other.editor_auto_pairs.or(self.editor_auto_pairs),
             editor_wrap: other.editor_wrap.or(self.editor_wrap),
             editor_wrap_column: other.editor_wrap_column.or(self.editor_wrap_column),
             ui_tab_bar: other.ui_tab_bar.or(self.ui_tab_bar),
@@ -386,6 +391,11 @@ impl Settings {
                 };
                 if let Some(m) = mode {
                     self.editor_minimap = Some(m);
+                }
+            },
+            ["editor", "auto_pairs"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.editor_auto_pairs = Some(b);
                 }
             },
             ["editor", "wrap"] => {
@@ -554,6 +564,7 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_auto_pairs: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
                 ui_tab_bar: None,
@@ -827,6 +838,7 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_auto_pairs: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
                 ui_tab_bar: None,
@@ -867,6 +879,7 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_auto_pairs: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
                 ui_tab_bar: None,
@@ -916,6 +929,7 @@ mod tests {
             scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            editor_auto_pairs: None,
             editor_wrap: None,
             editor_wrap_column: None,
             ui_tab_bar: None,
@@ -948,6 +962,7 @@ mod tests {
             scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            editor_auto_pairs: None,
             editor_wrap: None,
             editor_wrap_column: None,
             ui_tab_bar: None,
@@ -982,6 +997,7 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_auto_pairs: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
                 ui_tab_bar: None,
@@ -1019,6 +1035,7 @@ mod tests {
             scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            editor_auto_pairs: None,
             editor_wrap: None,
             editor_wrap_column: None,
             ui_tab_bar: None,
@@ -1054,6 +1071,7 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_auto_pairs: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
                 ui_tab_bar: None,
@@ -1102,6 +1120,7 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_auto_pairs: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
                 ui_tab_bar: None,
@@ -1142,6 +1161,7 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_auto_pairs: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
                 ui_tab_bar: None,
@@ -1179,6 +1199,7 @@ mod tests {
             scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            editor_auto_pairs: None,
             editor_wrap: None,
             editor_wrap_column: None,
             ui_tab_bar: None,
@@ -1211,6 +1232,7 @@ mod tests {
             scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            editor_auto_pairs: None,
             editor_wrap: None,
             editor_wrap_column: None,
             ui_tab_bar: None,

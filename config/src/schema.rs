@@ -155,6 +155,13 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "editor_width",
         },
         SettingDef {
+            path: &[Lit("editor"), Lit("auto_pairs")],
+            shape: ValueShape::Bool,
+            doc: "Write the closing half when a bracket or quote is typed in \
+                  insert mode, and step over a closer already there.",
+            default: "true",
+        },
+        SettingDef {
             path: &[Lit("editor"), Lit("wrap_column")],
             shape: ValueShape::Number,
             doc: "Column that bounded wrap mode wraps at, clamped to the pane \

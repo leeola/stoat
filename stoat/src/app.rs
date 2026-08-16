@@ -58,7 +58,10 @@ use stoat_action::{Conflict, Diff, OpenFile};
 use stoat_config::{MinimapMode, Settings, TabBarMode, WrapMode};
 use stoat_language::{self as language, LanguageRegistry};
 use stoat_scheduler::Executor;
-use stoat_text::{Anchor, Bias, IndentStyle, Rope, Selection, SelectionGoal};
+use stoat_text::{
+    auto_pairs::{self, AutoPairs, PairAction},
+    Anchor, Bias, IndentStyle, Rope, Selection, SelectionGoal,
+};
 use stoat_widgets::{pool::SmoothScrollState, ApcScene};
 use stoatty_protocol::window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent};
 use tokio::{
@@ -558,6 +561,20 @@ struct KeymapLookup(Option<Option<BoundActions>>);
 /// The actions a key press's binding names, with the digit a counted binding
 /// captured out of the key itself.
 type BoundActions = (Arc<[ResolvedAction]>, Option<f64>);
+
+/// One cursor's part of an insertion that differs per cursor.
+struct CursorInsert {
+    /// The selection this insertion belongs to, which is how it finds its
+    /// cursor again once the edit has moved every offset.
+    id: usize,
+    offset: usize,
+    text: String,
+    /// Bytes past `offset` the cursor lands on once the text is written. The
+    /// text's own length for an ordinary insertion, shorter for a cursor
+    /// landing inside what it wrote, longer for one stepping over text that was
+    /// already there.
+    caret: usize,
+}
 
 pub struct Stoat {
     pub(crate) size: Rect,
@@ -4756,9 +4773,7 @@ impl Stoat {
             KeyCode::Char(ch)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
-                let mut buf = [0u8; 4];
-                let s = ch.encode_utf8(&mut buf);
-                self.editor_insert(editor_id, buffer_id, s);
+                self.editor_insert_char(editor_id, buffer_id, ch);
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Backspace if key.modifiers == KeyModifiers::ALT => {
@@ -5317,12 +5332,27 @@ impl Stoat {
     }
 
     pub(crate) fn editor_insert(&mut self, editor_id: EditorId, buffer_id: BufferId, text: &str) {
+        let inserts = self.editor_cursor_offsets(editor_id);
+        self.editor_insert_at(editor_id, buffer_id, text, inserts);
+    }
+
+    /// Insert `text` at each cursor in `inserts`, which the caller resolved.
+    ///
+    /// Split out for [`Self::editor_insert_char`], which resolves the cursors to
+    /// ask the pair hook about them. Without the split it resolves them twice on
+    /// every typed bracket.
+    fn editor_insert_at(
+        &mut self,
+        editor_id: EditorId,
+        buffer_id: BufferId,
+        text: &str,
+        mut inserts: Vec<(usize, usize)>,
+    ) {
         if !text.is_empty()
             && let Some(run) = self.current_insert_run.as_mut()
         {
             run.push_str(text);
         }
-        let mut inserts = self.editor_cursor_offsets(editor_id);
         if inserts.is_empty() {
             return;
         }
@@ -5350,6 +5380,103 @@ impl Stoat {
         }
 
         self.land_cursors_after_insert(editor_id, inserts);
+    }
+
+    /// Insert one typed character at every cursor, completing or stepping over
+    /// an auto-pair wherever the buffer's pair table calls for it.
+    ///
+    /// Typing is the only thing that pairs. A paste and an accepted completion
+    /// both reach [`Self::editor_insert`] directly, and neither is a reader
+    /// reaching for a bracket.
+    fn editor_insert_char(&mut self, editor_id: EditorId, buffer_id: BufferId, ch: char) {
+        let mut encoded = [0u8; 4];
+        let text = ch.encode_utf8(&mut encoded);
+
+        // Most typed characters open nothing, and the table answers that from a
+        // six-entry scan before a single cursor is resolved.
+        let Some(pairs) = self.auto_pairs_for(buffer_id) else {
+            self.editor_insert(editor_id, buffer_id, text);
+            return;
+        };
+        if pairs.get(ch).is_none() && !ch.is_whitespace() {
+            self.editor_insert(editor_id, buffer_id, text);
+            return;
+        }
+
+        let cursors = self.editor_cursor_offsets(editor_id);
+        let actions = {
+            let ws = self.active_workspace();
+            let Some(buffer) = ws.buffers.get(buffer_id) else {
+                return;
+            };
+            let guard = buffer.read().expect("buffer poisoned");
+            let rope = guard.rope();
+            cursors
+                .iter()
+                .map(|&(_, offset)| auto_pairs::hook_insert(rope, offset, ch, pairs))
+                .collect::<Vec<_>>()
+        };
+
+        if actions.iter().all(Option::is_none) {
+            self.editor_insert_at(editor_id, buffer_id, text, cursors);
+            return;
+        }
+
+        let insertions = cursors
+            .iter()
+            .zip(&actions)
+            .map(|(&(id, offset), action)| match action {
+                Some(PairAction::Close(pair)) => CursorInsert {
+                    id,
+                    offset,
+                    text: String::from_iter([pair.open, pair.close]),
+                    caret: pair.open.len_utf8(),
+                },
+                Some(PairAction::Skip { width }) => CursorInsert {
+                    id,
+                    offset,
+                    text: String::new(),
+                    caret: *width,
+                },
+                None => CursorInsert {
+                    id,
+                    offset,
+                    text: text.to_owned(),
+                    caret: text.len(),
+                },
+            })
+            .collect();
+
+        // A bracket counts as typing even where it wrote nothing, since the run
+        // is what decides whether an untouched auto-indent is stripped on the
+        // way out of insert mode.
+        if let Some(run) = self.current_insert_run.as_mut() {
+            run.push(ch);
+        }
+
+        self.editor_insert_each_landing(editor_id, buffer_id, insertions);
+    }
+
+    /// The pair table for `buffer_id`, or `None` where nothing pairs.
+    ///
+    /// A modal input answers `None`. The search bar and the shell prompt both
+    /// resolve as editors, and a prompt completing brackets is a nuisance rather
+    /// than a convenience.
+    fn auto_pairs_for(&self, buffer_id: BufferId) -> Option<AutoPairs> {
+        if !self.settings.editor_auto_pairs.unwrap_or(true) {
+            return None;
+        }
+        if self.active_modal_input().is_some() {
+            return None;
+        }
+
+        let table = self
+            .active_workspace()
+            .buffers
+            .language_for(buffer_id)
+            .map(|lang| lang.pairs)
+            .unwrap_or(auto_pairs::DEFAULT_PAIRS);
+        Some(AutoPairs::new(table))
     }
 
     /// Every cursor in `editor_id` as `(selection id, byte offset)`, sorted by
@@ -5428,6 +5555,30 @@ impl Stoat {
         buffer_id: BufferId,
         insertions: Vec<(usize, usize, String)>,
     ) {
+        let insertions = insertions
+            .into_iter()
+            .map(|(id, offset, text)| CursorInsert {
+                id,
+                caret: text.len(),
+                offset,
+                text,
+            })
+            .collect();
+        self.editor_insert_each_landing(editor_id, buffer_id, insertions);
+    }
+
+    /// Insert a string per cursor in one multi-edit, landing each cursor where
+    /// its own [`CursorInsert::caret`] names rather than after its text.
+    ///
+    /// Auto-pairing needs both departures. A completed pair lands the cursor
+    /// between the halves it wrote, and a cursor stepping over a closer already
+    /// there writes nothing and still moves.
+    fn editor_insert_each_landing(
+        &mut self,
+        editor_id: EditorId,
+        buffer_id: BufferId,
+        insertions: Vec<CursorInsert>,
+    ) {
         if insertions.is_empty() {
             return;
         }
@@ -5440,20 +5591,21 @@ impl Stoat {
             let edits: Vec<(Range<usize>, &str)> = insertions
                 .iter()
                 .rev()
-                .map(|(_, offset, text)| (*offset..*offset, text.as_str()))
+                .map(|insert| (insert.offset..insert.offset, insert.text.as_str()))
                 .collect();
             buffer.write().expect("poisoned").edit_batch(&edits);
         }
 
-        // Each cursor lands after its own text, shifted by everything inserted
-        // at or before it. Lengths differ per cursor, so this is a running total
-        // where the uniform path multiplies one length by the insertion's index.
+        // Each cursor is shifted by everything inserted before it, then by its
+        // own caret. Lengths differ per cursor, so this is a running total where
+        // the uniform path multiplies one length by the insertion's index.
         let mut inserted = 0usize;
         let landings: Vec<(usize, usize)> = insertions
             .iter()
-            .map(|(id, offset, text)| {
-                inserted += text.len();
-                (*id, *offset + inserted)
+            .map(|insert| {
+                let landing = insert.offset + inserted + insert.caret;
+                inserted += insert.text.len();
+                (insert.id, landing)
             })
             .collect();
 
@@ -5630,8 +5782,9 @@ impl Stoat {
 
     fn editor_backspace(&mut self, editor_id: EditorId, buffer_id: BufferId) {
         let indent_width = self.buffer_indent_style(buffer_id).indent_width(TAB_WIDTH);
+        let pairs = self.auto_pairs_for(buffer_id);
         self.editor_delete_ranges(editor_id, buffer_id, move |rope, cursor| {
-            backspace_range(rope, cursor, indent_width)
+            backspace_range(rope, cursor, indent_width, pairs)
         });
     }
 
@@ -6434,9 +6587,18 @@ const TAB_WIDTH: usize = 4;
 /// When the cursor follows only whitespace on its line, backspace works by
 /// indent level. A preceding tab is removed on its own, and a run of spaces is
 /// trimmed back to the previous `indent_width` column (a full unit when already
-/// aligned). Anywhere else it removes a single grapheme. Returns `(start, end)`
-/// with `start == end` for a no-op at the buffer start.
-fn backspace_range(rope: &Rope, cursor: usize, indent_width: usize) -> (usize, usize) {
+/// aligned). A cursor between the halves of a pair in `pairs` removes both.
+/// Anywhere else it removes a single grapheme. Returns `(start, end)` with
+/// `start == end` for a no-op at the buffer start.
+///
+/// The indent rule is tried before the pair rule, since an indent run holds no
+/// bracket for the pair rule to answer anyway and a dedent is the larger claim.
+fn backspace_range(
+    rope: &Rope,
+    cursor: usize,
+    indent_width: usize,
+    pairs: Option<AutoPairs>,
+) -> (usize, usize) {
     if cursor == 0 {
         return (0, 0);
     }
@@ -6467,7 +6629,9 @@ fn backspace_range(rope: &Rope, cursor: usize, indent_width: usize) -> (usize, u
     }
 
     if !indent_only || prev == Some('\t') {
-        return one_back;
+        return pairs
+            .and_then(|pairs| auto_pairs::hook_delete(rope, cursor, pairs))
+            .unwrap_or(one_back);
     }
 
     let mut drop = width % indent_width;
@@ -14258,6 +14422,117 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "ab");
         h.type_keys("backspace");
         assert_eq!(buffer_text(&h, &path), "a");
+    }
+
+    #[test]
+    fn typing_open_paren_inserts_the_pair() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text("(");
+        assert_eq!(buffer_text(&h, &path), "()");
+
+        h.type_text("x");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "(x)",
+            "the cursor is left between the halves",
+        );
+    }
+
+    #[test]
+    fn pair_not_inserted_before_a_word_char() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "word");
+        h.type_keys("i");
+        h.type_text("(");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "(word",
+            "a closer here would trap the word inside the pair",
+        );
+    }
+
+    #[test]
+    fn typing_the_closer_skips_over_it() {
+        // The closer is seeded rather than typed, so the pin fails against a
+        // plain insert instead of reading the same either way.
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "()");
+        h.type_keys("l i");
+        h.type_text(")");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "()",
+            "the typed closer is the one already there"
+        );
+
+        h.type_text("x");
+        assert_eq!(buffer_text(&h, &path), "()x", "and the cursor is past it");
+    }
+
+    #[test]
+    fn quote_pair_requires_non_word_on_both_sides() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text("don't");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "don't",
+            "an apostrophe after a letter closes nothing",
+        );
+
+        h.type_text(" 'a");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "don't 'a'",
+            "after a space it pairs, and the letter lands inside",
+        );
+    }
+
+    #[test]
+    fn backspace_between_a_pair_deletes_both() {
+        // Seeded rather than typed, since typing one bracket and removing it
+        // reads the same whether or not the closer was ever written.
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "a()b");
+        h.type_keys("l l i");
+        h.type_keys("backspace");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "ab",
+            "the closer leaves with the opener"
+        );
+    }
+
+    #[test]
+    fn multi_cursor_pairs_land_per_cursor() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "\n\n");
+        h.type_keys("C");
+        h.type_keys("i");
+        h.type_text("(");
+        assert_eq!(buffer_text(&h, &path), "()\n()\n");
+        assert_eq!(
+            h.head_offsets(),
+            vec![1, 4],
+            "each cursor sits inside the pair it wrote",
+        );
+    }
+
+    #[test]
+    fn auto_pairs_off_types_every_character_as_written() {
+        let mut h = Stoat::test();
+        h.stoat.settings.editor_auto_pairs = Some(false);
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text("(");
+        assert_eq!(buffer_text(&h, &path), "(");
+
+        h.type_keys("backspace");
+        h.type_text("'");
+        assert_eq!(buffer_text(&h, &path), "'", "quotes are left alone too");
     }
 
     #[test]

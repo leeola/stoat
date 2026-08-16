@@ -1,4 +1,5 @@
 mod anchor;
+pub mod auto_pairs;
 mod buffer_id;
 mod comment;
 mod date_time;

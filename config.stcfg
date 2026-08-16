@@ -170,6 +170,10 @@ on init {
     # Column bounded wrap mode wraps at (applies only to editor.wrap = bounded).
     # editor.wrap_column = 80;
 
+    # Whether typing a bracket or quote in insert mode writes its closing half
+    # too, and typing the closer steps over the one already there.
+    editor.auto_pairs = true;
+
     # Rows the view keeps between the cursor and the top or bottom edge when
     # following the cursor.
     editor.scrolloff = 3;

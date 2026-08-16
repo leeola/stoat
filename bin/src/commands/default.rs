@@ -255,6 +255,7 @@ fn run_tui(
         scrolloff: None,
         editor_line_numbers: None,
         editor_minimap: None,
+        editor_auto_pairs: None,
         editor_wrap: None,
         editor_wrap_column: None,
         ui_tab_bar: None,
