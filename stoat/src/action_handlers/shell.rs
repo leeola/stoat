@@ -89,6 +89,61 @@ pub(crate) fn cancel(stoat: &mut Stoat) -> bool {
     true
 }
 
+/// Run `cmd` with `stdin`, answering the text it produced or why it failed.
+///
+/// Stderr is the output whenever the command wrote any, whatever it exited
+/// with, on the reading that a command with something to say about its work
+/// said it there. Only a non-zero exit that wrote **nothing** to stderr is a
+/// failure, since then there is no output to take and no message to show.
+///
+/// `selection` is the text the op runs over. A command that ends its output
+/// with a newline the selection lacked added that newline itself, so it comes
+/// off along with a carriage return before it. Insert and append pipe nothing
+/// but still measure against their selection.
+fn run_shell(
+    host: &dyn crate::host::ShellHost,
+    cmd: &str,
+    stdin: &str,
+    selection: &str,
+    diff: &[(String, Option<String>)],
+) -> Result<String, String> {
+    let out = host
+        .run(cmd, stdin.as_bytes(), None, diff)
+        .map_err(|err| format!("Shell command failed: {err}"))?;
+
+    let mut text = match (out.exit_code == 0, out.stderr.is_empty()) {
+        (false, true) => {
+            return Err(format!("Shell command failed: status {}", out.exit_code));
+        },
+        (_, false) => String::from_utf8_lossy(&out.stderr).into_owned(),
+        (true, true) => String::from_utf8_lossy(&out.stdout).into_owned(),
+    };
+
+    if !selection.ends_with('\n') && text.ends_with('\n') {
+        text.pop();
+        if text.ends_with('\r') {
+            text.pop();
+        }
+    }
+    Ok(text)
+}
+
+/// Text the primary selection covers, or empty where no editor is focused.
+///
+/// Insert and append pipe nothing, so this is the selection their trailing
+/// newline is measured against.
+fn primary_text(stoat: &mut Stoat) -> String {
+    let Some(editor) = super::focused_editor_mut(stoat) else {
+        return String::new();
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let primary = editor.selections.newest_anchor();
+    let start = buffer_snapshot.resolve_anchor(&primary.start);
+    let end = buffer_snapshot.resolve_anchor(&primary.end);
+    buffer_snapshot.rope().chunks_in_range(start..end).collect()
+}
+
 fn apply_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
     let diff = stoat.active_workspace().env.diff.clone();
     let Some(editor) = super::focused_editor_mut(stoat) else {
@@ -97,7 +152,7 @@ fn apply_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
-    let outputs: Vec<String> = editor
+    let outputs: Result<Vec<String>, String> = editor
         .selections
         .all_anchors()
         .iter()
@@ -105,12 +160,21 @@ fn apply_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &
             let start = buffer_snapshot.resolve_anchor(&sel.start);
             let end = buffer_snapshot.resolve_anchor(&sel.end);
             let stdin: String = rope.chunks_in_range(start..end).collect();
-            shell_host
-                .run(cmd, stdin.as_bytes(), None, &diff)
-                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
-                .unwrap_or_default()
+            run_shell(shell_host, cmd, &stdin, &stdin, &diff)
         })
         .collect();
+    // The first failure ends the op before any edit, so a command that fails
+    // partway leaves the buffer as it was rather than half rewritten.
+    let outputs = match outputs {
+        Ok(outputs) => outputs,
+        Err(message) => {
+            stoat.set_status(message);
+            return;
+        },
+    };
+    let Some(editor) = super::focused_editor_mut(stoat) else {
+        return;
+    };
     let buffer_id = editor.buffer_id;
     let buffer = match stoat.active_workspace().buffers.get(buffer_id) {
         Some(b) => b,
@@ -181,19 +245,28 @@ fn apply_pipe_to(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
+    // Pipe-to keeps no output, so the run matters only for whether it failed.
+    // Stopping at the first failure leaves the rest of the selections unrun,
+    // which is what tells the user the command is broken rather than the input.
     for sel in editor.selections.all_anchors() {
         let start = buffer_snapshot.resolve_anchor(&sel.start);
         let end = buffer_snapshot.resolve_anchor(&sel.end);
         let stdin: String = rope.chunks_in_range(start..end).collect();
-        let _ = shell_host.run(cmd, stdin.as_bytes(), None, &diff);
+        if let Err(message) = run_shell(shell_host, cmd, &stdin, &stdin, &diff) {
+            stoat.set_status(message);
+            return;
+        }
     }
 }
 
 fn apply_insert_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
     let diff = stoat.active_workspace().env.diff.clone();
-    let output = match shell_host.run(cmd, b"", None, &diff) {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
-        Err(_) => return,
+    let output = match run_shell(shell_host, cmd, "", &primary_text(stoat), &diff) {
+        Ok(output) => output,
+        Err(message) => {
+            stoat.set_status(message);
+            return;
+        },
     };
     if output.is_empty() {
         return;
@@ -227,9 +300,12 @@ fn apply_insert_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHos
 
 fn apply_append_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
     let diff = stoat.active_workspace().env.diff.clone();
-    let output = match shell_host.run(cmd, b"", None, &diff) {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
-        Err(_) => return,
+    let output = match run_shell(shell_host, cmd, "", &primary_text(stoat), &diff) {
+        Ok(output) => output,
+        Err(message) => {
+            stoat.set_status(message);
+            return;
+        },
     };
     if output.is_empty() {
         return;
@@ -273,14 +349,14 @@ fn apply_keep_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, c
         .selections
         .all_anchors()
         .iter()
+        // A selection survives whenever its run produced output, which a
+        // command that exits non-zero but writes to stderr still does. The exit
+        // code alone drops those, where the command did have something to say.
         .filter(|sel| {
             let start = buffer_snapshot.resolve_anchor(&sel.start);
             let end = buffer_snapshot.resolve_anchor(&sel.end);
             let stdin: String = rope.chunks_in_range(start..end).collect();
-            shell_host
-                .run(cmd, stdin.as_bytes(), None, &diff)
-                .map(|out| out.exit_code == 0)
-                .unwrap_or(false)
+            run_shell(shell_host, cmd, &stdin, &stdin, &diff).is_ok()
         })
         .cloned()
         .collect();
@@ -527,6 +603,131 @@ mod tests {
         // Filter empty -> selections unchanged (silent no-op).
         let spans = editor::selection_spans(&mut h.stoat);
         assert_eq!(spans, vec![(0, 3, false)]);
+    }
+
+    /// A command that fails with nothing to say aborts before any edit, so a
+    /// broken command leaves the buffer as it was and says so.
+    #[test]
+    fn a_failing_pipe_leaves_the_buffer_untouched() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        fake.set_response(
+            "false",
+            ShellOutput {
+                stdout: b"ignored".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 3,
+            },
+        );
+        h.seed_focused_buffer("hello");
+        select_range(&mut h, 0, 5);
+        dispatch(&mut h.stoat, &action::ShellPipe);
+        h.type_text("false");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        assert_eq!(buffer_text(&mut h), "hello", "no edit landed");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("Shell command failed: status 3"),
+        );
+    }
+
+    /// A command with something to say says it on stderr, so stderr is the
+    /// output whatever the command exited with.
+    #[test]
+    fn stderr_replaces_the_selection() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        fake.set_response(
+            "noisy",
+            ShellOutput {
+                stdout: b"out".to_vec(),
+                stderr: b"err".to_vec(),
+                exit_code: 1,
+            },
+        );
+        h.seed_focused_buffer("hello");
+        select_range(&mut h, 0, 5);
+        dispatch(&mut h.stoat, &action::ShellPipe);
+        h.type_text("noisy");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        assert_eq!(
+            buffer_text(&mut h),
+            "err",
+            "stderr wins over stdout, and a non-zero exit carrying it is no failure",
+        );
+    }
+
+    /// A newline the selection did not have is the command's own padding, so it
+    /// comes off rather than growing the buffer a line.
+    #[test]
+    fn a_trailing_newline_the_selection_lacked_comes_off() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        fake.set_response(
+            "wc -c",
+            ShellOutput {
+                stdout: b"5\r\n".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.seed_focused_buffer("hello");
+        select_range(&mut h, 0, 5);
+        dispatch(&mut h.stoat, &action::ShellPipe);
+        h.type_text("wc -c");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        assert_eq!(
+            buffer_text(&mut h),
+            "5",
+            "the carriage return goes with the newline it preceded",
+        );
+    }
+
+    /// Keep-pipe asks whether the run produced output, so a command that exits
+    /// non-zero while writing to stderr keeps its selection.
+    ///
+    /// Two selections answered differently, since a filter that keeps
+    /// everything and one that keeps nothing both leave the set untouched. The
+    /// second returns early rather than emptying it.
+    #[test]
+    fn keep_pipe_keeps_a_selection_whose_command_wrote_stderr() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        fake.set_response_for_stdin(
+            "check",
+            b"abc".to_vec(),
+            ShellOutput {
+                stdout: Vec::new(),
+                stderr: b"unknown option".to_vec(),
+                exit_code: 1,
+            },
+        );
+        fake.set_response_for_stdin(
+            "check",
+            b"def".to_vec(),
+            ShellOutput {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                exit_code: 1,
+            },
+        );
+        h.seed_focused_buffer("abc def");
+        select_range(&mut h, 0, 3);
+        add_range(&mut h, 4, 7);
+        assert_eq!(selection_count(&mut h), 2, "test setup: two selections");
+
+        dispatch(&mut h.stoat, &action::ShellKeepPipe);
+        h.type_text("check");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(0, 3, false)],
+            "the stderr run survives and the silent failure does not",
+        );
     }
 
     #[test]

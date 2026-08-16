@@ -13,6 +13,7 @@ use std::{
 #[derive(Default)]
 pub struct FakeShell {
     responses: Mutex<HashMap<String, ShellOutput>>,
+    by_stdin: Mutex<HashMap<(String, Vec<u8>), ShellOutput>>,
     invocations: Mutex<Vec<FakeShellInvocation>>,
 }
 
@@ -44,6 +45,24 @@ impl FakeShell {
             .insert(cmd.into(), output);
     }
 
+    /// Programme `output` as the response when `cmd` is run with exactly
+    /// `stdin`, which wins over a plain [`Self::set_response`] for that command.
+    ///
+    /// For a caller that runs one command over several selections and needs
+    /// them answered differently, which is the only way a filter over
+    /// selections tells one from another.
+    pub fn set_response_for_stdin(
+        &self,
+        cmd: impl Into<String>,
+        stdin: impl Into<Vec<u8>>,
+        output: ShellOutput,
+    ) {
+        self.by_stdin
+            .lock()
+            .expect("FakeShell responses poisoned")
+            .insert((cmd.into(), stdin.into()), output);
+    }
+
     /// Captured invocations in call order.
     pub fn invocations(&self) -> Vec<FakeShellInvocation> {
         self.invocations
@@ -70,6 +89,16 @@ impl ShellHost for FakeShell {
                 cwd: cwd.map(Path::to_path_buf),
                 env: env.to_vec(),
             });
+        let keyed = self
+            .by_stdin
+            .lock()
+            .expect("FakeShell responses poisoned")
+            .get(&(cmd.to_string(), stdin.to_vec()))
+            .cloned();
+        if let Some(output) = keyed {
+            return Ok(output);
+        }
+
         let responses = self.responses.lock().expect("FakeShell responses poisoned");
         Ok(responses.get(cmd).cloned().unwrap_or(ShellOutput {
             stdout: Vec::new(),
