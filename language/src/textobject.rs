@@ -172,7 +172,12 @@ fn find_smallest_capture_scanning(
             _ => best = Some(u),
         }
     }
-    best
+
+    // A capture reaching the end of the buffer is dropped, and the next
+    // smallest does not stand in for it. The winner is decided first and only
+    // then refused, so a file with no trailing newline offers no object for
+    // whatever closes it.
+    best.filter(|u| u.start < rope.len() && u.end < rope.len())
 }
 
 #[cfg(test)]

@@ -906,6 +906,21 @@ mod tests {
         assert!(span.ends_with("}"));
     }
 
+    /// A capture reaching the buffer's last byte is refused, so a file saved
+    /// without a trailing newline gives no object for the item that closes it.
+    #[test]
+    fn function_around_an_unterminated_last_byte_is_a_noop() {
+        let mut h = TestHarness::with_size(60, 20);
+        let src = "fn alpha() {\n    let x = 1;\n}";
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        jump(&mut h, src.find("let").expect("body present"));
+        let before = primary_range(&mut h);
+
+        h.type_keys("m a f");
+        assert_eq!(primary_range(&mut h), before);
+    }
+
     #[test]
     fn function_around_selects_full_rust_fn() {
         let mut h = TestHarness::with_size(60, 20);

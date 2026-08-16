@@ -642,6 +642,10 @@ fn focused_buffer_id(stoat: &Stoat) -> Option<crate::buffer::BufferId> {
 /// pair around the nearest one. A quote resolved from a string node
 /// has nothing outside it of its own type, so any `skip` above zero
 /// finds nothing there.
+///
+/// A cursor with no character boundary after it finds nothing, whatever
+/// encloses it. That refuses a real pair whose closer is the buffer's last
+/// character, and it is what Helix refuses too.
 pub(crate) fn find_surround_pair(
     rope: &Rope,
     cursor: usize,
@@ -650,6 +654,15 @@ pub(crate) fn find_surround_pair(
     scan: &PairScan<'_>,
     skip: usize,
 ) -> Option<(usize, usize)> {
+    // A selection reaching the end of the text is refused before anything is
+    // looked for, so a pair closing the buffer's last character is out of reach.
+    // The cursor stands in for the selection's end, which is one boundary past
+    // it for a cursor and for a forward selection alike.
+    let after_cursor = cursor + rope.chars_at(cursor).next().map_or(0, char::len_utf8);
+    if after_cursor >= rope.len() {
+        return None;
+    }
+
     if open == close {
         if rope.chars_at(cursor).next() == Some(open) {
             if skip > 0 {
@@ -963,7 +976,10 @@ mod tests {
             let text = nested_fixture(seed);
             let rope = Rope::from(text.as_str());
 
-            for cursor in 0..=rope.len() {
+            // The per-type walk refuses a cursor with nothing after it and the
+            // closest walk does not, which is the split Helix has, so the two
+            // only answer alike short of the last character.
+            for cursor in 0..rope.len().saturating_sub(1) {
                 if !text.is_char_boundary(cursor) {
                     continue;
                 }
@@ -1091,7 +1107,9 @@ mod tests {
         let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
         assert!(snapshot.is_some(), "the fixture has to have parsed");
 
-        for cursor in 0..=rope.len() {
+        // Short of the last character, for the reason the property test above
+        // gives.
+        for cursor in 0..rope.len().saturating_sub(1) {
             let tree = deepest_tree_at(snapshot, cursor);
             assert!(tree.is_some(), "a covering layer at {cursor}");
             assert_eq!(
@@ -1232,10 +1250,29 @@ mod tests {
 
     #[test]
     fn find_pair_paren_cursor_on_close() {
-        let r = rope("(abc)");
+        // Trailing text so the close is not the last character, which the
+        // buffer-end guard refuses on its own.
+        let r = rope("(abc);");
         assert_eq!(
             find_surround_pair(&r, 4, '(', ')', &PairScan::around(None, 0), 0),
             Some((0, 4))
+        );
+    }
+
+    /// A pair closing the buffer's last character is out of reach, which costs
+    /// a real object to keep the behavior Helix has.
+    #[test]
+    fn a_cursor_with_nothing_after_it_finds_no_pair() {
+        let r = rope("(abc)");
+        assert_eq!(
+            find_surround_pair(&r, 4, '(', ')', &PairScan::around(None, 0), 0),
+            None,
+            "the cursor sits on the last character"
+        );
+        assert_eq!(
+            find_surround_pair(&r, 2, '(', ')', &PairScan::around(None, 0), 0),
+            Some((0, 4)),
+            "a cursor with a character after it still resolves the same pair"
         );
     }
 
