@@ -144,6 +144,81 @@ fn primary_text(stoat: &mut Stoat) -> String {
     buffer_snapshot.rope().chunks_in_range(start..end).collect()
 }
 
+/// Where one op writes its output for one selection, and what it replaces.
+///
+/// The three editing ops differ in nothing else. Pipe covers the range and
+/// consumes it, insert writes at the range's start and consumes nothing, and
+/// append writes at its end.
+struct EditSpan {
+    from: usize,
+    to: usize,
+    deleted: usize,
+    reversed: bool,
+}
+
+/// Apply `outputs` at `spans` and leave each selection over what it wrote.
+///
+/// The spans arrive in document order, one output apiece. Each new selection
+/// runs from the edit point to the end of its output, so an op that wrote
+/// nothing leaves a collapsed cursor there rather than the selection it
+/// started with. The source range's direction carries over.
+///
+/// `primary_index` names the span whose piece takes the primary, which keeps
+/// the primary on the same selection the user had rather than moving it to an
+/// end of the set.
+fn reshape(stoat: &mut Stoat, spans: Vec<EditSpan>, outputs: Vec<String>, primary_index: usize) {
+    let Some(editor) = super::focused_editor_mut(stoat) else {
+        return;
+    };
+    let buffer_id = editor.buffer_id;
+    let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) else {
+        return;
+    };
+
+    {
+        // Descending, so each edit lands before the offsets of the ones still
+        // to come move under it.
+        let mut guard = buffer.write().expect("buffer poisoned");
+        let batch: Vec<(Range<usize>, &str)> = spans
+            .iter()
+            .zip(&outputs)
+            .rev()
+            .map(|(span, out)| (span.from..span.to, out.as_str()))
+            .collect();
+        guard.edit_batch(&batch);
+    }
+
+    let Some(editor) = super::focused_editor_mut(stoat) else {
+        return;
+    };
+    let new_display = editor.display_map.snapshot();
+    let new_buf = new_display.buffer_snapshot();
+    // Ascending this time, since the shift each piece sits at is the sum of
+    // what every earlier edit added and removed.
+    let pieces: Vec<Selection<Anchor>> = spans
+        .iter()
+        .zip(&outputs)
+        .scan(0i64, |delta, (span, out)| {
+            let start = (span.to as i64 + *delta) as usize - span.deleted;
+            let end = start + out.len();
+            *delta += out.len() as i64 - span.deleted as i64;
+            Some(Selection {
+                id: 0,
+                start: new_buf.anchor_at(start, Bias::Right),
+                end: new_buf.anchor_at(end, Bias::Right),
+                reversed: span.reversed,
+                goal: SelectionGoal::None,
+            })
+        })
+        .collect();
+    if pieces.is_empty() {
+        return;
+    }
+    editor
+        .selections
+        .replace_with_fresh_ids_primary(pieces, primary_index, new_buf);
+}
+
 fn apply_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
     let diff = stoat.active_workspace().env.diff.clone();
     let Some(editor) = super::focused_editor_mut(stoat) else {
@@ -172,69 +247,59 @@ fn apply_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &
             return;
         },
     };
-    let Some(editor) = super::focused_editor_mut(stoat) else {
+    let Some((spans, primary_index)) = edit_spans(stoat, Shape::Replace) else {
         return;
     };
-    let buffer_id = editor.buffer_id;
-    let buffer = match stoat.active_workspace().buffers.get(buffer_id) {
-        Some(b) => b,
-        None => return,
-    };
-    let editor = match super::focused_editor_mut(stoat) {
-        Some(e) => e,
-        None => return,
-    };
+    reshape(stoat, spans, outputs, primary_index);
+}
+
+/// Which of the three shapes an op writes with.
+#[derive(Copy, Clone)]
+enum Shape {
+    Replace,
+    Insert,
+    Append,
+}
+
+/// Every selection as an [`EditSpan`] under `shape`, with the primary's index.
+///
+/// Ordered by position, which is the order [`reshape`] reads them in and the
+/// order the selections already hold.
+fn edit_spans(stoat: &mut Stoat, shape: Shape) -> Option<(Vec<EditSpan>, usize)> {
+    let editor = super::focused_editor_mut(stoat)?;
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
-    let mut ranges: Vec<(usize, usize)> = editor
+    let primary_index = editor.selections.primary_index();
+    let spans = editor
         .selections
         .all_anchors()
         .iter()
         .map(|sel| {
-            let s = buffer_snapshot.resolve_anchor(&sel.start);
-            let e = buffer_snapshot.resolve_anchor(&sel.end);
-            (s, e)
+            let start = buffer_snapshot.resolve_anchor(&sel.start);
+            let end = buffer_snapshot.resolve_anchor(&sel.end);
+            match shape {
+                Shape::Replace => EditSpan {
+                    from: start,
+                    to: end,
+                    deleted: end - start,
+                    reversed: sel.reversed,
+                },
+                Shape::Insert => EditSpan {
+                    from: start,
+                    to: start,
+                    deleted: 0,
+                    reversed: sel.reversed,
+                },
+                Shape::Append => EditSpan {
+                    from: end,
+                    to: end,
+                    deleted: 0,
+                    reversed: sel.reversed,
+                },
+            }
         })
         .collect();
-    let mut indexed: Vec<(usize, usize, String)> = ranges
-        .drain(..)
-        .zip(outputs)
-        .map(|((s, e), out)| (s, e, out))
-        .collect();
-    indexed.sort_by_key(|b| std::cmp::Reverse(b.0));
-    {
-        let mut guard = buffer.write().expect("buffer poisoned");
-        let batch: Vec<(Range<usize>, &str)> = indexed
-            .iter()
-            .map(|(s, e, out)| (*s..*e, out.as_str()))
-            .collect();
-        guard.edit_batch(&batch);
-    }
-    let new_display = editor.display_map.snapshot();
-    let new_buf = new_display.buffer_snapshot();
-    let mut new_pieces: Vec<Selection<Anchor>> = indexed
-        .iter()
-        .rev()
-        .scan(0i64, |delta, (s, e, out)| {
-            let new_start = (*s as i64 + *delta) as usize;
-            let new_end = new_start + out.len();
-            *delta += out.len() as i64 - (*e as i64 - *s as i64);
-            Some(Selection {
-                id: 0,
-                start: new_buf.anchor_at(new_start, Bias::Right),
-                end: new_buf.anchor_at(new_end, Bias::Right),
-                reversed: false,
-                goal: SelectionGoal::None,
-            })
-        })
-        .collect();
-    if new_pieces.is_empty() {
-        return;
-    }
-    new_pieces.reverse();
-    editor
-        .selections
-        .replace_with_fresh_ids(new_pieces, new_buf);
+    Some((spans, primary_index))
 }
 
 fn apply_pipe_to(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
@@ -268,34 +333,12 @@ fn apply_insert_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHos
             return;
         },
     };
-    if output.is_empty() {
-        return;
-    }
-    let Some(editor) = super::focused_editor_mut(stoat) else {
+    let Some((spans, primary_index)) = edit_spans(stoat, Shape::Insert) else {
         return;
     };
-    let buffer_id = editor.buffer_id;
-    let display_snapshot = editor.display_map.snapshot();
-    let buffer_snapshot = display_snapshot.buffer_snapshot();
-    let mut heads: Vec<usize> = editor
-        .selections
-        .all_anchors()
-        .iter()
-        .map(|sel| buffer_snapshot.resolve_anchor(&sel.head()))
-        .collect();
-    heads.sort_unstable();
-    heads.dedup();
-    heads.reverse();
-    let buffer = match stoat.active_workspace().buffers.get(buffer_id) {
-        Some(b) => b,
-        None => return,
-    };
-    let mut guard = buffer.write().expect("buffer poisoned");
-    let batch: Vec<(Range<usize>, &str)> = heads
-        .iter()
-        .map(|head| (*head..*head, output.as_str()))
-        .collect();
-    guard.edit_batch(&batch);
+    // One run feeds every selection, so each takes a copy of the same output.
+    let outputs = vec![output; spans.len()];
+    reshape(stoat, spans, outputs, primary_index);
 }
 
 fn apply_append_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
@@ -307,34 +350,11 @@ fn apply_append_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHos
             return;
         },
     };
-    if output.is_empty() {
-        return;
-    }
-    let Some(editor) = super::focused_editor_mut(stoat) else {
+    let Some((spans, primary_index)) = edit_spans(stoat, Shape::Append) else {
         return;
     };
-    let buffer_id = editor.buffer_id;
-    let display_snapshot = editor.display_map.snapshot();
-    let buffer_snapshot = display_snapshot.buffer_snapshot();
-    let mut ends: Vec<usize> = editor
-        .selections
-        .all_anchors()
-        .iter()
-        .map(|sel| buffer_snapshot.resolve_anchor(&sel.end))
-        .collect();
-    ends.sort_unstable();
-    ends.dedup();
-    ends.reverse();
-    let buffer = match stoat.active_workspace().buffers.get(buffer_id) {
-        Some(b) => b,
-        None => return,
-    };
-    let mut guard = buffer.write().expect("buffer poisoned");
-    let batch: Vec<(Range<usize>, &str)> = ends
-        .iter()
-        .map(|end| (*end..*end, output.as_str()))
-        .collect();
-    guard.edit_batch(&batch);
+    let outputs = vec![output; spans.len()];
+    reshape(stoat, spans, outputs, primary_index);
 }
 
 fn apply_keep_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
@@ -398,6 +418,20 @@ mod tests {
                 end: end_anchor,
                 reversed: false,
                 goal: stoat_text::SelectionGoal::None,
+            });
+    }
+
+    /// [`select_range`] facing backward, so its head sits at `start`.
+    fn select_range_reversed(h: &mut TestHarness, start: usize, end: usize) {
+        select_range(h, start, end);
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        editor
+            .selections
+            .transform(buf_snap, |s| stoat_text::Selection {
+                reversed: true,
+                ..s.clone()
             });
     }
 
@@ -524,6 +558,146 @@ mod tests {
         h.type_text("date");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         assert_eq!(buffer_text(&mut h), "xMon Jan 1y");
+    }
+
+    /// Insert writes at each selection's start, so a forward selection gets the
+    /// output before it rather than after.
+    #[test]
+    fn insert_output_lands_before_a_forward_selection() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        fake.set_response(
+            "date",
+            ShellOutput {
+                stdout: b"DATE".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.seed_focused_buffer("hello world");
+        select_range(&mut h, 0, 5);
+        dispatch(&mut h.stoat, &action::ShellInsertOutput);
+        h.type_text("date");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        assert_eq!(buffer_text(&mut h), "DATEhello world");
+    }
+
+    /// Each selection ends up over the output it produced, which is what leaves
+    /// the inserted text ready for the next command.
+    #[test]
+    fn insert_output_selects_its_output() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        fake.set_response(
+            "date",
+            ShellOutput {
+                stdout: b"DATE".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.seed_focused_buffer("hello world");
+        select_range(&mut h, 0, 5);
+        dispatch(&mut h.stoat, &action::ShellInsertOutput);
+        h.type_text("date");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(0, 4, false)],
+            "the selection covers DATE rather than the text it was over",
+        );
+    }
+
+    /// A piped selection keeps the direction it had, since the direction says
+    /// which end the cursor sits on and the command did not move it.
+    #[test]
+    fn pipe_keeps_a_reversed_selection_reversed() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        fake.set_response(
+            "tr a-z A-Z",
+            ShellOutput {
+                stdout: b"HELLO".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.seed_focused_buffer("hello world");
+        select_range_reversed(&mut h, 0, 5);
+        dispatch(&mut h.stoat, &action::ShellPipe);
+        h.type_text("tr a-z A-Z");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        assert_eq!(editor::selection_spans(&mut h.stoat), vec![(0, 5, true)]);
+    }
+
+    /// A command that produced nothing still applies, leaving a collapsed
+    /// cursor at the point its output goes.
+    ///
+    /// Insert rather than pipe, since pipe always applied and only the two
+    /// output ops returned early on an empty result.
+    #[test]
+    fn empty_output_collapses_the_selection() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        fake.set_response(
+            "true",
+            ShellOutput {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.seed_focused_buffer("hello world");
+        select_range(&mut h, 0, 5);
+        dispatch(&mut h.stoat, &action::ShellInsertOutput);
+        h.type_text("true");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        assert_eq!(buffer_text(&mut h), "hello world", "nothing was written");
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(0, 0, false)],
+            "and the selection collapses where the output goes",
+        );
+    }
+
+    /// The primary stays on the piece its own selection produced, rather than
+    /// moving to an end of the set.
+    #[test]
+    fn pipe_keeps_the_primary_on_its_own_piece() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        fake.set_response(
+            "tag",
+            ShellOutput {
+                stdout: b"T".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.seed_focused_buffer("aa bb");
+        select_range(&mut h, 0, 2);
+        add_range(&mut h, 3, 5);
+        assert_eq!(selection_count(&mut h), 2, "test setup: two selections");
+
+        dispatch(&mut h.stoat, &action::ShellPipe);
+        h.type_text("tag");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        assert_eq!(buffer_text(&mut h), "T T");
+        let primary_start = {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            let snapshot = editor.display_map.snapshot();
+            let buf = snapshot.buffer_snapshot();
+            buf.resolve_anchor(&editor.selections.newest_anchor().start)
+        };
+        assert_eq!(
+            primary_start, 2,
+            "the primary was the second selection and stays on its piece",
+        );
     }
 
     #[test]

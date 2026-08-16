@@ -122,6 +122,20 @@ impl SelectionsCollection {
         Arc::clone(&self.disjoint)
     }
 
+    /// Position of the primary in the set, which is ordered by where each
+    /// selection starts.
+    ///
+    /// For a producer that rebuilds every selection and wants the primary to
+    /// stay on the same one, where its id does not survive the rebuild.
+    pub(crate) fn primary_index(&self) -> usize {
+        debug_assert_eq!(
+            self.newest,
+            newest_index(&self.disjoint),
+            "the recorded primary drifted from the set it indexes"
+        );
+        self.newest
+    }
+
     pub(crate) fn newest_anchor(&self) -> &Selection<Anchor> {
         debug_assert_eq!(
             self.newest,
