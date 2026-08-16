@@ -4757,6 +4757,10 @@ impl Stoat {
                 self.editor_backspace(editor_id, buffer_id);
                 Some(UpdateEffect::Redraw)
             },
+            KeyCode::Delete if key.modifiers == KeyModifiers::ALT => {
+                self.editor_delete_word_forward(editor_id, buffer_id);
+                Some(UpdateEffect::Redraw)
+            },
             KeyCode::Delete => {
                 self.editor_delete(editor_id, buffer_id);
                 Some(UpdateEffect::Redraw)
@@ -14602,6 +14606,26 @@ mod tests {
         h.type_keys("A");
         h.type_keys("alt-d");
         assert_eq!(buffer_text(&h, &path), "abc");
+    }
+
+    /// Alt-Delete is the forward alias of Alt-Backspace, so it takes the whole
+    /// word rather than the one character a bare Delete takes.
+    #[test]
+    fn alt_delete_deletes_word_forward() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "foo bar");
+        h.type_keys("i");
+        h.type_keys("alt-delete");
+        assert_eq!(buffer_text(&h, &path), " bar");
+    }
+
+    #[test]
+    fn bare_delete_still_deletes_one_char() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "foo bar");
+        h.type_keys("i");
+        h.type_keys("delete");
+        assert_eq!(buffer_text(&h, &path), "oo bar");
     }
 
     #[test]
