@@ -46,6 +46,18 @@ pub struct Language {
     /// matching the line, which is what keeps `/// x` continuing as `///`
     /// rather than degrading to the `//` that also matches it.
     pub line_comments: &'static [&'static str],
+    /// The pair that opens and closes a block comment, for languages that have
+    /// one.
+    ///
+    /// A language with no line comments has this as its only way to comment,
+    /// which is what lets `ToggleComments` work in JSON at all. A language with
+    /// both prefers the line tokens, since commenting whole lines one by one is
+    /// what a toggle over line ranges means.
+    ///
+    /// One pair, where a language defines several. The extras are alternate
+    /// spellings of the same construct, so recognizing the plain pair covers
+    /// what a toggle writes and reads back.
+    pub block_comments: Option<(&'static str, &'static str)>,
     /// Languages a fenced code block's info string may resolve to, for a
     /// grammar carrying an [`InjectionInner::Fence`] injection. Late-bound: the
     /// registry fills it after every language exists, since a fence host (e.g.
@@ -375,6 +387,7 @@ struct AuxQuerySources {
     outline: Option<&'static str>,
     tags: Option<&'static str>,
     line_comments: &'static [&'static str],
+    block_comments: Option<(&'static str, &'static str)>,
 }
 
 fn make_language(
@@ -402,6 +415,7 @@ fn make_language_with_injections(
         outline,
         tags,
         line_comments,
+        block_comments,
     } = aux;
 
     // Only these two are read to paint, so only these two are compiled here.
@@ -427,6 +441,7 @@ fn make_language_with_injections(
             tags: LazyQuery::new(tags),
         },
         line_comments,
+        block_comments,
         fence_candidates: OnceLock::new(),
     }
 }
@@ -502,6 +517,7 @@ fn make_rust() -> Language {
             )),
             tags: Some(include_str!("queries/rust/tags.scm")),
             line_comments: &["//", "///", "//!"],
+            block_comments: Some(("/*", "*/")),
         },
     )
 }
@@ -525,6 +541,7 @@ fn make_json() -> Language {
             )),
             tags: None,
             line_comments: &[],
+            block_comments: Some(("/*", "*/")),
         },
     )
 }
@@ -586,6 +603,7 @@ fn make_markdown() -> Language {
             )),
             tags: None,
             line_comments: &[],
+            block_comments: None,
         },
     )
 }
