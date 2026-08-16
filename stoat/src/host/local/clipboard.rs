@@ -1,4 +1,4 @@
-use crate::host::ClipboardHost;
+use crate::host::{ClipboardHost, ClipboardKind};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::{
     io::{self, Write},
@@ -70,11 +70,11 @@ impl LocalClipboard {
 
 /// One request for the clipboard thread, which owns the handle both need.
 enum Command {
-    Set(String),
+    Set(ClipboardKind, String),
     /// The reply channel a [`ClipboardHost::get`] caller blocks on. A platform
     /// error arrives as [`None`], since the caller treats a failed read and an
     /// empty clipboard the same way.
-    Get(Sender<Option<String>>),
+    Get(ClipboardKind, Sender<Option<String>>),
 }
 
 /// The retained platform handle the clipboard thread serves its commands from.
@@ -84,19 +84,53 @@ enum Command {
 /// worth pinning, and no test can reach a display server to pin them against
 /// the real thing.
 trait ClipboardBackend {
-    fn write(&mut self, text: &str) -> io::Result<()>;
+    fn write(&mut self, kind: ClipboardKind, text: &str) -> io::Result<()>;
 
-    /// The clipboard's text, or [`None`] where the platform reports nothing
-    /// this handle can read.
-    fn read(&mut self) -> io::Result<Option<String>>;
+    /// `kind`'s text, or [`None`] where the platform reports nothing this
+    /// handle can read.
+    fn read(&mut self, kind: ClipboardKind) -> io::Result<Option<String>>;
+}
+
+/// The primary selection exists only where the display server serves one, so
+/// arboard reaches it through a Linux-only extension. Everywhere else there is
+/// one clipboard, and addressing the primary selection lands on it.
+#[cfg(target_os = "linux")]
+fn linux_kind(kind: ClipboardKind) -> arboard::LinuxClipboardKind {
+    match kind {
+        ClipboardKind::System => arboard::LinuxClipboardKind::Clipboard,
+        ClipboardKind::Primary => arboard::LinuxClipboardKind::Primary,
+    }
 }
 
 impl ClipboardBackend for arboard::Clipboard {
-    fn write(&mut self, text: &str) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    fn write(&mut self, kind: ClipboardKind, text: &str) -> io::Result<()> {
+        use arboard::SetExtLinux;
+
+        self.set()
+            .clipboard(linux_kind(kind))
+            .text(text)
+            .map_err(io::Error::other)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn write(&mut self, _kind: ClipboardKind, text: &str) -> io::Result<()> {
         self.set_text(text).map_err(io::Error::other)
     }
 
-    fn read(&mut self) -> io::Result<Option<String>> {
+    #[cfg(target_os = "linux")]
+    fn read(&mut self, kind: ClipboardKind) -> io::Result<Option<String>> {
+        use arboard::GetExtLinux;
+
+        match self.get().clipboard(linux_kind(kind)).text() {
+            Ok(text) => Ok(Some(text)),
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(err) => Err(io::Error::other(err)),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn read(&mut self, _kind: ClipboardKind) -> io::Result<Option<String>> {
         match self.get_text() {
             Ok(text) => Ok(Some(text)),
             Err(arboard::Error::ContentNotAvailable) => Ok(None),
@@ -118,10 +152,10 @@ fn serve<B: ClipboardBackend>(commands: &Receiver<Command>, open: impl Fn() -> i
 
     while let Ok(command) = commands.recv() {
         match command {
-            Command::Set(text) => {
+            Command::Set(kind, text) => {
                 if handle
                     .as_mut()
-                    .is_some_and(|backend| backend.write(&text).is_ok())
+                    .is_some_and(|backend| backend.write(kind, &text).is_ok())
                 {
                     continue;
                 }
@@ -129,7 +163,7 @@ fn serve<B: ClipboardBackend>(commands: &Receiver<Command>, open: impl Fn() -> i
                 // Either nothing was open or the open handle failed to write,
                 // which is what a display connection gone stale looks like.
                 // One fresh handle, one retry.
-                handle = match reopen_and_write(&open, &text) {
+                handle = match reopen_and_write(&open, kind, &text) {
                     Ok(fresh) => Some(fresh),
                     Err(err) => {
                         tracing::warn!(
@@ -142,7 +176,7 @@ fn serve<B: ClipboardBackend>(commands: &Receiver<Command>, open: impl Fn() -> i
                 };
             },
 
-            Command::Get(reply) => {
+            Command::Get(kind, reply) => {
                 if handle.is_none() {
                     // Silent where a write is loud. A machine with no display
                     // server reads as an empty clipboard, which is what makes a
@@ -154,7 +188,7 @@ fn serve<B: ClipboardBackend>(commands: &Receiver<Command>, open: impl Fn() -> i
                     handle = Some(fresh);
                 }
 
-                let read = handle.as_mut().expect("just opened").read();
+                let read = handle.as_mut().expect("just opened").read(kind);
                 let text = match read {
                     Ok(text) => text,
                     Err(err) => {
@@ -178,23 +212,33 @@ fn serve<B: ClipboardBackend>(commands: &Receiver<Command>, open: impl Fn() -> i
 
 fn reopen_and_write<B: ClipboardBackend>(
     open: &impl Fn() -> io::Result<B>,
+    kind: ClipboardKind,
     text: &str,
 ) -> io::Result<B> {
     let mut fresh = open()?;
-    fresh.write(text)?;
+    fresh.write(kind, text)?;
     Ok(fresh)
 }
 
-/// The OSC 52 set-clipboard escape carrying `text`.
+/// The OSC 52 set-clipboard escape carrying `text` for `kind`.
 ///
 /// Built rather than written so both the channel and the direct write emit the
 /// same bytes. The payload is base64 because the escape's grammar has no way to
 /// carry arbitrary text otherwise.
-fn osc52_sequence(text: &str) -> Vec<u8> {
+///
+/// The escape names its selection in one byte, `c` for the clipboard and `p`
+/// for the primary selection, which is the same split the display server draws.
+fn osc52_sequence(kind: ClipboardKind, text: &str) -> Vec<u8> {
     let payload = STANDARD.encode(text.as_bytes());
+    let selection: &[u8] = match kind {
+        ClipboardKind::System => b"c",
+        ClipboardKind::Primary => b"p",
+    };
 
     let mut sequence = Vec::with_capacity(payload.len() + 9);
-    sequence.extend_from_slice(b"\x1b]52;c;");
+    sequence.extend_from_slice(b"\x1b]52;");
+    sequence.extend_from_slice(selection);
+    sequence.extend_from_slice(b";");
     sequence.extend_from_slice(payload.as_bytes());
     sequence.extend_from_slice(b"\x1b\\");
     sequence
@@ -204,24 +248,24 @@ impl ClipboardHost for LocalClipboard {
     /// Queues the write and returns. The error reports only that the clipboard
     /// thread is gone, never what the display server made of the text, which
     /// is no longer known by the time this returns.
-    fn set(&self, text: &str) -> io::Result<()> {
+    fn set(&self, kind: ClipboardKind, text: &str) -> io::Result<()> {
         self.commands
-            .send(Command::Set(text.to_owned()))
+            .send(Command::Set(kind, text.to_owned()))
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "clipboard thread is gone"))
     }
 
     /// Blocks until the clipboard thread answers, since a paste has nothing to
     /// insert until it does.
-    fn get(&self) -> io::Result<Option<String>> {
+    fn get(&self, kind: ClipboardKind) -> io::Result<Option<String>> {
         let (reply, answer) = mpsc::channel();
-        if self.commands.send(Command::Get(reply)).is_err() {
+        if self.commands.send(Command::Get(kind, reply)).is_err() {
             return Ok(None);
         }
         Ok(answer.recv().unwrap_or(None))
     }
 
-    fn osc52_emit(&self, text: &str) -> io::Result<()> {
-        let sequence = osc52_sequence(text);
+    fn osc52_emit(&self, kind: ClipboardKind, text: &str) -> io::Result<()> {
+        let sequence = osc52_sequence(kind, text);
 
         let Some(sink) = &self.osc52_sink else {
             let mut stdout = io::stdout().lock();
@@ -238,7 +282,7 @@ impl ClipboardHost for LocalClipboard {
 #[cfg(test)]
 mod tests {
     use super::{osc52_sequence, serve, ClipboardBackend, Command, LocalClipboard};
-    use crate::host::ClipboardHost;
+    use crate::host::{ClipboardHost, ClipboardKind};
     use std::{
         io,
         sync::{mpsc, Arc, Mutex, MutexGuard},
@@ -296,7 +340,7 @@ mod tests {
     }
 
     impl ClipboardBackend for Fake {
-        fn write(&mut self, text: &str) -> io::Result<()> {
+        fn write(&mut self, _kind: ClipboardKind, text: &str) -> io::Result<()> {
             let mut state = self.state();
             if state.writes_before_failing > 0 {
                 state.writes_before_failing -= 1;
@@ -308,7 +352,7 @@ mod tests {
             Ok(())
         }
 
-        fn read(&mut self) -> io::Result<Option<String>> {
+        fn read(&mut self, _kind: ClipboardKind) -> io::Result<Option<String>> {
             let mut state = self.state();
             if state.reads_to_fail > 0 {
                 state.reads_to_fail -= 1;
@@ -321,7 +365,7 @@ mod tests {
     /// A [`Command::Get`] paired with the channel its answer lands on.
     fn get() -> (Command, mpsc::Receiver<Option<String>>) {
         let (reply, answer) = mpsc::channel();
-        (Command::Get(reply), answer)
+        (Command::Get(ClipboardKind::System, reply), answer)
     }
 
     /// A queued write is still a write the next read has to see, which is what
@@ -331,7 +375,10 @@ mod tests {
         let fake = Fake::default();
         let (read, answer) = get();
 
-        fake.drive(vec![Command::Set("copied".to_owned()), read]);
+        fake.drive(vec![
+            Command::Set(ClipboardKind::System, "copied".to_owned()),
+            read,
+        ]);
 
         assert_eq!(answer.recv(), Ok(Some("copied".to_owned())));
         assert_eq!(fake.state().opens, 1, "both commands shared one handle");
@@ -352,8 +399,8 @@ mod tests {
         let (read, answer) = get();
 
         fake.drive(vec![
-            Command::Set("first".to_owned()),
-            Command::Set("second".to_owned()),
+            Command::Set(ClipboardKind::System, "first".to_owned()),
+            Command::Set(ClipboardKind::System, "second".to_owned()),
             read,
         ]);
 
@@ -373,7 +420,10 @@ mod tests {
         fake.state().writes_to_fail = 2;
         let (read, answer) = get();
 
-        fake.drive(vec![Command::Set("lost".to_owned()), read]);
+        fake.drive(vec![
+            Command::Set(ClipboardKind::System, "lost".to_owned()),
+            read,
+        ]);
 
         assert_eq!(answer.recv(), Ok(None), "nothing was written");
         assert_eq!(fake.state().opens, 2, "one retry, not a loop");
@@ -390,7 +440,11 @@ mod tests {
         let (first, first_answer) = get();
         let (second, second_answer) = get();
 
-        fake.drive(vec![Command::Set("copied".to_owned()), first, second]);
+        fake.drive(vec![
+            Command::Set(ClipboardKind::System, "copied".to_owned()),
+            first,
+            second,
+        ]);
 
         assert_eq!(first_answer.recv(), Ok(None), "the failed read reads empty");
         assert_eq!(second_answer.recv(), Ok(Some("copied".to_owned())));
@@ -416,7 +470,10 @@ mod tests {
     /// drifting until a real terminal ignored the yank.
     #[test]
     fn the_escape_wraps_base64_text_in_osc_52() {
-        assert_eq!(osc52_sequence("hello"), b"\x1b]52;c;aGVsbG8=\x1b\\");
+        assert_eq!(
+            osc52_sequence(ClipboardKind::System, "hello"),
+            b"\x1b]52;c;aGVsbG8=\x1b\\"
+        );
     }
 
     /// A yank runs on the event loop, so the escape leaves as one message on
@@ -426,9 +483,14 @@ mod tests {
         let (tx, mut rx) = unbounded_channel();
         let clipboard = LocalClipboard::new(Some(tx));
 
-        clipboard.osc52_emit("hello").expect("sink is open");
+        clipboard
+            .osc52_emit(ClipboardKind::System, "hello")
+            .expect("sink is open");
 
-        assert_eq!(rx.try_recv(), Ok(osc52_sequence("hello")));
+        assert_eq!(
+            rx.try_recv(),
+            Ok(osc52_sequence(ClipboardKind::System, "hello"))
+        );
         assert!(rx.try_recv().is_err(), "the escape arrived whole");
     }
 
@@ -441,6 +503,8 @@ mod tests {
         let clipboard = LocalClipboard::new(Some(tx));
         drop(rx);
 
-        assert!(clipboard.osc52_emit("hello").is_err());
+        assert!(clipboard
+            .osc52_emit(ClipboardKind::System, "hello")
+            .is_err());
     }
 }

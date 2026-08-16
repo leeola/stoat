@@ -14,6 +14,7 @@ use crate::{
     },
     buffer::BufferId,
     editor_state::{EditorId, ScrollGlide},
+    host::ClipboardKind,
     minimap::emit::minimap_view_window,
     pane::{FocusTarget, View},
     render::commit_picker::MIN_LIST_ROWS,
@@ -699,6 +700,7 @@ fn handle_hover_selection_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<
                 crate::host::clipboard_copy(
                     stoat.clipboard_host().as_ref(),
                     stoat.env_host().as_ref(),
+                    ClipboardKind::System,
                     &text,
                 );
             }
@@ -970,7 +972,12 @@ fn handle_run_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16, row:
             if text.is_empty() {
                 return false;
             }
-            crate::host::clipboard_copy(clipboard_host.as_ref(), env_host.as_ref(), &text);
+            crate::host::clipboard_copy(
+                clipboard_host.as_ref(),
+                env_host.as_ref(),
+                ClipboardKind::System,
+                &text,
+            );
             false
         },
         _ => false,
@@ -1220,7 +1227,12 @@ fn handle_editor_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16, r
             if text.is_empty() {
                 return false;
             }
-            crate::host::clipboard_copy(clipboard_host.as_ref(), env_host.as_ref(), &text);
+            crate::host::clipboard_copy(
+                clipboard_host.as_ref(),
+                env_host.as_ref(),
+                ClipboardKind::System,
+                &text,
+            );
             false
         },
         _ => false,
@@ -1303,7 +1315,12 @@ fn handle_terminal_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16,
             if let Some(text) = text {
                 let clipboard_host = stoat.clipboard_host.clone();
                 let env_host = stoat.env_host.clone();
-                crate::host::clipboard_copy(clipboard_host.as_ref(), env_host.as_ref(), &text);
+                crate::host::clipboard_copy(
+                    clipboard_host.as_ref(),
+                    env_host.as_ref(),
+                    ClipboardKind::System,
+                    &text,
+                );
             }
             false
         },

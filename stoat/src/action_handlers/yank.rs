@@ -1,5 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    host::ClipboardKind,
     pane::View,
     paths,
     register::Register,
@@ -58,6 +59,7 @@ pub(crate) fn write_fragments_to_register(
             crate::host::clipboard_copy(
                 stoat.clipboard_host().as_ref(),
                 stoat.env_host().as_ref(),
+                ClipboardKind::System,
                 &joined,
             );
         },
@@ -271,6 +273,7 @@ pub(super) fn yank_to_clipboard(stoat: &mut Stoat) -> UpdateEffect {
     crate::host::clipboard_copy(
         stoat.clipboard_host().as_ref(),
         stoat.env_host().as_ref(),
+        ClipboardKind::System,
         &fragments.join("\n"),
     );
     UpdateEffect::None
@@ -288,6 +291,7 @@ pub(super) fn yank_main_to_clipboard(stoat: &mut Stoat) -> UpdateEffect {
     crate::host::clipboard_copy(
         stoat.clipboard_host().as_ref(),
         stoat.env_host().as_ref(),
+        ClipboardKind::System,
         &content,
     );
     UpdateEffect::None
@@ -302,7 +306,7 @@ pub(super) fn paste_clipboard_before(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 fn paste_clipboard(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
-    let content = match stoat.clipboard_host().get() {
+    let content = match stoat.clipboard_host().get(ClipboardKind::System) {
         Ok(Some(text)) => text,
         Ok(None) => return UpdateEffect::None,
         Err(err) => {
@@ -422,7 +426,7 @@ pub(crate) fn read_register_fragments(
         // register insert and `replace_with_yanked`. The in-memory registers
         // below hold buffer-sourced text, which is already LF.
         Register::Clipboard => {
-            let text = match stoat.clipboard_host().get() {
+            let text = match stoat.clipboard_host().get(ClipboardKind::System) {
                 Ok(text) => text?,
                 Err(err) => {
                     tracing::warn!(target: "stoat::yank", ?err, "clipboard read failed");
@@ -647,7 +651,7 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
 #[cfg(test)]
 mod tests {
     use crate::{
-        host::ClipboardHost,
+        host::{ClipboardHost, ClipboardKind},
         test_harness::{keys, TestHarness},
     };
     use crossterm::event::{Event, KeyCode};
@@ -1353,7 +1357,9 @@ mod tests {
     fn paste_clipboard_after_inserts_clipboard_content() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.fake_clipboard().set("xyz").unwrap();
+        h.fake_clipboard()
+            .set(ClipboardKind::System, "xyz")
+            .unwrap();
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardAfter);
         assert_eq!(buffer_text(&h, &path), "abcxyz\n");
@@ -1371,7 +1377,9 @@ mod tests {
     fn pasting_crlf_clipboard_text_normalizes_it() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.fake_clipboard().set("x\r\ny\r\n").unwrap();
+        h.fake_clipboard()
+            .set(ClipboardKind::System, "x\r\ny\r\n")
+            .unwrap();
         h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardAfter);
         assert!(
@@ -1386,7 +1394,9 @@ mod tests {
     fn inserting_the_clipboard_register_normalizes_crlf() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.fake_clipboard().set("x\r\ny\r\n").unwrap();
+        h.fake_clipboard()
+            .set(ClipboardKind::System, "x\r\ny\r\n")
+            .unwrap();
         h.type_keys("escape");
         h.type_keys("\" * p");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
@@ -1426,7 +1436,9 @@ mod tests {
     fn paste_clipboard_before_inserts_clipboard_content() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.fake_clipboard().set("xyz").unwrap();
+        h.fake_clipboard()
+            .set(ClipboardKind::System, "xyz")
+            .unwrap();
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardBefore);
         assert_eq!(buffer_text(&h, &path), "xyzabc\n");
@@ -1809,7 +1821,9 @@ mod tests {
     fn paste_clipboard_register_reads_from_clipboard_host() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.fake_clipboard().set("xyz").unwrap();
+        h.fake_clipboard()
+            .set(ClipboardKind::System, "xyz")
+            .unwrap();
         h.type_keys("escape");
         h.type_keys("\" * p");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
@@ -1827,7 +1841,7 @@ mod tests {
         h.type_keys("\" + y");
 
         assert_eq!(
-            h.fake_clipboard().get().unwrap(),
+            h.fake_clipboard().get(ClipboardKind::System).unwrap(),
             Some("abc\ndef".to_string()),
             "the host still receives the one string it holds",
         );
@@ -1854,7 +1868,9 @@ mod tests {
         make_two_selections(&mut h);
         h.type_keys("\" + y");
 
-        h.fake_clipboard().set("from another app").unwrap();
+        h.fake_clipboard()
+            .set(ClipboardKind::System, "from another app")
+            .unwrap();
         assert_eq!(
             super::read_register_fragments(&mut h.stoat, crate::register::Register::Clipboard),
             Some(vec!["from another app".to_string()]),
@@ -2180,7 +2196,9 @@ mod tests {
     fn space_quote_r_replaces_from_clipboard() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.fake_clipboard().set("xyz").unwrap();
+        h.fake_clipboard()
+            .set(ClipboardKind::System, "xyz")
+            .unwrap();
         h.stoat.registers.write(
             crate::register::Register::Unnamed,
             vec!["unnamed".to_string()],

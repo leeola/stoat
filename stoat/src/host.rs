@@ -19,7 +19,9 @@ pub mod local;
 pub mod lsp;
 pub mod terminal;
 
-pub use clipboard::{clipboard_copy, osc52_should_emit, ClipboardHost, NoopClipboard};
+pub use clipboard::{
+    clipboard_copy, osc52_should_emit, ClipboardHost, ClipboardKind, NoopClipboard,
+};
 #[cfg(test)]
 pub use fake::{
     change_params, completion_params, definition_params, document_highlight_params, hover_params,

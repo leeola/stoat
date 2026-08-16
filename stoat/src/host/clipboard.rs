@@ -1,6 +1,23 @@
 use crate::host::EnvHost;
 use std::io;
 
+/// Which of the two selections a clipboard operation addresses.
+///
+/// X11 and Wayland carry both at once. An explicit copy goes to the clipboard,
+/// while the primary selection follows whatever was last selected and pastes on
+/// a middle click, so the two hold different text and neither clobbers the
+/// other.
+///
+/// Platforms with a single clipboard treat both as that one, which is why the
+/// distinction is a hint to the host rather than a promise to the caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ClipboardKind {
+    /// The clipboard an explicit copy goes to, addressed by `+`.
+    System,
+    /// The primary selection, addressed by `*`.
+    Primary,
+}
+
 /// System clipboard write surface.
 ///
 /// Production code routes clipboard writes through this trait so tests
@@ -8,15 +25,16 @@ use std::io;
 /// real OS clipboard. UTF-8-only by design: callers serialize into a
 /// `&str` before invoking [`Self::set`].
 pub trait ClipboardHost: Send + Sync {
-    /// Replaces the system clipboard contents with `text`.
-    fn set(&self, text: &str) -> io::Result<()>;
+    /// Replaces `kind`'s contents with `text`.
+    fn set(&self, kind: ClipboardKind, text: &str) -> io::Result<()>;
 
-    /// Returns the current clipboard contents. `Ok(None)` covers the
+    /// Returns `kind`'s current contents. `Ok(None)` covers the
     /// "no clipboard available" case (headless servers, CI without a
     /// display server) so callers fall back to a no-op rather than
     /// surface the platform error. The default impl returns
     /// `Ok(None)` for hosts without a real backing store.
-    fn get(&self) -> io::Result<Option<String>> {
+    fn get(&self, kind: ClipboardKind) -> io::Result<Option<String>> {
+        let _ = kind;
         Ok(None)
     }
 
@@ -25,8 +43,8 @@ pub trait ClipboardHost: Send + Sync {
     /// default impl is a no-op for hosts without a stdout-bound
     /// terminal (the test [`crate::host::FakeClipboard`] overrides
     /// this to record the emit).
-    fn osc52_emit(&self, text: &str) -> io::Result<()> {
-        let _ = text;
+    fn osc52_emit(&self, kind: ClipboardKind, text: &str) -> io::Result<()> {
+        let _ = (kind, text);
         Ok(())
     }
 }
@@ -52,8 +70,13 @@ pub fn osc52_should_emit(env: &dyn EnvHost) -> bool {
 ///
 /// Every clipboard write goes through here so the local set and the OSC 52
 /// forwarding never drift apart.
-pub fn clipboard_copy(clipboard: &dyn ClipboardHost, env: &dyn EnvHost, text: &str) {
-    if let Err(err) = clipboard.set(text) {
+pub fn clipboard_copy(
+    clipboard: &dyn ClipboardHost,
+    env: &dyn EnvHost,
+    kind: ClipboardKind,
+    text: &str,
+) {
+    if let Err(err) = clipboard.set(kind, text) {
         tracing::warn!(
             target: "stoat::host::clipboard",
             error = %err,
@@ -62,7 +85,7 @@ pub fn clipboard_copy(clipboard: &dyn ClipboardHost, env: &dyn EnvHost, text: &s
     }
 
     if osc52_should_emit(env)
-        && let Err(err) = clipboard.osc52_emit(text)
+        && let Err(err) = clipboard.osc52_emit(kind, text)
     {
         tracing::warn!(
             target: "stoat::host::clipboard",
@@ -78,9 +101,10 @@ pub fn clipboard_copy(clipboard: &dyn ClipboardHost, env: &dyn EnvHost, text: &s
 pub struct NoopClipboard;
 
 impl ClipboardHost for NoopClipboard {
-    fn set(&self, text: &str) -> io::Result<()> {
+    fn set(&self, kind: ClipboardKind, text: &str) -> io::Result<()> {
         tracing::trace!(
             target: "stoat::host::clipboard",
+            ?kind,
             len = text.len(),
             "clipboard set ignored (NoopClipboard)"
         );

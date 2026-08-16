@@ -1,4 +1,4 @@
-use crate::host::ClipboardHost;
+use crate::host::{ClipboardHost, ClipboardKind};
 use std::{io, sync::Mutex};
 
 /// In-memory [`ClipboardHost`] for tests. Records every
@@ -6,23 +6,33 @@ use std::{io, sync::Mutex};
 /// [`writes`](Self::writes) returns in call order, and every
 /// [`osc52_emit`](ClipboardHost::osc52_emit) call into a parallel
 /// buffer surfaced via [`osc52_emits`](Self::osc52_emits).
+///
+/// The two selections are recorded apart, the way a display server keeps them,
+/// so a test can tell which one a yank reached.
 pub struct FakeClipboard {
-    writes: Mutex<Vec<String>>,
+    system_writes: Mutex<Vec<String>>,
+    primary_writes: Mutex<Vec<String>>,
     osc52_emits: Mutex<Vec<String>>,
 }
 
 impl FakeClipboard {
     pub fn new() -> Self {
         Self {
-            writes: Mutex::new(Vec::new()),
+            system_writes: Mutex::new(Vec::new()),
+            primary_writes: Mutex::new(Vec::new()),
             osc52_emits: Mutex::new(Vec::new()),
         }
     }
 
-    /// Snapshots the recorded write log in call order. Each entry is
+    /// Snapshots the system clipboard's write log in call order. Each entry is
     /// the `text` argument from a [`ClipboardHost::set`] call.
     pub fn writes(&self) -> Vec<String> {
-        self.writes.lock().expect("poisoned").clone()
+        self.writes_for(ClipboardKind::System)
+    }
+
+    /// Snapshots one selection's write log in call order.
+    pub fn writes_for(&self, kind: ClipboardKind) -> Vec<String> {
+        self.log(kind).lock().expect("poisoned").clone()
     }
 
     /// Snapshots the recorded OSC 52 emit log in call order. Each
@@ -30,6 +40,13 @@ impl FakeClipboard {
     /// [`ClipboardHost::osc52_emit`] call.
     pub fn osc52_emits(&self) -> Vec<String> {
         self.osc52_emits.lock().expect("poisoned").clone()
+    }
+
+    fn log(&self, kind: ClipboardKind) -> &Mutex<Vec<String>> {
+        match kind {
+            ClipboardKind::System => &self.system_writes,
+            ClipboardKind::Primary => &self.primary_writes,
+        }
     }
 }
 
@@ -40,16 +57,19 @@ impl Default for FakeClipboard {
 }
 
 impl ClipboardHost for FakeClipboard {
-    fn set(&self, text: &str) -> io::Result<()> {
-        self.writes.lock().expect("poisoned").push(text.to_owned());
+    fn set(&self, kind: ClipboardKind, text: &str) -> io::Result<()> {
+        self.log(kind)
+            .lock()
+            .expect("poisoned")
+            .push(text.to_owned());
         Ok(())
     }
 
-    fn get(&self) -> io::Result<Option<String>> {
-        Ok(self.writes.lock().expect("poisoned").last().cloned())
+    fn get(&self, kind: ClipboardKind) -> io::Result<Option<String>> {
+        Ok(self.log(kind).lock().expect("poisoned").last().cloned())
     }
 
-    fn osc52_emit(&self, text: &str) -> io::Result<()> {
+    fn osc52_emit(&self, _kind: ClipboardKind, text: &str) -> io::Result<()> {
         self.osc52_emits
             .lock()
             .expect("poisoned")
@@ -65,9 +85,9 @@ mod tests {
     #[test]
     fn records_writes_in_order() {
         let cb = FakeClipboard::new();
-        cb.set("first").unwrap();
-        cb.set("second").unwrap();
-        cb.set("third").unwrap();
+        cb.set(ClipboardKind::System, "first").unwrap();
+        cb.set(ClipboardKind::System, "second").unwrap();
+        cb.set(ClipboardKind::System, "third").unwrap();
         assert_eq!(cb.writes(), vec!["first", "second", "third"]);
     }
 
@@ -81,8 +101,8 @@ mod tests {
     #[test]
     fn records_osc52_emits_in_order() {
         let cb = FakeClipboard::new();
-        cb.osc52_emit("alpha").unwrap();
-        cb.osc52_emit("beta").unwrap();
+        cb.osc52_emit(ClipboardKind::System, "alpha").unwrap();
+        cb.osc52_emit(ClipboardKind::System, "beta").unwrap();
         assert_eq!(cb.osc52_emits(), vec!["alpha", "beta"]);
         assert_eq!(cb.writes(), Vec::<String>::new());
     }

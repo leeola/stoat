@@ -16,7 +16,8 @@ use crate::{
     file_finder::{FileFinder, FinderPathCache},
     help::Help,
     host::{
-        EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspHost, NoopFsWatcher,
+        ClipboardKind, EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspHost,
+        NoopFsWatcher,
     },
     keymap::{Keymap, ResolvedAction, StateValue},
     keymap_state::{
@@ -5903,7 +5904,12 @@ impl Stoat {
                     }
                 }
                 for text in block.grid.clipboard_writes.drain(..) {
-                    crate::host::clipboard_copy(clipboard_host.as_ref(), env_host.as_ref(), &text);
+                    crate::host::clipboard_copy(
+                        clipboard_host.as_ref(),
+                        env_host.as_ref(),
+                        ClipboardKind::System,
+                        &text,
+                    );
                 }
                 // Adopt the latest OSC 7 cwd report. Captured before the
                 // alt-screen branch reborrows run_state below.
@@ -5955,7 +5961,12 @@ impl Stoat {
                     self.write_to_term(agent_id, &replies);
                 }
                 for text in clipboard_writes {
-                    crate::host::clipboard_copy(clipboard_host.as_ref(), env_host.as_ref(), &text);
+                    crate::host::clipboard_copy(
+                        clipboard_host.as_ref(),
+                        env_host.as_ref(),
+                        ClipboardKind::System,
+                        &text,
+                    );
                 }
                 if visible {
                     self.pty_dirty = true;
