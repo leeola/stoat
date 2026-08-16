@@ -343,6 +343,11 @@ impl SelectionsCollection {
 
     /// Drop the primary selection, answering whether one went.
     ///
+    /// The primary passes to the selection that followed the removed one in
+    /// document order, or to the new last when the removed one was last. The
+    /// user's next command therefore acts on the selection under where they
+    /// were rather than wherever the highest id happened to land.
+    ///
     /// The collection always holds at least one selection, so a lone selection
     /// stays and the answer is `false`. The caller reports that refusal, which
     /// is otherwise indistinguishable from a keypress that never arrived.
@@ -351,13 +356,19 @@ impl SelectionsCollection {
             return false;
         }
         let primary_id = self.newest_anchor().id;
-        let kept = self
+        let removed_index = self.newest;
+        let kept: Arc<[Selection<Anchor>]> = self
             .disjoint
             .iter()
             .filter(|s| s.id != primary_id)
             .cloned()
             .collect();
+
+        // Everything past the removed selection slides down one, so holding the
+        // index still lands on what followed it.
+        let promoted = removed_index.min(kept.len().saturating_sub(1));
         self.install(kept);
+        self.make_primary_at(promoted);
         true
     }
 
@@ -1840,13 +1851,82 @@ mod tests {
             &snapshot,
         );
         assert_eq!(collection.all_anchors().len(), 3);
-        let dropped_id = collection.newest_anchor().id;
 
         assert!(collection.remove_primary(), "one selection went");
 
-        let remaining_ids: Vec<usize> = collection.all_anchors().iter().map(|s| s.id).collect();
-        assert_eq!(remaining_ids, vec![0, 1]);
-        assert!(!remaining_ids.contains(&dropped_id));
+        // By offset rather than by id, since the promotion re-mints the block.
+        let starts: Vec<usize> = collection
+            .all_anchors()
+            .iter()
+            .map(|s| snapshot.resolve_anchor(&s.start))
+            .collect();
+        assert_eq!(starts, vec![0, 2], "the primary at offset 4 went");
+    }
+
+    /// The primary passes to the selection that followed the removed one,
+    /// which is where the user left off rather than wherever the highest id
+    /// sits.
+    #[test]
+    fn remove_primary_promotes_the_next_in_document_order() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+        collection.insert_cursor(
+            snapshot.anchor_at(2, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        collection.insert_cursor(
+            snapshot.anchor_at(4, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+
+        // Rotating puts the primary at the front, where the highest surviving
+        // id and the next in document order part company.
+        collection.rotate_primary_by(true, 1);
+        assert_eq!(
+            snapshot.resolve_anchor(&collection.newest_anchor().start),
+            0,
+            "test setup: the primary is the first of three",
+        );
+
+        assert!(collection.remove_primary());
+        assert_eq!(
+            snapshot.resolve_anchor(&collection.newest_anchor().start),
+            2,
+            "the selection after the removed one takes the primary, not the last",
+        );
+    }
+
+    /// Removing the document-last primary has nothing after it, so the primary
+    /// steps back to the new last.
+    #[test]
+    fn remove_primary_at_the_end_promotes_the_new_last() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+        collection.insert_cursor(
+            snapshot.anchor_at(2, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        collection.insert_cursor(
+            snapshot.anchor_at(4, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        assert_eq!(
+            snapshot.resolve_anchor(&collection.newest_anchor().start),
+            4,
+            "test setup: the primary is the last of three",
+        );
+
+        assert!(collection.remove_primary());
+        assert_eq!(
+            snapshot.resolve_anchor(&collection.newest_anchor().start),
+            2,
+        );
     }
 
     #[test]
