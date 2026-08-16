@@ -215,6 +215,125 @@ fn resolve_key(key: &Key) -> Option<KeyCode> {
     }
 }
 
+/// Write `key` as one token of the grammar config.stcfg binds with.
+///
+/// The same spelling either way round, so a macro a user reads out of a
+/// register looks like the keybindings they already write. `-` spells `minus`
+/// because the bare character is the modifier separator, which is the call
+/// [`resolve_key`] already makes for the config grammar.
+pub fn key_to_token(key: KeyEvent) -> String {
+    let base = match key.code {
+        KeyCode::Char(' ') => "space".to_string(),
+        KeyCode::Char('-') => "minus".to_string(),
+        KeyCode::Char('+') => "plus".to_string(),
+        KeyCode::Char(c) => c.to_string(),
+        KeyCode::Esc => "escape".to_string(),
+        KeyCode::Enter => "enter".to_string(),
+        KeyCode::Tab => "tab".to_string(),
+        KeyCode::BackTab => "backtab".to_string(),
+        KeyCode::Backspace => "backspace".to_string(),
+        KeyCode::Delete => "delete".to_string(),
+        KeyCode::Up => "up".to_string(),
+        KeyCode::Down => "down".to_string(),
+        KeyCode::Left => "left".to_string(),
+        KeyCode::Right => "right".to_string(),
+        KeyCode::Home => "home".to_string(),
+        KeyCode::End => "end".to_string(),
+        KeyCode::PageUp => "pageup".to_string(),
+        KeyCode::PageDown => "pagedown".to_string(),
+        KeyCode::Insert => "insert".to_string(),
+        KeyCode::F(n) => format!("f{n}"),
+        _ => return String::new(),
+    };
+
+    let mut parts = Vec::new();
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        parts.push("ctrl");
+    }
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        parts.push("shift");
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        parts.push("alt");
+    }
+    parts.push(&base);
+    parts.join("-")
+}
+
+/// Read one token written by [`key_to_token`] back into a key.
+///
+/// `None` for anything the grammar does not spell, so a register holding text
+/// that is not a macro is refused whole rather than replayed as the keys that
+/// happened to parse.
+pub fn token_to_key(token: &str) -> Option<KeyEvent> {
+    let mut modifiers = KeyModifiers::empty();
+    let mut rest = token;
+    while let Some((prefix, tail)) = rest.split_once('-') {
+        let modifier = match prefix {
+            "ctrl" => KeyModifiers::CONTROL,
+            "shift" => KeyModifiers::SHIFT,
+            "alt" => KeyModifiers::ALT,
+            // Not a modifier, so the split found the key's own name. `minus`
+            // reaches here rather than through the bare character.
+            _ => break,
+        };
+        if modifiers.contains(modifier) {
+            return None;
+        }
+        modifiers |= modifier;
+        rest = tail;
+    }
+
+    let code = match rest {
+        "space" => KeyCode::Char(' '),
+        "minus" => KeyCode::Char('-'),
+        "plus" => KeyCode::Char('+'),
+        "escape" => KeyCode::Esc,
+        "enter" => KeyCode::Enter,
+        "tab" => KeyCode::Tab,
+        "backtab" => KeyCode::BackTab,
+        "backspace" => KeyCode::Backspace,
+        "delete" => KeyCode::Delete,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "pageup" => KeyCode::PageUp,
+        "pagedown" => KeyCode::PageDown,
+        "insert" => KeyCode::Insert,
+        s if s.len() > 1 && s.starts_with('f') => KeyCode::F(s[1..].parse::<u8>().ok()?),
+        s => {
+            let mut chars = s.chars();
+            let c = chars.next()?;
+            if chars.next().is_some() {
+                return None;
+            }
+            KeyCode::Char(c)
+        },
+    };
+    Some(KeyEvent::new(code, modifiers))
+}
+
+/// Write a whole key sequence as the text a macro register holds.
+///
+/// Tokens are separated by spaces because stoat spells its named keys as words,
+/// so `escape` and `a` run together are one token rather than two.
+pub fn macro_to_text(keys: &[KeyEvent]) -> String {
+    keys.iter()
+        .copied()
+        .map(key_to_token)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Read a macro register's text back into keys, or `None` when any token is
+/// not one [`key_to_token`] writes.
+pub fn macro_from_text(text: &str) -> Option<Vec<KeyEvent>> {
+    text.split_whitespace().map(token_to_key).collect()
+}
+
 pub fn evaluate(predicate: &Predicate, state: &dyn KeymapState) -> bool {
     match predicate {
         Predicate::Eq(field, val) => match state.get(&field.node) {
@@ -755,6 +874,93 @@ mod tests {
             let ck = CompiledKey::from_key_part(&kp).expect("should compile");
             assert_eq!(ck.code, expected, "failed for {name}");
         }
+    }
+
+    /// Every key a macro records has to come back the same key, or a replay
+    /// runs something other than what was recorded.
+    ///
+    /// The awkward ones are the characters the grammar spells as words. `-` is
+    /// the modifier separator, and a space separates tokens rather than being
+    /// one.
+    #[test]
+    fn every_key_round_trips_through_its_token() {
+        let named = [
+            KeyCode::Char(' '),
+            KeyCode::Char('-'),
+            KeyCode::Char('+'),
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Backspace,
+            KeyCode::Delete,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Insert,
+            KeyCode::F(1),
+            KeyCode::F(12),
+        ];
+        let plain = "aZ0.<>/\\\"'".chars().map(KeyCode::Char);
+
+        let every_modifier = [
+            KeyModifiers::NONE,
+            KeyModifiers::CONTROL,
+            KeyModifiers::SHIFT,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+            KeyModifiers::SHIFT | KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT,
+        ];
+
+        for code in named.into_iter().chain(plain) {
+            for modifiers in every_modifier {
+                let key = KeyEvent::new(code, modifiers);
+                let token = key_to_token(key);
+                assert_eq!(
+                    token_to_key(&token),
+                    Some(key),
+                    "{token:?} did not come back as {code:?} with {modifiers:?}",
+                );
+            }
+        }
+    }
+
+    /// A register holding something other than a macro is refused whole, so a
+    /// replay never runs the subset of a sentence that happens to parse.
+    #[test]
+    fn text_that_is_not_a_macro_parses_to_nothing() {
+        for text in ["hello there", "ctrl-", "-a", "ctrl-ctrl-a", "fx", "<>"] {
+            assert_eq!(macro_from_text(text), None, "{text:?} is not a macro");
+        }
+        assert_eq!(
+            macro_from_text("f"),
+            Some(vec![KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)]),
+            "a lone f is the letter, not a truncated function key",
+        );
+    }
+
+    /// Whitespace separates tokens, so a sequence survives its own named keys
+    /// sitting next to plain characters.
+    #[test]
+    fn a_key_sequence_round_trips_as_register_text() {
+        let keys = vec![
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        ];
+        let text = macro_to_text(&keys);
+        assert_eq!(text, "c w x escape ctrl-a space");
+        assert_eq!(macro_from_text(&text), Some(keys));
     }
 
     #[test]
