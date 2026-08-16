@@ -12462,9 +12462,18 @@ mod tests {
 
     /// Quitting on an unbound Ctrl-C is the behavior the cascade arms carve out
     /// of, so it has to survive them.
+    ///
+    /// A pane holding no view binds nothing, which is what leaves the fallback
+    /// reachable. Editor and run panes both bind the key, so neither reaches
+    /// here.
     #[test]
     fn ctrl_c_with_no_modal_open_still_quits() {
         let mut h = Stoat::test();
+        {
+            let ws = h.stoat.active_workspace_mut();
+            let focused = ws.panes.focus();
+            ws.panes.pane_mut(focused).view = View::Label("nothing".into());
+        }
 
         assert!(matches!(h.stoat.handle_key(ctrl_c()), UpdateEffect::Quit));
     }
@@ -12568,6 +12577,54 @@ mod tests {
         assert!(
             !matches!(effect, UpdateEffect::Quit),
             "a bound Ctrl-C routes to the keymap rather than quitting"
+        );
+    }
+
+    /// A run pane in normal mode keeps its interrupt.
+    ///
+    /// Bindings resolve by predicate-atom count, and a run pane in normal mode
+    /// satisfies `mode == normal` as readily as an editor does. An editor-only
+    /// Ctrl-c is what keeps the two apart, since a `mode == normal` one
+    /// outranks `pane == run` and swallows the interrupt. The sibling test
+    /// above leaves the run pane in insert mode, where the question never
+    /// arises.
+    #[test]
+    fn a_run_pane_in_normal_mode_still_interrupts_on_ctrl_c() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.stoat
+            .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(h.stoat.focused_mode(), "normal", "the run pane left insert");
+
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        let actions = h
+            .stoat
+            .keymap
+            .lookup(
+                &state,
+                &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            )
+            .expect("Ctrl-C is bound in a run pane");
+        assert!(
+            actions.iter().any(|a| a.name == "RunInterrupt"),
+            "run-pane Ctrl-C stays the interrupt in normal mode, got {actions:?}"
+        );
+    }
+
+    /// Ctrl-C in an editor comments the selection. Unbound it quit the editor,
+    /// which is the worst answer available for a key a user reaches for while
+    /// editing.
+    #[test]
+    fn ctrl_c_in_an_editor_does_not_quit() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "let x = 1;\n");
+
+        let effect = h
+            .stoat
+            .handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(
+            !matches!(effect, UpdateEffect::Quit),
+            "Ctrl-C is bound in an editor now, so it never reaches the quit fallback",
         );
     }
 

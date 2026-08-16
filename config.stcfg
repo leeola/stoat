@@ -587,6 +587,16 @@ on key {
         a -> [SelectTextobjectAround(), SetMode(select)];
         i -> [SelectTextobjectInner(), SetMode(select)];
     }
+    # Ctrl-c carries the editor pane in its predicate so the run pane keeps its
+    # own. A run pane has no editor, so its mode reads as `normal`, and a plain
+    # `mode == normal` binding would outrank `pane == run` on atom count and
+    # swallow the interrupt.
+    !modal && mode == normal && pane == editor {
+        Ctrl-c -> ToggleComments();
+    }
+    mode == select && pane == editor {
+        Ctrl-c -> [ToggleComments(), SetMode(normal)];
+    }
     mode == select {
         Escape -> SetMode(normal);
         v -> SetMode(normal);

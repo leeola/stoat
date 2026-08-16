@@ -3763,6 +3763,40 @@ fn toggle_comments_rust_single_line_inserts_prefix() {
     assert_eq!(focused_buffer_text(&mut h), "// let x = 42;\n");
 }
 
+/// The handler and its tests predate any key reaching them, so the binding is
+/// what the user actually has. Driving the key rather than the action is what
+/// tells the two apart.
+#[test]
+fn toggle_comments_via_ctrl_c_binding() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "let x = 42;\n");
+    h.open_file(&path);
+
+    h.type_keys("ctrl-c");
+    assert_eq!(focused_buffer_text(&mut h), "// let x = 42;\n");
+
+    h.type_keys("ctrl-c");
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "let x = 42;\n",
+        "the same key toggles back",
+    );
+}
+
+/// Select mode leaves for normal after the toggle, so the comment is not still
+/// selected and the next motion moves rather than extends.
+#[test]
+fn toggle_comments_from_select_mode_returns_to_normal() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "let x = 42;\n");
+    h.open_file(&path);
+
+    h.type_keys("v l l");
+    h.type_keys("ctrl-c");
+    assert_eq!(focused_buffer_text(&mut h), "// let x = 42;\n");
+    assert_eq!(h.stoat.focused_mode(), "normal");
+}
+
 #[test]
 fn toggle_comments_rust_round_trip() {
     let mut h = TestHarness::with_size(40, 5);
