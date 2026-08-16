@@ -7253,3 +7253,27 @@ fn select_mode_alt_a_selects_all_siblings() {
     h.type_keys("Alt-a");
     assert_eq!(h.selection_spans(), vec![(0, 9, false), (10, 19, false)]);
 }
+
+/// The two chord keys select mode was missing. Both arm a pending state rather
+/// than editing, so the arming is what says the binding reached its handler.
+#[test]
+fn select_mode_q_arms_the_macro_replay() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "abc\n");
+    h.open_file(&path);
+    h.type_keys("v l");
+
+    h.type_keys("q");
+    assert!(h.stoat.pending_macro_replay.is_some());
+}
+
+#[test]
+fn select_mode_quote_arms_the_register_select() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "abc\n");
+    h.open_file(&path);
+    h.type_keys("v l");
+
+    h.type_keys("\"");
+    assert!(h.stoat.pending_register_select);
+}

@@ -293,7 +293,10 @@ on init {
 # with `0 -> GotoTab(10)` routes 0 to the tenth item while 1-9 flow through
 # `$num`.
 on key {
-    mode != normal && mode != goto && mode != space {
+    # The modes named here bind `?` to something of their own. This block
+    # outranks theirs on atom count, so a mode that takes the key has to be
+    # excluded here rather than out-specified there.
+    mode != normal && mode != goto && mode != select_goto && mode != space {
         ? -> OpenHelp();
     }
     modal == help && mode == normal {
@@ -652,7 +655,14 @@ on key {
         ; -> CollapseSelection();
         Alt-; -> FlipSelections();
         Alt-: -> EnsureSelectionsForward();
+        , -> KeepPrimarySelection();
+        Alt-, -> RemovePrimarySelection();
+        ( -> RotateSelectionsBackward();
+        ) -> RotateSelectionsForward();
+        C -> AddSelectionBelow();
+        Alt-C -> AddSelectionAbove();
         S -> SplitSelection();
+        Alt-s -> SplitSelectionOnNewline();
         s -> SelectRegex();
         x -> SelectLineBelow();
         X -> ExtendToLineBounds();
@@ -676,6 +686,9 @@ on key {
         Alt-Minus -> MergeSelections();
         Alt-_ -> MergeConsecutiveSelections();
         Q -> RecordMacro();
+        q -> ReplayMacro();
+        " -> SelectRegister();
+        Ctrl-s -> CommitUndoCheckpoint();
         > -> [IndentSelection(), SetMode(normal)];
         < -> [UnindentSelection(), SetMode(normal)];
         = -> FormatSelections();
@@ -708,6 +721,7 @@ on key {
     }
     mode == select_goto {
         Escape -> SetMode(select);
+        ? -> [OpenReverseSearchInput(), SetMode(select)];
         i -> [ExtendGotoFirstNonwhitespace(), SetMode(select)];
         j -> [ExtendGotoLastLine(), SetMode(select)];
         k -> [ExtendGotoFileStart(), SetMode(select)];

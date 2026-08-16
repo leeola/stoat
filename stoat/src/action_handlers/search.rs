@@ -552,6 +552,7 @@ pub(crate) fn compile_cursor_regex(pattern: &str, smart_case: bool) -> Option<Cu
 
 #[cfg(test)]
 mod tests {
+    use super::SearchDirection;
     use crate::test_harness::TestHarness;
     use std::path::PathBuf;
     use stoat_action::{self as action, OpenFile};
@@ -631,6 +632,42 @@ mod tests {
         h.type_text("abc");
         h.type_keys("enter");
         assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
+    }
+
+    /// The goto menu's select flavor reaches reverse search, and the prompt
+    /// reads its origin through `in_select_mode`, which answers yes for the
+    /// `select_goto` the chord sits in when the key lands.
+    #[test]
+    fn select_goto_question_opens_a_reverse_search_that_extends() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc\n");
+        h.type_keys("v l l");
+
+        h.type_keys("g");
+        assert_eq!(h.stoat.focused_mode(), "select_goto", "menu entered");
+
+        h.type_keys("?");
+        let state = h.stoat.search_input.as_ref().expect("prompt opened");
+        assert_eq!(state.direction, SearchDirection::Reverse);
+        assert!(state.extend, "opened from select mode, so the match joins");
+    }
+
+    #[test]
+    /// The help binding covers every mode that does not claim `?`, and it
+    /// outranks a mode block on atom count, so this says the normal goto menu
+    /// still reaches reverse search now that `select_goto` has joined its
+    /// exclusion list.
+    fn goto_question_opens_a_reverse_search() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc\n");
+
+        h.type_keys("g ?");
+        let state = h.stoat.search_input.as_ref().expect("prompt opened");
+        assert_eq!(state.direction, SearchDirection::Reverse);
+        assert!(
+            !state.extend,
+            "opened from normal mode, so the match replaces"
+        );
     }
 
     #[test]
