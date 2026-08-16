@@ -2061,6 +2061,34 @@ fn extend_to_last_line_grows_forward() {
     assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 9, false)]);
 }
 
+/// The same key with a count reaches the line the count names, where before it
+/// spent the count on nothing and ran to the end of the file.
+#[test]
+fn count_prefix_extend_to_last_line_reaches_that_line() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\njkl\n");
+    stoat.pending_count = Some(3);
+
+    dispatch(&mut stoat, &ExtendToLastLine);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(0, 9, false)],
+        "through the start of line three, not the end of the file"
+    );
+}
+
+/// A count past the last line lands on it rather than running off the buffer,
+/// and the blank row a trailing newline opens is not a line to land on.
+#[test]
+fn count_prefix_extend_to_last_line_clamps() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc\ndef\n");
+    stoat.pending_count = Some(99);
+
+    dispatch(&mut stoat, &ExtendToLastLine);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 5, false)]);
+}
+
 #[test]
 fn extend_to_file_start_reverses_from_end() {
     let mut stoat = stoat();

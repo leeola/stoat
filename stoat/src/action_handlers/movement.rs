@@ -4683,9 +4683,28 @@ fn scan_bracket_match(
     }
 }
 
-pub(super) fn goto_line_number(stoat: &mut Stoat) -> UpdateEffect {
+/// The last row a line-numbered jump lands on.
+///
+/// A trailing newline opens a row holding nothing, which is a cursor position
+/// but not a line anyone names, so `G` on a file ending in a newline reaches
+/// the last row with text on it.
+fn last_addressable_row(rope: &Rope) -> u32 {
+    let last = rope.max_point().row;
+    match last > 0 && rope.line_len(last) == 0 {
+        true => last - 1,
+        false => last,
+    }
+}
+
+/// Land on the line a count names, or on the last line without one.
+///
+/// `extend` decides whether the selections grow to the target or collapse onto
+/// it. Select mode binds `G` to the extending flavor, which is stoat's own
+/// scheme rather than a key Helix rebinds there, and a count reaching the
+/// target is what makes the two flavors agree on what `G` means.
+pub(super) fn goto_line_number(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let Some(count) = stoat.take_pending_count() else {
-        return goto_last_line(stoat, false);
+        return goto_last_line(stoat, extend);
     };
     super::jump::push_jump(stoat);
     let Some(editor) = focused_editor_mut(stoat) else {
@@ -4694,14 +4713,17 @@ pub(super) fn goto_line_number(stoat: &mut Stoat) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
-    let mut last_row = rope.max_point().row;
-    if last_row > 0 && rope.line_len(last_row) == 0 {
-        last_row -= 1;
-    }
     let zero_indexed = count.saturating_sub(1);
-    let target_row = (zero_indexed as u64).min(last_row as u64) as u32;
+    let target_row = (zero_indexed as u64).min(last_addressable_row(rope) as u64) as u32;
     let target_offset = rope.point_to_offset(Point::new(target_row, 0));
-    apply_primary_range(editor, target_offset..target_offset);
+
+    if extend {
+        move_cursors(&mut editor.selections, buffer_snapshot, true, |_| {
+            Some((target_offset, SelectionGoal::None))
+        });
+    } else {
+        apply_primary_range(editor, target_offset..target_offset);
+    }
     UpdateEffect::Redraw
 }
 
@@ -4752,11 +4774,7 @@ pub(super) fn goto_last_line(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
-    let mut target_row = rope.max_point().row;
-    if target_row > 0 && rope.line_len(target_row) == 0 {
-        target_row -= 1;
-    }
-    let target_offset = rope.point_to_offset(Point::new(target_row, 0));
+    let target_offset = rope.point_to_offset(Point::new(last_addressable_row(rope), 0));
     move_cursors(&mut editor.selections, buffer_snapshot, extend, |_| {
         Some((target_offset, SelectionGoal::None))
     });
