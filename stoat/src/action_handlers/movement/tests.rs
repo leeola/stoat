@@ -3763,6 +3763,27 @@ fn toggle_comments_rust_single_line_inserts_prefix() {
     assert_eq!(focused_buffer_text(&mut h), "// let x = 42;\n");
 }
 
+/// The margin is one decision for the whole set, not one per row.
+///
+/// A row whose token carries no space forces every row to keep its own, so the
+/// block gives up the same width everywhere and commenting it again restores
+/// what was there. Deciding per row takes two characters from the spaced rows
+/// and one from the rest, which flattens the difference between them for good.
+#[test]
+fn toggle_comments_mixed_margins_round_trip() {
+    let mut h = TestHarness::with_size(40, 6);
+    let path = h.write_file("s.rs", "// a\n//b\n");
+    h.open_file(&path);
+
+    h.type_keys("v j");
+    dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        " a\nb\n",
+        "no space after the second token, so neither row gives one up",
+    );
+}
+
 /// A doc comment starts with the ordinary comment token, so removing that token
 /// leaves the extra slash behind and turns documentation into a syntax error.
 #[test]

@@ -2411,17 +2411,26 @@ pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
         // removes at the shared column, which eats indentation when the
         // commented rows are not equally indented, and removing what each row
         // actually has is what makes the round trip exact.
+        let token_of = |row: &CommentRow| {
+            row.token
+                .expect("comment_all is false, so every row carries a token")
+        };
+
+        // The margin is one decision for the whole set, as Helix makes it. A row
+        // whose token carries no space keeps every row's, so the block gives up
+        // the same width throughout and commenting it again restores it. Per row
+        // the spaced rows lose two characters and the rest lose one, which
+        // flattens the column relationship between them permanently.
+        let margin = usize::from(commentable.iter().all(|row| {
+            matches!(
+                rope.chars_at(row.content_start + token_of(row).len())
+                    .next(),
+                Some(' ')
+            )
+        }));
+
         for row in &commentable {
-            let token = row
-                .token
-                .expect("comment_all is false, so every row carries a token");
-            let after_prefix = row.content_start + token.len();
-            let drop_trailing_space = matches!(rope.chars_at(after_prefix).next(), Some(' '));
-            let remove_end = if drop_trailing_space {
-                after_prefix + 1
-            } else {
-                after_prefix
-            };
+            let remove_end = row.content_start + token_of(row).len() + margin;
             edits.push((row.content_start, remove_end, String::new()));
         }
     }

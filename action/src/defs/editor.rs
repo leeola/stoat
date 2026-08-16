@@ -156,7 +156,7 @@ define_action!(
     "ToggleComments",
     ActionKind::ToggleComments,
     "toggle line comments",
-    "Toggle the line-comment prefix on every line touched by any selection. The prefix is the first of the language's `line_comments` (e.g. `//` for rust, `#` for toml); buffers whose language has none are a no-op. Each line decides independently: if its first non-whitespace run is the prefix (followed by a space or end-of-content), the prefix and one trailing space are removed; otherwise the prefix and a single space are inserted at the first non-whitespace position. Empty / whitespace-only lines are skipped.",
+    "Comment or uncomment every line touched by any selection, skipping empty and whitespace-only ones. Buffers whose language declares no `line_comments` are a no-op. The set decides together rather than line by line: one line that is not already commented commits the whole set to commenting, so a mixed block converges instead of inverting. Commenting inserts the language's first token and a space at the shallowest line's indent, which keeps the block's relative indentation. Uncommenting removes from each line the longest of the language's tokens it starts with, so a rust doc comment gives up `///` rather than the `//` inside it, plus one space when every line has one.",
     ActionPriority::Rare
 );
 
