@@ -685,11 +685,18 @@ pub struct Stoat {
     /// Stored macros keyed by [`crate::register::Register`]. Filled
     /// when `RecordMacro` toggles off; consumed by [`ReplayMacro`].
     pub(crate) macros: std::collections::HashMap<register::Register, Vec<KeyEvent>>,
-    /// Set after [`stoat_action::ReplayMacro`] arms the chord. The
-    /// next char keypress in normal/select mode names a register
-    /// and the stored macro is replayed; non-char keypresses also
-    /// clear the flag.
-    pub(crate) pending_macro_replay: bool,
+    /// How many times the armed replay chord runs its macro, `None` while no
+    /// chord is armed.
+    ///
+    /// [`stoat_action::ReplayMacro`] arms it, and the next char keypress in
+    /// normal/select mode names a register and replays the stored macro that
+    /// many times. A non-char keypress disarms it instead.
+    ///
+    /// The count rides here rather than in [`Self::pending_count`] because the
+    /// dispatch that arms the chord clears that one before the register char
+    /// arrives, and a count typed for the replay belongs to the whole macro
+    /// rather than to whichever key the macro happens to start with.
+    pub(crate) pending_macro_replay: Option<u32>,
     /// Active input modal for typing a shell command. `Some` while
     /// the user composes the command; cleared on submit or cancel.
     pub(crate) shell_input: Option<action_handlers::shell::ShellInputState>,
@@ -1881,7 +1888,7 @@ impl Stoat {
             filter_selections_input: None,
             macro_recording: None,
             macros: std::collections::HashMap::new(),
-            pending_macro_replay: false,
+            pending_macro_replay: None,
             shell_input: None,
             shell_host: Arc::new(crate::host::LocalShell),
             terminal_host: Arc::new(crate::host::LocalTerminalHost),
@@ -3790,14 +3797,13 @@ impl Stoat {
             }
         }
 
-        if self.pending_macro_replay {
-            self.pending_macro_replay = false;
+        if let Some(count) = self.pending_macro_replay.take() {
             if let KeyCode::Char(ch) = key.code {
                 // The register name is half of what a recording needs to replay
                 // this later, and returning here is what would skip the capture
                 // every other key goes through below.
                 action_handlers::macro_recording::capture(self, &key);
-                return action_handlers::macro_recording::execute_replay(self, ch);
+                return action_handlers::macro_recording::execute_replay(self, ch, count);
             }
             return UpdateEffect::Redraw;
         }

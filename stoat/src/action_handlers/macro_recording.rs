@@ -31,19 +31,27 @@ pub(super) fn toggle_record(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Arm the replay chord. The next char keypress in normal/select
 /// mode names a register and triggers [`execute_replay`].
+///
+/// The pending count is taken here rather than read at the register keypress,
+/// because the dispatch running this clears it before that key arrives. Taking
+/// it also keeps it off the macro's first key, which would otherwise consume a
+/// count meant for the whole replay.
 pub(super) fn arm_replay(stoat: &mut Stoat) -> UpdateEffect {
-    stoat.pending_macro_replay = true;
+    stoat.pending_macro_replay = Some(stoat.take_pending_count().unwrap_or(1).max(1));
     UpdateEffect::Redraw
 }
 
-/// Resolve the register from `ch` and replay its stored macro by
+/// Resolve the register from `ch` and replay its stored macro `count` times by
 /// re-feeding each captured [`KeyEvent`] through [`Stoat::update`].
 /// No-op when the register is empty or unnamed.
+///
+/// The count repeats the whole body rather than any one key, so a macro that
+/// ends where it started repeats from there.
 ///
 /// Replaying a register already partway through a replay is refused. The keys
 /// are re-fed through the path that started this one, so a macro naming itself,
 /// directly or through another, would otherwise never stop.
-pub(crate) fn execute_replay(stoat: &mut Stoat, ch: char) -> UpdateEffect {
+pub(crate) fn execute_replay(stoat: &mut Stoat, ch: char, count: u32) -> UpdateEffect {
     let register = super::yank::register_for_char(ch);
     if stoat.replaying_registers.contains(&register) {
         return UpdateEffect::None;
@@ -54,14 +62,16 @@ pub(crate) fn execute_replay(stoat: &mut Stoat, ch: char) -> UpdateEffect {
 
     stoat.replaying_registers.push(register);
     let mut effect = UpdateEffect::None;
-    for key in keys {
-        let outcome = stoat.update(Event::Key(key));
-        if matches!(outcome, UpdateEffect::Quit) {
-            stoat.replaying_registers.pop();
-            return UpdateEffect::Quit;
-        }
-        if matches!(outcome, UpdateEffect::Redraw) {
-            effect = UpdateEffect::Redraw;
+    for _ in 0..count {
+        for key in &keys {
+            let outcome = stoat.update(Event::Key(*key));
+            if matches!(outcome, UpdateEffect::Quit) {
+                stoat.replaying_registers.pop();
+                return UpdateEffect::Quit;
+            }
+            if matches!(outcome, UpdateEffect::Redraw) {
+                effect = UpdateEffect::Redraw;
+            }
         }
     }
     stoat.replaying_registers.pop();
@@ -117,10 +127,52 @@ mod tests {
         assert_eq!(primary_offset(&mut h), 3);
 
         dispatch(&mut h.stoat, &action::ReplayMacro);
-        assert!(h.stoat.pending_macro_replay);
+        assert_eq!(h.stoat.pending_macro_replay, Some(1));
         h.stoat.update(Event::Key(keys::key(KeyCode::Char('"'))));
-        assert!(!h.stoat.pending_macro_replay);
+        assert_eq!(h.stoat.pending_macro_replay, None);
         assert_eq!(primary_offset(&mut h), 6);
+    }
+
+    /// A count in front of the replay repeats the whole macro, the way a count
+    /// in front of any other motion repeats it.
+    #[test]
+    fn replay_honors_a_count_prefix() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("hello world again");
+        dispatch(&mut h.stoat, &action::RecordMacro);
+        h.type_keys("l l");
+        dispatch(&mut h.stoat, &action::RecordMacro);
+        assert_eq!(primary_offset(&mut h), 2);
+
+        h.type_keys("3");
+        dispatch(&mut h.stoat, &action::ReplayMacro);
+        h.stoat.update(Event::Key(keys::key(KeyCode::Char('"'))));
+        assert_eq!(
+            primary_offset(&mut h),
+            8,
+            "three replays of a two-column macro advance six columns",
+        );
+    }
+
+    /// The count has to be captured when the chord arms, since the dispatch
+    /// that armed it clears the pending count before the register char lands.
+    #[test]
+    fn replay_count_survives_the_register_chord() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("hello world again");
+        dispatch(&mut h.stoat, &action::RecordMacro);
+        h.type_keys("l");
+        dispatch(&mut h.stoat, &action::RecordMacro);
+
+        h.type_keys("4");
+        dispatch(&mut h.stoat, &action::ReplayMacro);
+        assert_eq!(
+            h.stoat.pending_count, None,
+            "the arming dispatch consumed the count, so only the chord still holds it",
+        );
+
+        h.stoat.update(Event::Key(keys::key(KeyCode::Char('"'))));
+        assert_eq!(primary_offset(&mut h), 5, "one from the record, four more");
     }
 
     #[test]
@@ -130,7 +182,7 @@ mod tests {
         let before = primary_offset(&mut h);
         dispatch(&mut h.stoat, &action::ReplayMacro);
         h.stoat.update(Event::Key(keys::key(KeyCode::Char('a'))));
-        assert!(!h.stoat.pending_macro_replay);
+        assert_eq!(h.stoat.pending_macro_replay, None);
         assert_eq!(primary_offset(&mut h), before);
     }
 
@@ -155,9 +207,9 @@ mod tests {
         let mut h = Stoat::test();
         h.seed_focused_buffer("hello");
         dispatch(&mut h.stoat, &action::ReplayMacro);
-        assert!(h.stoat.pending_macro_replay);
+        assert_eq!(h.stoat.pending_macro_replay, Some(1));
         h.stoat.update(Event::Key(keys::key(KeyCode::Esc)));
-        assert!(!h.stoat.pending_macro_replay);
+        assert_eq!(h.stoat.pending_macro_replay, None);
     }
 
     /// A macro in register `a` that moves two columns, left stored and not
