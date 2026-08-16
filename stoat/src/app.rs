@@ -4084,11 +4084,21 @@ impl Stoat {
         }
 
         if takes_pending && self.pending_surround_add {
-            if let KeyCode::Char(ch) = key.code {
-                self.pending_surround_add = false;
-                return action_handlers::surround::execute_surround_add(self, ch);
-            }
             self.pending_surround_add = false;
+            match key.code {
+                KeyCode::Char(ch) => {
+                    return action_handlers::surround::execute_surround_add(self, ch);
+                },
+                // Enter names a line ending, which is how a selection gets put
+                // on a line of its own. Always LF: a buffer holds LF whatever
+                // its file uses, and the CRLF a file arrived with is restored
+                // on save. Inserting one here leaves a stray carriage return in
+                // the text instead.
+                KeyCode::Enter => {
+                    return action_handlers::surround::execute_surround_add_pair(self, "\n", "\n");
+                },
+                _ => {},
+            }
         }
 
         if takes_pending && self.pending_register_select {

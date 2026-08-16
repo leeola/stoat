@@ -34,14 +34,29 @@ pub(super) fn surround_delete(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Apply the consumed-char keypress to the pending surround_add chord:
-/// wrap every non-empty selection in the focused editor with the pair
-/// returned by [`surround_pair_for`]. Empty (collapsed) selections are
-/// skipped. After the wrap, each affected selection's range covers the
-/// original content (between the inserted open and close), preserving
-/// the original `reversed` direction.
+/// Wrap every non-empty selection in the focused editor with the pair
+/// [`surround_pair_for`] names, skipping collapsed ones.
 pub(crate) fn execute_surround_add(stoat: &mut Stoat, ch: char) -> UpdateEffect {
     let (open, close) = surround_pair_for(ch);
+    execute_surround_add_pair(stoat, &open.to_string(), &close.to_string())
+}
+
+/// Wrap every non-empty selection with `open` and `close`, skipping collapsed
+/// ones.
+///
+/// Takes text rather than the pair's two chars, because a line ending is a
+/// string and CRLF is two of them.
+///
+/// Each affected selection comes out covering the whole pair, opener through
+/// closer, with the direction it had. The pair is what the operation just made,
+/// so it is what a follow-up edit or a second wrap acts on. Select mode ends
+/// here rather than at a binding. The char completing the chord is consumed
+/// before any keymap lookup runs, so no binding sees it.
+pub(crate) fn execute_surround_add_pair(
+    stoat: &mut Stoat,
+    open: &str,
+    close: &str,
+) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -76,9 +91,6 @@ pub(crate) fn execute_surround_add(stoat: &mut Stoat, ch: char) -> UpdateEffect 
 
     entries.sort_by_key(|(_, s, _, _)| *s);
 
-    let open_str = open.to_string();
-    let close_str = close.to_string();
-
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
@@ -88,19 +100,19 @@ pub(crate) fn execute_surround_add(stoat: &mut Stoat, ch: char) -> UpdateEffect 
         let batch: Vec<(Range<usize>, &str)> = entries
             .iter()
             .rev()
-            .flat_map(|(_, s, e, _)| [(*e..*e, close_str.as_str()), (*s..*s, open_str.as_str())])
+            .flat_map(|(_, s, e, _)| [(*e..*e, close), (*s..*s, open)])
             .collect();
         guard.edit_batch(&batch);
     }
 
-    let open_len = open.len_utf8();
-    let close_len = close.len_utf8();
+    let open_len = open.len();
+    let close_len = close.len();
     let mut id_to_range: std::collections::HashMap<usize, (usize, usize, bool)> =
         std::collections::HashMap::with_capacity(entries.len());
     let mut shift: i64 = 0;
     for (id, s, e, reversed) in entries.iter() {
-        let new_start = (*s as i64 + shift) as usize + open_len;
-        let new_end = (*e as i64 + shift) as usize + open_len;
+        let new_start = (*s as i64 + shift) as usize;
+        let new_end = (*e as i64 + shift) as usize + open_len + close_len;
         id_to_range.insert(*id, (new_start, new_end, *reversed));
         shift += (open_len + close_len) as i64;
     }
@@ -119,6 +131,7 @@ pub(crate) fn execute_surround_add(stoat: &mut Stoat, ch: char) -> UpdateEffect 
         }
         new
     });
+    stoat.set_focused_mode("normal".to_string());
     UpdateEffect::Redraw
 }
 
@@ -1025,7 +1038,11 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys("(");
         assert_eq!(buffer_text(&h, &path), "(a)bc\n");
-        assert_eq!(cursor_offset(&mut h), 1);
+        assert_eq!(
+            cursor_offset(&mut h),
+            2,
+            "the selection covers the pair, so the cursor rests on the closer",
+        );
         assert!(!h.stoat.pending_surround_add);
     }
 
@@ -1389,7 +1406,41 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys("(");
         assert_eq!(buffer_text(&h, &path), "(abc)\n");
-        assert_eq!(primary_range(&mut h), (1, 4));
+        assert_eq!(
+            primary_range(&mut h),
+            (0, 5),
+            "the pair is what the operation made, so it is what stays selected",
+        );
+    }
+
+    /// Enter names a line ending, which puts the selection on a line of its
+    /// own. LF whatever the file uses, since that is what the buffer holds.
+    #[test]
+    fn surround_add_enter_wraps_in_line_endings() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.type_keys("v l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
+        h.type_keys("enter");
+
+        assert_eq!(buffer_text(&h, &path), "\nabc\n\n");
+        assert!(!h.stoat.pending_surround_add, "the chord is spent");
+    }
+
+    /// The wrap ends in normal mode, so the next motion moves rather than
+    /// extends. The chord's last key never reaches the keymap, which leaves
+    /// the handler as the only place to do it.
+    #[test]
+    fn surround_add_exits_select_mode() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.type_keys("v l l");
+        assert_eq!(h.stoat.focused_mode(), "select");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
+        h.type_keys("(");
+        assert_eq!(buffer_text(&h, &path), "(abc)\n");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
