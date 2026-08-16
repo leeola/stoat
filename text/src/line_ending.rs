@@ -10,9 +10,12 @@ const SCAN_BYTES: usize = 1000;
 
 /// The line terminator a file on disk uses.
 ///
-/// A buffer always holds its text in LF regardless of this, so nothing between
-/// the read and the write has to reason about carriage returns. The value is
+/// A buffer always holds its terminators as LF regardless of this, so nothing
+/// between the read and the write has to reason about them. The value is
 /// remembered only so the file can be written back in the form it arrived in.
+///
+/// A carriage return with no newline after it is not a terminator and stays in
+/// the buffer as the content it is, so a buffer is not free of them.
 ///
 /// The [`Default`] is [`LineEnding::Lf`], which is what a file carrying no
 /// terminator at all gets, and what a buffer with no file behind it starts as.
@@ -44,27 +47,21 @@ impl LineEnding {
 
     /// Rewrite every line terminator in `text` as a bare `\n`.
     ///
-    /// Both `\r\n` and a lone `\r` are terminators, so a file mixing the two
-    /// arrives uniform. Text already free of carriage returns is borrowed
-    /// rather than copied, which is the ordinary case.
+    /// A terminator is `\r\n` or `\n`. A carriage return with no newline after
+    /// it is content and passes through, so a file holding one keeps it and
+    /// writes it back. Text with no `\r\n` in it is borrowed rather than
+    /// copied, which is the ordinary case.
     pub fn normalize(text: &str) -> Cow<'_, str> {
-        if !text.contains('\r') {
+        if !text.contains("\r\n") {
             return Cow::Borrowed(text);
         }
 
         let mut out = String::with_capacity(text.len());
         let mut rest = text;
-        while let Some(ix) = rest.find('\r') {
+        while let Some(ix) = rest.find("\r\n") {
             out.push_str(&rest[..ix]);
             out.push('\n');
-            // A `\r\n` is one terminator, so the `\n` it carries is consumed
-            // with it. A lone `\r` is a terminator on its own.
-            let consumed = if rest[ix + 1..].starts_with('\n') {
-                2
-            } else {
-                1
-            };
-            rest = &rest[ix + consumed..];
+            rest = &rest[ix + 2..];
         }
         out.push_str(rest);
         Cow::Owned(out)
@@ -116,16 +113,40 @@ mod tests {
     #[test]
     fn normalize_flattens_every_terminator() {
         assert_eq!(LineEnding::normalize("a\r\nb\r\n"), "a\nb\n");
-        assert_eq!(LineEnding::normalize("a\rb\r"), "a\nb\n");
-        assert_eq!(LineEnding::normalize("a\r\nb\rc\nd"), "a\nb\nc\nd");
+        assert_eq!(LineEnding::normalize("a\nb\n"), "a\nb\n");
+        assert_eq!(
+            LineEnding::normalize("a\r\nb\rc\nd"),
+            "a\nb\rc\nd",
+            "the pair flattens and the lone carriage return stays"
+        );
+    }
+
+    /// A carriage return with no newline after it is content, so it survives
+    /// the read and the write that follows puts it back.
+    #[test]
+    fn normalize_keeps_a_lone_carriage_return() {
+        assert_eq!(LineEnding::normalize("a\rb\r"), "a\rb\r");
+        assert_eq!(LineEnding::Lf.restore("a\rb\r"), "a\rb\r");
+        assert_eq!(
+            LineEnding::Crlf.restore(&LineEnding::normalize("a\rb\r\n")),
+            "a\rb\r\n",
+            "the content one is left alone and the terminator comes back"
+        );
     }
 
     #[test]
-    fn normalize_borrows_text_without_carriage_returns() {
+    fn normalize_borrows_text_without_a_crlf() {
         assert!(matches!(
             LineEnding::normalize("a\nb\n"),
             std::borrow::Cow::Borrowed(_)
         ));
+        assert!(
+            matches!(
+                LineEnding::normalize("a\rb\n"),
+                std::borrow::Cow::Borrowed(_)
+            ),
+            "a content carriage return rewrites nothing, so nothing is copied"
+        );
     }
 
     #[test]

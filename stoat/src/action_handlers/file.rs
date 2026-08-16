@@ -2752,6 +2752,35 @@ mod tests {
         assert_eq!(on_disk(&h, &path), b"one\r\ntwo\r\n");
     }
 
+    /// A carriage return with no newline after it is content, so it survives
+    /// the open and the save writes it back where it was. Read as a terminator
+    /// instead, it hands the file back with a line the user never wrote.
+    #[test]
+    fn a_lone_carriage_return_saves_back_unchanged() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/lone-cr-roundtrip");
+        let path = open_rs(&mut h, &root, "a.rs", b"one\rtwo\n");
+
+        dispatch(&mut h.stoat, &ForceSaveBuffer);
+        h.settle();
+
+        assert_eq!(on_disk(&h, &path), b"one\rtwo\n");
+    }
+
+    /// The terminator flattens on open and comes back on save, while the
+    /// content one either side of it is left alone.
+    #[test]
+    fn a_crlf_file_holding_a_lone_carriage_return_round_trips() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/mixed-cr-roundtrip");
+        let path = open_rs(&mut h, &root, "a.rs", b"one\rtwo\r\nthree\r\n");
+
+        dispatch(&mut h.stoat, &ForceSaveBuffer);
+        h.settle();
+
+        assert_eq!(on_disk(&h, &path), b"one\rtwo\r\nthree\r\n");
+    }
+
     /// Restore the workspace `h` last saved into a fresh one, the way
     /// `--continue` does.
     fn restore_session(h: &mut TestHarness) {

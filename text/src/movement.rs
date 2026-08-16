@@ -61,8 +61,13 @@ fn char_is_punctuation(ch: char) -> bool {
     )
 }
 
+/// Whether `ch` ends a line for the purpose of word motions.
+///
+/// A carriage return does not. A buffer holds its terminators as LF, so any
+/// `\r` left in one is content, and it falls to the whitespace arm of
+/// [`categorize_char`] the way every other control character does.
 fn char_is_line_ending(ch: char) -> bool {
-    matches!(ch, '\n' | '\r')
+    ch == '\n'
 }
 
 /// Whether `ch` belongs to a word for the short-word motions and the word
