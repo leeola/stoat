@@ -6209,6 +6209,23 @@ fn goto_column_jumps_to_count_column() {
     assert_eq!(h.cursor_display_positions(), vec![(0, 4)]);
 }
 
+/// Every other goto records where it came from, and this one is reached the
+/// same way, so a user who lands on the wrong column gets back the same way.
+#[test]
+fn goto_column_records_the_jump_it_came_from() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "abcdefgh\n");
+    h.open_file(&path);
+    h.type_keys("l l");
+    let origin = h.primary_head_offset();
+
+    h.type_keys("7 g |");
+    assert_ne!(h.primary_head_offset(), origin, "the column jump landed");
+
+    dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+    assert_eq!(h.primary_head_offset(), origin);
+}
+
 #[test]
 fn goto_column_without_count_lands_at_line_start() {
     let mut h = TestHarness::with_size(20, 5);

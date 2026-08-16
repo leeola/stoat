@@ -4729,6 +4729,7 @@ pub(super) fn goto_line_number(stoat: &mut Stoat, extend: bool) -> UpdateEffect 
 
 pub(super) fn goto_column(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
+    super::jump::push_jump(stoat);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
