@@ -57,8 +57,9 @@ pub(super) fn select_textobject_inner(stoat: &mut Stoat) -> UpdateEffect {
 /// resolve keeps the range it had. The chord is a no-op when the type char names
 /// no textobject, or when no cursor is inside one.
 ///
-/// `count` reaches the pair types alone, where it names the Nth enclosing pair.
-/// The word and tree-sitter types have no meaning to give it.
+/// `count` names the Nth enclosing pair for the pair types, and that many
+/// paragraphs for `p`. The word, tree-sitter, and change types have no meaning
+/// to give it.
 ///
 /// Cursors resolving to the same object end as one selection, the collection
 /// merging selections that overlap.
@@ -170,7 +171,7 @@ fn find_textobject(
         'p' => {
             let buffer = ws.buffers.get(buffer_id).expect("buffer");
             let guard = buffer.read().expect("poisoned");
-            find_textobject_paragraph(guard.rope(), cursor, mode)
+            find_textobject_paragraph(guard.rope(), cursor, mode, count)
         },
         'f' | 't' | 'a' | 'c' | 'T' | 'e' | 'x' => {
             let kind = match ch {
@@ -317,6 +318,7 @@ fn find_textobject_paragraph(
     rope: &Rope,
     cursor: usize,
     mode: TextobjectMode,
+    count: usize,
 ) -> Option<std::ops::Range<usize>> {
     let max_row = rope.max_point().row;
     let cursor_row = rope.offset_to_point(cursor).row;
@@ -330,10 +332,10 @@ fn find_textobject_paragraph(
 
     if blanks.is_blank(cursor_row) {
         let anchor_row = blank_row_anchor(cursor_row, max_row, &mut blanks)?;
-        return paragraph_range_starting_from(rope, anchor_row, mode, max_row, &mut blanks);
+        return paragraph_range_starting_from(rope, anchor_row, mode, max_row, &mut blanks, count);
     }
 
-    paragraph_range_starting_from(rope, cursor_row, mode, max_row, &mut blanks)
+    paragraph_range_starting_from(rope, cursor_row, mode, max_row, &mut blanks, count)
 }
 
 /// The row whose paragraph a cursor on the blank row `cursor_row` selects.
@@ -367,12 +369,19 @@ fn blank_row_anchor(cursor_row: u32, max_row: u32, blanks: &mut BlankRows<'_>) -
     None
 }
 
+/// The paragraph holding `anchor_row`, and the `count - 1` paragraphs after it.
+///
+/// Only the end reaches for the count. The start is where the anchor's own
+/// paragraph starts, whatever the count, and the blank rows between the
+/// paragraphs taken stay inside the range. A count past the last paragraph
+/// stops at the buffer's end rather than answering `None`.
 fn paragraph_range_starting_from(
     rope: &Rope,
     anchor_row: u32,
     mode: TextobjectMode,
     max_row: u32,
     blanks: &mut BlankRows<'_>,
+    count: usize,
 ) -> Option<std::ops::Range<usize>> {
     let mut start_row = anchor_row;
     while start_row > 0 && !blanks.is_blank(start_row - 1) {
@@ -381,6 +390,15 @@ fn paragraph_range_starting_from(
     let mut end_row = anchor_row;
     while end_row < max_row && !blanks.is_blank(end_row + 1) {
         end_row += 1;
+    }
+    for _ in 1..count {
+        let Some(next_row) = next_paragraph_row(end_row, max_row, blanks) else {
+            break;
+        };
+        end_row = next_row;
+        while end_row < max_row && !blanks.is_blank(end_row + 1) {
+            end_row += 1;
+        }
     }
     let start = rope.point_to_offset(Point::new(start_row, 0));
     let inner_end = end_of_line_offset(rope, end_row);
@@ -399,6 +417,19 @@ fn paragraph_range_starting_from(
             Some(start..around_end)
         },
     }
+}
+
+/// The first row of the paragraph after the one ending at `end_row`, or `None`
+/// when only blank rows are left.
+fn next_paragraph_row(end_row: u32, max_row: u32, blanks: &mut BlankRows<'_>) -> Option<u32> {
+    let mut row = end_row;
+    while row < max_row {
+        row += 1;
+        if !blanks.is_blank(row) {
+            return Some(row);
+        }
+    }
+    None
 }
 
 fn end_of_line_offset(rope: &Rope, row: u32) -> usize {
@@ -554,7 +585,7 @@ mod tests {
     fn paragraph_inner_selects_run_of_nonblank_lines() {
         let r = rope_of("alpha\nbeta\n\ngamma\n");
         let range =
-            find_textobject_paragraph(&r, 2, TextobjectMode::Inner).expect("paragraph found");
+            find_textobject_paragraph(&r, 2, TextobjectMode::Inner, 1).expect("paragraph found");
         assert_eq!(range, 0..11);
     }
 
@@ -562,14 +593,50 @@ mod tests {
     fn paragraph_around_includes_trailing_blank() {
         let r = rope_of("alpha\nbeta\n\ngamma\n");
         let range =
-            find_textobject_paragraph(&r, 2, TextobjectMode::Around).expect("paragraph found");
+            find_textobject_paragraph(&r, 2, TextobjectMode::Around, 1).expect("paragraph found");
         assert_eq!(range, 0..12);
+    }
+
+    /// The blank row between the two stays in. One count step takes a run of
+    /// text rows and then the blank run after it.
+    #[test]
+    fn paragraph_count_takes_that_many_paragraphs() {
+        let r = rope_of("alpha\n\nbeta\n\ngamma\n");
+        let range =
+            find_textobject_paragraph(&r, 0, TextobjectMode::Inner, 2).expect("paragraph found");
+        assert_eq!(range, 0..12);
+    }
+
+    #[test]
+    fn paragraph_count_around_keeps_the_trailing_blanks() {
+        let r = rope_of("alpha\n\nbeta\n\ngamma\n");
+        let range =
+            find_textobject_paragraph(&r, 0, TextobjectMode::Around, 2).expect("paragraph found");
+        assert_eq!(range, 0..13);
+    }
+
+    #[test]
+    fn paragraph_count_past_the_last_stops_at_the_buffer_end() {
+        let r = rope_of("alpha\n\nbeta\n\ngamma\n");
+        let range =
+            find_textobject_paragraph(&r, 0, TextobjectMode::Inner, 9).expect("paragraph found");
+        assert_eq!(range, 0..19, "every paragraph, not None");
+    }
+
+    #[test]
+    fn paragraph_count_via_chord() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "alpha\n\nbeta\n\ngamma\n");
+        jump(&mut h, 0);
+
+        h.type_keys("2 m i p");
+        assert_eq!(primary_range(&mut h), (0, 12));
     }
 
     #[test]
     fn paragraph_cursor_on_blank_line_takes_the_paragraph_it_opens() {
         let r = rope_of("alpha\n\nbeta\n");
-        let range = find_textobject_paragraph(&r, 6, TextobjectMode::Inner)
+        let range = find_textobject_paragraph(&r, 6, TextobjectMode::Inner, 1)
             .expect("neighbour paragraph found");
         assert_eq!(range, 7..12, "the paragraph below, not the one above");
     }
@@ -578,7 +645,7 @@ mod tests {
     #[test]
     fn paragraph_cursor_on_the_last_blank_line_reaches_back() {
         let r = rope_of("alpha\n\n");
-        let range = find_textobject_paragraph(&r, 6, TextobjectMode::Inner)
+        let range = find_textobject_paragraph(&r, 6, TextobjectMode::Inner, 1)
             .expect("neighbour paragraph found");
         assert_eq!(range, 0..6);
     }
@@ -588,7 +655,7 @@ mod tests {
     #[test]
     fn paragraph_cursor_inside_a_run_of_blanks_reaches_back() {
         let r = rope_of("alpha\n\n\nbeta\n");
-        let range = find_textobject_paragraph(&r, 6, TextobjectMode::Inner)
+        let range = find_textobject_paragraph(&r, 6, TextobjectMode::Inner, 1)
             .expect("neighbour paragraph found");
         assert_eq!(range, 0..6);
     }
@@ -597,7 +664,7 @@ mod tests {
     fn paragraph_empty_buffer_is_none() {
         let r = rope_of("");
         assert_eq!(
-            find_textobject_paragraph(&r, 0, TextobjectMode::Inner),
+            find_textobject_paragraph(&r, 0, TextobjectMode::Inner, 1),
             None
         );
     }
@@ -606,7 +673,7 @@ mod tests {
     fn paragraph_no_blank_lines_selects_whole_buffer() {
         let r = rope_of("alpha\nbeta\ngamma\n");
         let range =
-            find_textobject_paragraph(&r, 7, TextobjectMode::Inner).expect("paragraph found");
+            find_textobject_paragraph(&r, 7, TextobjectMode::Inner, 1).expect("paragraph found");
         assert_eq!(range, 0..17);
     }
 
