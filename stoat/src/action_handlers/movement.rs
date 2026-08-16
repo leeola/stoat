@@ -905,10 +905,24 @@ pub(super) fn goto_line_end(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     goto_line_boundary(stoat, LineBoundary::End, extend)
 }
 
+/// Move each cursor to the insert point past its line's last character.
+///
+/// The insert-mode End key. [`goto_line_end`] lands on the last character
+/// itself, which is where a block cursor belongs while reading. A caret about
+/// to type belongs one cell further on, which is the same landing [`A`] gives.
+///
+/// [`A`]: insert_at_line_end
+pub(crate) fn goto_line_end_newline(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
+    goto_line_boundary(stoat, LineBoundary::EndNewline, extend)
+}
+
 #[derive(Copy, Clone)]
 enum LineBoundary {
     Start,
     End,
+    /// The line's end itself, where the End arm lands on the character before
+    /// it.
+    EndNewline,
 }
 
 fn goto_line_boundary(stoat: &mut Stoat, boundary: LineBoundary, extend: bool) -> UpdateEffect {
@@ -922,22 +936,25 @@ fn goto_line_boundary(stoat: &mut Stoat, boundary: LineBoundary, extend: bool) -
     // The cell to land on, from a cursor at `head`/`tail`. The end boundary sits
     // one past the line's last character and a block cursor has to land on a
     // cell rather than the boundary, so it steps back. An empty line has no cell
-    // to step back to and stays at its start.
+    // to step back to and stays at its start. The insert-mode end keeps the
+    // boundary itself, since that is where a caret about to type belongs.
     let target_for = |head: usize, tail: usize| {
         // Use the block-cursor cell's row, not the raw head. A 1-wide cursor
         // sitting at a line's end has its head on the next line's first cell,
         // which would move the boundary to the wrong line.
         let cursor_row = rope.offset_to_point(cursor_offset(rope, tail, head)).row;
         let line_start = rope.point_to_offset(Point::new(cursor_row, 0));
+        let line_end = || rope.point_to_offset(Point::new(cursor_row, rope.line_len(cursor_row)));
         match boundary {
             LineBoundary::Start => line_start,
             LineBoundary::End => {
-                let end = rope.point_to_offset(Point::new(cursor_row, rope.line_len(cursor_row)));
+                let end = line_end();
                 match end > line_start {
                     true => rope.prev_grapheme_boundary(end),
                     false => end,
                 }
             },
+            LineBoundary::EndNewline => line_end(),
         }
     };
 

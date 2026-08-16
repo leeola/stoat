@@ -4834,6 +4834,25 @@ impl Stoat {
                 action_handlers::dispatch(self, &stoat_action::MoveDown);
                 Some(UpdateEffect::Redraw)
             },
+            KeyCode::Home => {
+                action_handlers::dispatch(self, &stoat_action::GotoLineStart);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::End => {
+                // Not the GotoLineEnd action, which lands on the last character
+                // for a block cursor to sit on. A caret about to type belongs
+                // past it.
+                action_handlers::movement::goto_line_end_newline(self, false);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::PageUp => {
+                action_handlers::dispatch(self, &stoat_action::PageUp);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::PageDown => {
+                action_handlers::dispatch(self, &stoat_action::PageDown);
+                Some(UpdateEffect::Redraw)
+            },
             _ => None,
         }
     }
@@ -14422,6 +14441,62 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "ab");
         h.type_keys("backspace");
         assert_eq!(buffer_text(&h, &path), "a");
+    }
+
+    #[test]
+    fn end_in_insert_mode_lands_past_the_last_character() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc\ndef\n");
+        h.type_keys("i");
+        h.type_keys("end");
+        h.type_text("X");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "abcX\ndef\n",
+            "the caret appends after the last character, not before it",
+        );
+    }
+
+    #[test]
+    fn home_in_insert_mode_lands_at_column_zero() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc\ndef\n");
+        h.type_keys("l l i");
+        h.type_keys("home");
+        h.type_text("X");
+        assert_eq!(buffer_text(&h, &path), "Xabc\ndef\n");
+    }
+
+    /// Measured against the actions themselves rather than against a row this
+    /// pin works out for itself, since the scroll arithmetic and the scrolloff
+    /// band are the motion's business and not this binding's. Both legs page
+    /// from insert mode, because the viewport a page spans is only known once a
+    /// frame has been drawn and entering insert mode draws one.
+    #[test]
+    fn page_keys_in_insert_mode_run_the_page_motions() {
+        let rows: String = (0..80).map(|n| format!("line {n}\n")).collect();
+
+        let expected = {
+            let mut h = Stoat::test();
+            open_scratch_file(&mut h, &rows);
+            h.type_keys("i");
+            action_handlers::dispatch(&mut h.stoat, &stoat_action::PageDown);
+            let down = h.primary_head_offset();
+            action_handlers::dispatch(&mut h.stoat, &stoat_action::PageUp);
+            (down, h.primary_head_offset())
+        };
+        assert_ne!(
+            expected.0, 0,
+            "a page motion that moves nothing pins nothing"
+        );
+
+        let mut h = Stoat::test();
+        open_scratch_file(&mut h, &rows);
+        h.type_keys("i");
+        h.type_keys("pagedown");
+        let down = h.primary_head_offset();
+        h.type_keys("pageup");
+        assert_eq!((down, h.primary_head_offset()), expected);
     }
 
     #[test]
