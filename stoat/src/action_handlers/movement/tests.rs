@@ -7166,3 +7166,44 @@ fn select_mode_capital_w_extends_by_long_word() {
     h.type_keys("W");
     assert_eq!(h.selection_spans(), vec![(0, 8, false)], "past the dot");
 }
+
+/// The two mode pins above dispatch the action directly. These press the key,
+/// which is what says select mode reaches the handler at all.
+#[test]
+fn select_mode_plus_increments_and_returns_to_normal() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "42\n");
+    h.open_file(&path);
+    h.type_keys("v l");
+
+    h.type_keys("+");
+    assert_eq!(focused_buffer_text(&mut h), "43\n");
+    assert_eq!(h.stoat.focused_mode(), "normal");
+}
+
+#[test]
+fn select_mode_minus_decrements_and_returns_to_normal() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "42\n");
+    h.open_file(&path);
+    h.type_keys("v l");
+
+    // Spelled out, since the harness reads a bare `-` as the chord separator.
+    h.type_keys("minus");
+    assert_eq!(focused_buffer_text(&mut h), "41\n");
+    assert_eq!(h.stoat.focused_mode(), "normal");
+}
+
+/// The binding carries no mode step, so a press that changes nothing leaves
+/// the user where they were.
+#[test]
+fn select_mode_plus_over_no_number_holds_select_mode() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "zz\n");
+    h.open_file(&path);
+    h.type_keys("v l");
+
+    h.type_keys("+");
+    assert_eq!(focused_buffer_text(&mut h), "zz\n");
+    assert_eq!(h.stoat.focused_mode(), "select");
+}

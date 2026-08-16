@@ -684,6 +684,10 @@ on key {
         ~ -> [SwitchCase(), SetMode(normal)];
         ` -> [SwitchToLowercase(), SetMode(normal)];
         Alt-` -> [SwitchToUppercase(), SetMode(normal)];
+        # No SetMode here, unlike the keys above. The handler leaves select
+        # mode only where an edit lands, and holds it where no number changed.
+        Plus -> Increment();
+        Minus -> Decrement();
         u -> Undo();
         U -> Redo();
         : -> OpenCommandPalette();
