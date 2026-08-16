@@ -424,15 +424,18 @@ impl SelectionsCollection {
             .position(|s| s.id == primary_id)
             .expect("primary id must be in disjoint");
         let len = self.disjoint.len();
-        let offset = (count as usize) % len;
-        if offset == 0 {
+        // A backward count is reduced by saturating rather than by modulo, so a
+        // count past the set size leaves the primary where it is instead of
+        // stepping to another selection. Forward reduces by modulo, where
+        // taking the remainder first gives the same place as not taking it.
+        let shift = match forward {
+            true => (count as usize) % len,
+            false => len.saturating_sub(count as usize) % len,
+        };
+        if shift == 0 {
             return;
         }
-        let new_idx = if forward {
-            (primary_idx + offset) % len
-        } else {
-            (primary_idx + len - offset) % len
-        };
+        let new_idx = (primary_idx + shift) % len;
         let new_id = self.next_selection_id;
         self.next_selection_id += 1;
         let rotated = self
@@ -1886,6 +1889,44 @@ mod tests {
         assert_eq!(primary_offset(&collection), 0);
         collection.rotate_primary_by(false, 1);
         assert_eq!(primary_offset(&collection), 6);
+    }
+
+    /// A backward count past the set size keeps the primary. A plain modulo
+    /// carries the leftover count into a step instead.
+    #[test]
+    fn count_past_len_rotate_backward_is_a_noop() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+        collection.insert_cursor(
+            snapshot.anchor_at(3, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        collection.insert_cursor(
+            snapshot.anchor_at(6, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+
+        let primary_offset = |c: &SelectionsCollection| -> usize {
+            snapshot.resolve_anchor(&c.newest_anchor().start)
+        };
+
+        assert_eq!(primary_offset(&collection), 6);
+        collection.rotate_primary_by(false, 4);
+        assert_eq!(
+            primary_offset(&collection),
+            6,
+            "four back over three selections holds, rather than stepping one"
+        );
+
+        collection.rotate_primary_by(true, 4);
+        assert_eq!(
+            primary_offset(&collection),
+            0,
+            "the forward count reduces by modulo and steps one on"
+        );
     }
 
     #[test]
