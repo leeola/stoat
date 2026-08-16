@@ -976,6 +976,15 @@ pub struct Stoat {
     /// [`action_handlers::surround::execute_surround_delete`].
     /// Non-char keypresses also clear the flag.
     pub(crate) pending_surround_delete: bool,
+    /// How far out the armed surround chord reaches, as the count typed
+    /// in front of it. One means the pair nearest each cursor.
+    ///
+    /// `SurroundDelete` and `SurroundReplace` both write it as they arm,
+    /// and neither runs until the other clears, so the one field serves
+    /// both. Dispatching those actions consumes the pending count
+    /// before the chars completing the chord arrive, which is why the
+    /// count is captured here rather than read where the edit runs.
+    pub(crate) pending_surround_count: usize,
     /// Set after `SelectTextobjectAround` or `SelectTextobjectInner`
     /// arms the chord. The next printable char keypress in normal /
     /// select mode names the textobject type (`f` function, `t`
@@ -1960,6 +1969,7 @@ impl Stoat {
             pending_surround_add: false,
             pending_surround_replace: action_handlers::surround::SurroundReplaceStage::Idle,
             pending_surround_delete: false,
+            pending_surround_count: 1,
             pending_textobject_select: None,
             search_input: None,
             last_search: None,

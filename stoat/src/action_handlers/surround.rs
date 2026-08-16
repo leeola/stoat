@@ -4,7 +4,7 @@ use crate::{
     buffer::TextBuffer,
     pane::View,
 };
-use std::ops::Range;
+use std::{cmp::Reverse, ops::Range};
 use stoat_text::{Bias, Rope, SelectionGoal};
 
 /// Two-step capture state for [`surround_replace`]: arms after the action
@@ -25,13 +25,24 @@ pub(super) fn surround_add(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 pub(super) fn surround_replace(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.pending_surround_count = arming_count(stoat);
     stoat.pending_surround_replace = SurroundReplaceStage::AwaitFrom;
     UpdateEffect::Redraw
 }
 
 pub(super) fn surround_delete(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.pending_surround_count = arming_count(stoat);
     stoat.pending_surround_delete = true;
     UpdateEffect::Redraw
+}
+
+/// The count typed in front of the chord that arms now, or one.
+///
+/// The chord reads it here rather than where it runs, because dispatching the
+/// action that arms the chord already cleared the pending count. The chars
+/// completing the chord arrive over later keypresses with nothing left to read.
+fn arming_count(stoat: &mut Stoat) -> usize {
+    stoat.take_pending_count().unwrap_or(1).max(1) as usize
 }
 
 /// Wrap every non-empty selection in the focused editor with the pair
@@ -149,12 +160,14 @@ pub(crate) fn surround_pair_for(ch: char) -> (char, char) {
 /// chord. For every selection's primary cursor, find the nearest
 /// enclosing surround pair and remove its open / close. `ch` names the
 /// pair type, except `m`, which means the nearest pair of any type (so a
-/// literal `m...m` pair is unreachable). Selections whose cursor is not
-/// enclosed by a matching pair are skipped. Pairs are deduped before
-/// edits run, so two cursors inside the same pair produce one edit.
+/// literal `m...m` pair is unreachable). A count typed in front of the
+/// chord reaches that far out, so `2 m d (` takes the parens around the
+/// nearest ones. Nothing is edited unless every cursor names a pair of
+/// its own, per [`collect_surround_pairs`].
 pub(crate) fn execute_surround_delete(stoat: &mut Stoat, ch: char) -> UpdateEffect {
     let pair = (ch != 'm').then(|| surround_pair_for(ch));
-    let pairs = match collect_surround_pairs(stoat, pair) {
+    let skip = stoat.pending_surround_count.saturating_sub(1);
+    let pairs = match collect_surround_pairs(stoat, pair, skip) {
         Some(p) if !p.is_empty() => p,
         _ => return UpdateEffect::None,
     };
@@ -183,12 +196,15 @@ pub(crate) fn execute_surround_delete(stoat: &mut Stoat, ch: char) -> UpdateEffe
 /// the nearest enclosing surround pair and replace its open / close with
 /// the canonical pair for `to`. `from` names the pair type, except `m`,
 /// which means the nearest pair of any type. `to` is always a literal
-/// pair char. Selections whose cursor is not enclosed by a matching pair
-/// are skipped. Pairs are deduped before edits run.
+/// pair char. A count typed in front of the chord reaches that far out,
+/// so `2 m r ( [` rewrites the parens around the nearest ones. Nothing is
+/// edited unless every cursor names a pair of its own, per
+/// [`collect_surround_pairs`].
 pub(crate) fn execute_surround_replace(stoat: &mut Stoat, from: char, to: char) -> UpdateEffect {
     let from_pair = (from != 'm').then(|| surround_pair_for(from));
     let (new_open, new_close) = surround_pair_for(to);
-    let pairs = match collect_surround_pairs(stoat, from_pair) {
+    let skip = stoat.pending_surround_count.saturating_sub(1);
+    let pairs = match collect_surround_pairs(stoat, from_pair, skip) {
         Some(p) if !p.is_empty() => p,
         _ => return UpdateEffect::None,
     };
@@ -241,8 +257,15 @@ fn edit_delimiters(buffer: &mut TextBuffer, mut edits: Vec<(usize, usize, &str)>
 /// Walk every selection's primary cursor in the focused editor and
 /// gather the enclosing surround pair per cursor, each carrying its own
 /// delimiter chars as `(open_off, close_off, open, close)`. Returns the
-/// deduped pairs sorted ascending, or `None` when the focused pane is
-/// not an editor.
+/// pairs sorted ascending, or `None` when the focused pane is not an
+/// editor.
+///
+/// `skip` reaches past that many pairs around every cursor, so a count of
+/// two on the chord passes one.
+///
+/// Two cases return `None` with a status set, leaving the caller nothing
+/// to edit. A cursor with no pair around it aborts the whole operation,
+/// and so does a pair two cursors both name.
 ///
 /// The `pair` argument chooses how each cursor resolves.
 /// `Some((open, close))` finds the enclosing pair of that one type via
@@ -253,6 +276,7 @@ fn edit_delimiters(buffer: &mut TextBuffer, mut edits: Vec<(usize, usize, &str)>
 fn collect_surround_pairs(
     stoat: &mut Stoat,
     pair: Option<(char, char)>,
+    skip: usize,
 ) -> Option<Vec<(usize, usize, char, char)>> {
     let (buffer_id, cursors) = {
         let ws = stoat.active_workspace_mut();
@@ -311,9 +335,9 @@ fn collect_surround_pairs(
         let scan = &scans[idx].1;
 
         let found = match pair {
-            Some((open, close)) => find_surround_pair(&rope, head, open, close, scan)
+            Some((open, close)) => find_surround_pair(&rope, head, open, close, scan, skip)
                 .map(|(open_off, close_off)| (open_off, close_off, open, close)),
-            None => closest_surround_pair(&rope, head, scan)
+            None => closest_surround_pair(&rope, head, scan, skip)
                 .map(|(open, close, open_off, close_off)| (open_off, close_off, open, close)),
         };
         // Both misses abort the whole operation rather than dropping the
@@ -353,7 +377,14 @@ pub(crate) fn surround_pair_at(
     let rope = buffer.read().expect("poisoned").rope().clone();
     let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
     let tree = deepest_tree_at(snapshot, cursor);
-    find_surround_pair(&rope, cursor, open, close, &PairScan::around(tree, cursor))
+    find_surround_pair(
+        &rope,
+        cursor,
+        open,
+        close,
+        &PairScan::around(tree, cursor),
+        0,
+    )
 }
 
 /// The tree of the deepest syntax layer whose byte span covers
@@ -400,40 +431,53 @@ const SURROUND_PAIRS: [(char, char); 7] = [
 /// for each bracket and quote pair and keeps the one with the greatest
 /// `open_off` (deepest enclosing). `None` when no pair type encloses
 /// the cursor. Drives the `m i m` / `m a m` closest-pair textobject.
+///
+/// `skip` reaches past that many enclosing pairs, and it counts them
+/// across types. A cursor in `([here])` resolves to the parens with `1`.
 pub(crate) fn closest_surround_pair(
     rope: &Rope,
     cursor: usize,
     scan: &PairScan<'_>,
+    skip: usize,
 ) -> Option<(char, char, usize, usize)> {
     let at_cursor = rope.chars_at(cursor).next();
 
     // A quote under the cursor cannot say which of its sides opens, so its type
     // is answered by the syntax tree rather than by walking. Deciding that here
     // keeps those types out of both walks entirely.
-    let mut resolved: [Option<(usize, usize)>; SURROUND_PAIRS.len()] = Default::default();
+    let mut string_pair: [Option<(usize, usize)>; SURROUND_PAIRS.len()] = Default::default();
     let mut settled = [false; SURROUND_PAIRS.len()];
     for (i, (open, close)) in SURROUND_PAIRS.into_iter().enumerate() {
         if open == close && at_cursor == Some(open) {
             settled[i] = true;
-            resolved[i] = enclosing_string_pair(rope, scan.tree, cursor, open);
+            string_pair[i] = enclosing_string_pair(rope, scan.tree, cursor, open);
         }
     }
 
-    let opens = scan_left_for_opens(rope, cursor, at_cursor, &settled, scan);
-    let closes = scan_right_for_closes(rope, cursor, at_cursor, &settled, scan);
-    for i in 0..SURROUND_PAIRS.len() {
-        if !settled[i] {
-            resolved[i] = opens[i].zip(closes[i]);
+    // A pair with n others inside it has at most n of its own type inside it,
+    // so the nth pair overall is within the first n of the type it belongs to.
+    // Running every type that far out therefore collects every candidate in
+    // contention, and ordering them by opener says which one wins.
+    let mut candidates: Vec<(char, char, usize, usize)> = Vec::with_capacity(SURROUND_PAIRS.len());
+    for reach in 0..=skip {
+        let opens = scan_left_for_opens(rope, cursor, at_cursor, &settled, scan, reach);
+        let closes = scan_right_for_closes(rope, cursor, at_cursor, &settled, scan, reach);
+        for (i, (open, close)) in SURROUND_PAIRS.into_iter().enumerate() {
+            // A string node has no second occurrence of its type outside it, so
+            // it stands only as the innermost candidate.
+            let resolved = match settled[i] {
+                true if reach == 0 => string_pair[i],
+                true => None,
+                false => opens[i].zip(closes[i]),
+            };
+            if let Some((open_off, close_off)) = resolved {
+                candidates.push((open, close, open_off, close_off));
+            }
         }
     }
 
-    SURROUND_PAIRS
-        .into_iter()
-        .enumerate()
-        .filter_map(|(i, (open, close))| {
-            resolved[i].map(|(open_off, close_off)| (open, close, open_off, close_off))
-        })
-        .max_by_key(|&(_, _, open_off, _)| open_off)
+    candidates.sort_unstable_by_key(|&(_, _, open_off, _)| Reverse(open_off));
+    candidates.into_iter().nth(skip)
 }
 
 /// Which pair type `c` is a delimiter of, if any.
@@ -448,22 +492,26 @@ fn pair_index(c: char) -> Option<usize> {
 /// Each asymmetric type carries the depth counter its own walk carried, and
 /// each symmetric type takes the first occurrence it meets. A type that has its
 /// answer drops out, so the walk only continues for those still looking.
+///
+/// Every type applies `skip` to itself alone. It passes over that many of its
+/// own opens before it takes an answer.
 fn scan_left_for_opens(
     rope: &Rope,
     cursor: usize,
     at_cursor: Option<char>,
     settled: &[bool; SURROUND_PAIRS.len()],
     scan: &PairScan<'_>,
+    skip: usize,
 ) -> [Option<usize>; SURROUND_PAIRS.len()] {
     let mut found: [Option<usize>; SURROUND_PAIRS.len()] = Default::default();
     let mut step_over = [0usize; SURROUND_PAIRS.len()];
+    let mut remaining = [skip; SURROUND_PAIRS.len()];
     let mut done = *settled;
 
     // An open under the cursor is that type's open, without walking anywhere.
     for (i, (open, close)) in SURROUND_PAIRS.into_iter().enumerate() {
         if !done[i] && open != close && at_cursor == Some(open) && !scan.skips(cursor) {
-            found[i] = Some(cursor);
-            done[i] = true;
+            take_or_skip(cursor, i, &mut found, &mut done, &mut remaining);
         }
     }
 
@@ -481,8 +529,7 @@ fn scan_left_for_opens(
 
         let (open, close) = SURROUND_PAIRS[i];
         if open == close || c == open && step_over[i] == 0 {
-            found[i] = Some(pos);
-            done[i] = true;
+            take_or_skip(pos, i, &mut found, &mut done, &mut remaining);
         } else if c == close {
             step_over[i] += 1;
         } else {
@@ -490,6 +537,23 @@ fn scan_left_for_opens(
         }
     }
     found
+}
+
+/// Answer pair type `i` with the delimiter at `pos`, or spend one of the
+/// type's remaining skips on it.
+fn take_or_skip(
+    pos: usize,
+    i: usize,
+    found: &mut [Option<usize>; SURROUND_PAIRS.len()],
+    done: &mut [bool; SURROUND_PAIRS.len()],
+    remaining: &mut [usize; SURROUND_PAIRS.len()],
+) {
+    if remaining[i] == 0 {
+        found[i] = Some(pos);
+        done[i] = true;
+    } else {
+        remaining[i] -= 1;
+    }
 }
 
 /// The matching close right of `cursor`, per pair type, in one walk.
@@ -508,15 +572,16 @@ fn scan_right_for_closes(
     at_cursor: Option<char>,
     settled: &[bool; SURROUND_PAIRS.len()],
     scan: &PairScan<'_>,
+    skip: usize,
 ) -> [Option<usize>; SURROUND_PAIRS.len()] {
     let mut found: [Option<usize>; SURROUND_PAIRS.len()] = Default::default();
     let mut step_over = [0usize; SURROUND_PAIRS.len()];
+    let mut remaining = [skip; SURROUND_PAIRS.len()];
     let mut done = *settled;
 
     for (i, (open, close)) in SURROUND_PAIRS.into_iter().enumerate() {
         if !done[i] && open != close && at_cursor == Some(close) && !scan.skips(cursor) {
-            found[i] = Some(cursor);
-            done[i] = true;
+            take_or_skip(cursor, i, &mut found, &mut done, &mut remaining);
         }
     }
 
@@ -528,8 +593,7 @@ fn scan_right_for_closes(
         {
             let (open, close) = SURROUND_PAIRS[i];
             if open == close || c == close && step_over[i] == 0 {
-                found[i] = Some(pos);
-                done[i] = true;
+                take_or_skip(pos, i, &mut found, &mut done, &mut remaining);
             } else if c == open {
                 step_over[i] += 1;
             } else {
@@ -567,26 +631,32 @@ fn focused_buffer_id(stoat: &Stoat) -> Option<crate::buffer::BufferId> {
 /// syntax map. Used by `execute_surround_replace` and
 /// `execute_surround_delete` so `m r ( )` and `m d (` ignore
 /// brackets that happen to live inside string literals.
+///
+/// `skip` reaches past that many enclosing pairs, so `1` gives the
+/// pair around the nearest one. A quote resolved from a string node
+/// has nothing outside it of its own type, so any `skip` above zero
+/// finds nothing there.
 pub(crate) fn find_surround_pair(
     rope: &Rope,
     cursor: usize,
     open: char,
     close: char,
     scan: &PairScan<'_>,
+    skip: usize,
 ) -> Option<(usize, usize)> {
     if open == close {
         if rope.chars_at(cursor).next() == Some(open) {
-            if let Some(pair) = enclosing_string_pair(rope, scan.tree, cursor, open) {
-                return Some(pair);
+            if skip > 0 {
+                return None;
             }
-            return None;
+            return enclosing_string_pair(rope, scan.tree, cursor, open);
         }
-        let open_pos = walk_left_for_symmetric(rope, cursor, open, scan)?;
-        let close_pos = walk_right_for_symmetric(rope, cursor, open, scan)?;
+        let open_pos = walk_left_for_symmetric(rope, cursor, open, scan, skip)?;
+        let close_pos = walk_right_for_symmetric(rope, cursor, open, scan, skip)?;
         Some((open_pos, close_pos))
     } else {
-        let open_pos = walk_left_for_open(rope, cursor, open, close, scan)?;
-        let close_pos = walk_right_for_close(rope, cursor, open, close, scan)?;
+        let open_pos = walk_left_for_open(rope, cursor, open, close, scan, skip)?;
+        let close_pos = walk_right_for_close(rope, cursor, open, close, scan, skip)?;
         Some((open_pos, close_pos))
     }
 }
@@ -637,12 +707,16 @@ fn walk_right_for_close(
     open: char,
     close: char,
     scan: &PairScan<'_>,
+    mut skip: usize,
 ) -> Option<usize> {
     let mut chars = rope.chars_at(cursor);
     let mut pos = cursor;
     let first = chars.next()?;
     if first == close && !scan.skips(pos) {
-        return Some(pos);
+        if skip == 0 {
+            return Some(pos);
+        }
+        skip -= 1;
     }
     pos += first.len_utf8();
     let mut step_over: usize = 0;
@@ -653,10 +727,13 @@ fn walk_right_for_close(
         if c == open && !scan.skips(pos) {
             step_over += 1;
         } else if c == close && !scan.skips(pos) {
-            if step_over == 0 {
+            if step_over > 0 {
+                step_over -= 1;
+            } else if skip == 0 {
                 return Some(pos);
+            } else {
+                skip -= 1;
             }
-            step_over -= 1;
         }
         pos += c.len_utf8();
     }
@@ -669,9 +746,13 @@ fn walk_left_for_open(
     open: char,
     close: char,
     scan: &PairScan<'_>,
+    mut skip: usize,
 ) -> Option<usize> {
     if rope.chars_at(cursor).next() == Some(open) && !scan.skips(cursor) {
-        return Some(cursor);
+        if skip == 0 {
+            return Some(cursor);
+        }
+        skip -= 1;
     }
     let mut pos = cursor;
     let mut step_over: usize = 0;
@@ -680,10 +761,13 @@ fn walk_left_for_open(
         if c == close && !scan.skips(pos) {
             step_over += 1;
         } else if c == open && !scan.skips(pos) {
-            if step_over == 0 {
+            if step_over > 0 {
+                step_over -= 1;
+            } else if skip == 0 {
                 return Some(pos);
+            } else {
+                skip -= 1;
             }
-            step_over -= 1;
         }
     }
     None
@@ -694,11 +778,15 @@ fn walk_right_for_symmetric(
     cursor: usize,
     ch: char,
     scan: &PairScan<'_>,
+    mut skip: usize,
 ) -> Option<usize> {
     let mut pos = cursor;
     for c in rope.chars_at(cursor).take(MAX_PAIR_SCAN) {
         if c == ch && !scan.skips(pos) {
-            return Some(pos);
+            if skip == 0 {
+                return Some(pos);
+            }
+            skip -= 1;
         }
         pos += c.len_utf8();
     }
@@ -710,12 +798,16 @@ fn walk_left_for_symmetric(
     cursor: usize,
     ch: char,
     scan: &PairScan<'_>,
+    mut skip: usize,
 ) -> Option<usize> {
     let mut pos = cursor;
     for c in rope.reversed_chars_at(cursor).take(MAX_PAIR_SCAN) {
         pos = pos.checked_sub(c.len_utf8())?;
         if c == ch && !scan.skips(pos) {
-            return Some(pos);
+            if skip == 0 {
+                return Some(pos);
+            }
+            skip -= 1;
         }
     }
     None
@@ -772,12 +864,12 @@ mod tests {
         let (rope, len) = spaced_pair(MAX_PAIR_SCAN + 100);
 
         assert_eq!(
-            walk_right_for_close(&rope, 1, '(', ')', &PairScan::around(None, 0)),
+            walk_right_for_close(&rope, 1, '(', ')', &PairScan::around(None, 0), 0),
             None,
             "the close is past where the walk gives up"
         );
         assert_eq!(
-            walk_left_for_open(&rope, len - 1, '(', ')', &PairScan::around(None, 0)),
+            walk_left_for_open(&rope, len - 1, '(', ')', &PairScan::around(None, 0), 0),
             None,
             "and so is the open, walking the other way"
         );
@@ -789,12 +881,12 @@ mod tests {
         let (rope, len) = spaced_pair(filler);
 
         assert_eq!(
-            walk_right_for_close(&rope, 1, '(', ')', &PairScan::around(None, 0)),
+            walk_right_for_close(&rope, 1, '(', ')', &PairScan::around(None, 0), 0),
             Some(1 + filler),
             "a close inside the cap is where it always was"
         );
         assert_eq!(
-            walk_left_for_open(&rope, len - 1, '(', ')', &PairScan::around(None, 0)),
+            walk_left_for_open(&rope, len - 1, '(', ')', &PairScan::around(None, 0), 0),
             Some(0),
             "and so is the open"
         );
@@ -810,8 +902,15 @@ mod tests {
         SURROUND_PAIRS
             .into_iter()
             .filter_map(|(open, close)| {
-                find_surround_pair(rope, cursor, open, close, &PairScan::around(tree, cursor))
-                    .map(|(open_off, close_off)| (open, close, open_off, close_off))
+                find_surround_pair(
+                    rope,
+                    cursor,
+                    open,
+                    close,
+                    &PairScan::around(tree, cursor),
+                    0,
+                )
+                .map(|(open_off, close_off)| (open, close, open_off, close_off))
             })
             .max_by_key(|&(_, _, open_off, _)| open_off)
     }
@@ -844,7 +943,7 @@ mod tests {
                     continue;
                 }
                 assert_eq!(
-                    closest_surround_pair(&rope, cursor, &PairScan::around(None, cursor)),
+                    closest_surround_pair(&rope, cursor, &PairScan::around(None, cursor), 0),
                     closest_by_type(&rope, cursor, None),
                     "seed {seed}, cursor {cursor}, in {text:?}"
                 );
@@ -935,7 +1034,7 @@ mod tests {
         );
 
         let tree = deepest_tree_at(snapshot, cursor);
-        let found = closest_surround_pair(&rope, cursor, &PairScan::around(tree, cursor));
+        let found = closest_surround_pair(&rope, cursor, &PairScan::around(tree, cursor), 0);
         assert_eq!(
             found.map(|(open, _, open_off, _)| (open, open_off)),
             Some(('(', real_open)),
@@ -971,7 +1070,7 @@ mod tests {
             let tree = deepest_tree_at(snapshot, cursor);
             assert!(tree.is_some(), "a covering layer at {cursor}");
             assert_eq!(
-                closest_surround_pair(&rope, cursor, &PairScan::around(tree, cursor)),
+                closest_surround_pair(&rope, cursor, &PairScan::around(tree, cursor), 0),
                 closest_by_type(&rope, cursor, tree),
                 "cursor {cursor}"
             );
@@ -1092,7 +1191,7 @@ mod tests {
     fn find_pair_paren_cursor_inside() {
         let r = rope("(abc)");
         assert_eq!(
-            find_surround_pair(&r, 2, '(', ')', &PairScan::around(None, 0)),
+            find_surround_pair(&r, 2, '(', ')', &PairScan::around(None, 0), 0),
             Some((0, 4))
         );
     }
@@ -1101,7 +1200,7 @@ mod tests {
     fn find_pair_paren_cursor_on_open() {
         let r = rope("(abc)");
         assert_eq!(
-            find_surround_pair(&r, 0, '(', ')', &PairScan::around(None, 0)),
+            find_surround_pair(&r, 0, '(', ')', &PairScan::around(None, 0), 0),
             Some((0, 4))
         );
     }
@@ -1110,7 +1209,7 @@ mod tests {
     fn find_pair_paren_cursor_on_close() {
         let r = rope("(abc)");
         assert_eq!(
-            find_surround_pair(&r, 4, '(', ')', &PairScan::around(None, 0)),
+            find_surround_pair(&r, 4, '(', ')', &PairScan::around(None, 0), 0),
             Some((0, 4))
         );
     }
@@ -1119,7 +1218,7 @@ mod tests {
     fn find_pair_paren_no_match_returns_none() {
         let r = rope("abc");
         assert_eq!(
-            find_surround_pair(&r, 1, '(', ')', &PairScan::around(None, 0)),
+            find_surround_pair(&r, 1, '(', ')', &PairScan::around(None, 0), 0),
             None
         );
     }
@@ -1128,7 +1227,7 @@ mod tests {
     fn find_pair_nested_paren_finds_innermost() {
         let r = rope("((abc))");
         assert_eq!(
-            find_surround_pair(&r, 3, '(', ')', &PairScan::around(None, 0)),
+            find_surround_pair(&r, 3, '(', ')', &PairScan::around(None, 0), 0),
             Some((1, 5))
         );
     }
@@ -1137,7 +1236,7 @@ mod tests {
     fn find_pair_unbalanced_paren_returns_none() {
         let r = rope("(abc");
         assert_eq!(
-            find_surround_pair(&r, 1, '(', ')', &PairScan::around(None, 0)),
+            find_surround_pair(&r, 1, '(', ')', &PairScan::around(None, 0), 0),
             None
         );
     }
@@ -1146,7 +1245,7 @@ mod tests {
     fn find_pair_quote_cursor_inside() {
         let r = rope("\"abc\"");
         assert_eq!(
-            find_surround_pair(&r, 2, '"', '"', &PairScan::around(None, 2)),
+            find_surround_pair(&r, 2, '"', '"', &PairScan::around(None, 2), 0),
             Some((0, 4))
         );
     }
@@ -1155,11 +1254,11 @@ mod tests {
     fn find_pair_quote_cursor_on_quote_is_ambiguous() {
         let r = rope("\"abc\"");
         assert_eq!(
-            find_surround_pair(&r, 0, '"', '"', &PairScan::around(None, 0)),
+            find_surround_pair(&r, 0, '"', '"', &PairScan::around(None, 0), 0),
             None
         );
         assert_eq!(
-            find_surround_pair(&r, 4, '"', '"', &PairScan::around(None, 4)),
+            find_surround_pair(&r, 4, '"', '"', &PairScan::around(None, 4), 0),
             None
         );
     }
@@ -1168,7 +1267,7 @@ mod tests {
     fn find_pair_quote_no_match_returns_none() {
         let r = rope("abc");
         assert_eq!(
-            find_surround_pair(&r, 1, '"', '"', &PairScan::around(None, 1)),
+            find_surround_pair(&r, 1, '"', '"', &PairScan::around(None, 1), 0),
             None
         );
     }
@@ -1237,6 +1336,73 @@ mod tests {
             "abc\n",
             "the outer close was edited at an offset the inner delete had moved"
         );
+    }
+
+    #[test]
+    fn count_prefix_surround_delete_takes_outer_pair() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "((abc))\n");
+        h.type_keys("l l l");
+
+        h.type_keys("2 m d (");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "(abc)\n",
+            "the count reached past the nearest pair"
+        );
+    }
+
+    #[test]
+    fn count_prefix_surround_replace_takes_outer_pair() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "((abc))\n");
+        h.type_keys("l l l");
+
+        h.type_keys("2 m r ( [");
+        assert_eq!(buffer_text(&h, &path), "[(abc)]\n");
+    }
+
+    /// The nearest pair and the one around it are different types, so the count
+    /// has to order candidates across types rather than per type.
+    #[test]
+    fn count_prefix_closest_pair_crosses_types() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "([abc])\n");
+        h.type_keys("l l l");
+
+        h.type_keys("2 m d m");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "[abc]\n",
+            "the parens went, the brackets stayed"
+        );
+    }
+
+    #[test]
+    fn count_past_the_outermost_pair_edits_nothing() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "(abc)\n");
+        h.type_keys("l l");
+
+        h.type_keys("3 m d (");
+        assert_eq!(buffer_text(&h, &path), "(abc)\n");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("no surround pair around one of the cursors"),
+        );
+    }
+
+    /// A chord armed without a count reaches the nearest pair, whatever the
+    /// count the last chord captured.
+    #[test]
+    fn count_does_not_carry_to_the_next_chord() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "((abc))\n");
+        h.type_keys("l l l");
+
+        h.type_keys("2 m d (");
+        h.type_keys("m d (");
+        assert_eq!(buffer_text(&h, &path), "abc\n");
     }
 
     #[test]
@@ -1421,11 +1587,11 @@ mod tests {
     fn surround_pair_on_quote_no_tree_returns_none() {
         let r = rope("\"abc\"");
         assert_eq!(
-            find_surround_pair(&r, 0, '"', '"', &PairScan::around(None, 0)),
+            find_surround_pair(&r, 0, '"', '"', &PairScan::around(None, 0), 0),
             None
         );
         assert_eq!(
-            find_surround_pair(&r, 4, '"', '"', &PairScan::around(None, 4)),
+            find_surround_pair(&r, 4, '"', '"', &PairScan::around(None, 4), 0),
             None
         );
     }
