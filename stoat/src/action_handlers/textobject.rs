@@ -307,6 +307,9 @@ fn find_textobject_treesitter(
 /// includes the trailing blank-line run; Inner mode trims trailing
 /// blanks. A blank line is one whose [`Rope::line_len`] is zero.
 ///
+/// A cursor on a blank line takes a neighbouring paragraph, which side
+/// decided by [`blank_row_anchor`].
+///
 /// Returns `None` when `cursor` sits on a blank line and no
 /// surrounding paragraph extends across it (i.e. the buffer has no
 /// non-blank line at all, or only blank lines around the cursor).
@@ -326,30 +329,42 @@ fn find_textobject_paragraph(
     let mut blanks = BlankRows::new(rope);
 
     if blanks.is_blank(cursor_row) {
-        let mut probe = cursor_row;
-        let mut found = None;
-        while probe > 0 {
-            probe -= 1;
-            if !blanks.is_blank(probe) {
-                found = Some(probe);
-                break;
-            }
-        }
-        if found.is_none() {
-            let mut probe = cursor_row;
-            while probe < max_row {
-                probe += 1;
-                if !blanks.is_blank(probe) {
-                    found = Some(probe);
-                    break;
-                }
-            }
-        }
-        let anchor_row = found?;
+        let anchor_row = blank_row_anchor(cursor_row, max_row, &mut blanks)?;
         return paragraph_range_starting_from(rope, anchor_row, mode, max_row, &mut blanks);
     }
 
     paragraph_range_starting_from(rope, cursor_row, mode, max_row, &mut blanks)
+}
+
+/// The row whose paragraph a cursor on the blank row `cursor_row` selects.
+///
+/// A blank row directly above a paragraph belongs to the paragraph it opens, so
+/// it reaches forward. Any other blank row -- one closing the buffer, or one
+/// with more blanks after it -- reaches back to the paragraph behind it, and
+/// looks forward only when there is nothing behind it.
+///
+/// `None` when the buffer holds no non-blank row at all.
+fn blank_row_anchor(cursor_row: u32, max_row: u32, blanks: &mut BlankRows<'_>) -> Option<u32> {
+    if cursor_row < max_row && !blanks.is_blank(cursor_row + 1) {
+        return Some(cursor_row + 1);
+    }
+
+    let mut probe = cursor_row;
+    while probe > 0 {
+        probe -= 1;
+        if !blanks.is_blank(probe) {
+            return Some(probe);
+        }
+    }
+
+    let mut probe = cursor_row;
+    while probe < max_row {
+        probe += 1;
+        if !blanks.is_blank(probe) {
+            return Some(probe);
+        }
+    }
+    None
 }
 
 fn paragraph_range_starting_from(
@@ -552,8 +567,27 @@ mod tests {
     }
 
     #[test]
-    fn paragraph_cursor_on_blank_line_finds_neighbour() {
+    fn paragraph_cursor_on_blank_line_takes_the_paragraph_it_opens() {
         let r = rope_of("alpha\n\nbeta\n");
+        let range = find_textobject_paragraph(&r, 6, TextobjectMode::Inner)
+            .expect("neighbour paragraph found");
+        assert_eq!(range, 7..12, "the paragraph below, not the one above");
+    }
+
+    /// A blank row closing the buffer opens nothing, so it reaches back.
+    #[test]
+    fn paragraph_cursor_on_the_last_blank_line_reaches_back() {
+        let r = rope_of("alpha\n\n");
+        let range = find_textobject_paragraph(&r, 6, TextobjectMode::Inner)
+            .expect("neighbour paragraph found");
+        assert_eq!(range, 0..6);
+    }
+
+    /// The forward rule claims the row above a paragraph alone. A blank row
+    /// with another blank after it is not that row.
+    #[test]
+    fn paragraph_cursor_inside_a_run_of_blanks_reaches_back() {
+        let r = rope_of("alpha\n\n\nbeta\n");
         let range = find_textobject_paragraph(&r, 6, TextobjectMode::Inner)
             .expect("neighbour paragraph found");
         assert_eq!(range, 0..6);
