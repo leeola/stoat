@@ -3000,6 +3000,7 @@ pub(super) fn trim_selections(stoat: &mut Stoat) -> UpdateEffect {
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
 
+    let primary_id = editor.selections.newest_anchor().id;
     let trimmed: Vec<Selection<Anchor>> = editor
         .selections
         .all_anchors()
@@ -3029,7 +3030,18 @@ pub(super) fn trim_selections(stoat: &mut Stoat) -> UpdateEffect {
         });
         editor.selections.keep_primary();
     } else {
+        // A survivor of the primary keeps the primary by keeping its id, which
+        // is still the highest. Where the primary was all whitespace it has no
+        // survivor, and the primary falls to the document-last one rather than
+        // to whichever id happens to top the rest.
+        let promote = match trimmed.iter().any(|sel| sel.id == primary_id) {
+            true => None,
+            false => trimmed.last().map(|sel| sel.id),
+        };
         editor.selections.replace_with(trimmed, buffer_snapshot);
+        if let Some(id) = promote {
+            editor.selections.make_primary(id);
+        }
     }
     UpdateEffect::Redraw
 }

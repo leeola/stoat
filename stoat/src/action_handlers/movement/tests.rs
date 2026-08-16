@@ -2880,6 +2880,67 @@ fn snapshot_trim_selections_all_whitespace_collapses_to_primary() {
     h.assert_snapshot("snapshot_trim_selections_all_whitespace_collapses_to_primary");
 }
 
+/// A primary that trims away entirely leaves the primary to the document-last
+/// survivor, not to whichever survivor happens to hold the highest id.
+///
+/// Copying upward mints ids against document order, which is what makes the
+/// two rules part company here.
+#[test]
+fn trim_that_eats_the_primary_promotes_the_last() {
+    let mut h = TestHarness::with_size(20, 8);
+    let path = h.write_file("s.txt", "ab\n   \ncd\nef\n");
+    h.open_file(&path);
+    h.type_keys("3 j");
+    dispatch(&mut h.stoat, &stoat_action::AddSelectionAbove);
+    dispatch(&mut h.stoat, &stoat_action::AddSelectionAbove);
+    assert_eq!(
+        h.cursor_display_positions(),
+        vec![(1, 0), (2, 0), (3, 0)],
+        "test setup: one cursor per row from the whitespace row down",
+    );
+
+    dispatch(&mut h.stoat, &stoat_action::TrimSelections);
+    let primary_start = {
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let display = editor.display_map.snapshot();
+        let buffer = display.buffer_snapshot();
+        buffer.resolve_anchor(&editor.selections.newest_anchor().start)
+    };
+    assert_eq!(
+        primary_start, 10,
+        "the primary falls to the last survivor on row 3",
+    );
+}
+
+/// A primary that survives the trim keeps the primary, so the fallback fires
+/// only where the primary has no survivor at all.
+#[test]
+fn trim_that_spares_the_primary_leaves_it_alone() {
+    let mut h = TestHarness::with_size(20, 8);
+    let path = h.write_file("s.txt", "ab \n cd \n ef\n");
+    h.open_file(&path);
+    h.type_keys("% alt-s )");
+    let before = {
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.selections.newest_anchor().id
+    };
+
+    dispatch(&mut h.stoat, &stoat_action::TrimSelections);
+    let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+    let display = editor.display_map.snapshot();
+    let buffer = display.buffer_snapshot();
+    assert_eq!(
+        editor.selections.newest_anchor().id,
+        before,
+        "the primary keeps its identity across the trim",
+    );
+    assert_eq!(
+        buffer.resolve_anchor(&editor.selections.newest_anchor().start),
+        5,
+        "and stays on the middle row rather than falling to the last",
+    );
+}
+
 fn focused_buffer_text(h: &mut TestHarness) -> String {
     let ws = h.stoat.active_workspace();
     let focused = ws.panes.focus();
