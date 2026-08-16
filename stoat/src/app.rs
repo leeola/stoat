@@ -4095,12 +4095,22 @@ impl Stoat {
         }
 
         if takes_pending && self.pending_replace {
-            if let KeyCode::Char(ch) = key.code {
-                self.pending_replace = false;
-                return action_handlers::movement::execute_replace(self, ch);
-            }
             self.pending_replace = false;
-            return UpdateEffect::Redraw;
+            let mut encoded = [0u8; 4];
+            let text = match key.code {
+                KeyCode::Char(ch) => Some(&*ch.encode_utf8(&mut encoded)),
+                // Enter names a line ending and Tab a tab, so both replace a
+                // run with whitespace no printable key reaches. Always LF: a
+                // buffer holds LF whatever its file uses, and the CRLF a file
+                // arrived with is restored on save.
+                KeyCode::Enter => Some("\n"),
+                KeyCode::Tab => Some("\t"),
+                _ => None,
+            };
+            let Some(text) = text else {
+                return UpdateEffect::Redraw;
+            };
+            return action_handlers::movement::execute_replace(self, text);
         }
 
         if takes_pending && self.pending_surround_add {
@@ -15366,6 +15376,39 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "Xbc");
         assert_eq!(h.stoat.focused_mode(), "normal");
         assert!(!h.stoat.pending_replace);
+    }
+
+    /// Enter is the only way to replace a run with a line break, so it names
+    /// one rather than cancelling the chord.
+    #[test]
+    fn replace_char_with_enter_inserts_line_ending() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc");
+        h.type_keys("r");
+        h.type_keys("enter");
+        assert_eq!(buffer_text(&h, &path), "\nbc");
+        assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
+    #[test]
+    fn replace_char_with_tab_inserts_tab() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc");
+        h.type_keys("r");
+        h.type_keys("tab");
+        assert_eq!(buffer_text(&h, &path), "\tbc");
+    }
+
+    /// The replacement repeats once per character covered, so a run becomes a
+    /// run of line breaks rather than a single one.
+    #[test]
+    fn replace_char_with_enter_repeats_over_the_selection() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abcdef");
+        h.type_keys("v l l");
+        h.type_keys("r");
+        h.type_keys("enter");
+        assert_eq!(buffer_text(&h, &path), "\n\n\ndef");
     }
 
     #[test]

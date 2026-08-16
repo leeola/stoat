@@ -1474,7 +1474,7 @@ define_action!(
     "ReplaceChar",
     ActionKind::ReplaceChar,
     "replace selected chars with next typed char",
-    "Arms a one-shot prompt for the next character keypress; once a printable char arrives, every character in every non-empty selection is replaced with that char and the selection is preserved over the replaced text. Empty selections are left untouched. Mirrors Helix's `r` binding.",
+    "Arms a one-shot prompt for the next keypress. A printable character replaces every character of every non-empty selection with itself, and the selection is preserved over the replaced text. Enter replaces with a line ending and Tab with a tab. Every other key spends the prompt and leaves the text alone. Empty selections are left untouched.",
     ActionPriority::Rare
 );
 

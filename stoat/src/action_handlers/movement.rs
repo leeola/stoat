@@ -2123,7 +2123,13 @@ pub(super) fn set_pending_replace(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(crate) fn execute_replace(stoat: &mut Stoat, ch: char) -> UpdateEffect {
+/// Replace every character of every non-empty selection with `text`.
+///
+/// `text` is one keypress worth of replacement, and it repeats once per
+/// grapheme covered rather than once per selection. It is a string rather than
+/// a character because Enter and Tab name replacements no character key
+/// reaches.
+pub(crate) fn execute_replace(stoat: &mut Stoat, text: &str) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -2159,11 +2165,7 @@ pub(crate) fn execute_replace(stoat: &mut Stoat, ch: char) -> UpdateEffect {
                     byte_pos = next;
                     count += 1;
                 }
-                let mut replacement = String::with_capacity(count * ch.len_utf8());
-                for _ in 0..count {
-                    replacement.push(ch);
-                }
-                (sel.id, s, e, replacement)
+                (sel.id, s, e, text.repeat(count))
             })
             .collect();
         (buffer_id, entries)
