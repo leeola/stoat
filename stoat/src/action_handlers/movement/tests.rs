@@ -1227,11 +1227,32 @@ fn switch_case_over_three_selections_records_what_three_edits_would() {
 }
 
 #[test]
-fn move_left_at_start_is_noop() {
+fn move_left_at_start_keeps_the_cursor_there() {
     let mut stoat = stoat();
     editor::seed_focused_buffer(&mut stoat, "hello");
     dispatch(&mut stoat, &MoveLeft);
     assert_eq!(editor::head_offsets(&mut stoat), vec![0]);
+}
+
+/// The step reaches the cell it started on and lands there anyway, which is
+/// what turns the selection into a cursor. A selection held instead reads as
+/// the key doing nothing.
+#[test]
+fn move_left_at_start_collapses_a_selection() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "hello");
+    dispatch(&mut stoat, &MoveRight);
+    dispatch(&mut stoat, &MoveRight);
+    dispatch(&mut stoat, &ExtendLeft);
+    dispatch(&mut stoat, &ExtendLeft);
+    assert_eq!(
+        editor::selection_spans(&mut stoat),
+        vec![(0, 3, true)],
+        "reversed, so the cursor sits at offset 0"
+    );
+
+    dispatch(&mut stoat, &MoveLeft);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 1, false)]);
 }
 
 #[test]
@@ -1342,11 +1363,24 @@ fn move_up_at_first_row_is_noop() {
 }
 
 #[test]
-fn move_down_at_last_row_is_noop() {
+fn move_down_at_last_row_keeps_the_cursor_there() {
     let mut stoat = stoat();
     editor::seed_focused_buffer(&mut stoat, "abc");
     dispatch(&mut stoat, &MoveDown);
     assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 0)]);
+}
+
+/// The horizontal counterpart, on the row rather than the cell.
+#[test]
+fn move_up_at_the_first_row_collapses_a_selection() {
+    let mut stoat = stoat();
+    editor::seed_focused_buffer(&mut stoat, "abc");
+    dispatch(&mut stoat, &ExtendRight);
+    dispatch(&mut stoat, &ExtendRight);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
+
+    dispatch(&mut stoat, &MoveUp);
+    assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 3, false)]);
 }
 
 /// A trailing newline opens a line below the text, and `j` reaches it.

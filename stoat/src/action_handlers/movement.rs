@@ -252,7 +252,11 @@ pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32, extend: bool) -> Up
     move_cursors(&mut editor.selections, buffer_snapshot, extend, |read| {
         let cursor = cursor_offset(rope, read.tail, read.head);
         let target = (0..count).fold(cursor, |t, _| step(t));
-        (target != cursor).then_some((target, SelectionGoal::None))
+        // A step that reaches the cell it started on still lands. That is what
+        // collapses a wide selection to a cursor when the user presses `h` at
+        // the buffer start, where holding the selection instead reads as the
+        // key doing nothing at all.
+        Some((target, SelectionGoal::None))
     });
     UpdateEffect::Redraw
 }
@@ -335,11 +339,11 @@ fn move_vertical_by(
                 display_snapshot.buffer_to_display(Point::new(line, 0)).row
             },
         };
-        // A plain j/k at the file edge stays a no-op. An overshooting count jump
-        // lands on the clamped edge row rather than doing nothing.
-        if new_row == cursor_display.row {
-            return None;
-        }
+        // The clamp above is what keeps an overshooting count on the edge row
+        // rather than past the buffer. A step that reaches the row it started
+        // on still lands, collapsing a wide selection the way `h` at the buffer
+        // start does.
+        //
         // Snapping through the clip is what carries the cursor off a row that
         // holds no text, a fold placeholder or a diff block row, onto the next
         // one in the travel direction.
