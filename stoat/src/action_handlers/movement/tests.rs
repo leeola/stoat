@@ -4231,6 +4231,56 @@ fn indent_selection_uses_space_indent_style() {
     assert_eq!(focused_buffer_text(&mut h), "  a\n  b\n");
 }
 
+/// A line off the indent stops gains only what reaches the next one, so a
+/// second press lands it on a whole multiple rather than compounding the drift.
+#[test]
+fn indent_selection_aligns_a_misaligned_space_indent() {
+    let mut h = TestHarness::with_size(20, 5);
+    // The 4-space step from the first line to the second sets the style.
+    let path = h.write_file("s.txt", "a\n    b\n   c\n");
+    h.open_file(&path);
+    h.type_keys("2 j");
+    dispatch(&mut h.stoat, &stoat_action::IndentSelection);
+    assert_eq!(focused_buffer_text(&mut h), "a\n    b\n    c\n");
+
+    dispatch(&mut h.stoat, &stoat_action::IndentSelection);
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "a\n    b\n        c\n",
+        "an aligned line gains a whole unit"
+    );
+}
+
+/// A tab style inserts whole units over the same misaligned line, since tab
+/// stops belong to the renderer and no partial tab exists to insert.
+#[test]
+fn indent_selection_with_tabs_ignores_the_leading_spaces() {
+    let mut h = TestHarness::with_size(20, 5);
+    // The tab step from the first line to the second sets the style.
+    let path = h.write_file("s.txt", "\ta\n\t\tb\n   c\n");
+    h.open_file(&path);
+    h.type_keys("2 j");
+    dispatch(&mut h.stoat, &stoat_action::IndentSelection);
+    assert_eq!(focused_buffer_text(&mut h), "\ta\n\t\tb\n\t   c\n");
+}
+
+/// A count multiplies the whole units and the alignment is taken once, so the
+/// line still lands on a stop.
+#[test]
+fn count_prefix_indent_selection_aligns_once() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "a\n    b\n   c\n");
+    h.open_file(&path);
+    h.type_keys("2 j");
+    h.stoat.pending_count = Some(3);
+    dispatch(&mut h.stoat, &stoat_action::IndentSelection);
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "a\n    b\n            c\n",
+        "three units less the one space of drift, landing on 12"
+    );
+}
+
 #[test]
 fn indent_selection_skips_blank_lines() {
     let mut h = TestHarness::with_size(20, 5);

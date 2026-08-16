@@ -27,7 +27,7 @@ use stoat_text::{
     cursor_offset, date_time_increment, integer_increment, next_char_boundary,
     next_long_word_end_range, next_long_word_start_range, next_word_end_range,
     next_word_start_range, prev_long_word_end_range, prev_long_word_start_range,
-    prev_word_end_range, prev_word_start_range, Anchor, Bias, Point, Rope, Selection,
+    prev_word_end_range, prev_word_start_range, Anchor, Bias, IndentStyle, Point, Rope, Selection,
     SelectionGoal,
 };
 
@@ -2631,10 +2631,10 @@ fn apply_line_indent(stoat: &mut Stoat, dir: IndentDir) -> UpdateEffect {
             match dir {
                 IndentDir::In => {
                     // Indenting leaves all-whitespace rows untouched, like Helix.
-                    if first_nonwhitespace(rope, line_start, line_end).is_none() {
+                    let Some(leading) = leading_whitespace_chars(rope, line_start, line_end) else {
                         continue;
-                    }
-                    edits.push((line_start, line_start, style.as_str().repeat(count)));
+                    };
+                    edits.push((line_start, line_start, indent_text(style, count, leading)));
                 },
                 IndentDir::Out => {
                     // Remove leading whitespace up to `count` indent widths of
@@ -2684,6 +2684,43 @@ fn apply_line_indent(stoat: &mut Stoat, dir: IndentDir) -> UpdateEffect {
     let new_buf = new_display.buffer_snapshot();
     editor.selections.transform(new_buf, |sel| sel.clone());
     UpdateEffect::Redraw
+}
+
+/// Text one `>` inserts at a line start, given the leading whitespace already
+/// there.
+///
+/// A space style tops the line up to the next indent stop rather than adding a
+/// whole unit, so a line three spaces into a four-space style gains one space
+/// and every later press gains four. Tab stops belong to the renderer and no
+/// partial tab exists to insert, so a tab style always inserts whole units.
+fn indent_text(style: IndentStyle, count: usize, leading: usize) -> String {
+    let unit = style.as_str();
+    match style {
+        IndentStyle::Tabs => unit.repeat(count),
+        // The width comes from the string actually inserted, which is clamped
+        // to at least one character, so the remainder always has a divisor.
+        IndentStyle::Spaces(_) => " ".repeat(unit.len() * count - leading % unit.len()),
+    }
+}
+
+/// Count of whitespace characters a line opens with, or `None` when the line
+/// holds nothing else.
+///
+/// The count is in characters rather than bytes so it lines up with an indent
+/// width measured in space characters. A leading tab therefore counts as one,
+/// whatever column it advances to.
+fn leading_whitespace_chars(rope: &Rope, line_start: usize, line_end: usize) -> Option<usize> {
+    let mut cursor = line_start;
+    for (chars, ch) in rope.chars_at(line_start).enumerate() {
+        if cursor >= line_end {
+            return None;
+        }
+        if !ch.is_whitespace() {
+            return Some(chars);
+        }
+        cursor += ch.len_utf8();
+    }
+    None
 }
 
 fn toggle_case(s: &str) -> String {
