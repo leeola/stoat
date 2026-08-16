@@ -15333,7 +15333,28 @@ mod tests {
         h.type_keys("r");
         h.type_keys("X");
         assert_eq!(buffer_text(&h, &path), "XXXXef");
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "a replacement that lands hands back normal mode"
+        );
+    }
+
+    /// The chord arms while select mode is on and the mode ends with the edit,
+    /// so a chord that never applies leaves the mode where it found it.
+    #[test]
+    fn a_cancelled_replace_char_keeps_select_mode() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abcdef");
+        h.type_keys("v l l l");
+
+        h.type_keys("r");
+        assert!(h.stoat.pending_replace, "chord armed");
+
+        h.type_keys("escape");
+        assert!(!h.stoat.pending_replace, "chord dropped");
         assert_eq!(h.stoat.focused_mode(), "select");
+        assert_eq!(buffer_text(&h, &path), "abcdef");
     }
 
     #[test]

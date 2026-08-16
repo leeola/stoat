@@ -2204,6 +2204,11 @@ pub(crate) fn execute_replace(stoat: &mut Stoat, ch: char) -> UpdateEffect {
         }
         new
     });
+    // Select mode ends here rather than at the binding. The binding fires when
+    // the chord arms, a keypress before the replacement char arrives, and a
+    // chord cancelled in between then leaves select mode having changed
+    // nothing.
+    stoat.set_focused_mode("normal".to_string());
     UpdateEffect::Redraw
 }
 

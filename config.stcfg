@@ -659,8 +659,8 @@ on key {
         Alt-Minus -> MergeSelections();
         Alt-_ -> MergeConsecutiveSelections();
         Q -> RecordMacro();
-        > -> IndentSelection();
-        < -> UnindentSelection();
+        > -> [IndentSelection(), SetMode(normal)];
+        < -> [UnindentSelection(), SetMode(normal)];
         = -> FormatSelections();
         & -> [AlignSelections(), SetMode(normal)];
         d -> [DeleteSelection(), SetMode(normal)];
@@ -670,9 +670,9 @@ on key {
         r -> ReplaceChar();
         y -> [Yank(), SetMode(normal)];
         R -> [ReplaceWithYanked(), SetMode(normal)];
-        ~ -> SwitchCase();
-        ` -> SwitchToLowercase();
-        Alt-` -> SwitchToUppercase();
+        ~ -> [SwitchCase(), SetMode(normal)];
+        ` -> [SwitchToLowercase(), SetMode(normal)];
+        Alt-` -> [SwitchToUppercase(), SetMode(normal)];
         u -> Undo();
         U -> Redo();
         : -> OpenCommandPalette();

@@ -3137,6 +3137,23 @@ fn select_mode_tilde_switches_case() {
     h.type_keys("v l l l");
     h.type_keys("~");
     assert_eq!(focused_buffer_text(&mut h), "ABCDef\n");
+    assert_eq!(
+        h.stoat.focused_mode(),
+        "normal",
+        "and hands back normal mode"
+    );
+}
+
+#[test]
+fn select_mode_indent_returns_to_normal() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "abc\n");
+    h.open_file(&path);
+    h.type_keys("v l l");
+
+    h.type_keys(">");
+    assert_eq!(focused_buffer_text(&mut h), "\tabc\n");
+    assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
 #[test]
