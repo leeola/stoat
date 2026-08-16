@@ -1,4 +1,7 @@
-use crate::app::{Stoat, UpdateEffect};
+use crate::{
+    action_handlers::movement::{self, NodeBound},
+    app::{Stoat, UpdateEffect},
+};
 use std::{
     future::Future,
     pin::Pin,
@@ -21,28 +24,34 @@ pub(crate) struct ResolvedCompletion {
 
 /// Arbitrate the Tab key in insert mode.
 ///
-/// An in-flight snippet advances its placeholder. An open completion popup
-/// accepts its highlighted item. Otherwise, a cursor following only whitespace
-/// on its line inserts the buffer's indent unit. Returns [`UpdateEffect::None`]
-/// when none of those branches apply, so other dispatch layers (or the user)
-/// can decide what to do with the keystroke.
+/// An open completion popup accepts its highlighted item. Otherwise the line
+/// behind the cursors decides. With nothing but whitespace behind every one of
+/// them the key indents. Anywhere else it advances an in-flight snippet, or
+/// moves to the end of the enclosing syntax node when there is none.
+///
+/// Indentation is what Tab means in an indent whatever else is in flight, which
+/// is why a running snippet does not take the key there. It only takes the key
+/// where the alternative is a motion.
 pub(super) fn smart_tab(stoat: &mut Stoat) -> UpdateEffect {
-    if stoat.active_snippet.is_some() {
-        crate::completion::snippet::advance(stoat);
-        return UpdateEffect::Redraw;
-    }
     if stoat.pending_completion.is_some() {
         return crate::completion::accept::execute(stoat);
     }
     let Some((editor_id, buffer_id)) = stoat.focused_editor_ids() else {
         return UpdateEffect::None;
     };
-    if stoat.cursor_after_only_whitespace(editor_id, buffer_id) {
+    if stoat.cursors_after_only_whitespace(editor_id, buffer_id) {
         let unit = stoat.buffer_indent_style(buffer_id).as_str();
         stoat.editor_insert(editor_id, buffer_id, unit);
         return UpdateEffect::Redraw;
     }
-    UpdateEffect::None
+    if stoat.active_snippet.is_some() {
+        crate::completion::snippet::advance(stoat);
+        return UpdateEffect::Redraw;
+    }
+
+    // The movement function rather than the action, since dispatching from
+    // inside a dispatch arm opens a second undo group around this one.
+    movement::move_to_parent_bound(stoat, NodeBound::End, false)
 }
 
 /// Insert the buffer's indent unit at every cursor, unconditionally.
@@ -205,13 +214,56 @@ mod tests {
     }
 
     #[test]
-    fn smart_tab_no_op_after_nonwhitespace_without_popup() {
+    fn smart_tab_after_nonwhitespace_writes_nothing() {
         let mut h = Stoat::test();
         let path = h.write_file("a.rs", "abc\n");
         h.open_file(&path);
         h.type_keys("l l l i");
         dispatch(&mut h.stoat, &SmartTab);
-        assert_eq!(buffer_text(&h.stoat, &path), "abc\n");
+        assert_eq!(
+            buffer_text(&h.stoat, &path),
+            "abc\n",
+            "mid-line the key is a motion, so it leaves the text alone",
+        );
+    }
+
+    #[test]
+    fn two_cursors_one_mid_word_tab_moves_to_parent_end() {
+        let mut h = Stoat::test();
+        let path = h.write_file("a.rs", "fn f() {\n  ab\n xcd\n}\n");
+        h.open_file(&path);
+        // Both cursors land on column 2, where one line has whitespace behind
+        // it and the other has an `x`. The mid-word one decides for both.
+        h.type_keys("j l l");
+        h.type_keys("C");
+        h.type_keys("i");
+        let before = h.primary_head_offset();
+
+        dispatch(&mut h.stoat, &SmartTab);
+        assert_eq!(
+            buffer_text(&h.stoat, &path),
+            "fn f() {\n  ab\n xcd\n}\n",
+            "no cursor indents, not even the one sitting in an indent",
+        );
+        assert_ne!(h.primary_head_offset(), before, "the cursor moved instead");
+    }
+
+    #[test]
+    fn tab_in_indent_still_indents() {
+        let mut h = Stoat::test();
+        // The 2-space indent makes the buffer space-styled.
+        let path = h.write_file("a.rs", "  ab\n  cd\n");
+        h.open_file(&path);
+        h.type_keys("l l");
+        h.type_keys("C");
+        h.type_keys("i");
+
+        dispatch(&mut h.stoat, &SmartTab);
+        assert_eq!(
+            buffer_text(&h.stoat, &path),
+            "    ab\n    cd\n",
+            "every cursor sits after whitespace, so every one indents",
+        );
     }
 
     #[test]

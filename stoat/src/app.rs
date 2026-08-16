@@ -4859,7 +4859,13 @@ impl Stoat {
         }
     }
 
-    pub(crate) fn cursor_after_only_whitespace(
+    /// True when every cursor in `editor_id` has nothing but whitespace behind
+    /// it on its line.
+    ///
+    /// Every cursor, because one cursor mid-word is enough to make the Tab key
+    /// mean something other than indentation. A reader with cursors in two
+    /// places wants one answer for the keystroke, not two.
+    pub(crate) fn cursors_after_only_whitespace(
         &mut self,
         editor_id: EditorId,
         buffer_id: BufferId,
@@ -4873,22 +4879,24 @@ impl Stoat {
         }
         let display_snapshot = editor.display_map.snapshot();
         let buf_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor().clone();
         let rope = buf_snapshot.rope();
-        let offset = stoat_text::cursor_offset(
-            rope,
-            buf_snapshot.resolve_anchor(&sel.tail()),
-            buf_snapshot.resolve_anchor(&sel.head()),
-        );
-        for ch in rope.reversed_chars_at(offset) {
-            if ch == '\n' {
-                return true;
-            }
-            if !ch.is_whitespace() {
-                return false;
-            }
-        }
-        true
+
+        let ends = {
+            let anchors: Vec<Anchor> = editor
+                .selections
+                .all_anchors()
+                .iter()
+                .flat_map(|sel| [sel.tail(), sel.head()])
+                .collect();
+            buf_snapshot.resolve_anchors_batch(&anchors)
+        };
+
+        ends.chunks_exact(2).all(|ends| {
+            let offset = stoat_text::cursor_offset(rope, ends[0], ends[1]);
+            rope.reversed_chars_at(offset)
+                .take_while(|&ch| ch != '\n')
+                .all(char::is_whitespace)
+        })
     }
 
     /// The mode of the focused input target.
@@ -16180,6 +16188,58 @@ mod tests {
         h.type_keys("down");
         let (after_down, _) = focused_primary_offsets(&mut h);
         assert!(after_down > 0, "down arrow should advance cursor");
+    }
+
+    #[test]
+    fn snippet_tabstop_wins_mid_line_only() {
+        use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_keys("p r i");
+        let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..3);
+        h.stoat.pending_completion = Some(CompletionPopup {
+            items: vec![CompletionItem {
+                label: "fn".into(),
+                source: CompletionSource::Lsp,
+                kind: None,
+                detail: None,
+                replace_range,
+                insert_text: "${1:name}(${2:arg})$0".into(),
+                is_snippet: true,
+                documentation: None,
+                lsp_item: None,
+                server: None,
+            }],
+            selected_idx: 0,
+            anchor_offset: 0,
+            prefix_range: 0..3,
+            prefix: String::new(),
+            incomplete: Vec::new(),
+        });
+        h.type_keys("tab");
+        assert_eq!(buffer_text(&h, &path), "name(arg)");
+        assert!(h.stoat.active_snippet.is_some(), "a snippet is in flight");
+
+        h.type_keys("home");
+        h.type_keys("tab");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "\tname(arg)",
+            "in an indent the key indents, snippet or no snippet",
+        );
+        assert!(
+            h.stoat.active_snippet.is_some(),
+            "and the snippet is still there to advance",
+        );
+
+        h.type_keys("end");
+        h.type_keys("tab");
+        assert_eq!(
+            focused_primary_offsets(&mut h),
+            (6, 9),
+            "away from the indent the key advances the snippet, arg shifted by the tab",
+        );
     }
 
     #[test]
