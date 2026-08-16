@@ -42,13 +42,17 @@ use std::{
 use stoat_scheduler::Task;
 use stoat_text::{Anchor, Bias, Point, Rope, SelectionGoal};
 
-/// Direction for [`goto_diagnostic`]. `Next` searches forward from
-/// the cursor's byte offset; `Prev` searches backward. Neither
-/// wraps when the search exhausts.
+/// Which diagnostic [`goto_diagnostic`] goes to.
+///
+/// `Next` and `Prev` search out from the cursor's byte offset and stop rather
+/// than wrapping when the search exhausts. `First` and `Last` take the ends of
+/// the sorted list and ignore the cursor.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum DiagnosticDirection {
     Next,
     Prev,
+    First,
+    Last,
 }
 
 /// Move the focused editor's primary cursor to the next or previous
@@ -56,7 +60,14 @@ pub(crate) enum DiagnosticDirection {
 /// not an editor, the buffer has no path, or no diagnostic lies in
 /// the requested direction.
 pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection) -> UpdateEffect {
-    stoat.last_motion = Some(crate::action_handlers::LastMotion::Diagnostic { dir: direction });
+    // Repeating a search for the next one goes somewhere new, where repeating a
+    // jump to the first goes nowhere, so only the two searches are repeatable.
+    if matches!(
+        direction,
+        DiagnosticDirection::Next | DiagnosticDirection::Prev
+    ) {
+        stoat.last_motion = Some(crate::action_handlers::LastMotion::Diagnostic { dir: direction });
+    }
     let (cursor_offset, buffer_id, _rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -106,6 +117,9 @@ pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection)
             .into_iter()
             .rev()
             .find(|&(start, _)| start < cursor_offset),
+        // The ends of the sorted list, whatever the cursor is near.
+        DiagnosticDirection::First => spans.first().copied(),
+        DiagnosticDirection::Last => spans.last().copied(),
     };
 
     let Some((start, end)) = target else {
@@ -2638,6 +2652,58 @@ mod tests {
         h.seed_diagnostics(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
         assert_eq!(cursor_offset(&mut h), 4);
+    }
+
+    /// The ends of the list are taken whatever the cursor is near, so a cursor
+    /// already past the first still reaches back to it.
+    #[test]
+    fn goto_first_diagnostic_reaches_back_past_the_cursor() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.seed_diagnostics(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoLastDiagnostic);
+        assert_eq!(cursor_offset(&mut h), 8, "test setup: on the last");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoFirstDiagnostic);
+        assert_eq!(cursor_offset(&mut h), 4);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(
+            cursor_offset(&mut h),
+            8,
+            "the origin went on the jumplist before the landing",
+        );
+    }
+
+    /// A buffer with nothing to go to moves nothing, and leaves the jumplist
+    /// alone rather than recording a jump that went nowhere.
+    #[test]
+    fn goto_first_diagnostic_with_none_pushes_no_jump() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        // A known entry to land on. A push by the no-op takes its place as what
+        // the jump back reaches.
+        h.type_keys("l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("l l");
+        assert_eq!(cursor_offset(&mut h), 3, "test setup: away from the entry");
+
+        assert_eq!(
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoFirstDiagnostic),
+            crate::app::UpdateEffect::None,
+        );
+        assert_eq!(cursor_offset(&mut h), 3, "the cursor stayed put");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(
+            cursor_offset(&mut h),
+            1,
+            "the jump back reaches the earlier entry, so the no-op pushed none",
+        );
     }
 
     #[test]

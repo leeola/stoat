@@ -1649,6 +1649,26 @@ define_action!(
 );
 
 define_action!(
+    GotoFirstDiagnosticDef,
+    GotoFirstDiagnostic,
+    "GotoFirstDiagnostic",
+    ActionKind::GotoFirstDiagnostic,
+    "goto the first diagnostic in the buffer",
+    "Select the buffer's first diagnostic, whatever the cursor is near, and record the origin on the jumplist. The whole selection set becomes that one span. A buffer with no diagnostics moves nothing and records nothing.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoLastDiagnosticDef,
+    GotoLastDiagnostic,
+    "GotoLastDiagnostic",
+    ActionKind::GotoLastDiagnostic,
+    "goto the last diagnostic in the buffer",
+    "Select the buffer's last diagnostic, whatever the cursor is near, and record the origin on the jumplist. The whole selection set becomes that one span. A buffer with no diagnostics moves nothing and records nothing.",
+    ActionPriority::Rare
+);
+
+define_action!(
     AddNewlineBelowDef,
     AddNewlineBelow,
     "AddNewlineBelow",

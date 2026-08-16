@@ -973,6 +973,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoPrevDiagnostic => {
             lsp::goto_diagnostic(stoat, lsp::DiagnosticDirection::Prev)
         },
+        ActionKind::GotoFirstDiagnostic => {
+            lsp::goto_diagnostic(stoat, lsp::DiagnosticDirection::First)
+        },
+        ActionKind::GotoLastDiagnostic => {
+            lsp::goto_diagnostic(stoat, lsp::DiagnosticDirection::Last)
+        },
         ActionKind::GotoDefinition => lsp::goto_definition(stoat),
         ActionKind::GotoDeclaration => lsp::goto_declaration(stoat),
         ActionKind::GotoTypeDefinition => lsp::goto_type_definition(stoat),

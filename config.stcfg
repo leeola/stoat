@@ -534,6 +534,7 @@ on key {
     mode == bracket_next {
         Escape -> SetMode(normal);
         Space -> [AddNewlineBelow(), SetMode(normal)];
+        D -> [GotoLastDiagnostic(), SetMode(normal)];
         g -> [GotoNextChange(), SetMode(normal)];
         p -> [GotoNextParagraph(), SetMode(normal)];
         d -> [GotoNextDiagnostic(), SetMode(normal)];
@@ -548,6 +549,7 @@ on key {
     mode == bracket_prev {
         Escape -> SetMode(normal);
         Space -> [AddNewlineAbove(), SetMode(normal)];
+        D -> [GotoFirstDiagnostic(), SetMode(normal)];
         g -> [GotoPrevChange(), SetMode(normal)];
         p -> [GotoPrevParagraph(), SetMode(normal)];
         d -> [GotoPrevDiagnostic(), SetMode(normal)];
@@ -565,6 +567,7 @@ on key {
     mode == select_bracket_next {
         Escape -> SetMode(select);
         Space -> [AddNewlineBelow(), SetMode(select)];
+        D -> [GotoLastDiagnostic(), SetMode(select)];
         g -> [GotoNextChange(), SetMode(select)];
         p -> [ExtendGotoNextParagraph(), SetMode(select)];
         d -> [GotoNextDiagnostic(), SetMode(select)];
@@ -579,6 +582,7 @@ on key {
     mode == select_bracket_prev {
         Escape -> SetMode(select);
         Space -> [AddNewlineAbove(), SetMode(select)];
+        D -> [GotoFirstDiagnostic(), SetMode(select)];
         g -> [GotoPrevChange(), SetMode(select)];
         p -> [ExtendGotoPrevParagraph(), SetMode(select)];
         d -> [GotoPrevDiagnostic(), SetMode(select)];
