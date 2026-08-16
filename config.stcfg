@@ -667,6 +667,12 @@ on key {
         Alt-d -> [DeleteSelectionNoYank(), SetMode(normal)];
         c -> [ChangeSelection(), SetMode(insert)];
         Alt-c -> [ChangeSelectionNoYank(), SetMode(insert)];
+        i -> [EnterInsertMode(), SetMode(insert)];
+        a -> [AppendMode(), SetMode(insert)];
+        I -> [InsertAtLineStart(), SetMode(insert)];
+        A -> [InsertAtLineEnd(), SetMode(insert)];
+        o -> [OpenBelow(), SetMode(insert)];
+        O -> [OpenAbove(), SetMode(insert)];
         r -> ReplaceChar();
         y -> [Yank(), SetMode(normal)];
         p -> [PasteAfter(), SetMode(normal)];

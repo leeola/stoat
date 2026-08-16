@@ -7071,3 +7071,38 @@ fn cancelling_the_find_chord_leaves_the_key_hints_alone() {
     assert!(h.stoat.pending_find.is_none(), "chord dropped");
     assert!(h.stoat.key_hints_visible, "and the hints are untouched");
 }
+
+/// Insert reorients the selection head-to-start and keeps the span, so typing
+/// lands before what was selected rather than near its end.
+#[test]
+fn select_mode_i_enters_insert_before_the_selection() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "abcdef\n");
+    h.open_file(&path);
+    h.type_keys("v l l");
+    assert_eq!(h.selection_spans(), vec![(0, 3, false)], "abc selected");
+
+    h.type_keys("i");
+    assert_eq!(h.stoat.focused_mode(), "insert");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 3, true)],
+        "same span, reversed"
+    );
+
+    h.type_keys("X");
+    assert_eq!(focused_buffer_text(&mut h), "Xabcdef\n");
+}
+
+#[test]
+fn select_mode_o_opens_below_and_enters_insert() {
+    let mut h = TestHarness::with_size(30, 5);
+    let path = h.write_file("s.txt", "abc\ndef\n");
+    h.open_file(&path);
+    h.type_keys("v l");
+
+    h.type_keys("o");
+    assert_eq!(h.stoat.focused_mode(), "insert");
+    h.type_keys("X");
+    assert_eq!(focused_buffer_text(&mut h), "abc\nX\ndef\n");
+}
