@@ -1088,6 +1088,19 @@ fn join_selections_joins_without_selecting_the_space() {
     assert_ne!(h.selection_spans(), vec![(2, 3, false)]);
 }
 
+/// Every other join fixture is two lines, which is one turn of the join loop.
+/// Three lines makes it turn twice, which is where the second join has to start
+/// from where the first one's target ended.
+#[test]
+fn join_selections_across_three_lines_joins_each_in_turn() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "ab\ncd\nef\n");
+    h.open_file(&path);
+    set_range(&mut h, 0, 8);
+    dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
+    assert_eq!(buffer_string(&mut h), "ab cd ef\n");
+}
+
 /// The plain join reaches a key, not just the palette.
 ///
 /// A shifted key extends in this scheme, which takes J away from the join.

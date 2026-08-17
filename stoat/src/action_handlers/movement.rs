@@ -1311,8 +1311,12 @@ fn join_selections_impl(stoat: &mut Stoat, select_space: bool) -> UpdateEffect {
                 line_comment_continues(rope, first_start, first_end, comment_tokens)
                     .map(|(_, token)| token);
 
+            // Where each turn joins onto is where the turn before worked out
+            // its target ended, and the rope is not edited until the whole
+            // batch lands, so the answer is carried rather than asked for
+            // again.
+            let mut join_start = first_end;
             for line in start_row..end_row {
-                let join_start = line_content_end(rope, line);
                 let next_end = line_content_end(rope, line + 1);
                 let next_start = rope.point_to_offset(Point::new(line + 1, 0));
                 let mut join_end = skip_spaces_tabs(rope, next_start, next_end);
@@ -1327,6 +1331,7 @@ fn join_selections_impl(stoat: &mut Stoat, select_space: bool) -> UpdateEffect {
 
                 let has_space = join_end != next_end;
                 changes.push((join_start, join_end, has_space));
+                join_start = next_end;
             }
         }
         changes
