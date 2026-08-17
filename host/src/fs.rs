@@ -78,6 +78,24 @@ pub trait FsHost: Send + Sync {
         self.write(path, data)
     }
 
+    /// [`Self::write_atomic`] for a caller holding its content in pieces.
+    ///
+    /// For a writer whose bytes are already chunked, an editor buffer being the
+    /// case in point, so the whole file never has to exist as one buffer beside
+    /// the one it came from.
+    ///
+    /// The default joins the chunks and delegates, which is the same file for
+    /// twice the memory. An implementation backed by a real filesystem
+    /// overrides it to write each chunk as it arrives.
+    fn write_atomic_stream(
+        &self,
+        path: &Path,
+        chunks: &mut dyn Iterator<Item = &[u8]>,
+    ) -> io::Result<()> {
+        let joined: Vec<u8> = chunks.flatten().copied().collect();
+        self.write_atomic(path, &joined)
+    }
+
     /// Returns metadata, or `None` if the path doesn't exist. Errors
     /// only on real IO failures (permission denied, etc.), not NotFound.
     fn metadata(&self, path: &Path) -> io::Result<Option<FsMetadata>>;
@@ -426,6 +444,14 @@ impl FsHost for LocalFs {
     }
 
     fn write_atomic(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        self.write_atomic_stream(path, &mut std::iter::once(data))
+    }
+
+    fn write_atomic_stream(
+        &self,
+        path: &Path,
+        chunks: &mut dyn Iterator<Item = &[u8]>,
+    ) -> io::Result<()> {
         let dest = resolve_write_target(path);
 
         // Replacing the inode would leave every other name for this file
@@ -434,14 +460,18 @@ impl FsHost for LocalFs {
         // is the lesser harm.
         if has_siblings(&dest) {
             let mut file = std::fs::File::create(&dest)?;
-            file.write_all(data)?;
+            for chunk in chunks {
+                file.write_all(chunk)?;
+            }
             file.sync_all()?;
             return Ok(());
         }
 
         let dir = dest.parent().unwrap_or_else(|| Path::new("."));
         let mut tmp = NamedTempFile::new_in(dir)?;
-        tmp.write_all(data)?;
+        for chunk in chunks {
+            tmp.write_all(chunk)?;
+        }
         tmp.as_file().sync_all()?;
 
         match std::fs::metadata(&dest) {
@@ -779,6 +809,36 @@ mod tests {
         LocalFs.write_atomic(&path, b"new").expect("write");
 
         assert_eq!(read(&path), b"new");
+    }
+
+    /// A file written in pieces is the file written whole. Both destinations
+    /// are covered, since a file with another name pointing at it keeps its
+    /// inode and takes a different route through the write.
+    #[test]
+    fn a_streamed_write_lands_the_same_bytes_as_a_whole_one() {
+        let dir = TempDir::new().expect("tempdir");
+        let chunks: Vec<&[u8]> = vec![b"one\n", b"two\n", b"three"];
+        let joined: Vec<u8> = chunks.concat();
+
+        let fresh = dir.path().join("fresh.txt");
+        LocalFs
+            .write_atomic_stream(&fresh, &mut chunks.iter().copied())
+            .expect("write");
+        assert_eq!(read(&fresh), joined, "a file created by the write");
+
+        let linked = dir.path().join("linked.txt");
+        fs::write(&linked, b"old").expect("seed");
+        fs::hard_link(&linked, dir.path().join("other.txt")).expect("link");
+        LocalFs
+            .write_atomic_stream(&linked, &mut chunks.iter().copied())
+            .expect("write");
+        assert_eq!(read(&linked), joined, "a file written through its inode");
+
+        let empty = dir.path().join("empty.txt");
+        LocalFs
+            .write_atomic_stream(&empty, &mut std::iter::empty())
+            .expect("write");
+        assert_eq!(read(&empty), b"", "no chunks writes an empty file");
     }
 
     /// A group the running user belongs to that is not `current`, or `None`

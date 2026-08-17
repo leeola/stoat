@@ -463,6 +463,17 @@ impl FsHost for FakeFs {
         )
     }
 
+    /// Records the same op the whole-buffer write does, so a test reads the
+    /// file it was handed rather than how the caller chose to hand it over.
+    fn write_atomic_stream(
+        &self,
+        path: &Path,
+        chunks: &mut dyn Iterator<Item = &[u8]>,
+    ) -> io::Result<()> {
+        let joined: Vec<u8> = chunks.flatten().copied().collect();
+        self.write_atomic(path, &joined)
+    }
+
     fn metadata(&self, path: &Path) -> io::Result<Option<FsMetadata>> {
         let mut state = self.state.lock().expect("FakeFs lock poisoned");
         state.ops.push(FakeFsOp::Metadata {
