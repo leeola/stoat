@@ -6590,6 +6590,7 @@ impl Stoat {
         crate::buffer_lifecycle::install_pending_opens(self);
         action_handlers::sync_palette_picker(self);
         action_handlers::sync_file_finder_preview(self);
+        action_handlers::search::sync_search_preview(self);
         self.drive_parse_jobs();
         self.drive_diff_jobs();
 

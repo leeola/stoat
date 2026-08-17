@@ -1,10 +1,13 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    editor_state::{EditorState, ScrollGlide},
     input_view::{InputView, SubmitTarget},
+    jumplist::JumpEntry,
+    pane::View,
 };
 use regex_cursor::{engines::meta, regex_automata::util::syntax};
-use std::collections::HashSet;
-use stoat_text::{char_is_word, Rope};
+use std::{collections::HashSet, sync::Arc};
+use stoat_text::{char_is_word, Anchor, Rope, Selection};
 
 /// The search pattern compiled for the engine that matches over a rope.
 pub(crate) type CursorRegex = meta::Regex;
@@ -30,6 +33,11 @@ impl SearchDirection {
 
 /// Active state while the user is typing a search query into the
 /// input modal. Disposed by [`search_submit`] / [`search_cancel`].
+///
+/// Everything past [`Self::input`] is the origin the preview computes from:
+/// where the editor stood when the prompt opened. Each keystroke restores that
+/// state and jumps again from it, so a preview never builds on the previous
+/// preview's landing.
 pub(crate) struct SearchInputState {
     pub(crate) input: InputView,
     pub(crate) direction: SearchDirection,
@@ -40,6 +48,30 @@ pub(crate) struct SearchInputState {
     /// behave the same way whether or not the user left select mode while
     /// typing the pattern.
     extend: bool,
+    /// The pane editor's selection set when the prompt opened.
+    ///
+    /// Recomputing every preview from this, rather than from wherever the last
+    /// one landed, is what lets backspace walk a query back: the preview for
+    /// `fo` is the same whether the user typed up to it or deleted down to it.
+    /// It also bounds an extend-mode preview to origin-plus-one range, where
+    /// chaining collects a range per keystroke.
+    origin_selections: Arc<[Selection<Anchor>]>,
+    /// The pane editor's scroll position when the prompt opened, as
+    /// `(scroll_row, scroll_offset)`. Restored when the query stops naming a
+    /// match, so an emptied prompt glides back to where the search started.
+    origin_view: (u32, f32),
+    /// The jumplist entry for the origin, captured before the prompt took
+    /// focus. `None` when no editor was focused.
+    ///
+    /// [`search_submit`] pushes this rather than reading the position at submit
+    /// time, which by then is the preview's landing rather than the origin
+    /// `C-o` must return to.
+    origin_jump: Option<JumpEntry>,
+    /// The query the live preview last ran for.
+    ///
+    /// The preview syncs once per frame, so without this every idle frame
+    /// redoes the restore-and-jump for a query that has not changed.
+    previewed: Option<String>,
 }
 
 /// Persisted query + direction from the most recent submitted search.
@@ -148,21 +180,126 @@ fn open_input(stoat: &mut Stoat, direction: SearchDirection) -> UpdateEffect {
         return UpdateEffect::None;
     }
     let extend = stoat.in_select_mode();
+
+    // Captured before InputView::create, which moves focus onto the prompt's
+    // own editor. After it, both of these answer for that editor rather than
+    // the pane's.
+    let origin_jump = super::jump::live_entry(stoat);
+    let origin = pane_editor(stoat).map(|editor| {
+        (
+            editor.selections.shared_anchors(),
+            (editor.scroll_row, editor.scroll_offset),
+        )
+    });
+
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let input = InputView::create(ws, executor, SubmitTarget::Search, "", "insert", 1);
+    let (origin_selections, origin_view) = origin.unwrap_or((Arc::from([]), (0, 0.0)));
     stoat.search_input = Some(SearchInputState {
         input,
         direction,
         extend,
+        origin_selections,
+        origin_view,
+        origin_jump,
+        previewed: None,
     });
     UpdateEffect::Redraw
 }
 
-/// Submit the search query: read the typed text, jump to the first
-/// match in the chosen direction (with wrap), and store
-/// [`LastSearch`] for `n` / `N` to repeat. Returns true when the
-/// modal was open so the prompt-submit router can short-circuit.
+/// The focused pane's editor, or `None` when that pane shows something else.
+///
+/// The search paths reach the editor this way rather than through
+/// [`super::focused_editor_mut`], because while the prompt is open focus sits
+/// on the prompt's own input view, which that one answers with instead.
+fn pane_editor(stoat: &mut Stoat) -> Option<&mut EditorState> {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let View::Editor(editor_id) = ws.panes.pane(focused).view else {
+        return None;
+    };
+    ws.editors.get_mut(editor_id)
+}
+
+/// Put the pane editor back where the open prompt found it.
+///
+/// Both halves move together on every path that abandons a preview, so they are
+/// restored together too. The view goes back as a glide rather than a jump,
+/// which [`crate::app::Stoat::tick_scroll_anim`] eases and snaps past its
+/// three-viewport bound.
+fn restore_origin(stoat: &mut Stoat, selections: Arc<[Selection<Anchor>]>, view: (u32, f32)) {
+    let Some(editor) = pane_editor(stoat) else {
+        return;
+    };
+    editor.selections.restore(selections);
+
+    let (row, offset) = view;
+    if editor.scroll_row != row {
+        editor.scroll_row = row;
+        editor.scroll_glide = ScrollGlide::Page;
+    } else {
+        editor.scroll_offset = offset;
+    }
+}
+
+/// Bring the open search prompt's live preview up to date with what is typed.
+///
+/// A no-op when no prompt is open, or when the query has not changed since the
+/// last sync. Otherwise the pane editor returns to the origin captured at open
+/// and jumps again from there, so the preview shown is always the one that
+/// query alone produces.
+///
+/// The preview is deliberately silent. A query that wraps, matches nothing, or
+/// does not compile yet is an ordinary state mid-typing, so none of them raises
+/// a status message the way a submit does. A query with no usable match
+/// restores the origin instead.
+///
+/// Runs from `drive_background` rather than the paint, so the preview lands in
+/// the same frame as the keystroke that caused it.
+pub(crate) fn sync_search_preview(stoat: &mut Stoat) {
+    let Some(state) = stoat.search_input.as_ref() else {
+        return;
+    };
+    let query = state.input.text(stoat.active_workspace());
+    if state.previewed.as_deref() == Some(query.as_str()) {
+        return;
+    }
+
+    let state = stoat.search_input.as_mut().expect("prompt still open");
+    state.previewed = Some(query.clone());
+    let direction = state.direction;
+    let extend = state.extend;
+    let selections = Arc::clone(&state.origin_selections);
+    let view = state.origin_view;
+
+    restore_origin(stoat, selections, view);
+
+    let regex = (!query.is_empty())
+        .then(|| compile_cursor_regex(&query, smart_case(stoat)))
+        .flatten();
+    if let Some(regex) = regex
+        && jump_to_match(stoat, &regex, direction, extend).moved()
+    {
+        let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+        if let Some(editor) = pane_editor(stoat) {
+            super::view::follow_jump(editor, scrolloff);
+        }
+    }
+
+    // The frame reads the query straight off the prompt rather than through a
+    // display layer, so nothing else reports that the highlighted matches moved.
+    stoat.paint_generation += 1;
+}
+
+/// Submit the search query and keep where the preview landed.
+///
+/// Stores [`LastSearch`] for `n` / `N` to repeat. Returns true when the modal
+/// was open, so the prompt-submit router short-circuits.
+///
+/// The jump re-runs from the origin the prompt captured rather than from the
+/// preview's landing. Repeated from the origin it finds the same match again,
+/// where a search on from the preview skips past it to the next one.
 pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.search_input.take() else {
         return false;
@@ -173,15 +310,17 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
 
+    restore_origin(stoat, state.origin_selections, state.origin_view);
+
     if query.is_empty() {
+        stoat.paint_generation += 1;
         return true;
     }
 
     let last = LastSearch::new(query, direction, smart_case(stoat));
-    let origin = super::jump::live_entry(stoat);
     if let Some(regex) = last.regex.as_ref()
         && jump_to_match(stoat, regex, direction, extend).moved()
-        && let Some(entry) = origin
+        && let Some(entry) = state.origin_jump
     {
         super::jump::push_entry(stoat, entry);
     }
@@ -189,20 +328,23 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
         stoat.set_status(format!("invalid regex: {}", last.query));
     }
     // The query reaches the frame directly rather than through any display
-    // layer, so nothing else would report that the highlighted matches moved.
+    // layer, so nothing else reports that the highlighted matches moved.
     stoat.paint_generation += 1;
     stoat.last_search = Some(last);
     true
 }
 
-/// Cancel the input modal without changing the cursor. Disposes
-/// the embedded [`InputView`].
+/// Cancel the input modal, putting the pane editor back where the prompt found
+/// it. Disposes the embedded [`InputView`].
 pub(crate) fn search_cancel(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.search_input.take() else {
         return false;
     };
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
+
+    restore_origin(stoat, state.origin_selections, state.origin_view);
+    stoat.paint_generation += 1;
     true
 }
 
@@ -432,15 +574,9 @@ fn jump_to_match(
     direction: SearchDirection,
     extend: bool,
 ) -> SearchOutcome {
-    use crate::pane::View;
-
-    let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return SearchOutcome::NoMatch,
+    let Some(editor) = pane_editor(stoat) else {
+        return SearchOutcome::NoMatch;
     };
-    let editor = ws.editors.get_mut(editor_id).expect("editor");
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
@@ -1368,14 +1504,15 @@ mod tests {
         assert_eq!(h.stoat.pending_message.as_deref(), Some("invalid regex: ["),);
     }
 
-    /// Submitting a search moves the paint generation, and moving the cursor
+    /// Every query change moves the paint generation, and moving the cursor
     /// does not.
     ///
     /// The query is read straight off the app when a frame is built, so no
-    /// display layer reports that the highlighted matches changed. A motion
-    /// changes what is selected, which the display map already answers for.
+    /// display layer reports that the highlighted matches changed. That holds
+    /// for each previewed query as much as for the submit. A motion changes
+    /// what is selected, which the display map already answers for.
     #[test]
-    fn submitting_a_search_moves_the_paint_generation() {
+    fn every_query_change_moves_the_paint_generation() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc def\nabc\n");
         let before = h.stoat.paint_generation;
@@ -1388,11 +1525,17 @@ mod tests {
 
         h.type_keys("/");
         h.type_text("abc");
+        let previewed = h.stoat.paint_generation;
+        assert!(
+            previewed > before,
+            "a previewed query changes which matches are highlighted",
+        );
+
         h.type_keys("enter");
         assert_eq!(
             h.stoat.paint_generation,
-            before + 1,
-            "a submitted query changes which matches are highlighted",
+            previewed + 1,
+            "and the submit that keeps the landing moves it once more",
         );
     }
 
@@ -1434,6 +1577,202 @@ mod tests {
         assert_eq!(cursor_offset(&mut h), before);
         assert!(h.stoat.last_search.is_none());
         assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
+    /// The pane editor's selection ranges, as `(start, end)` byte offsets.
+    ///
+    /// [`cursor_offset`] and `TestHarness::selection_spans` both read the
+    /// *focused* editor, which is no use here. While the prompt is open that is
+    /// the prompt's own input view, not the pane the preview moves.
+    fn pane_spans(h: &mut TestHarness) -> Vec<(usize, usize)> {
+        let editor = super::pane_editor(&mut h.stoat).expect("pane holds an editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        editor
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                (
+                    buf_snap.resolve_anchor(&sel.start),
+                    buf_snap.resolve_anchor(&sel.end),
+                )
+            })
+            .collect()
+    }
+
+    fn pane_scroll_row(h: &mut TestHarness) -> u32 {
+        super::pane_editor(&mut h.stoat)
+            .expect("pane holds an editor")
+            .scroll_row
+    }
+
+    /// Type into the open prompt and run the preview a frame runs.
+    ///
+    /// The tests drive the sync directly rather than through a paint, the way
+    /// the file-finder preview tests do, so what a keystroke previews is
+    /// asserted without a render in the middle.
+    fn preview(h: &mut TestHarness, text: &str) {
+        h.type_text(text);
+        super::sync_search_preview(&mut h.stoat);
+    }
+
+    /// The editor sits on the match before Enter, which is the whole point of
+    /// the preview. The user judges the query by what they see.
+    #[test]
+    fn typing_a_query_previews_the_first_match() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc\n");
+        h.type_keys("/");
+
+        preview(&mut h, "def");
+        assert_eq!(
+            pane_spans(&mut h),
+            [(4, 7)],
+            "the preview sits on the match"
+        );
+        assert!(h.stoat.last_search.is_none(), "nothing is stored yet");
+    }
+
+    /// Every preview recomputes from the origin, never from where the previous
+    /// one landed.
+    ///
+    /// Chained previews walk the cursor forward one match per keystroke. A
+    /// query typed left to right then lands somewhere different from the same
+    /// query pasted whole, and backspace has nothing to walk back to.
+    #[test]
+    fn each_keystroke_previews_from_the_origin_not_the_last_preview() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "aa ab aa ab\n");
+        h.type_keys("/");
+
+        preview(&mut h, "a");
+        assert_eq!(
+            pane_spans(&mut h),
+            [(1, 2)],
+            "the first `a` after the cursor"
+        );
+
+        preview(&mut h, "b");
+        assert_eq!(
+            pane_spans(&mut h),
+            [(3, 5)],
+            "`ab` is found from the origin, not from the previous landing",
+        );
+
+        h.type_keys("backspace");
+        super::sync_search_preview(&mut h.stoat);
+        assert_eq!(
+            pane_spans(&mut h),
+            [(1, 2)],
+            "and backspace walks the preview back to what `a` alone previews",
+        );
+    }
+
+    /// A pattern mid-typing is routinely not yet valid, so it restores rather
+    /// than erroring. A report instead flashes a message on the way to every
+    /// bracketed pattern.
+    #[test]
+    fn a_partial_pattern_restores_the_origin_without_a_message() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc\n");
+        let origin = pane_spans(&mut h);
+        h.type_keys("/");
+
+        preview(&mut h, "fo[");
+        assert_eq!(pane_spans(&mut h), origin, "an uncompilable query restores");
+        assert!(
+            h.stoat.pending_message.is_none(),
+            "and the preview stays silent",
+        );
+    }
+
+    /// Emptying the prompt is the user backing out of the query, so the editor
+    /// goes back to where the search started rather than holding the last match
+    /// that happened to compile.
+    #[test]
+    fn deleting_the_query_restores_the_origin() {
+        let mut h = TestHarness::with_size(20, 6);
+        seed(&mut h, "one\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\ntarget\n");
+        let origin = pane_spans(&mut h);
+        h.type_keys("/");
+
+        preview(&mut h, "target");
+        assert_ne!(
+            pane_spans(&mut h),
+            origin,
+            "the preview moved off the origin"
+        );
+        let previewed_row = pane_scroll_row(&mut h);
+
+        for _ in 0.."target".len() {
+            h.type_keys("backspace");
+        }
+        super::sync_search_preview(&mut h.stoat);
+
+        assert_eq!(pane_spans(&mut h), origin, "the selection came back");
+        assert_ne!(previewed_row, 0, "the preview had scrolled away");
+        assert_eq!(pane_scroll_row(&mut h), 0, "and the view came back too");
+    }
+
+    /// Escape abandons the search, so it undoes the preview as well as closing
+    /// the prompt.
+    #[test]
+    fn escape_after_a_preview_restores_the_origin() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc\n");
+        let origin = pane_spans(&mut h);
+        h.type_keys("/");
+
+        preview(&mut h, "def");
+        assert_ne!(pane_spans(&mut h), origin, "the preview moved");
+
+        h.type_keys("escape");
+        assert_eq!(pane_spans(&mut h), origin, "escape puts it back");
+        assert!(h.stoat.last_search.is_none(), "and stores no search");
+    }
+
+    /// Enter keeps the preview's landing, and `C-o` returns to where the search
+    /// started rather than to the preview.
+    #[test]
+    fn enter_keeps_the_preview_and_jumps_back_to_the_origin() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc\n");
+        let origin = pane_spans(&mut h);
+        h.type_keys("/");
+
+        preview(&mut h, "def");
+        h.type_keys("enter");
+        assert_eq!(pane_spans(&mut h), [(4, 7)], "the landing survives submit");
+        assert_eq!(
+            h.stoat.last_search.as_ref().map(|last| last.query.as_str()),
+            Some("def"),
+            "and the query is stored for n / N",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::JumpBackward);
+        assert_eq!(pane_spans(&mut h), origin, "C-o returns to the origin");
+    }
+
+    /// An extend-mode preview holds origin-plus-one range however many
+    /// keystrokes it took to type the query. The recompute from the origin is
+    /// what bounds it. Chained previews add a range per keystroke instead.
+    #[test]
+    fn a_select_mode_preview_adds_one_range_per_query_not_per_keystroke() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc\n");
+        h.type_keys("v l l");
+        let origin = pane_spans(&mut h);
+        h.type_keys("/");
+
+        preview(&mut h, "d");
+        preview(&mut h, "e");
+        preview(&mut h, "f");
+
+        let spans = pane_spans(&mut h);
+        assert_eq!(spans.len(), origin.len() + 1, "one range joined the set");
+        assert_eq!(spans[0], origin[0], "the origin range is untouched");
+        assert_eq!(spans[1], (4, 7), "and the match is the one that joined");
     }
 
     #[test]
