@@ -2048,6 +2048,25 @@ fn extend_next_word_start_repeated_keeps_tail() {
     assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 8, false)]);
 }
 
+/// Cursors added *above* take the higher ids, so the ids run against the offset
+/// order the selections are held in. That is the case a landing lookup by id
+/// gets wrong when the list it searches is not sorted by id.
+#[test]
+fn extend_word_lands_every_cursor_when_ids_run_backwards() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "foo bar\nfoo bar\nfoo bar\n");
+    h.open_file(&path);
+    h.type_keys("j j");
+    h.type_keys("2 alt-shift-C");
+    assert_eq!(h.selection_spans().len(), 3, "three cursors to extend");
+
+    dispatch(&mut h.stoat, &ExtendNextWordStart);
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 4, false), (8, 12, false), (16, 20, false)],
+    );
+}
+
 #[test]
 fn extend_next_word_end_grows_selection_from_cursor() {
     let mut stoat = stoat();

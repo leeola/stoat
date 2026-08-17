@@ -940,9 +940,8 @@ impl SelectionsCollection {
     /// Replace named selections with the spans given as offsets.
     ///
     /// `landings` carries a selection id, the span it lands on, which way it
-    /// faces, and the goal to keep. A selection the list does not name keeps
-    /// the span, the goal, and the anchors it has. Order does not matter, the
-    /// lookup being by id.
+    /// faces, and the goal to keep, sorted by id. A selection the list does not
+    /// name keeps the span, the goal, and the anchors it has.
     ///
     /// The counterpart to [`Self::land_block_cursors`] for a caller landing a
     /// span rather than a cursor. What it saves is the same round trip: every
@@ -953,11 +952,15 @@ impl SelectionsCollection {
         landings: &[SpanLanding],
         snapshot: &MultiBufferSnapshot,
     ) {
+        debug_assert!(
+            landings.is_sorted_by_key(|landing| landing.id),
+            "replace_from_offsets landings must be sorted by id"
+        );
         self.land_from_offsets(snapshot, |sel| {
-            landings
-                .iter()
-                .find(|landing| landing.id == sel.id)
-                .copied()
+            let found = landings
+                .binary_search_by_key(&sel.id, |landing| landing.id)
+                .ok()?;
+            Some(landings[found])
         });
     }
 
@@ -1731,6 +1734,11 @@ mod tests {
                 }
             })
             .collect();
+        let landings = {
+            let mut landings = landings;
+            landings.sort_unstable_by_key(|landing| landing.id);
+            landings
+        };
 
         through_offsets.replace_from_offsets(&landings, &snapshot);
 

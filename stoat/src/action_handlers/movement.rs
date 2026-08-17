@@ -598,6 +598,8 @@ pub(crate) fn move_cursors<F>(
 /// The span counterpart to [`block_cursor_landings`]. `landing_for` answers
 /// with the span a selection lands on, or [`None`] for one this motion leaves
 /// where it is.
+///
+/// Sorted by id, which is what the landing lookup binary-searches.
 fn span_landings<F>(
     selections: &SelectionsCollection,
     buffer: &MultiBufferSnapshot,
@@ -606,11 +608,13 @@ fn span_landings<F>(
 where
     F: Fn(&ResolvedRead) -> Option<SpanLanding>,
 {
-    selections
+    let mut landings: Vec<SpanLanding> = selections
         .resolved_reads(buffer)
         .iter()
         .filter_map(landing_for)
-        .collect()
+        .collect();
+    landings.sort_unstable_by_key(|landing| landing.id);
+    landings
 }
 
 /// Work out where each selection's block cursor lands, in the shape
