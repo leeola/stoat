@@ -1540,12 +1540,21 @@ impl Rope {
     /// are clipped to it, so the automata see the span's edges as the edges of
     /// the text. Most callers want [`Self::regex_slice_input`].
     pub fn regex_cursor_over(&self, span: Range<usize>) -> RegexChunks<'_> {
+        let chunks = self.chunks_cursor_at(span.start);
+        RegexChunks { chunks, span }
+    }
+
+    /// The chunks cursor parked on the chunk holding `at`.
+    ///
+    /// A cursor seeked past the last chunk holds no item, and a haystack has to
+    /// sit on one, so it steps back onto the last.
+    fn chunks_cursor_at(&self, at: usize) -> sum_tree::Cursor<'_, '_, Chunk, usize> {
         let mut chunks = self.chunks.cursor::<usize>(());
-        chunks.seek(&span.start, Bias::Right);
+        chunks.seek(&at, Bias::Right);
         if chunks.item().is_none() {
             chunks.prev();
         }
-        RegexChunks { chunks, span }
+        chunks
     }
 
     /// An [`Input`] searching `range` of this rope, with the rest of the rope
@@ -1558,10 +1567,24 @@ impl Rope {
     ///
     /// Offsets come back as rope offsets either way.
     ///
+    /// The haystack starts on the chunk holding `range.start` rather than on
+    /// the rope's first. Every engine entry starts by moving to the range's
+    /// start, and that move walks a chunk at a time from wherever the cursor
+    /// sits, so a search resuming mid-buffer otherwise pays for every chunk
+    /// ahead of it before matching anything.
+    ///
     /// See also:
     /// - [`Self::regex_slice_input`] for when the range is the whole text.
     pub fn regex_input(&self, range: Range<usize>) -> Input<RegexChunks<'_>> {
-        Input::new(self.regex_cursor()).range(range)
+        // The span stays the whole rope, which is what keeps the offsets rope
+        // offsets and lets an assertion at the range's start read what precedes
+        // it. `Input::new` seeds its own span from the cursor, and `range`
+        // overwrites that outright.
+        let haystack = RegexChunks {
+            chunks: self.chunks_cursor_at(range.start),
+            span: 0..self.len(),
+        };
+        Input::new(haystack).range(range)
     }
 
     /// An [`Input`] over `range` of this rope as though nothing surrounded it.
@@ -5393,6 +5416,54 @@ mod regex_cursor_tests {
             spans(&regex, rope.regex_input(range)),
             Vec::new(),
             "the span is part-way through a text that started elsewhere"
+        );
+    }
+
+    /// A span starts part-way through a text that carries on either side of it,
+    /// so it reads what precedes its start and reports rope offsets. Pinned
+    /// across a chunk boundary, where reading behind means stepping back a
+    /// chunk, and where the haystack it is handed decides how far the engine
+    /// walks to get going.
+    #[test]
+    fn a_span_from_mid_rope_looks_behind_its_start() {
+        let text = straddling();
+        let rope = Rope::from(text.as_str());
+        let boundary = rope.chunks().next().expect("a first chunk").len();
+
+        // The first line start past the first chunk boundary, so the newline
+        // that anchors a match at the range's start is in an earlier chunk.
+        let from = boundary + text[boundary..].find("\ncaf").expect("the fixture has one") + 1;
+
+        let regex = Regex::new("(?m)^caf").expect("the pattern compiles");
+        let found = spans(&regex, rope.regex_input(from..rope.len()));
+        let expected: Vec<(usize, usize)> = spans(&regex, Input::new(text.as_str()))
+            .into_iter()
+            .filter(|&(start, _)| start >= from)
+            .collect();
+
+        assert_eq!(
+            found.first().copied(),
+            Some((from, from + 3)),
+            "the newline before the range anchors a match at its very start"
+        );
+        assert_eq!(found, expected, "and the rest agree with the whole text");
+
+        // The haystack the engine is handed sits on the chunk holding the
+        // range's start, not on the rope's first, which is what it walks from.
+        let holding = rope
+            .chunks()
+            .scan(0, |at, chunk| {
+                let start = *at;
+                *at += chunk.len();
+                Some((start, chunk))
+            })
+            .find(|&(start, chunk)| (start..start + chunk.len()).contains(&from))
+            .expect("some chunk holds it")
+            .1;
+        assert_eq!(
+            rope.regex_input(from..rope.len()).chunk(),
+            holding.as_bytes(),
+            "the search starts on the chunk it is searching from",
         );
     }
 
