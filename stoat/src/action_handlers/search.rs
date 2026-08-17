@@ -797,9 +797,14 @@ mod tests {
         })
     }
 
+    /// How many matches the last paint lit in the pane editor.
+    ///
+    /// Reads the pane rather than the focused editor, which while a prompt is
+    /// open is the prompt's own input view. That one paints no highlights, so
+    /// it holds no cache to count.
     fn cached_match_count(h: &mut TestHarness) -> usize {
-        crate::action_handlers::focused_editor_mut(&mut h.stoat)
-            .expect("focused editor")
+        super::pane_editor(&mut h.stoat)
+            .expect("pane holds an editor")
             .search_match_cache
             .as_ref()
             .expect("search active so the render populated the match cache")
@@ -1856,6 +1861,44 @@ mod tests {
             cached_match_count(&mut h),
             3,
             "changing the query recomputes the cache: 'a' matches three times",
+        );
+    }
+
+    /// An open prompt lights its own query, and closing it hands the highlights
+    /// back to the stored one.
+    ///
+    /// The user judges a query by the matches on screen, so a prompt showing
+    /// the previous search's matches lights the wrong text throughout the typing
+    /// the preview exists to serve.
+    #[test]
+    fn an_open_prompt_highlights_the_query_being_typed() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "aaa\n");
+
+        h.type_keys("/");
+        h.type_text("aa");
+        h.type_keys("enter");
+        assert_eq!(
+            cached_match_count(&mut h),
+            1,
+            "the submitted 'aa' matches once in 'aaa'",
+        );
+
+        h.type_keys("/");
+        h.type_text("a");
+        let _ = h.render_composited();
+        assert_eq!(
+            cached_match_count(&mut h),
+            3,
+            "the typed query lights its own matches before Enter",
+        );
+
+        h.type_keys("escape");
+        let _ = h.render_composited();
+        assert_eq!(
+            cached_match_count(&mut h),
+            1,
+            "and abandoning the prompt lights the stored query again",
         );
     }
 

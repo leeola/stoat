@@ -278,9 +278,13 @@ pub(crate) struct FrameCtx<'a> {
     /// column of a multibyte line. Held as the registry rather than a prebuilt
     /// map so the encodings are resolved only when the diagnostic span cache
     /// rebuilds, not on every frame.
-    /// Most-recently submitted in-buffer search query. When `Some`,
-    /// every editor pane paints visible matches with the
-    /// `ui.search.match` style so users see all hits at once.
+    /// The in-buffer search query every editor pane lights visible matches for,
+    /// in the `ui.search.match` style, so users see all hits at once.
+    ///
+    /// An open `/` or `?` prompt supplies the query, so the highlights track
+    /// what the user types rather than the last search. An emptied prompt shows
+    /// no matches. With no prompt open the query is the most recently submitted
+    /// one, which the highlights return to as the prompt closes.
     pub(crate) search_query: Option<&'a str>,
     /// Whether [`Self::search_query`] compiles under smart case, resolved from
     /// `search.smart_case` (default on). It travels with the query because the
@@ -666,7 +670,10 @@ pub(crate) fn frame(
         goto_word_labels: stoat.pending_goto_word.as_ref(),
         mode_label: pane::mode_segment(mode, &stoat.theme, &stoat.settings.mode_badges),
         diagnostics: &stoat.diagnostics,
-        search_query: stoat.last_search.as_ref().map(|s| s.query.as_str()),
+        search_query: match search_prompt.as_ref() {
+            Some(prompt) => Some(prompt.text.as_str()),
+            None => stoat.last_search.as_ref().map(|s| s.query.as_str()),
+        },
         search_smart_case,
         search_prompt: search_prompt.as_ref(),
         line_numbers: stoat
