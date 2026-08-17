@@ -199,8 +199,8 @@ pub(crate) fn render_editor_with_overlay(
         return;
     }
 
-    let empty_severity = BTreeMap::new();
-    let row_severity: &BTreeMap<u32, DiagnosticSeverity> = match diagnostic_info {
+    let empty_severity = RowSeverity::default();
+    let row_severity: &RowSeverity = match diagnostic_info {
         Some((path, set)) => {
             let version = set.version();
             let buffer_version = snapshot.buffer_snapshot().version();
@@ -853,7 +853,7 @@ pub(crate) fn paint_chunk_rows(
 pub(crate) struct GutterSeverityCache {
     pub(crate) version: u64,
     buffer_version: u64,
-    pub(crate) map: Arc<BTreeMap<u32, DiagnosticSeverity>>,
+    pub(crate) map: Arc<RowSeverity>,
 }
 
 /// Cached gutter geometry for one set of drawn-gutter inputs, in three layers.
@@ -894,27 +894,114 @@ pub(crate) struct GutterGeometryCache {
     scene_bytes: Vec<u8>,
 }
 
-/// Build a per-buffer-row map from resolved diagnostic spans, picking the worst
-/// severity (lowest LSP code) when several overlap a row.
+/// The severity each buffer row carries, held as the runs it comes in rather
+/// than a row at a time.
+///
+/// A diagnostic covers a contiguous run, and one over a `#[cfg]`-excluded block
+/// or a test module covers thousands of rows. The map this replaced held an
+/// entry for each, and it is rebuilt on every buffer version because the
+/// anchors move under typing, so a keystroke paid for every covered row.
+#[derive(Default, Clone, PartialEq, Eq, Debug)]
+pub(crate) struct RowSeverity {
+    /// Sorted by start row and disjoint, so a lookup is one partition point.
+    runs: Vec<(Range<u32>, DiagnosticSeverity)>,
+}
+
+impl RowSeverity {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.runs.is_empty()
+    }
+
+    /// The severity at `row`, or `None` where no diagnostic reaches it.
+    pub(crate) fn at(&self, row: u32) -> Option<DiagnosticSeverity> {
+        let index = self.runs.partition_point(|(rows, _)| rows.end <= row);
+        let (rows, severity) = self.runs.get(index)?;
+        rows.contains(&row).then_some(*severity)
+    }
+
+    /// Build from single rows, for a caller naming the rows directly rather
+    /// than the spans they came from.
+    #[cfg(test)]
+    pub(crate) fn for_rows(rows: impl IntoIterator<Item = (u32, DiagnosticSeverity)>) -> Self {
+        let mut runs: Vec<(Range<u32>, DiagnosticSeverity)> = rows
+            .into_iter()
+            .map(|(row, severity)| (row..row + 1, severity))
+            .collect();
+        runs.sort_unstable_by_key(|(rows, _)| rows.start);
+        Self { runs }
+    }
+
+    /// Every row in `rows` a diagnostic reaches, in order.
+    ///
+    /// The minimap marks each one, so this spells a run back out into the rows
+    /// it stands for. Clipped to the query, so a diagnostic covering a whole
+    /// file costs only the rows asked about.
+    pub(crate) fn rows_in(&self, rows: Range<u32>) -> Vec<u32> {
+        let first = self.runs.partition_point(|(run, _)| run.end <= rows.start);
+        self.runs[first..]
+            .iter()
+            .take_while(|(run, _)| run.start < rows.end)
+            .flat_map(|(run, _)| run.start.max(rows.start)..run.end.min(rows.end))
+            .collect()
+    }
+}
+
+/// Build the row severities from resolved diagnostic spans, the worst severity
+/// (lowest LSP code) winning where several overlap a row.
 ///
 /// The rows come from `spans` rather than from the diagnostics themselves so
 /// they name where the text is now. A diagnostic's own rows are where the
 /// server last saw it, and the reader has been typing since.
-fn row_severity_from_spans(spans: &[ResolvedDiag]) -> BTreeMap<u32, DiagnosticSeverity> {
-    let mut out: BTreeMap<u32, DiagnosticSeverity> = BTreeMap::new();
+///
+/// Swept over the spans' endpoints, so the cost follows how many diagnostics
+/// there are rather than how many rows they cover.
+fn row_severity_from_spans(spans: &[ResolvedDiag]) -> RowSeverity {
+    // A span opens at its first row and closes past its last, so a row's
+    // severities are the ones opened and not yet closed when the sweep reaches
+    // it.
+    let mut events: Vec<(u32, i32, DiagnosticSeverity)> = Vec::with_capacity(spans.len() * 2);
     for span in spans {
-        for row in span.start_line..=span.end_line {
-            out.entry(row)
-                .and_modify(|cur| {
-                    if severity_rank(span.severity) < severity_rank(*cur) {
-                        *cur = span.severity;
-                    }
-                })
-                .or_insert(span.severity);
+        events.push((span.start_line, 1, span.severity));
+        events.push((span.end_line + 1, -1, span.severity));
+    }
+    events.sort_unstable_by_key(|&(row, _, _)| row);
+
+    // Counted per rank rather than kept as a set, there being four of them.
+    let mut open = [0i32; 4];
+    let mut runs: Vec<(Range<u32>, DiagnosticSeverity)> = Vec::new();
+    let mut index = 0;
+    while index < events.len() {
+        let row = events[index].0;
+        while let Some(&(_, delta, severity)) = events.get(index).filter(|e| e.0 == row) {
+            open[severity_rank(severity) as usize] += delta;
+            index += 1;
+        }
+
+        // Nothing is open past the last event, every span having closed, so a
+        // run always has the next boundary to end at.
+        let Some(&(next_row, _, _)) = events.get(index) else {
+            break;
+        };
+        let Some(rank) = open.iter().position(|&count| count > 0) else {
+            continue;
+        };
+        let severity = SEVERITY_BY_RANK[rank];
+        match runs.last_mut() {
+            Some((rows, held)) if rows.end == row && *held == severity => rows.end = next_row,
+            _ => runs.push((row..next_row, severity)),
         }
     }
-    out
+    RowSeverity { runs }
 }
+
+/// The severities [`severity_rank`] numbers, which is how a sweep counting by
+/// rank names the one it settled on.
+const SEVERITY_BY_RANK: [DiagnosticSeverity; 4] = [
+    DiagnosticSeverity::ERROR,
+    DiagnosticSeverity::WARNING,
+    DiagnosticSeverity::INFORMATION,
+    DiagnosticSeverity::HINT,
+];
 
 /// The collections [`paint_diagnostic_spans`] refills on every call.
 ///
@@ -1165,7 +1252,7 @@ pub(crate) struct DiagnosticRowsCache {
 /// rebuild of a viewport-sized list.
 fn diagnostic_rows<'c>(
     snapshot: &DisplaySnapshot,
-    row_severity: &BTreeMap<u32, DiagnosticSeverity>,
+    row_severity: &RowSeverity,
     scroll_row: u32,
     inner: Rect,
     end_row: u32,
@@ -1189,7 +1276,7 @@ fn diagnostic_rows<'c>(
             })
             .filter_map(|(display_row, offset)| {
                 let row = buffer_row_of(snapshot, display_row)?;
-                Some((offset, *row_severity.get(&row)?))
+                Some((offset, row_severity.at(row)?))
             })
             .collect();
         *cache = Some(DiagnosticRowsCache { key, rows });
@@ -1394,7 +1481,7 @@ pub(crate) fn gutter_diff_marks_from(
 
 pub(crate) fn gutter_component_lines(
     folded: &[(u32, u16)],
-    row_severity: &BTreeMap<u32, DiagnosticSeverity>,
+    row_severity: &RowSeverity,
     diff_marks: &BTreeMap<u32, (DiffHunkStatus, bool)>,
     diff_colors: &DiffMarkColors,
     colors: &SeverityColors,
@@ -1416,9 +1503,9 @@ pub(crate) fn gutter_component_lines(
                     },
                     seam: status == DiffHunkStatus::Deleted,
                 }),
-            diagnostic: row_severity.get(&(number - 1)).map(|sev| Diagnostic {
-                color: severity_color(*sev, colors),
-                mark: severity_mark(*sev),
+            diagnostic: row_severity.at(number - 1).map(|sev| Diagnostic {
+                color: severity_color(sev, colors),
+                mark: severity_mark(sev),
             }),
         })
         .collect()
@@ -1528,7 +1615,7 @@ fn draw_line_number_gutter(
     scroll_row: u32,
     inner: Rect,
     end_row: u32,
-    row_severity: &BTreeMap<u32, DiagnosticSeverity>,
+    row_severity: &RowSeverity,
     theme: &crate::theme::Theme,
     chrome: &ResolvedChrome,
     current_line: Option<u32>,
@@ -1675,7 +1762,7 @@ fn draw_rich_gutter(
 pub(crate) fn draw_fallback_line_numbers(
     folded: &[(u32, u16)],
     width_digits: u16,
-    row_severity: &BTreeMap<u32, DiagnosticSeverity>,
+    row_severity: &RowSeverity,
     diff_marks: &BTreeMap<u32, (DiffHunkStatus, bool)>,
     current_line: Option<u32>,
     inner: Rect,
@@ -1719,10 +1806,10 @@ pub(crate) fn draw_fallback_line_numbers(
         if y >= inner.y + inner.height {
             break;
         }
-        if let Some(sev) = row_severity.get(&(line - 1)) {
+        if let Some(sev) = row_severity.at(line - 1) {
             buf[(inner.x, y)]
-                .set_char(severity_mark(*sev))
-                .set_style(style_for(severity_scope(*sev)));
+                .set_char(severity_mark(sev))
+                .set_style(style_for(severity_scope(sev)));
         }
 
         number.clear();
@@ -2428,6 +2515,7 @@ pub(crate) fn editor_cursor_position(editor: &EditorState) -> Option<(u32, u32)>
 
 #[cfg(test)]
 mod tests {
+    use super::RowSeverity;
     use crate::{
         action_handlers::{self, dispatch},
         Stoat,
@@ -2438,6 +2526,45 @@ mod tests {
     use stoat_action::{ExtendToLineEnd, MoveDown, MoveRight, OpenFile, OpenFileFinder};
     use stoat_config::{LineNumbers, WrapMode};
     use stoat_text::{Bias, Point, SelectionGoal};
+
+    /// Overlapping spans of mixed severity, so the sweep has to keep the worst
+    /// one inside the overlap and hand each row back to the one still open once
+    /// the other closes. The gaps between them answer nothing.
+    #[test]
+    fn row_severity_keeps_the_worst_of_overlapping_spans() {
+        let span = |start_line, end_line, severity| super::ResolvedDiag {
+            start: 0,
+            end: 0,
+            severity,
+            unnecessary: false,
+            start_line,
+            end_line,
+            index: 0,
+        };
+        let severity = super::row_severity_from_spans(&[
+            span(2, 8, DiagnosticSeverity::WARNING),
+            span(5, 6, DiagnosticSeverity::ERROR),
+            span(12, 12, DiagnosticSeverity::HINT),
+        ]);
+
+        let at: Vec<Option<DiagnosticSeverity>> = (0..14).map(|row| severity.at(row)).collect();
+        let w = Some(DiagnosticSeverity::WARNING);
+        let e = Some(DiagnosticSeverity::ERROR);
+        let h = Some(DiagnosticSeverity::HINT);
+        assert_eq!(
+            at,
+            vec![None, None, w, w, w, e, e, w, w, None, None, None, h, None],
+            "the error wins rows 5 and 6, the warning holds either side of it",
+        );
+
+        assert_eq!(
+            severity.rows_in(4..8),
+            vec![4, 5, 6, 7],
+            "the run spells back out to the rows asked about, clipped to them",
+        );
+        assert_eq!(severity.rows_in(9..12), Vec::<u32>::new(), "a gap has none");
+        assert!(super::row_severity_from_spans(&[]).is_empty());
+    }
 
     fn diag(line: u32, severity: DiagnosticSeverity) -> Diagnostic {
         Diagnostic {
@@ -2473,9 +2600,7 @@ mod tests {
                 .as_ref()
                 .expect("built by the paint")
                 .map
-                .keys()
-                .copied()
-                .collect()
+                .rows_in(0..u32::MAX)
         };
 
         assert_eq!(
@@ -2522,8 +2647,7 @@ mod tests {
 
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let snapshot = editor.display_map.snapshot();
-        let severity: std::collections::BTreeMap<u32, DiagnosticSeverity> =
-            std::iter::once((2, DiagnosticSeverity::ERROR)).collect();
+        let severity = RowSeverity::for_rows([(2, DiagnosticSeverity::ERROR)]);
         let area = Rect::new(0, 0, 4, 12);
 
         let mut cache = None;
@@ -2592,8 +2716,7 @@ mod tests {
             "the first line has to wrap for this to bite"
         );
 
-        let severity: std::collections::BTreeMap<u32, DiagnosticSeverity> =
-            std::iter::once((1, DiagnosticSeverity::ERROR)).collect();
+        let severity = RowSeverity::for_rows([(1, DiagnosticSeverity::ERROR)]);
         let mut buf = Buffer::empty(Rect::new(0, 0, 4, 12));
         let theme = h.stoat.theme.clone();
         let mut cache = None;
@@ -3058,7 +3181,7 @@ mod tests {
         let width = super::draw_fallback_line_numbers(
             &folded,
             1,
-            &std::collections::BTreeMap::new(),
+            &RowSeverity::default(),
             &diff_marks,
             None,
             area,
@@ -3113,7 +3236,7 @@ mod tests {
         super::draw_fallback_line_numbers(
             &folded,
             1,
-            &std::collections::BTreeMap::new(),
+            &RowSeverity::default(),
             &diff_marks,
             None,
             area,
@@ -4328,7 +4451,7 @@ mod tests {
 
         let lines = super::gutter_component_lines(
             &folded,
-            &std::collections::BTreeMap::new(),
+            &RowSeverity::default(),
             &diff_marks,
             &diff_colors,
             &severity,

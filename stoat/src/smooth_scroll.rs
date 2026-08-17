@@ -29,7 +29,7 @@ use crate::{
         conflict_view::render_conflict_rows,
         editor::{
             draw_fallback_line_numbers, gutter_component_lines, gutter_diff_marks, gutter_geometry,
-            paint_chunk_rows, rich_gutter, RichGutterColors,
+            paint_chunk_rows, rich_gutter, RichGutterColors, RowSeverity,
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
@@ -38,9 +38,8 @@ use crate::{
     },
     review_session::ReviewViewState,
 };
-use lsp_types::DiagnosticSeverity;
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 use stoat_action::registry::RegistryEntry;
 use stoat_widgets::ApcScene;
 use stoatty_protocol::command::encode_fill_scope;
@@ -253,7 +252,7 @@ pub(crate) struct PageGutter {
     /// to paint absolute numbers. Resolved on the run loop so a pooled page
     /// numbers relative to the cursor exactly as the live render does.
     current_line: Option<u32>,
-    severity: Arc<BTreeMap<u32, DiagnosticSeverity>>,
+    severity: Arc<RowSeverity>,
     theme: Arc<crate::theme::Theme>,
     rich: Option<RichGutterColors>,
 }
@@ -266,7 +265,7 @@ impl PageGutter {
     /// selects relative numbering, and `None` paints absolute.
     pub(crate) fn new(
         line_numbers: bool,
-        severity: Arc<BTreeMap<u32, DiagnosticSeverity>>,
+        severity: Arc<RowSeverity>,
         theme: Arc<crate::theme::Theme>,
         rich: Option<RichGutterColors>,
         current_line: Option<u32>,
@@ -793,11 +792,11 @@ mod tests {
         use super::{page_buffer, render_page_from_snapshot, serialize_buffer, PageGutter, Rect};
         use crate::{
             action_handlers::{self, dispatch},
-            render::editor::render_editor_with_overlay,
+            render::editor::{render_editor_with_overlay, RowSeverity},
             theme::{scope, Theme},
             LineNumbers, Stoat,
         };
-        use std::{collections::BTreeMap, path::PathBuf};
+        use std::path::PathBuf;
         use stoat_action::OpenFile;
         use stoat_config::WrapMode;
 
@@ -824,7 +823,7 @@ mod tests {
         // must match the live render's so the settle handoff shows no shift.
         let gutter = PageGutter::new(
             true,
-            Arc::new(BTreeMap::new()),
+            Arc::new(RowSeverity::default()),
             Arc::new(theme.clone()),
             None,
             None,
@@ -883,11 +882,11 @@ mod tests {
         use super::{page_buffer, render_page_from_snapshot, serialize_buffer, PageGutter, Rect};
         use crate::{
             action_handlers::{self, dispatch},
-            render::editor::render_editor_with_overlay,
+            render::editor::{render_editor_with_overlay, RowSeverity},
             theme::{scope, Theme},
             LineNumbers, Stoat,
         };
-        use std::{collections::BTreeMap, path::PathBuf};
+        use std::path::PathBuf;
         use stoat_action::OpenFile;
         use stoat_config::WrapMode;
 
@@ -906,7 +905,7 @@ mod tests {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let gutter = PageGutter::new(
             true,
-            Arc::new(BTreeMap::new()),
+            Arc::new(RowSeverity::default()),
             Arc::new(theme.clone()),
             None,
             None,
@@ -966,11 +965,11 @@ mod tests {
         use super::{page_buffer, render_page_from_snapshot, serialize_buffer, PageGutter, Rect};
         use crate::{
             action_handlers::{self, dispatch},
-            render::editor::render_editor_with_overlay,
+            render::editor::{render_editor_with_overlay, RowSeverity},
             theme::{scope, Theme},
             LineNumbers, Stoat,
         };
-        use std::{collections::BTreeMap, path::PathBuf};
+        use std::path::PathBuf;
         use stoat_action::OpenFile;
         use stoat_config::WrapMode;
 
@@ -995,7 +994,7 @@ mod tests {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let gutter = PageGutter::new(
             true,
-            Arc::new(BTreeMap::new()),
+            Arc::new(RowSeverity::default()),
             Arc::new(theme.clone()),
             None,
             None,
@@ -1055,12 +1054,12 @@ mod tests {
         use super::{dim_page, render_page_from_snapshot, Buffer, PageGutter, Rect};
         use crate::{
             action_handlers::{self, dispatch},
-            render::{paint::style_rgb, pane::dim_pane_content},
+            render::{editor::RowSeverity, paint::style_rgb, pane::dim_pane_content},
             theme::scope,
             Stoat,
         };
         use ratatui::style::{Color, Style};
-        use std::{collections::BTreeMap, path::PathBuf};
+        use std::path::PathBuf;
         use stoat_action::OpenFile;
 
         let mut h = Stoat::test();
@@ -1076,7 +1075,13 @@ mod tests {
         let bg = style_rgb(theme.try_get(scope::UI_BACKGROUND).and_then(|s| s.bg))
             .expect("default theme has an rgb background");
         let fallback = theme.get(scope::UI_TEXT);
-        let gutter = PageGutter::new(true, Arc::new(BTreeMap::new()), theme.clone(), None, None);
+        let gutter = PageGutter::new(
+            true,
+            Arc::new(RowSeverity::default()),
+            theme.clone(),
+            None,
+            None,
+        );
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let snapshot = editor.display_map.snapshot();
 
@@ -1133,9 +1138,10 @@ mod tests {
             diff_map::DiffMap,
             display_map::DisplayMap,
             multi_buffer::MultiBuffer,
+            render::editor::RowSeverity,
             theme::{scope, Theme},
         };
-        use std::{collections::BTreeMap, sync::RwLock};
+        use std::sync::RwLock;
         use stoat_language::structural_diff;
         use stoat_scheduler::{Executor, TestScheduler};
 
@@ -1158,7 +1164,7 @@ mod tests {
         let fallback = theme.get(scope::UI_TEXT);
         let gutter = PageGutter::new(
             true,
-            Arc::new(BTreeMap::new()),
+            Arc::new(RowSeverity::default()),
             Arc::new(theme.clone()),
             None,
             None,
@@ -1269,10 +1275,11 @@ mod tests {
         use super::{paint_page_gutter, Buffer, PageGutter, Rect};
         use crate::{
             action_handlers::{self, dispatch},
+            render::editor::RowSeverity,
             theme::Theme,
             Stoat,
         };
-        use std::{collections::BTreeMap, path::PathBuf};
+        use std::path::PathBuf;
         use stoat_action::OpenFile;
 
         let mut h = Stoat::test();
@@ -1292,7 +1299,7 @@ mod tests {
         // keeps its absolute number.
         let gutter = PageGutter::new(
             true,
-            Arc::new(BTreeMap::new()),
+            Arc::new(RowSeverity::default()),
             Arc::new(theme),
             None,
             Some(3),
@@ -1350,11 +1357,12 @@ mod tests {
             display_map::highlights::{
                 HighlightStyle, HighlightStyleInterner, SemanticTokenHighlight,
             },
+            render::editor::RowSeverity,
             theme::{scope, Theme},
             Stoat,
         };
         use ratatui::style::Color;
-        use std::{collections::BTreeMap, path::PathBuf};
+        use std::path::PathBuf;
         use stoat_action::OpenFile;
 
         let mut h = Stoat::test();
@@ -1372,7 +1380,7 @@ mod tests {
         let fallback = theme.get(scope::UI_TEXT);
         let gutter = PageGutter::new(
             true,
-            Arc::new(BTreeMap::new()),
+            Arc::new(RowSeverity::default()),
             Arc::new(theme.clone()),
             None,
             None,
@@ -1450,9 +1458,10 @@ mod tests {
             diff_map::DiffMap,
             display_map::DisplayMap,
             multi_buffer::MultiBuffer,
+            render::editor::RowSeverity,
             theme::{scope, Theme},
         };
-        use std::{collections::BTreeMap, sync::RwLock};
+        use std::sync::RwLock;
         use stoat_language::structural_diff;
         use stoat_scheduler::{Executor, TestScheduler};
 
@@ -1487,7 +1496,7 @@ mod tests {
         let fallback = theme.get(scope::UI_TEXT);
         let gutter = PageGutter::new(
             true,
-            Arc::new(BTreeMap::new()),
+            Arc::new(RowSeverity::default()),
             Arc::new(theme.clone()),
             None,
             None,
@@ -1530,10 +1539,11 @@ mod tests {
         use super::{render_page_fill, render_page_from_snapshot, PageGutter};
         use crate::{
             action_handlers::{self, dispatch},
+            render::editor::RowSeverity,
             theme::{scope, Theme},
             Stoat,
         };
-        use std::{collections::BTreeMap, path::PathBuf};
+        use std::path::PathBuf;
         use stoat_action::OpenFile;
         use stoatty_protocol::command::FillCommand;
 
@@ -1551,7 +1561,7 @@ mod tests {
         let snapshot = editor.display_map.snapshot();
         let gutter = PageGutter::new(
             false,
-            Arc::new(BTreeMap::new()),
+            Arc::new(RowSeverity::default()),
             Arc::new(Theme::empty()),
             None,
             None,
@@ -1604,11 +1614,11 @@ mod tests {
         use super::{render_page_fill, PageGutter};
         use crate::{
             action_handlers::{self, dispatch},
-            render::editor::resolve_rich_gutter,
+            render::editor::{resolve_rich_gutter, RowSeverity},
             theme::scope,
             Stoat,
         };
-        use std::{collections::BTreeMap, path::PathBuf};
+        use std::path::PathBuf;
         use stoat_action::OpenFile;
 
         let mut h = Stoat::test();
@@ -1626,7 +1636,7 @@ mod tests {
             .expect("the shipped theme resolves the rich gutter colors");
         let gutter = PageGutter::new(
             true,
-            Arc::new(BTreeMap::new()),
+            Arc::new(RowSeverity::default()),
             theme.clone(),
             Some(rich),
             None,

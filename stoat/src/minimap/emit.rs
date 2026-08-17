@@ -419,7 +419,7 @@ struct MinimapEdges<'a> {
     /// not put. Held once for the pass, since `edge_of` runs per row and the
     /// diff job's own rows are already behind.
     diff: OnceCell<Option<crate::diff_map::LiveHunks<'a>>>,
-    severity_map: &'a std::collections::BTreeMap<u32, lsp_types::DiagnosticSeverity>,
+    severity_map: &'a crate::render::editor::RowSeverity,
     class_table: &'a crate::minimap::ClassTable,
 }
 
@@ -441,11 +441,7 @@ impl EdgeSource for MinimapEdges<'_> {
     }
 
     fn marked_rows(&self, rows: Range<u32>) -> Vec<u32> {
-        let mut marked: Vec<u32> = self
-            .severity_map
-            .range(rows.clone())
-            .map(|(&row, _)| row)
-            .collect();
+        let mut marked = self.severity_map.rows_in(rows.clone());
 
         if let Some(diff) = self.live_hunks() {
             for (_, hunk_rows) in diff.in_range(rows.clone()) {
@@ -464,15 +460,15 @@ impl EdgeSource for MinimapEdges<'_> {
 /// severity or diff status resolves to a class against `class_table`.
 fn minimap_edge_class(
     diff: Option<&crate::diff_map::LiveHunks<'_>>,
-    severity_map: &std::collections::BTreeMap<u32, lsp_types::DiagnosticSeverity>,
+    severity_map: &crate::render::editor::RowSeverity,
     class_table: &crate::minimap::ClassTable,
     row: u32,
 ) -> Option<u8> {
     use crate::{host::DiffStatus, minimap::EdgeClass};
     use lsp_types::DiagnosticSeverity;
 
-    if let Some(severity) = severity_map.get(&row) {
-        let kind = match *severity {
+    if let Some(severity) = severity_map.at(row) {
+        let kind = match severity {
             DiagnosticSeverity::ERROR => EdgeClass::Error,
             DiagnosticSeverity::WARNING => EdgeClass::Warning,
             _ => EdgeClass::Info,
