@@ -1504,11 +1504,17 @@ pub struct Stoat {
     /// ignored so a burst does not queue duplicate writes.
     pub(crate) pending_format_on_save:
         Option<stoat_scheduler::Task<action_handlers::file::FormatOnSaveOutcome>>,
+    /// In-flight write of a buffer to disk. The bytes stream from a clone of
+    /// the rope on a blocking thread, so a slow disk costs the run loop
+    /// nothing; [`action_handlers::file::pump_pending_save`] lands the outcome.
+    /// While `Some`, further saves are dropped so a burst does not queue
+    /// duplicate writes.
+    pub(crate) pending_save: Option<action_handlers::file::PendingSave>,
     /// Set by `:wq` ([`action_handlers::file::write_quit`]) when the save it
-    /// triggered was deferred to an in-flight format-on-save write. Consumed by
-    /// [`action_handlers::file::pump_format_on_save`] when that write lands: it
-    /// sets [`Self::quit_requested`] only if the write succeeded, so a failed
-    /// deferred write aborts the quit and leaves the buffer for the user.
+    /// triggered was deferred to an in-flight write. Whichever pump lands that
+    /// write consumes it, setting [`Self::quit_requested`] only if the write
+    /// succeeded, so a failed deferred write aborts the quit and leaves the
+    /// buffer for the user.
     pub(crate) quit_after_save: bool,
     /// Set once a `:wq`-driven write has landed and the app should exit. The run
     /// loop takes it right after [`Self::drive_background`] and quits, so a quit
@@ -2094,6 +2100,7 @@ impl Stoat {
             pending_workspace_symbol_request: None,
             pending_format_request: StampedPending::default(),
             pending_format_on_save: None,
+            pending_save: None,
             quit_after_save: false,
             quit_requested: false,
             pending_completion: None,
@@ -6615,6 +6622,7 @@ impl Stoat {
         action_handlers::workspace::sync_workspace_picker(self);
 
         let format_on_save = action_handlers::file::pump_format_on_save(self);
+        let pending_save = action_handlers::file::pump_pending_save(self);
         let completion = crate::completion::request::pump(self);
         let completion_resolve = action_handlers::completion::pump_completion_resolve(self);
         let completion_accept = crate::completion::accept::pump_completion_accept(self);
@@ -6627,6 +6635,7 @@ impl Stoat {
             || changed_file_jump
             || lsp
             || format_on_save
+            || pending_save
             || completion
             || completion_resolve
             || completion_accept
@@ -9092,6 +9101,9 @@ mod tests {
             "the save reached a handler rather than falling through"
         );
         scheduler.run_until_parked();
+        // The write streams off the run loop, so the reindex it drives waits on
+        // the pump that lands it.
+        stoat.drive_pumps();
         // A refused or failed write returns before the enqueue, so a reindex
         // arriving at all is what says the bytes reached disk first.
         assert_eq!(

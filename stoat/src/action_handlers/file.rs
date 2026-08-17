@@ -18,7 +18,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::Arc,
+    sync::{mpsc, Arc},
     task::{Context, Poll},
     time::Duration,
 };
@@ -127,6 +127,13 @@ fn save_flow(stoat: &mut Stoat, force: bool) -> SaveFlow {
         return SaveFlow::RefusedDiskChanged;
     }
 
+    // A save already on its way to disk drops later ones, the same rule a save
+    // already formatting follows. The in-flight one still lands the text it
+    // took, and a buffer that moved since keeps its dirty flag.
+    if stoat.pending_save.is_some() {
+        return SaveFlow::AlreadyPending;
+    }
+
     if let Some(host) = format_on_save_host(stoat, buffer_id) {
         // A save already formatting drops later ones so a burst does not queue
         // duplicate writes. The in-flight one still lands the latest text.
@@ -137,10 +144,10 @@ fn save_flow(stoat: &mut Stoat, force: bool) -> SaveFlow {
         return SaveFlow::Armed;
     }
 
-    if write_buffer_to_disk(stoat, buffer_id, &path, force) {
-        SaveFlow::Wrote
-    } else {
-        SaveFlow::Failed
+    match write_buffer_to_disk(stoat, buffer_id, &path, force) {
+        WriteOutcome::Wrote => SaveFlow::Wrote,
+        WriteOutcome::Armed => SaveFlow::Armed,
+        WriteOutcome::Failed => SaveFlow::Failed,
     }
 }
 
@@ -294,13 +301,22 @@ pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
                     );
                 }
             }
-            let wrote =
-                write_buffer_to_disk(stoat, outcome.buffer_id, &outcome.path, outcome.force);
             // A `:wq` that deferred behind this write quits once it lands, but
             // only if it succeeded, so a failed deferred write leaves the buffer
-            // for the user instead of exiting over unsaved changes.
-            if std::mem::take(&mut stoat.quit_after_save) {
-                stoat.quit_requested = wrote;
+            // for the user instead of exiting over unsaved changes. An armed
+            // write leaves the flag for its own pump to consume.
+            match write_buffer_to_disk(stoat, outcome.buffer_id, &outcome.path, outcome.force) {
+                WriteOutcome::Armed => {},
+                WriteOutcome::Wrote => {
+                    if std::mem::take(&mut stoat.quit_after_save) {
+                        stoat.quit_requested = true;
+                    }
+                },
+                WriteOutcome::Failed => {
+                    if std::mem::take(&mut stoat.quit_after_save) {
+                        stoat.quit_requested = false;
+                    }
+                },
             }
             true
         },
@@ -326,14 +342,28 @@ pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
 /// [`Stoat::pending_message`] set) or the buffer had already vanished. A
 /// skipped `did_save` notification (an unmappable path) still counts as a
 /// successful write.
-fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, force: bool) -> bool {
+fn write_buffer_to_disk(
+    stoat: &mut Stoat,
+    buffer_id: BufferId,
+    path: &Path,
+    force: bool,
+) -> WriteOutcome {
     let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) else {
-        return false;
+        return WriteOutcome::Failed;
     };
     if !force && disk_changed_since_open(stoat, buffer_id, path) {
         stoat.set_status("file changed on disk; use :w! to overwrite");
-        return false;
+        return WriteOutcome::Failed;
     }
+
+    // A config is re-applied from the bytes just written, and both files are
+    // small, so deferring one puts a reload behind a thread hop for nothing.
+    // Every other save streams off the run loop.
+    if !is_config_path(path) {
+        arm_pending_save(stoat, buffer_id, path);
+        return WriteOutcome::Armed;
+    }
+
     let text = {
         let guard = buffer.read().expect("buffer poisoned");
         guard.rope().to_string()
@@ -346,7 +376,7 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, for
     {
         tracing::warn!(target: "stoat::file", ?err, ?path, "buffer save failed");
         stoat.set_status(format!("save failed: {err}"));
-        return false;
+        return WriteOutcome::Failed;
     }
     {
         let mut guard = buffer.write().expect("buffer poisoned");
@@ -387,7 +417,7 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, for
         crate::paths::stoatty_config_path().as_deref(),
     );
     let Some(uri) = super::lsp::path_to_uri(path) else {
-        return true;
+        return WriteOutcome::Wrote;
     };
     let params = DidSaveTextDocumentParams {
         text_document: TextDocumentIdentifier { uri },
@@ -404,7 +434,205 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, for
             })
             .detach();
     }
+    WriteOutcome::Wrote
+}
+
+/// What a write did.
+///
+/// The armed case is the ordinary one. A write streams off the run loop, so the
+/// caller learns nothing here beyond that it started.
+enum WriteOutcome {
+    /// The bytes landed and the buffer was marked clean, which only a config
+    /// save answers now.
+    Wrote,
+    /// The write is on its way to disk. [`pump_pending_save`] finishes it.
+    Armed,
+    /// The write was refused or failed, with [`Stoat::pending_message`] set.
+    Failed,
+}
+
+/// Whether `path` is one of the two configs this editor re-applies on save.
+fn is_config_path(path: &Path) -> bool {
+    [
+        crate::paths::user_config_path(),
+        crate::paths::stoatty_config_path(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|config| config == path)
+}
+
+/// A buffer's bytes on their way to disk.
+pub(crate) struct PendingSave {
+    rx: mpsc::Receiver<std::io::Result<()>>,
+    _task: stoat_scheduler::Task<()>,
+    buffer_id: BufferId,
+    path: PathBuf,
+    /// The buffer version the written bytes came from.
+    ///
+    /// A buffer that has moved past it stays dirty when the write lands, since
+    /// the disk then holds older text than the buffer does.
+    version: u64,
+}
+
+/// Start streaming `buffer_id`'s current text to `path` off the run loop.
+///
+/// The rope is cloned, which is cheap, and the chunks are written as they come,
+/// so neither the whole file nor its CRLF-restored copy ever exists beside the
+/// buffer it came from.
+fn arm_pending_save(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) {
+    let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) else {
+        return;
+    };
+    let (rope, version) = {
+        let guard = buffer.read().expect("buffer poisoned");
+        (guard.rope().clone(), guard.version())
+    };
+
+    let ending = stoat.active_workspace().buffers.line_ending(buffer_id);
+    let fs_host = stoat.fs_host.clone();
+    let redraw = stoat.redraw_notify.clone();
+    let target = path.to_path_buf();
+    let (tx, rx) = mpsc::channel();
+
+    let task = {
+        let target = target.clone();
+        stoat.executor.spawn_blocking(move || {
+            // A chunk never splits a line ending, so restoring per chunk is the
+            // same bytes the whole-text restore produced.
+            let mut restored = rope.chunks().map(|chunk| ending.restore(chunk));
+            let mut chunks = std::iter::from_fn(|| restored.next()).collect::<Vec<_>>();
+            let mut bytes = chunks.iter_mut().map(|chunk| chunk.as_bytes());
+            let result = fs_host.write_atomic_stream(&target, &mut bytes);
+            let _ = tx.send(result);
+            redraw.notify_one();
+        })
+    };
+
+    stoat.pending_save = Some(PendingSave {
+        rx,
+        _task: task,
+        buffer_id,
+        path: target,
+        version,
+    });
+}
+
+/// Land a write that has come back from its thread.
+///
+/// The buffer is marked clean only when it still holds the version that was
+/// written. One that moved inside the write window is genuinely dirty against
+/// what reached the disk, so it keeps its flag and the next save writes again.
+///
+/// Returns `true` when an outcome landed this call, which is what tells the run
+/// loop to redraw.
+pub(crate) fn pump_pending_save(stoat: &mut Stoat) -> bool {
+    let Some(pending) = stoat.pending_save.take() else {
+        return false;
+    };
+    let result = match pending.rx.try_recv() {
+        Ok(result) => result,
+        Err(mpsc::TryRecvError::Empty) => {
+            stoat.pending_save = Some(pending);
+            return false;
+        },
+        Err(mpsc::TryRecvError::Disconnected) => {
+            // The worker died without answering, which leaves the file in
+            // whatever state it reached. Reported as a failure so the buffer
+            // stays dirty rather than being marked clean over unknown bytes.
+            Err(std::io::Error::other("the save worker stopped"))
+        },
+    };
+
+    let wrote = match result {
+        Ok(()) => {
+            finish_pending_save(stoat, &pending);
+            true
+        },
+        Err(err) => {
+            tracing::warn!(target: "stoat::file", ?err, path = ?pending.path, "buffer save failed");
+            stoat.set_status(format!("save failed: {err}"));
+            false
+        },
+    };
+
+    if std::mem::take(&mut stoat.quit_after_save) {
+        stoat.quit_requested = wrote;
+    }
     true
+}
+
+/// Everything a landed write does beyond the bytes themselves.
+fn finish_pending_save(stoat: &mut Stoat, pending: &PendingSave) {
+    let held = stoat
+        .active_workspace()
+        .buffers
+        .get(pending.buffer_id)
+        .map(|buffer| buffer.read().expect("buffer poisoned").version())
+        == Some(pending.version);
+
+    if held && let Some(buffer) = stoat.active_workspace().buffers.get(pending.buffer_id) {
+        buffer.write().expect("buffer poisoned").mark_clean();
+    }
+    if let Some(mtime) = stoat
+        .fs_host
+        .metadata(&pending.path)
+        .ok()
+        .flatten()
+        .map(|m| m.modified)
+    {
+        stoat
+            .active_workspace_mut()
+            .buffers
+            .set_disk_mtime(pending.buffer_id, mtime);
+    }
+    // The file on disk now matches the buffer, so this is the moment the shard
+    // a later open warm-loads becomes worth writing.
+    if !stoat.persistence_disabled {
+        let executor = stoat.executor.clone();
+        let index_update_tx = stoat.index_update_tx.clone();
+        let redraw_notify = stoat.redraw_notify.clone();
+        stoat.active_workspace_mut().enqueue_reindex(
+            &executor,
+            &index_update_tx,
+            &redraw_notify,
+            pending.buffer_id,
+            true,
+        );
+    }
+
+    // A buffer that moved inside the write window has text the disk does not
+    // hold, and a notification naming it describes a file that never existed.
+    // The change the reader made reaches the server as an edit instead.
+    if !held {
+        return;
+    }
+    let Some(uri) = super::lsp::path_to_uri(&pending.path) else {
+        return;
+    };
+    let Some(text) = stoat
+        .active_workspace()
+        .buffers
+        .get(pending.buffer_id)
+        .map(|buffer| buffer.read().expect("buffer poisoned").rope().to_string())
+    else {
+        return;
+    };
+    let params = DidSaveTextDocumentParams {
+        text_document: TextDocumentIdentifier { uri },
+        text: Some(text),
+    };
+    for lsp in crate::lsp::hosts::hosts_for_buffer(stoat, pending.buffer_id) {
+        let params = params.clone();
+        stoat
+            .executor
+            .spawn(async move {
+                if let Err(err) = lsp.did_save(params).await {
+                    tracing::warn!(target: "stoat::lsp", ?err, "did_save notification failed");
+                }
+            })
+            .detach();
+    }
 }
 
 /// Re-apply the config just written to `path`, when it is one of the two this
@@ -2653,6 +2881,7 @@ mod tests {
         h.fake_fs()
             .fail_writes_to(&path, std::io::ErrorKind::PermissionDenied);
         assert_eq!(dispatch(&mut h.stoat, &SaveBuffer), UpdateEffect::Redraw);
+        h.settle();
 
         let mut written = Vec::new();
         h.fake_fs()
@@ -2750,6 +2979,57 @@ mod tests {
         h.settle();
 
         assert_eq!(on_disk(&h, &path), b"one\r\ntwo\r\n");
+    }
+
+    /// The write takes the text it was armed with, so a buffer typed into while
+    /// it flies is dirty against what reached the disk and says so.
+    #[test]
+    fn a_save_leaves_a_buffer_typed_into_mid_write_dirty() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/save-raced");
+        let path = open_edited(&mut h, &root, "a.txt", b"original\n");
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .edit(0..0, "later ");
+        h.settle();
+
+        assert_eq!(
+            on_disk(&h, &path),
+            b"edited original\n",
+            "the disk holds the text the write was armed with",
+        );
+        assert!(
+            editor::focused_dirty(&h.stoat),
+            "and the buffer stays dirty, holding text the disk does not",
+        );
+    }
+
+    /// A file long enough to span rope chunks, since the line endings are
+    /// restored a chunk at a time and a boundary is where that parts from
+    /// restoring the whole text at once.
+    #[test]
+    fn a_multi_chunk_crlf_file_saves_back_as_crlf() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/crlf-chunks");
+        let seed: Vec<u8> = (0..400)
+            .flat_map(|n| format!("line {n}\r\n").into_bytes())
+            .collect();
+        let path = open_rs(&mut h, &root, "a.rs", &seed);
+
+        dispatch(&mut h.stoat, &ForceSaveBuffer);
+        h.settle();
+
+        assert_eq!(on_disk(&h, &path), seed, "every terminator comes back");
     }
 
     /// A carriage return with no newline after it is content, so it survives
@@ -3012,6 +3292,7 @@ mod tests {
             dispatch(&mut h.stoat, &ForceSaveBuffer),
             UpdateEffect::Redraw
         );
+        h.settle();
         assert!(!editor::focused_dirty(&h.stoat), "force save clears dirty");
         let mut written = Vec::new();
         h.fake_fs().read(&path, &mut written).expect("readable");
@@ -3021,13 +3302,22 @@ mod tests {
         );
     }
 
+    /// The write streams off the run loop, so the quit waits for it rather than
+    /// exiting over a file still on its way to disk.
     #[test]
     fn write_quit_saves_and_quits_the_last_pane() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/wq-save");
         let path = open_edited(&mut h, &root, "a.txt", b"original\n");
 
-        assert_eq!(dispatch(&mut h.stoat, &WriteQuit), UpdateEffect::Quit);
+        assert_eq!(dispatch(&mut h.stoat, &WriteQuit), UpdateEffect::Redraw);
+        assert!(
+            !h.stoat.quit_requested,
+            "the quit waits for the write it armed"
+        );
+
+        h.settle();
+        assert!(h.stoat.quit_requested, "and lands once the write does");
         assert_eq!(
             on_disk(&h, &path),
             b"edited original\n",
@@ -3134,6 +3424,7 @@ mod tests {
         let path = open_edited(&mut h, &root, "a.txt", b"original\n");
 
         assert_eq!(dispatch(&mut h.stoat, &SaveBuffer), UpdateEffect::Redraw);
+        h.settle();
         assert!(!editor::focused_dirty(&h.stoat));
 
         let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
@@ -3148,6 +3439,7 @@ mod tests {
         buffer.write().expect("poisoned").edit(0..0, "more ");
 
         assert_eq!(dispatch(&mut h.stoat, &SaveBuffer), UpdateEffect::Redraw);
+        h.settle();
         assert!(
             !editor::focused_dirty(&h.stoat),
             "second save succeeds because the first refreshed the mtime baseline",
@@ -3187,6 +3479,7 @@ mod tests {
         assert!(editor::focused_dirty(&h.stoat));
 
         dispatch(&mut h.stoat, &SaveBuffer);
+        h.settle();
         assert!(!editor::focused_dirty(&h.stoat));
     }
 
