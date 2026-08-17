@@ -10,7 +10,7 @@ use std::{
     ops::Range,
     sync::{
         atomic::{AtomicUsize, Ordering as AtomicOrdering},
-        Arc,
+        Arc, Mutex,
     },
 };
 use stoat_text::{
@@ -282,6 +282,27 @@ pub struct DiffMap {
     /// drift from it.
     staged_tally: (usize, usize),
     version: usize,
+    /// What [`Self::live_hunks`] last resolved, so the four callers that ask
+    /// per frame pay for one walk between them.
+    ///
+    /// Shared across clones because a [`crate::display_map::DisplaySnapshot`]
+    /// takes one and every page paint reads through it. A mutex rather than a
+    /// cell for that same reason, a snapshot crossing to a blocking worker.
+    resolved_rows: Arc<Mutex<Option<LiveRowsCache>>>,
+}
+
+/// The rows [`DiffMap::live_hunks`] resolved for one buffer version.
+///
+/// Keyed on the buffer alone, the hunks being immutable once the map is built.
+/// A rebuilt map starts with none of this, so rows never outlive the hunks they
+/// were resolved against.
+#[derive(Debug)]
+struct LiveRowsCache {
+    buffer_version: u64,
+    /// One per hunk, in the order the tree iterates them.
+    rows: Vec<Range<u32>>,
+    /// Indices into `rows`, ordered as the answer is.
+    order: Vec<usize>,
 }
 
 impl DiffMap {
@@ -312,6 +333,7 @@ impl DiffMap {
             base_staged,
             staged_tally,
             version: Self::next_version(),
+            resolved_rows: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -455,6 +477,25 @@ impl DiffMap {
     /// fragments. Reading each row against the stored rows instead costs
     /// nothing, but answers for the text as it was when the diff ran.
     pub fn live_hunks<'a>(&'a self, buffer: &MultiBufferSnapshot) -> LiveHunks<'a> {
+        let buffer_version = buffer.version();
+        let mut cache = self.resolved_rows.lock().expect("poisoned");
+
+        // Four callers ask per frame and the answer moves only with the buffer,
+        // so the first one through pays the walk and the rest read it back.
+        if let Some(held) = cache
+            .as_ref()
+            .filter(|held| held.buffer_version == buffer_version)
+        {
+            let hunks: Vec<&DiffHunk> = self.hunks.iter().collect();
+            return LiveHunks {
+                hunks: held
+                    .order
+                    .iter()
+                    .map(|&i| (hunks[i], held.rows[i].clone()))
+                    .collect(),
+            };
+        }
+
         // A hunk built before anchoring, or by a caller that never anchored,
         // keeps its stored rows. Stale, but the only answer available for it.
         let mut live: Vec<(&DiffHunk, Range<u32>)> = self
@@ -486,10 +527,26 @@ impl DiffMap {
             }
         }
 
+        // Held in hunk order with the answer's order beside it, so a later call
+        // rebuilds the answer without resolving or sorting again.
+        let rows: Vec<Range<u32>> = live.iter().map(|(_, rows)| rows.clone()).collect();
+        let mut order: Vec<usize> = (0..rows.len()).collect();
         // An edit inside one hunk moves it past another only if the diff itself
         // is stale enough to have overlapping hunks, so this rarely reorders.
-        live.sort_by_key(|(_, rows)| (rows.start, rows.end));
-        LiveHunks { hunks: live }
+        order.sort_by_key(|&i| (rows[i].start, rows[i].end));
+
+        let held = cache.insert(LiveRowsCache {
+            buffer_version,
+            rows,
+            order,
+        });
+        LiveHunks {
+            hunks: held
+                .order
+                .iter()
+                .map(|&i| (live[i].0, held.rows[i].clone()))
+                .collect(),
+        }
     }
 
     pub fn version(&self) -> usize {
@@ -1395,6 +1452,51 @@ mod tests {
     /// A file with no trailing newline has no row start after its last line. An
     /// exclusive end anchored at a row start therefore lands on the last line
     /// itself, and leaves the hunk covering nothing.
+    /// Four callers ask per frame, so the second one through has to answer the
+    /// same as the first, and an edit has to be seen rather than served from
+    /// what the edit moved.
+    #[test]
+    fn live_hunks_repeats_its_answer_and_re_resolves_after_an_edit() {
+        use crate::{
+            buffer::{BufferId, TextBuffer},
+            multi_buffer::MultiBuffer,
+        };
+        use std::sync::RwLock;
+
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "l0\nl1\nl2\nl3\n",
+        )));
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+        let mut dm = DiffMap::from_hunks([added_hunk(2..3)], None);
+        dm.anchor_hunks(&shared.read().expect("poisoned").snapshot);
+
+        let rows = |dm: &DiffMap, multi: &MultiBuffer| -> Vec<std::ops::Range<u32>> {
+            dm.live_hunks(&multi.snapshot())
+                .in_range(0..10)
+                .map(|(_, rows)| rows)
+                .collect()
+        };
+
+        let first = rows(&dm, &multi);
+        assert_eq!(first, vec![2..3], "the hunk covers the row it was built on");
+        assert_eq!(
+            rows(&dm, &multi),
+            first,
+            "and asking again answers the same"
+        );
+
+        // A line inserted above pushes the hunk down, which the cached rows
+        // predate.
+        shared.write().expect("poisoned").edit(0..0, "inserted\n");
+        assert_eq!(
+            rows(&dm, &multi),
+            vec![3..4],
+            "the edit moves the hunk rather than being served the old rows",
+        );
+    }
+
     #[test]
     fn a_hunk_on_an_unterminated_last_line_keeps_its_gutter_mark() {
         use crate::{
