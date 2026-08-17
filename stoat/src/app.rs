@@ -5286,17 +5286,19 @@ impl Stoat {
         let buf_snapshot = display_snapshot.buffer_snapshot();
         let rope = buf_snapshot.rope();
 
+        let recorded = {
+            let mut recorded = auto_indent_cursors.to_vec();
+            recorded.sort_unstable();
+            recorded
+        };
+
         let mut ranges: Vec<(usize, usize)> = editor
             .selections
-            .all_anchors()
+            .resolved_reads(buf_snapshot)
             .iter()
-            .filter(|sel| auto_indent_cursors.contains(&sel.id))
-            .filter_map(|sel| {
-                let cursor = stoat_text::cursor_offset(
-                    rope,
-                    buf_snapshot.resolve_anchor(&sel.tail()),
-                    buf_snapshot.resolve_anchor(&sel.head()),
-                );
+            .filter(|read| recorded.binary_search(&read.id).is_ok())
+            .filter_map(|read| {
+                let cursor = stoat_text::cursor_offset(rope, read.tail, read.head);
                 let row = rope.offset_to_point(cursor).row;
                 let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
                 let line_end =
@@ -5316,10 +5318,15 @@ impl Stoat {
         ranges.dedup();
 
         {
-            let mut guard = buffer.write().expect("poisoned");
-            for (start, end) in ranges.iter().rev() {
-                guard.edit(*start..*end, "");
-            }
+            // Descending and disjoint, which is what the batch takes: the
+            // ranges are whole lines, sorted ascending and deduped, so no two
+            // that survive share a row.
+            let edits: Vec<(Range<usize>, &str)> = ranges
+                .iter()
+                .rev()
+                .map(|&(start, end)| (start..end, ""))
+                .collect();
+            buffer.write().expect("poisoned").edit_batch(&edits);
         }
 
         let new_display = editor.display_map.snapshot();
@@ -15664,6 +15671,35 @@ mod tests {
         assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_keys("escape");
         assert_eq!(focused_buffer_string(&h), "fn a() {\n\n}\n");
+    }
+
+    /// One edit covers every stripped line, so a second cursor's line has to
+    /// come out as clean as the first, and at the coordinates it had before any
+    /// of them ran.
+    ///
+    /// Three of them, so the batch carries more than the pair that a single
+    /// off-by-one in its ordering still happens to get right.
+    #[test]
+    fn open_below_at_three_cursors_then_escape_strips_every_indent() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"fn a() {\n\tx\n\ty\n\tz\n}\n");
+        h.type_keys("j");
+        h.type_keys("2 C");
+        assert_eq!(h.selection_spans().len(), 3, "a cursor on each inner line");
+
+        h.type_keys("o");
+        assert_eq!(
+            focused_buffer_string(&h),
+            "fn a() {\n\tx\n\t\n\ty\n\t\n\tz\n\t\n}\n",
+            "every opened line carries the indent while insert mode is open",
+        );
+
+        h.type_keys("escape");
+        assert_eq!(
+            focused_buffer_string(&h),
+            "fn a() {\n\tx\n\n\ty\n\n\tz\n\n}\n",
+            "and every one loses it again untouched",
+        );
     }
 
     #[test]
