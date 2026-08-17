@@ -9,8 +9,9 @@ use crate::{
     lsp::sync,
 };
 use lsp_types::{
-    DidSaveTextDocumentParams, DocumentFormattingParams, TextDocumentIdentifier, TextEdit, Uri,
-    WorkDoneProgressParams, WorkspaceEdit,
+    DidSaveTextDocumentParams, DocumentFormattingParams, TextDocumentIdentifier,
+    TextDocumentSyncCapability, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkDoneProgressParams,
+    WorkspaceEdit,
 };
 use std::{
     collections::HashMap,
@@ -339,9 +340,9 @@ pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
 ///
 /// Returns `true` when the bytes landed and the buffer was marked clean, and
 /// `false` when the write was refused or failed (with
-/// [`Stoat::pending_message`] set) or the buffer had already vanished. A
-/// skipped `did_save` notification (an unmappable path) still counts as a
-/// successful write.
+/// [`Stoat::pending_message`] set) or the buffer had already vanished. A save
+/// that notifies no server still counts as a successful write, whether the path
+/// maps to no URI or no server asked for the notification.
 fn write_buffer_to_disk(
     stoat: &mut Stoat,
     buffer_id: BufferId,
@@ -364,10 +365,11 @@ fn write_buffer_to_disk(
         return WriteOutcome::Armed;
     }
 
-    let text = {
+    let rope = {
         let guard = buffer.read().expect("buffer poisoned");
-        guard.rope().to_string()
+        guard.rope().clone()
     };
+    let text = rope.to_string();
 
     let ending = stoat.active_workspace().buffers.line_ending(buffer_id);
     if let Err(err) = stoat
@@ -416,15 +418,31 @@ fn write_buffer_to_disk(
         crate::paths::user_config_path().as_deref(),
         crate::paths::stoatty_config_path().as_deref(),
     );
+    notify_did_save(stoat, buffer_id, path, &rope);
+    WriteOutcome::Wrote
+}
+
+/// Tell every language server mirroring `buffer_id` that `path` was written.
+///
+/// A server states in its sync options whether it wants save notifications at
+/// all and whether it wants the saved text with them. A server that asked for
+/// neither hears nothing, and `text` is materialized once per server that asked
+/// for it rather than once for the whole fan-out.
+///
+/// A path that maps to no URI notifies nobody.
+fn notify_did_save(stoat: &Stoat, buffer_id: BufferId, path: &Path, text: &Rope) {
     let Some(uri) = super::lsp::path_to_uri(path) else {
-        return WriteOutcome::Wrote;
-    };
-    let params = DidSaveTextDocumentParams {
-        text_document: TextDocumentIdentifier { uri },
-        text: Some(text),
+        return;
     };
     for lsp in crate::lsp::hosts::hosts_for_buffer(stoat, buffer_id) {
-        let params = params.clone();
+        let Some(include_text) = save_notification_text(&lsp.capabilities().text_document_sync)
+        else {
+            continue;
+        };
+        let params = DidSaveTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            text: include_text.then(|| text.to_string()),
+        };
         stoat
             .executor
             .spawn(async move {
@@ -434,7 +452,26 @@ fn write_buffer_to_disk(
             })
             .detach();
     }
-    WriteOutcome::Wrote
+}
+
+/// Whether a server declaring `cap` wants a save notification, and whether it
+/// wants the saved text with it.
+///
+/// `None` when it wants no notification. The `save` field is what asks for one,
+/// so a server that omits it, or sets it to `false`, is left alone. The bare
+/// `Kind` form predates the field and says nothing about saves, which the
+/// protocol reads as a notification without the text.
+fn save_notification_text(cap: &Option<TextDocumentSyncCapability>) -> Option<bool> {
+    match cap.as_ref()? {
+        TextDocumentSyncCapability::Kind(_) => Some(false),
+        TextDocumentSyncCapability::Options(options) => match options.save.as_ref()? {
+            TextDocumentSyncSaveOptions::Supported(false) => None,
+            TextDocumentSyncSaveOptions::Supported(true) => Some(false),
+            TextDocumentSyncSaveOptions::SaveOptions(save) => {
+                Some(save.include_text.unwrap_or(false))
+            },
+        },
+    }
 }
 
 /// What a write did.
@@ -607,32 +644,15 @@ fn finish_pending_save(stoat: &mut Stoat, pending: &PendingSave) {
     if !held {
         return;
     }
-    let Some(uri) = super::lsp::path_to_uri(&pending.path) else {
-        return;
-    };
-    let Some(text) = stoat
+    let Some(rope) = stoat
         .active_workspace()
         .buffers
         .get(pending.buffer_id)
-        .map(|buffer| buffer.read().expect("buffer poisoned").rope().to_string())
+        .map(|buffer| buffer.read().expect("buffer poisoned").rope().clone())
     else {
         return;
     };
-    let params = DidSaveTextDocumentParams {
-        text_document: TextDocumentIdentifier { uri },
-        text: Some(text),
-    };
-    for lsp in crate::lsp::hosts::hosts_for_buffer(stoat, pending.buffer_id) {
-        let params = params.clone();
-        stoat
-            .executor
-            .spawn(async move {
-                if let Err(err) = lsp.did_save(params).await {
-                    tracing::warn!(target: "stoat::lsp", ?err, "did_save notification failed");
-                }
-            })
-            .detach();
-    }
+    notify_did_save(stoat, pending.buffer_id, &pending.path, &rope);
 }
 
 /// Re-apply the config just written to `path`, when it is one of the two this
@@ -1400,6 +1420,10 @@ mod tests {
         lsp::sync,
         test_harness::{editor, TestHarness},
         Stoat,
+    };
+    use lsp_types::{
+        SaveOptions, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
+        TextDocumentSyncOptions, TextDocumentSyncSaveOptions,
     };
     use std::path::{Path, PathBuf};
     use stoat_action::{ForceSaveBuffer, MoveDown, OpenFile, SaveBuffer, WriteQuit};
@@ -3483,11 +3507,111 @@ mod tests {
         assert!(!editor::focused_dirty(&h.stoat));
     }
 
+    /// Sync options declaring `save`, the field a server sets to ask for save
+    /// notifications at all.
+    fn save_sync(save: Option<TextDocumentSyncSaveOptions>) -> Option<TextDocumentSyncCapability> {
+        Some(TextDocumentSyncCapability::Options(
+            TextDocumentSyncOptions {
+                save,
+                ..TextDocumentSyncOptions::default()
+            },
+        ))
+    }
+
+    /// Save a dirty buffer against a server declaring `sync`, and answer the
+    /// text of every save notification it received.
+    fn saves_under_sync(sync: Option<TextDocumentSyncCapability>) -> Vec<Option<String>> {
+        let mut h = Stoat::test();
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            text_document_sync: sync,
+            ..ServerCapabilities::default()
+        });
+        open_edited(&mut h, &PathBuf::from("/did-save-gate"), "a.txt", b"note\n");
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.settle();
+
+        h.fake_lsp()
+            .observed_saves()
+            .into_iter()
+            .map(|params| params.text)
+            .collect()
+    }
+
+    /// The saved text is a whole copy of the file per notification, so it goes
+    /// only to a server that set `include_text`. Every other shape of the
+    /// capability asks for the notification alone.
+    #[test]
+    fn did_save_carries_the_text_only_where_the_server_asked_for_it() {
+        let include = |flag| {
+            save_sync(Some(TextDocumentSyncSaveOptions::SaveOptions(
+                SaveOptions { include_text: flag },
+            )))
+        };
+        assert_eq!(
+            saves_under_sync(include(Some(true))),
+            [Some("edited note\n".to_string())],
+            "include_text true carries the saved text",
+        );
+        assert_eq!(
+            saves_under_sync(include(Some(false))),
+            [None],
+            "include_text false carries no text",
+        );
+        assert_eq!(
+            saves_under_sync(include(None)),
+            [None],
+            "an absent include_text carries no text",
+        );
+        assert_eq!(
+            saves_under_sync(save_sync(Some(TextDocumentSyncSaveOptions::Supported(
+                true
+            )))),
+            [None],
+            "bare save support carries no text",
+        );
+        assert_eq!(
+            saves_under_sync(Some(TextDocumentSyncCapability::Kind(
+                TextDocumentSyncKind::FULL
+            ))),
+            [None],
+            "the bare kind form predates the save field and carries no text",
+        );
+    }
+
+    /// A server asks for save notifications by declaring `save`. One that
+    /// declines, or never mentions saves, is left alone entirely.
+    #[test]
+    fn did_save_skips_a_server_that_asked_for_no_save_notification() {
+        assert_eq!(
+            saves_under_sync(save_sync(Some(TextDocumentSyncSaveOptions::Supported(
+                false
+            )))),
+            [],
+            "a declined save reaches the server not at all",
+        );
+        assert_eq!(
+            saves_under_sync(save_sync(None)),
+            [],
+            "sync options without a save field ask for no notification",
+        );
+        assert_eq!(
+            saves_under_sync(None),
+            [],
+            "a server declaring no text sync at all asks for no notification",
+        );
+    }
+
     /// A raw path holding a space parses as no URI at all. A notification built
     /// that way reaches no server, and the work a save drives never fires.
+    ///
+    /// The sync capability is armed because a server that declares none is sent
+    /// no save notification at all, which leaves nothing here to name.
     #[test]
     fn a_save_names_the_document_by_the_uri_the_open_registered() {
         let mut h = Stoat::test();
+        h.fake_lsp()
+            .set_text_document_sync(TextDocumentSyncKind::FULL);
         let root = PathBuf::from("/save uri");
         let path = root.join("my file.txt");
         h.fake_fs().insert_file(&path, b"x");
