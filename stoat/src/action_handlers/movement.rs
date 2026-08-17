@@ -2688,39 +2688,64 @@ fn apply_line_indent(stoat: &mut Stoat, dir: IndentDir) -> UpdateEffect {
         rows.sort_unstable();
         rows.dedup();
 
-        let mut edits: Vec<(usize, usize, String)> = Vec::with_capacity(rows.len());
+        // Contiguous runs, so one walk reads each. A walk carries one cursor
+        // across consecutive rows, so a single walk over two selections far
+        // apart steps through every row between them.
+        let mut runs: Vec<Range<u32>> = Vec::new();
         for row in rows {
-            let line_start = rope.point_to_offset(Point::new(row, 0));
-            let line_end = rope.point_to_offset(Point::new(row, rope.line_len(row)));
-            match dir {
-                IndentDir::In => {
-                    // Indenting leaves all-whitespace rows untouched, like Helix.
-                    let Some(leading) = leading_whitespace_chars(rope, line_start, line_end) else {
-                        continue;
-                    };
-                    edits.push((line_start, line_start, indent_text(style, count, leading)));
-                },
-                IndentDir::Out => {
-                    // Remove leading whitespace up to `count` indent widths of
-                    // visual columns, counting a tab to its next stop.
-                    let target = count.saturating_mul(style.indent_width(TAB_WIDTH));
-                    let mut width = 0usize;
-                    let mut consumed = 0usize;
-                    for ch in rope.chars_at(line_start) {
-                        match ch {
-                            ' ' => width += 1,
-                            '\t' => width = (width / TAB_WIDTH + 1) * TAB_WIDTH,
-                            _ => break,
+            match runs.last_mut() {
+                Some(run) if run.end == row => run.end = row + 1,
+                _ => runs.push(row..row + 1),
+            }
+        }
+
+        let mut edits: Vec<(usize, usize, String)> = Vec::new();
+        let mut line = String::new();
+        for run in runs {
+            // One descent for the run's head. Every row after it follows from
+            // the length the walk reports plus the newline it stepped over.
+            let mut line_start = rope.point_to_offset(Point::new(run.start, 0));
+            let mut walk = rope.line_walk(run);
+            loop {
+                line.clear();
+                let Some(len) = walk.next_into(&mut line) else {
+                    break;
+                };
+                match dir {
+                    IndentDir::In => {
+                        // Indenting leaves all-whitespace rows untouched, like
+                        // Helix.
+                        if let Some(leading) = leading_whitespace_chars(&line) {
+                            edits.push((
+                                line_start,
+                                line_start,
+                                indent_text(style, count, leading),
+                            ));
                         }
-                        consumed += ch.len_utf8();
-                        if width >= target {
-                            break;
+                    },
+                    IndentDir::Out => {
+                        // Remove leading whitespace up to `count` indent widths
+                        // of visual columns, counting a tab to its next stop.
+                        let target = count.saturating_mul(style.indent_width(TAB_WIDTH));
+                        let mut width = 0usize;
+                        let mut consumed = 0usize;
+                        for ch in line.chars() {
+                            match ch {
+                                ' ' => width += 1,
+                                '\t' => width = (width / TAB_WIDTH + 1) * TAB_WIDTH,
+                                _ => break,
+                            }
+                            consumed += ch.len_utf8();
+                            if width >= target {
+                                break;
+                            }
                         }
-                    }
-                    if consumed > 0 {
-                        edits.push((line_start, line_start + consumed, String::new()));
-                    }
-                },
+                        if consumed > 0 {
+                            edits.push((line_start, line_start + consumed, String::new()));
+                        }
+                    },
+                }
+                line_start += len as usize + 1;
             }
         }
         edits
@@ -2773,18 +2798,8 @@ fn indent_text(style: IndentStyle, count: usize, leading: usize) -> String {
 /// The count is in characters rather than bytes so it lines up with an indent
 /// width measured in space characters. A leading tab therefore counts as one,
 /// whatever column it advances to.
-fn leading_whitespace_chars(rope: &Rope, line_start: usize, line_end: usize) -> Option<usize> {
-    let mut cursor = line_start;
-    for (chars, ch) in rope.chars_at(line_start).enumerate() {
-        if cursor >= line_end {
-            return None;
-        }
-        if !ch.is_whitespace() {
-            return Some(chars);
-        }
-        cursor += ch.len_utf8();
-    }
-    None
+fn leading_whitespace_chars(line: &str) -> Option<usize> {
+    line.chars().position(|ch| !ch.is_whitespace())
 }
 
 fn toggle_case(s: &str) -> String {
