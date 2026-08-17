@@ -63,6 +63,26 @@ pub(crate) struct LastSearch {
     regex: Option<CursorRegex>,
 }
 
+/// The open search prompt as the status bar paints it.
+///
+/// The prompt is the only thing on screen that shows the typed query, so it
+/// carries the caret position as well as the text. A snapshot rather than a
+/// borrow of [`SearchInputState`], because the caret resolves through a mutable
+/// workspace and the frame holds that borrow for the whole paint.
+pub(crate) struct SearchPrompt {
+    /// `/` for a forward search, `?` for a reverse one.
+    pub(crate) sigil: char,
+    /// The query typed so far.
+    pub(crate) text: String,
+    /// Caret position as a byte offset into [`Self::text`].
+    ///
+    /// Always a char boundary in `0..=text.len()`, so a painter splits the text
+    /// there with no check of its own. [`prompt_display`] establishes that: the
+    /// offset comes from the input's own editor, and the paint path has no way
+    /// to recover from a bad one.
+    pub(crate) cursor: usize,
+}
+
 impl LastSearch {
     pub(crate) fn new(query: String, direction: SearchDirection, smart_case: bool) -> Self {
         Self {
@@ -71,6 +91,48 @@ impl LastSearch {
             direction,
         }
     }
+}
+
+/// The open search prompt, or `None` when no search input is open.
+///
+/// Takes `&mut Stoat` because resolving the caret snapshots the input editor's
+/// display map, so the frame must call it before it borrows the workspace.
+pub(crate) fn prompt_display(stoat: &mut Stoat) -> Option<SearchPrompt> {
+    let (sigil, editor_id, text) = {
+        let state = stoat.search_input.as_ref()?;
+        let sigil = match state.direction {
+            SearchDirection::Forward => '/',
+            SearchDirection::Reverse => '?',
+        };
+        (
+            sigil,
+            state.input.editor_id,
+            state.input.text(stoat.active_workspace()),
+        )
+    };
+
+    let offset = stoat
+        .active_workspace_mut()
+        .editors
+        .get_mut(editor_id)
+        .map(|editor| {
+            let display_snapshot = editor.display_map.snapshot();
+            let buf_snapshot = display_snapshot.buffer_snapshot();
+            let head = editor.selections.newest_anchor().head();
+            buf_snapshot.resolve_anchor(&head)
+        })
+        .unwrap_or(text.len());
+
+    let cursor = (0..=offset.min(text.len()))
+        .rev()
+        .find(|&at| text.is_char_boundary(at))
+        .unwrap_or(0);
+
+    Some(SearchPrompt {
+        sigil,
+        text,
+        cursor,
+    })
 }
 
 pub(super) fn open_search_input(stoat: &mut Stoat) -> UpdateEffect {

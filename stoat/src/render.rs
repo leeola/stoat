@@ -42,6 +42,7 @@ pub(crate) mod workspace_picker;
 
 use self::undercurl::UndercurlBatch;
 use crate::{
+    action_handlers::search::{self, SearchPrompt},
     app::{self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
     buffer::BufferId,
     buffer_registry::BufferRegistry,
@@ -286,6 +287,10 @@ pub(crate) struct FrameCtx<'a> {
     /// paint compiles its own regex, and a highlight disagreeing with the jump
     /// lights up a different set of matches than `n` walks.
     pub(crate) search_smart_case: bool,
+    /// The open `/` or `?` prompt, painted over the focused pane's status-bar
+    /// left segments so the user reads the query as they type it. `None`
+    /// whenever no search input is open.
+    pub(crate) search_prompt: Option<&'a SearchPrompt>,
     /// How document editor panes number the gutter, resolved from
     /// `editor.line_numbers` (default [`LineNumbers::Relative`]).
     /// [`LineNumbers::Off`] keeps the diagnostic-only gutter column.
@@ -540,6 +545,11 @@ pub(crate) fn frame(
 
     stoat.refresh_dimmed_minimap_palette(minimap_enabled, inactive_dim);
 
+    // Resolved before the field borrows below, because snapshotting the prompt
+    // editor's display map takes the whole app mutably. Nothing between here
+    // and the status bars opens or closes the prompt.
+    let search_prompt = search::prompt_display(stoat);
+
     // The last whole-app borrows are behind us, so what the frame reads from
     // here on is field by field and can live alongside the workspace below.
     let mode = stoat.frame_mode.as_str();
@@ -574,7 +584,7 @@ pub(crate) fn frame(
     let painted_modal = active_modal(stoat);
     // Resolved here for the same reason. It reads the whole &Stoat, where the
     // search query it travels with is read below through a disjoint field.
-    let search_smart_case = crate::action_handlers::search::smart_case(stoat);
+    let search_smart_case = search::smart_case(stoat);
 
     let ws = &mut stoat.workspaces[stoat.active_workspace];
 
@@ -658,6 +668,7 @@ pub(crate) fn frame(
         diagnostics: &stoat.diagnostics,
         search_query: stoat.last_search.as_ref().map(|s| s.query.as_str()),
         search_smart_case,
+        search_prompt: search_prompt.as_ref(),
         line_numbers: stoat
             .settings
             .editor_line_numbers
@@ -1177,9 +1188,11 @@ pub(crate) fn frame(
                 );
             }
         },
-        // The transient text inputs paint in the popup section further down
-        // rather than as a centered box, so they leave the key-hints branch
-        // below to run exactly as no-modal frames do.
+        // The transient text inputs paint no centered box. Search paints in the
+        // focused pane's status bar, Rename in the popup section further down,
+        // and SplitSelection, FilterSelections and ShellInput do not paint yet.
+        // All of them leave the key-hints branch below to run exactly as
+        // no-modal frames do.
         Some(
             ActiveModal::Rename
             | ActiveModal::Search

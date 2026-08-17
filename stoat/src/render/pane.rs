@@ -1,4 +1,5 @@
 use crate::{
+    action_handlers::search::SearchPrompt,
     app::SPINNER_FRAMES,
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
@@ -781,6 +782,10 @@ fn status_segments(
 
     let mut left: Vec<(String, Style)> = Vec::new();
     let mut cursor = area.x;
+    // The prompt takes the identifying left segments for as long as it is open.
+    // The query is what the user needs to read mid-type. The workspace, screen
+    // and file names are context they already have.
+    let prompt = frame.search_prompt.filter(|_| is_focused);
     if is_focused {
         let (label, mode_bg) = frame.mode_label;
         let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
@@ -791,27 +796,33 @@ fn status_segments(
             format!(" {label} "),
             mode_style,
         );
-        push_left(
-            &mut left,
-            &mut cursor,
-            end_x,
-            format!(" {} ", frame.workspace_name),
-            base_style.add_modifier(Modifier::BOLD),
-        );
-        if let Some((screen_label, screen_color)) = screen_segment(frame.screen, theme) {
+        if let Some(prompt) = prompt {
+            push_prompt(&mut left, &mut cursor, end_x, prompt, base_style);
+        } else {
             push_left(
                 &mut left,
                 &mut cursor,
                 end_x,
-                format!(" {screen_label} "),
-                base_style.fg(screen_color),
+                format!(" {} ", frame.workspace_name),
+                base_style.add_modifier(Modifier::BOLD),
             );
+            if let Some((screen_label, screen_color)) = screen_segment(frame.screen, theme) {
+                push_left(
+                    &mut left,
+                    &mut cursor,
+                    end_x,
+                    format!(" {screen_label} "),
+                    base_style.fg(screen_color),
+                );
+            }
         }
     }
 
     let status = pane_status_info(view, frame.workspace_root, frame.home, editors, buffers);
     let cursor_pos = status.cursor_pos;
-    if let Some(name) = &status.filename {
+    if let Some(name) = &status.filename
+        && prompt.is_none()
+    {
         let left_pad = if cursor == area.x { " " } else { "" };
         let text = if status.dirty {
             format!("{left_pad}{name} [+] ")
@@ -954,6 +965,55 @@ fn status_segments(
     let _ = cursor;
     let _ = right_anchor;
     (left, right)
+}
+
+/// Append the open search prompt as left-anchored segments.
+///
+/// Three of them, because a segment carries one style for its whole text and
+/// the caret is a single inverted cell inside an otherwise uniform run. The
+/// trailing segment always ends in a space, so the query never abuts whatever
+/// the bar packs after it.
+fn push_prompt(
+    left: &mut Vec<StatusSeg>,
+    cursor: &mut u16,
+    end_x: u16,
+    prompt: &SearchPrompt,
+    base_style: Style,
+) {
+    let (before, rest) = prompt.text.split_at(prompt.cursor);
+    let at_caret = rest.chars().next();
+
+    push_left(
+        left,
+        cursor,
+        end_x,
+        format!("{}{before}", prompt.sigil),
+        base_style,
+    );
+    push_left(
+        left,
+        cursor,
+        end_x,
+        at_caret.unwrap_or(' ').to_string(),
+        prompt_caret_style(base_style),
+    );
+
+    let after = at_caret.map_or("", |ch| &rest[ch.len_utf8()..]);
+    push_left(left, cursor, end_x, format!("{after} "), base_style);
+}
+
+/// Style for the one cell the search prompt's caret covers.
+///
+/// Swaps the bar's own color pair rather than setting [`Modifier::REVERSED`],
+/// because [`resolve_rich_segments`] carries a segment across as an fg/bg pair
+/// and drops its modifiers. A reversed caret therefore vanishes under stoatty
+/// and shows only in the cell fallback. A bar style missing either color has no
+/// pair to swap, so that case keeps the modifier the fallback honors.
+fn prompt_caret_style(base_style: Style) -> Style {
+    match (base_style.fg, base_style.bg) {
+        (Some(fg), Some(bg)) => base_style.fg(bg).bg(fg),
+        _ => base_style.add_modifier(Modifier::REVERSED),
+    }
 }
 
 /// Append a left-anchored segment and advance `cursor` as [`paint_segment`]
@@ -1292,7 +1352,7 @@ mod tests {
         path::{Path, PathBuf},
         sync::{Arc, RwLock},
     };
-    use stoat_action::OpenFile;
+    use stoat_action::{OpenFile, OpenReverseSearchInput};
 
     /// The rendered name is reused only while everything it was rendered from
     /// holds still.
@@ -1826,6 +1886,64 @@ mod tests {
         assert!(
             !stopped.contains("REC"),
             "and the indicator leaves with the recording:\n{stopped}",
+        );
+    }
+
+    /// The search prompt is the only thing on screen that reports the query, so
+    /// a user without it types blind.
+    ///
+    /// The sigil has to distinguish the two directions, and the prompt has to
+    /// leave when the search does. A bar still showing `/foo` claims a prompt
+    /// that no longer takes keys.
+    #[test]
+    fn the_status_bar_shows_the_search_query_while_it_is_typed() {
+        let mut h = crate::test_harness::TestHarness::with_size(100, 12);
+        h.seed_focused_buffer("hello");
+
+        let bar_text = |h: &mut crate::test_harness::TestHarness| -> String {
+            h.snapshot();
+            h.rendered_text().replace('─', " ")
+        };
+
+        h.type_keys("/ f o o");
+        let typing = bar_text(&mut h);
+        assert!(
+            typing.contains("/foo"),
+            "the bar reads back the forward query:\n{typing}",
+        );
+
+        // The caret has to invert the bar's colors rather than carry a REVERSED
+        // modifier, because the rich status path resolves a segment to a color
+        // pair and drops its modifiers.
+        let buf = h.rendered_buffer();
+        let row = buf.area.height - 1;
+        let sigil = (0..buf.area.width)
+            .find(|&x| buf[(x, row)].symbol() == "/")
+            .expect("the prompt paints on the status row");
+        let (query, caret) = (&buf[(sigil, row)], &buf[(sigil + 4, row)]);
+        assert_eq!(
+            (caret.fg, caret.bg),
+            (query.bg, query.fg),
+            "the caret cell past the query inverts the bar's own colors",
+        );
+
+        h.type_keys("escape");
+        let cancelled = bar_text(&mut h);
+        assert!(
+            !cancelled.contains("/foo"),
+            "and the prompt leaves with the search:\n{cancelled}",
+        );
+
+        // Opened by dispatch rather than by `g ?`, whose binding runs
+        // SetMode(normal) after the open and so leaves a prompt that takes no
+        // keys. That defect is the binding's, and typing here is what pins the
+        // sigil.
+        dispatch(&mut h.stoat, &OpenReverseSearchInput);
+        h.type_text("b");
+        let reverse = bar_text(&mut h);
+        assert!(
+            reverse.contains("?b"),
+            "a reverse search prompts with its own sigil:\n{reverse}",
         );
     }
 

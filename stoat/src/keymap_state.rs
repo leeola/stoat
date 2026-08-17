@@ -421,8 +421,10 @@ impl ActiveModal {
     /// width where a band exists at all, so hiding the strip for the palette would
     /// cost the user their minimap for no overlap.
     ///
-    /// Also false for the transient text inputs, which draw in a single row of
-    /// existing chrome rather than over the editor at all.
+    /// Also false for the transient text inputs, which never claim the editor
+    /// area as a box. Search draws in the focused pane's status bar, Rename
+    /// draws a popup beside the cursor, and SplitSelection, FilterSelections
+    /// and ShellInput do not paint yet.
     pub(crate) fn hides_minimap(self) -> bool {
         !matches!(
             self,
@@ -452,9 +454,11 @@ impl ActiveModal {
 
     /// Whether the frame paints this modal as its own centered box.
     ///
-    /// False for the transient text inputs, which render in the popup section
-    /// beside the cursor instead, leaving the frame free to paint the key-hints
-    /// box over the editor behind them.
+    /// False for the transient text inputs. Search renders in the focused pane's
+    /// status bar and Rename in the popup section beside the cursor, while
+    /// SplitSelection, FilterSelections and ShellInput do not paint yet. All of
+    /// them leave the frame free to paint the key-hints box over the editor
+    /// behind them.
     pub(crate) fn paints_own_box(self) -> bool {
         !matches!(
             self,
