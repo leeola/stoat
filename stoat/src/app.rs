@@ -5570,6 +5570,48 @@ impl Stoat {
         editor.selections.land_block_cursors(&landings, new_buf);
     }
 
+    /// Insert one indent step at every cursor.
+    ///
+    /// A tab style writes a tab, which is a tab stop wherever it lands. A space
+    /// style writes only the spaces that reach the next stop, so a cursor at
+    /// column 6 under a width of 4 gets two spaces and lands on 8. Writing a
+    /// whole unit from an off-grid column keeps the indentation off the grid
+    /// for good.
+    pub(crate) fn editor_insert_indent(&mut self, editor_id: EditorId, buffer_id: BufferId) {
+        let style = self.buffer_indent_style(buffer_id);
+        let IndentStyle::Spaces(width) = style else {
+            self.editor_insert(editor_id, buffer_id, style.as_str());
+            return;
+        };
+        let width = (width as usize).max(1);
+
+        let cursors = self.editor_cursor_offsets(editor_id);
+        let insertions = {
+            let ws = self.active_workspace();
+            let Some(buffer) = ws.buffers.get(buffer_id) else {
+                return;
+            };
+            let guard = buffer.read().expect("buffer poisoned");
+            let rope = guard.rope();
+
+            cursors
+                .into_iter()
+                .map(|(id, offset)| {
+                    // Characters rather than bytes, since the grid a tab stop
+                    // sits on counts cells and not the storage behind them.
+                    let column = rope
+                        .reversed_chars_at(offset)
+                        .take_while(|&ch| ch != '\n')
+                        .count();
+                    let text = " ".repeat(width - column % width);
+                    (id, offset, text)
+                })
+                .collect()
+        };
+
+        self.editor_insert_each(editor_id, buffer_id, insertions);
+    }
+
     /// Insert a string per cursor in one multi-edit, mirroring
     /// [`Self::editor_insert`]. `insertions` pairs each selection id with its
     /// cursor offset and the text that cursor inserts, in offset order.

@@ -40,8 +40,7 @@ pub(super) fn smart_tab(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     };
     if stoat.cursors_after_only_whitespace(editor_id, buffer_id) {
-        let unit = stoat.buffer_indent_style(buffer_id).as_str();
-        stoat.editor_insert(editor_id, buffer_id, unit);
+        stoat.editor_insert_indent(editor_id, buffer_id);
         return UpdateEffect::Redraw;
     }
     if stoat.active_snippet.is_some() {
@@ -54,7 +53,7 @@ pub(super) fn smart_tab(stoat: &mut Stoat) -> UpdateEffect {
     movement::move_to_parent_bound(stoat, NodeBound::End, false)
 }
 
-/// Insert the buffer's indent unit at every cursor, unconditionally.
+/// Insert one indent step at every cursor, unconditionally.
 ///
 /// The plain counterpart to [`smart_tab`], skipping the snippet, completion,
 /// and leading-whitespace arbitration, so a keystroke bound to it always
@@ -63,8 +62,7 @@ pub(super) fn insert_tab(stoat: &mut Stoat) -> UpdateEffect {
     let Some((editor_id, buffer_id)) = stoat.focused_editor_ids() else {
         return UpdateEffect::None;
     };
-    let unit = stoat.buffer_indent_style(buffer_id).as_str();
-    stoat.editor_insert(editor_id, buffer_id, unit);
+    stoat.editor_insert_indent(editor_id, buffer_id);
     UpdateEffect::Redraw
 }
 
@@ -211,6 +209,37 @@ mod tests {
         h.type_keys("l l i");
         dispatch(&mut h.stoat, &SmartTab);
         assert_eq!(buffer_text(&h.stoat, &path), "    abc\n");
+    }
+
+    #[test]
+    fn tab_at_column_6_under_width_4_inserts_2_spaces() {
+        let mut h = Stoat::test();
+        // Four-space steps between consecutive lines, which is what the style
+        // detector votes on. A pair of two-space steps reaching the same depth
+        // detects as a width of 2 instead, where the pin proves nothing.
+        let path = h.write_file("a.rs", "a\n    b\n        c\n");
+        h.open_file(&path);
+        h.type_keys("j j l l l l l l i");
+        dispatch(&mut h.stoat, &SmartTab);
+        assert_eq!(
+            buffer_text(&h.stoat, &path),
+            "a\n    b\n          c\n",
+            "column 6 reaches the stop at 8, so two spaces and not four",
+        );
+    }
+
+    #[test]
+    fn tab_style_inserts_a_whole_tab() {
+        let mut h = Stoat::test();
+        let path = h.write_file("a.rs", "\ta\n\t\tb\n");
+        h.open_file(&path);
+        h.type_keys("l i");
+        dispatch(&mut h.stoat, &SmartTab);
+        assert_eq!(
+            buffer_text(&h.stoat, &path),
+            "\t\ta\n\t\tb\n",
+            "a tab is a tab stop wherever it lands, so it is never trimmed",
+        );
     }
 
     #[test]
