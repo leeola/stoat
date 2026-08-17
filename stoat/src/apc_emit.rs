@@ -686,7 +686,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         theme: Arc<crate::theme::Theme>,
     }
     struct ConflictFillParts {
-        state: crate::conflict_session::ConflictViewState,
+        state: Arc<crate::conflict_session::ConflictViewState>,
         theme: Arc<crate::theme::Theme>,
     }
     enum PoolFill {
@@ -1523,7 +1523,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 let ConflictFillParts { state, theme } = *parts;
                 for index in pages {
                     let snapshot = snapshot.clone();
-                    let mut state = state.clone();
+                    let state = state.clone();
                     let theme = theme.clone();
                     let apc_tx = apc_tx.clone();
                     stoat
@@ -1531,7 +1531,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                         .spawn_blocking(move || {
                             let fill = crate::smooth_scroll::render_conflict_page_from_parts(
                                 &snapshot,
-                                &mut state,
+                                &state,
                                 &theme,
                                 pool,
                                 index,
@@ -3752,9 +3752,11 @@ mod tests {
 
         let area = Rect::new(0, 0, region.width, region.height);
         let mut expected = crate::smooth_scroll::page_buffer(area, &theme);
+        let (doc, derived) = Arc::make_mut(&mut state).derived(&snapshot);
         render_conflict_rows(
             &snapshot,
-            &mut state,
+            doc,
+            derived,
             0,
             area,
             fallback,

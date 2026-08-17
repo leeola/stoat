@@ -1,5 +1,5 @@
 use crate::{
-    conflict_session::ConflictViewState,
+    conflict_session::ConflictDerived,
     display_map::{CachedHighlightEndpoints, DisplaySnapshot},
     editor_state::EditorState,
     merge_view::{AlignRow, ChunkState, MergeDoc},
@@ -12,6 +12,7 @@ use crate::{
     review::ReviewSide,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use std::sync::Arc;
 
 /// At or above this inner width the ours and theirs columns keep a line-number
 /// gutter. Below it they drop it so their text has room to read.
@@ -112,9 +113,11 @@ pub(crate) fn render_conflict_view(
     let mut endpoint_cache = editor.highlight_endpoint_cache.take();
     let mut row_cache = editor.diff_row_cache.take();
     if let Some(state) = editor.conflict_view.as_mut() {
+        let (doc, derived) = Arc::make_mut(state).derived(&snapshot);
         render_conflict_rows(
             &snapshot,
-            state,
+            doc,
+            derived,
             scroll_row,
             inner,
             fallback_style,
@@ -154,7 +157,8 @@ pub(crate) fn render_conflict_view(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_conflict_rows(
     snapshot: &DisplaySnapshot,
-    state: &mut ConflictViewState,
+    doc: &MergeDoc,
+    derived: &ConflictDerived,
     scroll_row: u32,
     inner: Rect,
     fallback_style: Style,
@@ -164,7 +168,6 @@ pub(crate) fn render_conflict_rows(
     row_cache: Option<&mut Option<crate::render::review::DiffRowCache>>,
 ) {
     let cols = ConflictColumns::compute(inner);
-    let (doc, derived) = state.derived(snapshot);
     paint_conflict_rows(
         snapshot,
         scroll_row,
@@ -377,7 +380,7 @@ mod tests {
     use super::ConflictColumns;
     use crate::test_harness::TestHarness;
     use ratatui::layout::Rect;
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc};
 
     /// Open the conflict view on one three-stage file in a `width`-wide harness.
     fn conflict_harness(width: u16, ancestor: &str, ours: &str, theirs: &str) -> TestHarness {
@@ -423,8 +426,9 @@ mod tests {
     ) {
         let editor =
             crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("center editor");
+        let view = editor.conflict_view.clone().expect("conflict view");
         (
-            editor.conflict_view.clone().expect("conflict view"),
+            Arc::try_unwrap(view).unwrap_or_else(|shared| (*shared).clone()),
             editor.display_map.snapshot(),
         )
     }

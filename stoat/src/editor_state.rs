@@ -135,7 +135,10 @@ pub(crate) struct EditorState {
     /// from. The backing conflict session on the workspace holds the source of
     /// truth. The editor stays a normal editable buffer on the merged text, so
     /// `view_predicate` reports "conflict" for keymap scoping.
-    pub(crate) conflict_view: Option<ConflictViewState>,
+    ///
+    /// Behind an [`Arc`] for the same reason as [`Self::review_view`]: every
+    /// pooled page fill takes a handle rather than a copy of the aligned rows.
+    pub(crate) conflict_view: Option<Arc<ConflictViewState>>,
     pub(crate) selections: SelectionsCollection,
     /// Per-editor cursor for cycling through ambiguous move sources.
     /// `(hunk_line, source_index)` identifies which source the user is

@@ -406,7 +406,7 @@ pub(crate) fn render_review_page_from_parts(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_conflict_page_from_parts(
     snapshot: &DisplaySnapshot,
-    state: &mut ConflictViewState,
+    state: &ConflictViewState,
     theme: &crate::theme::Theme,
     pool: u32,
     index: u64,
@@ -419,9 +419,25 @@ pub(crate) fn render_conflict_page_from_parts(
         .min(u32::MAX as u64) as u32;
     let area = Rect::new(0, 0, region_width, region_height);
     let mut buf = page_buffer(area, theme);
+
+    // The live paint of the same frame leaves the layout current, so a page
+    // reads the state it shares with the editor. One arriving without a current
+    // layout builds its own copy, which is what every page used to do.
+    let mut built = None;
+    if state.derived_current(snapshot).is_none() {
+        let mut copy = state.clone();
+        copy.derived(snapshot);
+        built = Some(copy);
+    }
+    let source = built.as_ref().unwrap_or(state);
+    let (doc, derived) = source
+        .derived_current(snapshot)
+        .expect("the layout is current or was just built");
+
     render_conflict_rows(
         snapshot,
-        state,
+        doc,
+        derived,
         scroll_row,
         area,
         fallback_style,
@@ -1221,21 +1237,25 @@ mod tests {
 
         let area = Rect::new(0, 0, 150, 8);
         let mut expected = page_buffer(area, &theme);
-        render_conflict_rows(
-            &snapshot,
-            &mut state,
-            0,
-            area,
-            fallback,
-            &theme,
-            &mut expected,
-            None,
-            None,
-        );
+        {
+            let (doc, derived) = Arc::make_mut(&mut state).derived(&snapshot);
+            render_conflict_rows(
+                &snapshot,
+                doc,
+                derived,
+                0,
+                area,
+                fallback,
+                &theme,
+                &mut expected,
+                None,
+                None,
+            );
+        }
         let expected = serialize_buffer(&expected);
 
         let got =
-            render_conflict_page_from_parts(&snapshot, &mut state, &theme, 7, 0, fallback, 150, 8);
+            render_conflict_page_from_parts(&snapshot, &state, &theme, 7, 0, fallback, 150, 8);
         assert!(
             got.windows(expected.len()).any(|w| w == expected),
             "the conflict page carries the live three-column body inside its fill frames",

@@ -170,14 +170,14 @@ fn prepare_file(
         .collect();
 
     let mut editor = EditorState::new(buffer_id, buffer, executor, ws.redraw_notify.clone());
-    editor.conflict_view = Some(ConflictViewState::new(
+    editor.conflict_view = Some(Arc::new(ConflictViewState::new(
         doc.clone(),
         chunk_anchors.clone(),
         picks.clone(),
         index,
         file_count,
         rel_path,
-    ));
+    )));
     let editor_id = ws.editors.insert(editor);
 
     Some((
@@ -844,6 +844,7 @@ fn apply_resolution(
         .get_mut(editor_id)
         .and_then(|editor| editor.conflict_view.as_mut())
     {
+        let view = Arc::make_mut(view);
         view.picks[chunk_idx] = picks;
         // A pick can reassemble a region to text it already held, leaving the
         // buffer version unmoved, so the version key alone would miss it.

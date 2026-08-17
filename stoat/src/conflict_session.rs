@@ -163,6 +163,24 @@ impl ConflictViewState {
         (&self.doc, self.derived.as_ref().expect("just populated"))
     }
 
+    /// The document and its layout, when the layout is already current for
+    /// `snapshot`.
+    ///
+    /// For a reader holding the state by shared reference. A pooled page fill
+    /// shares it with the editor rather than owning a copy, and the live paint
+    /// of the same frame has already built the layout it wants.
+    pub(crate) fn derived_current(
+        &self,
+        snapshot: &DisplaySnapshot,
+    ) -> Option<(&MergeDoc, &ConflictDerived)> {
+        let version = snapshot.buffer_snapshot().version();
+        let derived = self
+            .derived
+            .as_ref()
+            .filter(|d| d.buffer_version == version)?;
+        Some((&self.doc, derived))
+    }
+
     /// Drop the derived layout so the next paint rebuilds it.
     pub(crate) fn invalidate_derived(&mut self) {
         self.derived = None;
