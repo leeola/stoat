@@ -5735,8 +5735,8 @@ impl Stoat {
         }
     }
 
-    /// The text to insert for a newline at `cursor_offset`, being a line ending
-    /// plus the continued indentation.
+    /// The text one Enter writes at `cursor_offset`, and how far into it the
+    /// cursor lands.
     ///
     /// On a line whose first non-whitespace run is one of the language's
     /// line-comment tokens, the new line carries that token forward (indented to
@@ -5748,35 +5748,65 @@ impl Stoat {
     /// cursor still inside the leading whitespace has no comment behind it to
     /// continue, and a token carried there lands ahead of the token already on
     /// the line.
-    pub(crate) fn newline_continuation(&self, buffer_id: BufferId, cursor_offset: usize) -> String {
-        let continued_comment = {
-            let buffers = &self.active_workspace().buffers;
-            let tokens = buffers
-                .language_for(buffer_id)
-                .map_or(&[][..], |lang| lang.line_comments);
-            match buffers.get(buffer_id) {
-                Some(buffer) => {
-                    let guard = buffer.read().expect("buffer poisoned");
-                    let rope = guard.rope();
-                    let row = rope.offset_to_point(cursor_offset).row;
-                    let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
-                    let line_end =
-                        rope.point_to_offset(stoat_text::Point::new(row, rope.line_len(row)));
-                    action_handlers::movement::line_comment_continues(
-                        rope, line_start, line_end, tokens,
-                    )
-                    .filter(|&(start, _)| start < cursor_offset)
-                    .map(|(_, token)| {
-                        format!("{}{token} ", language::line_leading_whitespace(rope, row))
-                    })
-                },
-                None => None,
-            }
-        };
-        match continued_comment {
-            Some(prefix) => format!("\n{prefix}"),
-            None => format!("\n{}", self.newline_indent_string(buffer_id, cursor_offset)),
+    /// A cursor between the halves of a pair opens two lines rather than one.
+    /// The first carries an extra indent level and takes the cursor, and the
+    /// closing half lands on the second at the outer level.
+    fn newline_continuation(&self, buffer_id: BufferId, cursor_offset: usize) -> (String, usize) {
+        if let Some(prefix) = self.continued_comment_prefix(buffer_id, cursor_offset) {
+            let text = format!("\n{prefix}");
+            let caret = text.len();
+            return (text, caret);
         }
+
+        let indent = self.newline_indent_string(buffer_id, cursor_offset);
+        if self.cursor_inside_pair(buffer_id, cursor_offset) {
+            let unit = self.buffer_indent_style(buffer_id).as_str();
+            let caret = "\n".len() + indent.len() + unit.len();
+            return (format!("\n{indent}{unit}\n{indent}"), caret);
+        }
+
+        let text = format!("\n{indent}");
+        let caret = text.len();
+        (text, caret)
+    }
+
+    /// The indent and comment token a new line carries to continue the comment
+    /// `cursor_offset` sits in, or `None` outside one.
+    fn continued_comment_prefix(
+        &self,
+        buffer_id: BufferId,
+        cursor_offset: usize,
+    ) -> Option<String> {
+        let buffers = &self.active_workspace().buffers;
+        let tokens = buffers
+            .language_for(buffer_id)
+            .map_or(&[][..], |lang| lang.line_comments);
+        let buffer = buffers.get(buffer_id)?;
+
+        let guard = buffer.read().expect("buffer poisoned");
+        let rope = guard.rope();
+        let row = rope.offset_to_point(cursor_offset).row;
+        let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
+        let line_end = rope.point_to_offset(stoat_text::Point::new(row, rope.line_len(row)));
+
+        action_handlers::movement::line_comment_continues(rope, line_start, line_end, tokens)
+            .filter(|&(start, _)| start < cursor_offset)
+            .map(|(_, token)| format!("{}{token} ", language::line_leading_whitespace(rope, row)))
+    }
+
+    /// True when `cursor_offset` sits between the two halves of a pair.
+    ///
+    /// Answered through [`Self::auto_pairs_for`], so a reader who turned
+    /// pairing off gets none of what it implies either.
+    fn cursor_inside_pair(&self, buffer_id: BufferId, cursor_offset: usize) -> bool {
+        let Some(pairs) = self.auto_pairs_for(buffer_id) else {
+            return false;
+        };
+        let Some(buffer) = self.active_workspace().buffers.get(buffer_id) else {
+            return false;
+        };
+        let guard = buffer.read().expect("buffer poisoned");
+        auto_pairs::enclosing_pair(guard.rope(), cursor_offset, pairs).is_some()
     }
 
     /// The leading whitespace of `row` in `buffer_id`, for opening a line at the
@@ -5973,11 +6003,11 @@ impl Stoat {
             .zip(&breaks)
             .map(|(&(id, cursor), brk)| match *brk {
                 LineBreak::Continue { from } => {
-                    let text = self.newline_continuation(buffer_id, cursor);
+                    let (text, caret) = self.newline_continuation(buffer_id, cursor);
                     CursorEdit {
                         id,
                         range: from..cursor,
-                        caret: text.len(),
+                        caret,
                         text,
                     }
                 },
@@ -15769,6 +15799,26 @@ mod tests {
         h.type_keys("i");
         h.type_keys("enter");
         assert_eq!(focused_buffer_string(&h), "\n// foo\n");
+    }
+
+    #[test]
+    fn enter_between_braces_opens_an_indented_line() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"fn f() {}\n");
+        h.type_keys("l l l l l l l l i");
+        h.type_keys("enter");
+        assert_eq!(
+            focused_buffer_string(&h),
+            "fn f() {\n\t\n}\n",
+            "the braces part onto their own lines with a line between them",
+        );
+
+        h.type_text("x");
+        assert_eq!(
+            focused_buffer_string(&h),
+            "fn f() {\n\tx\n}\n",
+            "and the cursor is on that line, one level in",
+        );
     }
 
     #[test]

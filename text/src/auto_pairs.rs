@@ -137,12 +137,21 @@ pub fn hook_delete(rope: &Rope, cursor: usize, pairs: AutoPairs) -> Option<(usiz
         }
     }
 
-    let pair = pairs.get(cur)?;
-    if pair.open != prev || pair.close != cur {
-        return None;
-    }
-
+    enclosing_pair(rope, cursor, pairs)?;
     Some(surrounding_span(rope, cursor))
+}
+
+/// The pair whose two halves sit either side of `cursor` with nothing between
+/// them.
+///
+/// What "inside a pair" means to everything that acts on it. Backspace removes
+/// both halves from here, and a line break opens a line between them.
+pub fn enclosing_pair(rope: &Rope, cursor: usize, pairs: AutoPairs) -> Option<Pair> {
+    let cur = char_at(rope, cursor)?;
+    let prev = prev_char(rope, cursor)?;
+    let pair = pairs.get(cur)?;
+
+    (pair.open == prev && pair.close == cur).then_some(pair)
 }
 
 fn insert_open(rope: &Rope, cursor: usize, pair: Pair) -> Option<PairAction> {
