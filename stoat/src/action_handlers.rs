@@ -39,6 +39,7 @@ pub(crate) mod yank;
 use crate::{
     apc_emit,
     app::{Stoat, UpdateEffect},
+    auto_reload,
     command_palette::CommandPalette,
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
@@ -201,7 +202,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::QuitAllConfirm => quit_all_confirm(stoat),
         ActionKind::QuitAllCancel => quit_all_cancel(stoat),
         ActionKind::ShowVersion => show_version(stoat),
-        ActionKind::OpenLogs => file::open_logs(stoat),
+        ActionKind::OpenLogs => auto_reload::open_logs(stoat),
         ActionKind::SplitRight => pane::split_pane(stoat, Axis::Vertical),
         ActionKind::SplitDown => pane::split_pane(stoat, Axis::Horizontal),
         ActionKind::SplitNewRight => pane::split_pane_new(stoat, Axis::Vertical),
@@ -476,10 +477,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ShellKeepPipe => shell::open_keep_pipe(stoat),
         ActionKind::SaveBuffer => file::save_buffer(stoat),
         ActionKind::ForceSaveBuffer => file::force_save_buffer(stoat),
-        ActionKind::ReloadBuffer => file::reload_focused(stoat, false),
-        ActionKind::ForceReloadBuffer => file::reload_focused(stoat, true),
-        ActionKind::ReloadAll => file::reload_all(stoat, false),
-        ActionKind::ForceReloadAll => file::reload_all(stoat, true),
+        ActionKind::ReloadBuffer => auto_reload::reload_focused(stoat, false),
+        ActionKind::ForceReloadBuffer => auto_reload::reload_focused(stoat, true),
+        ActionKind::ReloadAll => auto_reload::reload_all(stoat, false),
+        ActionKind::ForceReloadAll => auto_reload::reload_all(stoat, true),
         ActionKind::WriteQuit => file::write_quit(stoat),
         ActionKind::CloseBuffer => crate::buffer_lifecycle::close_buffer(stoat),
         ActionKind::AutoReload => {
@@ -487,14 +488,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .as_any()
                 .downcast_ref::<AutoReload>()
                 .expect("AutoReload action downcast");
-            file::set_buffer_auto_reload(stoat, &auto.state)
+            auto_reload::set_buffer_auto_reload(stoat, &auto.state)
         },
         ActionKind::AutoReloadConfig => {
             let auto = action
                 .as_any()
                 .downcast_ref::<AutoReloadConfig>()
                 .expect("AutoReloadConfig action downcast");
-            file::set_auto_reload_config(stoat, &auto.state)
+            auto_reload::set_auto_reload_config(stoat, &auto.state)
         },
         ActionKind::FontSizeInc => file::font_size_step(stoat, 1),
         ActionKind::FontSizeDec => file::font_size_step(stoat, -1),

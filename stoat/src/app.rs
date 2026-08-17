@@ -285,7 +285,7 @@ const MAX_FRAME_DT: f32 = 0.1;
 
 /// Poll cadence for auto-reloading buffers. While any buffer is flagged, a
 /// timer at this interval wakes [`Stoat::drive_background`] so
-/// [`crate::action_handlers::file::pump_auto_reload`] can re-read files whose
+/// [`crate::auto_reload::pump_auto_reload`] can re-read files whose
 /// on-disk mtime advanced.
 pub(crate) const AUTO_RELOAD_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -1165,13 +1165,13 @@ pub struct Stoat {
     pub(crate) lsp_pending_changes: std::collections::HashMap<BufferId, stoat_scheduler::Task<()>>,
     /// Poll task re-reading auto-reload-flagged buffers, live only while at
     /// least one buffer is flagged. Dropping the task cancels its timer loop, so
-    /// [`crate::action_handlers::file::pump_auto_reload`] clears this field to
+    /// [`crate::auto_reload::pump_auto_reload`] clears this field to
     /// disarm the poll once no buffer wants following.
     pub(crate) auto_reload_poll: Option<stoat_scheduler::Task<()>>,
     /// Poll ticks from [`Self::auto_reload_poll`]'s timer, one per interval.
     ///
     /// The run loop receives them on its own select arm so a tick wakes it
-    /// without implying a frame. Only [`crate::action_handlers::file::pump_auto_reload`]
+    /// without implying a frame. Only [`crate::auto_reload::pump_auto_reload`]
     /// reporting a change turns one into a repaint, which is what keeps a
     /// buffer tailing an idle file from painting twice a second. The single
     /// slot coalesces ticks that arrive while the loop is busy.
@@ -2873,7 +2873,7 @@ impl Stoat {
                 // reason to paint. Only the pump finding one of them advanced
                 // asks for a frame.
                 Some(()) = self.auto_reload_rx.recv() => {
-                    if action_handlers::file::pump_auto_reload(self) {
+                    if crate::auto_reload::pump_auto_reload(self) {
                         UpdateEffect::Redraw
                     } else {
                         UpdateEffect::None
