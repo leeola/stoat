@@ -949,29 +949,26 @@ impl Rope {
             return offset;
         };
 
-        let local = offset - chunk_start_offset;
-        let text = chunk.text.as_str();
-        if text.is_char_boundary(local) {
-            return offset;
-        }
+        clip_within(chunk.text.as_str(), chunk_start_offset, offset, bias)
+    }
 
-        let clipped_local = match bias {
-            Bias::Left => {
-                let mut c = local;
-                while c > 0 && !text.is_char_boundary(c) {
-                    c -= 1;
-                }
-                c
-            },
-            Bias::Right => {
-                let mut c = local;
-                while c < text.len() && !text.is_char_boundary(c) {
-                    c += 1;
-                }
-                c
-            },
-        };
-        chunk_start_offset + clipped_local
+    /// The chunk holding `offset`, where that chunk starts, and `offset` clipped
+    /// to a char boundary inside it.
+    ///
+    /// One descent for what the grapheme steppers otherwise take three of. They
+    /// each want the chunk, the clipped offset, and then the chunk again to seed
+    /// their cursor loop.
+    ///
+    /// `None` past the last chunk, which after the clamp is only the rope's end.
+    fn chunk_clipped(&self, offset: usize, bias: Bias) -> Option<(&str, usize, usize)> {
+        let offset = offset.min(self.len());
+        let (chunk_start, _end, chunk) = self.chunks.find::<usize, _>((), &offset, Bias::Right);
+        let text = chunk?.text.as_str();
+        Some((
+            text,
+            chunk_start,
+            clip_within(text, chunk_start, offset, bias),
+        ))
     }
 
     /// Move `offset` to a grapheme-cluster boundary, or leave it where it is if
@@ -989,20 +986,25 @@ impl Rope {
     /// - [`Self::next_grapheme_boundary`] and [`Self::prev_grapheme_boundary`] for the stepping
     ///   pair.
     pub fn clip_to_grapheme_boundary(&self, offset: usize, bias: Bias) -> usize {
-        let offset = self.clip_offset(offset, Bias::Left);
+        // One descent for the clip, the ASCII check, and the cursor loop, all
+        // of which want the chunk holding the offset.
+        let Some((first, first_start, offset)) = self.chunk_clipped(offset, Bias::Left) else {
+            return offset.min(self.len());
+        };
         if offset == 0 || offset >= self.len() {
             return offset;
         }
 
-        if self.ascii_pair_brackets(offset) {
+        if ascii_pair_breaks(first.as_bytes(), offset - first_start) {
             return offset;
         }
 
         // The cursor needs the text before `offset` to answer, since whether a
         // boundary exists here depends on what it would be splitting.
+        let mut held = Some((first, first_start));
         let mut cursor = GraphemeCursor::new(offset, self.len(), true);
         let on_boundary = loop {
-            let Some((chunk, chunk_start)) = self.chunk_at(offset) else {
+            let Some((chunk, chunk_start)) = held.take().or_else(|| self.chunk_at(offset)) else {
                 return offset;
             };
             match cursor.is_boundary(chunk, chunk_start) {
@@ -1031,17 +1033,6 @@ impl Rope {
         }
     }
 
-    /// [`ascii_pair_breaks`] for a rope offset, fetching the chunk it needs.
-    ///
-    /// For a caller holding no chunk yet. One already inside a walk applies
-    /// [`ascii_pair_breaks`] to the chunk in hand instead.
-    fn ascii_pair_brackets(&self, offset: usize) -> bool {
-        let Some((chunk, chunk_start)) = self.chunk_at(offset) else {
-            return false;
-        };
-        ascii_pair_breaks(chunk.as_bytes(), offset - chunk_start)
-    }
-
     /// Offset of the first grapheme-cluster boundary after `offset`, or
     /// `offset` itself at the rope end.
     ///
@@ -1055,29 +1046,36 @@ impl Rope {
     /// - [`Self::prev_grapheme_boundary`] for the backward step.
     /// - [`Self::clip_to_grapheme_boundary`] to snap onto one instead of past it.
     pub fn next_grapheme_boundary(&self, offset: usize) -> usize {
-        // One descent settles the ordinary case. A cluster holding the ASCII
-        // scalar at `offset` can only reach past it through Extend, ZWJ,
-        // SpacingMark or a regional indicator, none of which is ASCII, or
-        // through CR before LF, which the check excludes.
+        // The one descent this whole step takes, unless a cluster runs past the
+        // chunk. It serves the fast path below, the clip, and the first turn of
+        // the cursor loop, which all want the chunk holding `offset`.
+        let Some((first, first_start, clipped)) = self.chunk_clipped(offset, Bias::Left) else {
+            return offset.min(self.len());
+        };
+
+        // A cluster holding the ASCII scalar at `offset` reaches past it only
+        // through Extend, ZWJ, SpacingMark or a regional indicator, none of
+        // which is ASCII, or through CR before LF, which the check excludes.
         //
-        // Ahead of the clip below, since a byte under 0x80 is never a
+        // Read against the unclipped offset, since a byte under 0x80 is never a
         // continuation byte. An offset this accepts is on a char boundary
         // already, and one that is not always fails it.
-        if let Some((chunk, chunk_start)) = self.chunk_at(offset)
-            && ascii_pair_breaks(chunk.as_bytes(), offset + 1 - chunk_start)
-        {
+        if ascii_pair_breaks(first.as_bytes(), offset + 1 - first_start) {
             return offset + 1;
         }
 
-        let offset = self.clip_offset(offset, Bias::Left);
+        let offset = clipped;
         if offset >= self.len() {
             return offset;
         }
 
+        // The clip stays inside the chunk it was found in, so the loop opens on
+        // the chunk already in hand and descends again only to cross a seam.
+        let mut held = Some((first, first_start));
         let mut cursor = GraphemeCursor::new(offset, self.len(), true);
         let mut pos = offset;
         loop {
-            let Some((chunk, chunk_start)) = self.chunk_at(pos) else {
+            let Some((chunk, chunk_start)) = held.take().or_else(|| self.chunk_at(pos)) else {
                 return offset;
             };
             match cursor.next_boundary(chunk, chunk_start) {
@@ -1333,25 +1331,36 @@ impl Rope {
     /// cluster definition and the same left-clipping of an `offset` that is not
     /// on a char boundary.
     pub fn prev_grapheme_boundary(&self, offset: usize) -> usize {
-        // The mirror of the forward step's fast path, one position back. The
-        // chunk is taken at `offset - 1` rather than at `offset` so a step back
-        // from the rope end, where nothing holds `offset`, still lands here.
-        if offset > 0
-            && let Some((chunk, chunk_start)) = self.chunk_at(offset - 1)
-            && ascii_pair_breaks(chunk.as_bytes(), offset - 1 - chunk_start)
-        {
-            return offset - 1;
-        }
-
-        let offset = self.clip_offset(offset, Bias::Left);
+        let offset = offset.min(self.len());
         if offset == 0 {
             return 0;
         }
 
+        // Taken at `offset - 1` rather than at `offset`, so a step back from the
+        // rope end, where nothing holds `offset`, still lands on a chunk. It
+        // clips `offset` too. That offset either sits in this chunk, or is
+        // exactly the chunk's end and so already a boundary.
+        let Some((first, first_start)) = self.chunk_at(offset - 1) else {
+            return offset;
+        };
+
+        // The mirror of the forward step's fast path, one position back.
+        if ascii_pair_breaks(first.as_bytes(), offset - 1 - first_start) {
+            return offset - 1;
+        }
+
+        let offset = clip_within(first, first_start, offset, Bias::Left);
+        if offset == 0 {
+            return 0;
+        }
+
+        // The clip only moves back within this chunk, so `offset - 1` is still
+        // in it and the loop opens on the chunk already in hand.
+        let mut held = Some((first, first_start));
         let mut cursor = GraphemeCursor::new(offset, self.len(), true);
         let mut pos = offset - 1;
         loop {
-            let Some((chunk, chunk_start)) = self.chunk_at(pos) else {
+            let Some((chunk, chunk_start)) = held.take().or_else(|| self.chunk_at(pos)) else {
                 return offset;
             };
             match cursor.prev_boundary(chunk, chunk_start) {
@@ -2428,6 +2437,36 @@ fn escaped_offsets(requests: &[(usize, Bias)], indices: &[usize]) -> Vec<usize> 
     indices.iter().map(|&i| requests[i].0).collect()
 }
 
+/// `offset` moved to a char boundary, decided entirely inside `chunk`.
+///
+/// `chunk` must hold `offset` or end exactly at it. A chunk never splits a
+/// codepoint, so an offset inside a character escapes it in the same chunk
+/// whichever way it goes, and a chunk's own start is already a boundary.
+fn clip_within(chunk: &str, chunk_start: usize, offset: usize, bias: Bias) -> usize {
+    let local = offset - chunk_start;
+    if chunk.is_char_boundary(local) {
+        return offset;
+    }
+
+    let clipped = match bias {
+        Bias::Left => {
+            let mut c = local;
+            while c > 0 && !chunk.is_char_boundary(c) {
+                c -= 1;
+            }
+            c
+        },
+        Bias::Right => {
+            let mut c = local;
+            while c < chunk.len() && !chunk.is_char_boundary(c) {
+                c += 1;
+            }
+            c
+        },
+    };
+    chunk_start + clipped
+}
+
 fn ascii_pair_breaks(bytes: &[u8], local: usize) -> bool {
     if local == 0 || local >= bytes.len() {
         return false;
@@ -3246,16 +3285,47 @@ mod tests {
     /// first.
     #[test]
     fn clip_offset_mid_char_in_a_later_chunk() {
-        let head = "a".repeat(MAX_BASE + 5);
-        let rope = Rope::from(format!("{head}h\u{00e9}\u{4e16}").as_str());
-        assert!(rope.chunks().count() > 1, "the fixture has to span chunks");
-
-        let at = head.len() + 1;
+        let (rope, at) = mid_char_in_a_later_chunk();
         assert_eq!(rope.clip_offset(at + 1, Bias::Left), at);
         assert_eq!(rope.clip_offset(at + 1, Bias::Right), at + 2);
         assert_eq!(rope.clip_offset(at + 3, Bias::Left), at + 2);
         assert_eq!(rope.clip_offset(at + 3, Bias::Right), at + 5);
         assert_eq!(rope.clip_offset(at, Bias::Left), at, "already a boundary");
+    }
+
+    /// The grapheme entry points clip an off-boundary offset before they step,
+    /// and the cluster fixtures only ever hand them offsets already on one. This
+    /// covers the clip they do, in a chunk that is not the first.
+    #[test]
+    fn grapheme_steps_from_mid_char_in_a_later_chunk() {
+        let (rope, at) = mid_char_in_a_later_chunk();
+        assert_eq!(
+            rope.next_grapheme_boundary(at + 1),
+            at + 2,
+            "clipped back onto the character, then forward over it",
+        );
+        assert_eq!(
+            rope.prev_grapheme_boundary(at + 1),
+            at - 1,
+            "clipped back onto the character, then back over the one before",
+        );
+        // Both biases land on `at`, since the char clip gets there first and it
+        // is already a cluster boundary. The bias only decides which way to
+        // escape a cluster, and this offset is inside a character rather than
+        // inside a cluster of several.
+        assert_eq!(rope.clip_to_grapheme_boundary(at + 1, Bias::Left), at);
+        assert_eq!(rope.clip_to_grapheme_boundary(at + 1, Bias::Right), at);
+    }
+
+    /// A multi-chunk rope and the offset of a two-byte character living past the
+    /// first chunk, so an offset one past it is inside a character and inside a
+    /// later chunk at once.
+    fn mid_char_in_a_later_chunk() -> (Rope, usize) {
+        let head = "a".repeat(MAX_BASE + 5);
+        let rope = Rope::from(format!("{head}h\u{00e9}\u{4e16}").as_str());
+        assert!(rope.chunks().count() > 1, "the fixture has to span chunks");
+        let at = head.len() + 1;
+        (rope, at)
     }
 
     #[test]
