@@ -624,6 +624,13 @@ impl Rope {
         self.chunks.summary()
     }
 
+    /// Summarize the text `range` covers.
+    ///
+    /// An empty or inverted range covers no text and so answers the default
+    /// summary, as every form of the chunk walk yields nothing for one. Two
+    /// independently derived offsets sometimes arrive out of order, and
+    /// answering that with a panic makes it a crash in a caller that only asked
+    /// a question.
     pub fn text_summary_for_range(&self, range: Range<usize>) -> TextSummary {
         let mut cursor = self.cursor(range.start);
         cursor.summary(range.end)
@@ -1757,6 +1764,10 @@ impl Rope {
         }
     }
 
+    /// The text `range` covers, as a rope of its own.
+    ///
+    /// An empty or inverted range covers no text and so answers the empty rope,
+    /// for the reason [`Self::text_summary_for_range`] gives.
     pub fn slice(&self, range: Range<usize>) -> Rope {
         let mut cursor = self.cursor(range.start);
         cursor.slice(range.end)
@@ -2324,8 +2335,19 @@ impl<'a> Cursor<'a> {
         self.offset = offset;
     }
 
+    /// Summarize the text from the cursor to `end_offset`, and leave the cursor
+    /// there.
+    ///
+    /// An `end_offset` at or below the cursor covers no text, so it answers the
+    /// default summary and leaves the cursor put. Two independently derived
+    /// offsets sometimes arrive out of order, and a cursor moved backward by one
+    /// that covered nothing reads the next call from somewhere the caller never
+    /// asked for.
     pub fn summary(&mut self, end_offset: usize) -> TextSummary {
         let mut result = TextSummary::default();
+        if end_offset <= self.offset {
+            return result;
+        }
 
         let chunk = match self.chunks.item() {
             Some(c) => c,
@@ -2370,8 +2392,16 @@ impl<'a> Cursor<'a> {
         result
     }
 
+    /// The text from the cursor to `end_offset`, leaving the cursor there.
+    ///
+    /// An `end_offset` at or below the cursor covers no text, so it answers the
+    /// empty rope and leaves the cursor put, for the reason
+    /// [`Self::summary`] gives.
     pub fn slice(&mut self, end_offset: usize) -> Rope {
         let mut slice = Rope::new();
+        if end_offset <= self.offset {
+            return slice;
+        }
 
         if let Some(chunk) = self.chunks.item() {
             let start_ix = self.offset - *self.chunks.start();
@@ -3446,6 +3476,30 @@ mod tests {
         assert_eq!(rope.chunks_in_range(start..end).count(), 0);
         assert_eq!(rope.bytes_in_range(start..end).count(), 0);
         assert_eq!(rope.reversed_chunks_in_range(start..end).count(), 0);
+    }
+
+    /// The same contract, for the two entry points that build a cursor and hand
+    /// it the end. Both subtract that end from a chunk start, so an end below
+    /// the cursor's own chunk underflows rather than answering.
+    ///
+    /// The rope spans several chunks so the end lands below the cursor's chunk
+    /// rather than merely below the cursor inside it, which is the pair that
+    /// underflows.
+    #[test]
+    fn an_inverted_range_slices_and_summarizes_to_nothing() {
+        let rope = Rope::from("abcdefghij".repeat(400).as_str());
+        assert!(
+            rope.chunks().count() > 1,
+            "the fixture has to span chunks for the end to fall below one",
+        );
+        let start = rope.len() - 1;
+        let end = 2;
+
+        assert_eq!(rope.slice(start..end).to_string(), "");
+        assert_eq!(
+            rope.text_summary_for_range(start..end),
+            TextSummary::default()
+        );
     }
 
     #[test]
