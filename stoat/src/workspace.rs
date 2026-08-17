@@ -778,11 +778,22 @@ impl Workspace {
         self.diff_versions.get(&id) == Some(&version)
     }
 
-    /// Compute and install `id`'s diff map synchronously, bypassing the
-    /// background job so its hunks are available on the current turn.
+    /// Compute and install `id`'s hunks synchronously, bypassing the background
+    /// job so they are available on the current turn.
     ///
-    /// Records the buffer's version so [`Self::drive_diff_jobs`] does not
-    /// redundantly recompute the same map. A no-op for a buffer without a path.
+    /// The diff view's left-column colors are not part of what lands here. They
+    /// cost a parse of the whole base file, which is the expensive half of a
+    /// diff map and no part of what a caller needing hunks this turn is after.
+    /// For a file with a language, the buffer's version is therefore left
+    /// unrecorded, so the next [`Self::drive_diff_jobs`] pass recomputes the map
+    /// with its colors and installs it a settle window later.
+    ///
+    /// That replacement rests on the hunks left here carrying no anchors, which
+    /// is what tells [`DiffMap::renders_same_as`] the recomputed map decorates
+    /// differently. Anchor them here and it suppresses the install instead, and
+    /// the colors never arrive.
+    ///
+    /// A no-op for a buffer without a path.
     pub(crate) fn install_diff_map_now(
         &mut self,
         git_host: &Arc<dyn GitHost>,
@@ -805,13 +816,14 @@ impl Workspace {
             )
         };
 
-        let language = language_registry.for_path(&path);
+        // The language is what gates the base-text parse inside, so withholding
+        // it is how the colors are skipped.
         let computed = compute_diff_map(
             &**git_host,
             &self.git_root,
             &path,
             &text,
-            language.as_ref(),
+            None,
             syntax_styles,
             base_cache,
             self.diff_base_text.get(&path).cloned(),
@@ -823,7 +835,12 @@ impl Workspace {
         if let Some(shared) = self.buffers.get(id) {
             shared.write().expect("buffer poisoned").diff_map = diff_map;
         }
-        self.diff_versions.insert(id, version);
+
+        // A file with no language has no colors to wait for, so its map is
+        // already whole and nothing has to recompute it.
+        if language_registry.for_path(&path).is_none() {
+            self.diff_versions.insert(id, version);
+        }
     }
 
     /// Install `diff_map` on `id` and record it as computed for the buffer's
@@ -2359,6 +2376,52 @@ mod tests {
             flags,
             vec![(1, true), (3, false)],
             "the index-staged line-1 hunk is staged, the line-3 hunk is not"
+        );
+    }
+
+    /// Opening the view used to parse the whole base file on the thread that
+    /// handled the key, for colors nothing reads until the first frame after.
+    #[test]
+    fn the_diff_toggle_opens_on_hunks_and_takes_its_colors_later() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario(
+            "/repo",
+            &[("a.rs", "fn foo() {}\n", "fn foo() {}\nfn bar() {}\n")],
+        );
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.rs"));
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        let map = |h: &TestHarness| {
+            let ws = h.stoat.active_workspace();
+            let buffer = ws.buffers.get(buffer_id).expect("buffer");
+            let guard = buffer.read().expect("poisoned");
+            let dm = guard.diff_map.as_ref().expect("diff map installed");
+            (
+                dm.hunks_in_range(0..u32::MAX).len(),
+                dm.base_highlights_for_line(0).is_some(),
+            )
+        };
+
+        h.stoat.toggle_diff_view();
+        assert_eq!(
+            map(&h),
+            (1, false),
+            "the toggle opens on the hunk, with the base left uncolored",
+        );
+        assert!(
+            !h.stoat.active_workspace().diff_map_current(buffer_id),
+            "and leaves the version unrecorded, so the background pass takes it up",
+        );
+
+        h.settle_diff_jobs();
+        assert_eq!(
+            map(&h),
+            (1, true),
+            "which lands the same hunk with its colors",
+        );
+        assert!(
+            h.stoat.active_workspace().diff_map_current(buffer_id),
+            "and the whole map settles",
         );
     }
 

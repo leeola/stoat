@@ -981,6 +981,10 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
     // over from before an external git mutation counts as empty. It describes a
     // base that has since moved, so trusting it would open the view on hunks
     // measured against a HEAD that no longer exists.
+    //
+    // Only the hunks are needed to open on. The left column's colors cost a
+    // parse of the whole base file, which the background pass takes on and
+    // lands a settle later.
     let map_current = stoat.active_workspace().diff_map_current(buffer_id);
     let has_map = super::focused_editor_mut(stoat)
         .map(|editor| editor.display_map.snapshot().diff_map().is_some())
