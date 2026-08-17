@@ -682,7 +682,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     // The review view and theme a pooled review page needs, boxed so the
     // Review variant does not dwarf Editor.
     struct ReviewFillParts {
-        view: crate::review_session::ReviewViewState,
+        view: Arc<crate::review_session::ReviewViewState>,
         theme: Arc<crate::theme::Theme>,
     }
     struct ConflictFillParts {

@@ -4570,7 +4570,7 @@ impl Stoat {
         if session.cursor.current != Some(chunk_id) {
             session.cursor.current = Some(chunk_id);
             session.version += 1;
-            view.refresh_from_session(session);
+            Arc::make_mut(view).refresh_from_session(session);
         }
     }
 

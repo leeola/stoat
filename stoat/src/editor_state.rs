@@ -116,7 +116,12 @@ pub(crate) struct EditorState {
     /// to the side-by-side renderer and flattened rows are read from the
     /// cache here. The cache is rebuilt by action handlers whenever the
     /// backing session's `version` advances past `review_view.session_version`.
-    pub(crate) review_view: Option<ReviewViewState>,
+    ///
+    /// Held behind an [`Arc`] because every pooled page fill takes a handle on
+    /// it, and the state carries two `String`s per row of every file under
+    /// review. A mutator reaches it through [`Arc::make_mut`], which copies only
+    /// while a fill is still in flight over the same state.
+    pub(crate) review_view: Option<Arc<ReviewViewState>>,
     /// When set, `render_editor` paints this editor as a side-by-side diff: the
     /// right column is the normal syntax-highlighted buffer and the left column
     /// shows the base (HEAD) text via the buffer's diff map. Unlike

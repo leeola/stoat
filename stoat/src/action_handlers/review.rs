@@ -566,7 +566,7 @@ fn sync_review_view_and_scroll(
         return;
     };
     if let Some(session) = ws.review.as_ref() {
-        view.refresh_from_session(session);
+        Arc::make_mut(view).refresh_from_session(session);
     }
     // A refresh that lands mid-motion must not yank scroll_row out from under
     // the animation. scroll_row is the fixed target the offset eases toward
@@ -2084,7 +2084,7 @@ fn render_review_editor(stoat: &mut Stoat) {
 
     let mut editor = EditorState::new(buffer_id, buffer, executor, ws.redraw_notify.clone());
     editor.display_map.insert_blocks(blocks);
-    editor.review_view = Some(view);
+    editor.review_view = Some(Arc::new(view));
 
     let new_editor_id = ws.editors.insert(editor);
     let prev_view_editor = ws.review.as_ref().and_then(|s| s.view_editor);
@@ -2199,7 +2199,10 @@ mod tests {
         review_session::ChunkStatus,
         test_harness::TestHarness,
     };
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
     #[test]
     fn install_review_session_populates_diff_cache() {
@@ -2575,13 +2578,14 @@ mod tests {
         let ghost_row = {
             let editor_id = h.with_review(|s| s.view_editor).expect("review editor");
             let ws = h.stoat.active_workspace_mut();
-            let view = ws
-                .editors
-                .get_mut(editor_id)
-                .expect("editor")
-                .review_view
-                .as_mut()
-                .expect("review view");
+            let view = Arc::make_mut(
+                ws.editors
+                    .get_mut(editor_id)
+                    .expect("editor")
+                    .review_view
+                    .as_mut()
+                    .expect("review view"),
+            );
             let mut found = None;
             for (i, row) in view.rows.iter_mut().enumerate() {
                 if let ReviewRow::Changed { right: Some(s), .. } = row
