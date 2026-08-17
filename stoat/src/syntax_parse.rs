@@ -169,11 +169,6 @@ pub(crate) fn parse_buffer_step(
         },
     };
 
-    // Past here the parse can no longer abort, so the caller's prior has done
-    // its job and every abort above has left it whole for the retry.
-    prior.take();
-    prior_syntax_map.take();
-
     // What the re-query has to cover. The root tree names where the host
     // grammar restyled, and the reparse names where the layer set moved. An
     // injected buffer needs that second half, since a layer can restyle its
@@ -210,6 +205,20 @@ pub(crate) fn parse_buffer_step(
     } else {
         None
     };
+
+    // A re-query that gave up leaves the capture walk below, and that walk
+    // honors no clock of its own. A parse with tokens to carry is never handed
+    // a viewport to narrow it, so the walk it faces covers the whole rope,
+    // which is the stall a deadline exists to prevent. Handing the parse back
+    // undone sends it to the pool, where the same walk costs a frame instead.
+    if deadline.is_some() && prior_token_spans.is_some() && recaptured.is_none() {
+        return None;
+    }
+
+    // Past here the parse can no longer abort, so the caller's prior has done
+    // its job and every abort above has left it whole for the retry.
+    prior.take();
+    prior_syntax_map.take();
 
     // The whole file unless the caller named a viewport to do first, in which
     // case that plus a margin, so an opened file styles what is on screen

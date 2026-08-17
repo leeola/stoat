@@ -1000,8 +1000,10 @@ impl Workspace {
 
             // A small buffer parses on the run loop first. The tree-sitter parse
             // honors the deadline and the captures walk after it does not, so
-            // the size cap is what bounds that walk. Under it the whole file is
-            // small, and the fallback walk is viewport-first besides.
+            // what bounds that walk is the size cap for a first parse, which
+            // narrows to the viewport anyway, and the abort inside for a parse
+            // carrying tokens, which faces the whole rope whenever its
+            // narrowed re-query gives up.
             //
             // Landing here rather than a frame later is what the keystroke
             // feels. An abort leaves the prior state untouched, which is the
@@ -2687,6 +2689,57 @@ mod tests {
         assert!(
             ws.buffers.syntax_version(id).is_some(),
             "and its highlights are already installed"
+        );
+    }
+
+    /// An edit that restyles most of the file leaves the narrowed re-query with
+    /// nothing to save, and the walk that answers instead covers the whole rope
+    /// under no clock at all. Under the cap that walk is still a stall the
+    /// keystroke feels, so the parse goes to the pool rather than run it inline.
+    #[test]
+    fn an_inline_parse_whose_requery_gives_up_goes_to_the_pool() {
+        let source = "fn f() { let a = 1; }\n".repeat(200);
+        let (mut h, id) = harness_with_file("/requery", "wide.rs", source.as_bytes());
+        h.stoat.drive_background();
+        let ws = h.stoat.active_workspace();
+        assert!(
+            ws.buffers.syntax_version(id).is_some() && !ws.partial_token_buffers.contains(&id),
+            "the file is styled whole, so the next parse has tokens to carry",
+        );
+
+        // Rewriting the last three quarters of the file, which is what a paste
+        // over a wide selection does. The re-query's covers then reach past
+        // half the rope and it gives up rather than narrow anything.
+        //
+        // Written through the registry rather than through the harness, whose
+        // edit helper renders a frame and drives the parse with it.
+        {
+            let rewritten = "fn g() { let b = 2; }\n".repeat(150);
+            let buffer = h.stoat.active_workspace().buffers.get(id).expect("buffer");
+            let mut guard = buffer.write().expect("buffer poisoned");
+            guard.edit(source.len() / 4..source.len(), &rewritten);
+        }
+        h.stoat.drive_background();
+
+        let ws = h.stoat.active_workspace();
+        assert!(
+            ws.parse_jobs.contains_key(&id),
+            "the parse it cannot narrow spawns a background job",
+        );
+
+        // The scheduler tick resolves the blocking task, and the second drive
+        // is the poll that moves its output into the registry.
+        h.settle();
+        h.stoat.drive_background();
+
+        let ws = h.stoat.active_workspace();
+        assert!(
+            !ws.parse_jobs.contains_key(&id),
+            "the finished job leaves the map",
+        );
+        assert!(
+            ws.buffers.syntax_version(id).is_some(),
+            "and the tokens land through the job poll",
         );
     }
 
