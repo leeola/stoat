@@ -83,6 +83,27 @@ const INLINE_PARSE_MAX_BYTES: usize = 256 * 1024;
 /// loop, which the abort does at the cost of the time already spent.
 const INLINE_PARSE_BUDGET: Duration = Duration::from_millis(1);
 
+/// Per-file diff memo, keyed by graph [`FileId`], holding the base and buffer
+/// content hashes the ranges were measured from alongside the ranges.
+///
+/// Both hashes still matching is what lets a scan reuse an entry rather than
+/// diff the file again.
+pub(crate) type ChangedRangesMemo = HashMap<FileId, (ContentHash, ContentHash, Vec<Range<usize>>)>;
+
+/// A working-tree diff scan, ready to install on the workspace it ran for.
+///
+/// [`scan_changed_ranges`] produces one off the run loop, so what it learned has
+/// to travel back as data rather than as a mutation.
+#[derive(Default)]
+pub(crate) struct ChangedRangesScan {
+    /// The changed byte ranges per file, which becomes
+    /// [`Workspace::changed_ranges`] whole.
+    ranges: HashMap<FileId, Vec<Range<usize>>>,
+    /// The files the scan had to diff, with the hashes it diffed them at. The
+    /// memo takes these on, so a scan finding the same texts reuses them.
+    computed: Vec<(FileId, ContentHash, ContentHash, Vec<Range<usize>>)>,
+}
+
 /// Stable-across-restart workspace identifier. [`WorkspaceId`] is a SlotMap
 /// key whose generation is recycled each run, so it can't serve as an on-disk
 /// filename. [`WorkspaceUid`] is assigned once at construction time from the
@@ -208,19 +229,16 @@ pub struct Workspace {
     pub(crate) file_paths: HashMap<FileId, PathBuf>,
     /// Byte ranges changed against HEAD for each file with a working-tree
     /// diff, in the working-tree text's byte space. Rebuilt by
-    /// [`Self::refresh_changed_ranges`] so diff-filtered navigation can ask
-    /// whether a symbol's definition overlaps a change.
+    /// [`scan_changed_ranges`] so diff-filtered navigation asks whether a
+    /// symbol's definition overlaps a change.
     pub(crate) changed_ranges: HashMap<FileId, Vec<Range<usize>>>,
-    /// Per-file diff memo keyed by [`FileId`], holding the base and buffer
-    /// content hashes the ranges were computed from alongside the ranges
-    /// themselves. [`Self::refresh_changed_ranges`] reuses an entry whenever
-    /// both hashes still match, so repeated diff-filtered navigation over an
+    /// Per-file diff memo, so repeated diff-filtered navigation over an
     /// unchanged tree recomputes nothing. The memo persists across refreshes,
-    /// while [`Self::changed_ranges`] is cleared and rebuilt each call.
-    changed_ranges_memo: HashMap<FileId, (ContentHash, ContentHash, Vec<Range<usize>>)>,
-    /// Count of memo misses (actual diffs run) in
-    /// [`Self::refresh_changed_ranges`], so a test can prove the memo spares
-    /// the recompute on an unchanged tree.
+    /// while [`Self::changed_ranges`] is replaced by each scan.
+    changed_ranges_memo: ChangedRangesMemo,
+    /// Count of memo misses (actual diffs run) landed by
+    /// [`Self::install_changed_ranges`], so a test proves the memo spares the
+    /// recompute on an unchanged tree.
     #[cfg(test)]
     changed_ranges_recomputes: u64,
     /// The active call-graph trail, if the user has marked a start. Holds
@@ -1442,49 +1460,31 @@ impl Workspace {
         self.index_jobs.insert(buffer_id, task);
     }
 
-    /// Rebuild [`Self::changed_ranges`] from the working tree.
+    /// A copy of the diff memo for a scan that runs off the run loop.
     ///
-    /// Scans the changed files, diffs each against HEAD, and records the
-    /// byte ranges its hunks cover in the working-tree text, keyed by the
-    /// graph [`FileId`]. Clears prior state, so an empty map means no
-    /// working-tree diff.
-    pub(crate) fn refresh_changed_ranges(
-        &mut self,
-        git: &dyn GitHost,
-        fs: &dyn FsHost,
-        langs: &LanguageRegistry,
-    ) {
-        self.changed_ranges.clear();
-        let Some((_workdir, inputs)) = diff::scan_working_tree(git, fs, langs, &self.git_root)
-        else {
-            return;
-        };
-        for input in &inputs {
-            let fid = file_id(&input.rel_path);
-            let base_hash = buffer_registry::fingerprint_bytes(input.base_text.as_str());
-            let buffer_hash = buffer_registry::fingerprint_bytes(input.buffer_text.as_str());
+    /// The scan decides per file whether the ranges it already has still hold.
+    /// It runs with no borrow on the workspace, so it carries its own copy of
+    /// what the memo knew when it started.
+    pub(crate) fn changed_ranges_memo_snapshot(&self) -> ChangedRangesMemo {
+        self.changed_ranges_memo.clone()
+    }
 
-            let ranges = match self.changed_ranges_memo.get(&fid) {
-                Some((cached_base, cached_buffer, cached))
-                    if *cached_base == base_hash && *cached_buffer == buffer_hash =>
-                {
-                    cached.clone()
-                },
-                _ => {
-                    let computed = changed_byte_ranges(input);
-                    #[cfg(test)]
-                    {
-                        self.changed_ranges_recomputes += 1;
-                    }
-                    self.changed_ranges_memo
-                        .insert(fid, (base_hash, buffer_hash, computed.clone()));
-                    computed
-                },
-            };
-
-            if !ranges.is_empty() {
-                self.changed_ranges.insert(fid, ranges);
+    /// Replace [`Self::changed_ranges`] with what `scan` found, and take on the
+    /// entries it had to diff.
+    ///
+    /// A scan armed before an edit lands after it, and installs ranges measured
+    /// against text the tree has moved past. The next scan corrects them, which
+    /// is the same staleness the synchronous path had against any change made
+    /// during the scan itself.
+    pub(crate) fn install_changed_ranges(&mut self, scan: ChangedRangesScan) {
+        self.changed_ranges = scan.ranges;
+        for (fid, base_hash, buffer_hash, ranges) in scan.computed {
+            #[cfg(test)]
+            {
+                self.changed_ranges_recomputes += 1;
             }
+            self.changed_ranges_memo
+                .insert(fid, (base_hash, buffer_hash, ranges));
         }
     }
 
@@ -1760,6 +1760,51 @@ fn bucket_base_highlights(
 /// consumer tests whole-line overlap, and treating moved code as a delete plus
 /// an add yields the same or a strictly larger changed set for that test, at a
 /// fraction of the cost.
+/// Diff every changed file against HEAD and collect the byte ranges its hunks
+/// cover, reusing `memo` for a file whose base and buffer text both still hash
+/// to what the ranges were measured from.
+///
+/// Free of the workspace so it runs on a blocking thread. The status walk, the
+/// HEAD blobs, and a disk read per changed file are the whole cost of a
+/// diff-filtered hop. [`Workspace::install_changed_ranges`] takes the result.
+pub(crate) fn scan_changed_ranges(
+    git: &dyn GitHost,
+    fs: &dyn FsHost,
+    langs: &LanguageRegistry,
+    git_root: &Path,
+    memo: &ChangedRangesMemo,
+) -> ChangedRangesScan {
+    let mut scan = ChangedRangesScan::default();
+    let Some((_workdir, inputs)) = diff::scan_working_tree(git, fs, langs, git_root) else {
+        return scan;
+    };
+
+    for input in &inputs {
+        let fid = file_id(&input.rel_path);
+        let base_hash = buffer_registry::fingerprint_bytes(input.base_text.as_str());
+        let buffer_hash = buffer_registry::fingerprint_bytes(input.buffer_text.as_str());
+
+        let ranges = match memo.get(&fid) {
+            Some((cached_base, cached_buffer, cached))
+                if *cached_base == base_hash && *cached_buffer == buffer_hash =>
+            {
+                cached.clone()
+            },
+            _ => {
+                let computed = changed_byte_ranges(input);
+                scan.computed
+                    .push((fid, base_hash, buffer_hash, computed.clone()));
+                computed
+            },
+        };
+
+        if !ranges.is_empty() {
+            scan.ranges.insert(fid, ranges);
+        }
+    }
+    scan
+}
+
 fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
     let result = structural_diff::diff(&input.base_text, &input.buffer_text);
     let hunks = changes_to_hunks(&result.changes, &input.base_text, &input.buffer_text);
@@ -1783,8 +1828,8 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        changed_byte_ranges, compute_base_highlights, BaseHighlightMemo, ParseJob, Workspace,
-        INLINE_PARSE_MAX_BYTES,
+        changed_byte_ranges, compute_base_highlights, scan_changed_ranges, BaseHighlightMemo,
+        ParseJob, Workspace, INLINE_PARSE_MAX_BYTES,
     };
     use crate::{
         buffer::BufferId, display_map::syntax_theme::SyntaxStyles, host::DiffStatus, pane::View,
@@ -2424,7 +2469,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_changed_ranges_memoizes_across_unchanged_refreshes() {
+    fn changed_ranges_scan_memoizes_across_unchanged_scans() {
         let mut h = TestHarness::with_size(80, 24);
         h.stage_review_scenario(
             "/repo",
@@ -2434,22 +2479,33 @@ mod tests {
         let git = h.stoat.git_host.clone();
         let fs = h.stoat.fs_host.clone();
         let langs = h.stoat.language_registry.clone();
+        let scan_and_install = |ws: &mut Workspace| {
+            let scan = scan_changed_ranges(
+                git.as_ref(),
+                fs.as_ref(),
+                &langs,
+                &ws.git_root.clone(),
+                &ws.changed_ranges_memo_snapshot(),
+            );
+            ws.install_changed_ranges(scan);
+        };
+
         let ws = h.stoat.active_workspace_mut();
 
-        ws.refresh_changed_ranges(git.as_ref(), fs.as_ref(), &langs);
+        scan_and_install(ws);
         assert_eq!(
             ws.changed_ranges_recomputes, 1,
-            "the first refresh diffs the changed file once"
+            "the first scan diffs the changed file once"
         );
         assert!(
             !ws.changed_ranges.is_empty(),
             "the working-tree change is recorded"
         );
 
-        ws.refresh_changed_ranges(git.as_ref(), fs.as_ref(), &langs);
+        scan_and_install(ws);
         assert_eq!(
             ws.changed_ranges_recomputes, 1,
-            "a second refresh over the unchanged tree reuses the memo, no re-diff"
+            "a second scan over the unchanged tree reuses the memo, no re-diff"
         );
         assert!(
             !ws.changed_ranges.is_empty(),

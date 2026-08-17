@@ -12,10 +12,11 @@ use crate::{
     editor_state::EditorState,
     nav_list::NavList,
     symbol_finder::{SymbolEntry, SymbolPicker},
-    workspace::Workspace,
+    workspace::{self, ChangedRangesScan, Workspace},
 };
 use codegraph::{Dir, EdgeKind, SymbolKey};
-use std::path::Path;
+use std::{path::Path, sync::mpsc};
+use stoat_scheduler::Task;
 use stoat_text::{Anchor, Bias, BufferId};
 
 /// How far the diff-filtered hops search before giving up.
@@ -95,24 +96,81 @@ pub(crate) fn goto_diff_callee_down(stoat: &mut Stoat) -> UpdateEffect {
     goto_nearest_diff(stoat, Dir::Down)
 }
 
-/// Refresh the working-tree diff, then walk the call axis to the nearest
-/// changed symbol and jump there.
+/// A diff-filtered hop whose working-tree scan has not landed yet.
+///
+/// Held on [`Stoat`] between the keypress that armed it and
+/// [`pump_diff_nav_jump`]. The symbol the hop leaves from travels here, because
+/// the scan reports which symbols changed and never where to start.
+pub(crate) struct PendingDiffNavJump {
+    rx: mpsc::Receiver<ChangedRangesScan>,
+    _task: Task<()>,
+    start: SymbolKey,
+    dir: Dir,
+}
+
+/// Arm a working-tree scan, so a landed one walks the call axis to the nearest
+/// changed symbol and jumps there.
+///
+/// Returns as soon as the scan is armed. Listing the repo's changes, reading
+/// each changed file, and diffing it against HEAD are what the hop costs, so
+/// all of it runs off the thread that handled the key.
+///
+/// A second press while one is in flight replaces it. Both presses answer the
+/// same question about the same tree, so the later one is the whole answer.
 fn goto_nearest_diff(stoat: &mut Stoat, dir: Dir) -> UpdateEffect {
     let Some(start) = symbol_at_cursor(stoat) else {
         return UpdateEffect::None;
     };
-    {
-        let git = stoat.git_host.clone();
-        let fs = stoat.fs_host.clone();
-        let langs = stoat.language_registry.clone();
-        stoat
-            .active_workspace_mut()
-            .refresh_changed_ranges(git.as_ref(), fs.as_ref(), &langs);
-    }
-    let Some(target) = nearest_diff_target(stoat.active_workspace(), start, dir) else {
-        return UpdateEffect::None;
+
+    let git = stoat.git_host.clone();
+    let fs = stoat.fs_host.clone();
+    let langs = stoat.language_registry.clone();
+    let git_root = stoat.active_workspace().git_root.clone();
+    let memo = stoat.active_workspace().changed_ranges_memo_snapshot();
+    let redraw = stoat.redraw_notify.clone();
+    let (tx, rx) = mpsc::channel();
+
+    let task = stoat.executor.spawn_blocking(move || {
+        let scan =
+            workspace::scan_changed_ranges(git.as_ref(), fs.as_ref(), &langs, &git_root, &memo);
+        let _ = tx.send(scan);
+        redraw.notify_one();
+    });
+
+    stoat.pending_diff_nav_jump = Some(PendingDiffNavJump {
+        rx,
+        _task: task,
+        start,
+        dir,
+    });
+    UpdateEffect::Redraw
+}
+
+/// Install a landed working-tree scan and jump to the nearest changed symbol
+/// along the armed direction.
+///
+/// The scan is installed whether or not it leads anywhere, so the fresh diff
+/// serves the next hop as well. A hop that finds nothing records no jump,
+/// because [`jump_to_symbol`] is what pushes the jumplist entry.
+pub(crate) fn pump_diff_nav_jump(stoat: &mut Stoat) -> bool {
+    let Some(pending) = stoat.pending_diff_nav_jump.take() else {
+        return false;
     };
-    jump_to_symbol(stoat, target)
+    let scan = match pending.rx.try_recv() {
+        Ok(scan) => scan,
+        Err(mpsc::TryRecvError::Empty) => {
+            stoat.pending_diff_nav_jump = Some(pending);
+            return false;
+        },
+        Err(mpsc::TryRecvError::Disconnected) => return false,
+    };
+
+    stoat.active_workspace_mut().install_changed_ranges(scan);
+    if let Some(target) = nearest_diff_target(stoat.active_workspace(), pending.start, pending.dir)
+    {
+        jump_to_symbol(stoat, target);
+    }
+    true
 }
 
 /// The nearest symbol along `dir` from `start` whose definition overlaps a
@@ -472,13 +530,16 @@ mod tests {
         trail_prev,
     };
     use crate::{
+        action_handlers::dispatch,
         app::{Stoat, UpdateEffect},
         host::FakeFs,
+        test_harness::TestHarness,
     };
     use codegraph::{
         Confidence, Dir, Edge, EdgeKind, FileId, FileShard, Symbol, SymbolKey, Target,
     };
     use std::{ops::Range, path::PathBuf, sync::Arc};
+    use stoat_action::GotoDiffCalleeDown;
     use stoat_config::Settings;
     use stoat_language::SymbolKind;
     use stoat_scheduler::TestScheduler;
@@ -685,6 +746,121 @@ mod tests {
             nearest_diff_target(stoat.active_workspace(), baz, Dir::Up),
             Some(foo),
             "skips the unchanged caller bar and lands on the changed caller foo",
+        );
+    }
+
+    /// A repo with a four-deep call chain, the cursor parked at its unchanged
+    /// head, and answers `baz`, the first changed symbol below it.
+    ///
+    /// `foo` calls `bar` calls `baz` calls `qux`, of which only the last two
+    /// carry a working-tree change. A hop down from `foo` has an unchanged
+    /// neighbor to skip past, and one landing on `baz` still has `qux` below it
+    /// to move on to.
+    fn stage_changed_callee(h: &mut TestHarness) -> SymbolKey {
+        h.stage_review_scenario(
+            "/repo",
+            &[(
+                "a.rs",
+                "fn foo() {}\nfn bar() {}\nfn baz() {}\nfn qux() {}\n",
+                "fn foo() {}\nfn bar() {}\nfn baz() { z(); }\nfn qux() { z(); }\n",
+            )],
+        );
+
+        let file = build::file_id("a.rs");
+        let (foo, bar, baz, qux) = (
+            SymbolKey([1u8; 16]),
+            SymbolKey([2u8; 16]),
+            SymbolKey([3u8; 16]),
+            SymbolKey([4u8; 16]),
+        );
+        {
+            let ws = h.stoat.active_workspace_mut();
+            ws.code_graph.insert_shard(FileShard {
+                content_hash: [0u8; 32],
+                symbols: vec![
+                    sym(1, file, "foo", 0..12),
+                    sym(2, file, "bar", 12..24),
+                    sym(3, file, "baz", 24..42),
+                    sym(4, file, "qux", 42..60),
+                ],
+                edges: vec![
+                    call_edge(foo, bar),
+                    call_edge(bar, baz),
+                    call_edge(baz, qux),
+                ],
+            });
+            ws.file_paths.insert(file, PathBuf::from("a.rs"));
+        }
+
+        jump_to_symbol(&mut h.stoat, foo);
+        assert_eq!(symbol_at_cursor(&mut h.stoat), Some(foo), "parked in foo");
+        baz
+    }
+
+    /// Every press used to walk the whole changeset on the run loop. That is the
+    /// repo's status, a HEAD blob and a disk read per changed file, and a diff
+    /// each.
+    ///
+    /// What this pins is the deferral rather than the thread. The test scheduler
+    /// runs a blocking closure inline, so the scan's work happens on this stack
+    /// either way. When the cursor moves is what tells the two apart.
+    #[test]
+    fn a_diff_filtered_hop_lands_when_its_scan_does() {
+        let mut h = TestHarness::with_size(40, 20);
+        let baz = stage_changed_callee(&mut h);
+
+        dispatch(&mut h.stoat, &GotoDiffCalleeDown);
+        assert_eq!(
+            symbol_at_cursor(&mut h.stoat),
+            Some(SymbolKey([1u8; 16])),
+            "the keypress moves the cursor nowhere itself",
+        );
+        assert!(
+            h.stoat.pending_diff_nav_jump.is_some(),
+            "it leaves a scan for the pump to apply",
+        );
+
+        h.settle();
+        assert_eq!(
+            symbol_at_cursor(&mut h.stoat),
+            Some(baz),
+            "which is where the hop lands, skipping past the unchanged neighbor",
+        );
+        assert!(
+            !h.stoat.active_workspace().changed_ranges.is_empty(),
+            "the landed scan installs the ranges it found",
+        );
+        assert!(
+            h.stoat.pending_diff_nav_jump.is_none(),
+            "and the scan is spent once applied",
+        );
+    }
+
+    /// Two presses inside one scan window ask the same question of the same
+    /// tree, so the second replaces the first rather than queueing behind it.
+    #[test]
+    fn a_second_hop_press_replaces_the_scan_in_flight() {
+        let mut h = TestHarness::with_size(40, 20);
+        let baz = stage_changed_callee(&mut h);
+        let jumps = |h: &TestHarness| {
+            let panes = &h.stoat.active_workspace().panes;
+            panes.pane(panes.focus()).jumplist.entries().len()
+        };
+        let before = jumps(&h);
+
+        dispatch(&mut h.stoat, &GotoDiffCalleeDown);
+        dispatch(&mut h.stoat, &GotoDiffCalleeDown);
+        h.settle();
+
+        assert_eq!(
+            symbol_at_cursor(&mut h.stoat),
+            Some(baz),
+            "both presses left foo, so the pair lands one hop down",
+        );
+        assert_eq!(
+            jumps(&h) - before,
+            1,
+            "the burst records one jump, not one per press",
         );
     }
 

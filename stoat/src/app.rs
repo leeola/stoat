@@ -816,6 +816,10 @@ pub struct Stoat {
     /// A cross-file changed-file hop scanning off the UI thread, applied by
     /// [`action_handlers::movement::pump_changed_file_jump`] when it lands.
     pub(crate) pending_changed_file_jump: Option<action_handlers::movement::PendingChangedFileJump>,
+    /// A diff-filtered call-graph hop whose working-tree scan runs off the UI
+    /// thread, applied by [`crate::code_index::nav::pump_diff_nav_jump`] when it
+    /// lands.
+    pub(crate) pending_diff_nav_jump: Option<crate::code_index::nav::PendingDiffNavJump>,
     /// In-flight code-search scan streaming match batches from the blocking pool.
     pub(crate) pending_code_search: Option<action_handlers::code_search::PendingCodeSearch>,
     /// Timer that forwards the latest code-search query on
@@ -1958,6 +1962,7 @@ impl Stoat {
             perf: crate::perf::PerfStats::default(),
             pending_review_scan: None,
             pending_changed_file_jump: None,
+            pending_diff_nav_jump: None,
             pending_code_search: None,
             code_search_debounce: None,
             code_search_query_tx,
@@ -6618,6 +6623,7 @@ impl Stoat {
         action_handlers::code_search::sync_code_search(self);
 
         let changed_file_jump = action_handlers::movement::pump_changed_file_jump(self);
+        let diff_nav_jump = crate::code_index::nav::pump_diff_nav_jump(self);
         let lsp = crate::lsp::pump_all(self);
         action_handlers::workspace::sync_workspace_picker(self);
 
@@ -6633,6 +6639,7 @@ impl Stoat {
             || review
             || code_search
             || changed_file_jump
+            || diff_nav_jump
             || lsp
             || format_on_save
             || pending_save
