@@ -59,17 +59,13 @@ pub(super) fn project_term_cells(
     }
 }
 
-/// The inclusive viewport row span a selection covers, clamped to the grid, or
-/// `None` when it falls entirely below the viewport.
-///
-/// `offset` is the display offset the projection ran at, converting the
-/// selection's terminal lines to viewport rows the same way the cell loop does.
 /// A cleared row-flag buffer `rows` long, reusing one a past frame gave back
 /// through [`Terminal::recycle_damage`] when `spare` holds one.
 ///
-/// Takes the pool rather than the whole terminal so a caller can reach it while
-/// the terminal's own content or damage is borrowed, which every call site is
-/// in the middle of.
+/// Takes that list alone rather than the whole terminal, so a caller reaches it
+/// while the terminal's own content or damage is borrowed. Every call site is
+/// in the middle of that, three of them writing the result into a `Damage` on
+/// the same statement.
 pub(super) fn row_bounds(spare: &mut Vec<Vec<RowDamage>>, rows: usize) -> Vec<RowDamage> {
     let mut bounds = spare.pop().unwrap_or_default();
     bounds.clear();
@@ -132,6 +128,11 @@ pub(super) fn detect_shift(
     0
 }
 
+/// The inclusive viewport row span a selection covers, clamped to the grid, or
+/// `None` when it falls entirely below the viewport.
+///
+/// `offset` is the display offset the projection ran at, converting the
+/// selection's terminal lines to viewport rows the same way the cell loop does.
 pub(super) fn selection_span(
     range: &SelectionRange,
     offset: i32,
