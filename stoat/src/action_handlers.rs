@@ -2924,4 +2924,32 @@ mod tests {
         );
         assert!(stoat.jumplist_picker.is_some(), "recall should reopen");
     }
+
+    /// The recall chord hands the space leader's mode back, and the order
+    /// decides which editor takes it. After the re-open, focus is the recalled
+    /// picker's own input, so a switch there drops it out of insert.
+    ///
+    /// A picker that reopens but takes no keys reads as a broken chord. It sits
+    /// on screen, and nothing the user types reaches it.
+    #[test]
+    fn the_recall_chord_reopens_a_picker_that_takes_keys() {
+        let mut h = crate::test_harness::TestHarness::with_size(80, 20);
+        dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+        h.type_keys("escape");
+
+        h.type_keys("space '");
+        h.type_text("th");
+
+        let palette = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("the chord reopens the palette");
+        assert_eq!(
+            palette.input.text(h.stoat.active_workspace()),
+            "th",
+            "the recalled palette takes the keys typed into it",
+        );
+        assert_eq!(h.stoat.focused_mode(), "insert", "its input stays live");
+    }
 }

@@ -1018,7 +1018,10 @@ on key {
         j -> [JumpBackward(), SetMode(normal)];
         k -> [JumpForward(), SetMode(normal)];
         / -> OpenCodeSearch();
-        ' -> [OpenLastPicker(), SetMode(normal)];
+        # The mode switch leads, as in the goto menus' `?` arms. The recalled
+        # picker takes focus with its own input, so a switch after the re-open
+        # lands there and leaves the picker unable to take keys.
+        ' -> [SetMode(normal), OpenLastPicker()];
         ? -> [ToggleKeyHints(), SetMode(normal)];
     }
     mode == space_clipboard {
