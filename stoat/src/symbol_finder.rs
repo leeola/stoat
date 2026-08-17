@@ -1,6 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
+    fuzzy,
     host::OffsetEncoding,
     input_view::{InputView, SubmitTarget},
     markdown::StyledLine,
@@ -70,6 +71,9 @@ pub(crate) struct SymbolFinder {
     pub(crate) entries: Vec<SymbolFinderEntry>,
     pub(crate) filtered: Vec<usize>,
     pub(crate) match_indices: Vec<Vec<u32>>,
+    /// The parse behind the current ranking, so a painted row past the indexed
+    /// block derives its offsets rather than going unhighlighted.
+    last_pattern: Option<fuzzy::Pattern>,
     pub(crate) selected: usize,
     pub(crate) viewport_rows: Option<usize>,
     /// Read-only pane showing the selected symbol's source. Kept in sync by
@@ -149,6 +153,7 @@ impl SymbolFinder {
             entries: Vec::new(),
             filtered: Vec::new(),
             match_indices: Vec::new(),
+            last_pattern: None,
             selected: 0,
             viewport_rows: None,
             preview,
@@ -196,9 +201,10 @@ impl SymbolFinder {
         }
         self.last_filter_key = Some(key);
 
-        let (filtered, match_indices) = rank_entries(&self.entries, query);
+        let (filtered, match_indices, pattern) = rank_entries(&self.entries, query);
         self.filtered = filtered;
         self.match_indices = match_indices;
+        self.last_pattern = pattern;
         self.clamp_selected();
     }
 
@@ -267,16 +273,44 @@ impl SymbolFinder {
         self.preview.dispose(ws);
     }
 
+    /// Matched offsets to highlight in filtered `row`'s title.
+    ///
+    /// See [`picker::row_indices`] for what `scratch` and `matching` are for.
+    pub(crate) fn row_indices<'a>(
+        &'a self,
+        row: usize,
+        scratch: &'a mut Vec<u32>,
+        matching: &mut fuzzy::Scratch,
+    ) -> &'a [u32] {
+        let title = self
+            .filtered
+            .get(row)
+            .and_then(|&idx| self.entries.get(idx))
+            .map(|entry| entry.title.as_str())
+            .unwrap_or_default();
+        picker::row_indices(
+            &self.match_indices,
+            self.last_pattern.as_ref(),
+            row,
+            title,
+            scratch,
+            matching,
+        )
+    }
+
     fn clamp_selected(&mut self) {
         picker::nav_clamp(self.filtered.len(), &mut self.selected);
     }
 }
 
-/// Rank `entries` for `query`, returning parallel `(filtered, match_indices)`
-/// vectors. `filtered` holds indices into `entries` and `match_indices` the
-/// matched character offsets in each row's title. Empty query yields document
-/// order and no highlights.
-fn rank_entries(entries: &[SymbolFinderEntry], query: &str) -> (Vec<usize>, Vec<Vec<u32>>) {
+/// Rank `entries` for `query`, returning the parallel `(filtered,
+/// match_indices)` vectors and the parse that painting rows past the indexed
+/// block needs. `filtered` holds indices into `entries`. Empty query yields
+/// document order and no highlights.
+fn rank_entries(
+    entries: &[SymbolFinderEntry],
+    query: &str,
+) -> (Vec<usize>, Vec<Vec<u32>>, Option<fuzzy::Pattern>) {
     let items = entries
         .iter()
         .enumerate()
@@ -284,14 +318,14 @@ fn rank_entries(entries: &[SymbolFinderEntry], query: &str) -> (Vec<usize>, Vec<
 
     let mut filtered = Vec::new();
     let mut match_indices = Vec::new();
-    picker::rank_into(
+    let pattern = picker::rank_into(
         query,
         items,
         entries.len(),
         &mut filtered,
         &mut match_indices,
     );
-    (filtered, match_indices)
+    (filtered, match_indices, pattern)
 }
 
 /// One entry in the graph-navigation [`SymbolPicker`]. `title` is the symbol
@@ -810,8 +844,9 @@ mod tests {
     use crate::{
         buffer::BufferId,
         editor_state::EditorId,
+        fuzzy,
         input_view::{InputView, SubmitTarget},
-        picker::Preview,
+        picker::{self, Preview},
     };
 
     fn entry(title: &str) -> SymbolFinderEntry {
@@ -836,6 +871,7 @@ mod tests {
             entries: titles.iter().map(|t| entry(t)).collect(),
             filtered: Vec::new(),
             match_indices: Vec::new(),
+            last_pattern: None,
             selected: 0,
             viewport_rows: None,
             preview: Preview::test_dummy(),
@@ -896,7 +932,7 @@ mod tests {
     #[test]
     fn empty_query_lists_in_document_order() {
         let entries: Vec<_> = ["zeta", "alpha", "mu"].iter().map(|t| entry(t)).collect();
-        let (filtered, indices) = rank_entries(&entries, "");
+        let (filtered, indices, _) = rank_entries(&entries, "");
         assert_eq!(filtered, vec![0, 1, 2]);
         assert_eq!(indices, vec![Vec::<u32>::new(); 3]);
     }
@@ -907,7 +943,7 @@ mod tests {
             .iter()
             .map(|t| entry(t))
             .collect();
-        let (filtered, indices) = rank_entries(&entries, "fmt");
+        let (filtered, indices, _) = rank_entries(&entries, "fmt");
         assert_eq!(
             filtered
                 .iter()
@@ -919,6 +955,35 @@ mod tests {
         assert!(
             !indices[0].is_empty(),
             "the top match carries highlight offsets"
+        );
+    }
+
+    /// Deriving offsets is the expensive half of a match, so a workspace's
+    /// symbols are ranked with only the leading block indexed. A reader who
+    /// scrolls below it still gets highlights, derived from the kept parse when
+    /// the row is painted.
+    #[test]
+    fn a_row_below_the_indexed_block_derives_its_offsets() {
+        let titles: Vec<String> = (0..picker::INDEXED_ROWS + 8)
+            .map(|i| format!("fmt_{i:04}"))
+            .collect();
+        let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
+        let mut f = finder(&refs);
+        f.refilter("fmt");
+
+        assert_eq!(f.filtered.len(), titles.len(), "every title matches");
+        assert_eq!(
+            f.match_indices.len(),
+            picker::INDEXED_ROWS,
+            "the leading block alone carries stored offsets",
+        );
+
+        let mut scratch = Vec::new();
+        let mut matching = fuzzy::Scratch::default();
+        assert_eq!(
+            f.row_indices(picker::INDEXED_ROWS + 4, &mut scratch, &mut matching),
+            [0, 1, 2],
+            "a row past the block still highlights its matched prefix",
         );
     }
 

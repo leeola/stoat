@@ -1,4 +1,5 @@
 use crate::{
+    fuzzy,
     input_view::InputView,
     paths, picker,
     workspace::{registry::RegistryEntry, Workspace, WorkspaceId, WorkspaceUid},
@@ -48,6 +49,9 @@ pub struct WorkspacePicker {
     /// Matched character offsets in each filtered row's haystack, parallel to
     /// [`Self::filtered`], driving name-column highlights.
     match_indices: Vec<Vec<u32>>,
+    /// The parse behind the current ranking, so a painted row past the indexed
+    /// block derives its offsets rather than going unhighlighted.
+    last_pattern: Option<fuzzy::Pattern>,
     /// Cursor into [`Self::filtered`].
     selected: usize,
     /// Query the current ranking came from, so the idle tick's repeat call
@@ -178,6 +182,7 @@ impl WorkspacePicker {
             haystacks,
             filtered: Vec::new(),
             match_indices: Vec::new(),
+            last_pattern: None,
             selected,
             last_filter_query: None,
             viewport_rows: None,
@@ -194,8 +199,29 @@ impl WorkspacePicker {
         &self.filtered
     }
 
-    pub fn match_indices(&self) -> &[Vec<u32>] {
-        &self.match_indices
+    /// Matched offsets to highlight in filtered `row`'s haystack.
+    ///
+    /// See [`picker::row_indices`] for what `scratch` and `matching` are for.
+    pub(crate) fn row_indices<'a>(
+        &'a self,
+        row: usize,
+        scratch: &'a mut Vec<u32>,
+        matching: &mut fuzzy::Scratch,
+    ) -> &'a [u32] {
+        let haystack = self
+            .filtered
+            .get(row)
+            .and_then(|&idx| self.haystacks.get(idx))
+            .map(String::as_str)
+            .unwrap_or_default();
+        picker::row_indices(
+            &self.match_indices,
+            self.last_pattern.as_ref(),
+            row,
+            haystack,
+            scratch,
+            matching,
+        )
     }
 
     pub fn selected(&self) -> usize {
@@ -224,7 +250,7 @@ impl WorkspacePicker {
             .enumerate()
             .map(|(idx, haystack)| (idx, haystack.as_str()));
 
-        picker::rank_into(
+        self.last_pattern = picker::rank_into(
             query,
             items,
             self.entries.len(),

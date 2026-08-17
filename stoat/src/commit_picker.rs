@@ -1,6 +1,7 @@
 use crate::{
     commit_graph::{self, GraphRow},
     commit_list::{PendingPreview, PreviewCache},
+    fuzzy,
     host::CommitInfo,
     input_view::{InputView, SubmitTarget},
     picker,
@@ -175,6 +176,9 @@ pub(crate) struct CommitPicker {
     pub(crate) filtered: Vec<usize>,
     /// Matched character offsets per filtered row, parallel to `filtered`.
     pub(crate) match_indices: Vec<Vec<u32>>,
+    /// The parse behind the current ranking, so a painted row past the indexed
+    /// block derives its offsets rather than going unhighlighted.
+    last_pattern: Option<fuzzy::Pattern>,
     pub(crate) selected: usize,
     /// Rendered list height, refreshed each frame so [`Self::page`] can size
     /// its step. `None` before the first render.
@@ -291,6 +295,7 @@ impl CommitPicker {
             branch_tips: HashMap::new(),
             filtered: Vec::new(),
             match_indices: Vec::new(),
+            last_pattern: None,
             selected: 0,
             viewport_rows: None,
             preview_sessions: PreviewCache::default(),
@@ -477,7 +482,7 @@ impl CommitPicker {
             };
             (idx, text)
         });
-        picker::rank_into(
+        self.last_pattern = picker::rank_into(
             query,
             items,
             self.commits.len(),
@@ -576,6 +581,46 @@ impl CommitPicker {
         if let Some(row) = found {
             self.set_selected(row);
         }
+    }
+
+    /// Matched offsets to highlight in filtered `row`, in the joined row's
+    /// offset space.
+    ///
+    /// This does not reach [`picker::row_indices`] because a scoped query
+    /// matched one cell, and offsets derived here arrive in that cell's space.
+    /// Shifting them by the cell's own start is what the refilter already did
+    /// to the rows it stored.
+    ///
+    /// `scratch` holds a derived list and `matching` is working memory, both
+    /// reused across the rows a caller paints.
+    pub(crate) fn row_indices<'a>(
+        &'a self,
+        row: usize,
+        scratch: &'a mut Vec<u32>,
+        matching: &mut fuzzy::Scratch,
+    ) -> &'a [u32] {
+        if let Some(indices) = self.match_indices.get(row) {
+            return indices;
+        }
+
+        scratch.clear();
+        let (Some(&idx), Some(pattern)) = (self.filtered.get(row), self.last_pattern.as_ref())
+        else {
+            return scratch;
+        };
+        let (haystack, shift) = match self.filter_column {
+            Some(column) => {
+                let cell = &self.rows[idx].cells[column as usize];
+                (cell.text.as_str(), cell.start as u32)
+            },
+            None => (self.rows[idx].text.as_str(), 0),
+        };
+
+        fuzzy::indices_of_parsed(pattern, haystack, scratch, matching);
+        for index in scratch.iter_mut() {
+            *index += shift;
+        }
+        scratch
     }
 
     /// The commit under the selection cursor, or `None` for an empty list.
@@ -688,6 +733,7 @@ mod tests {
             branch_tips,
             filtered: Vec::new(),
             match_indices: Vec::new(),
+            last_pattern: None,
             selected: 0,
             viewport_rows: None,
             preview_sessions: PreviewCache::default(),

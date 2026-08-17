@@ -29,7 +29,7 @@ pub(crate) const PREVIEW_BYTE_LIMIT: usize = 128 * 1024;
 /// Deriving them is the expensive half of matching, and a list this deep is
 /// already far past what a viewport shows or a reader pages through. Rows below
 /// it derive theirs when something actually paints them.
-const INDEXED_ROWS: usize = 512;
+pub(crate) const INDEXED_ROWS: usize = 512;
 
 /// Source of process-unique content-version stamps, shared by every pool that
 /// versions its content by a monotonic generation instead of a content hash.
@@ -96,6 +96,12 @@ pub(crate) fn nav_clamp(len: usize, selected: &mut usize) {
 /// shows. `len` is how many there are, since an empty query never walks
 /// `items`.
 ///
+/// **`match_indices` is shorter than `filtered` after a real query.** Deriving
+/// an offset list is the expensive half of a match, so only the leading
+/// [`INDEXED_ROWS`] rows get one. The returned parse is what a painter reaching
+/// past them hands [`row_indices`] to derive the rest. `None` for the empty
+/// query, where every row's offsets are stored and empty.
+///
 /// Ties break alphabetically by haystack, through [`fuzzy::sort_ranked`].
 pub(crate) fn rank_into<'a>(
     query: &str,
@@ -103,23 +109,50 @@ pub(crate) fn rank_into<'a>(
     len: usize,
     filtered: &mut Vec<usize>,
     match_indices: &mut Vec<Vec<u32>>,
-) {
+) -> Option<fuzzy::Pattern> {
     filtered.clear();
     match_indices.clear();
 
-    let Some(mut matches) = fuzzy::match_and_rank(query, items) else {
+    let Some(ranked) = fuzzy::rank_indexing_best(query, items, INDEXED_ROWS) else {
         filtered.extend(0..len);
         match_indices.resize(len, Vec::new());
-        return;
+        return None;
     };
 
-    fuzzy::sort_ranked(&mut matches);
-    filtered.reserve(matches.len());
-    match_indices.reserve(matches.len());
-    for m in matches {
+    filtered.reserve(ranked.matches.len());
+    match_indices.reserve(ranked.indexed);
+    for (row, m) in ranked.matches.into_iter().enumerate() {
         filtered.push(m.item);
-        match_indices.push(m.matched_indices);
+        if row < ranked.indexed {
+            match_indices.push(m.matched_indices);
+        }
     }
+    fuzzy::parse_query(query)
+}
+
+/// Matched offsets for filtered `row`, stored when [`rank_into`] indexed it and
+/// derived from `haystack` when it did not.
+///
+/// `scratch` holds a derived list, and a caller painting a window reuses one
+/// across its rows rather than allocating per row. `matching` is working memory
+/// for the same window and holds nothing the caller reads.
+pub(crate) fn row_indices<'a>(
+    stored: &'a [Vec<u32>],
+    pattern: Option<&fuzzy::Pattern>,
+    row: usize,
+    haystack: &str,
+    scratch: &'a mut Vec<u32>,
+    matching: &mut fuzzy::Scratch,
+) -> &'a [u32] {
+    if let Some(indices) = stored.get(row) {
+        return indices;
+    }
+
+    scratch.clear();
+    if let Some(pattern) = pattern {
+        fuzzy::indices_of_parsed(pattern, haystack, scratch, matching);
+    }
+    scratch
 }
 
 /// Query-driven fuzzy result list over a fixed `base` set of paths, decoupled

@@ -600,11 +600,13 @@ pub(crate) fn paint_commit_picker_rows(
     let branch_style = theme.get(scope::VCS_COMMIT_METADATA);
     let end_x = area.x + area.width;
 
-    for (row_idx, (row, indices)) in visible
-        .iter()
-        .zip(picker.match_indices.iter().skip(start_row))
-        .enumerate()
-    {
+    // Reused across the painted rows rather than allocated per row, since a row
+    // past the indexed block derives its offsets here.
+    let mut derived = Vec::new();
+    let mut matching = crate::fuzzy::Scratch::default();
+
+    for (row_idx, row) in visible.iter().enumerate() {
+        let indices = picker.row_indices(start_row + row_idx, &mut derived, &mut matching);
         let y = area.y + row_idx as u16;
         let is_selected = start_row + row_idx == picker.selected;
         let style = if is_selected {

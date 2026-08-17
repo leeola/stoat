@@ -112,13 +112,17 @@ pub(crate) fn render_workspace_picker(
     let rows = inner.height.saturating_sub(HEADER_ROWS) as usize;
     picker.viewport_rows = Some(rows);
     let selected = picker.selected();
-    let match_indices = picker.match_indices();
     let entries = picker.entries();
+
+    // Reused across the painted rows rather than allocated per row, since a row
+    // past the indexed block derives its offsets here.
+    let mut derived = Vec::new();
+    let mut matching = crate::fuzzy::Scratch::default();
 
     let start = crate::render::picker::window_start(selected, rows);
     for (i, &idx) in picker.filtered().iter().enumerate().skip(start).take(rows) {
         let entry = &entries[idx];
-        let indices = &match_indices[i];
+        let indices = picker.row_indices(i, &mut derived, &mut matching);
         let row = entries_top + (i - start) as u16;
         let is_selected = i == selected;
         let base_style = if is_selected {

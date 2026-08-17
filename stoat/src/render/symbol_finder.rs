@@ -157,14 +157,19 @@ fn paint_symbol_rows(
     let end_x = area.x + area.width;
     let label_x = area.x + 1;
 
-    for (row_idx, (&idx, indices)) in finder
+    // Reused across the painted rows rather than allocated per row, since a row
+    // past the indexed block derives its offsets here.
+    let mut derived = Vec::new();
+    let mut matching = crate::fuzzy::Scratch::default();
+
+    for (row_idx, &idx) in finder
         .filtered
         .iter()
-        .zip(finder.match_indices.iter())
         .skip(start_row)
         .take(rows)
         .enumerate()
     {
+        let indices = finder.row_indices(start_row + row_idx, &mut derived, &mut matching);
         let row = area.y + row_idx as u16;
         let is_selected = start_row + row_idx == finder.selected;
         let style = if is_selected {
