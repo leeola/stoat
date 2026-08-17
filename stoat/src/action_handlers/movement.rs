@@ -1465,18 +1465,11 @@ pub(super) fn align_selections(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     }
 
-    let mut row_indices: Vec<u32> = Vec::new();
-    let row_index_for = |row_indices: &mut Vec<u32>, row: u32| -> usize {
-        match row_indices.iter().position(|r| *r == row) {
-            Some(i) => i,
-            None => {
-                row_indices.push(row);
-                row_indices.len() - 1
-            },
-        }
-    };
-
+    // The entries arrive in position order, so equal head rows come as one run
+    // and a row is new exactly when the rank resets. That is the whole of the
+    // row numbering, with no list to search.
     let mut ranked: Vec<RankedEntry> = Vec::with_capacity(entries.len());
+    let mut row_count = 0usize;
     let mut last_row: Option<u32> = None;
     let mut rank: usize = 0;
     for entry in entries {
@@ -1485,33 +1478,40 @@ pub(super) fn align_selections(stoat: &mut Stoat) -> UpdateEffect {
         } else {
             rank = 0;
             last_row = Some(entry.head_row);
+            row_count += 1;
         }
-        let row_idx = row_index_for(&mut row_indices, entry.head_row);
         ranked.push(RankedEntry {
             insert_offset: entry.insert_offset,
             head_col: entry.head_col,
-            row_idx,
+            row_idx: row_count - 1,
             rank,
         });
     }
 
-    let max_rank = ranked
-        .iter()
-        .map(|e| e.rank)
-        .max()
-        .expect("entries non-empty");
-    let mut offs = vec![0u32; row_indices.len()];
+    // Grouped once rather than filtered per rank, which is two passes over
+    // every entry for each rank a row reaches.
+    let mut by_rank: Vec<Vec<usize>> = Vec::new();
+    for (index, entry) in ranked.iter().enumerate() {
+        if by_rank.len() <= entry.rank {
+            by_rank.resize(entry.rank + 1, Vec::new());
+        }
+        by_rank[entry.rank].push(index);
+    }
+
+    let mut offs = vec![0u32; row_count];
     let mut edits: Vec<(usize, String)> = Vec::new();
 
-    for current_rank in 0..=max_rank {
-        let max_col = ranked
+    // In rank order, since a rank's target column is read after the ranks
+    // before it have already pushed their rows right.
+    for bucket in &by_rank {
+        let max_col = bucket
             .iter()
-            .filter(|e| e.rank == current_rank)
-            .map(|e| e.head_col + offs[e.row_idx])
+            .map(|&index| ranked[index].head_col + offs[ranked[index].row_idx])
             .max();
         let Some(max_col) = max_col else { continue };
 
-        for entry in ranked.iter().filter(|e| e.rank == current_rank) {
+        for &index in bucket {
+            let entry = &ranked[index];
             let actual = entry.head_col + offs[entry.row_idx];
             if max_col > actual {
                 let pad = (max_col - actual) as usize;

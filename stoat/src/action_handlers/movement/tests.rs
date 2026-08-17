@@ -4623,6 +4623,28 @@ fn align_from_select_mode_returns_to_normal() {
     assert_eq!(focused_buffer_text(&mut h), "  abc\ndefgh\n   ij\n");
 }
 
+/// Every other align fixture has one cursor per row, which is one rank and one
+/// column. Two per row gives two, and the second reads its target after the
+/// first has already pushed its row right.
+#[test]
+fn align_selections_aligns_a_second_column_after_the_first() {
+    let mut h = TestHarness::with_size(20, 5);
+    let path = h.write_file("s.txt", "a=b=c\nddd=ee=f\n");
+    h.open_file(&path);
+    h.type_keys("%");
+    dispatch(&mut h.stoat, &stoat_action::SelectRegex);
+    h.type_text("=");
+    h.type_keys("enter");
+    assert_eq!(h.selection_spans().len(), 4, "two cursors on each row");
+
+    dispatch(&mut h.stoat, &stoat_action::AlignSelections);
+    assert_eq!(
+        focused_buffer_text(&mut h),
+        "a  =b =c\nddd=ee=f\n",
+        "both columns line up, the second measured after the first padded",
+    );
+}
+
 #[test]
 fn align_selections_already_aligned_is_noop() {
     let mut h = TestHarness::with_size(20, 5);
