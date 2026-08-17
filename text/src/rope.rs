@@ -934,17 +934,27 @@ impl Rope {
 
     pub fn clip_offset(&self, offset: usize, bias: Bias) -> usize {
         let offset = offset.min(self.len());
-        if self.is_char_boundary(offset) {
+        if offset == 0 {
             return offset;
         }
+
+        // One descent answers both questions. Asking whether the offset is on a
+        // boundary and then clipping it are the same lookup, and this runs per
+        // selection per keypress through the grapheme steppers.
         let (chunk_start_offset, _end, chunk_opt) =
             self.chunks.find::<usize, _>((), &offset, Bias::Right);
-        let chunk = match chunk_opt {
-            Some(c) => c,
-            None => return self.len(),
+        // No chunk holds the offset only when it is the rope's end, which the
+        // clamp above already put it at and which is always a boundary.
+        let Some(chunk) = chunk_opt else {
+            return offset;
         };
+
         let local = offset - chunk_start_offset;
         let text = chunk.text.as_str();
+        if text.is_char_boundary(local) {
+            return offset;
+        }
+
         let clipped_local = match bias {
             Bias::Left => {
                 let mut c = local;
@@ -3228,6 +3238,24 @@ mod tests {
     fn clip_offset_clamps() {
         let rope = Rope::from("abc");
         assert_eq!(rope.clip_offset(100, Bias::Left), 3);
+    }
+
+    /// Every other clip fixture fits in one chunk, where any chunk lookup lands
+    /// on the right one. This one puts the character past a chunk boundary, so
+    /// the lookup has to find the chunk holding the offset rather than the
+    /// first.
+    #[test]
+    fn clip_offset_mid_char_in_a_later_chunk() {
+        let head = "a".repeat(MAX_BASE + 5);
+        let rope = Rope::from(format!("{head}h\u{00e9}\u{4e16}").as_str());
+        assert!(rope.chunks().count() > 1, "the fixture has to span chunks");
+
+        let at = head.len() + 1;
+        assert_eq!(rope.clip_offset(at + 1, Bias::Left), at);
+        assert_eq!(rope.clip_offset(at + 1, Bias::Right), at + 2);
+        assert_eq!(rope.clip_offset(at + 3, Bias::Left), at + 2);
+        assert_eq!(rope.clip_offset(at + 3, Bias::Right), at + 5);
+        assert_eq!(rope.clip_offset(at, Bias::Left), at, "already a boundary");
     }
 
     #[test]
