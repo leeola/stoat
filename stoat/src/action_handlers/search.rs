@@ -698,7 +698,7 @@ mod tests {
 
     /// The goto menu's select flavor reaches reverse search, and the prompt
     /// reads its origin through `in_select_mode`, which answers yes for the
-    /// `select_goto` the chord sits in when the key lands.
+    /// `select` the chord hands back before it opens the prompt.
     #[test]
     fn select_goto_question_opens_a_reverse_search_that_extends() {
         let mut h = TestHarness::with_size(40, 10);
@@ -712,6 +712,39 @@ mod tests {
         let state = h.stoat.search_input.as_ref().expect("prompt opened");
         assert_eq!(state.direction, SearchDirection::Reverse);
         assert!(state.extend, "opened from select mode, so the match joins");
+    }
+
+    /// A `?` chord opens a prompt and hands the menu's mode back, and the order
+    /// decides which editor the hand-back lands on. After the open, focus is the
+    /// prompt's own editor, so a switch there drops the prompt out of insert.
+    ///
+    /// The wrong order has two symptoms, and both are pinned here. A prompt
+    /// that takes no keys is indistinguishable from one that never opened. A
+    /// pane left in the menu mode surfaces the moment the prompt closes.
+    #[test]
+    fn a_reverse_search_chord_takes_keys_and_hands_the_mode_back() {
+        for (chord, back) in [("g ?", "normal"), ("v g ?", "select")] {
+            let mut h = TestHarness::with_size(40, 10);
+            seed(&mut h, "abc def abc\n");
+
+            h.type_keys(chord);
+            h.type_text("de");
+
+            let state = h.stoat.search_input.as_ref().expect("prompt opened");
+            assert_eq!(
+                state.input.text(h.stoat.active_workspace()),
+                "de",
+                "`{chord}` opens a prompt that takes the keys typed into it",
+            );
+            assert_eq!(h.stoat.focused_mode(), "insert", "`{chord}` prompt is live");
+
+            h.type_keys("escape");
+            assert_eq!(
+                h.stoat.focused_mode(),
+                back,
+                "`{chord}` leaves the menu behind once the prompt closes",
+            );
+        }
     }
 
     #[test]

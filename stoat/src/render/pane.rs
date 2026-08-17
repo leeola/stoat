@@ -1352,7 +1352,7 @@ mod tests {
         path::{Path, PathBuf},
         sync::{Arc, RwLock},
     };
-    use stoat_action::{OpenFile, OpenReverseSearchInput};
+    use stoat_action::OpenFile;
 
     /// The rendered name is reused only while everything it was rendered from
     /// holds still.
@@ -1934,11 +1934,7 @@ mod tests {
             "and the prompt leaves with the search:\n{cancelled}",
         );
 
-        // Opened by dispatch rather than by `g ?`, whose binding runs
-        // SetMode(normal) after the open and so leaves a prompt that takes no
-        // keys. That defect is the binding's, and typing here is what pins the
-        // sigil.
-        dispatch(&mut h.stoat, &OpenReverseSearchInput);
+        h.type_keys("g ?");
         h.type_text("b");
         let reverse = bar_text(&mut h);
         assert!(

@@ -506,7 +506,10 @@ on key {
     }
     mode == goto {
         Escape -> SetMode(normal);
-        ? -> [OpenReverseSearchInput(), SetMode(normal)];
+        # The mode switch leads here, unlike every motion arm below. Opening the
+        # prompt moves focus onto its own editor, so a switch after the open
+        # lands there and drops the prompt out of insert.
+        ? -> [SetMode(normal), OpenReverseSearchInput()];
         i -> [GotoFirstNonwhitespace(), SetMode(normal)];
         s -> [GotoImplementation(), SetMode(normal)];
         j -> [GotoLastLine(), SetMode(normal)];
@@ -767,7 +770,8 @@ on key {
     }
     mode == select_goto {
         Escape -> SetMode(select);
-        ? -> [OpenReverseSearchInput(), SetMode(select)];
+        # Switch first, for the reason the normal-mode twin gives.
+        ? -> [SetMode(select), OpenReverseSearchInput()];
         i -> [ExtendGotoFirstNonwhitespace(), SetMode(select)];
         j -> [ExtendGotoLastLine(), SetMode(select)];
         k -> [ExtendGotoFileStart(), SetMode(select)];

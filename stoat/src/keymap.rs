@@ -1471,33 +1471,40 @@ mod tests {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let question = key_event(KeyCode::Char('?'), KeyModifiers::NONE);
-        let name_in = |mode: &str| {
+        let names_in = |mode: &str| {
             let state = TestState::new().set("mode", StateValue::String(mode.into()));
             keymap
                 .lookup(&state, &question)
-                .unwrap_or_else(|| panic!("? is unbound in {mode}"))[0]
-                .name
-                .clone()
+                .unwrap_or_else(|| panic!("? is unbound in {mode}"))
+                .iter()
+                .map(|resolved| resolved.name.clone())
+                .collect::<Vec<_>>()
         };
 
         assert_eq!(
-            name_in("normal"),
-            "OpenHelp",
+            names_in("normal"),
+            ["OpenHelp"],
             "? opens help directly in normal mode",
         );
         assert_eq!(
-            name_in("goto"),
-            "OpenReverseSearchInput",
-            "reverse search relocated to g ?",
+            names_in("goto"),
+            ["SetMode", "OpenReverseSearchInput"],
+            "reverse search relocated to g ?, and the menu hands its mode back \
+             before the prompt takes focus",
         );
         assert_eq!(
-            name_in("space"),
-            "ToggleKeyHints",
+            names_in("select_goto"),
+            ["SetMode", "OpenReverseSearchInput"],
+            "the select flavor of the menu orders its two actions the same way",
+        );
+        assert_eq!(
+            names_in("space"),
+            ["ToggleKeyHints", "SetMode"],
             "the hints toggle relocated to the space leader",
         );
         assert_eq!(
-            name_in("space_buffer"),
-            "OpenHelp",
+            names_in("space_buffer"),
+            ["OpenHelp"],
             "? still opens help in other sub-modes",
         );
     }
