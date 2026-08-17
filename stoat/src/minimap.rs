@@ -187,6 +187,49 @@ impl<F: Fn(u32) -> Option<u8>> EdgeSource for F {
     }
 }
 
+/// The edges of a row range, asked for once.
+///
+/// For a caller that both summarizes a range and records its marks, which
+/// otherwise asks the source for each row twice.
+struct ResolvedEdges {
+    /// The marked rows and their classes, sorted by row.
+    marks: Vec<(u32, u8)>,
+}
+
+impl ResolvedEdges {
+    fn over(source: &impl EdgeSource, rows: Range<u32>) -> Self {
+        // `marked_rows` answers a superset in any order, so the candidates are
+        // narrowed and ordered here before each is asked for its class.
+        let mut candidates = source.marked_rows(rows.clone());
+        candidates.retain(|row| rows.contains(row));
+        candidates.sort_unstable();
+        candidates.dedup();
+
+        Self {
+            marks: candidates
+                .into_iter()
+                .filter_map(|row| Some((row, source.edge_of(row)?)))
+                .collect(),
+        }
+    }
+}
+
+impl EdgeSource for ResolvedEdges {
+    fn edge_of(&self, row: u32) -> Option<u8> {
+        let index = self.marks.partition_point(|&(at, _)| at < row);
+        self.marks
+            .get(index)
+            .filter(|&&(at, _)| at == row)
+            .map(|&(_, class)| class)
+    }
+
+    fn marked_rows(&self, rows: Range<u32>) -> Vec<u32> {
+        let from = self.marks.partition_point(|&(row, _)| row < rows.start);
+        let to = self.marks.partition_point(|&(row, _)| row < rows.end);
+        self.marks[from..to].iter().map(|&(row, _)| row).collect()
+    }
+}
+
 /// The run summaries of one buffer, plus the incremental-sync bookkeeping.
 ///
 /// Mirrors the terminal's content store: one entry per line, spliced as the
@@ -360,14 +403,16 @@ impl MinimapContent {
         if self.built_upto < total {
             let end = (self.built_upto + BUILD_CHUNK).min(total);
             let tokens = tokens_for(self.built_upto..end);
-            let lines = summarize_rows(new_rope, self.built_upto..end, &tokens, &marks);
+            // Resolved once through the bulk path, since the summary below and
+            // the record beside it both want every row's edge.
+            let edges = ResolvedEdges::over(&marks, self.built_upto..end);
+            let lines = summarize_rows(new_rope, self.built_upto..end, &tokens, &edges);
             self.queue_splice(Splice {
                 start: self.built_upto,
                 removed: 0,
                 lines: lines.clone(),
             });
-            self.edges
-                .extend((self.built_upto..end).filter_map(|row| Some((row, marks.edge_of(row)?))));
+            self.edges.extend(edges.marks);
             self.lines.extend(lines);
             self.built_upto = end;
         }

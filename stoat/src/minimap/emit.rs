@@ -345,13 +345,24 @@ pub(crate) fn minimap_line_tokens(
     if rows.start > last_row {
         return by_row;
     }
+    // Where every row in range starts and ends, taken in two walks rather than
+    // two descents per row of every span. A build sweeps thousands of rows a
+    // tick, so the bucket loop below is left as arithmetic over these.
+    let line_starts = {
+        let points: Vec<stoat_text::Point> = (rows.start..=last_row)
+            .map(|row| stoat_text::Point::new(row, 0))
+            .collect();
+        rope.points_to_offsets_batch(&points)
+    };
+    let line_lens = rope.line_lens_in_range(rows.start..last_row + 1);
+    let line_end = |row: u32| -> usize {
+        let index = (row - rows.start) as usize;
+        line_starts[index] + line_lens[index] as usize
+    };
+
     // The byte span of `rows`, so each channel resolves anchors only for the
     // tokens that can overlap it instead of the whole buffer.
-    let byte_range = {
-        let start = rope.point_to_offset(stoat_text::Point::new(rows.start, 0));
-        let end = rope.point_to_offset(stoat_text::Point::new(last_row, rope.line_len(last_row)));
-        start..end
-    };
+    let byte_range = line_starts[0]..line_end(last_row);
 
     for highlights in [
         snapshot.semantic_token_highlights(),
@@ -362,25 +373,41 @@ pub(crate) fn minimap_line_tokens(
         };
         let bounds =
             channel.overlap_bounds(&byte_range, |anchor| buffer_snap.resolve_anchor(anchor));
-        for span in channel.range(bounds) {
-            let class = class_table.class_of(span.style);
-            if class == 0 {
-                continue;
-            }
-            let start = buffer_snap.resolve_anchor(&span.range.start);
-            let end = buffer_snap.resolve_anchor(&span.range.end);
+
+        // Every surviving span's endpoints in one batch. Resolving them one at
+        // a time descends from the root twice per span.
+        let surviving: Vec<(u8, &_)> = channel
+            .range(bounds)
+            .filter_map(|span| match class_table.class_of(span.style) {
+                0 => None,
+                class => Some((class, span)),
+            })
+            .collect();
+        let spans = {
+            let anchors: Vec<stoat_text::Anchor> = surviving
+                .iter()
+                .flat_map(|(_, span)| [span.range.start, span.range.end])
+                .collect();
+            let offsets = buffer_snap.resolve_anchors_batch(&anchors);
+            let points = rope.offsets_to_points_batch(&offsets);
+            offsets
+                .chunks_exact(2)
+                .zip(points.chunks_exact(2))
+                .map(|(offsets, points)| (offsets[0], offsets[1], points[0].row, points[1].row))
+                .collect::<Vec<_>>()
+        };
+
+        for (&(class, _), &(start, end, first_row, last_span_row)) in surviving.iter().zip(&spans) {
             if start >= end {
                 continue;
             }
 
-            let start_row = rope.offset_to_point(start).row.max(rows.start);
-            let end_row = rope.offset_to_point(end).row.min(last_row);
+            let start_row = first_row.max(rows.start);
+            let end_row = last_span_row.min(last_row);
             for row in start_row..=end_row {
-                let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
-                let line_end =
-                    rope.point_to_offset(stoat_text::Point::new(row, rope.line_len(row)));
+                let line_start = line_starts[(row - rows.start) as usize];
                 let s = start.max(line_start);
-                let e = end.min(line_end);
+                let e = end.min(line_end(row));
                 if s < e {
                     by_row
                         .entry(row)
@@ -1750,6 +1777,80 @@ mod tests {
             Some(0),
             "the toggle recolors line 0 monochrome, got {mono:?}"
         );
+    }
+
+    /// Several spans across several rows, including one that runs past a line
+    /// ending and one outside the asked-for range, so the bucketing has to clip
+    /// each piece to its own row and drop what the range does not reach.
+    #[test]
+    fn minimap_line_tokens_buckets_each_span_into_its_rows() {
+        use crate::display_map::highlights::SemanticTokenHighlight;
+        use std::sync::Arc;
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/minimap-buckets");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"aaaa\nbbbb\ncccc\ndddd\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let (editor_id, buffer_id) = {
+            let ids = h.stoat.focused_editor_ids().expect("editor");
+            (ids.0, ids.1)
+        };
+        let (style, interner) = first_scope_style(&h.stoat);
+        let class = h.stoat.minimap_class_table.class_of(style);
+        assert_ne!(class, 0, "the test style must map to a syntax class");
+
+        // Rows are five bytes each. One span covers the tail of row 0 through
+        // the head of row 2, one sits inside row 3, and one covers row 5, which
+        // the file does not reach.
+        let spans: Arc<[SemanticTokenHighlight]> = {
+            let shared = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer");
+            let snap = shared.read().expect("poisoned").snapshot.clone();
+            let at = |start: usize, end: usize| SemanticTokenHighlight {
+                range: snap.anchor_at(start, Bias::Right)..snap.anchor_at(end, Bias::Left),
+                style,
+            };
+            Arc::from(vec![at(2, 12), at(16, 18), at(25, 27)])
+        };
+        h.stoat.active_workspace_mut().editors[editor_id]
+            .display_map
+            .set_semantic_token_highlights(buffer_id, spans, interner);
+
+        let snapshot = h.stoat.active_workspace_mut().editors[editor_id]
+            .display_map
+            .snapshot();
+        let tokens = minimap_line_tokens(
+            &snapshot,
+            buffer_id,
+            h.stoat.syntax_highlight,
+            &h.stoat.minimap_class_table,
+            0..3,
+        );
+
+        let row = |row: u32| -> Vec<(usize, usize, u8)> {
+            tokens.get(&row).map_or_else(Vec::new, |line| {
+                line.iter()
+                    .map(|token| (token.range.start, token.range.end, token.class))
+                    .collect()
+            })
+        };
+        assert_eq!(row(0), vec![(2, 4, class)], "clipped to the line's own end");
+        assert_eq!(row(1), vec![(0, 4, class)], "the whole line between");
+        assert_eq!(
+            row(2),
+            vec![(0, 2, class)],
+            "clipped to where the span ends"
+        );
+        assert_eq!(row(3), Vec::new(), "outside the rows asked about");
+        assert_eq!(tokens.len(), 3, "and no other row carries anything");
     }
 
     /// A theme switch keeps the minimap's syntax highlighting.
