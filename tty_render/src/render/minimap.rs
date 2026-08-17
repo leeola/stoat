@@ -765,9 +765,9 @@ mod tests {
         pass.prepare(&device, &queue, &grid, &[], resolution);
         assert_eq!(pass.strips.len(), 1, "the declared strip builds one draw");
 
-        // set_minimaps outside projection does not bump the epoch, so a grid
-        // change the epoch does not reflect is skipped and the prior strips stay.
-        grid.set_minimaps(Vec::new());
+        // A change to something the epoch does not cover leaves the strips as
+        // they were, which is the skip this pass exists for.
+        grid.set_text_runs(Vec::new());
         pass.prepare(&device, &queue, &grid, &[], resolution);
         assert_eq!(
             pass.strips.len(),
@@ -775,9 +775,20 @@ mod tests {
             "an unchanged epoch skips the rebuild and keeps the prior strips"
         );
 
-        pass.prepare(&device, &queue, &grid, &[], [800.0, 600.0]);
+        // The grid bumps the epoch itself, so emptying the list outside a
+        // projection is a change this sees.
+        grid.set_minimaps(Vec::new());
+        pass.prepare(&device, &queue, &grid, &[], resolution);
         assert!(
             pass.strips.is_empty(),
+            "a moved epoch rebuilds against the current grid"
+        );
+
+        grid.set_minimaps(vec![strip(None)]);
+        pass.prepare(&device, &queue, &grid, &[], [800.0, 600.0]);
+        assert_eq!(
+            pass.strips.len(),
+            1,
             "a resolution change rebuilds the strips against the current grid"
         );
     }

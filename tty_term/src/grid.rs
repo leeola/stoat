@@ -119,12 +119,11 @@ impl Grid {
 
     /// Change counter for the minimap decorations, covering both the strip list
     /// and the line-summary content stores.
+    ///
+    /// Read like [`Self::popovers_epoch`], and maintained here for the same
+    /// reason.
     pub fn minimap_epoch(&self) -> u64 {
         self.minimap_epoch
-    }
-
-    pub(crate) fn bump_minimap_epoch(&mut self) {
-        self.minimap_epoch += 1;
     }
 
     pub fn rows(&self) -> usize {
@@ -212,8 +211,9 @@ impl Grid {
     ///
     /// Content is not preserved. The driver repopulates the grid afterward.
     ///
-    /// Moves [`Self::popovers_epoch`] and [`Self::text_runs_epoch`], since
-    /// dropping those lists is as much a change as replacing them.
+    /// Moves [`Self::popovers_epoch`], [`Self::text_runs_epoch`], and
+    /// [`Self::minimap_epoch`], since dropping those lists is as much a change
+    /// as replacing them.
     pub fn resize(&mut self, rows: usize, cols: usize) {
         self.rows = rows;
         self.cols = cols;
@@ -232,6 +232,7 @@ impl Grid {
 
         self.popovers_epoch += 1;
         self.text_runs_epoch += 1;
+        self.minimap_epoch += 1;
     }
 
     /// Reset every cell to [`Cell::default`] and drop all decorations, keeping
@@ -240,8 +241,7 @@ impl Grid {
     /// Unlike [`Self::resize`], the cell buffer is cleared in place rather than
     /// reallocated, so recycling a grid to hold new content allocates nothing.
     ///
-    /// Moves [`Self::popovers_epoch`] and [`Self::text_runs_epoch`], as
-    /// [`Self::resize`] does.
+    /// Moves the three decoration epochs, as [`Self::resize`] does.
     pub fn clear(&mut self) {
         self.cells.fill(Cell::default());
         self.border_table.clear();
@@ -257,6 +257,7 @@ impl Grid {
 
         self.popovers_epoch += 1;
         self.text_runs_epoch += 1;
+        self.minimap_epoch += 1;
     }
 
     /// The border set `id` names, or the borderless set for an id this grid
@@ -462,8 +463,11 @@ impl Grid {
 
     /// Replace the minimap list with `count` strips built by `minimap`, reusing the
     /// vector already there.
+    ///
+    /// Moves [`Self::minimap_epoch`].
     pub fn fill_minimaps(&mut self, count: usize, minimap: impl FnMut(usize) -> Minimap) {
         fill_owned(&mut self.minimaps, count, minimap);
+        self.minimap_epoch += 1;
     }
 
     /// Fill `list` with `count` items built from this grid, for a list already taken
@@ -635,13 +639,19 @@ impl Grid {
     }
 
     /// Replace the declared minimap strips.
+    ///
+    /// Moves [`Self::minimap_epoch`].
     pub fn set_minimaps(&mut self, minimaps: Vec<Minimap>) {
         self.minimaps = minimaps;
+        self.minimap_epoch += 1;
     }
 
     /// Replace the minimap line-summary stores.
+    ///
+    /// Moves [`Self::minimap_epoch`].
     pub fn set_minimap_contents(&mut self, contents: HashMap<u32, Vec<LineSummary>>) {
         self.minimap_contents = contents;
+        self.minimap_epoch += 1;
     }
 
     /// Splice `lines` into store `content_id`, replacing `removed` lines from
@@ -650,6 +660,10 @@ impl Grid {
     /// Replays one `minimap_lines` change against the grid's stores, which equal
     /// the term's as of the last projection, so this clamps exactly as the term's
     /// splice did.
+    ///
+    /// Moves [`Self::minimap_epoch`], so replaying a journal of several changes
+    /// moves it once per change. Only inequality is read, so that costs a
+    /// renderer nothing beyond the rebuild it was owed anyway.
     pub fn splice_minimap_content(
         &mut self,
         content_id: u32,
@@ -659,11 +673,15 @@ impl Grid {
     ) {
         let store = self.minimap_contents.entry(content_id).or_default();
         splice_summaries(store, start, removed, lines);
+        self.minimap_epoch += 1;
     }
 
     /// Remove the store under `content_id`, replaying a `minimap_drop`.
+    ///
+    /// Moves [`Self::minimap_epoch`], as [`Self::splice_minimap_content`] does.
     pub fn drop_minimap_content(&mut self, content_id: u32) {
         self.minimap_contents.remove(&content_id);
+        self.minimap_epoch += 1;
     }
 
     /// Replace the per-logical-line heights, in rows, indexed from the top.
@@ -1644,8 +1662,9 @@ impl BitOrAssign for Flags {
 #[cfg(test)]
 mod tests {
     use super::{
-        Bar, Border, BorderEdge, BorderId, BorderStyle, Borders, Cell, Flags, Grid, Icon, IconKind,
-        Overlay, PagePool, Rgb, Scale, ScrollRegion, TextRun,
+        Bar, Border, BorderEdge, BorderId, BorderStyle, Borders, Cell, Flags, Grid, HashMap, Icon,
+        IconKind, LineSummary, Minimap, MinimapRun, MinimapStrip, Overlay, PagePool, Rgb, Rgba,
+        Scale, ScrollRegion, TextRun,
     };
 
     /// The rows the slide vacates have to come back blank rather than holding
@@ -2012,6 +2031,35 @@ mod tests {
         }
     }
 
+    fn epoch_probe_minimap() -> Minimap {
+        Minimap {
+            strip: MinimapStrip {
+                top: 0,
+                left: 0,
+                width: 1,
+                height: 1,
+                strip_id: 1,
+                content_id: 7,
+                lines_per_cell: 1,
+                max_columns: 1,
+                bg: Rgba::new(0, 0, 0, 255),
+                thumb: Rgba::new(0, 0, 0, 255),
+                thumb_border: Rgb::new(0, 0, 0),
+                palette: Vec::new(),
+            },
+            seq: 0,
+            view: None,
+        }
+    }
+
+    fn epoch_probe_summary() -> LineSummary {
+        std::sync::Arc::from([MinimapRun {
+            start_col: 0,
+            len: 1,
+            class: 0,
+        }])
+    }
+
     fn epoch_probe_overlay() -> Overlay {
         Overlay {
             top: 0,
@@ -2062,6 +2110,35 @@ mod tests {
             ("resize", |g| g.resize(4, 4)),
             ("clear", |g| g.clear()),
         ];
+        let minimaps: [NamedChange; 7] = [
+            ("set_minimaps", |g| g.set_minimaps(vec![])),
+            ("fill_minimaps", |g| {
+                g.fill_minimaps(1, |_| epoch_probe_minimap())
+            }),
+            ("set_minimap_contents", |g| {
+                g.set_minimap_contents(HashMap::new())
+            }),
+            ("splice_minimap_content", |g| {
+                g.splice_minimap_content(7, 0, 0, &[epoch_probe_summary()])
+            }),
+            ("drop_minimap_content", |g| g.drop_minimap_content(7)),
+            ("resize", |g| g.resize(4, 4)),
+            ("clear", |g| g.clear()),
+        ];
+        for (name, change) in minimaps {
+            let mut grid = Grid::new(4, 4);
+            grid.set_minimaps(vec![epoch_probe_minimap()]);
+            grid.splice_minimap_content(7, 0, 0, &[epoch_probe_summary()]);
+
+            let before = grid.minimap_epoch();
+            change(&mut grid);
+
+            assert!(
+                grid.minimap_epoch() > before,
+                "{name} left minimap_epoch at {before}"
+            );
+        }
+
         for (name, change) in overlays {
             let mut grid = Grid::new(4, 4);
             grid.set_overlays(vec![epoch_probe_overlay()]);

@@ -2675,7 +2675,6 @@ impl Terminal {
         }
         if self.decorations_dirty.minimaps || resized {
             apply_minimaps(grid, &self.minimaps, &self.minimap_seq, &self.minimap_views);
-            grid.bump_minimap_epoch();
         }
         // A resize empties the grid's stores, so re-clone them wholesale and drop
         // the journal the clone subsumes. Otherwise replay only the splices and
@@ -2685,7 +2684,6 @@ impl Terminal {
         if resized {
             grid.set_minimap_contents(self.minimap_contents.clone());
             self.minimap_journal.clear();
-            grid.bump_minimap_epoch();
             self.minimap_content_dirty = false;
         } else if self.minimap_content_dirty {
             for change in self.minimap_journal.drain(..) {
@@ -2699,7 +2697,6 @@ impl Terminal {
                     MinimapJournal::Drop(content_id) => grid.drop_minimap_content(content_id),
                 }
             }
-            grid.bump_minimap_epoch();
             self.minimap_content_dirty = false;
         }
 
