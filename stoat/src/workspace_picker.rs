@@ -1,7 +1,6 @@
 use crate::{
-    fuzzy,
     input_view::InputView,
-    paths,
+    paths, picker,
     workspace::{registry::RegistryEntry, Workspace, WorkspaceId, WorkspaceUid},
 };
 use slotmap::SlotMap;
@@ -225,17 +224,13 @@ impl WorkspacePicker {
             .enumerate()
             .map(|(idx, haystack)| (idx, haystack.as_str()));
 
-        match fuzzy::match_and_rank(query, items) {
-            Some(mut matches) => {
-                matches.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.item.cmp(&b.item)));
-                self.filtered = matches.iter().map(|m| m.item).collect();
-                self.match_indices = matches.into_iter().map(|m| m.matched_indices).collect();
-            },
-            None => {
-                self.filtered = (0..self.entries.len()).collect();
-                self.match_indices = vec![Vec::new(); self.entries.len()];
-            },
-        }
+        picker::rank_into(
+            query,
+            items,
+            self.entries.len(),
+            &mut self.filtered,
+            &mut self.match_indices,
+        );
 
         self.clamp_selected();
     }
@@ -280,23 +275,23 @@ impl WorkspacePicker {
     }
 
     pub fn select_next(&mut self) {
-        crate::picker::nav_move(self.filtered.len(), &mut self.selected, 1);
+        picker::nav_move(self.filtered.len(), &mut self.selected, 1);
     }
 
     pub fn select_prev(&mut self) {
-        crate::picker::nav_move(self.filtered.len(), &mut self.selected, -1);
+        picker::nav_move(self.filtered.len(), &mut self.selected, -1);
     }
 
     /// Page the selection by half the rendered list height in `dir` (negative
     /// up, positive down). Falls back to a single row before the first render
     /// sets [`Self::viewport_rows`].
     pub(crate) fn page(&mut self, dir: i32) {
-        let step = dir * crate::picker::nav_page_step(self.viewport_rows);
-        crate::picker::nav_move(self.filtered.len(), &mut self.selected, step);
+        let step = dir * picker::nav_page_step(self.viewport_rows);
+        picker::nav_move(self.filtered.len(), &mut self.selected, step);
     }
 
     fn clamp_selected(&mut self) {
-        crate::picker::nav_clamp(self.filtered.len(), &mut self.selected);
+        picker::nav_clamp(self.filtered.len(), &mut self.selected);
     }
 
     /// How the per-row path column should render for this picker's entries.

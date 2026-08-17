@@ -6,7 +6,7 @@ use crate::{
     input_view::{InputView, SubmitTarget},
     pane::{FocusTarget, View},
     paths,
-    picker::{PathPicker, PreviewPolicy, Scan},
+    picker::{self, PathPicker, PreviewPolicy, Scan},
     rebase::RebasePause,
     workspace::Workspace,
 };
@@ -496,7 +496,7 @@ impl CommandPalette {
             availability,
             viewport_rows: None,
             arg_picker: None,
-            generation: crate::picker::next_generation(),
+            generation: picker::next_generation(),
             last_filter_key: 0,
             command_rows,
         }
@@ -659,7 +659,7 @@ impl CommandPalette {
             return;
         }
         self.last_filter_key = key;
-        self.generation = crate::picker::next_generation();
+        self.generation = picker::next_generation();
 
         self.command = parse_command(&text, &self.availability).map(|(entry, _)| entry);
         if self.command.is_some() {
@@ -913,9 +913,7 @@ pub(crate) fn refilter(
             filtered.push(entry);
             match_indices.push(Vec::new());
         }
-        if *selected >= filtered.len() {
-            *selected = filtered.len().saturating_sub(1);
-        }
+        picker::nav_clamp(filtered.len(), selected);
         return;
     };
 
@@ -959,9 +957,7 @@ pub(crate) fn refilter(
         match_indices.insert(0, indices);
     }
 
-    if *selected >= filtered.len() {
-        *selected = filtered.len().saturating_sub(1);
-    }
+    picker::nav_clamp(filtered.len(), selected);
 }
 
 #[cfg(test)]

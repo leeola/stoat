@@ -1,9 +1,9 @@
 use crate::{
     commit_graph::{self, GraphRow},
     commit_list::{PendingPreview, PreviewCache},
-    fuzzy,
     host::CommitInfo,
     input_view::{InputView, SubmitTarget},
+    picker,
     workspace::Workspace,
 };
 use std::{
@@ -477,36 +477,27 @@ impl CommitPicker {
             };
             (idx, text)
         });
+        picker::rank_into(
+            query,
+            items,
+            self.commits.len(),
+            &mut self.filtered,
+            &mut self.match_indices,
+        );
 
-        let (filtered, match_indices) = match fuzzy::match_and_rank(query, items) {
-            None => (
-                (0..self.commits.len()).collect(),
-                vec![Vec::new(); self.commits.len()],
-            ),
-            Some(mut matches) => {
-                fuzzy::sort_ranked(&mut matches);
-
-                let mut filtered = Vec::with_capacity(matches.len());
-                let mut match_indices = Vec::with_capacity(matches.len());
-                for m in matches {
-                    // A scoped query searches one cell, so the matcher reports
-                    // offsets into that cell rather than into the join.
-                    // Shifting them by the cell's own start puts them back in
-                    // join space, which is the only offset space the renderer
-                    // knows about.
-                    let shift = match column {
-                        Some(column) => self.rows[m.item].cells[column as usize].start as u32,
-                        None => 0,
-                    };
-                    match_indices.push(m.matched_indices.iter().map(|&i| i + shift).collect());
-                    filtered.push(m.item);
+        // A scoped query searches one cell, so the matcher reports offsets into
+        // that cell rather than into the join. Shifting them by the cell's own
+        // start puts them back in join space, which is the only offset space the
+        // renderer knows about.
+        if let Some(column) = column {
+            for (&row, indices) in self.filtered.iter().zip(self.match_indices.iter_mut()) {
+                let shift = self.rows[row].cells[column as usize].start as u32;
+                for index in indices.iter_mut() {
+                    *index += shift;
                 }
-                (filtered, match_indices)
-            },
-        };
+            }
+        }
 
-        self.filtered = filtered;
-        self.match_indices = match_indices;
         self.col_widest = measure_columns(&self.rows, &self.filtered);
         self.filter_generation = self.filter_generation.wrapping_add(1);
 
@@ -536,7 +527,7 @@ impl CommitPicker {
     /// Adjust the selection cursor by `delta`, saturating at list bounds.
     pub(crate) fn move_selection(&mut self, delta: i32) {
         let mut next = self.selected;
-        crate::picker::nav_move(self.filtered.len(), &mut next, delta);
+        picker::nav_move(self.filtered.len(), &mut next, delta);
         self.set_selected(next);
     }
 
@@ -558,7 +549,7 @@ impl CommitPicker {
     /// up, positive down). Falls back to a single row before the first render
     /// sets [`Self::viewport_rows`].
     pub(crate) fn page(&mut self, dir: i32) {
-        self.move_selection(dir * crate::picker::nav_page_step(self.viewport_rows));
+        self.move_selection(dir * picker::nav_page_step(self.viewport_rows));
     }
 
     /// Jump the selection to the nearest branch tip in `dir` (negative up the
@@ -637,7 +628,7 @@ impl CommitPicker {
 
     fn clamp_selected(&mut self) {
         let mut next = self.selected;
-        crate::picker::nav_clamp(self.filtered.len(), &mut next);
+        picker::nav_clamp(self.filtered.len(), &mut next);
         self.set_selected(next);
     }
 }

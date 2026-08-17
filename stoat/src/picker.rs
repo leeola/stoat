@@ -83,6 +83,45 @@ pub(crate) fn nav_clamp(len: usize, selected: &mut usize) {
     }
 }
 
+/// Rank `items` for `query` into the parallel `filtered` and `match_indices`
+/// vectors every modal list paints from.
+///
+/// `items` pairs each candidate's index with the text the query matches
+/// against. `filtered` comes back holding the indices that matched, best first,
+/// and `match_indices` the matched character offsets into each one's haystack.
+/// Both are cleared first.
+///
+/// A query with no usable atoms is not a filter at all, so every candidate is
+/// listed in index order with no highlights, which is what an empty input box
+/// shows. `len` is how many there are, since an empty query never walks
+/// `items`.
+///
+/// Ties break alphabetically by haystack, through [`fuzzy::sort_ranked`].
+pub(crate) fn rank_into<'a>(
+    query: &str,
+    items: impl IntoIterator<Item = (usize, &'a str)>,
+    len: usize,
+    filtered: &mut Vec<usize>,
+    match_indices: &mut Vec<Vec<u32>>,
+) {
+    filtered.clear();
+    match_indices.clear();
+
+    let Some(mut matches) = fuzzy::match_and_rank(query, items) else {
+        filtered.extend(0..len);
+        match_indices.resize(len, Vec::new());
+        return;
+    };
+
+    fuzzy::sort_ranked(&mut matches);
+    filtered.reserve(matches.len());
+    match_indices.reserve(matches.len());
+    for m in matches {
+        filtered.push(m.item);
+        match_indices.push(m.matched_indices);
+    }
+}
+
 /// Query-driven fuzzy result list over a fixed `base` set of paths, decoupled
 /// from any input widget.
 ///

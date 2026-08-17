@@ -1,11 +1,10 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
-    fuzzy,
     host::OffsetEncoding,
     input_view::{InputView, SubmitTarget},
     markdown::StyledLine,
-    picker::{Preview, PreviewSource},
+    picker::{self, Preview, PreviewSource},
     theme::Theme,
     workspace::Workspace,
 };
@@ -220,14 +219,14 @@ impl SymbolFinder {
 
     /// Adjust the selection cursor by `delta`, saturating at list bounds.
     pub(crate) fn move_selection(&mut self, delta: i32) {
-        crate::picker::nav_move(self.filtered.len(), &mut self.selected, delta);
+        picker::nav_move(self.filtered.len(), &mut self.selected, delta);
     }
 
     /// Page the selection by half the rendered list height in `dir` (negative
     /// up, positive down). Falls back to a single row before the first render
     /// sets [`Self::viewport_rows`].
     pub(crate) fn page(&mut self, dir: i32) {
-        self.move_selection(dir * crate::picker::nav_page_step(self.viewport_rows));
+        self.move_selection(dir * picker::nav_page_step(self.viewport_rows));
     }
 
     /// The entry under the selection cursor, or `None` for an empty list.
@@ -269,7 +268,7 @@ impl SymbolFinder {
     }
 
     fn clamp_selected(&mut self) {
-        crate::picker::nav_clamp(self.filtered.len(), &mut self.selected);
+        picker::nav_clamp(self.filtered.len(), &mut self.selected);
     }
 }
 
@@ -282,19 +281,16 @@ fn rank_entries(entries: &[SymbolFinderEntry], query: &str) -> (Vec<usize>, Vec<
         .iter()
         .enumerate()
         .map(|(idx, entry)| (idx, entry.title.as_str()));
-    let Some(mut matches) = fuzzy::match_and_rank(query, items) else {
-        return (
-            (0..entries.len()).collect(),
-            vec![Vec::new(); entries.len()],
-        );
-    };
-    fuzzy::sort_ranked(&mut matches);
-    let mut filtered = Vec::with_capacity(matches.len());
-    let mut match_indices = Vec::with_capacity(matches.len());
-    for m in matches {
-        filtered.push(m.item);
-        match_indices.push(m.matched_indices);
-    }
+
+    let mut filtered = Vec::new();
+    let mut match_indices = Vec::new();
+    picker::rank_into(
+        query,
+        items,
+        entries.len(),
+        &mut filtered,
+        &mut match_indices,
+    );
     (filtered, match_indices)
 }
 
