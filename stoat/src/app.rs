@@ -1373,7 +1373,7 @@ pub struct Stoat {
     pub(crate) diff_cache: Arc<std::sync::Mutex<crate::diff_cache::DiffCache>>,
     /// Memoized tree-sitter parses of git-base texts, so the diff view's
     /// syntax-highlighted left column parses each base once across edits.
-    pub(crate) base_highlights_cache: crate::workspace::BaseHighlightCache,
+    pub(crate) base_highlights_cache: crate::workspace::diff::BaseHighlightCache,
     /// Memoized tree-sitter parses of git-base texts for the structural diff,
     /// so the per-file warm that re-runs on every debounced edit parses that
     /// file's unchanged HEAD text once rather than per edit.
@@ -2082,7 +2082,7 @@ impl Stoat {
                 256,
             ))),
             base_highlights_cache: Arc::new(std::sync::Mutex::new(
-                crate::workspace::BaseHighlightMemo::default(),
+                crate::workspace::diff::BaseHighlightMemo::default(),
             )),
             diff_tree_cache: stoat_language::structural_diff::TreeCache::default(),
             lsp_progress: crate::lsp::progress::LspProgressMap::new(),

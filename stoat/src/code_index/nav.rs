@@ -12,7 +12,10 @@ use crate::{
     editor_state::EditorState,
     nav_list::NavList,
     symbol_finder::{SymbolEntry, SymbolPicker},
-    workspace::{self, ChangedRangesScan, Workspace},
+    workspace::{
+        diff::{scan_changed_ranges, ChangedRangesScan},
+        Workspace,
+    },
 };
 use codegraph::{Dir, EdgeKind, SymbolKey};
 use std::{path::Path, sync::mpsc};
@@ -131,8 +134,7 @@ fn goto_nearest_diff(stoat: &mut Stoat, dir: Dir) -> UpdateEffect {
     let (tx, rx) = mpsc::channel();
 
     let task = stoat.executor.spawn_blocking(move || {
-        let scan =
-            workspace::scan_changed_ranges(git.as_ref(), fs.as_ref(), &langs, &git_root, &memo);
+        let scan = scan_changed_ranges(git.as_ref(), fs.as_ref(), &langs, &git_root, &memo);
         let _ = tx.send(scan);
         redraw.notify_one();
     });

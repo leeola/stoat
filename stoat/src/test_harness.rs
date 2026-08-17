@@ -634,7 +634,7 @@ impl TestHarness {
         // drive only opens that window. The clock has to clear it before the
         // drive that spawns the job.
         self.stoat.drive_background();
-        self.advance_clock(crate::workspace::DIFF_SETTLE + Duration::from_millis(1));
+        self.advance_clock(crate::workspace::diff::DIFF_SETTLE + Duration::from_millis(1));
         for _ in 0..2 {
             self.stoat.drive_background();
             self.settle();
