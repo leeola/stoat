@@ -858,14 +858,21 @@ fn insert_with_indent(stoat: &mut Stoat, fallback: IndentFallback) -> UpdateEffe
     }
 
     // Every inserted indent before an offset pushes it further right in the
-    // edited buffer.
-    let shift_before = |off: usize| -> usize {
-        inserts
-            .iter()
-            .filter(|ins| ins.at < off)
-            .map(|ins| ins.indent.len())
-            .sum()
+    // edited buffer. Summed once over the whole list rather than per query,
+    // which every cursor and every plan makes one of.
+    let inserted_before: Vec<usize> = {
+        let mut running = 0;
+        std::iter::once(0)
+            .chain(inserts.iter().map(|ins| {
+                running += ins.indent.len();
+                running
+            }))
+            .collect()
     };
+    // The insertions are in offset order, so the count of those ahead of an
+    // offset indexes the running total directly.
+    let shift_before =
+        |off: usize| -> usize { inserted_before[inserts.partition_point(|ins| ins.at < off)] };
 
     let mut landings: std::collections::HashMap<usize, (usize, bool)> =
         std::collections::HashMap::new();

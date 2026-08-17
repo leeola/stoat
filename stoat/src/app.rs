@@ -15640,6 +15640,31 @@ mod tests {
         assert_eq!(focused_buffer_string(&h), "fn a() {\n\tx\n}\n");
     }
 
+    /// Each cursor lands past every indent inserted ahead of it, not only its
+    /// own. The two blank lines sit at different depths so their indents differ
+    /// in length, and the line between them takes the non-blank path, whose
+    /// landing shifts by the insert above it.
+    #[test]
+    fn shift_i_at_nested_blank_lines_lands_each_past_the_indents_ahead() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"fn a() {\n\n\tif b {\n\n\t}\n}\n");
+        h.type_keys("j");
+        h.type_keys("2 C");
+        assert_eq!(
+            h.selection_spans().len(),
+            3,
+            "a cursor on each of three rows"
+        );
+
+        h.type_keys("I");
+        h.type_text("x");
+        assert_eq!(
+            focused_buffer_string(&h),
+            "fn a() {\n\tx\n\txif b {\n\t\tx\n\t}\n}\n",
+            "every cursor types where it landed, none inside another's indent",
+        );
+    }
+
     #[test]
     fn shift_i_on_whitespace_line_falls_back_to_line_start() {
         let mut h = Stoat::test();
