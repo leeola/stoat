@@ -17,7 +17,10 @@ use crate::{
     code_index::build::file_id,
     diff::{self, ReviewFileInput},
     diff_cache::ContentHash,
-    diff_map::{changes_to_hunks, line_starts, BaseHighlights, DiffMap},
+    diff_map::{
+        changes_to_hunks, line_starts, ranges_overlap, BaseHighlights, DiffHunk, DiffHunkStatus,
+        DiffMap,
+    },
     display_map::syntax_theme::SyntaxStyles,
     host::{FsHost, GitHost},
 };
@@ -554,12 +557,35 @@ pub(super) fn compute_diff_map(
             .collect()
     };
 
-    let mut diff_map = DiffMap::from_structural_changes_staged(
-        result,
-        base.head.clone(),
-        buffer_text,
-        &index_changed,
-    );
+    // A whole-file removal is one change, not one per item the differ found
+    // inside it. Left to the structural pass, a file holding two functions
+    // tallies as two removals in the statusline.
+    let mut diff_map = if buffer_removed(buffer_text) && !base_text.is_empty() {
+        let anchor = 0..0;
+        let unstaged_lines = match index_changed.iter().any(|c| ranges_overlap(c, &anchor)) {
+            true => vec![anchor.clone()],
+            false => Vec::new(),
+        };
+        DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Deleted,
+                buffer_start_line: 0,
+                buffer_line_range: anchor,
+                base_byte_range: 0..base_text.len(),
+                anchor_range: None,
+                token_detail: None,
+                unstaged_lines,
+            }],
+            Some(base.head.clone()),
+        )
+    } else {
+        DiffMap::from_structural_changes_staged(
+            result,
+            base.head.clone(),
+            buffer_text,
+            &index_changed,
+        )
+    };
     if let Some(language) = language {
         diff_map.set_base_highlights(compute_base_highlights(
             base_text,
@@ -569,6 +595,17 @@ pub(super) fn compute_diff_map(
         ));
     }
     Some((diff_map, base.clone()))
+}
+
+/// Whether `buffer_text` stands for a file that is no longer in the working
+/// tree.
+///
+/// A removed file still opens. The read misses and the open path substitutes a
+/// lone newline, so the buffer holds `"\n"` rather than nothing. A test for an
+/// empty string alone therefore misses every real removal and catches only a
+/// file that exists holding zero bytes.
+fn buffer_removed(buffer_text: &str) -> bool {
+    buffer_text.is_empty() || buffer_text == "\n"
 }
 
 /// Highlight `base_text` for the diff view's left column, per base line.
@@ -757,8 +794,9 @@ mod tests {
         DIFF_SETTLE,
     };
     use crate::{
-        buffer::BufferId, display_map::syntax_theme::SyntaxStyles, host::DiffStatus, pane::View,
-        review::ReviewFileInput, test_harness::TestHarness, theme::Theme, workspace::Workspace,
+        buffer::BufferId, diff_map::DiffHunkStatus, display_map::syntax_theme::SyntaxStyles,
+        host::DiffStatus, pane::View, review::ReviewFileInput, test_harness::TestHarness,
+        theme::Theme, workspace::Workspace,
     };
     use std::{
         path::{Path, PathBuf},
@@ -1309,6 +1347,59 @@ mod tests {
         assert!(
             !diff_view_on(&mut h),
             "and a later modified file stays plain"
+        );
+    }
+
+    /// A file present in HEAD but gone from the working tree diffed into one
+    /// hunk per run of removed lines, so a file whose content came in two
+    /// blocks tallied as two removals in the statusline. A removed file is one
+    /// removal.
+    ///
+    /// The file is seeded into HEAD alone, with nothing written to the fake fs,
+    /// because that absence is what makes the open substitute a lone newline
+    /// and the diff read as a removal.
+    #[test]
+    fn a_removed_file_is_one_deleted_hunk() {
+        let head = "fn one() {}\n\nfn two() {}\n";
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        {
+            let mut builder = h.fake_git().add_repo("/repo").with_fs(h.fake_fs());
+            builder.head_file("gone.rs", head);
+        }
+        h.open_file(Path::new("/repo/gone.rs"));
+
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        let git_host = h.stoat.git_host.clone();
+        let language_registry = h.stoat.language_registry.clone();
+        let syntax_styles = h.stoat.syntax_styles.clone();
+        let base_cache = h.stoat.base_highlights_cache.clone();
+        h.stoat.active_workspace_mut().install_diff_map_now(
+            &git_host,
+            &language_registry,
+            &syntax_styles,
+            &base_cache,
+            buffer_id,
+        );
+
+        let ws = h.stoat.active_workspace();
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        let dm = guard.diff_map.as_ref().expect("diff map populated");
+
+        // Read through hunks() rather than a range query: a removal occupies no
+        // buffer rows, so the zero-width hunk is invisible to hunks_in_range.
+        assert_eq!(
+            dm.hunks()
+                .map(|h| (h.status, h.base_byte_range.clone()))
+                .collect::<Vec<_>>(),
+            vec![(DiffHunkStatus::Deleted, 0..head.len())],
+            "the removal is one hunk spanning the whole base"
+        );
+        assert_eq!(
+            dm.staged_counts(),
+            (0, 1),
+            "and the statusline tallies it as a single unstaged change"
         );
     }
 
