@@ -1,5 +1,5 @@
 use super::TEXT_SCALE_POPUP;
-use crate::{app::Stoat, editor_state::EditorId};
+use crate::{app::Stoat, editor_state::EditorId, pane::View};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -26,7 +26,9 @@ pub(crate) struct HoverSelection {
 /// Hover popup state ready to paint. Mirrors [`HoverResponse`] but
 /// lives on [`Stoat::pending_hover`] (separate from the in-flight
 /// task slot) so the renderer can borrow it without polling.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// `Eq` is absent because [`Self::anchor`] carries a fractional row offset and
+// `f32` is only `PartialEq`.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct HoverPopup {
     /// Rendered content, one line per entry, each a list of styled spans.
     pub(crate) lines: Vec<Vec<(String, Style)>>,
@@ -47,6 +49,14 @@ pub(crate) struct HoverPopup {
     /// [`render_hover`]. The selection hit-test maps a
     /// pointer through this. Empty until the first render.
     pub(crate) inner: Rect,
+    /// The pane pool this popup rides and the document top row its layout was
+    /// laid against, stamped by [`render_hover`] alongside the rects.
+    ///
+    /// `None` while the popup overflows the pane's pool region. A shifted draw
+    /// of an overflowing popup leaves a stale copy over the neighbour or the
+    /// status bar, which no composite repaints mid-glide, so that case keeps the
+    /// unanchored behavior of holding still until the scroll settles.
+    pub(crate) anchor: Option<(u32, f32)>,
     /// The live mouse selection over the body, if any.
     pub(crate) selection: Option<HoverSelection>,
     /// Content-version stamp for the hover pool, from the shared generation
@@ -81,6 +91,7 @@ impl HoverPopup {
             lines,
             anchor_offset,
             editor_id,
+            anchor: None,
             scroll_half_pages: 0,
             area: Rect::default(),
             inner: Rect::default(),
@@ -128,15 +139,23 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
+    let run_bg = crate::render::paint::style_rgb(
+        stoat
+            .theme
+            .try_get(crate::theme::scope::UI_BACKGROUND)
+            .and_then(|s| s.bg),
+    );
+    let anchor = host_anchor(stoat, popup_area);
 
     crate::render::clear_themed(popup_area, buf, &stoat.theme);
-    let inner = crate::render::chrome::modal_frame(
+    let inner = crate::render::chrome::modal_frame_anchored(
         buf,
         popup_area,
-        None,
         modal_style,
         &stoat.theme,
         &mut *scene,
+        anchor,
+        run_bg,
     );
 
     // Clamp the half-page scroll to the content that overflows the interior, then
@@ -156,6 +175,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
         open.scroll_half_pages = scroll / half_page;
         open.area = popup_area;
         open.inner = inner;
+        open.anchor = anchor;
     }
 
     // A span's style is a delta over the modal base, so a plain span keeps the
@@ -391,6 +411,38 @@ pub(crate) fn hover_selected_text(popup: &HoverPopup) -> String {
     out.push('\n');
     out.extend(logical(end.0).chars().take(end.1));
     out
+}
+
+/// The focused pane's pool id and current top row, when `popup_area` sits
+/// wholly inside that pane's pool region.
+///
+/// The region is derived the same way [`crate::apc_emit::editor_pool_panes`]
+/// derives it, minimap strip excluded, because the anchor only means anything
+/// against the region the terminal actually composites. `None` for a popup that
+/// overflows it, which is what keeps a stale copy off the surfaces around the
+/// pane.
+fn host_anchor(stoat: &Stoat, popup_area: Rect) -> Option<(u32, f32)> {
+    let ws = stoat.active_workspace();
+    let pane = ws.panes.pane(ws.panes.focus());
+    let View::Editor(editor_id) = pane.view else {
+        return None;
+    };
+    let editor = ws.editors.get(editor_id)?;
+
+    let (content, _) = crate::render::layout::split_pane_status(pane.area);
+    let strip_cols = editor.minimap_rect.map_or(0, |rect| rect.width);
+    let region = Rect {
+        width: content.width.saturating_sub(strip_cols),
+        ..content
+    };
+
+    let inside = popup_area.x >= region.x
+        && popup_area.y >= region.y
+        && popup_area.x + popup_area.width <= region.x + region.width
+        && popup_area.y + popup_area.height <= region.y + region.height;
+
+    (inside && region.width > 0 && region.height > 0)
+        .then_some((pane.index, editor.scroll_row as f32))
 }
 
 /// Compute the hover popup's screen rect and its interior rect.

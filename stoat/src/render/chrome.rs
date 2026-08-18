@@ -149,6 +149,48 @@ pub(crate) fn modal_frame_above_pools(
     modal_frame_inner(buf, area, title, style, theme, scene, true)
 }
 
+/// Draw a modal frame that rides a gliding pool, otherwise identical to
+/// [`modal_frame`].
+///
+/// `anchor` names the host pool and the document top row this layout assumed,
+/// so the terminal carries the frame along with the text beneath it instead of
+/// leaving it parked until the scroll settles. `fill` paints the interior
+/// opaque, which an anchored frame needs: the shifted draw exposes cells the
+/// base pass wrote for a different scroll, and an unfilled box shows them.
+///
+/// Falls back to [`modal_frame`] when there is no anchor, or when the scene is
+/// dead and only the degraded cell border is drawn.
+pub(crate) fn modal_frame_anchored(
+    buf: &mut Buffer,
+    area: Rect,
+    style: Style,
+    theme: &Theme,
+    scene: &mut ApcScene,
+    anchor: Option<(u32, f32)>,
+    fill: Option<[u8; 3]>,
+) -> Rect {
+    let Some(anchor) = anchor.filter(|_| scene.live()) else {
+        return modal_frame(buf, area, None, style, theme, scene);
+    };
+    let Some(border) = style_rgb(style.fg) else {
+        return modal_frame(buf, area, None, style, theme, scene);
+    };
+
+    Panel {
+        style: BorderStyle::Rounded,
+        border,
+        corner_radius: 6,
+        fill,
+        shadow: PanelShadow::Drop,
+        inset_x: 0,
+        above_pools: true,
+        anchor: Some(anchor),
+    }
+    .draw_components(area, scene);
+
+    Block::default().borders(Borders::ALL).inner(area)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn modal_frame_inner(
     buf: &mut Buffer,

@@ -33,7 +33,7 @@ use stoat_widgets::{
     pool::{self, MinimapWindowInputs},
     ApcScene,
 };
-use stoatty_protocol::command::PoolRegionCommand;
+use stoatty_protocol::command::{PoolAnchorCommand, PoolRegionCommand};
 
 /// Flush the frame's APC decoration scene to the channel, when it changed.
 ///
@@ -623,8 +623,24 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .as_ref()
         .and_then(|p| p.selection.as_ref())
         .is_some();
+    // Mid-glide the popup's own layout is frozen at the rect the last live frame
+    // stamped. Re-laying it against the jumped-ahead scroll target is what parts
+    // the body from the frame. The frame rides the anchor while the body jumps
+    // to where the target lands.
+    let hover_frozen = stoat
+        .pending_hover
+        .as_ref()
+        .filter(|popup| popup.area.width > 0 && popup.area.height > 0)
+        .filter(|popup| {
+            stoat
+                .active_workspace()
+                .editors
+                .get(popup.editor_id)
+                .is_some_and(|editor| editor.scroll_glide != ScrollGlide::None)
+        })
+        .map(|popup| (popup.area, popup.inner));
     let hover_layout = (!overlay && !hover_selected)
-        .then(|| crate::render::hover::hover_popup_layout(stoat))
+        .then(|| hover_frozen.or_else(|| crate::render::hover::hover_popup_layout(stoat)))
         .flatten();
 
     let mut out = Vec::new();
@@ -1407,6 +1423,19 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 )
             },
         );
+
+        // Ships after the region so the terminal has the pool before it is told
+        // what that pool rides.
+        if let Some((host, top_rows)) = popup.anchor {
+            stoatty_protocol::command::encode_pool_anchor_into(
+                &mut out,
+                &PoolAnchorCommand {
+                    pool: crate::smooth_scroll::non_pane_pool::HOVER,
+                    host,
+                    top_rows,
+                },
+            );
+        }
     }
 
     emit_window_content(stoat, &mut out);
@@ -2155,6 +2184,146 @@ mod tests {
                 Command::PoolDrop(d) if d.pool == crate::smooth_scroll::non_pane_pool::HOVER
             )),
             "a live selection retires the pool so the live frame owns it, got {dropped:?}",
+        );
+    }
+
+    /// A hover harness with the popup open and rendered once, so the stamped
+    /// rects and anchor are what a live frame left behind.
+    fn hover_harness() -> (
+        crate::test_harness::TestHarness,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+        EditorId,
+    ) {
+        use crate::render::hover::HoverPopup;
+        use ratatui::style::Style;
+
+        let mut h = Stoat::test();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        let root = PathBuf::from("/pool");
+        let path = root.join("a.txt");
+        h.fake_fs()
+            .insert_file(&path, b"alpha\nbravo\ncharlie\ndelta\necho\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
+        h.stoat.pending_hover = Some(HoverPopup::new(
+            vec![vec![("hovered".to_string(), Style::default())]],
+            0,
+            editor_id,
+        ));
+        h.snapshot();
+        (h, rx, editor_id)
+    }
+
+    #[test]
+    fn a_hover_inside_its_pane_ships_the_pool_anchor() {
+        use stoatty_protocol::command::Command;
+
+        let (mut h, mut rx, _) = hover_harness();
+        let stamped = h
+            .stoat
+            .pending_hover
+            .as_ref()
+            .expect("popup")
+            .anchor
+            .expect("a popup inside the pane stamps an anchor");
+
+        emit_smooth_scroll(&mut h.stoat);
+        let batch = drain_apc(&mut rx);
+
+        assert!(
+            batch.iter().any(|cmd| matches!(
+                cmd,
+                Command::PoolAnchor(a)
+                    if a.pool == crate::smooth_scroll::non_pane_pool::HOVER
+                        && (a.host, a.top_rows) == stamped
+            )),
+            "the hover pool names the pane it rides, got {batch:?}"
+        );
+    }
+
+    #[test]
+    fn a_hover_overflowing_its_pane_ships_no_anchor() {
+        use crate::render::hover::HoverPopup;
+        use ratatui::style::Style;
+        use stoatty_protocol::command::Command;
+
+        let (mut h, mut rx, _) = hover_harness();
+        // The popup is window-bounded, not pane-bounded, so a line wider than
+        // half the terminal overflows a vertically split pane into its
+        // neighbour. That is the case the anchor has to decline.
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
+        h.stoat.pending_hover = Some(HoverPopup::new(
+            vec![vec![("w".repeat(70), Style::default())]],
+            0,
+            editor_id,
+        ));
+        h.snapshot();
+
+        assert_eq!(
+            h.stoat.pending_hover.as_ref().expect("popup").anchor,
+            None,
+            "a popup past the pane's region stamps no anchor"
+        );
+
+        emit_smooth_scroll(&mut h.stoat);
+        let batch = drain_apc(&mut rx);
+        assert!(
+            !batch
+                .iter()
+                .any(|cmd| matches!(cmd, Command::PoolAnchor(_))),
+            "and nothing tells the terminal to ride it, got {batch:?}"
+        );
+    }
+
+    #[test]
+    fn a_gliding_pane_freezes_the_hover_region_at_the_stamped_rect() {
+        use stoatty_protocol::command::Command;
+
+        let (mut h, mut rx, editor_id) = hover_harness();
+        let stamped = h.stoat.pending_hover.as_ref().expect("popup").inner;
+
+        // Arm a glide and jump the scroll target past where the popup was laid
+        // out. Re-laying against that target is exactly what the freeze avoids.
+        {
+            let editor = h
+                .stoat
+                .active_workspace_mut()
+                .editors
+                .get_mut(editor_id)
+                .expect("editor");
+            editor.scroll_glide = ScrollGlide::Wheel;
+            editor.scroll_row = 2;
+        }
+
+        emit_smooth_scroll(&mut h.stoat);
+        let batch = drain_apc(&mut rx);
+
+        let region = batch
+            .iter()
+            .find_map(|cmd| match cmd {
+                Command::PoolRegion(r) if r.pool == crate::smooth_scroll::non_pane_pool::HOVER => {
+                    Some(*r)
+                },
+                _ => None,
+            })
+            .expect("the hover pool stays declared through the glide");
+
+        assert_eq!(
+            (region.top, region.left, region.width, region.height),
+            (stamped.y, stamped.x, stamped.width, stamped.height),
+            "the region holds the rect the live frame stamped"
+        );
+        assert!(
+            !batch.iter().any(|cmd| matches!(
+                cmd,
+                Command::PoolDrop(d) if d.pool == crate::smooth_scroll::non_pane_pool::HOVER
+            )),
+            "and the pool stays in the active set, got {batch:?}"
         );
     }
 
