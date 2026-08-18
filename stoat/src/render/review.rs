@@ -53,6 +53,14 @@ const STAGED_LINE_TINT: f32 = 0.95;
 /// like [`STAGED_LINE_TINT`].
 const STAGED_SPAN_TINT: f32 = 0.86;
 
+/// Fraction an unchanged row's token foregrounds blend toward the editor
+/// background, leaving 60% of the syntax color.
+///
+/// The washes carry all of the emphasis while every row paints its palette at
+/// full strength, so the context competes with the change it surrounds.
+/// Receding the context inverts that, and the eye lands on the changed rows.
+const CONTEXT_SOFTEN: f32 = 0.40;
+
 pub(crate) fn render_review(
     editor: &mut EditorState,
     inner: Rect,
@@ -540,6 +548,7 @@ pub(crate) fn paint_diff_rows(
                     changes,
                     side.map(|c| c.removed_span),
                     side.map(|c| c.moved_span),
+                    None,
                 );
                 if let Some(staged) = staged {
                     let change_scope =
@@ -576,6 +585,10 @@ pub(crate) fn paint_diff_rows(
                 let staged = row_state.staged;
                 let status = row_state.status;
                 let side = tints.as_ref().map(|t| t.side(staged.unwrap_or(false)));
+                let soften_row = match status {
+                    DiffStatus::Unchanged => tints.as_ref().map(|t| t.bg),
+                    _ => None,
+                };
                 if let Some(side) = side {
                     let line_tint = match status {
                         DiffStatus::Added | DiffStatus::Modified => Some(side.added_line),
@@ -598,6 +611,7 @@ pub(crate) fn paint_diff_rows(
                     changes,
                     side.map(|c| c.added_span),
                     side.map(|c| c.moved_span),
+                    soften_row,
                     &mut row_cursor,
                 );
                 if status == DiffStatus::Moved
@@ -663,6 +677,7 @@ pub(crate) fn paint_diff_rows(
                         &[],
                         None,
                         None,
+                        soften_row,
                     );
                     base_line += 1;
                 }
@@ -696,7 +711,12 @@ pub(crate) fn paint_diff_rows(
 /// The washes come in a staged set and an unstaged set. Staged content recedes
 /// an extra step toward the background so it reads as fading into the index
 /// while unstaged changes stay vivid. Select a set for a row with [`Self::side`].
+///
+/// `bg` is the editor background every wash blends toward. It rides along so
+/// foreground softening ([`soften_style`]) shares this type's RGB gate instead
+/// of resolving the background a second time.
 struct DiffTints {
+    bg: [u8; 3],
     unstaged: ChangeTints,
     staged: ChangeTints,
 }
@@ -747,6 +767,7 @@ fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTints> {
         moved_span: dim_rgb(moved, bg, span),
     };
     Some(DiffTints {
+        bg,
         unstaged: set(LINE_TINT, SPAN_TINT),
         staged: set(STAGED_LINE_TINT, STAGED_SPAN_TINT),
     })
@@ -772,6 +793,24 @@ fn apply_span_tint(
     }
 }
 
+/// Recede `style` by blending its foreground toward `bg` by `amount` and
+/// dropping bold.
+///
+/// A non-RGB foreground comes back unblended, because there is no channel to
+/// interpolate. Bold goes regardless. Weight pulls the eye as hard as color, so
+/// a softened run that keeps its bold still competes with the changed content
+/// it sits behind.
+fn soften_style(style: Style, bg: [u8; 3], amount: f32) -> Style {
+    let style = match style_rgb(style.fg) {
+        Some(fg) => {
+            let [r, g, b] = dim_rgb(fg, bg, amount);
+            style.fg(Color::Rgb(r, g, b))
+        },
+        None => style,
+    };
+    style.remove_modifier(Modifier::BOLD)
+}
+
 /// Paint base text with per-token syntax styles for the diff view's left
 /// column.
 ///
@@ -784,6 +823,10 @@ fn apply_span_tint(
 /// the span wash as its background. A replaced span takes `side_span_tint` (the
 /// removed color on this base side) and a moved span takes `moved_span_tint`. A
 /// `None` tint (a non-RGB theme) falls back to [`Modifier::UNDERLINED`].
+///
+/// `soften_row` recedes the whole row behind the changed rows around it, by
+/// blending every foreground toward the given background per [`soften_style`].
+/// Pass the editor background for an unchanged row and `None` for a changed one.
 #[allow(clippy::too_many_arguments)]
 fn paint_base_row(
     buf: &mut Buffer,
@@ -796,6 +839,7 @@ fn paint_base_row(
     change_spans: &[(std::ops::Range<usize>, ChangeKind)],
     side_span_tint: Option<[u8; 3]>,
     moved_span_tint: Option<[u8; 3]>,
+    soften_row: Option<[u8; 3]>,
 ) {
     debug_assert!(
         token_spans.is_sorted_by_key(|(range, _)| range.start),
@@ -819,6 +863,9 @@ fn paint_base_row(
             Some((range, hs)) if range.start <= byte_idx => hs.to_ratatui_style(),
             _ => fallback,
         };
+        if let Some(bg) = soften_row {
+            style = soften_style(style, bg, CONTEXT_SOFTEN);
+        }
 
         while change_spans
             .get(span_cursor)
@@ -892,6 +939,10 @@ fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
 /// `moved_span_tint`; a `None` tint (a non-RGB theme) falls back to
 /// [`Modifier::UNDERLINED`]. Columns, not byte offsets, are used because the
 /// chunks expand tabs, so the counter tracks display cells.
+///
+/// `soften_row` recedes the whole row behind the changed rows around it, by
+/// blending every foreground toward the given background per [`soften_style`].
+/// Pass the editor background for an unchanged row and `None` for a changed one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_highlighted_row(
     snapshot: &DisplaySnapshot,
@@ -905,6 +956,7 @@ pub(crate) fn paint_highlighted_row(
     change_spans: &[(std::ops::Range<usize>, ChangeKind)],
     side_span_tint: Option<[u8; 3]>,
     moved_span_tint: Option<[u8; 3]>,
+    soften_row: Option<[u8; 3]>,
     row_cursor: &mut RowHighlightCursor,
 ) {
     debug_assert!(
@@ -924,6 +976,11 @@ pub(crate) fn paint_highlighted_row(
                 .map(|hs| hs.to_ratatui_style())
                 .unwrap_or(fallback_style)
         };
+        let style = match soften_row {
+            Some(bg) => soften_style(style, bg, CONTEXT_SOFTEN),
+            None => style,
+        };
+
         for ch in chunk.text.chars() {
             if ch == '\n' || col >= max_cols {
                 return;
@@ -2443,6 +2500,52 @@ mod tests {
     }
 
     #[test]
+    fn diff_view_softens_context_row_foregrounds() {
+        // Only the first line is rewritten, so the second renders as a context
+        // row and both open with the same `fn` keyword to compare.
+        let h = diff_harness("fn a() {}\nfn keep() {}\n", "fn b() {}\nfn keep() {}\n");
+
+        let bg = style_rgb(
+            h.stoat
+                .theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|s| s.bg),
+        )
+        .expect("rgb background");
+        let buf = h.rendered_buffer();
+
+        let row_with = |text: &str| {
+            (0..buf.area.height)
+                .find(|&y| line_text(buf, y, 68..buf.area.width).contains(text))
+                .unwrap_or_else(|| panic!("{text:?} rendered in the right column"))
+        };
+        let leading_glyph = |y: u16| {
+            let x = (68..buf.area.width)
+                .find(|&x| !buf[(x, y)].symbol().trim().is_empty())
+                .expect("a glyph on the row");
+            (buf[(x, y)].symbol().to_string(), buf[(x, y)].style().fg)
+        };
+
+        let (changed_glyph, changed_fg) = leading_glyph(row_with("fn b"));
+        let (context_glyph, context_fg) = leading_glyph(row_with("fn keep"));
+        let [r, g, b] = dim_rgb(
+            style_rgb(changed_fg).expect("rgb fg on the changed row"),
+            bg,
+            CONTEXT_SOFTEN,
+        );
+
+        assert_eq!(
+            (changed_glyph.as_str(), context_glyph.as_str(), context_fg),
+            ("f", "f", Some(Color::Rgb(r, g, b))),
+            "the context row's keyword blends the changed row's color toward the background"
+        );
+        assert_ne!(
+            context_fg, changed_fg,
+            "the blend moves the context color off the full-strength one"
+        );
+    }
+
+    #[test]
     fn diff_view_added_line_carries_the_added_wash() {
         // The second line is a pure insertion, so nothing is refined.
         let h = diff_harness("fn a() {}\n", "fn a() {}\nfn b() {}\n");
@@ -2801,6 +2904,7 @@ mod tests {
             &change_spans,
             Some([10, 20, 30]),
             Some([40, 50, 60]),
+            None,
         );
 
         for x in 0..3 {
@@ -2841,6 +2945,7 @@ mod tests {
             &[],
             Style::default(),
             &change_spans,
+            None,
             None,
             None,
         );
