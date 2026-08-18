@@ -19,6 +19,16 @@ pub trait KeymapState {
     fn get(&self, field: &str) -> Option<&StateValue>;
 }
 
+/// Which way a wheel notch turned, as the keymap names it.
+///
+/// A wheel gesture is bindable like a key, so it needs a spelling the config
+/// grammar accepts and a value a lookup compares. This is that value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelDirection {
+    Up,
+    Down,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledKey {
     pub code: KeyCode,
@@ -30,6 +40,13 @@ pub struct CompiledKey {
     /// recovered with [`Self::captured_digit`] so a `$num` action argument can
     /// bind it.
     pub any_digit: bool,
+    /// A wheel binding, matching a mouse notch in that direction rather than
+    /// any key press.
+    ///
+    /// When set, [`Self::code`] is an unused sentinel and [`Self::matches`]
+    /// always refuses, because no [`KeyEvent`] is ever a wheel notch. Reach
+    /// these through [`Keymap::lookup_wheel`] instead.
+    pub wheel: Option<WheelDirection>,
 }
 
 impl CompiledKey {
@@ -68,7 +85,25 @@ impl CompiledKey {
                 code: KeyCode::Null,
                 modifiers,
                 any_digit: true,
+                wheel: None,
             });
+        }
+
+        // Ahead of resolve_key, which has no key code to answer a wheel with.
+        if let Key::Named(n) = &kp.keys[key_idx] {
+            let wheel = match n.as_str() {
+                "WheelUp" => Some(WheelDirection::Up),
+                "WheelDown" => Some(WheelDirection::Down),
+                _ => None,
+            };
+            if wheel.is_some() {
+                return Some(Self {
+                    code: KeyCode::Null,
+                    modifiers,
+                    any_digit: false,
+                    wheel,
+                });
+            }
         }
 
         let code = resolve_key(&kp.keys[key_idx])?;
@@ -76,10 +111,15 @@ impl CompiledKey {
             code,
             modifiers,
             any_digit: false,
+            wheel: None,
         })
     }
 
     pub fn matches(&self, event: &KeyEvent) -> bool {
+        // No key event is a wheel notch, so a wheel binding never wins one.
+        if self.wheel.is_some() {
+            return false;
+        }
         if event.modifiers != self.modifiers {
             return false;
         }
@@ -106,6 +146,12 @@ impl CompiledKey {
     pub fn to_key_token(&self) -> String {
         if self.any_digit {
             return self.format_with_modifiers("num");
+        }
+        if let Some(dir) = self.wheel {
+            return self.format_with_modifiers(match dir {
+                WheelDirection::Up => "wheelup",
+                WheelDirection::Down => "wheeldown",
+            });
         }
         let base = match self.code {
             KeyCode::Char(' ') => "space",
@@ -160,6 +206,8 @@ impl CompiledKey {
         }
         parts.push(match self.code {
             _ if self.any_digit => "0-9".to_string(),
+            _ if self.wheel == Some(WheelDirection::Up) => "WhUp".to_string(),
+            _ if self.wheel == Some(WheelDirection::Down) => "WhDn".to_string(),
             KeyCode::Char(' ') => "Spc".to_string(),
             KeyCode::Char(c) => c.to_string(),
             KeyCode::Esc => "Esc".to_string(),
@@ -587,6 +635,37 @@ impl Keymap {
         best.map(|(_, binding)| (binding.actions.clone(), binding.key.captured_digit(event)))
     }
 
+    /// Resolve a wheel notch in `dir` held with `modifiers` against `state` to
+    /// the winning binding's actions.
+    ///
+    /// Ranks by predicate specificity exactly as a key press does, so a
+    /// `view == diff` wheel binding beats a bare `mode == normal` one and an
+    /// equally specific pair keeps source order. `None` when nothing in
+    /// `state` binds that notch, which is the caller's signal to scroll.
+    pub fn lookup_wheel(
+        &self,
+        state: &dyn KeymapState,
+        dir: WheelDirection,
+        modifiers: KeyModifiers,
+    ) -> Option<Arc<[ResolvedAction]>> {
+        let mut best: Option<(usize, &CompiledBinding)> = None;
+        for binding in &self.bindings {
+            if binding.key.wheel != Some(dir) || binding.key.modifiers != modifiers {
+                continue;
+            }
+            if !binding.predicates.iter().all(|p| evaluate(p, state)) {
+                continue;
+            }
+            let score: usize = binding.predicates.iter().map(predicate_atoms).sum();
+            // Strict `>` keeps the earliest binding on a tie, matching how a
+            // key press resolves equally specific matches.
+            if best.is_none_or(|(best_score, _)| score > best_score) {
+                best = Some((score, binding));
+            }
+        }
+        best.map(|(_, binding)| binding.actions.clone())
+    }
+
     pub fn active_keys(&self, state: &dyn KeymapState) -> Vec<(&CompiledKey, &[ResolvedAction])> {
         let mut results = Vec::new();
         for binding in &self.bindings {
@@ -974,11 +1053,104 @@ mod tests {
     }
 
     #[test]
+    fn a_wheel_binding_compiles_to_a_direction_and_never_matches_a_key() {
+        let config =
+            parse_config("on key { mode == normal { Alt-WheelDown -> GotoNextChange(); } }");
+        let keymap = Keymap::compile(&config);
+        let key = &keymap.bindings[0].key;
+
+        assert_eq!(
+            (key.wheel, key.modifiers, key.any_digit),
+            (Some(WheelDirection::Down), KeyModifiers::ALT, false),
+            "Alt-WheelDown compiles to a down wheel held with alt"
+        );
+        assert!(
+            !key.matches(&key_event(KeyCode::Null, KeyModifiers::ALT))
+                && !key.matches(&key_event(KeyCode::Char('j'), KeyModifiers::ALT)),
+            "no key press ever wins a wheel binding"
+        );
+    }
+
+    #[test]
+    fn lookup_wheel_resolves_a_bound_notch_and_ignores_the_rest() {
+        let config =
+            parse_config("on key { mode == normal { Alt-WheelDown -> GotoNextChange(); } }");
+        let keymap = Keymap::compile(&config);
+        let normal = TestState::new().set("mode", StateValue::String("normal".into()));
+
+        let hit = keymap
+            .lookup_wheel(&normal, WheelDirection::Down, KeyModifiers::ALT)
+            .expect("the bound notch resolves");
+        assert_eq!(hit[0].name, "GotoNextChange");
+
+        assert!(
+            keymap
+                .lookup_wheel(&normal, WheelDirection::Up, KeyModifiers::ALT)
+                .is_none()
+                && keymap
+                    .lookup_wheel(&normal, WheelDirection::Down, KeyModifiers::CONTROL)
+                    .is_none()
+                && keymap
+                    .lookup_wheel(&normal, WheelDirection::Down, KeyModifiers::NONE)
+                    .is_none(),
+            "the other direction, another modifier, and a bare notch all miss"
+        );
+    }
+
+    #[test]
+    fn lookup_wheel_ranks_the_more_specific_predicate_first() {
+        let config = parse_config(
+            "on key {
+                mode == normal { Alt-WheelDown -> GotoNextFunction(); }
+                view == diff && mode == normal { Alt-WheelDown -> GotoNextChange(); }
+            }",
+        );
+        let keymap = Keymap::compile(&config);
+
+        let in_diff = TestState::new()
+            .set("mode", StateValue::String("normal".into()))
+            .set("view", StateValue::String("diff".into()));
+        let plain = TestState::new().set("mode", StateValue::String("normal".into()));
+
+        assert_eq!(
+            (
+                keymap
+                    .lookup_wheel(&in_diff, WheelDirection::Down, KeyModifiers::ALT)
+                    .expect("bound in the diff view")[0]
+                    .name
+                    .clone(),
+                keymap
+                    .lookup_wheel(&plain, WheelDirection::Down, KeyModifiers::ALT)
+                    .expect("bound in a plain buffer")[0]
+                    .name
+                    .clone(),
+            ),
+            ("GotoNextChange".to_string(), "GotoNextFunction".to_string()),
+            "the two-atom diff binding outranks the one-atom mode binding"
+        );
+    }
+
+    #[test]
+    fn a_wheel_key_spells_itself_for_the_overlay_and_for_a_macro() {
+        let kp = KeyPart {
+            keys: vec![Key::Named("Alt".into()), Key::Named("WheelUp".into())],
+        };
+        let ck = CompiledKey::from_key_part(&kp).expect("should compile");
+
+        assert_eq!(
+            (ck.display_label(), ck.to_key_token()),
+            ("A-WhUp".to_string(), "alt-wheelup".to_string()),
+            "a wheel key labels and tokenizes by direction"
+        );
+    }
+
+    #[test]
     fn matches_event() {
         let ck = CompiledKey {
             code: KeyCode::Char('s'),
             modifiers: KeyModifiers::CONTROL,
             any_digit: false,
+            wheel: None,
         };
         assert!(ck.matches(&key_event(KeyCode::Char('s'), KeyModifiers::CONTROL)));
         assert!(!ck.matches(&key_event(KeyCode::Char('s'), KeyModifiers::NONE)));
@@ -2015,6 +2187,7 @@ mod tests {
             code: KeyCode::Char('q'),
             modifiers: KeyModifiers::NONE,
             any_digit: false,
+            wheel: None,
         };
         assert_eq!(ck.display_label(), "q");
     }
@@ -2025,6 +2198,7 @@ mod tests {
             code: KeyCode::Char('s'),
             modifiers: KeyModifiers::CONTROL,
             any_digit: false,
+            wheel: None,
         };
         assert_eq!(ck.display_label(), "C-s");
     }
@@ -2036,6 +2210,7 @@ mod tests {
                 code: KeyCode::Esc,
                 modifiers: KeyModifiers::NONE,
                 any_digit: false,
+                wheel: None,
             }
             .display_label(),
             "Esc"
@@ -2045,6 +2220,7 @@ mod tests {
                 code: KeyCode::Char(' '),
                 modifiers: KeyModifiers::NONE,
                 any_digit: false,
+                wheel: None,
             }
             .display_label(),
             "Spc"
@@ -2057,6 +2233,7 @@ mod tests {
             code: KeyCode::BackTab,
             modifiers: KeyModifiers::NONE,
             any_digit: false,
+            wheel: None,
         };
         assert_eq!(ck.display_label(), "S-Tab");
     }
@@ -2067,6 +2244,7 @@ mod tests {
             code: KeyCode::Char('q'),
             modifiers: KeyModifiers::NONE,
             any_digit: false,
+            wheel: None,
         };
         assert_eq!(ck.to_key_token(), "q");
     }
@@ -2077,6 +2255,7 @@ mod tests {
             code: KeyCode::Char(' '),
             modifiers: KeyModifiers::NONE,
             any_digit: false,
+            wheel: None,
         };
         assert_eq!(ck.to_key_token(), "space");
     }
@@ -2087,6 +2266,7 @@ mod tests {
             code: KeyCode::Char('s'),
             modifiers: KeyModifiers::CONTROL,
             any_digit: false,
+            wheel: None,
         };
         assert_eq!(ck.to_key_token(), "ctrl-s");
     }
