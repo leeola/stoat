@@ -391,6 +391,69 @@ pub(crate) fn anchored_cursor_pos(
     ([col, y], in_region)
 }
 
+/// The vertical pixel shift a surface anchored to a gliding pool draws at.
+///
+/// `top_rows` is the document top row the anchored surface's layout assumed,
+/// and `host_scroll_pages` the host pool's eased scroll in pages, which
+/// `host_region_height` converts to rows. The gap between the two, scaled by
+/// `cell_h`, is how far the host's content has travelled since that layout, and
+/// therefore how far the surface must travel to stay over the same text.
+///
+/// Positive means the host has not yet eased down to the assumed top, so the
+/// surface draws lower. The result is deliberately un-snapped, because the whole
+/// point is to ride the ease sub-cell.
+pub(crate) fn anchored_shift(
+    top_rows: f32,
+    host_scroll_pages: f32,
+    host_region_height: f32,
+    cell_h: f32,
+) -> f32 {
+    (top_rows - host_scroll_pages * host_region_height) * cell_h
+}
+
+/// One pool's resolved tie to a host that moved this frame.
+///
+/// Captured while the frame's pool list is still in hand, because the composite
+/// build that needs it runs after that list has gone back to its scratch slot.
+/// The pixel shift is left uncomputed here, since the cell height it scales by
+/// is only resolved later.
+#[derive(Clone, Copy)]
+pub(crate) struct AnchorRide {
+    /// The anchored pool this ride belongs to.
+    pub(crate) pool: u32,
+    /// The document top row the anchored pool's layout assumed.
+    pub(crate) top_rows: f32,
+    /// The host's eased scroll in pages, as of this frame.
+    pub(crate) host_scroll: f32,
+    /// The host's region, which both scales the shift and clips the ride.
+    pub(crate) host_region: PoolRegion,
+}
+
+/// Move scissor rect `[x, y, width, height]` down by `dy_px`, clamping at the
+/// top edge of the surface.
+///
+/// A ride that carries the rect above the surface keeps only the part still on
+/// screen, so the height shrinks by whatever the clamp cut.
+pub(crate) fn shift_scissor(scissor: [u32; 4], dy_px: f32) -> [u32; 4] {
+    let [x, y, w, h] = scissor;
+    let shifted = y as f32 + dy_px;
+    let top = shifted.max(0.0) as u32;
+    let cut = (top as f32 - shifted).max(0.0) as u32;
+    [x, top, w, h.saturating_sub(cut)]
+}
+
+/// The overlap of two scissor rects, or a zero-height rect when they miss.
+///
+/// A ride is clipped to its host's region this way, so a surface that slides
+/// past the pane edge is cut there rather than drawn over the neighbour.
+pub(crate) fn intersect_scissor(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
+    let x0 = a[0].max(b[0]);
+    let y0 = a[1].max(b[1]);
+    let x1 = (a[0] + a[2]).min(b[0] + b[2]);
+    let y1 = (a[1] + a[3]).min(b[1] + b[3]);
+    [x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0)]
+}
+
 /// The pixel scissor rect [x, y, width, height] covering pool `region`, laid out
 /// on a `cw` by `ch` cell grid.
 pub(crate) fn region_scissor(region: PoolRegion, cw: f32, ch: f32) -> [u32; 4] {
@@ -711,6 +774,47 @@ mod tests {
         // A line below the pane's bottom edge is hidden too.
         let (_, in_region) = anchored_cursor_pos(0.0, 40.0, 45.0, 0.0, 0.0);
         assert!(!in_region);
+    }
+
+    #[test]
+    fn anchored_shift_tracks_the_gap_between_the_assumed_and_eased_top() {
+        // A 40-row host eased to a quarter page sits at document row 10. A
+        // surface whose layout assumed that same top needs no shift.
+        assert_eq!(anchored_shift(10.0, 0.25, 40.0, 16.0), 0.0);
+
+        // Mid scroll-down the content still lags above the target, so the host
+        // top is row 8 while the layout assumed 10. Two rows of shift draws the
+        // surface lower, keeping it over the text it was laid out against.
+        assert_eq!(anchored_shift(10.0, 0.2, 40.0, 16.0), 32.0);
+
+        // A shift under one cell passes through rather than snapping, which is
+        // what lets the surface ride the ease sub-cell. A 1/32-row gap is exact
+        // in f32, so this pins the half-pixel rather than a rounding artifact.
+        assert_eq!(anchored_shift(10.031_25, 0.25, 40.0, 16.0), 0.5);
+    }
+
+    #[test]
+    fn shift_scissor_moves_the_rect_and_clamps_at_the_top_edge() {
+        assert_eq!(shift_scissor([10, 40, 100, 60], 12.0), [10, 52, 100, 60]);
+
+        // Carried above the surface, the rect keeps only what is still on
+        // screen, so the height loses exactly what the clamp cut.
+        assert_eq!(shift_scissor([10, 40, 100, 60], -55.0), [10, 0, 100, 45]);
+    }
+
+    #[test]
+    fn intersect_scissor_overlaps_or_collapses() {
+        assert_eq!(
+            intersect_scissor([0, 0, 100, 100], [20, 30, 100, 100]),
+            [20, 30, 80, 70]
+        );
+
+        // Disjoint rects collapse rather than wrapping around, so a ride past
+        // the pane edge draws nothing instead of drawing everywhere.
+        assert_eq!(
+            intersect_scissor([0, 0, 10, 10], [50, 50, 10, 10]),
+            [50, 50, 0, 0]
+        );
     }
 
     #[test]

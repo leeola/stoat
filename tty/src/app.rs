@@ -10,10 +10,11 @@
 
 use crate::{
     anim::{
-        advance_pool_glide, anchored_cursor_pos, block_corners, cursor_in_region, cursor_position,
-        refresh_popover_overflows, region_scissor, seed_settle_flight, step_cursor,
-        step_grid_scroll, step_popover_scroll, step_region_scroll, step_scrollback_scroll,
-        ActivePool, AnchoredCursor, PoolAnim, PoolStep, EASE_BASELINE_FRAME, MAX_EASE_DT,
+        advance_pool_glide, anchored_cursor_pos, anchored_shift, block_corners, cursor_in_region,
+        cursor_position, intersect_scissor, refresh_popover_overflows, region_scissor,
+        seed_settle_flight, shift_scissor, step_cursor, step_grid_scroll, step_popover_scroll,
+        step_region_scroll, step_scrollback_scroll, ActivePool, AnchorRide, AnchoredCursor,
+        PoolAnim, PoolStep, EASE_BASELINE_FRAME, MAX_EASE_DT,
     },
     config::{self, Config, CursorAnimation},
     input::{
@@ -604,6 +605,7 @@ struct State {
     /// and the per-overlay overflow amounts, each cleared and refilled per frame.
     pools_scratch: Vec<PoolView>,
     active_scratch: Vec<ActivePool>,
+    rides_scratch: Vec<AnchorRide>,
     overflows_scratch: Vec<Option<f32>>,
     /// Row-flag buffers from the frame before, handed back to the terminal at
     /// the start of the next one so its damage flags land in the same
@@ -863,6 +865,7 @@ impl ApplicationHandler<PtyEvent> for App {
             damage_spares: Vec::new(),
             pools_scratch: Vec::new(),
             active_scratch: Vec::new(),
+            rides_scratch: Vec::new(),
             overflows_scratch: Vec::new(),
             last_popovers_epoch: None,
             aux: Vec::new(),
@@ -2010,6 +2013,7 @@ fn redraw(state: &mut State) {
         active,
         pool_easing,
         cursor_anchor,
+        rides,
         clear_colors,
     ) = {
         let mut terminal = state.terminal.lock();
@@ -2062,6 +2066,9 @@ fn redraw(state: &mut State) {
         active.clear();
         let mut pool_easing = false;
         let mut cursor_anchor: Option<AnchoredCursor> = None;
+        // Which pools moved this frame. The anchored pass below reads it to tell
+        // an anchor whose host rides from one whose host sits still.
+        let mut glided: Vec<u32> = Vec::new();
         for pool in &pools {
             let anim = state
                 .pool_anims
@@ -2073,6 +2080,7 @@ fn redraw(state: &mut State) {
                 continue;
             }
             pool_easing = true;
+            glided.push(pool.id);
 
             // While the focused pane glides it ships the primary
             // cursor's document anchor, so place the cursor riding
@@ -2098,6 +2106,64 @@ fn redraw(state: &mut State) {
             }
         }
 
+        // Resolve every pool riding a host that moved this frame, to the pixel
+        // shift that keeps it over the text it was laid out against and the host
+        // region that clips it.
+        let mut rides = mem::take(&mut state.rides_scratch);
+        rides.clear();
+        for pool in &pools {
+            let Some((host, top_rows)) = pool.anchor else {
+                continue;
+            };
+            if !glided.contains(&host) {
+                continue;
+            }
+            let Some(host_view) = pools.iter().find(|candidate| candidate.id == host) else {
+                continue;
+            };
+            let Some(host_anim) = state.pool_anims.get(&host) else {
+                continue;
+            };
+            rides.push(AnchorRide {
+                pool: pool.id,
+                top_rows,
+                host_scroll: host_anim.scroll,
+                host_region: host_view.region,
+            });
+        }
+
+        // A ridden pool has to composite even when its own scroll settled. The
+        // base grid still holds it where the last live frame drew it, and no live
+        // frame ships mid-glide, so without this its body stays put and tears
+        // away from the shifted frame.
+        for &AnchorRide { pool: id, .. } in &rides {
+            if active.iter().any(|tile| tile.id == id) {
+                continue;
+            }
+            let Some(view) = pools.iter().find(|pool| pool.id == id) else {
+                continue;
+            };
+            let anim = state
+                .pool_anims
+                .entry(id)
+                .or_insert_with(|| PoolAnim::new(view.scroll_target.pages()));
+            let Some((frac, _)) = terminal.project_pool(id, &mut anim.document_grid, anim.scroll)
+            else {
+                continue;
+            };
+            pool_easing = true;
+            active.push(ActivePool {
+                id,
+                region: view.region,
+                frac,
+                content_changed: true,
+                scrolled_rows: None,
+            });
+        }
+        // Pools composite in ascending id, which is their z-order, and a forced
+        // one is appended out of turn.
+        active.sort_by_key(|tile| tile.id);
+
         state.pools_scratch = pools;
 
         (
@@ -2109,6 +2175,7 @@ fn redraw(state: &mut State) {
             active,
             pool_easing,
             cursor_anchor,
+            rides,
             clear_colors,
         )
     };
@@ -2319,11 +2386,36 @@ fn redraw(state: &mut State) {
                 let y0 = (region.top as f32 * ch) as u32;
                 let x1 = ((region.left as f32 + region.width as f32) * cw) as u32;
                 let y1 = ((region.top as f32 + region.height as f32) * ch) as u32;
+
+                // An anchored pool rides its host's ease. The shift moves both
+                // the drawn origin and the scissor, and the host's own scissor
+                // then clips it, so the surface slides out of the pane edge
+                // rather than over the neighbour.
+                let ride = rides.iter().find(|ride| ride.pool == pool.id);
+                let (origin_y, scissor) = match ride {
+                    Some(ride) => {
+                        let dy_px = anchored_shift(
+                            ride.top_rows,
+                            ride.host_scroll,
+                            (ride.host_region.height as f32).max(1.0),
+                            ch,
+                        );
+                        (
+                            region.top as f32 + dy_px / ch,
+                            intersect_scissor(
+                                shift_scissor([x0, y0, x1 - x0, y1 - y0], dy_px),
+                                region_scissor(ride.host_region, cw, ch),
+                            ),
+                        )
+                    },
+                    None => (region.top as f32, [x0, y0, x1 - x0, y1 - y0]),
+                };
+
                 PoolComposite {
                     id: pool.id,
                     grid: &state.pool_anims[&pool.id].document_grid,
-                    origin_cells: [region.left as f32, region.top as f32],
-                    scissor: [x0, y0, x1 - x0, y1 - y0],
+                    origin_cells: [region.left as f32, origin_y],
+                    scissor,
                     shift_rows: -snap_shift_to_pixels(pool.frac, ch),
                     content_changed: pool.content_changed,
                     scrolled_rows: pool.scrolled_rows,
@@ -2408,6 +2500,7 @@ fn redraw(state: &mut State) {
     };
 
     state.active_scratch = active;
+    state.rides_scratch = rides;
     // Held for the next frame, which hands them back before it asks
     // the terminal for its damage.
     state.damage_spares.push(damage);
