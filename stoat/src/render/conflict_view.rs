@@ -293,6 +293,7 @@ fn paint_conflict_rows(
                     None,
                     None,
                     None,
+                    None,
                     &mut row_cursor,
                 );
             },

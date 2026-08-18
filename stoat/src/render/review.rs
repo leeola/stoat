@@ -61,6 +61,14 @@ const STAGED_SPAN_TINT: f32 = 0.86;
 /// Receding the context inverts that, and the eye lands on the changed rows.
 const CONTEXT_SOFTEN: f32 = 0.40;
 
+/// Fraction the unchanged chars of a token-refined row blend toward the editor
+/// background, leaving 75% of the syntax color.
+///
+/// Lighter than [`CONTEXT_SOFTEN`] on purpose. The row is changed content, so
+/// it must still read as ahead of the context around it, while the chars the
+/// refinement marks pop hardest inside their own line.
+const MODIFIED_ROW_SOFTEN: f32 = 0.25;
+
 pub(crate) fn render_review(
     editor: &mut EditorState,
     inner: Rect,
@@ -549,6 +557,7 @@ pub(crate) fn paint_diff_rows(
                     side.map(|c| c.removed_span),
                     side.map(|c| c.moved_span),
                     None,
+                    tints.as_ref().map(|t| t.bg),
                 );
                 if let Some(staged) = staged {
                     let change_scope =
@@ -589,6 +598,10 @@ pub(crate) fn paint_diff_rows(
                     DiffStatus::Unchanged => tints.as_ref().map(|t| t.bg),
                     _ => None,
                 };
+                let soften_gaps = match status {
+                    DiffStatus::Modified | DiffStatus::Moved => tints.as_ref().map(|t| t.bg),
+                    _ => None,
+                };
                 if let Some(side) = side {
                     let line_tint = match status {
                         DiffStatus::Added | DiffStatus::Modified => Some(side.added_line),
@@ -612,6 +625,7 @@ pub(crate) fn paint_diff_rows(
                     side.map(|c| c.added_span),
                     side.map(|c| c.moved_span),
                     soften_row,
+                    soften_gaps,
                     &mut row_cursor,
                 );
                 if status == DiffStatus::Moved
@@ -678,6 +692,7 @@ pub(crate) fn paint_diff_rows(
                         None,
                         None,
                         soften_row,
+                        None,
                     );
                     base_line += 1;
                 }
@@ -827,6 +842,11 @@ fn soften_style(style: Style, bg: [u8; 3], amount: f32) -> Style {
 /// `soften_row` recedes the whole row behind the changed rows around it, by
 /// blending every foreground toward the given background per [`soften_style`].
 /// Pass the editor background for an unchanged row and `None` for a changed one.
+///
+/// `soften_gaps` recedes only the chars outside every change span, at the
+/// lighter [`MODIFIED_ROW_SOFTEN`], so a refined row's changed chars lead their
+/// own line. An empty `change_spans` no-ops it, which keeps a row the
+/// refinement never reached at full strength.
 #[allow(clippy::too_many_arguments)]
 fn paint_base_row(
     buf: &mut Buffer,
@@ -840,6 +860,7 @@ fn paint_base_row(
     side_span_tint: Option<[u8; 3]>,
     moved_span_tint: Option<[u8; 3]>,
     soften_row: Option<[u8; 3]>,
+    soften_gaps: Option<[u8; 3]>,
 ) {
     debug_assert!(
         token_spans.is_sorted_by_key(|(range, _)| range.start),
@@ -850,6 +871,7 @@ fn paint_base_row(
         "change_spans must be start-sorted for the monotonic cursor"
     );
 
+    let soften_gaps = soften_gaps.filter(|_| !change_spans.is_empty());
     let mut token_cursor = 0;
     let mut span_cursor = 0;
     paint_style_runs(buf, start_x, y, text, max_cols, |byte_idx| {
@@ -873,10 +895,15 @@ fn paint_base_row(
         {
             span_cursor += 1;
         }
-        if let Some((range, kind)) = change_spans.get(span_cursor)
-            && range.start <= byte_idx
-        {
-            style = apply_span_tint(style, kind, side_span_tint, moved_span_tint);
+        match change_spans.get(span_cursor) {
+            Some((range, kind)) if range.start <= byte_idx => {
+                style = apply_span_tint(style, kind, side_span_tint, moved_span_tint);
+            },
+            _ => {
+                if let Some(bg) = soften_gaps {
+                    style = soften_style(style, bg, MODIFIED_ROW_SOFTEN);
+                }
+            },
         }
 
         style
@@ -943,6 +970,11 @@ fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
 /// `soften_row` recedes the whole row behind the changed rows around it, by
 /// blending every foreground toward the given background per [`soften_style`].
 /// Pass the editor background for an unchanged row and `None` for a changed one.
+///
+/// `soften_gaps` recedes only the cells outside every change span, at the
+/// lighter [`MODIFIED_ROW_SOFTEN`], so a refined row's changed cells lead their
+/// own line. An empty `change_spans` no-ops it, which keeps a row the
+/// refinement never reached at full strength.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_highlighted_row(
     snapshot: &DisplaySnapshot,
@@ -957,6 +989,7 @@ pub(crate) fn paint_highlighted_row(
     side_span_tint: Option<[u8; 3]>,
     moved_span_tint: Option<[u8; 3]>,
     soften_row: Option<[u8; 3]>,
+    soften_gaps: Option<[u8; 3]>,
     row_cursor: &mut RowHighlightCursor,
 ) {
     debug_assert!(
@@ -964,6 +997,7 @@ pub(crate) fn paint_highlighted_row(
         "change_spans must be start-sorted for the monotonic cursor"
     );
 
+    let soften_gaps = soften_gaps.filter(|_| !change_spans.is_empty());
     let mut col = 0usize;
     let mut span_cursor = 0;
     for chunk in snapshot.row_chunks(display_row, row_cursor) {
@@ -978,6 +1012,12 @@ pub(crate) fn paint_highlighted_row(
         };
         let style = match soften_row {
             Some(bg) => soften_style(style, bg, CONTEXT_SOFTEN),
+            None => style,
+        };
+        // Both variants resolve per chunk rather than per cell, because a
+        // chunk's cells differ only in which side of a change span they fall on.
+        let gap_style = match soften_gaps {
+            Some(bg) => soften_style(style, bg, MODIFIED_ROW_SOFTEN),
             None => style,
         };
 
@@ -999,7 +1039,7 @@ pub(crate) fn paint_highlighted_row(
                 Some((range, kind)) if range.start <= col => {
                     apply_span_tint(style, kind, side_span_tint, moved_span_tint)
                 },
-                _ => style,
+                _ => gap_style,
             };
             buf[(x, y)].set_char(ch).set_style(cell_style);
             col += 1;
@@ -2500,10 +2540,61 @@ mod tests {
     }
 
     #[test]
+    fn diff_view_softens_the_unchanged_gaps_of_a_refined_row() {
+        // `main` becomes `other` on the first line, so that line is refined.
+        // The second is a pure insertion, which nothing refines, so its
+        // identical `fn` keyword stays at full strength to compare against.
+        let h = diff_harness("fn main() {}\n", "fn other() {}\nfn extra() {}\n");
+
+        let bg = style_rgb(
+            h.stoat
+                .theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|s| s.bg),
+        )
+        .expect("rgb background");
+        let buf = h.rendered_buffer();
+
+        let row_with = |text: &str| {
+            (0..buf.area.height)
+                .find(|&y| line_text(buf, y, 68..buf.area.width).contains(text))
+                .unwrap_or_else(|| panic!("{text:?} rendered in the right column"))
+        };
+        let fg_of = |y: u16, glyph: &str| {
+            let x = (68..buf.area.width)
+                .find(|&x| buf[(x, y)].symbol() == glyph)
+                .unwrap_or_else(|| panic!("{glyph:?} on row {y}"));
+            buf[(x, y)].style().fg.expect("an fg")
+        };
+
+        let refined = row_with("fn other");
+        let added = row_with("fn extra");
+
+        let full_keyword = fg_of(added, "f");
+        let [r, g, b] = dim_rgb(
+            style_rgb(Some(full_keyword)).expect("rgb fg on the added row"),
+            bg,
+            MODIFIED_ROW_SOFTEN,
+        );
+
+        assert_eq!(
+            (fg_of(refined, "f"), fg_of(refined, "o")),
+            (Color::Rgb(r, g, b), fg_of(added, "e")),
+            "the gaps blend toward the background while the changed word stays full"
+        );
+        assert_ne!(
+            fg_of(refined, "f"),
+            full_keyword,
+            "the gap blend moves the color off full strength"
+        );
+    }
+
+    #[test]
     fn diff_view_softens_context_row_foregrounds() {
-        // Only the first line is rewritten, so the second renders as a context
-        // row and both open with the same `fn` keyword to compare.
-        let h = diff_harness("fn a() {}\nfn keep() {}\n", "fn b() {}\nfn keep() {}\n");
+        // The first line is untouched, so it renders as a context row. The
+        // second is a pure insertion, which nothing softens, so its identical
+        // `fn` keyword is the full-strength reference.
+        let h = diff_harness("fn keep() {}\n", "fn keep() {}\nfn add() {}\n");
 
         let bg = style_rgb(
             h.stoat
@@ -2526,21 +2617,21 @@ mod tests {
             (buf[(x, y)].symbol().to_string(), buf[(x, y)].style().fg)
         };
 
-        let (changed_glyph, changed_fg) = leading_glyph(row_with("fn b"));
+        let (added_glyph, added_fg) = leading_glyph(row_with("fn add"));
         let (context_glyph, context_fg) = leading_glyph(row_with("fn keep"));
         let [r, g, b] = dim_rgb(
-            style_rgb(changed_fg).expect("rgb fg on the changed row"),
+            style_rgb(added_fg).expect("rgb fg on the added row"),
             bg,
             CONTEXT_SOFTEN,
         );
 
         assert_eq!(
-            (changed_glyph.as_str(), context_glyph.as_str(), context_fg),
+            (added_glyph.as_str(), context_glyph.as_str(), context_fg),
             ("f", "f", Some(Color::Rgb(r, g, b))),
-            "the context row's keyword blends the changed row's color toward the background"
+            "the context row's keyword blends the added row's color toward the background"
         );
         assert_ne!(
-            context_fg, changed_fg,
+            context_fg, added_fg,
             "the blend moves the context color off the full-strength one"
         );
     }
@@ -2905,6 +2996,7 @@ mod tests {
             Some([10, 20, 30]),
             Some([40, 50, 60]),
             None,
+            None,
         );
 
         for x in 0..3 {
@@ -2945,6 +3037,7 @@ mod tests {
             &[],
             Style::default(),
             &change_spans,
+            None,
             None,
             None,
             None,
