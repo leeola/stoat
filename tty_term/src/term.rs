@@ -672,6 +672,13 @@ pub struct PoolView {
     /// rides while this pool glides, so the renderer draws it at the eased
     /// content offset instead of the VT cursor cell.
     pub cursor_anchor: Option<(u64, u16)>,
+    /// The host pool this one rides and the document top row its layout assumed,
+    /// or `None` for a pool that floats free.
+    ///
+    /// `Some((host, top_rows))` asks the renderer to draw this pool shifted by
+    /// the gap between `top_rows` and the host's eased top, so a popup laid out
+    /// over a scrolling pane travels with the text beneath it.
+    pub anchor: Option<(u32, f32)>,
     /// Bumped whenever the pooled page bytes change, so a renderer can tell a
     /// pure sub-cell glide from a frame whose composed content actually changed.
     pub content_version: u64,
@@ -700,6 +707,13 @@ struct Pool {
     /// eased content offset rather than the VT cursor cell. `None` when no anchor
     /// has arrived. Cleared when the pool is dropped, since the pool is removed.
     cursor_anchor: Option<(u64, u16)>,
+    /// This pool's tie to a host pool it must ride, set by
+    /// `Gstoatty;pool_anchor`. `Some((host, top_rows))` names the host pool and
+    /// the document top row this pool's layout assumed, so a renderer draws it
+    /// shifted by the gap between that assumption and the host's eased offset.
+    /// `None` when the pool floats free, which is every pool that is not a
+    /// popup riding a pane. Cleared when the pool is dropped.
+    anchor: Option<(u32, f32)>,
 }
 
 impl Pool {
@@ -716,6 +730,7 @@ impl Pool {
             reposition: None,
             content_version: 0,
             cursor_anchor: None,
+            anchor: None,
         }
     }
 }
@@ -1382,6 +1397,15 @@ impl Terminal {
                     self.mark_window_dirty(window);
                 }
             },
+            Command::PoolAnchor(anchor) => {
+                let window = self.pools.get_mut(&anchor.pool).map(|pool| {
+                    pool.anchor = Some((anchor.host, anchor.top_rows));
+                    pool.region.window
+                });
+                if let Some(window) = window {
+                    self.mark_window_dirty(window);
+                }
+            },
             Command::Reposition(reposition) => {
                 let window = self.pools.get_mut(&reposition.pool).map(|pool| {
                     pool.scroll_target = DocumentOffset {
@@ -1674,6 +1698,7 @@ impl Terminal {
             | Command::PoolRegion(_)
             | Command::Scroll(_)
             | Command::PoolCursor(_)
+            | Command::PoolAnchor(_)
             | Command::Reposition(_)
             | Command::PoolDrop(_)
             | Command::MinimapLines(_)
@@ -1774,6 +1799,7 @@ impl Terminal {
             region: pool.region,
             scroll_target: pool.scroll_target,
             cursor_anchor: pool.cursor_anchor,
+            anchor: pool.anchor,
             content_version: pool.content_version,
         }
     }
@@ -2894,15 +2920,16 @@ mod tests {
         encode_bar, encode_border, encode_config_reload, encode_fill, encode_fill_end,
         encode_font_step, encode_hello, encode_icon, encode_ident_reply, encode_line_layout,
         encode_minimap, encode_minimap_drop, encode_minimap_lines, encode_minimap_view,
-        encode_panel, encode_polyline, encode_pool_cursor, encode_pool_drop, encode_pool_region,
-        encode_popover, encode_reposition, encode_reset, encode_scale, encode_scroll,
-        encode_scroll_region, encode_text_run, encode_window_open, encode_zoom_capture, BarCommand,
-        BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, HelloCommand, IconCommand,
-        IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, LineSummary, MinimapCommand,
-        MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
-        PanelShadow as ProtoPanelShadow, PolylineCommand, PoolCursorCommand, PoolDropCommand,
-        PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand,
-        ScrollRegionCommand, TextRunCommand, WindowOpenCommand,
+        encode_panel, encode_polyline, encode_pool_anchor, encode_pool_cursor, encode_pool_drop,
+        encode_pool_region, encode_popover, encode_reposition, encode_reset, encode_scale,
+        encode_scroll, encode_scroll_region, encode_text_run, encode_window_open,
+        encode_zoom_capture, BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle,
+        FillCommand, HelloCommand, IconCommand, IconKind as ProtoIconKind, IdentReply,
+        LineLayoutCommand, LineSummary, MinimapCommand, MinimapDropCommand, MinimapLinesCommand,
+        MinimapRun, MinimapViewCommand, PanelCommand, PanelShadow as ProtoPanelShadow,
+        PolylineCommand, PoolAnchorCommand, PoolCursorCommand, PoolDropCommand, PoolRegionCommand,
+        PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
+        TextRunCommand, WindowOpenCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -4177,6 +4204,7 @@ mod tests {
             shadow: ProtoPanelShadow::Drop,
             inset_x: 0,
             above_pools: false,
+            anchor: None,
         });
 
         let mut terminal = Terminal::new(8, 8, Theme::default());
@@ -4198,6 +4226,7 @@ mod tests {
                 shadow: PanelShadow::Drop,
                 inset_x: 0,
                 above_pools: false,
+                anchor: None,
                 seq: 1,
             }]
         );
@@ -4217,6 +4246,7 @@ mod tests {
             shadow: ProtoPanelShadow::Drop,
             inset_x: 0,
             above_pools: true,
+            anchor: None,
         });
 
         let mut terminal = Terminal::new(8, 8, Theme::default());
@@ -4238,6 +4268,7 @@ mod tests {
                 shadow: PanelShadow::Drop,
                 inset_x: 0,
                 above_pools: true,
+                anchor: None,
                 seq: 1,
             }]
         );
@@ -4257,6 +4288,7 @@ mod tests {
             shadow: ProtoPanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            anchor: None,
         });
 
         let mut terminal = Terminal::new(4, 4, Theme::default());
@@ -4282,6 +4314,7 @@ mod tests {
             shadow: ProtoPanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            anchor: None,
         });
         stream.extend_from_slice(&encode_icon(&IconCommand {
             top: 0,
@@ -4344,6 +4377,7 @@ mod tests {
             shadow: ProtoPanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            anchor: None,
         });
 
         let mut terminal = Terminal::new(4, 3, Theme::default());
@@ -6365,6 +6399,56 @@ mod tests {
             terminal.pools().first().map(|pool| pool.cursor_anchor),
             Some(None),
             "a re-declared pool does not inherit the dropped pool's anchor",
+        );
+    }
+
+    #[test]
+    fn pool_anchor_exposes_the_host_and_top_through_pools_into() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_pool(&mut terminal, 0, 4, 8);
+        terminal.advance(&encode_pool_anchor(&PoolAnchorCommand {
+            pool: 0,
+            host: 3,
+            top_rows: 12.5,
+        }));
+
+        assert_eq!(
+            terminal.pools().first().map(|pool| pool.anchor),
+            Some(Some((3, 12.5))),
+        );
+    }
+
+    #[test]
+    fn pool_drop_clears_the_anchor() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_pool(&mut terminal, 0, 4, 8);
+        terminal.advance(&encode_pool_anchor(&PoolAnchorCommand {
+            pool: 0,
+            host: 3,
+            top_rows: 12.5,
+        }));
+        terminal.advance(&encode_pool_drop(&PoolDropCommand { pool: 0 }));
+
+        declare_pool(&mut terminal, 0, 4, 8);
+        assert_eq!(
+            terminal.pools().first().map(|pool| pool.anchor),
+            Some(None),
+            "a re-declared pool does not inherit the dropped pool's anchor",
+        );
+    }
+
+    #[test]
+    fn pool_anchor_for_an_undeclared_pool_is_ignored() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        terminal.advance(&encode_pool_anchor(&PoolAnchorCommand {
+            pool: 9,
+            host: 1,
+            top_rows: 2.0,
+        }));
+
+        assert!(
+            terminal.pools().is_empty(),
+            "a stray anchor creates no pool"
         );
     }
 

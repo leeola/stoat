@@ -29,6 +29,13 @@ pub struct Panel {
     /// composite covering the same cells draws over it. The fallback border
     /// ignores it (a plain terminal has no pools).
     pub above_pools: bool,
+    /// The host pool this panel rides and the document top row its layout
+    /// assumed, or `None` for a panel fixed to the screen.
+    ///
+    /// `Some` makes the frame travel with a gliding pane beneath it instead of
+    /// holding its screen position. The fallback border ignores it (a plain
+    /// terminal has no pools, and text and frame land together at the repaint).
+    pub anchor: Option<(u32, f32)>,
 }
 
 impl StatefulWidget for Panel {
@@ -61,6 +68,7 @@ impl Panel {
                 shadow: self.shadow,
                 inset_x: self.inset_x,
                 above_pools: self.above_pools,
+                anchor: self.anchor,
             },
         );
     }
@@ -108,6 +116,7 @@ mod tests {
             shadow: PanelShadow::Drop,
             inset_x: 4,
             above_pools: false,
+            anchor: None,
         }
         .render(area, &mut buf, &mut scene);
 
@@ -123,6 +132,7 @@ mod tests {
             shadow: PanelShadow::Drop,
             inset_x: 4,
             above_pools: false,
+            anchor: None,
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
     }
@@ -141,6 +151,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            anchor: None,
         }
         .render(area, &mut buf, &mut scene);
 
@@ -166,6 +177,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            anchor: None,
         }
         .render(area, &mut buf, &mut scene);
 
@@ -187,6 +199,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            anchor: None,
         };
 
         let mut scene = ApcScene::new();

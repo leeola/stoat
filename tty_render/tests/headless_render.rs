@@ -123,6 +123,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         shadow: PanelShadow::Drop,
         inset_x: 0,
         above_pools: false,
+        anchor: None,
         seq: 0,
     }]);
 

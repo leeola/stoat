@@ -1213,7 +1213,9 @@ pub struct Overlay {
 ///
 /// [`Self::fill`] is [`Some`] to paint the interior that color, or [`None`] to
 /// leave the cells' own backgrounds showing through.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+// `Eq` is absent because [`Self::anchor`] carries a fractional row offset and
+// `f32` is only `PartialEq`.
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Panel {
     pub top: u16,
     pub left: u16,
@@ -1232,6 +1234,12 @@ pub struct Panel {
     /// paint over its rect. `false` layers the panel with the grid, where a pool
     /// composite covering the same cells draws over it.
     pub above_pools: bool,
+    /// The host pool this panel rides and the document top row its layout
+    /// assumed, or `None` for a panel fixed to the screen.
+    ///
+    /// Carried from the panel command so the renderer draws the frame shifted
+    /// by the gap between `top_rows` and the host's eased top.
+    pub anchor: Option<(u32, f32)>,
     /// Monotonic declaration-order index across all non-cell components.
     ///
     /// It orders nothing. Draw order is fixed by the renderer's pass chain, one

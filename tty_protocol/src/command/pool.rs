@@ -95,6 +95,25 @@ pub struct PoolCursorCommand {
     pub col: u16,
 }
 
+/// A floating surface's tie to the pool it must ride.
+///
+/// A popup laid out over a scrolling pane is drawn from a live frame, but no
+/// live frame ships mid-glide, so it holds its screen position while the text
+/// beneath it eases. This names the host pool [`Self::host`] and the document
+/// top row [`Self::top_rows`] the layout assumed, so the terminal draws pool
+/// [`Self::pool`] shifted by the gap between that assumption and the host's
+/// eased offset.
+///
+/// The sibling of [`PoolCursorCommand`], which ties the cursor to a pool the
+/// same way. Both ship once per glide tick so the drawn surface stays
+/// frame-locked to the eased content.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct PoolAnchorCommand {
+    pub pool: u32,
+    pub host: u32,
+    pub top_rows: f32,
+}
+
 /// A discontinuous smooth-scroll jump to a document page.
 ///
 /// `page` is the destination document page index in pool [`Self::pool`]. Unlike
@@ -265,6 +284,29 @@ pub fn encode_pool_cursor_into(out: &mut Vec<u8>, command: &PoolCursorCommand) {
     frame::end(out);
 }
 
+/// Encode a [`PoolAnchorCommand`] as a full `Gstoatty;pool_anchor` frame.
+///
+/// The anchor rides one fixed 12-byte big-endian argument holding the anchored
+/// pool, the host pool, and the assumed top row. `top_rows` is a fractional row
+/// count, so it ships as IEEE-754 bits rather than a whole-row integer.
+pub fn encode_pool_anchor(command: &PoolAnchorCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_pool_anchor_into(&mut out, command);
+    out
+}
+
+/// Append a `Gstoatty;pool_anchor` frame for `command` to `out` without
+/// allocating.
+pub fn encode_pool_anchor_into(out: &mut Vec<u8>, command: &PoolAnchorCommand) {
+    frame::begin(out, "pool_anchor");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.pool.to_be_bytes())?;
+        w.write_all(&command.host.to_be_bytes())?;
+        w.write_all(&command.top_rows.to_be_bytes())
+    });
+    frame::end(out);
+}
+
 /// Encode a [`RepositionCommand`] as a full `Gstoatty;reposition` frame.
 ///
 /// The destination page index rides in a single fixed 8-byte big-endian
@@ -346,6 +388,16 @@ pub(super) fn decode_pool_cursor(args: &[Vec<u8>]) -> Option<PoolCursorCommand> 
             arg[4], arg[5], arg[6], arg[7], arg[8], arg[9], arg[10], arg[11],
         ]),
         col: u16::from_be_bytes([arg[12], arg[13]]),
+    })
+}
+
+pub(super) fn decode_pool_anchor(args: &[Vec<u8>]) -> Option<PoolAnchorCommand> {
+    let arg: &[u8; 12] = args.first()?.get(..12)?.try_into().ok()?;
+
+    Some(PoolAnchorCommand {
+        pool: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
+        host: u32::from_be_bytes([arg[4], arg[5], arg[6], arg[7]]),
+        top_rows: f32::from_be_bytes([arg[8], arg[9], arg[10], arg[11]]),
     })
 }
 
@@ -512,6 +564,26 @@ mod tests {
     fn rejects_wrong_length_pool_cursor_payload() {
         // The single arg here decodes to 3 bytes, not the 14 a cursor anchor needs.
         assert!(decode(b"Gstoatty;pool_cursor;YWJj").is_none());
+    }
+
+    #[test]
+    fn pool_anchor_round_trips() {
+        let command = PoolAnchorCommand {
+            pool: 3,
+            host: 4_000_000_000,
+            top_rows: -12.5,
+        };
+
+        assert_eq!(
+            decode(&encode_pool_anchor(&command)),
+            Some(Command::PoolAnchor(command))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_pool_anchor_payload() {
+        // The single arg here decodes to 3 bytes, not the 12 an anchor needs.
+        assert!(decode(b"Gstoatty;pool_anchor;YWJj").is_none());
     }
 
     #[test]

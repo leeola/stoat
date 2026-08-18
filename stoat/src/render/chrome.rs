@@ -171,6 +171,7 @@ fn modal_frame_inner(
                 shadow: PanelShadow::Drop,
                 inset_x: 0,
                 above_pools,
+                anchor: None,
             }
             .draw_components(area, scene);
             if let Some(title) = title {
@@ -238,6 +239,7 @@ pub(crate) fn popout_frame(
                 shadow: PanelShadow::Overhang,
                 inset_x: POPOUT_INSET_PX,
                 above_pools: false,
+                anchor: None,
             }
             .draw_components(area, scene);
         },
@@ -509,6 +511,7 @@ mod tests {
             shadow: PanelShadow::Drop,
             inset_x: 0,
             above_pools: false,
+            anchor: None,
         });
         // The title run carries no background box and anchors one cell into the
         // modal (area.x * 16 + 16 = 48, area.y * 16 = 16), so the hairline draws
@@ -550,6 +553,7 @@ mod tests {
                 shadow: PanelShadow::Drop,
                 inset_x: 0,
                 above_pools: true,
+                anchor: None,
             }),
             "the flag is the only difference from modal_frame's frame"
         );
@@ -580,6 +584,7 @@ mod tests {
                 shadow: PanelShadow::Drop,
                 inset_x: 0,
                 above_pools: false,
+                anchor: None,
             })
         );
     }
@@ -620,6 +625,7 @@ mod tests {
                 shadow: PanelShadow::Overhang,
                 inset_x: POPOUT_INSET_PX,
                 above_pools: false,
+                anchor: None,
             }),
         );
     }

@@ -34,7 +34,9 @@ pub enum PanelShadow {
 ///
 /// `fill` is [`Some`] to paint the interior that color, or [`None`] to leave the
 /// cells' own SGR backgrounds showing through.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+// `Eq` is absent because [`Self::anchor`] carries a fractional row offset and
+// `f32` is only `PartialEq`.
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct PanelCommand {
     pub top: u16,
     pub left: u16,
@@ -54,6 +56,15 @@ pub struct PanelCommand {
     /// paint over its rect. `false` layers the panel with the grid, where a pool
     /// composite covering the same cells draws over it.
     pub above_pools: bool,
+    /// The host pool this panel rides and the document top row its layout
+    /// assumed, or `None` for a panel fixed to the screen.
+    ///
+    /// `Some((host, top_rows))` asks the terminal to draw the frame shifted by
+    /// the gap between `top_rows` and the host's eased top, so a popup framed
+    /// over a scrolling pane travels with the text beneath it. The panel's
+    /// counterpart to [`PoolAnchorCommand`](super::PoolAnchorCommand), which
+    /// carries the same tie for the popup's own pool region.
+    pub anchor: Option<(u32, f32)>,
 }
 
 /// Encode a [`PanelCommand`] as a full `Gstoatty;panel` frame for an emitter.
@@ -79,6 +90,12 @@ pub fn encode_panel_into(out: &mut Vec<u8>, command: &PanelCommand) {
         w.write_all(&[shadow_code(command.shadow)])?;
         w.write_all(&[command.inset_x])?;
         w.write_all(&[command.above_pools as u8])?;
+        // Trailing and optional, so a receiver built before the anchor existed
+        // reads the frame whole and treats the panel as screen-fixed.
+        if let Some((host, top_rows)) = command.anchor {
+            w.write_all(&host.to_be_bytes())?;
+            w.write_all(&top_rows.to_be_bytes())?;
+        }
         Ok(())
     });
     frame::end(out);
@@ -102,6 +119,12 @@ pub(super) fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
         shadow: decode_shadow(arg[17]),
         inset_x: arg[18],
         above_pools: arg.get(19).is_some_and(|byte| *byte != 0),
+        anchor: arg.get(20..28).map(|tail| {
+            (
+                u32::from_be_bytes([tail[0], tail[1], tail[2], tail[3]]),
+                f32::from_be_bytes([tail[4], tail[5], tail[6], tail[7]]),
+            )
+        }),
     })
 }
 
@@ -144,6 +167,7 @@ mod tests {
             shadow: PanelShadow::Drop,
             inset_x: 4,
             above_pools: false,
+            anchor: None,
         };
 
         assert_eq!(
@@ -166,6 +190,7 @@ mod tests {
             shadow: PanelShadow::Drop,
             inset_x: 4,
             above_pools: true,
+            anchor: None,
         };
 
         assert_eq!(
@@ -188,6 +213,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            anchor: None,
         };
 
         assert_eq!(
@@ -210,6 +236,7 @@ mod tests {
             shadow: PanelShadow::Tucked,
             inset_x: 4,
             above_pools: false,
+            anchor: None,
         };
 
         assert_eq!(
@@ -232,6 +259,7 @@ mod tests {
             shadow: PanelShadow::Overhang,
             inset_x: 4,
             above_pools: false,
+            anchor: None,
         };
 
         assert_eq!(
@@ -292,7 +320,57 @@ mod tests {
                 shadow: PanelShadow::Drop,
                 inset_x: 0,
                 above_pools: true,
+                anchor: None,
             })
+        );
+    }
+
+    #[test]
+    fn panel_anchor_round_trips() {
+        let command = PanelCommand {
+            top: 3,
+            left: 12,
+            width: 40,
+            height: 10,
+            style: BorderStyle::Rounded,
+            border: [200, 40, 90],
+            corner_radius: 6,
+            fill: Some([20, 22, 30]),
+            shadow: PanelShadow::Drop,
+            inset_x: 4,
+            above_pools: true,
+            anchor: Some((7, 12.5)),
+        };
+
+        assert_eq!(
+            decode(&encode_panel(&command)),
+            Some(Command::Panel(command))
+        );
+    }
+
+    #[test]
+    fn panel_decode_defaults_an_anchorless_frame_to_screen_fixed() {
+        // A 20-byte arg carries the above_pools flag but predates the anchor.
+        // An emitter left over from before a mid-session rebuild still decodes,
+        // its panel holding its screen position as it did when written.
+        let mut arg = Vec::new();
+        arg.extend_from_slice(&3u16.to_be_bytes());
+        arg.extend_from_slice(&12u16.to_be_bytes());
+        arg.extend_from_slice(&40u16.to_be_bytes());
+        arg.extend_from_slice(&10u16.to_be_bytes());
+        arg.push(style_code(BorderStyle::Rounded));
+        arg.extend_from_slice(&[200, 40, 90]);
+        arg.push(6);
+        arg.push(0);
+        arg.extend_from_slice(&[0, 0, 0]);
+        arg.push(shadow_code(PanelShadow::Drop));
+        arg.push(4);
+        arg.push(1);
+        assert_eq!(arg.len(), 20);
+
+        assert_eq!(
+            decode_panel(&[arg]).map(|panel| (panel.above_pools, panel.anchor)),
+            Some((true, None)),
         );
     }
 
@@ -329,6 +407,7 @@ mod tests {
                 shadow: PanelShadow::Tucked,
                 inset_x: 4,
                 above_pools: false,
+                anchor: None,
             })
         );
     }

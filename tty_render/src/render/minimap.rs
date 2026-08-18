@@ -984,6 +984,7 @@ mod tests {
             shadow: PanelShadow::Drop,
             inset_x: 0,
             above_pools: false,
+            anchor: None,
             // Above the strip's own seq, which is what makes it occlude.
             seq: 1,
         };

@@ -25,8 +25,8 @@ use minimap::{decode_minimap, decode_minimap_drop, decode_minimap_lines, decode_
 use panel::decode_panel;
 use polyline::decode_polyline;
 use pool::{
-    decode_fill, decode_pool_cursor, decode_pool_drop, decode_pool_region, decode_reposition,
-    decode_scroll,
+    decode_fill, decode_pool_anchor, decode_pool_cursor, decode_pool_drop, decode_pool_region,
+    decode_reposition, decode_scroll,
 };
 use popover::decode_popover;
 use scale::decode_scale;
@@ -64,10 +64,11 @@ pub use panel::{encode_panel, encode_panel_into, PanelCommand, PanelShadow};
 pub use polyline::{encode_polyline, encode_polyline_into, PolylineCommand};
 pub use pool::{
     encode_fill, encode_fill_end, encode_fill_end_into, encode_fill_into, encode_fill_scope,
-    encode_pool_cursor, encode_pool_cursor_into, encode_pool_drop, encode_pool_drop_into,
-    encode_pool_region, encode_pool_region_into, encode_reposition, encode_reposition_into,
-    encode_scroll, encode_scroll_into, fill_batch_key, FillCommand, PoolCursorCommand,
-    PoolDropCommand, PoolRegionCommand, RepositionCommand, ScrollCommand, NON_PANE_POOL_BASE,
+    encode_pool_anchor, encode_pool_anchor_into, encode_pool_cursor, encode_pool_cursor_into,
+    encode_pool_drop, encode_pool_drop_into, encode_pool_region, encode_pool_region_into,
+    encode_reposition, encode_reposition_into, encode_scroll, encode_scroll_into, fill_batch_key,
+    FillCommand, PoolAnchorCommand, PoolCursorCommand, PoolDropCommand, PoolRegionCommand,
+    RepositionCommand, ScrollCommand, NON_PANE_POOL_BASE,
 };
 pub use popover::{
     encode_popover, encode_popover_end, encode_popover_end_into, encode_popover_into,
@@ -96,7 +97,10 @@ pub use window::{
 /// The enum is intentionally exhaustive: adding a variant forces every matcher,
 /// including the terminal's apply seam, to handle it rather than silently
 /// dropping the new command.
-#[derive(Clone, PartialEq, Eq, Debug)]
+// `Eq` is absent because [`PoolAnchorCommand`] carries a fractional row offset
+// and `f32` is only `PartialEq`. Nothing keys a collection on a command, so the
+// weaker bound costs nothing and comparisons in tests are unaffected.
+#[derive(Clone, PartialEq, Debug)]
 pub enum Command {
     Border(BorderCommand),
     Panel(PanelCommand),
@@ -147,6 +151,14 @@ pub enum Command {
     /// eased scroll offset instead of easing it toward its last VT cell. Sent
     /// once per glide tick alongside the pool's [`Command::Scroll`] frame.
     PoolCursor(PoolCursorCommand),
+    /// Anchor a floating pool to the host pool it must ride while that host
+    /// glides.
+    ///
+    /// Carries the host pool and the document top row the anchored pool's layout
+    /// assumed, so the terminal draws it shifted by the gap between that
+    /// assumption and the host's eased offset. The sibling of
+    /// [`Command::PoolCursor`], sent on the same once-per-tick cadence.
+    PoolAnchor(PoolAnchorCommand),
     /// Jump the smooth-scroll target to a document page across an unbuffered gap.
     ///
     /// Re-anchors the live offset to a local neighbour of [`RepositionCommand`]'s
@@ -327,6 +339,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::FillEnd => encode_fill_end_into(out),
         Command::Scroll(c) => encode_scroll_into(out, c),
         Command::PoolCursor(c) => encode_pool_cursor_into(out, c),
+        Command::PoolAnchor(c) => encode_pool_anchor_into(out, c),
         Command::Reposition(c) => encode_reposition_into(out, c.pool, c.page),
         Command::PoolDrop(c) => encode_pool_drop_into(out, c.pool),
         Command::Minimap(c) => encode_minimap_into(out, c),
@@ -367,6 +380,7 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         "fill_end" => Some(Command::FillEnd),
         "scroll" => decode_scroll(args).map(Command::Scroll),
         "pool_cursor" => decode_pool_cursor(args).map(Command::PoolCursor),
+        "pool_anchor" => decode_pool_anchor(args).map(Command::PoolAnchor),
         "reposition" => decode_reposition(args).map(Command::Reposition),
         "pool_drop" => decode_pool_drop(args).map(Command::PoolDrop),
         "minimap" => decode_minimap(args).map(Command::Minimap),
@@ -493,6 +507,14 @@ mod tests {
                     pool: 1,
                     row: 2,
                     col: 3,
+                }),
+            ),
+            (
+                "pool_anchor",
+                encode_pool_anchor(&PoolAnchorCommand {
+                    pool: 1,
+                    host: 2,
+                    top_rows: 3.0,
                 }),
             ),
             (
