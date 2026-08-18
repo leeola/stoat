@@ -4300,6 +4300,22 @@ impl Stoat {
             return UpdateEffect::None;
         };
 
+        self.run_bound_actions(&actions, captured_digit)
+    }
+
+    /// Run a binding's resolved actions, applying the mode switches, variable
+    /// sets, and dispatches it names, and report what the frame owes.
+    ///
+    /// `captured_digit` binds a `$num` argument when the winning key was the
+    /// digit placeholder. Pass `None` from a path with no placeholder to bind.
+    ///
+    /// Every input path that resolves a binding runs it through here, so a
+    /// wheel gesture and a key press share one set of chord semantics.
+    fn run_bound_actions(
+        &mut self,
+        actions: &Arc<[ResolvedAction]>,
+        captured_digit: Option<f64>,
+    ) -> UpdateEffect {
         let mut effect = UpdateEffect::None;
         let mut dispatched_action = false;
         let mut dispatched_hover = false;
