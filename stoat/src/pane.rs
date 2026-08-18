@@ -368,7 +368,7 @@ impl PaneTree {
         self.next_index += 1;
 
         self.insert_pane_leaf(new_pane_id, axis);
-        self.focus = new_pane_id;
+        self.set_focus(new_pane_id);
         self.recalculate();
         new_pane_id
     }
@@ -461,7 +461,8 @@ impl PaneTree {
         };
 
         if self.focus == id {
-            self.focus = self.next_split_pane(id);
+            let next = self.next_split_pane(id);
+            self.set_focus(next);
         }
 
         self.detach_node(node_id);
@@ -488,7 +489,8 @@ impl PaneTree {
         };
 
         if self.focus == id {
-            self.focus = self.next_split_pane(id);
+            let next = self.next_split_pane(id);
+            self.set_focus(next);
         }
 
         self.detach_node(node_id);
@@ -507,7 +509,7 @@ impl PaneTree {
     pub fn attach(&mut self, id: PaneId) {
         self.panes[id].placement = Placement::Split;
         self.insert_pane_leaf(id, Axis::Vertical);
-        self.focus = id;
+        self.set_focus(id);
         self.recalculate();
     }
 
@@ -558,18 +560,20 @@ impl PaneTree {
             && let NodeContent::Leaf(pane_id) = self.nodes[target].content
             && pane_id != self.focus
         {
-            self.focus = pane_id;
+            self.set_focus(pane_id);
             return true;
         }
         false
     }
 
     pub fn focus_next(&mut self) {
-        self.focus = self.next_split_pane(self.focus);
+        let next = self.next_split_pane(self.focus);
+        self.set_focus(next);
     }
 
     pub fn focus_prev(&mut self) {
-        self.focus = self.prev_split_pane(self.focus);
+        let prev = self.prev_split_pane(self.focus);
+        self.set_focus(prev);
     }
 
     /// Swap the focused pane's content with the split leaf in `direction`,
@@ -587,7 +591,7 @@ impl PaneTree {
             && target_pane != anchor
         {
             self.swap_pane_contents(anchor, target_pane);
-            self.focus = target_pane;
+            self.set_focus(target_pane);
             return true;
         }
         false
@@ -616,7 +620,7 @@ impl PaneTree {
             return false;
         }
         self.swap_pane_contents(anchor, target);
-        self.focus = target;
+        self.set_focus(target);
         true
     }
 
@@ -1947,6 +1951,44 @@ mod tests {
         assert_eq!(tree.widened(), None, "focusing another pane unwidens");
         assert_eq!(tree.pane(tl).area, tl_area, "the widened pane is restored");
         assert_eq!(tree.pane(tr).area, tr_area, "the covered pane is restored");
+    }
+
+    #[test]
+    fn split_while_widened_unwidens_and_shows_both_panes() {
+        let mut tree = PaneTree::new(area());
+        let first = tree.focus();
+        assert!(tree.widen(first));
+
+        let new_pane = tree.split(Axis::Vertical);
+
+        assert_eq!(
+            (tree.widened(), tree.focus()),
+            (None, new_pane),
+            "the split unwidens and focus lands on the new pane"
+        );
+        assert!(
+            tree.pane(first).area.width > 0 && tree.pane(new_pane).area.width > 0,
+            "neither pane is left with a zero-width area: {:?} and {:?}",
+            tree.pane(first).area,
+            tree.pane(new_pane).area
+        );
+    }
+
+    #[test]
+    fn focus_next_off_the_widened_pane_unwidens() {
+        let (mut tree, tl, bl, tr, br) = grid_2x2();
+        let natural: Vec<Rect> = [tl, bl, tr, br].map(|id| tree.pane(id).area).into();
+        tree.set_focus(tl);
+        assert!(tree.widen(tl));
+
+        tree.focus_next();
+
+        assert_eq!(tree.widened(), None, "walking focus onward unwidens");
+        assert_eq!(
+            [tl, bl, tr, br].map(|id| tree.pane(id).area).to_vec(),
+            natural,
+            "every pane's natural area is restored"
+        );
     }
 
     #[test]
