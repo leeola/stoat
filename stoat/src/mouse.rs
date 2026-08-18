@@ -447,10 +447,15 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
     // A left-button drag over an open hover popup selects its text. Routed
     // ahead of focus_at and the pane handlers so the click never reaches the
     // editor, leaving the buffer selection and cursor untouched.
-    if stoat.pending_hover.is_some()
-        && let Some(effect) = handle_hover_selection_mouse(stoat, mouse)
-    {
-        return effect;
+    // A press outside closes the popup and falls through, so the frame still
+    // owes a repaint even when nothing below the fall-through consumes the
+    // press. The two exits after this carry that debt.
+    let mut hover_closed = false;
+    if stoat.pending_hover.is_some() {
+        if let Some(effect) = handle_hover_selection_mouse(stoat, mouse) {
+            return effect;
+        }
+        hover_closed = stoat.pending_hover.is_none();
     }
 
     // A press or drag over a pane's minimap strip scrubs that pane, ahead of
@@ -474,10 +479,15 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
         }
         focus_at(stoat, mouse.column, mouse.row);
     }
-    let Some((col, row)) = translate_mouse_to_focused(stoat, mouse.column, mouse.row) else {
-        return UpdateEffect::None;
+    let closed_effect = |effect| match effect {
+        UpdateEffect::None if hover_closed => UpdateEffect::Redraw,
+        other => other,
     };
-    apply_focused_pane_mouse(stoat, mouse.kind, col, row)
+
+    let Some((col, row)) = translate_mouse_to_focused(stoat, mouse.column, mouse.row) else {
+        return closed_effect(UpdateEffect::None);
+    };
+    closed_effect(apply_focused_pane_mouse(stoat, mouse.kind, col, row))
 }
 
 /// Route a pane-relative pointer event to whichever focused pane kind owns
@@ -633,9 +643,14 @@ fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scr
 /// release over the popup), `None` when it should fall through to normal
 /// mouse handling.
 ///
-/// A press inside starts a drag selection. A press outside clears any
-/// selection and falls through, leaving the popup open. A release keeps the
-/// selection live and copies it to the clipboard when non-empty.
+/// A left press inside starts a drag selection, and a release keeps that
+/// selection live, copying it to the clipboard when non-empty.
+///
+/// A press outside closes the popup and its in-flight request, then falls
+/// through so the press still lands. This mirrors the key path, where any key
+/// the popup does not scroll with closes it and then dispatches. The press is
+/// not swallowed, so it goes on to place the cursor, arm a divider, or change
+/// focus exactly as it does with no popup open.
 fn handle_hover_selection_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
     let popup_area = stoat.pending_hover.as_ref()?.area;
     let inside = popup_area.contains(Position {
@@ -644,11 +659,13 @@ fn handle_hover_selection_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<
     });
 
     match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => {
+        MouseEventKind::Down(button) => {
             if !inside {
-                if let Some(popup) = stoat.pending_hover.as_mut() {
-                    popup.selection = None;
-                }
+                stoat.pending_hover = None;
+                stoat.pending_hover_request = None;
+                return None;
+            }
+            if button != MouseButton::Left {
                 return None;
             }
             let pos = crate::render::hover::hover_hit_test(

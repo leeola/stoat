@@ -1437,6 +1437,9 @@ pub struct Stoat {
     /// intercept in [`Self::handle_key`]): Escape and Ctrl-c are consumed by the
     /// close, every other key closes it and then dispatches. Any non-Hover action
     /// also clears it, so the popup vanishes on cursor motion.
+    ///
+    /// The mouse follows the same rule. A press outside the popup's rect closes
+    /// it and then falls through, so the click still lands where it was aimed.
     pub(crate) pending_hover: Option<crate::render::hover::HoverPopup>,
 
     /// In-flight `textDocument/signatureHelp` request, armed by
@@ -11447,6 +11450,33 @@ mod tests {
         );
     }
 
+    /// The key path closes the popup on any key it does not scroll with, then
+    /// dispatches. A click outside owes the same, so the press still lands
+    /// rather than being spent on the dismissal.
+    #[test]
+    fn a_press_outside_the_hover_closes_it_and_still_lands() {
+        for button in [MouseButton::Left, MouseButton::Middle] {
+            let mut h = Stoat::test();
+            let _ = open_scratch_file(&mut h, "buffer text\nsecond line\n");
+            h.stoat.pending_hover = Some(hover_sel_popup(&["hello world"], 0));
+
+            // Column 2 of row 0 sits left of the popup's rect, which starts at
+            // x 9, so the press is outside it and inside the editor.
+            h.stoat
+                .update(mouse_event(MouseEventKind::Down(button), 2, 0));
+
+            assert!(
+                h.stoat.pending_hover.is_none() && h.stoat.pending_hover_request.is_none(),
+                "{button:?} outside the popup closes it and its in-flight request"
+            );
+            assert_eq!(
+                h.primary_head_offset(),
+                2,
+                "{button:?} still places the cursor where it was aimed"
+            );
+        }
+    }
+
     #[test]
     fn unplaceable_hover_popup_stops_consuming_mouse_input() {
         use crate::render::hover::HoverPopup;
@@ -11476,15 +11506,17 @@ mod tests {
         );
 
         // A Down inside the previously rendered rect falls through to the pane
-        // instead of the stale area swallowing it as a hover selection.
+        // instead of the stale area swallowing it as a hover selection. The
+        // reset rect puts every point outside the popup, so the press also
+        // dismisses it on the way through.
         h.stoat.update(mouse_event(
             MouseEventKind::Down(MouseButton::Left),
             rendered.x + 1,
             rendered.y + 1,
         ));
         assert!(
-            h.stoat.pending_hover.as_ref().unwrap().selection.is_none(),
-            "the stale rect no longer consumes the click as a selection",
+            h.stoat.pending_hover.is_none(),
+            "the stale rect takes the click as a dismissal, not as a selection",
         );
     }
 
