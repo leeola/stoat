@@ -652,6 +652,7 @@ impl PaneTree {
         std::mem::swap(&mut pa.prev_view, &mut pb.prev_view);
         std::mem::swap(&mut pa.jumplist, &mut pb.jumplist);
         std::mem::swap(&mut pa.last_buffer, &mut pb.last_buffer);
+        std::mem::swap(&mut pa.diff_mode, &mut pb.diff_mode);
     }
 
     pub fn split_panes(&self) -> Traverse<'_> {
@@ -1543,6 +1544,9 @@ mod tests {
         let b = tree.split(Axis::Vertical);
         tree.pane_mut(a).view = View::Label("a".into());
         tree.pane_mut(b).view = View::Label("b".into());
+        // A latched review session belongs to the content, so pushing it into
+        // another slot has to take the latch along.
+        tree.pane_mut(b).diff_mode = true;
         let (a_area, a_index) = (tree.pane(a).area, tree.pane(a).index);
         let (b_area, b_index) = (tree.pane(b).area, tree.pane(b).index);
 
@@ -1561,6 +1565,12 @@ mod tests {
         );
         assert_eq!(tree.pane(b).area, b_area);
         assert_eq!(tree.pane(b).index, b_index);
+
+        assert_eq!(
+            (tree.pane(a).diff_mode, tree.pane(b).diff_mode),
+            (true, false),
+            "the diff latch travels with the content it belongs to"
+        );
     }
 
     #[test]
