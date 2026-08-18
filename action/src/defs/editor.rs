@@ -799,6 +799,21 @@ define_action!(
 );
 
 define_action!(
+    GotoLastAccessedDef,
+    GotoLastAccessed,
+    "GotoLastAccessed",
+    ActionKind::GotoLastAccessed,
+    "switch back to the buffer shown before this one",
+    "Show the buffer the focused pane displayed before the current one, so \
+     repeating it alternates between the pair. The memory is per pane, so each \
+     split alternates within its own history. Reports in the status line when \
+     the pane has shown nothing else yet, or when that buffer has since been \
+     closed.",
+    ActionPriority::Common,
+    aliases = &["goto-last-accessed"]
+);
+
+define_action!(
     AcceptCompletionDef,
     AcceptCompletion,
     "AcceptCompletion",

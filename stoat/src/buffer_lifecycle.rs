@@ -18,7 +18,7 @@ use crate::{
     badge::{Anchor, Badge, BadgeSource, BadgeState},
     buffer::{BufferId, SharedBuffer},
     editor_state::{EditorId, EditorState},
-    pane::{PaneId, View},
+    pane::{FocusTarget, PaneId, View},
     workspace::WorkspaceId,
 };
 use lsp_types::{DidCloseTextDocumentParams, TextDocumentIdentifier};
@@ -268,6 +268,9 @@ fn finish_open(
 /// so re-showing an open buffer skips the editor swap. The buffer must
 /// already be registered in the workspace. Callers that read from disk go
 /// through [`open_file_in_pane`].
+///
+/// The displaced buffer becomes the pane's last accessed one, which is what
+/// [`goto_last_accessed`] switches back to.
 pub(crate) fn show_buffer_in_pane(
     stoat: &mut Stoat,
     workspace: WorkspaceId,
@@ -294,13 +297,63 @@ pub(crate) fn show_buffer_in_pane(
         View::Editor(eid) => Some(eid),
         _ => None,
     };
+    // Read before the gc below, which is free to drop the outgoing editor.
+    let outgoing = old
+        .and_then(|eid| ws.editors.get(eid))
+        .map(|editor| editor.buffer_id)
+        .filter(|id| *id != buffer_id);
+
     ws.panes.pane_mut(target).view = View::Editor(new_editor_id);
+    if let Some(outgoing) = outgoing {
+        ws.panes.pane_mut(target).last_buffer = Some(outgoing);
+    }
 
     if let Some(old_id) = old {
         gc_editor_if_unreferenced(ws, old_id);
     }
 
     Some(buffer_id)
+}
+
+/// Show the buffer the focused pane displayed before its current one.
+///
+/// Repeating alternates between the pair, because the switch records the buffer
+/// it leaves on the way out. The jump lands on the pane's jumplist first, so a
+/// backward jump reverses it like any cross-file open.
+///
+/// Sets a status message and moves nothing when the pane has shown no other
+/// buffer, or when that buffer has since been closed.
+pub(crate) fn goto_last_accessed(stoat: &mut Stoat) -> UpdateEffect {
+    let workspace = stoat.active_workspace;
+    let resolved = {
+        let ws = &mut stoat.workspaces[workspace];
+        let target = match ws.focus {
+            FocusTarget::SplitPane => ws.panes.focus(),
+            FocusTarget::Dock(_) => return UpdateEffect::None,
+        };
+        let previous = ws
+            .panes
+            .pane(target)
+            .last_buffer
+            .and_then(|id| ws.buffers.get(id).map(|buffer| (id, buffer)));
+
+        // A closed buffer never comes back, so drop the dangling id rather than
+        // resolving it again on every later press.
+        if previous.is_none() {
+            ws.panes.pane_mut(target).last_buffer = None;
+        }
+        previous.map(|(id, buffer)| (target, id, buffer))
+    };
+
+    let Some((target, buffer_id, buffer)) = resolved else {
+        stoat.set_status("no previously shown buffer");
+        return UpdateEffect::Redraw;
+    };
+
+    let executor = stoat.executor.clone();
+    jump::record_pane_switch(stoat, workspace, target, buffer_id);
+    show_buffer_in_pane(stoat, workspace, target, buffer_id, buffer, executor);
+    UpdateEffect::Redraw
 }
 
 /// Drop the focused buffer from the workspace's
@@ -403,7 +456,9 @@ mod tests {
         action_handlers::dispatch,
         test_harness::{editor, TestHarness},
     };
-    use stoat_action::{CloseBuffer, OpenBuffer, OpenFile};
+    use stoat_action::{
+        CloseBuffer, FocusLeft, GotoLastAccessed, OpenBuffer, OpenFile, SplitRight,
+    };
 
     fn focused_buffer_id(stoat: &mut Stoat) -> BufferId {
         focused_editor_mut(stoat).expect("editor").buffer_id
@@ -755,6 +810,113 @@ mod tests {
         assert_eq!(
             text, "live-edit disk-a\n",
             "the live in-memory edit must survive, proving no disk reload",
+        );
+    }
+
+    /// Open `a.txt` then `b.txt` in the focused pane, returning both ids in
+    /// open order. The pane ends on `b`, with `a` as the one to switch back to.
+    fn open_two(h: &mut TestHarness) -> (BufferId, BufferId) {
+        let root = PathBuf::from("/last-accessed");
+        h.fake_fs().insert_file(root.join("a.txt"), b"a\n");
+        h.fake_fs().insert_file(root.join("b.txt"), b"b\n");
+        h.stoat.active_workspace_mut().git_root = root.clone();
+
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: root.join("a.txt"),
+            },
+        );
+        h.settle();
+        let a = focused_buffer_id(&mut h.stoat);
+
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: root.join("b.txt"),
+            },
+        );
+        h.settle();
+        (a, focused_buffer_id(&mut h.stoat))
+    }
+
+    #[test]
+    fn goto_last_accessed_alternates_between_the_pair() {
+        let mut h = Stoat::test();
+        let (a, b) = open_two(&mut h);
+
+        dispatch(&mut h.stoat, &GotoLastAccessed);
+        h.settle();
+        let first = focused_buffer_id(&mut h.stoat);
+
+        dispatch(&mut h.stoat, &GotoLastAccessed);
+        h.settle();
+        let second = focused_buffer_id(&mut h.stoat);
+
+        assert_eq!(
+            (first, second),
+            (a, b),
+            "the pane walks back to the previous buffer, then returns"
+        );
+    }
+
+    #[test]
+    fn goto_last_accessed_reports_when_the_pane_has_shown_nothing_else() {
+        let mut h = Stoat::test();
+        let (_path, buffer_id) = open_path(&mut h, b"only\n");
+
+        // A split inherits the focused view but starts its own history, so the
+        // new pane has shown exactly one buffer.
+        dispatch(&mut h.stoat, &SplitRight);
+        dispatch(&mut h.stoat, &GotoLastAccessed);
+        h.settle();
+
+        assert_eq!(
+            (
+                focused_buffer_id(&mut h.stoat),
+                h.stoat.pending_message.as_deref()
+            ),
+            (buffer_id, Some("no previously shown buffer")),
+            "a pane with no history stays put and says so"
+        );
+    }
+
+    #[test]
+    fn goto_last_accessed_reports_when_the_previous_buffer_was_closed() {
+        let mut h = Stoat::test();
+        let (a, b) = open_two(&mut h);
+
+        // Closing acts on the focused buffer, so a pane never closes its own
+        // previous one. A second pane closes `a` out from under the first.
+        dispatch(&mut h.stoat, &SplitRight);
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: PathBuf::from("/last-accessed/a.txt"),
+            },
+        );
+        h.settle();
+        dispatch(&mut h.stoat, &CloseBuffer);
+        h.settle();
+        dispatch(&mut h.stoat, &FocusLeft);
+
+        dispatch(&mut h.stoat, &GotoLastAccessed);
+        h.settle();
+
+        let focused_pane = h.stoat.active_workspace().panes.focus();
+        assert_eq!(
+            (
+                h.stoat.active_workspace().buffers.get(a).is_some(),
+                focused_buffer_id(&mut h.stoat),
+                h.stoat.pending_message.as_deref(),
+                h.stoat
+                    .active_workspace()
+                    .panes
+                    .pane(focused_pane)
+                    .last_buffer,
+            ),
+            (false, b, Some("no previously shown buffer"), None),
+            "a closed previous buffer reports, stays put, and drops the dangling id"
         );
     }
 

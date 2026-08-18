@@ -30,10 +30,10 @@ use crate::{
             ExtendToLineEnd, ExtendToLineStart, ExtendToWord, ExtendUp, FindNextChar, FindPrevChar,
             FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
             GotoDiffCallerUp, GotoFileStart, GotoFirstChange, GotoFirstDiagnostic,
-            GotoFirstNonwhitespace, GotoImplementors, GotoLastChange, GotoLastDiagnostic,
-            GotoLastLine, GotoLastModification, GotoLineEnd, GotoLineNumber, GotoLineStart,
-            GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass, GotoNextComment, GotoNextEntry,
-            GotoNextFunction, GotoNextParagraph, GotoNextParameter, GotoNextTest,
+            GotoFirstNonwhitespace, GotoImplementors, GotoLastAccessed, GotoLastChange,
+            GotoLastDiagnostic, GotoLastLine, GotoLastModification, GotoLineEnd, GotoLineNumber,
+            GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass, GotoNextComment,
+            GotoNextEntry, GotoNextFunction, GotoNextParagraph, GotoNextParameter, GotoNextTest,
             GotoNextXmlElement, GotoPrevChange, GotoPrevClass, GotoPrevComment, GotoPrevEntry,
             GotoPrevFunction, GotoPrevParagraph, GotoPrevParameter, GotoPrevTest,
             GotoPrevXmlElement, GotoReferences, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
@@ -678,6 +678,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(DismissKeyHints::DEF, |_| Ok(Box::new(DismissKeyHints)));
     add(WriteQuit::DEF, |_| Ok(Box::new(WriteQuit)));
     add(CloseBuffer::DEF, |_| Ok(Box::new(CloseBuffer)));
+    add(GotoLastAccessed::DEF, |_| Ok(Box::new(GotoLastAccessed)));
     add(AcceptCompletion::DEF, |_| Ok(Box::new(AcceptCompletion)));
     add(SmartTab::DEF, |_| Ok(Box::new(SmartTab)));
     add(InsertTab::DEF, |_| Ok(Box::new(InsertTab)));
@@ -1838,6 +1839,7 @@ mod tests {
         // + 2 ReloadAll/ForceReloadAll.
         // + 1 WriteQuit.
         // + 1 CloseBuffer.
+        // + 1 GotoLastAccessed.
         // + 1 AcceptCompletion.
         // + 2 SmartTab/TriggerCompletion.
         // + 1 GotoLineNumber.
@@ -1973,7 +1975,7 @@ mod tests {
         // + 1 ReplaceWithClipboard.
         // + 2 ToggleLineComments/ToggleBlockComments.
         // + 4 the long-word extends.
-        assert_eq!(all().count(), 474);
+        assert_eq!(all().count(), 475);
     }
 
     #[test]

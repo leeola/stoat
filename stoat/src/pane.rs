@@ -2,6 +2,7 @@ use crate::{editor_state::EditorId, jumplist::JumpList, run::RunId, term_session
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 use slotmap::{new_key_type, SlotMap};
+use stoat_text::BufferId;
 
 new_key_type! {
     pub struct PaneId;
@@ -154,6 +155,17 @@ pub struct Pane {
     /// restored session starts with an empty history.
     #[serde(skip)]
     pub(crate) jumplist: JumpList,
+    /// The buffer this pane showed before its current one, for the alternating
+    /// switch [`crate::buffer_lifecycle::goto_last_accessed`] makes.
+    ///
+    /// Per pane rather than per workspace, so each split alternates within the
+    /// pair it has actually shown. A workspace-wide most-recent list answers
+    /// with buffers the pane never displayed.
+    ///
+    /// `serde(skip)`: navigation scratch like [`Self::jumplist`], so a restored
+    /// session starts with nothing to switch back to.
+    #[serde(skip)]
+    pub(crate) last_buffer: Option<BufferId>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -216,6 +228,7 @@ impl PaneTree {
             area,
             index: 0,
             jumplist: JumpList::default(),
+            last_buffer: None,
         });
 
         let root_id = nodes.insert(Node {
@@ -350,6 +363,7 @@ impl PaneTree {
             area: Rect::default(),
             index: self.next_index,
             jumplist: JumpList::default(),
+            last_buffer: None,
         });
         self.next_index += 1;
 
@@ -615,6 +629,7 @@ impl PaneTree {
         std::mem::swap(&mut pa.view, &mut pb.view);
         std::mem::swap(&mut pa.prev_view, &mut pb.prev_view);
         std::mem::swap(&mut pa.jumplist, &mut pb.jumplist);
+        std::mem::swap(&mut pa.last_buffer, &mut pb.last_buffer);
     }
 
     pub fn split_panes(&self) -> Traverse<'_> {

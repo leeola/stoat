@@ -193,6 +193,7 @@ action_kinds! {
     ForceSaveBuffer,
     WriteQuit,
     CloseBuffer,
+    GotoLastAccessed,
     AutoReload,
     AutoReloadConfig,
     FontSizeInc,
