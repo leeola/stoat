@@ -1236,7 +1236,19 @@ pub(crate) fn frame(
             } else if screen == Some("conflict") {
                 stoat.keymap.scoped_bindings(&state, "view", "conflict")
             } else {
-                stoat.keymap.active_bindings(&state)
+                // Wheel gestures are left out. This overlay affords pressing
+                // one of the keys it lists, which a notch is not. Width is also
+                // the scarce resource here, because normal mode already fills
+                // two columns and a third overflows any ordinary terminal. The
+                // help screen reads the unfiltered set, so nothing is hidden
+                // from a reader looking for it.
+                stoat
+                    .keymap
+                    .active_keys(&state)
+                    .into_iter()
+                    .filter(|(key, _)| key.wheel.is_none())
+                    .map(|(key, actions)| (key.display_label(), actions))
+                    .collect()
             };
             let bindings: Vec<(&str, String)> = raw
                 .iter()

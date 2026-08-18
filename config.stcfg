@@ -375,6 +375,21 @@ on key {
     # and Ctrl-d/gg/G scroll the editor hidden behind it. Render then paints one
     # modal while keys route to another.
     !modal && mode == normal {
+        # WheelUp and WheelDown are bindable named keys and take the usual
+        # modifier prefixes, so a modified notch runs an action instead of
+        # scrolling. Alt is the default. Shift is the terminal-side bypass for
+        # mouse reporting, and ctrl-wheel is the GUI zoom convention.
+        #
+        # A wheel dispatch acts on the focused pane, exactly as a key press
+        # does, rather than on the pane under the pointer. An unbound modifier
+        # falls through to plain scrolling. Aux windows and macro recording both
+        # ignore wheel modifiers.
+        #
+        # Under a foreign terminal the gesture reaches only as far as that
+        # terminal forwards the modifier with its wheel report. Alt is widely
+        # forwarded. Shift is commonly intercepted by the terminal itself.
+        Alt-WheelDown -> GotoNextFunction();
+        Alt-WheelUp -> GotoPrevFunction();
         Enter -> RunSubmit();
         q -> ReplayMacro();
         Space -> SetMode(space);
@@ -845,6 +860,12 @@ on key {
         s -> RebaseConflictSkipEntry();
         Enter -> RebaseConflictApply();
         : -> OpenCommandPalette();
+    }
+    # Two atoms against the normal block's one, so the diff view walks changes
+    # where a plain buffer walks functions.
+    view == diff && mode == normal {
+        Alt-WheelDown -> GotoNextChange();
+        Alt-WheelUp -> GotoPrevChange();
     }
     view == review && mode == normal {
         Escape -> CloseReview();

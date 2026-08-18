@@ -1682,6 +1682,40 @@ mod tests {
     }
 
     #[test]
+    fn the_default_alt_wheel_walks_changes_in_a_diff_and_functions_elsewhere() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let plain = TestState::new().set("mode", StateValue::String("normal".into()));
+        let in_diff = TestState::new()
+            .set("mode", StateValue::String("normal".into()))
+            .set("view", StateValue::String("diff".into()));
+        let bound = |state: &TestState, dir| {
+            keymap
+                .lookup_wheel(state, dir, KeyModifiers::ALT)
+                .expect("alt-wheel is bound")[0]
+                .name
+                .clone()
+        };
+
+        assert_eq!(
+            (
+                bound(&plain, WheelDirection::Down),
+                bound(&plain, WheelDirection::Up),
+                bound(&in_diff, WheelDirection::Down),
+                bound(&in_diff, WheelDirection::Up),
+            ),
+            (
+                "GotoNextFunction".to_string(),
+                "GotoPrevFunction".to_string(),
+                "GotoNextChange".to_string(),
+                "GotoPrevChange".to_string(),
+            ),
+            "the two-atom diff block outranks the one-atom normal block"
+        );
+    }
+
+    #[test]
     fn space_pane_display_binds_digits_to_focus_pane() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
