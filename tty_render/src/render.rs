@@ -148,6 +148,24 @@ pub(crate) struct Occluder {
     _pad: u32,
 }
 
+/// One panel riding a pool that composites this frame.
+///
+/// A popup's frame is laid out by a live frame, and no live frame ships while
+/// its host glides, so the frame holds its screen position while the text under
+/// it eases. Drawing it shifted by [`Self::dy_px`], after the host's composite
+/// and clipped to [`Self::scissor`], carries it along instead.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct AnchoredPanel {
+    /// The host pool the panel rides, matched against a panel's own anchor.
+    pub host: u32,
+    /// Vertical pixel shift, from the gap between the top row the panel's layout
+    /// assumed and the host's eased top.
+    pub dy_px: f32,
+    /// The host region's scissor, so the panel is cut at the pane edge rather
+    /// than drawn over the neighbour.
+    pub scissor: [u32; 4],
+}
+
 /// One pool's instances for a composite draw.
 ///
 /// A frame composites several pools over the live grid, and each needs its own
@@ -438,9 +456,14 @@ pub(crate) fn row_len<T>(rows: &[Vec<T>]) -> usize {
 /// Every pass that occludes reads the same list off the same panels, so a frame
 /// builds it once and lends it around. `out` is cleared first, so the frame's
 /// scratch holds only this frame's panels.
-pub(crate) fn build_occluders_into(panels: &[Panel], out: &mut Vec<Occluder>) {
+pub(crate) fn build_occluders_into(panels: &[Panel], riding: &[u32], out: &mut Vec<Occluder>) {
     out.clear();
-    out.extend(panels.iter().map(panel_occluder));
+    out.extend(
+        panels
+            .iter()
+            .filter(|panel| !rides(panel, riding))
+            .map(panel_occluder),
+    );
 }
 
 /// Collect into `out` the occluders a pool composite uploads, given the panels on
@@ -457,14 +480,29 @@ pub(crate) fn build_occluders_into(panels: &[Panel], out: &mut Vec<Occluder>) {
 ///
 /// See also:
 /// - [`occlusion_globals`] for the count the composite shaders read off this list.
-pub(crate) fn pool_occluders_into(occludable: bool, panels: &[Panel], out: &mut Vec<Occluder>) {
+pub(crate) fn pool_occluders_into(
+    occludable: bool,
+    panels: &[Panel],
+    riding: &[u32],
+    out: &mut Vec<Occluder>,
+) {
     out.clear();
     out.extend(
         panels
             .iter()
+            .filter(|panel| !rides(panel, riding))
             .filter(|panel| occludable || panel.above_pools)
             .map(panel_occluder),
     );
+}
+
+/// Whether `panel` is anchored to one of the pools in `riding`.
+///
+/// Such a panel draws shifted, after the composites, so its rect on the live
+/// grid is stale for the whole glide. Both occluder lists drop it rather than
+/// punch a hole where it no longer is.
+pub(crate) fn rides(panel: &Panel, riding: &[u32]) -> bool {
+    panel.anchor.is_some_and(|(host, _)| riding.contains(&host))
 }
 
 /// The `(panel_count, occlude_all)` a pool composite writes into its globals
@@ -819,7 +857,12 @@ mod tests {
     #[test]
     fn occludable_pool_occludes_all_panels_without_a_seq_test() {
         let mut occluders = Vec::new();
-        pool_occluders_into(true, &[panel(1, false), panel(2, true)], &mut occluders);
+        pool_occluders_into(
+            true,
+            &[panel(1, false), panel(2, true)],
+            &[],
+            &mut occluders,
+        );
 
         assert_eq!(
             occluders.iter().map(|o| o.seq).collect::<Vec<_>>(),
@@ -836,7 +879,12 @@ mod tests {
     #[test]
     fn non_pane_pool_occludes_only_against_panels_above_pools() {
         let mut occluders = Vec::new();
-        pool_occluders_into(false, &[panel(1, false), panel(2, true)], &mut occluders);
+        pool_occluders_into(
+            false,
+            &[panel(1, false), panel(2, true)],
+            &[],
+            &mut occluders,
+        );
 
         assert_eq!(
             occluders.iter().map(|o| o.seq).collect::<Vec<_>>(),
@@ -845,6 +893,39 @@ mod tests {
              surface covers it"
         );
         assert_eq!(occlusion_globals(&occluders), (1, 1));
+    }
+
+    /// A panel anchored to a compositing host draws shifted, after the pools, so
+    /// its rect on the live grid names where it no longer is. Punching that rect
+    /// out of a composite leaves a hole over the very content the panel left
+    /// behind.
+    #[test]
+    fn an_anchored_panel_drops_out_of_both_occluder_lists_while_its_host_rides() {
+        let mut riding = panel(2, true);
+        riding.anchor = Some((7, 0.0));
+        let panels = [panel(1, false), riding];
+
+        let mut occluders = Vec::new();
+        pool_occluders_into(true, &panels, &[7], &mut occluders);
+        let pane = occluders.iter().map(|o| o.seq).collect::<Vec<_>>();
+
+        build_occluders_into(&panels, &[7], &mut occluders);
+        let base = occluders.iter().map(|o| o.seq).collect::<Vec<_>>();
+
+        assert_eq!(
+            (pane, base),
+            (vec![1], vec![1]),
+            "the ridden panel is out of the pane pool's list and the base list"
+        );
+
+        // With the host parked, a live frame has placed the panel, so it
+        // occludes from its own rect exactly as any other panel does.
+        pool_occluders_into(true, &panels, &[], &mut occluders);
+        assert_eq!(
+            occluders.iter().map(|o| o.seq).collect::<Vec<_>>(),
+            [1, 2],
+            "a panel whose host is not riding keeps its place"
+        );
     }
 
     /// An occluder list is compared against the last one uploaded to decide whether to
@@ -857,17 +938,17 @@ mod tests {
     #[test]
     fn an_occluder_list_compares_equal_only_while_the_panels_hold() {
         let mut held = Vec::new();
-        build_occluders_into(&[panel(1, false), panel(2, true)], &mut held);
+        build_occluders_into(&[panel(1, false), panel(2, true)], &[], &mut held);
 
         let mut again = Vec::new();
-        build_occluders_into(&[panel(1, false), panel(2, true)], &mut again);
+        build_occluders_into(&[panel(1, false), panel(2, true)], &[], &mut again);
         assert!(
             !upload_needed(&again, &held),
             "an unchanged frame's panels build a list equal to the one held"
         );
 
         let mut moved = Vec::new();
-        build_occluders_into(&[panel(1, false), panel(2, true)], &mut moved);
+        build_occluders_into(&[panel(1, false), panel(2, true)], &[], &mut moved);
         moved[1].cell[0] += 1.0;
         assert!(
             upload_needed(&moved, &held),
@@ -875,14 +956,14 @@ mod tests {
         );
 
         let mut resequenced = Vec::new();
-        build_occluders_into(&[panel(1, false), panel(9, true)], &mut resequenced);
+        build_occluders_into(&[panel(1, false), panel(9, true)], &[], &mut resequenced);
         assert!(
             upload_needed(&resequenced, &held),
             "a panel's seq decides what it hides, so a new seq has to be re-sent"
         );
 
         let mut fewer = Vec::new();
-        build_occluders_into(&[panel(1, false)], &mut fewer);
+        build_occluders_into(&[panel(1, false)], &[], &mut fewer);
         assert!(
             upload_needed(&fewer, &held),
             "a closed box leaves a shorter list"
@@ -978,8 +1059,18 @@ mod tests {
     #[test]
     fn a_reused_occluder_buffer_holds_only_the_pool_it_was_filled_for() {
         let mut occluders = Vec::new();
-        pool_occluders_into(true, &[panel(1, false), panel(2, true)], &mut occluders);
-        pool_occluders_into(false, &[panel(3, false), panel(4, true)], &mut occluders);
+        pool_occluders_into(
+            true,
+            &[panel(1, false), panel(2, true)],
+            &[],
+            &mut occluders,
+        );
+        pool_occluders_into(
+            false,
+            &[panel(3, false), panel(4, true)],
+            &[],
+            &mut occluders,
+        );
 
         assert_eq!(
             occluders.iter().map(|o| o.seq).collect::<Vec<_>>(),
@@ -996,7 +1087,12 @@ mod tests {
     #[test]
     fn non_pane_pool_with_no_panel_above_pools_occludes_nothing() {
         let mut occluders = Vec::new();
-        pool_occluders_into(false, &[panel(1, false), panel(2, false)], &mut occluders);
+        pool_occluders_into(
+            false,
+            &[panel(1, false), panel(2, false)],
+            &[],
+            &mut occluders,
+        );
 
         assert_eq!(occluders.len(), 0, "no panel floats above the pool");
         assert_eq!(

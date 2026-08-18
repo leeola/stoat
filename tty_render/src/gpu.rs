@@ -9,7 +9,7 @@
 //! draws into any texture view, so a frame can target an off-screen texture as
 //! well as the window surface that [`GpuContext`] wraps.
 
-pub use crate::render::{text::build_font_system, Frame, Scroll};
+pub use crate::render::{text::build_font_system, AnchoredPanel, Frame, Scroll};
 use crate::{
     perf::FrameProfiler,
     render::{
@@ -395,7 +395,7 @@ impl Renderer {
         grid: &Grid,
         frame: Frame<'_>,
     ) {
-        self.prepare_frame(device, queue, grid, &frame);
+        self.prepare_frame(device, queue, grid, &frame, &[]);
 
         // Time this frame's GPU work when the timer's current slot is free.
         #[cfg(feature = "perf")]
@@ -423,6 +423,7 @@ impl Renderer {
         queue: &Queue,
         grid: &Grid,
         frame: &Frame<'_>,
+        anchored: &[AnchoredPanel],
     ) {
         let resolution = [self.width as f32, self.height as f32];
         self.background.prepare(
@@ -449,11 +450,13 @@ impl Renderer {
         );
         // Built once here rather than per pass, since every pass that occludes
         // derives the same list from the same panels.
-        crate::render::build_occluders_into(grid.panels(), &mut self.occluders);
+        let riding: Vec<u32> = anchored.iter().map(|ride| ride.host).collect();
+        crate::render::build_occluders_into(grid.panels(), &riding, &mut self.occluders);
 
         self.text
             .prepare(device, queue, grid, resolution, frame, &self.occluders);
-        self.panel.prepare(device, queue, grid, resolution);
+        self.panel
+            .prepare(device, queue, grid, anchored, resolution);
         self.overlay.prepare(device, queue, grid, resolution);
         self.icon
             .prepare(device, queue, grid.icons(), &self.occluders, resolution);
@@ -507,6 +510,16 @@ impl Renderer {
     ///
     /// Leaves the full-surface scissor set, so whatever records next starts from a
     /// clean clip rather than the last scissored draw's.
+    /// Record the panels riding a compositing pool, each clipped to its host.
+    ///
+    /// [`Self::record_frame`] left their slots out, so this is where they land.
+    /// The scissor is restored to the full surface afterward, since the draws
+    /// that follow set their own.
+    pub(crate) fn record_riding_panels(&self, render_pass: &mut RenderPass<'_>) {
+        self.panel.draw_riding(render_pass);
+        render_pass.set_scissor_rect(0, 0, self.width, self.height);
+    }
+
     pub(crate) fn record_frame(&self, render_pass: &mut RenderPass<'_>, cursor: CursorLayer) {
         self.background.draw(render_pass);
         self.panel.draw(render_pass);
@@ -720,7 +733,7 @@ impl Renderer {
         // built once here rather than in each of them. It cannot share
         // `self.occluders`: that holds the live grid's unfiltered list, which the live
         // passes still read on a frame that also composites pools.
-        crate::render::pool_occluders_into(occludable, panels, &mut self.pool_occluders);
+        crate::render::pool_occluders_into(occludable, panels, &[], &mut self.pool_occluders);
 
         self.background.prepare_composite(
             device,
@@ -1365,6 +1378,7 @@ impl GpuContext {
         live_grid: &Grid,
         frame: Frame<'_>,
         pools: &[PoolComposite<'_>],
+        anchored: &[AnchoredPanel],
         cursor_scissor: Option<[u32; 4]>,
     ) -> bool {
         self.perf.begin_frame();
@@ -1412,7 +1426,7 @@ impl GpuContext {
         // on an epoch mismatch, so the second sweep re-resolves exactly what went
         // stale.
         let epoch_before = self.renderer.content_epoch();
-        self.prepare_pool_frame(live_grid, &base, pools);
+        self.prepare_pool_frame(live_grid, &base, pools, anchored);
         let settled = self.renderer.content_epoch();
         let atlas_changed = if settled == epoch_before {
             false
@@ -1430,7 +1444,7 @@ impl GpuContext {
                 decoration_damage: &full,
                 scrolled_rows: 0,
             };
-            self.prepare_pool_frame(live_grid, &heal, pools);
+            self.prepare_pool_frame(live_grid, &heal, pools, anchored);
             // A grow during the healing sweep leaves it stale in turn, and the
             // caller's extra frame is the backstop for that.
             self.renderer.content_epoch() != settled
@@ -1468,8 +1482,23 @@ impl GpuContext {
 
             self.renderer
                 .record_frame(&mut render_pass, CursorLayer::Deferred);
+
+            // A ridden panel goes over the pane composites it floats above, and
+            // under the non-pane composites, which are the box content it frames.
+            // Splitting the loop on `occludable` puts it exactly there.
             for (slot, pool) in pools.iter().enumerate() {
-                if let Some(scissor) = self.renderer.pool_scissor(pool.scissor) {
+                if pool.occludable
+                    && let Some(scissor) = self.renderer.pool_scissor(pool.scissor)
+                {
+                    self.renderer
+                        .record_pool(&mut render_pass, scissor, pool.id, slot);
+                }
+            }
+            self.renderer.record_riding_panels(&mut render_pass);
+            for (slot, pool) in pools.iter().enumerate() {
+                if !pool.occludable
+                    && let Some(scissor) = self.renderer.pool_scissor(pool.scissor)
+                {
                     self.renderer
                         .record_pool(&mut render_pass, scissor, pool.id, slot);
                 }
@@ -1533,9 +1562,10 @@ impl GpuContext {
         live_grid: &Grid,
         frame: &Frame<'_>,
         pools: &[PoolComposite<'_>],
+        anchored: &[AnchoredPanel],
     ) {
         self.renderer
-            .prepare_frame(&self.device, &self.queue, live_grid, frame);
+            .prepare_frame(&self.device, &self.queue, live_grid, frame, anchored);
 
         let panels = live_grid.panels();
         for (slot, pool) in pools.iter().enumerate() {
@@ -1784,7 +1814,7 @@ mod tests {
             },
         ];
 
-        renderer.prepare_frame(&device, &queue, &live, &frame);
+        renderer.prepare_frame(&device, &queue, &live, &frame, &[]);
         for (slot, pool) in pools.iter().enumerate() {
             renderer.prepare_pool(
                 &device,

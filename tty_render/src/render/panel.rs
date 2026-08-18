@@ -7,7 +7,7 @@
 //! render over the fill, and text outside the frame renders over the shadow. An
 //! unfilled panel leaves its interior showing the grid beneath it.
 
-use crate::render::CellMetrics;
+use crate::render::{AnchoredPanel, CellMetrics};
 use bytemuck::{Pod, Zeroable};
 use std::mem;
 use stoatty_term::grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb};
@@ -91,6 +91,12 @@ pub struct PanelPass {
     /// keeps spares an allocation the frame would otherwise discard.
     built: Vec<PanelInstance>,
     count: u32,
+    /// Instance slots the base draw skips, with the scissor each rides under.
+    ///
+    /// Rebuilt every frame from the panels carrying an anchor whose host
+    /// composites. Empty on a frame with no glide, where the base draw covers
+    /// every panel as it always did.
+    riding: Vec<(u32, [u32; 4])>,
     /// The uniform last written, so an unchanged frame skips that write too.
     last_globals: Option<Globals>,
     metrics: CellMetrics,
@@ -198,6 +204,7 @@ impl PanelPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
+            riding: Vec::new(),
             last_instances: Vec::new(),
             last_globals: None,
             built: Vec::new(),
@@ -214,7 +221,14 @@ impl PanelPass {
     ///
     /// `resolution` is the surface size in physical pixels. Reallocates the
     /// instance buffer only when the panel count outgrows the current capacity.
-    pub fn prepare(&mut self, device: &Device, queue: &Queue, grid: &Grid, resolution: [f32; 2]) {
+    pub fn prepare(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        anchored: &[AnchoredPanel],
+        resolution: [f32; 2],
+    ) {
         // With no panel to draw now and none drawn last frame, nothing reads this
         // pass's buffers, so the frame skips it without touching the GPU. The frame
         // that empties the list still runs, which is what drops the count to zero
@@ -224,6 +238,23 @@ impl PanelPass {
         }
 
         build_panel_instances_into(grid.panels(), self.metrics.scale_factor, &mut self.built);
+
+        // A ridden panel keeps its slot in the buffer, because the fragment
+        // shader self-occludes against every later instance, so a reorder changes
+        // which box hides which. Only its drawn position moves, and the base draw
+        // skips its slot so it lands after the composites instead.
+        self.riding.clear();
+        for (index, panel) in grid.panels().iter().enumerate() {
+            let Some((host, _)) = panel.anchor else {
+                continue;
+            };
+            let Some(ride) = anchored.iter().find(|ride| ride.host == host) else {
+                continue;
+            };
+            self.built[index].cell[1] += ride.dy_px / self.metrics.height;
+            self.riding.push((index as u32, ride.scissor));
+        }
+
         self.count = self.built.len() as u32;
 
         let globals = Globals {
@@ -269,7 +300,41 @@ impl PanelPass {
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.instances.slice(..));
-        render_pass.draw(0..6, 0..self.count);
+
+        // A ridden slot is skipped here and drawn by [`Self::draw_riding`] after
+        // the composites, so the base pass leaves a gap where it sits.
+        let mut next = 0;
+        for &(index, _) in &self.riding {
+            if index > next {
+                render_pass.draw(0..6, next..index);
+            }
+            next = index + 1;
+        }
+        if next < self.count {
+            render_pass.draw(0..6, next..self.count);
+        }
+    }
+
+    /// Draw the panels riding a compositing pool, each clipped to its host.
+    ///
+    /// Recorded after the host's composite rather than with the rest of the
+    /// chrome, so the frame lands over the pooled surface it belongs to instead
+    /// of being painted over by it. A no-op on a frame with no ride.
+    pub fn draw_riding(&self, render_pass: &mut RenderPass<'_>) {
+        if self.riding.is_empty() {
+            return;
+        }
+
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.instances.slice(..));
+        for &(index, [x, y, w, h]) in &self.riding {
+            if w == 0 || h == 0 {
+                continue;
+            }
+            render_pass.set_scissor_rect(x, y, w, h);
+            render_pass.draw(0..6, index..index + 1);
+        }
     }
 }
 
@@ -419,7 +484,7 @@ mod tests {
         clear: Color,
     ) -> Vec<u8> {
         let mut pass = PanelPass::new(device, TextureFormat::Rgba8Unorm, metrics);
-        pass.prepare(device, queue, grid, [TARGET as f32, TARGET as f32]);
+        pass.prepare(device, queue, grid, &[], [TARGET as f32, TARGET as f32]);
 
         let size = Extent3d {
             width: TARGET,

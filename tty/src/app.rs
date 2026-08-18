@@ -53,7 +53,7 @@ use stoatty_protocol::{
     window_ipc::{MouseKind, WindowIpcEvent},
 };
 use stoatty_render::{
-    gpu::{FontConfig, FontLoad, Frame, GpuContext, PoolComposite, Scroll},
+    gpu::{AnchoredPanel, FontConfig, FontLoad, Frame, GpuContext, PoolComposite, Scroll},
     render,
 };
 use stoatty_term::{
@@ -2424,6 +2424,22 @@ fn redraw(state: &mut State) {
             })
             .collect::<Vec<_>>();
 
+        // The panel half of a ride. The renderer matches these against each
+        // panel's own anchor, so one entry per host carries every frame riding it.
+        let anchored_panels = rides
+            .iter()
+            .map(|ride| AnchoredPanel {
+                host: ride.host_region.pool,
+                dy_px: anchored_shift(
+                    ride.top_rows,
+                    ride.host_scroll,
+                    (ride.host_region.height as f32).max(1.0),
+                    ch,
+                ),
+                scissor: region_scissor(ride.host_region, cw, ch),
+            })
+            .collect::<Vec<_>>();
+
         let (base_cursor, base_corners, cursor_easing) = match cursor_anchor {
             Some(anchor) => {
                 // The anchor is frame-locked to the pool's eased
@@ -2488,6 +2504,7 @@ fn redraw(state: &mut State) {
                 scrolled_rows: scroll_delta as isize,
             },
             &composites,
+            &anchored_panels,
             cursor_scissor,
         ) {
             // A pool composite grew or evicted from the atlas after
@@ -2653,6 +2670,7 @@ fn redraw_aux(
             scrolled_rows: 0,
         },
         &composites,
+        &[],
         None,
     );
     easing || heal
