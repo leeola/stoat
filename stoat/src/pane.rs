@@ -155,6 +155,22 @@ pub struct Pane {
     /// restored session starts with an empty history.
     #[serde(skip)]
     pub(crate) jumplist: JumpList,
+    /// Whether `:diff` has latched review mode on for this pane, surviving the
+    /// `EditorState` swaps a cross-file navigation makes.
+    ///
+    /// The flag the view itself reads lives on the editor, and every navigation
+    /// builds a fresh one, so review intent has to be held somewhere the
+    /// navigation does not replace. While this is set, each buffer the pane
+    /// shows opens as a diff when it has hunks against HEAD and plain when it
+    /// does not. Only an explicit `:diff` clears it.
+    ///
+    /// Per pane rather than per workspace, because the widen it engages is per
+    /// pane and a second pane stays independent of this one.
+    ///
+    /// `serde(skip)`: session intent rather than persisted layout, matching
+    /// [`Self::jumplist`], so a restored session starts unlatched.
+    #[serde(skip)]
+    pub(crate) diff_mode: bool,
     /// The buffer this pane showed before its current one, for the alternating
     /// switch [`crate::buffer_lifecycle::goto_last_accessed`] makes.
     ///
@@ -228,6 +244,7 @@ impl PaneTree {
             area,
             index: 0,
             jumplist: JumpList::default(),
+            diff_mode: false,
             last_buffer: None,
         });
 
@@ -363,6 +380,7 @@ impl PaneTree {
             area: Rect::default(),
             index: self.next_index,
             jumplist: JumpList::default(),
+            diff_mode: false,
             last_buffer: None,
         });
         self.next_index += 1;

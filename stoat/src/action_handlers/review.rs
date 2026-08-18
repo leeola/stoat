@@ -1,6 +1,7 @@
 use super::movement::ChangeDir;
 use crate::{
     app::{Stoat, UpdateEffect},
+    buffer::BufferId,
     diff_cache::{DiffCache, DiffCacheKey},
     display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
     editor_state::{EditorId, EditorState, ScrollGlide},
@@ -950,12 +951,22 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
         return;
     };
 
+    // Either half being set means review is on, so `:diff` exits from a latched
+    // pane showing a clean file plain as readily as from a diff itself.
     let turned_on = {
+        let latched = {
+            let panes = &stoat.active_workspace().panes;
+            panes.pane(panes.focus()).diff_mode
+        };
         let Some(editor) = super::focused_editor_mut(stoat) else {
             return;
         };
-        let on = !editor.diff_view;
+        let on = !(latched || editor.diff_view);
         editor.set_diff_view(on);
+
+        let panes = &mut stoat.active_workspace_mut().panes;
+        let focus = panes.focus();
+        panes.pane_mut(focus).diff_mode = on;
         on
     };
 
@@ -976,31 +987,8 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
         return;
     }
 
-    // The background diff job usually has the map ready (it drives the gutter
-    // marks), so only compute it here when the fast path is empty. A map left
-    // over from before an external git mutation counts as empty. It describes a
-    // base that has since moved, so trusting it would open the view on hunks
-    // measured against a HEAD that no longer exists.
-    //
-    // Only the hunks are needed to open on. The left column's colors cost a
-    // parse of the whole base file, which the background pass takes on and
-    // lands a settle later.
-    let map_current = stoat.active_workspace().diff_map_current(buffer_id);
-    let has_map = super::focused_editor_mut(stoat)
-        .map(|editor| editor.display_map.snapshot().diff_map().is_some())
-        .unwrap_or(false);
-    if !has_map || !map_current {
-        let git_host = stoat.git_host.clone();
-        let language_registry = stoat.language_registry.clone();
-        let syntax_styles = stoat.syntax_styles.clone();
-        let base_cache = stoat.base_highlights_cache.clone();
-        stoat.active_workspace_mut().install_diff_map_now(
-            &git_host,
-            &language_registry,
-            &syntax_styles,
-            &base_cache,
-            buffer_id,
-        );
+    if let Some((editor_id, _)) = stoat.focused_editor_ids() {
+        ensure_diff_map(stoat, editor_id, buffer_id);
     }
 
     let jumped = super::focused_editor_mut(stoat).is_some_and(|editor| {
@@ -1050,6 +1038,59 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
     if !jumped {
         let _ = super::movement::goto_change(stoat, ChangeDir::Next);
     }
+}
+
+/// Make sure `editor_id`'s display map holds a current diff map for
+/// `buffer_id`, and report whether it found any hunk to show.
+///
+/// The editor is named rather than taken as the focused one, because the pane a
+/// navigation targets is not always the focused pane, and an answer from the
+/// wrong editor's map opens the wrong view.
+///
+/// The background diff job usually has the map ready, since it drives the
+/// gutter marks, so the synchronous install below runs only when the fast path
+/// is empty. A map left over from before an external git mutation counts as
+/// empty. Such a map describes a base that has since moved, so trusting it
+/// opens the view on hunks measured against a HEAD that no longer exists.
+///
+/// Only the hunks are computed here. The left column's colors cost a parse of
+/// the whole base file, which the background pass takes on and lands a settle
+/// later.
+///
+/// `false` is the answer for a clean or untracked file, which is what tells a
+/// latched pane to show it plain.
+pub(crate) fn ensure_diff_map(stoat: &mut Stoat, editor_id: EditorId, buffer_id: BufferId) -> bool {
+    let map_current = stoat.active_workspace().diff_map_current(buffer_id);
+    let has_map = stoat
+        .active_workspace_mut()
+        .editors
+        .get_mut(editor_id)
+        .is_some_and(|editor| editor.display_map.snapshot().diff_map().is_some());
+    if !has_map || !map_current {
+        let git_host = stoat.git_host.clone();
+        let language_registry = stoat.language_registry.clone();
+        let syntax_styles = stoat.syntax_styles.clone();
+        let base_cache = stoat.base_highlights_cache.clone();
+        stoat.active_workspace_mut().install_diff_map_now(
+            &git_host,
+            &language_registry,
+            &syntax_styles,
+            &base_cache,
+            buffer_id,
+        );
+    }
+
+    stoat
+        .active_workspace_mut()
+        .editors
+        .get_mut(editor_id)
+        .is_some_and(|editor| {
+            editor
+                .display_map
+                .snapshot()
+                .diff_map()
+                .is_some_and(|diff_map| !diff_map.hunks_in_range(0..u32::MAX).is_empty())
+        })
 }
 
 /// How [`stage_hunk`] acts on the hunk under the cursor.

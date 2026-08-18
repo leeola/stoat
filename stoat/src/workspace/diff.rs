@@ -1218,6 +1218,100 @@ mod tests {
         );
     }
 
+    /// A two-file repo where `a.rs` and `b.rs` differ from HEAD and `clean.rs`
+    /// does not, opened on `a.rs` with the diff latch armed.
+    fn latched_harness() -> TestHarness {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario(
+            "/repo",
+            &[
+                ("a.rs", "fn foo() {}\n", "fn foo() {}\nfn bar() {}\n"),
+                ("b.rs", "fn baz() {}\n", "fn baz() {}\nfn qux() {}\n"),
+            ],
+        );
+        // Matching HEAD and working text, which stage_review_scenario refuses,
+        // so the latch has a genuinely clean file to fall back to plain on.
+        h.fake_fs()
+            .insert_file(Path::new("/repo/clean.rs"), b"fn same() {}\n");
+        {
+            let mut builder = h.fake_git().add_repo("/repo").with_fs(h.fake_fs());
+            builder.head_file("clean.rs", "fn same() {}\n");
+        }
+        h.open_file(Path::new("/repo/a.rs"));
+        h.stoat.toggle_diff_view();
+        h
+    }
+
+    fn diff_view_on(h: &mut TestHarness) -> bool {
+        crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .diff_view
+    }
+
+    fn latched(h: &TestHarness) -> bool {
+        let panes = &h.stoat.active_workspace().panes;
+        panes.pane(panes.focus()).diff_mode
+    }
+
+    #[test]
+    fn a_latched_pane_opens_the_next_modified_file_as_a_diff() {
+        let mut h = latched_harness();
+        h.open_file(Path::new("/repo/b.rs"));
+
+        assert!(
+            diff_view_on(&mut h),
+            "navigation while latched carries review mode to the new editor"
+        );
+        assert_eq!(
+            h.stoat
+                .active_workspace()
+                .editors
+                .iter()
+                .filter(|(_, e)| e.diff_view)
+                .count(),
+            1,
+            "and only the one editor the pane now shows"
+        );
+    }
+
+    /// The latch decides review mode per file, so a file with nothing against
+    /// HEAD reads as a plain editor without disarming the session.
+    #[test]
+    fn a_clean_file_shows_plain_while_the_latch_stays_armed() {
+        let mut h = latched_harness();
+        h.open_file(Path::new("/repo/clean.rs"));
+
+        assert_eq!(
+            (diff_view_on(&mut h), latched(&h)),
+            (false, true),
+            "a clean file opens plain with the latch still on"
+        );
+
+        h.open_file(Path::new("/repo/b.rs"));
+        assert!(
+            diff_view_on(&mut h),
+            "so hopping back to a modified file re-enters the diff"
+        );
+    }
+
+    #[test]
+    fn toggling_off_over_a_clean_file_disarms_the_latch() {
+        let mut h = latched_harness();
+        h.open_file(Path::new("/repo/clean.rs"));
+        h.stoat.toggle_diff_view();
+
+        assert!(
+            !latched(&h),
+            "the toggle exits from a latched pane showing a plain file"
+        );
+
+        h.open_file(Path::new("/repo/b.rs"));
+        assert!(
+            !diff_view_on(&mut h),
+            "and a later modified file stays plain"
+        );
+    }
+
     #[test]
     fn a_crlf_head_leaves_an_lf_buffer_of_equal_content_unchanged() {
         let mut h = TestHarness::with_size(80, 24);

@@ -312,6 +312,19 @@ pub(crate) fn show_buffer_in_pane(
         gc_editor_if_unreferenced(ws, old_id);
     }
 
+    // A latched pane opens each buffer it navigates to as a diff, but only when
+    // that file actually has hunks against HEAD. A clean or untracked file shows
+    // plain with the latch still armed, so hopping back to a modified file
+    // re-enters the diff. Neither widen nor cursor moves here. The widen belongs
+    // to the latched session, and the jump target is the position.
+    let latched = stoat.workspaces[workspace].panes.pane(target).diff_mode;
+    if latched
+        && crate::action_handlers::review::ensure_diff_map(stoat, new_editor_id, buffer_id)
+        && let Some(editor) = stoat.workspaces[workspace].editors.get_mut(new_editor_id)
+    {
+        editor.set_diff_view(true);
+    }
+
     Some(buffer_id)
 }
 
