@@ -141,6 +141,21 @@ pub(crate) fn modifier_bits(mods: ModifiersState) -> u8 {
         | u8::from(mods.super_key()) << 3
 }
 
+/// Pack the active keyboard modifiers into the bits an SGR mouse report adds
+/// to its button code, with shift at `4`, alt at `8`, and control at `16`.
+///
+/// Super has no bit, because the SGR encoding defines none. A child holding
+/// only super therefore sees an unmodified report.
+///
+/// Distinct from [`modifier_bits`], which packs the same modifiers into this
+/// project's own IPC layout. These bits go on the wire to a child process, so
+/// their values belong to the terminal protocol rather than to us.
+pub(crate) fn sgr_modifier_bits(mods: ModifiersState) -> u8 {
+    u8::from(mods.shift_key()) << 2
+        | u8::from(mods.alt_key()) << 3
+        | u8::from(mods.control_key()) << 4
+}
+
 /// Resolve a wheel `delta` to whole lines of scrollback to move, positive
 /// scrolling up into history.
 ///
@@ -171,8 +186,13 @@ pub(crate) fn alternate_scroll_bytes(lines: i32) -> Vec<u8> {
 /// Encode `lines` of wheel scroll as SGR mouse-wheel reports at cell
 /// (`col`, `row`): one button-press report per line, button 64 (up) when
 /// `lines` is positive, 65 (down) when negative, with 1-based coordinates.
-pub(crate) fn sgr_wheel_bytes(lines: i32, col: usize, row: usize) -> Vec<u8> {
-    let button = if lines > 0 { 64 } else { 65 };
+///
+/// `mods` are the held-modifier bits from [`sgr_modifier_bits`], summed into
+/// the button code. A child decodes them back off the code, so a modified
+/// notch arrives distinguishable from a plain one.
+pub(crate) fn sgr_wheel_bytes(lines: i32, col: usize, row: usize, mods: u8) -> Vec<u8> {
+    let direction = if lines > 0 { 64 } else { 65 };
+    let button = direction + mods;
     let report = format!("\x1b[<{button};{};{}M", col + 1, row + 1);
     report.repeat(lines.unsigned_abs() as usize).into_bytes()
 }
@@ -345,14 +365,43 @@ mod tests {
     fn sgr_wheel_bytes_reports_one_press_per_line_at_the_cell() {
         // Two lines up: button 64, one press per line, 1-based cell (3,7)->(4,8).
         assert_eq!(
-            sgr_wheel_bytes(2, 3, 7),
+            sgr_wheel_bytes(2, 3, 7, 0),
             b"\x1b[<64;4;8M\x1b[<64;4;8M".to_vec(),
             "wheel up reports button 64 once per line"
         );
         assert_eq!(
-            sgr_wheel_bytes(-1, 0, 0),
+            sgr_wheel_bytes(-1, 0, 0, 0),
             b"\x1b[<65;1;1M".to_vec(),
             "wheel down at the origin cell reports button 65"
+        );
+    }
+
+    #[test]
+    fn sgr_wheel_bytes_adds_the_modifier_bits_to_the_button() {
+        let alt = sgr_modifier_bits(ModifiersState::ALT);
+        assert_eq!(
+            (
+                sgr_wheel_bytes(1, 0, 0, alt),
+                sgr_wheel_bytes(-1, 0, 0, alt)
+            ),
+            (b"\x1b[<72;1;1M".to_vec(), b"\x1b[<73;1;1M".to_vec()),
+            "alt lifts the wheel buttons from 64/65 to 72/73"
+        );
+    }
+
+    #[test]
+    fn sgr_modifier_bits_packs_the_protocol_bits() {
+        assert_eq!(
+            (
+                sgr_modifier_bits(ModifiersState::empty()),
+                sgr_modifier_bits(ModifiersState::SHIFT),
+                sgr_modifier_bits(ModifiersState::ALT),
+                sgr_modifier_bits(ModifiersState::CONTROL),
+                sgr_modifier_bits(ModifiersState::SUPER),
+                sgr_modifier_bits(ModifiersState::ALT | ModifiersState::CONTROL),
+            ),
+            (0, 4, 8, 16, 0, 24),
+            "shift 4, alt 8, control 16, and super has no bit to set"
         );
     }
 

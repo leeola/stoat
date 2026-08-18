@@ -18,8 +18,8 @@ use crate::{
     config::{self, Config, CursorAnimation},
     input::{
         alternate_scroll_bytes, cell_at, encode_key, font_step, ipc_button, modifier_bits,
-        paste_bytes, sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes, stepped_font_size,
-        swallow_super_combo, wheel_lines,
+        paste_bytes, sgr_button_bytes, sgr_modifier_bits, sgr_motion_bytes, sgr_wheel_bytes,
+        stepped_font_size, swallow_super_combo, wheel_lines,
     },
     pty::{self, Pty, PtyOutput},
     stoat_bin,
@@ -1363,6 +1363,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         lines,
                         state.pointer_cell,
                         state.modifiers.shift_key(),
+                        sgr_modifier_bits(state.modifiers),
                     );
 
                     // A notch the scrollback took is one this window has to
@@ -1579,7 +1580,7 @@ impl<W: PtyWrite> Input<'_, W> {
     ///
     /// `Some(0)` still means the scrollback handled it, the viewport having
     /// been at the edge of the history it could reach.
-    fn wheel(&mut self, lines: i32, at: (usize, usize), shift: bool) -> Option<i32> {
+    fn wheel(&mut self, lines: i32, at: (usize, usize), shift: bool, mods: u8) -> Option<i32> {
         // Snapshot the routing modes under one lock so the branch below reads a
         // consistent terminal state.
         let (mouse_report, alternate_scroll) = {
@@ -1591,7 +1592,7 @@ impl<W: PtyWrite> Input<'_, W> {
         };
 
         if mouse_report {
-            let _ = self.pty.write(&sgr_wheel_bytes(lines, at.0, at.1));
+            let _ = self.pty.write(&sgr_wheel_bytes(lines, at.0, at.1, mods));
             return None;
         }
         if !shift && alternate_scroll {
@@ -3355,7 +3356,7 @@ mod tests {
             terminal: &terminal,
             pty: &mut pty,
         }
-        .wheel(1, (0, 0), false);
+        .wheel(1, (0, 0), false, 0);
 
         assert_eq!(
             terminal.lock().display_offset() as i32 - before,
@@ -3377,12 +3378,12 @@ mod tests {
             terminal: &terminal,
             pty: &mut pty,
         }
-        .wheel(1, (2, 3), false);
+        .wheel(1, (2, 3), false, 0);
 
         assert_eq!(moved, None, "the shell took the notch, so nothing to ease");
         assert_eq!(
             pty.written,
-            sgr_wheel_bytes(1, 2, 3),
+            sgr_wheel_bytes(1, 2, 3, 0),
             "the notch goes as a button press at the pointer"
         );
         assert_eq!(
@@ -3403,7 +3404,7 @@ mod tests {
                 terminal: &terminal,
                 pty: &mut pty,
             }
-            .wheel(1, (0, 0), shift);
+            .wheel(1, (0, 0), shift, 0);
             (moved.is_some(), pty.written)
         };
 
