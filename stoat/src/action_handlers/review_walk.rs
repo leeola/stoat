@@ -1254,9 +1254,9 @@ mod tests {
     }
 
     #[test]
-    fn space_g_l_opens_the_browser() {
+    fn space_capital_g_l_opens_the_browser() {
         let mut h = harness();
-        h.type_keys("space g l");
+        h.type_keys("space G l");
         h.settle();
 
         assert_eq!(

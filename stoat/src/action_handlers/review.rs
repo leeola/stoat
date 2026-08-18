@@ -2918,14 +2918,14 @@ mod tests {
     }
 
     #[test]
-    fn space_g_s_stages_the_hunk_from_a_plain_editor() {
+    fn space_capital_g_s_stages_the_hunk_from_a_plain_editor() {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = open_git_file_at_cursor(&mut h, 2);
 
-        h.type_keys("space g s");
+        h.type_keys("space G s");
 
         let patches = h.fake_git().applied_patches(&workdir);
-        assert_eq!(patches.len(), 1, "space g s stages the hunk: {patches:?}");
+        assert_eq!(patches.len(), 1, "space G s stages the hunk: {patches:?}");
         assert!(
             patches[0].contains("-c\n") && patches[0].contains("+X\n"),
             "stages the cursor hunk: {}",

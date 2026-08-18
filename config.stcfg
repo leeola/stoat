@@ -522,6 +522,7 @@ on key {
         w -> [GotoWord(), SetMode(normal)];
         | -> [GotoColumn(), SetMode(normal)];
         . -> [GotoLastModification(), SetMode(normal)];
+        a -> [GotoLastAccessed(), SetMode(normal)];
     }
     mode == z {
         Escape -> SetMode(normal);
@@ -1011,7 +1012,8 @@ on key {
         " -> SetMode(space_clipboard);
         p -> OpenFileFinder();
         r -> [ReloadAll(), SetMode(normal)];
-        g -> SetMode(space_git);
+        g -> SetMode(space_goto);
+        G -> SetMode(space_git);
         W -> SetMode(space_walkthrough);
         d -> [Diff(), SetMode(normal)];
         s -> [SaveSelection(), SetMode(normal)];
@@ -1038,9 +1040,18 @@ on key {
         d -> [CloseBuffer(), SetMode(normal)];
         f -> [AutoReload(follow), SetMode(normal)];
     }
+    # The goto chord. `a` mirrors the normal-mode `g a` so both spellings of
+    # goto reach the last buffer, and n/p repeat the git-change hops that the
+    # git submode below also carries.
+    mode == space_goto {
+        Escape -> SetMode(normal);
+        a -> [GotoLastAccessed(), SetMode(normal)];
+        n -> [GotoNextChange(), SetMode(normal)];
+        p -> [GotoPrevChange(), SetMode(normal)];
+    }
     mode == space_git {
         Escape -> SetMode(normal);
-        g -> SetMode(git_pin);
+        G -> SetMode(git_pin);
         d -> [Diff(), SetMode(normal)];
         s -> [StageHunk(), SetMode(normal)];
         u -> [UnstageHunk(), SetMode(normal)];

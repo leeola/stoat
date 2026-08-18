@@ -1744,17 +1744,24 @@ mod tests {
     }
 
     #[test]
-    fn space_g_g_pins_the_git_mode_and_holds_it() {
+    fn space_capital_g_twice_pins_the_git_mode_and_holds_it() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
+
+        let space = TestState::new().set("mode", StateValue::String("space".into()));
+        let to_git = keymap
+            .lookup(&space, &key_event(KeyCode::Char('G'), KeyModifiers::NONE))
+            .expect("G is bound in space mode");
+        assert_eq!(to_git[0].name, "SetMode");
+        assert_eq!(to_git[0].args[0].value, Value::Ident("space_git".into()));
 
         let space_git = TestState::new().set("mode", StateValue::String("space_git".into()));
         let g = keymap
             .lookup(
                 &space_git,
-                &key_event(KeyCode::Char('g'), KeyModifiers::NONE),
+                &key_event(KeyCode::Char('G'), KeyModifiers::NONE),
             )
-            .expect("g is bound in space_git mode");
+            .expect("G is bound in space_git mode");
         assert_eq!(g[0].name, "SetMode");
         assert_eq!(g[0].args[0].value, Value::Ident("git_pin".into()));
 
@@ -1781,6 +1788,37 @@ mod tests {
             .expect("Escape is bound in git_pin mode");
         assert_eq!(esc[0].name, "SetMode");
         assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
+    }
+
+    #[test]
+    fn space_g_opens_the_goto_submode_and_a_reaches_the_last_buffer() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let space = TestState::new().set("mode", StateValue::String("space".into()));
+        let g = keymap
+            .lookup(&space, &key_event(KeyCode::Char('g'), KeyModifiers::NONE))
+            .expect("g is bound in space mode");
+        assert_eq!(g[0].name, "SetMode");
+        assert_eq!(g[0].args[0].value, Value::Ident("space_goto".into()));
+
+        let space_goto = TestState::new().set("mode", StateValue::String("space_goto".into()));
+        let a = keymap
+            .lookup(
+                &space_goto,
+                &key_event(KeyCode::Char('a'), KeyModifiers::NONE),
+            )
+            .expect("a is bound in space_goto mode");
+        assert_eq!(a[0].name, "GotoLastAccessed");
+
+        let goto = TestState::new().set("mode", StateValue::String("goto".into()));
+        let normal_a = keymap
+            .lookup(&goto, &key_event(KeyCode::Char('a'), KeyModifiers::NONE))
+            .expect("a is bound in goto mode");
+        assert_eq!(
+            normal_a[0].name, "GotoLastAccessed",
+            "g a and space g a reach the same action"
+        );
     }
 
     #[test]
