@@ -294,6 +294,13 @@ pub(crate) const AUTO_RELOAD_POLL: std::time::Duration = std::time::Duration::fr
 /// wakes the run loop so [`crate::render::frame`] can clear the expired message.
 const STATUS_MESSAGE_TTL: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// Shortest gap between two wheel notches that both run a keymap binding.
+///
+/// A trackpad flick emits a stream of per-line reports far faster than this,
+/// so one flick walks a handful of jumps rather than a hundred. A deliberate
+/// notch cadence runs near 150ms, so every intended gesture still lands.
+pub(crate) const WHEEL_BINDING_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(80);
+
 /// Maximum index updates [`Stoat::drain_index_updates`] processes in one call.
 /// Bounds the graph work per event-loop turn so a large reindex burst cannot
 /// stall input. On hitting the cap the drain reschedules itself to finish the
@@ -938,6 +945,13 @@ pub struct Stoat {
     /// idle screen retires the message without waiting for input.
     /// Replacing it cancels the prior timer.
     pub(crate) pending_message_expiry: Option<stoat_scheduler::Task<()>>,
+    /// When a modified wheel notch last ran a keymap binding, on the
+    /// scheduler clock.
+    ///
+    /// A trackpad flick arrives as a burst of per-line reports, and an ungated
+    /// burst walks a hundred jumps. A notch inside [`WHEEL_BINDING_COOLDOWN`]
+    /// of this scrolls instead of dispatching.
+    pub(crate) wheel_binding_last: Option<std::time::Instant>,
     /// Accumulated digit prefix for the next motion (Vim-style
     /// `<count>j` etc.). Filled by `handle_key` when a digit press
     /// hits an unbound key in normal mode; consumed once via
@@ -1996,6 +2010,7 @@ impl Stoat {
             pending_message: None,
             pending_message_deadline: None,
             pending_message_expiry: None,
+            wheel_binding_last: None,
             pending_count: None,
             pending_find: None,
             pending_mark: None,
@@ -4311,7 +4326,7 @@ impl Stoat {
     ///
     /// Every input path that resolves a binding runs it through here, so a
     /// wheel gesture and a key press share one set of chord semantics.
-    fn run_bound_actions(
+    pub(crate) fn run_bound_actions(
         &mut self,
         actions: &Arc<[ResolvedAction]>,
         captured_digit: Option<f64>,

@@ -11,10 +11,13 @@ use crate::{
     app::{
         modal_split_percent, modal_zoom_steps, ModalKind, ModalSeparator, PanelHit, SeparatorAxis,
         Stoat, UpdateEffect, MIN_PREVIEW_ROWS, MODAL_ZOOM_MAX, MODAL_ZOOM_MIN, PREVIEW_WHEEL_ROWS,
+        WHEEL_BINDING_COOLDOWN,
     },
     buffer::BufferId,
     editor_state::{EditorId, ScrollGlide},
     host::ClipboardKind,
+    keymap::WheelDirection,
+    keymap_state::StoatKeymapState,
     minimap::emit::minimap_view_window,
     pane::{FocusTarget, View},
     render::commit_picker::MIN_LIST_ROWS,
@@ -718,6 +721,46 @@ fn hover_selection_dragging(stoat: &Stoat) -> bool {
         .is_some_and(|s| s.dragging)
 }
 
+/// Run the keymap binding a modified wheel notch names, if it names one.
+///
+/// `None` hands the notch back to the ordinary scroll routing, which covers an
+/// unmodified wheel, a modifier nothing binds, and a notch arriving inside
+/// [`WHEEL_BINDING_COOLDOWN`] of the last one that dispatched.
+///
+/// The pointer position is not consulted. The actions a wheel binds move the
+/// focused editor's selection, so acting on the pane under the pointer moves a
+/// selection the user is not looking at.
+///
+/// A focused modal needs no special casing here. The mode predicate is then the
+/// modal input's, so an editor binding misses and the notch falls through to
+/// the modal arms below.
+fn wheel_binding(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
+    if mouse.modifiers.is_empty() {
+        return None;
+    }
+    let dir = match mouse.kind {
+        MouseEventKind::ScrollUp => WheelDirection::Up,
+        MouseEventKind::ScrollDown => WheelDirection::Down,
+        _ => return None,
+    };
+
+    let actions = {
+        let state = StoatKeymapState::from_stoat(stoat);
+        stoat.keymap.lookup_wheel(&state, dir, mouse.modifiers)?
+    };
+
+    let now = stoat.executor.now();
+    if stoat
+        .wheel_binding_last
+        .is_some_and(|last| now.duration_since(last) < WHEEL_BINDING_COOLDOWN)
+    {
+        return None;
+    }
+    stoat.wheel_binding_last = Some(now);
+
+    Some(stoat.run_bound_actions(&actions, None))
+}
+
 /// Scrolls the pane under the wheel pointer.
 ///
 /// A `View::Editor` split pane gets inertial velocity, so a notch starts
@@ -725,6 +768,10 @@ fn hover_selection_dragging(stoat: &Stoat) -> bool {
 /// plain stepped scrolling of its output, three rows per notch, clamped to
 /// the top. Anything else drops the event.
 fn handle_mouse_scroll(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
+    if let Some(effect) = wheel_binding(stoat, mouse) {
+        return effect;
+    }
+
     // The location picker is modal, so it owns the wheel wherever the
     // pointer sits and browses its candidates with it.
     if let Some(picker) = stoat.location_picker.as_mut() {
@@ -1460,6 +1507,7 @@ pub(crate) fn focus_at(stoat: &mut Stoat, column: u16, row: u16) {
 mod tests {
     use super::*;
     use crate::test_fixture::{mouse_event, open_scratch_file};
+    use crossterm::event::KeyModifiers;
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
@@ -1511,6 +1559,115 @@ mod tests {
     }
 
     // TEST IMPORTS
+
+    /// A harness over a ten-line buffer whose keymap binds `src`, with the
+    /// wheel cooldown clear so the first notch dispatches.
+    fn wheel_binding_harness(src: &str) -> crate::test_harness::TestHarness {
+        let mut h = Stoat::test();
+        open_scratch_file(&mut h, "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
+        let (config, errors) = stoat_config::parse(src);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        h.stoat.keymap = crate::keymap::Keymap::compile(&config.expect("config"));
+        h.stoat.wheel_binding_last = None;
+        h
+    }
+
+    fn wheel(kind: MouseEventKind, modifiers: KeyModifiers) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn a_modified_wheel_runs_its_binding_on_the_focused_editor() {
+        let mut h =
+            wheel_binding_harness("on key { mode == normal { Alt-WheelDown -> MoveDown(); } }");
+        let before = h.cursor_display_positions();
+
+        handle_mouse_scroll(
+            &mut h.stoat,
+            wheel(MouseEventKind::ScrollDown, KeyModifiers::ALT),
+        );
+
+        assert_eq!(
+            (before, h.cursor_display_positions()),
+            (vec![(0, 0)], vec![(1, 0)]),
+            "the bound notch moves the focused editor's cursor down a row"
+        );
+    }
+
+    #[test]
+    fn a_second_wheel_notch_inside_the_cooldown_does_not_dispatch() {
+        let mut h =
+            wheel_binding_harness("on key { mode == normal { Alt-WheelDown -> MoveDown(); } }");
+
+        for _ in 0..2 {
+            handle_mouse_scroll(
+                &mut h.stoat,
+                wheel(MouseEventKind::ScrollDown, KeyModifiers::ALT),
+            );
+        }
+
+        assert_eq!(
+            h.cursor_display_positions(),
+            vec![(1, 0)],
+            "a trackpad burst walks one jump, not one per report"
+        );
+    }
+
+    #[test]
+    fn a_notch_past_the_cooldown_dispatches_again() {
+        let mut h =
+            wheel_binding_harness("on key { mode == normal { Alt-WheelDown -> MoveDown(); } }");
+
+        handle_mouse_scroll(
+            &mut h.stoat,
+            wheel(MouseEventKind::ScrollDown, KeyModifiers::ALT),
+        );
+        // Backdate the gate rather than sleeping, so the test stays pure.
+        h.stoat.wheel_binding_last = h
+            .stoat
+            .wheel_binding_last
+            .map(|t| t - WHEEL_BINDING_COOLDOWN);
+        handle_mouse_scroll(
+            &mut h.stoat,
+            wheel(MouseEventKind::ScrollDown, KeyModifiers::ALT),
+        );
+
+        assert_eq!(
+            h.cursor_display_positions(),
+            vec![(2, 0)],
+            "a deliberate second notch lands once the cooldown has passed"
+        );
+    }
+
+    #[test]
+    fn an_unbound_modifier_and_a_bare_notch_both_fall_through() {
+        // The bare arm is bound too, so a fall-through is the early return on
+        // an empty modifier set rather than a lookup miss.
+        let mut h = wheel_binding_harness(
+            "on key { mode == normal { Alt-WheelDown -> MoveDown(); WheelDown -> MoveDown(); } }",
+        );
+
+        handle_mouse_scroll(
+            &mut h.stoat,
+            wheel(MouseEventKind::ScrollDown, KeyModifiers::CONTROL),
+        );
+        let after_unbound = h.cursor_display_positions();
+        handle_mouse_scroll(
+            &mut h.stoat,
+            wheel(MouseEventKind::ScrollDown, KeyModifiers::NONE),
+        );
+
+        assert_eq!(
+            (after_unbound, h.cursor_display_positions()),
+            (vec![(0, 0)], vec![(0, 0)]),
+            "an unbound modifier and an unmodified notch both scroll instead"
+        );
+    }
 
     #[test]
     fn mouse_translates_to_focused_pane_coords() {
