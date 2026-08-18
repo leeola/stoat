@@ -114,10 +114,12 @@ impl DiagnosticSpanCache {
 
 /// Resolve every diagnostic for `path` to byte offsets, sorted by start.
 ///
-/// Each range is converted through the offset encoding its publishing server
-/// negotiated (a server absent from `encodings` falls back to UTF-16), so a
-/// utf-16 server's diagnostic on a multibyte line lands on the right byte. The
-/// index into `set.get(path)` is retained so callers can recover the source
+/// The offsets come from the anchors [`crate::diagnostics`] recorded at the
+/// publish. They follow the text through later edits, rather than the
+/// coordinates the server named. A diagnostic whose anchors are missing, or
+/// belong to another buffer, resolves to an empty span at the buffer start.
+///
+/// The index into `set.get(path)` is retained so callers can recover the source
 /// diagnostic.
 pub(crate) fn resolve_diagnostic_spans(
     set: &crate::diagnostics::DiagnosticSet,

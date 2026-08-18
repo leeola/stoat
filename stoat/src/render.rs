@@ -270,14 +270,6 @@ pub(crate) struct FrameCtx<'a> {
     /// focused buffer's path and paints a compact severity badge when
     /// any diagnostics are present.
     pub(crate) diagnostics: &'a crate::diagnostics::DiagnosticSet,
-    /// The LSP registry, so the editor render path can resolve each server's
-    /// negotiated offset encoding on demand.
-    ///
-    /// Diagnostic positions convert to byte columns through their publishing
-    /// server's encoding, so a utf-16 server's undercurl paints on the right
-    /// column of a multibyte line. Held as the registry rather than a prebuilt
-    /// map so the encodings are resolved only when the diagnostic span cache
-    /// rebuilds, not on every frame.
     /// The in-buffer search query every editor pane lights visible matches for,
     /// in the `ui.search.match` style, so users see all hits at once.
     ///
