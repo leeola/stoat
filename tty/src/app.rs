@@ -62,13 +62,15 @@ use stoatty_term::{
     theme::Theme,
     NON_PANE_POOL_BASE,
 };
+#[cfg(target_os = "linux")]
+use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState},
-    window::{UserAttentionType, Window, WindowId},
+    window::{UserAttentionType, Window, WindowAttributes, WindowId},
 };
 
 /// Window title shown before a program sets one, and restored when a program
@@ -80,6 +82,25 @@ const DEFAULT_TITLE: &str = "stoatty";
 /// default scroll multiplier of 3). Applies only to local scrollback, never to
 /// the wheel reports forwarded to a mouse-reporting app.
 const SCROLLBACK_SCROLL_MULTIPLIER: i32 = 3;
+
+/// Name every window after the application, so a desktop environment can match
+/// it to `stoatty.desktop` and paint the icon it names.
+///
+/// The name is set here rather than left to winit's default, which is argv[0]
+/// and so reports whatever path launched the binary. Plasma on Wayland matches
+/// by exact app id, and no path matches.
+#[cfg(target_os = "linux")]
+fn with_app_name(attributes: WindowAttributes) -> WindowAttributes {
+    // The trait is named for Wayland, but the general name it writes reaches
+    // both display servers: Wayland sends it as the app id, and X11 as the
+    // WM_CLASS class the desktop entry's StartupWMClass matches.
+    attributes.with_name(DEFAULT_TITLE, DEFAULT_TITLE)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn with_app_name(attributes: WindowAttributes) -> WindowAttributes {
+    attributes
+}
 
 /// Bytes of the child's most recent output retained for the exit diagnostic
 /// logged when the pty closes, enough to carry a startup error line without
@@ -687,7 +708,7 @@ impl ApplicationHandler<PtyEvent> for App {
         // rather than panicking.
         let font_load = self.font_load.take().unwrap_or_else(FontLoad::spawn);
 
-        let mut attributes = Window::default_attributes().with_title(DEFAULT_TITLE);
+        let mut attributes = with_app_name(Window::default_attributes().with_title(DEFAULT_TITLE));
         if let Some([cols, rows]) = self.size {
             let [cell_width, cell_height] = render::cell_size(self.font_size, 1.0);
             attributes = attributes.with_inner_size(LogicalSize::new(
@@ -1899,9 +1920,11 @@ fn open_aux_window(
     }
 
     let [cell_w, cell_h] = render::cell_size(state.font_size, state.scale_factor as f32);
-    let attributes = Window::default_attributes()
-        .with_title(title)
-        .with_inner_size(LogicalSize::new(cols as f32 * cell_w, rows as f32 * cell_h));
+    let attributes = with_app_name(
+        Window::default_attributes()
+            .with_title(title)
+            .with_inner_size(LogicalSize::new(cols as f32 * cell_w, rows as f32 * cell_h)),
+    );
     let window = match event_loop.create_window(attributes) {
         Ok(window) => Arc::new(window),
         Err(error) => {
