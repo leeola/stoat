@@ -130,15 +130,20 @@ pub(crate) fn render_symbol_finder(
 
     let git_root = ws.git_root.clone();
     finder.viewport_rows = Some(list.height as usize);
-    paint_symbol_rows(finder, list, &git_root, theme, buf);
+    let start_row = crate::render::picker::window_start(finder.selected, list.height as usize);
+    paint_symbol_rows(finder, list, start_row, &git_root, theme, buf);
 }
 
-/// Paint the symbol list into `area`, following the selection so the selected
-/// row stays visible. Each row shows the title with fuzzy-match highlighting on
-/// the left and a dim kind and 1-based line suffix on the right.
-fn paint_symbol_rows(
+/// Paint the symbol list into `area`, starting at symbol `start_row`.
+///
+/// Each row shows the title with fuzzy-match highlighting on the left and a dim
+/// kind and 1-based line suffix on the right. The caller picks the window
+/// rather than the painter deriving it, so a pooled page can paint rows the
+/// selection is nowhere near.
+pub(crate) fn paint_symbol_rows(
     finder: &SymbolFinder,
     area: Rect,
+    start_row: usize,
     git_root: &Path,
     theme: &Theme,
     buf: &mut Buffer,
@@ -147,7 +152,6 @@ fn paint_symbol_rows(
     if rows == 0 {
         return;
     }
-    let start_row = crate::render::picker::window_start(finder.selected, rows);
 
     let row_style = theme.get(scope::UI_TEXT);
     let selected_style = theme.get(scope::UI_SELECTION);

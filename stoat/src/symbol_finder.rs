@@ -128,7 +128,7 @@ pub(crate) struct SymbolFinder {
     /// an identical outcome. Ranking runs from the per-frame sync and walks
     /// every entry with a fuzzy traceback, so a modal left sitting over a
     /// workspace's symbols would otherwise re-rank thousands of them a frame.
-    last_filter_key: Option<u64>,
+    pub(crate) last_filter_key: Option<u64>,
     /// Ranking, selection, and pane height the preview pane was last built for.
     ///
     /// The ranking key belongs in it because a new query repoints the same

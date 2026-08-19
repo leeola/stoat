@@ -80,15 +80,20 @@ pub(crate) fn render_code_search(
 
     finder.viewport_rows = Some(layout.list.height as usize);
     finder.preview_rows = layout.preview.map(|rect| rect.height as usize);
-    paint_match_rows(finder, layout.list, &git_root, theme, buf);
+    let start_row =
+        crate::render::picker::window_start(finder.selected, layout.list.height as usize);
+    paint_match_rows(finder, layout.list, start_row, &git_root, theme, buf);
 }
 
-/// Paint the match list into `area`, following the selection so the selected row
-/// stays visible. Each row shows a dim `path:line:col` location and the matched
-/// line's snippet.
-fn paint_match_rows(
+/// Paint the match list into `area`, starting at match `start_row`.
+///
+/// Each row shows a dim `path:line:col` location and the matched line's
+/// snippet. The caller picks the window rather than the painter deriving it,
+/// so a pooled page can paint rows the selection is nowhere near.
+pub(crate) fn paint_match_rows(
     finder: &CodeSearchFinder,
     area: Rect,
+    start_row: usize,
     git_root: &Path,
     theme: &Theme,
     buf: &mut Buffer,
@@ -103,8 +108,6 @@ fn paint_match_rows(
         write_str(buf, area.x + 1, area.y, "invalid pattern", dim_style);
         return;
     }
-
-    let start_row = crate::render::picker::window_start(finder.selected, rows);
 
     let row_style = theme.get(scope::UI_TEXT);
     let selected_style = theme.get(scope::UI_SELECTION);

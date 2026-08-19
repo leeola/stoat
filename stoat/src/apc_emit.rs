@@ -515,6 +515,37 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         })
         .map(|layout| layout.list);
 
+    // Code search asks for the whole area rather than measuring a match list it
+    // would only ever outgrow, so its list rect comes from the finder layout at
+    // an unbounded content size, exactly as its render asks for it.
+    let code_search_list = (!overlay)
+        .then_some(stoat.code_search.as_ref())
+        .flatten()
+        .and_then(|_| {
+            crate::render::file_finder::file_finder_layout(
+                stoat.size(),
+                (u16::MAX, u16::MAX),
+                modal_zoom_steps(&stoat.modal_zoom, ModalKind::CodeSearch),
+                modal_split_percent(&stoat.modal_split, ModalKind::CodeSearch),
+            )
+        })
+        .map(|layout| layout.list);
+
+    // The symbol finder's box grows with its symbol count, so the layout needs
+    // that count to land on the same rect the render paints into.
+    let symbol_finder_list = (!overlay)
+        .then_some(stoat.symbol_finder.as_ref())
+        .flatten()
+        .and_then(|finder| {
+            crate::render::symbol_finder::symbol_finder_layout(
+                stoat.size(),
+                finder.content_rows,
+                modal_zoom_steps(&stoat.modal_zoom, ModalKind::SymbolFinder),
+                modal_split_percent(&stoat.modal_split, ModalKind::SymbolFinder),
+            )
+        })
+        .map(|(_, _, list, _)| list);
+
     // The command palette is a modal over normal mode like the finder. Its
     // fixed list region pools as a non-pane surface. Command-filter mode
     // pools the command list.
@@ -673,6 +704,12 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     }
     if palette_list.is_some() || palette_arg_list.is_some() {
         active.push(crate::smooth_scroll::non_pane_pool::PALETTE);
+    }
+    if code_search_list.is_some() {
+        active.push(crate::smooth_scroll::non_pane_pool::CODE_SEARCH_LIST);
+    }
+    if symbol_finder_list.is_some() {
+        active.push(crate::smooth_scroll::non_pane_pool::SYMBOL_FINDER_LIST);
     }
     if commits_region.is_some() {
         active.push(crate::smooth_scroll::non_pane_pool::COMMITS);
@@ -1035,6 +1072,92 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         );
     }
 
+    if let (Some(list), Some(finder)) = (code_search_list, stoat.code_search.as_ref()) {
+        let region = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::CODE_SEARCH_LIST,
+            top: list.y,
+            left: list.x,
+            width: list.width,
+            height: list.height,
+            window: 0,
+        };
+        let scroll_row =
+            crate::render::picker::window_start(finder.selected, list.height.max(1) as usize)
+                as u32;
+        // Matches stream in a batch at a time, so the count moves while a scan
+        // runs and the pool refills behind it. The query covers a re-scan that
+        // lands on the same count, and the invalid-pattern flag covers the
+        // placeholder row, which is not a match at all.
+        let content_version = {
+            let mut hasher = DefaultHasher::new();
+            stoat.theme_epoch.hash(&mut hasher);
+            finder.last_query.hash(&mut hasher);
+            finder.matches.len().hash(&mut hasher);
+            finder.invalid_pattern.hash(&mut hasher);
+            hasher.finish()
+        };
+        let git_root = stoat.active_workspace().git_root.clone();
+        pool::emit_into(
+            &mut out,
+            &mut stoat.smooth_scroll,
+            region,
+            scroll_row as f32,
+            content_version,
+            true,
+            |page| {
+                crate::smooth_scroll::render_code_search_page(
+                    finder,
+                    &git_root,
+                    page,
+                    theme,
+                    region.width,
+                    region.height,
+                )
+            },
+        );
+    }
+
+    if let (Some(list), Some(finder)) = (symbol_finder_list, stoat.symbol_finder.as_ref()) {
+        let region = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::SYMBOL_FINDER_LIST,
+            top: list.y,
+            left: list.x,
+            width: list.width,
+            height: list.height,
+            window: 0,
+        };
+        let scroll_row =
+            crate::render::picker::window_start(finder.selected, list.height.max(1) as usize)
+                as u32;
+        // The ranking is a pure function of the query and the entry list, and
+        // the finder already keys its skip-rerank check on exactly that pair,
+        // so the same key versions the rows the pool paints.
+        let content_version = {
+            let mut hasher = DefaultHasher::new();
+            stoat.theme_epoch.hash(&mut hasher);
+            finder.last_filter_key.hash(&mut hasher);
+            hasher.finish()
+        };
+        let git_root = stoat.active_workspace().git_root.clone();
+        pool::emit_into(
+            &mut out,
+            &mut stoat.smooth_scroll,
+            region,
+            scroll_row as f32,
+            content_version,
+            true,
+            |page| {
+                crate::smooth_scroll::render_symbol_finder_page(
+                    finder,
+                    &git_root,
+                    page,
+                    theme,
+                    region.width,
+                    region.height,
+                )
+            },
+        );
+    }
     if let (Some(list), Some(palette)) = (palette_list, stoat.command_palette.as_ref()) {
         let filtered = &palette.filtered;
         let match_indices = &palette.match_indices;
@@ -3462,6 +3585,193 @@ mod tests {
         );
     }
 
+    #[test]
+    fn code_search_list_is_pooled_and_retired() {
+        use stoat_action::OpenCodeSearch;
+        use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/codesearch");
+        h.fake_fs().insert_file(root.join("a.rs"), b"needle\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenCodeSearch);
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        emit_smooth_scroll(&mut h.stoat);
+        let list = crate::render::file_finder::file_finder_layout(
+            size,
+            (u16::MAX, u16::MAX),
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::CodeSearch),
+            modal_split_percent(&h.stoat.modal_split, ModalKind::CodeSearch),
+        )
+        .expect("code search fits the test terminal")
+        .list;
+        let expected = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::CODE_SEARCH_LIST,
+            top: list.y,
+            left: list.x,
+            width: list.width,
+            height: list.height,
+            window: 0,
+        };
+        assert!(
+            drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
+            "the match list declares a pool at its list rect"
+        );
+
+        // The pool has to stay in the active set while the modal is up, or the
+        // next frame retires it out from under the open list.
+        emit_smooth_scroll(&mut h.stoat);
+        assert!(
+            !drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
+                pool: crate::smooth_scroll::non_pane_pool::CODE_SEARCH_LIST,
+            })),
+            "and keeps it across a frame the modal stays open for"
+        );
+
+        h.stoat.code_search = None;
+        emit_smooth_scroll(&mut h.stoat);
+        assert!(
+            drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
+                pool: crate::smooth_scroll::non_pane_pool::CODE_SEARCH_LIST,
+            })),
+            "closing code search retires its pool"
+        );
+    }
+
+    /// A landed scan plus a selection past the visible page refills the pool.
+    ///
+    /// Both halves are load-bearing. The pool holds its refill while the scroll
+    /// target sits still, since the live grid paints those rows anyway, so a
+    /// version that never moved would also emit nothing here. Scrolling past the
+    /// page is what makes the deferred window observable.
+    #[test]
+    fn a_scrolled_code_search_list_refills_its_pool() {
+        use stoat_action::OpenCodeSearch;
+        use stoatty_protocol::command::Command;
+
+        fn fills(cmds: &[Command]) -> Vec<u64> {
+            cmds.iter()
+                .filter_map(|cmd| match cmd {
+                    Command::Fill(fill)
+                        if fill.pool == crate::smooth_scroll::non_pane_pool::CODE_SEARCH_LIST =>
+                    {
+                        Some(fill.index)
+                    },
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/codesearch-fill");
+        for i in 0..200 {
+            h.fake_fs()
+                .insert_file(root.join(format!("f{i}.rs")), b"needle here\n");
+        }
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenCodeSearch);
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        h.type_text("needle");
+        h.settle();
+        h.advance_clock(crate::debounce::CODE_SEARCH_DEBOUNCE);
+        h.settle();
+        let landed = h.stoat.code_search.as_ref().expect("open").matches.len();
+        assert!(landed > 100, "the scan landed matches to scroll: {landed}");
+
+        // The first display prefills the whole window, which is the state the
+        // scroll arrives into.
+        emit_smooth_scroll(&mut h.stoat);
+        let _ = drain_apc(&mut rx);
+
+        let finder = h.stoat.code_search.as_mut().expect("open");
+        finder.selected = landed - 1;
+        emit_smooth_scroll(&mut h.stoat);
+        assert!(
+            !fills(&drain_apc(&mut rx)).is_empty(),
+            "a selection past the visible page refills the pool"
+        );
+    }
+
+    #[test]
+    fn symbol_finder_list_is_pooled_and_retired() {
+        use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        crate::test_fixture::enable_document_symbols(&h);
+        let root = crate::test_fixture::seed(&mut h, &[("main.rs", "fn one() {}\nfn two() {}\n")]);
+        let path = root.join("main.rs");
+        crate::test_fixture::open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_document_symbols(
+            path.to_str().unwrap(),
+            lsp_types::DocumentSymbolResponse::Flat(vec![
+                crate::test_fixture::flat_symbol("one", path.to_str().unwrap(), 0, 3),
+                crate::test_fixture::flat_symbol("two", path.to_str().unwrap(), 1, 3),
+            ]),
+        );
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        emit_smooth_scroll(&mut h.stoat);
+        let list = {
+            let finder = h.stoat.symbol_finder.as_ref().expect("the finder is open");
+            crate::render::symbol_finder::symbol_finder_layout(
+                size,
+                finder.content_rows,
+                modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::SymbolFinder),
+                modal_split_percent(&h.stoat.modal_split, ModalKind::SymbolFinder),
+            )
+            .expect("the finder fits the test terminal")
+            .2
+        };
+        let expected = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::SYMBOL_FINDER_LIST,
+            top: list.y,
+            left: list.x,
+            width: list.width,
+            height: list.height,
+            window: 0,
+        };
+        assert!(
+            drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
+            "the symbol list declares a pool at its list rect"
+        );
+
+        // The pool has to stay in the active set while the modal is up, or the
+        // next frame retires it out from under the open list.
+        emit_smooth_scroll(&mut h.stoat);
+        assert!(
+            !drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
+                pool: crate::smooth_scroll::non_pane_pool::SYMBOL_FINDER_LIST,
+            })),
+            "and keeps it across a frame the modal stays open for"
+        );
+
+        h.stoat.symbol_finder = None;
+        emit_smooth_scroll(&mut h.stoat);
+        assert!(
+            drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
+                pool: crate::smooth_scroll::non_pane_pool::SYMBOL_FINDER_LIST,
+            })),
+            "closing the symbol finder retires its pool"
+        );
+    }
     /// The pool paints rows the live grid paints anyway, so a keystroke that
     /// re-filters the list has nothing worth filling until the target moves.
     ///

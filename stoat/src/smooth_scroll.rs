@@ -15,6 +15,7 @@
 //! `p * region.height`. [`page_top_row`] maps a page index to that row.
 
 use crate::{
+    code_search::CodeSearchFinder,
     command_palette::ArgPicker,
     commit_list::CommitListState,
     completion::CompletionItem,
@@ -23,6 +24,7 @@ use crate::{
     file_finder::FileFinder,
     help::Help,
     render::{
+        code_search::paint_match_rows,
         command_palette::paint_palette_rows,
         commits::paint_commit_rows,
         completion::paint_completion_rows,
@@ -35,8 +37,10 @@ use crate::{
         help::{paint_help_detail_rows, paint_help_list_rows},
         review::{paint_diff_rows, render_review_rows},
         serialize_buffer,
+        symbol_finder::paint_symbol_rows,
     },
     review_session::ReviewViewState,
+    symbol_finder::SymbolFinder,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::{path::Path, sync::Arc};
@@ -76,6 +80,8 @@ pub(crate) mod non_pane_pool {
     pub(crate) const HOVER: u32 = BASE + 8;
     pub(crate) const COMMIT_PICKER_LIST: u32 = BASE + 9;
     pub(crate) const COMMIT_PICKER_PREVIEW: u32 = BASE + 10;
+    pub(crate) const CODE_SEARCH_LIST: u32 = BASE + 11;
+    pub(crate) const SYMBOL_FINDER_LIST: u32 = BASE + 12;
     /// First id of the per-window status-bar partition. A detached pane's status
     /// row pools at `WINDOW_STATUS + pane.index`, so the partition is offset far
     /// enough above the fixed non-pane ids that pane indices never collide.
@@ -498,6 +504,52 @@ pub(crate) fn render_finder_page(
         page,
         theme,
         |buf, area, start_row| paint_finder_rows(finder, home, area, start_row, theme, buf),
+    )
+}
+
+/// Render `region_height` rows of the code-search match list starting at row
+/// `page * region_height` into a fresh region-sized [`Buffer`], returning the
+/// page's self-contained VT byte stream.
+///
+/// Mirrors [`render_finder_page`] but paints match rows. The finder is
+/// read-only here -- the page index alone selects the rows.
+pub(crate) fn render_code_search_page(
+    finder: &CodeSearchFinder,
+    git_root: &Path,
+    page: u64,
+    theme: &crate::theme::Theme,
+    region_width: u16,
+    region_height: u16,
+) -> Vec<u8> {
+    render_rows_page(
+        region_width,
+        region_height,
+        page,
+        theme,
+        |buf, area, start_row| paint_match_rows(finder, area, start_row, git_root, theme, buf),
+    )
+}
+
+/// Render `region_height` rows of the symbol finder list starting at row
+/// `page * region_height` into a fresh region-sized [`Buffer`], returning the
+/// page's self-contained VT byte stream.
+///
+/// Mirrors [`render_finder_page`] but paints symbol rows. The finder is
+/// read-only here -- the page index alone selects the rows.
+pub(crate) fn render_symbol_finder_page(
+    finder: &SymbolFinder,
+    git_root: &Path,
+    page: u64,
+    theme: &crate::theme::Theme,
+    region_width: u16,
+    region_height: u16,
+) -> Vec<u8> {
+    render_rows_page(
+        region_width,
+        region_height,
+        page,
+        theme,
+        |buf, area, start_row| paint_symbol_rows(finder, area, start_row, git_root, theme, buf),
     )
 }
 
