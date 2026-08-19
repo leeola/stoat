@@ -19,7 +19,7 @@ use crate::{
     diff_cache::ContentHash,
     diff_map::{changes_to_hunks, line_starts, BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap},
     display_map::syntax_theme::SyntaxStyles,
-    host::{FsHost, GitHost},
+    host::{FsHost, GitHost, GitRepo},
 };
 use codegraph::FileId;
 use std::{
@@ -67,6 +67,31 @@ pub(crate) struct ChangedRangesScan {
     pub(super) computed: Vec<(FileId, ContentHash, ContentHash, Vec<Range<usize>>)>,
 }
 
+/// What a workspace's buffers diff against, when that is not the working
+/// tree's own HEAD-plus-index.
+///
+/// Reviewing a commit checks it out and points the diff at the commit's
+/// parent, so the base moves off HEAD while the buffers stay the working
+/// tree. An agent's proposed edits have no commit behind them at all, so they
+/// carry their base as text.
+// The constructors (`:diff <rev>`, the review walk, the rebase edit pause, the
+// commits view, and the agent-edit entry point) do not exist yet. The base
+// resolution below lands ahead of them, and `#[allow(dead_code)]` covers the
+// gap until the first one arrives.
+#[allow(dead_code)]
+#[derive(Clone)]
+pub(crate) enum DiffBase {
+    /// The tree at `sha`. `None` is the empty tree, which is what a root
+    /// commit's parent amounts to.
+    Rev { sha: Option<String> },
+    /// Base text supplied directly, keyed by absolute path. A path the map
+    /// does not carry falls back to the working tree's own base, so an
+    /// untouched file still diffs normally.
+    Memory {
+        files: HashMap<PathBuf, Arc<String>>,
+    },
+}
+
 /// The per-buffer bookkeeping that decides when a diff is owed, and what the
 /// last one read.
 ///
@@ -92,6 +117,11 @@ pub(crate) struct DiffState {
     /// which the `.git` watcher drives, so an entry cannot outlive the git
     /// state it was read from.
     pub(super) base_text: HashMap<PathBuf, DiffBaseText>,
+    /// What buffers diff against, `None` for the ordinary working-tree diff.
+    ///
+    /// Set through [`super::Workspace::set_diff_base`], which invalidates
+    /// every buffer, since a base change moves every diff in the workspace.
+    pub(super) base_override: Option<DiffBase>,
     /// Files with staged and with unstaged changes across the whole repo, as
     /// the status bar's repo-wide tally reads them.
     ///
@@ -256,6 +286,7 @@ impl DiffState {
             syntax_styles,
             base_cache,
             self.base_text.get(&path).cloned(),
+            self.base_override.as_ref(),
         );
         let diff_map = computed.map(|(diff_map, base)| {
             self.base_text.insert(path.clone(), base);
@@ -402,6 +433,7 @@ impl DiffState {
                 let syntax_styles = syntax_styles.clone();
                 let base_cache = base_cache.clone();
                 let path = path.clone();
+                let base_override = self.base_override.clone();
                 move || {
                     // Materialize the rope only now that the diff is confirmed
                     // stale and a job is committed, off the event-loop thread.
@@ -415,6 +447,7 @@ impl DiffState {
                         &syntax_styles,
                         &base_cache,
                         cached_base,
+                        base_override.as_ref(),
                     )
                     .map(|(mut diff_map, base)| {
                         diff_map.anchor_hunks(&buffer_snapshot);
@@ -510,8 +543,11 @@ pub(crate) struct BaseHighlightMemo {
 
 pub(crate) type BaseHighlightCache = Arc<Mutex<BaseHighlightMemo>>;
 
-/// Compute a buffer's HEAD-vs-worktree [`DiffMap`], or [`None`] when the file
-/// is outside a repo or has no HEAD content to diff against.
+/// Compute a buffer's [`DiffMap`] against `base_override`, or against the
+/// working tree's own HEAD-plus-index without one.
+///
+/// [`None`] when the file is outside a repo, or when an unoverridden base has
+/// no HEAD content to diff against.
 ///
 /// Both `discover` and `head_content` do git and filesystem IO, so this must
 /// run on a blocking thread. Uses the language-agnostic line diff, matching
@@ -526,31 +562,14 @@ pub(super) fn compute_diff_map(
     syntax_styles: &SyntaxStyles,
     base_cache: &BaseHighlightCache,
     cached_base: Option<DiffBaseText>,
+    base_override: Option<&DiffBase>,
 ) -> Option<(DiffMap, DiffBaseText)> {
     // Reading the blobs is what costs. It takes the repo mutex and then
     // decompresses bytes that a keystroke cannot have changed. The pair is
     // handed back either way so the caller can file it for the next one.
     let base = match cached_base {
         Some(base) => base,
-        None => {
-            let repo = git.discover(git_root)?;
-            let head = Arc::new(repo.head_content(path)?);
-            // A tracked file with no index entry is staged for deletion, so
-            // its index side is empty text. HEAD's bytes there mark the
-            // removal unstaged.
-            let index = match repo.index_content(path) {
-                Some(index) => Arc::new(index),
-                None => Arc::new(String::new()),
-            };
-            let head_hash = buffer_registry::fingerprint_bytes(&head);
-            let index_hash = buffer_registry::fingerprint_bytes(&index);
-            DiffBaseText {
-                head,
-                index,
-                head_hash,
-                index_hash,
-            }
-        },
+        None => resolve_base(git, git_root, path, base_override)?,
     };
     let base_text = &*base.head;
     let index_text = &*base.index;
@@ -615,6 +634,70 @@ pub(super) fn compute_diff_map(
         ));
     }
     Some((diff_map, base.clone()))
+}
+
+/// Read the two blobs a diff measures `path` against, per the workspace's base.
+///
+/// The head side is what the diff hunks describe. The index side is what marks
+/// them staged, being the content a hunk is already applied to.
+///
+/// Under a [`DiffBase::Rev`] the rev is the review base and HEAD is the commit
+/// checked out over it, so a hunk already in that commit reads staged and a
+/// worktree-only edit reads unstaged. Either side missing the file reads as
+/// empty text rather than abandoning the diff, so a file the commit adds still
+/// diffs against nothing.
+///
+/// Under a [`DiffBase::Memory`] both sides are the supplied text, which leaves
+/// every hunk unstaged. Nothing has applied an agent's proposal anywhere.
+fn resolve_base(
+    git: &dyn GitHost,
+    git_root: &Path,
+    path: &Path,
+    base_override: Option<&DiffBase>,
+) -> Option<DiffBaseText> {
+    let repo = git.discover(git_root)?;
+
+    let (head, index) = match base_override {
+        Some(DiffBase::Rev { sha }) => {
+            let rev = match sha {
+                Some(sha) => repo.content_at(sha, path).unwrap_or_default(),
+                None => String::new(),
+            };
+            (
+                Arc::new(rev),
+                Arc::new(repo.head_content(path).unwrap_or_default()),
+            )
+        },
+        Some(DiffBase::Memory { files }) => match files.get(path) {
+            Some(text) => (text.clone(), text.clone()),
+            None => working_tree_base(&*repo, path)?,
+        },
+        None => working_tree_base(&*repo, path)?,
+    };
+
+    let head_hash = buffer_registry::fingerprint_bytes(&head);
+    let index_hash = buffer_registry::fingerprint_bytes(&index);
+    Some(DiffBaseText {
+        head,
+        index,
+        head_hash,
+        index_hash,
+    })
+}
+
+/// The working tree's own base for `path`, as HEAD and the index.
+///
+/// [`None`] when HEAD does not carry the file, which is what leaves an
+/// untracked buffer without a diff map.
+fn working_tree_base(repo: &dyn GitRepo, path: &Path) -> Option<(Arc<String>, Arc<String>)> {
+    let head = Arc::new(repo.head_content(path)?);
+    // A tracked file with no index entry is staged for deletion, so its index
+    // side is empty text. HEAD's bytes there mark the removal unstaged.
+    let index = match repo.index_content(path) {
+        Some(index) => Arc::new(index),
+        None => Arc::new(String::new()),
+    };
+    Some((head, index))
 }
 
 /// Whether `buffer_text` stands for a file that is no longer in the working
@@ -811,14 +894,21 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 mod tests {
     use super::{
         changed_byte_ranges, compute_base_highlights, scan_changed_ranges, BaseHighlightMemo,
-        DIFF_SETTLE,
+        DiffBase, DIFF_SETTLE,
     };
     use crate::{
-        buffer::BufferId, diff_map::DiffHunkStatus, display_map::syntax_theme::SyntaxStyles,
-        host::DiffStatus, pane::View, review::ReviewFileInput, test_harness::TestHarness,
-        theme::Theme, workspace::Workspace,
+        buffer::BufferId,
+        diff_map::{DiffHunkStatus, DiffMap},
+        display_map::syntax_theme::SyntaxStyles,
+        host::DiffStatus,
+        pane::View,
+        review::ReviewFileInput,
+        test_harness::TestHarness,
+        theme::Theme,
+        workspace::Workspace,
     };
     use std::{
+        collections::HashMap,
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
@@ -1452,6 +1542,167 @@ mod tests {
         );
 
         (h, buffer_id)
+    }
+
+    /// Stand up `/repo/a.rs` with the three texts a checked-out review has:
+    /// the base commit's content, the checked-out commit's content in HEAD,
+    /// and the working tree's own. Returns the harness with `base` installed
+    /// and the buffer's diff computed against it.
+    fn based_harness(base: Option<DiffBase>, rev: &str, head: &str, working: &str) -> DiffMap {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        {
+            let mut builder = h.fake_git().add_repo("/repo").with_fs(h.fake_fs());
+            builder.commit("base1", &[("a.rs", rev)]);
+            builder.head_file("a.rs", head);
+            builder.unstaged_file("a.rs", working);
+        }
+        h.open_file(Path::new("/repo/a.rs"));
+        h.stoat.active_workspace_mut().set_diff_base(base);
+
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        let git_host = h.stoat.git_host.clone();
+        let language_registry = h.stoat.language_registry.clone();
+        let syntax_styles = h.stoat.syntax_styles.clone();
+        let base_cache = h.stoat.base_highlights_cache.clone();
+        h.stoat.active_workspace_mut().install_diff_map_now(
+            &git_host,
+            &language_registry,
+            &syntax_styles,
+            &base_cache,
+            buffer_id,
+        );
+
+        let ws = h.stoat.active_workspace();
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        guard.diff_map.clone().expect("diff map populated")
+    }
+
+    #[test]
+    fn a_rev_base_diffs_against_the_named_commit() {
+        let dm = based_harness(
+            Some(DiffBase::Rev {
+                sha: Some("base1".into()),
+            }),
+            "old\n",
+            "mid\n",
+            "new\n",
+        );
+        assert_eq!(
+            dm.base_text().map(|t| t.as_str()),
+            Some("old\n"),
+            "the base is the named commit, not HEAD"
+        );
+    }
+
+    /// The rev is what the review is against and HEAD is the commit checked
+    /// out over it, so the same staged machinery splits the two apart.
+    #[test]
+    fn a_rev_base_reads_in_commit_hunks_staged_and_worktree_edits_unstaged() {
+        let dm = based_harness(
+            Some(DiffBase::Rev {
+                sha: Some("base1".into()),
+            }),
+            "a\nx\nb\n",
+            "A\nx\nb\n",
+            "A\nx\nB\n",
+        );
+        assert_eq!(
+            dm.staged_counts(),
+            (1, 1),
+            "the commit's own hunk reads staged and the worktree's reads unstaged"
+        );
+    }
+
+    #[test]
+    fn a_rev_base_with_no_sha_diffs_against_nothing() {
+        let dm = based_harness(Some(DiffBase::Rev { sha: None }), "old\n", "mid\n", "new\n");
+        assert_eq!(
+            dm.base_text().map(|t| t.as_str()),
+            Some(""),
+            "a root commit's parent is the empty tree"
+        );
+    }
+
+    #[test]
+    fn a_memory_base_diffs_against_the_supplied_text() {
+        let files = std::iter::once((
+            PathBuf::from("/repo/a.rs"),
+            Arc::new("proposed\n".to_string()),
+        ))
+        .collect();
+        let dm = based_harness(Some(DiffBase::Memory { files }), "old\n", "mid\n", "new\n");
+        assert_eq!(
+            dm.base_text().map(|t| t.as_str()),
+            Some("proposed\n"),
+            "the supplied text is the base"
+        );
+        assert_eq!(
+            dm.staged_counts(),
+            (0, 1),
+            "and nothing has applied an agent's proposal, so the hunk is unstaged"
+        );
+    }
+
+    #[test]
+    fn a_memory_base_falls_back_for_a_path_it_does_not_carry() {
+        let dm = based_harness(
+            Some(DiffBase::Memory {
+                files: HashMap::new(),
+            }),
+            "old\n",
+            "mid\n",
+            "new\n",
+        );
+        assert_eq!(
+            dm.base_text().map(|t| t.as_str()),
+            Some("mid\n"),
+            "an untouched file keeps the working tree's own base"
+        );
+    }
+
+    #[test]
+    fn setting_a_diff_base_drops_the_cached_blobs() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        {
+            let mut builder = h.fake_git().add_repo("/repo").with_fs(h.fake_fs());
+            builder.head_file("a.rs", "old\n");
+            builder.unstaged_file("a.rs", "new\n");
+        }
+        h.open_file(Path::new("/repo/a.rs"));
+
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        let git_host = h.stoat.git_host.clone();
+        let language_registry = h.stoat.language_registry.clone();
+        let syntax_styles = h.stoat.syntax_styles.clone();
+        let base_cache = h.stoat.base_highlights_cache.clone();
+        h.stoat.active_workspace_mut().install_diff_map_now(
+            &git_host,
+            &language_registry,
+            &syntax_styles,
+            &base_cache,
+            buffer_id,
+        );
+        assert!(
+            h.stoat
+                .active_workspace()
+                .diff
+                .holds(buffer_id, Some(Path::new("/repo/a.rs"))),
+            "the blobs are cached before the base moves"
+        );
+
+        h.stoat
+            .active_workspace_mut()
+            .set_diff_base(Some(DiffBase::Rev { sha: None }));
+        assert!(
+            !h.stoat
+                .active_workspace()
+                .diff
+                .holds(buffer_id, Some(Path::new("/repo/a.rs"))),
+            "a base change drops blobs read against the base it replaced"
+        );
     }
 
     #[test]

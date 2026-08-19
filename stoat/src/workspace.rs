@@ -28,7 +28,9 @@ use crate::{
     run::{RunId, RunState},
     syntax_parse::{parse_buffer_step, ParseJobOutput},
     term_session::{TermId, TermReturnFocus, TermSession},
-    workspace::diff::{BaseHighlightCache, ChangedRangesMemo, ChangedRangesScan, DiffState},
+    workspace::diff::{
+        BaseHighlightCache, ChangedRangesMemo, ChangedRangesScan, DiffBase, DiffState,
+    },
 };
 use codegraph::{CodeGraph, FileId};
 pub use persist::find_resume_anchor;
@@ -674,6 +676,19 @@ impl Workspace {
             base_cache,
             id,
         );
+    }
+
+    /// Point every buffer's diff at `base`, or back at the working tree's own
+    /// HEAD-plus-index with `None`.
+    ///
+    /// Re-diffs the whole workspace. Every cached blob was read against the
+    /// base being replaced, so none of them survive the change.
+    // The callers that point the diff at a revision do not exist yet, so
+    // `#[allow(dead_code)]` covers the gap until the first one arrives.
+    #[allow(dead_code)]
+    pub(crate) fn set_diff_base(&mut self, base: Option<DiffBase>) {
+        self.diff.base_override = base;
+        self.diff.invalidate_all();
     }
 
     /// Files with staged and with unstaged changes across the repo, as
