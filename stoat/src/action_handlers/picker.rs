@@ -25,7 +25,9 @@ pub(crate) fn picker_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     }
 
     match active_modal(stoat) {
-        Some(ActiveModal::Jumplist) => shift!(stoat.jumplist_picker.as_mut()),
+        Some(ActiveModal::Jumplist) => {
+            shift!(stoat.jumplist_picker.as_mut().map(|p| &mut p.picker))
+        },
         Some(ActiveModal::Diagnostics) => {
             shift!(stoat.diagnostics_picker.as_mut().map(|p| &mut p.picker))
         },
@@ -157,7 +159,9 @@ pub(super) fn jumplist_picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect 
 }
 
 pub(super) fn jumplist_picker_close(stoat: &mut Stoat) -> UpdateEffect {
-    stoat.jumplist_picker = None;
+    if let Some(picker) = stoat.jumplist_picker.take() {
+        picker.dispose(stoat.active_workspace_mut());
+    }
     UpdateEffect::Redraw
 }
 
@@ -168,7 +172,11 @@ pub(super) fn jumplist_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let Some(picker) = stoat.jumplist_picker.take() else {
         return UpdateEffect::None;
     };
-    let idx = picker.selected();
+    let idx = picker.selected_index();
+    picker.dispose(stoat.active_workspace_mut());
+    let Some(idx) = idx else {
+        return UpdateEffect::Redraw;
+    };
     let Some(entry) =
         focused_pane_jumplist(stoat).and_then(|jumplist| jumplist.entries().get(idx).cloned())
     else {
@@ -354,10 +362,72 @@ pub(super) fn open_jumplist_picker(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     }
     let jumplist = jumplist.clone();
-    let picker =
-        crate::jumplist_picker::JumplistPicker::new(&jumplist, &stoat.active_workspace().buffers);
-    stoat.jumplist_picker = Some(picker);
+    let entries = crate::jumplist_picker::JumplistPicker::entries_from(
+        &jumplist,
+        &stoat.active_workspace().buffers,
+    );
+
+    let executor = stoat.executor.clone();
+    stoat.set_focused_mode("insert".into());
+    let ws = stoat.active_workspace_mut();
+    let input = crate::input_view::InputView::create(
+        ws,
+        executor.clone(),
+        crate::input_view::SubmitTarget::JumplistPicker,
+        "",
+        "insert",
+        1,
+    );
+    let preview = crate::picker::Preview::new(ws, executor);
+    stoat.jumplist_picker = Some(crate::jumplist_picker::JumplistPicker::from_entries(
+        entries,
+        jumplist.cursor(),
+        input,
+        preview,
+    ));
     UpdateEffect::Redraw
+}
+
+/// Re-rank the jumplist picker for what is typed and sync its preview.
+///
+/// Driven once per frame beside the other picker syncs, so typing narrows the
+/// list and the pane follows the selection without an action of its own.
+pub(crate) fn sync_jumplist_picker(stoat: &mut Stoat) {
+    if stoat.jumplist_picker.is_none() {
+        return;
+    }
+    let query = {
+        let ws = stoat.active_workspace();
+        stoat
+            .jumplist_picker
+            .as_ref()
+            .expect("jumplist_picker present")
+            .picker
+            .input
+            .text(ws)
+    };
+
+    let active_idx = stoat.active_workspace;
+    let ws = &mut stoat.workspaces[active_idx];
+    let fs_host = &*stoat.fs_host;
+    let language_registry = &stoat.language_registry;
+    let Some(picker) = stoat.jumplist_picker.as_mut() else {
+        return;
+    };
+    picker.picker.refilter(&query);
+    if picker.picker.preview_current() {
+        return;
+    }
+
+    // Resolving reads the workspace and the sync writes it, so the target is
+    // in hand before the picker takes its mutable borrow.
+    let target = picker
+        .picker
+        .selected_entry()
+        .and_then(|entry| crate::jumplist_picker::jumplist_target(ws, entry));
+    picker
+        .picker
+        .sync_preview(ws, fs_host, language_registry, target);
 }
 
 /// Drive [`ActionKind::OpenWorkspaceDiagnosticsPicker`].

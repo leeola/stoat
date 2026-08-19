@@ -969,10 +969,16 @@ pub(crate) fn frame(
         },
         Some(ActiveModal::Jumplist) => {
             if let Some(picker) = &mut stoat.jumplist_picker {
+                let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::JumplistPicker);
+                let split = modal_split_percent(&stoat.modal_split, ModalKind::JumplistPicker);
                 jumplist_picker::render_jumplist_picker(
                     picker,
+                    ws,
                     &stoat.theme,
+                    chrome,
                     full,
+                    zoom,
+                    split,
                     buf,
                     &mut *scene,
                 );

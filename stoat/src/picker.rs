@@ -1303,7 +1303,7 @@ impl PathPicker {
 /// `File` reads the path from disk. `Buffer` reads a live, possibly modified
 /// in-memory buffer, so the preview reflects unsaved edits rather than the
 /// backing file.
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum PreviewSource {
     File(PathBuf),
     /// Live in-memory buffer, so the preview reflects unsaved edits rather than

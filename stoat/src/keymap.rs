@@ -1849,7 +1849,9 @@ mod tests {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
-        // The finder family prompts in insert mode. The rest take normal keys.
+        // Every list modal prompts, so every one of them takes these in insert
+        // mode. Help alone also answers them in normal mode, which its own case
+        // below covers.
         let insert_modals = [
             "finder",
             "symbols",
@@ -1860,8 +1862,8 @@ mod tests {
             "workspace_picker",
             "location",
             "diagnostics",
+            "jumplist",
         ];
-        let normal_modals = ["jumplist"];
 
         let expected = [
             (KeyCode::Up, KeyModifiers::NONE, "PickerPrev"),
@@ -1874,11 +1876,7 @@ mod tests {
             (KeyCode::PageUp, KeyModifiers::NONE, "PickerPageUp"),
         ];
 
-        for (modal, mode) in insert_modals
-            .iter()
-            .map(|m| (*m, "insert"))
-            .chain(normal_modals.iter().map(|m| (*m, "normal")))
-        {
+        for (modal, mode) in insert_modals.iter().map(|m| (*m, "insert")) {
             let state = TestState::new()
                 .set("modal", StateValue::String(modal.into()))
                 .set("mode", StateValue::String(mode.into()));
@@ -1893,7 +1891,7 @@ mod tests {
         }
 
         // Ctrl-d and Ctrl-u belong to the preview, so only the modals that
-        // show one bind them. The jumplist and workspace pickers have none.
+        // show one bind them. The workspace picker has none.
         let with_preview = [
             ("finder", "insert"),
             ("symbols", "insert"),
@@ -1904,6 +1902,7 @@ mod tests {
             ("help", "normal"),
             ("location", "insert"),
             ("diagnostics", "insert"),
+            ("jumplist", "insert"),
         ];
         for (modal, mode) in with_preview {
             let state = TestState::new()

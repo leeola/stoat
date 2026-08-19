@@ -231,14 +231,17 @@ fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
         },
         ActiveModal::Jumplist => {
             let picker = stoat.jumplist_picker.as_ref()?;
-            plain(
-                crate::render::jumplist_picker::jumplist_picker_layout(
-                    size,
-                    picker.entries().len(),
-                ),
-                picker.entries().len(),
-                picker.selected(),
-            )
+            let layout = crate::render::picker::target_picker_layout(
+                size,
+                zoom(ModalKind::JumplistPicker),
+                split(ModalKind::JumplistPicker),
+            )?;
+            Some(ModalSurfaces {
+                list: layout.list,
+                preview: layout.preview,
+                len: picker.filtered().len(),
+                selected: picker.selected(),
+            })
         },
         ActiveModal::Diagnostics => {
             let picker = stoat.diagnostics_picker.as_ref()?;
@@ -423,6 +426,10 @@ pub(crate) fn open_modal_box(stoat: &Stoat, kind: ModalKind, zoom: i8) -> Option
         },
         ModalKind::DiagnosticsPicker => {
             stoat.diagnostics_picker.as_ref()?;
+            crate::render::picker::target_picker_layout(size, zoom, split)?.modal
+        },
+        ModalKind::JumplistPicker => {
+            stoat.jumplist_picker.as_ref()?;
             crate::render::picker::target_picker_layout(size, zoom, split)?.modal
         },
     };

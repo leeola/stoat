@@ -536,7 +536,9 @@ pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
             }
         },
         ActiveModal::Jumplist => {
-            stoat.jumplist_picker = None;
+            if let Some(picker) = stoat.jumplist_picker.take() {
+                picker.dispose(stoat.active_workspace_mut());
+            }
         },
         ActiveModal::Diagnostics => {
             if let Some(picker) = stoat.diagnostics_picker.take() {

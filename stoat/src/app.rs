@@ -399,8 +399,8 @@ enum WindowIpc {
 ///
 /// The zoom combo is context-relative, so a step has to land on whichever modal
 /// the user is looking at rather than on a single global level. This names that
-/// target. Modals sized entirely by their content already (the jumplist and
-/// workspace pickers) have nothing to zoom and are absent.
+/// target. The workspace picker sizes entirely to its content and has nothing
+/// to zoom, so it is absent.
 ///
 /// Every kind here sizes its box against its own [`Stoat::modal_zoom`] entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -413,6 +413,7 @@ pub(crate) enum ModalKind {
     SymbolFinder,
     LocationPicker,
     DiagnosticsPicker,
+    JumplistPicker,
 }
 
 /// Rows one wheel notch moves the commit picker's diff preview.
@@ -4669,7 +4670,8 @@ impl Stoat {
             ActiveModal::ShellInput => &self.shell_input.as_ref()?.input,
             ActiveModal::Location => &self.location_picker.as_ref()?.input,
             ActiveModal::Diagnostics => &self.diagnostics_picker.as_ref()?.picker.input,
-            ActiveModal::Run | ActiveModal::QuitConfirm | ActiveModal::Jumplist => return None,
+            ActiveModal::Jumplist => &self.jumplist_picker.as_ref()?.picker.input,
+            ActiveModal::Run | ActiveModal::QuitConfirm => return None,
         };
 
         Some((input.editor_id, input.buffer_id))
@@ -6688,6 +6690,7 @@ impl Stoat {
         action_handlers::workspace::sync_workspace_picker(self);
         action_handlers::picker::sync_location_picker(self);
         action_handlers::picker::sync_diagnostics_picker(self);
+        action_handlers::picker::sync_jumplist_picker(self);
 
         let format_on_save = action_handlers::file::pump_format_on_save(self);
         let pending_save = action_handlers::file::pump_pending_save(self);
@@ -17342,6 +17345,299 @@ mod tests {
             h.rendered_buffer()[(rows.x + 1, last_row)].style().bg,
             selection.bg,
             "the selected diagnostic is painted as selected"
+        );
+    }
+
+    /// Open a jumplist picker over `count` jumps into a seeded file, one per
+    /// line, each line naming its own 1-based number so a row is identifiable.
+    ///
+    /// The list holds `count + 1` rows: opening the file records a jump out of
+    /// the scratch buffer the harness starts on.
+    fn open_jumplist_picker(h: &mut crate::test_harness::TestHarness, count: usize) -> PathBuf {
+        let root = PathBuf::from("/jump-picker");
+        let path = root.join("target.rs");
+        let text: String = (1..=count)
+            .map(|i| format!("jump-{i} lands here\n"))
+            .collect();
+        h.fake_fs()
+            .insert_files(std::iter::once((path.clone(), text.as_bytes())));
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+
+        for _ in 0..count {
+            action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+            action_handlers::dispatch(&mut h.stoat, &stoat_action::MoveDown);
+        }
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenJumplistPicker);
+        h.snapshot();
+        path
+    }
+
+    /// The jumplist picker's inner rows rect for the harness' screen size.
+    fn jumplist_picker_rows(h: &crate::test_harness::TestHarness) -> Rect {
+        crate::render::picker::target_picker_layout(
+            h.stoat.size(),
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::JumplistPicker),
+            modal_split_percent(&h.stoat.modal_split, ModalKind::JumplistPicker),
+        )
+        .expect("picker laid out")
+        .list
+    }
+    /// The picker prompts like every other target list, so typing narrows the
+    /// jumps rather than reaching the buffer behind it.
+    #[test]
+    fn typing_narrows_the_jumps() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        open_jumplist_picker(&mut h, 12);
+        let all = h
+            .stoat
+            .jumplist_picker
+            .as_ref()
+            .expect("open")
+            .filtered()
+            .len();
+
+        h.type_text("jump-7");
+        h.stoat.drive_background();
+
+        let narrowed = h
+            .stoat
+            .jumplist_picker
+            .as_ref()
+            .expect("the picker stays open while typing")
+            .filtered()
+            .len();
+        assert_eq!(
+            (all, narrowed),
+            (13, 1),
+            "the query keeps only the jump it names"
+        );
+    }
+
+    /// The preview shows the selected jump's buffer, scrolled to the line it
+    /// points at, so a reader sees the target before committing to the jump.
+    #[test]
+    fn the_jumplist_preview_follows_the_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        open_jumplist_picker(&mut h, 40);
+        h.stoat
+            .jumplist_picker
+            .as_mut()
+            .expect("open")
+            .picker
+            .move_selection(-39);
+        h.stoat.drive_background();
+        h.snapshot();
+
+        let preview_editor = h
+            .stoat
+            .jumplist_picker
+            .as_ref()
+            .expect("open")
+            .picker
+            .preview
+            .editor;
+        let scroll = |h: &crate::test_harness::TestHarness| {
+            h.stoat
+                .active_workspace()
+                .editors
+                .get(preview_editor)
+                .expect("preview editor")
+                .scroll_row
+        };
+        let before = scroll(&h);
+
+        h.stoat
+            .jumplist_picker
+            .as_mut()
+            .expect("open")
+            .picker
+            .move_selection(39);
+        h.stoat.drive_background();
+        h.snapshot();
+
+        assert!(
+            scroll(&h) > before,
+            "the preview scrolled toward the last jump's line"
+        );
+    }
+
+    /// Escape closes the picker and releases the editors it owns, so a closed
+    /// picker leaves no scratch buffers behind.
+    #[test]
+    fn escape_closes_the_jumplist_picker_and_disposes_it() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        open_jumplist_picker(&mut h, 4);
+        let before = h.stoat.active_workspace().editors.len();
+        assert!(
+            before > 1,
+            "the picker took editors for its prompt and preview"
+        );
+
+        h.type_keys("escape");
+
+        assert_eq!(
+            (
+                h.stoat.jumplist_picker.is_some(),
+                h.stoat.active_workspace().editors.len()
+            ),
+            (false, before - 2),
+            "closing gives back the prompt and preview editors"
+        );
+    }
+
+    /// A page covers half the rows the render stamped, and stops at each end
+    /// rather than wrapping.
+    #[test]
+    fn jumplist_picker_pages_by_half_a_screen_and_stops_at_the_ends() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        open_jumplist_picker(&mut h, 19);
+
+        let half = h
+            .stoat
+            .jumplist_picker
+            .as_ref()
+            .expect("open")
+            .picker
+            .viewport_rows
+            .expect("the render stamped a viewport")
+            / 2;
+        assert!(
+            half > 1,
+            "a meaningful page needs more than one row: {half}"
+        );
+
+        let page = |h: &mut crate::test_harness::TestHarness, dir: i32| {
+            h.stoat.jumplist_picker.as_mut().expect("open").page(dir);
+        };
+        let selected = |h: &crate::test_harness::TestHarness| {
+            h.stoat.jumplist_picker.as_ref().expect("open").selected()
+        };
+
+        // The picker opens on the walk cursor, so paging starts from a known row.
+        h.stoat
+            .jumplist_picker
+            .as_mut()
+            .expect("open")
+            .picker
+            .move_selection(-20);
+        assert_eq!(selected(&h), 0, "the selection starts at the first row");
+
+        page(&mut h, 1);
+        assert_eq!(selected(&h), half, "a page down covers half a screen");
+        page(&mut h, -1);
+        assert_eq!(selected(&h), 0, "and a page up returns");
+
+        for _ in 0..20 {
+            page(&mut h, 1);
+        }
+        assert_eq!(selected(&h), 19, "paging past the end stops on it");
+        for _ in 0..20 {
+            page(&mut h, -1);
+        }
+        assert_eq!(selected(&h), 0, "and past the start stops there");
+    }
+
+    /// More jumps than the box shows means the window has to scroll to reach
+    /// the last one, and the row it lands on paints as selected.
+    ///
+    /// The terminal is short on purpose: the jumplist caps at
+    /// [`JUMP_LIST_CAPACITY`](crate::jumplist) entries, so a full-height box
+    /// would hold every row it can ever have and never scroll.
+    #[test]
+    fn jumplist_picker_renders_a_selection_past_the_visible_rows() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 26);
+        open_jumplist_picker(&mut h, 40);
+
+        let rows = jumplist_picker_rows(&h);
+        let entries = h
+            .stoat
+            .jumplist_picker
+            .as_ref()
+            .expect("open")
+            .entries()
+            .len();
+        assert!(
+            entries > rows.height as usize,
+            "the list has to outgrow its box: {entries} entries in {} rows",
+            rows.height
+        );
+
+        h.stoat
+            .jumplist_picker
+            .as_mut()
+            .expect("open")
+            .picker
+            .move_selection(entries as i32);
+        h.snapshot();
+
+        // Rows are read individually rather than by scanning the whole frame.
+        // The key hints overlay paints across the right end of the bottom rows.
+        let row_text = |row: u16| -> String {
+            let buf = h.rendered_buffer();
+            (rows.x..rows.x + rows.width)
+                .map(|col| buf[(col, row)].symbol())
+                .collect()
+        };
+        let last_row = rows.y + rows.height - 1;
+
+        assert!(
+            !row_text(rows.y).contains("jump-11 "),
+            "the window scrolled the oldest surviving jump off: {}",
+            row_text(rows.y)
+        );
+        assert!(
+            row_text(last_row).contains("jump-40"),
+            "the selected newest jump paints on the last row: {}",
+            row_text(last_row)
+        );
+
+        let selection = h.stoat.theme.get(crate::theme::scope::UI_SELECTION);
+        assert_eq!(
+            h.rendered_buffer()[(rows.x + 1, last_row)].style().bg,
+            selection.bg,
+            "the selected jump is painted as selected"
+        );
+    }
+
+    /// The rows follow the box, so a list longer than the box paints inside it
+    /// rather than spilling the surplus onto the editor behind.
+    ///
+    /// The terminal is short on purpose, for the same reason the scrolling test
+    /// above uses one: a full-height box never overflows a capped jumplist.
+    #[test]
+    fn the_jumplist_box_paints_nothing_outside_itself() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 26);
+        open_jumplist_picker(&mut h, 40);
+
+        let modal = crate::render::picker::target_picker_layout(
+            h.stoat.size(),
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::JumplistPicker),
+            modal_split_percent(&h.stoat.modal_split, ModalKind::JumplistPicker),
+        )
+        .expect("picker laid out")
+        .modal;
+
+        let before = h.rendered_buffer().clone();
+        h.stoat
+            .jumplist_picker
+            .as_mut()
+            .expect("open")
+            .picker
+            .move_selection(40);
+        h.snapshot();
+        let after = h.rendered_buffer();
+
+        let changed: Vec<(u16, u16)> = (0..26u16)
+            .flat_map(|y| (0..120u16).map(move |x| (x, y)))
+            .filter(|&(x, y)| !modal.contains((x, y).into()))
+            .filter(|&(x, y)| after[(x, y)] != before[(x, y)])
+            .collect();
+        assert_eq!(
+            changed,
+            Vec::new(),
+            "scrolling the list repaints only cells inside the box"
         );
     }
     /// Seed a definition-capable fake server, open `main.rs` holding

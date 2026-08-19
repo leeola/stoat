@@ -2,19 +2,15 @@ use crate::{
     jumplist_picker::JumplistPicker,
     render::table::{self, Column, Width},
 };
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    widgets::{Block, Borders},
-};
-
-/// Rows of jumps the modal shows at once. A longer list scrolls under the
-/// selection rather than growing the box past a readable height.
-const MAX_ENTRY_ROWS: u16 = 12;
+use ratatui::{buffer::Buffer, layout::Rect};
 
 /// A one-column marker for the walk cursor, then the file, the position, and
 /// the line's text. Headerless, since the marker column has nothing to label
 /// and the rest are obvious.
+///
+/// The sized columns stay narrow because the list shares its body with a
+/// preview. A file and a position wide enough to read whole would leave the
+/// snippet, which is what a query names, nothing at all.
 const COLUMNS: [Column; 4] = [
     Column {
         label: "",
@@ -22,11 +18,11 @@ const COLUMNS: [Column; 4] = [
     },
     Column {
         label: "file",
-        width: Width::Fixed(18),
+        width: Width::Fixed(14),
     },
     Column {
         label: "position",
-        width: Width::Fixed(9),
+        width: Width::Fixed(8),
     },
     Column {
         label: "snippet",
@@ -34,71 +30,125 @@ const COLUMNS: [Column; 4] = [
     },
 ];
 
-/// Lay the jumplist picker's modal out within `area`, returning its outer box
-/// and the inner rect holding the jump rows, or [`None`] when `area` is too
-/// small to host it or there is nothing to list.
-pub(crate) fn jumplist_picker_layout(area: Rect, entries_len: usize) -> Option<(Rect, Rect)> {
-    if entries_len == 0 {
-        return None;
-    }
-    let entry_rows = (entries_len as u16).min(MAX_ENTRY_ROWS);
-    let modal = crate::render::chrome::modal_box(area, (0, 2 + entry_rows), (80, 3), (50, 3), 0)?;
-    Some((modal, Block::default().borders(Borders::ALL).inner(modal)))
-}
-
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_jumplist_picker(
     picker: &mut JumplistPicker,
+    ws: &mut crate::workspace::Workspace,
     theme: &crate::theme::Theme,
+    chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
+    zoom: i8,
+    list_percent: u16,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let Some((modal_area, inner)) = jumplist_picker_layout(area, picker.entries().len()) else {
+    let Some(layout) = crate::render::picker::target_picker_layout(area, zoom, list_percent) else {
         return;
     };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
-    crate::render::clear_themed(modal_area, buf, theme);
+    crate::render::clear_themed(layout.modal, buf, theme);
     crate::render::chrome::modal_frame(
         buf,
-        modal_area,
+        layout.modal,
         Some(" jumplist "),
         modal_style,
         theme,
-        scene,
+        &mut *scene,
     );
+
+    crate::render::picker::filter_header(
+        buf,
+        layout.inner,
+        ">",
+        &picker.picker.input,
+        ws,
+        theme,
+        chrome,
+        &mut *scene,
+    );
+
+    if let Some(preview_rect) = layout.preview {
+        crate::render::chrome::vline(
+            buf,
+            layout.list.x + layout.list.width,
+            layout.list.y,
+            layout.list.height,
+            theme.get(crate::theme::scope::UI_BORDER_INACTIVE),
+            scene,
+        );
+        picker.picker.preview_rows = Some(preview_rect.height as usize);
+        crate::render::picker::render_picker_preview(
+            &picker.picker.preview,
+            preview_rect,
+            theme,
+            chrome,
+            ws,
+            buf,
+        );
+    }
+
+    paint_jump_rows(picker, layout.list, theme, buf);
+}
+
+/// Paint the surviving jumps into `area`, following the selection.
+///
+/// The row the walk cursor sits on carries its own style, so a filtered list
+/// still says where a plain backward jump would land. Matched characters of
+/// the snippet carry the search-match style.
+fn paint_jump_rows(
+    picker: &mut JumplistPicker,
+    area: Rect,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+) {
+    let rows = area.height as usize;
+    if rows == 0 {
+        return;
+    }
+    picker.picker.viewport_rows = Some(rows);
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
+    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
 
     let cursor_idx = picker.cursor_idx();
     let selected = picker.selected();
 
     // The marker column is flush against the border, so its own gap supplies
     // the pad the other pickers put in front of their table.
-    let widths = table::resolve_widths(&COLUMNS, &[], inner.width);
-
-    let rows = inner.height as usize;
-    picker.viewport_rows = Some(rows);
+    let widths = table::resolve_widths(&COLUMNS, &[], area.width);
     let start = crate::render::picker::window_start(selected, rows);
-    for (i, entry) in picker.entries().iter().enumerate().skip(start).take(rows) {
-        let row = inner.y + (i - start) as u16;
-        let is_selected = i == selected;
-        let is_current = i == cursor_idx;
-        let base_style = if is_selected {
-            selected_style
-        } else if is_current {
-            prompt_style
-        } else {
-            row_style
+
+    let mut derived = Vec::new();
+    let mut matching = crate::fuzzy::Scratch::default();
+
+    for offset in 0..rows.min(picker.filtered().len().saturating_sub(start)) {
+        let row_idx = start + offset;
+        let Some(&entry_idx) = picker.filtered().get(row_idx) else {
+            continue;
+        };
+        let Some(entry) = picker.entries().get(entry_idx) else {
+            continue;
+        };
+        let row = area.y + offset as u16;
+        let is_selected = row_idx == selected;
+        let is_current = entry_idx == cursor_idx;
+        let base_style = match (is_selected, is_current) {
+            (true, _) => selected_style,
+            (false, true) => prompt_style,
+            (false, false) => row_style,
         };
 
-        for col in inner.x..inner.x + inner.width {
+        for col in area.x..area.x + area.width {
             buf[(col, row)].set_char(' ').set_style(base_style);
         }
 
-        let marker = if is_current { ">" } else { " " };
+        let marker = match is_current {
+            true => ">",
+            false => " ",
+        };
         let position = format!("{:>4}:{:<3}", entry.line, entry.column);
         let cells = [
             marker,
@@ -111,166 +161,32 @@ pub(crate) fn render_jumplist_picker(
         // walk cursor is on, so no cell needs one of its own.
         table::paint_row(
             buf,
-            Rect::new(inner.x, row, inner.width, 1),
+            Rect::new(area.x, row, area.width, 1),
             &cells,
             &widths,
             |_| base_style,
         );
-    }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::{jumplist_picker_layout, render_jumplist_picker, MAX_ENTRY_ROWS};
-    use crate::{
-        buffer_registry::BufferRegistry,
-        jumplist::{JumpEntry, JumpList},
-        jumplist_picker::JumplistPicker,
-        render::picker::test_support::{row_text, selected_rows, selection_theme},
-    };
-    use ratatui::{buffer::Buffer, layout::Rect};
-    use std::path::Path;
-    use stoat_text::{Bias, Selection, SelectionGoal};
-
-    /// A picker over `count` jumps into one buffer, each on its own line, whose
-    /// snippet carries its index so a painted row is identifiable.
-    fn picker_over(count: usize) -> JumplistPicker {
-        // Every line is the same width, so entry `i` starts at `i * LINE_LEN`.
-        const LINE_LEN: usize = "entry 00\n".len();
-        let mut buffers = BufferRegistry::new();
-        let text: String = (0..count).map(|i| format!("entry {i:02}\n")).collect();
-        let (buffer_id, _) = buffers.open(Path::new("/dir/file.rs"), &text);
-
-        let mut jumplist = JumpList::default();
-        for i in 0..count {
-            let anchor = {
-                let buffer = buffers.get(buffer_id).expect("buffer open");
-                let guard = buffer.read().expect("buffer readable");
-                guard.anchor_at(i * LINE_LEN, Bias::Right)
+        // The haystack joins the location to the snippet, so its offsets index
+        // that joined string rather than any one column. Only offsets landing
+        // in the snippet are painted, which is the part a query usually names.
+        let indices = picker
+            .picker
+            .row_indices(row_idx, &mut derived, &mut matching);
+        if indices.is_empty() {
+            continue;
+        }
+        let snippet_x = area.x + table::column_starts(&widths)[3];
+        let prefix_len = crate::jumplist_picker::haystack_prefix_len(entry);
+        let end_x = area.x + area.width;
+        for &index in indices {
+            let Some(col) = index.checked_sub(prefix_len) else {
+                continue;
             };
-            let entry = JumpEntry {
-                buffer_id,
-                selections: vec![Selection {
-                    id: 0,
-                    start: anchor,
-                    end: anchor,
-                    reversed: false,
-                    goal: SelectionGoal::None,
-                }],
-            };
-            jumplist.push(entry, &buffers);
+            let x = snippet_x + col as u16;
+            if x < end_x {
+                buf[(x, row)].set_style(match_style);
+            }
         }
-        JumplistPicker::new(&jumplist, &buffers)
-    }
-
-    fn render(picker: &mut JumplistPicker, buf: &mut Buffer, area: Rect) {
-        render_jumplist_picker(
-            picker,
-            &selection_theme(),
-            area,
-            buf,
-            &mut stoat_widgets::ApcScene::new(),
-        );
-    }
-
-    #[test]
-    fn layout_holds_one_row_per_jump() {
-        let (modal, inner) =
-            jumplist_picker_layout(Rect::new(0, 0, 100, 40), 3).expect("the area hosts the modal");
-        assert_eq!(modal.width, 80, "the box holds at its recommended width");
-        assert_eq!(inner.height, 3, "one row per jump");
-    }
-
-    #[test]
-    fn layout_caps_the_rows_it_shows() {
-        let (_, inner) =
-            jumplist_picker_layout(Rect::new(0, 0, 100, 40), 30).expect("the area hosts the modal");
-        assert_eq!(inner.height, MAX_ENTRY_ROWS);
-    }
-
-    /// An area too short for the whole list gives back a shorter box rather
-    /// than none, where the old hand-rolled sizing refused outright. The rows
-    /// have to follow the box down, or the surplus paints through the bottom
-    /// border and onto the editor behind.
-    #[test]
-    fn a_box_shortened_to_fit_paints_nothing_outside_itself() {
-        let mut picker = picker_over(12);
-        let area = Rect::new(0, 0, 100, 12);
-        let (modal, inner) =
-            jumplist_picker_layout(area, 12).expect("a short area still hosts the modal");
-        assert!(
-            inner.height < 12,
-            "the area forces a box shorter than the list: {inner:?}"
-        );
-
-        let mut buf = Buffer::empty(area);
-        render(&mut picker, &mut buf, area);
-
-        let pristine = Buffer::empty(area);
-        let outside: Vec<(u16, u16)> = (area.y..area.y + area.height)
-            .flat_map(|y| (area.x..area.x + area.width).map(move |x| (x, y)))
-            .filter(|&(x, y)| !modal.contains((x, y).into()))
-            .filter(|&(x, y)| buf[(x, y)] != pristine[(x, y)])
-            .collect();
-        assert_eq!(outside, Vec::new(), "every painted cell is inside the box");
-    }
-
-    #[test]
-    fn layout_none_when_too_small_or_empty() {
-        assert_eq!(jumplist_picker_layout(Rect::new(0, 0, 40, 24), 3), None);
-        assert_eq!(jumplist_picker_layout(Rect::new(0, 0, 80, 4), 3), None);
-        assert_eq!(jumplist_picker_layout(Rect::new(0, 0, 80, 24), 0), None);
-    }
-
-    #[test]
-    fn paging_moves_by_half_the_rendered_rows_and_stops_at_the_ends() {
-        let mut picker = picker_over(20);
-        let area = Rect::new(0, 0, 100, 30);
-        render(&mut picker, &mut Buffer::empty(area), area);
-
-        let half = picker.viewport_rows.expect("the render stamped a viewport") / 2;
-        assert!(
-            half > 1,
-            "a meaningful page needs more than one row: {half}"
-        );
-
-        // The picker opens on the walk cursor, so paging starts from a known row.
-        while picker.selected() > 0 {
-            picker.move_selection(-1);
-        }
-        picker.page(1);
-        assert_eq!(picker.selected(), half, "a page down covers half a screen");
-        picker.page(-1);
-        assert_eq!(picker.selected(), 0, "and a page up returns");
-
-        for _ in 0..20 {
-            picker.page(1);
-        }
-        assert_eq!(picker.selected(), 19, "paging past the end stops on it");
-        for _ in 0..20 {
-            picker.page(-1);
-        }
-        assert_eq!(picker.selected(), 0, "and past the start stops there");
-    }
-
-    #[test]
-    fn the_last_of_more_jumps_than_fit_paints_as_selected() {
-        let mut picker = picker_over(20);
-        while picker.selected() + 1 < picker.entries().len() {
-            picker.move_selection(1);
-        }
-        assert_eq!(picker.selected(), 19, "the last entry is selected");
-
-        let area = Rect::new(0, 0, 100, 30);
-        let mut buf = Buffer::empty(area);
-        render(&mut picker, &mut buf, area);
-
-        let rows = selected_rows(&buf);
-        assert_eq!(rows.len(), 1, "the selection is on screen exactly once");
-        let text = row_text(&buf, rows[0]);
-        assert!(
-            text.contains("entry 19"),
-            "and it is the selected entry that paints there: {text:?}"
-        );
     }
 }

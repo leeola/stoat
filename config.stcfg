@@ -345,7 +345,7 @@ on key {
         N -> QuitAllCancel();
         Escape -> QuitAllCancel();
     }
-    modal == jumplist {
+    modal == jumplist && mode == insert {
         Up -> PickerPrev();
         Down -> PickerNext();
         Ctrl-p -> PickerPrev();
@@ -354,8 +354,8 @@ on key {
         Ctrl-b -> PickerPageUp();
         PageDown -> PickerPageDown();
         PageUp -> PickerPageUp();
-        Enter -> SubmitPromptInput();
-        Escape -> CancelPromptInput();
+        Ctrl-d -> PickerDetailDown();
+        Ctrl-u -> PickerDetailUp();
     }
     modal == diagnostics && mode == insert {
         Up -> PickerPrev();
