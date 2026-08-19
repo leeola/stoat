@@ -1,7 +1,6 @@
 use super::{
     paint::{
-        dim_rgb, fill_line_tint, paint_style_runs, render_empty_num, render_side_num,
-        render_side_text, style_rgb,
+        dim_rgb, paint_style_runs, render_empty_num, render_side_num, render_side_text, style_rgb,
     },
     TEXT_SCALE_COMPACT,
 };
@@ -33,32 +32,23 @@ use stoat_widgets::{
     ApcScene,
 };
 
-/// Fraction a changed line's background wash blends toward the editor
-/// background, leaving 10% of the diff color. Light enough that code stays
-/// readable through the wash that marks the whole line.
-const LINE_TINT: f32 = 0.90;
-
 /// Fraction an intraline change span's wash blends toward the background,
-/// leaving 28% of the diff color. Stronger than [`LINE_TINT`] so the exact
-/// changed chars stand out within an already-washed line.
+/// leaving 28% of the diff color. The only background the diff paints, so it
+/// marks the exact changed chars and nothing wider.
 const SPAN_TINT: f32 = 0.72;
-
-/// Line wash for content already applied to the git index, leaving 5% of the
-/// diff color. One step past [`LINE_TINT`] toward the background so staged
-/// changes read as receding while unstaged ones stay vivid.
-const STAGED_LINE_TINT: f32 = 0.95;
 
 /// Span wash for content already applied to the git index, leaving 14% of the
 /// diff color. The staged counterpart to [`SPAN_TINT`], receding a step further
-/// like [`STAGED_LINE_TINT`].
+/// so staged changes read as fading into the index.
 const STAGED_SPAN_TINT: f32 = 0.86;
 
 /// Fraction an unchanged row's token foregrounds blend toward the editor
 /// background, leaving 60% of the syntax color.
 ///
-/// The washes carry all of the emphasis while every row paints its palette at
-/// full strength, so the context competes with the change it surrounds.
-/// Receding the context inverts that, and the eye lands on the changed rows.
+/// Context receding is what makes a changed row stand out, the changed row
+/// itself painting its syntax colors at full strength. Nothing washes a whole
+/// line, so the palette carries the emphasis and the eye lands on the rows
+/// still at full strength.
 const CONTEXT_SOFTEN: f32 = 0.40;
 
 /// Fraction the unchanged chars of a token-refined row blend toward the editor
@@ -537,14 +527,6 @@ pub(crate) fn paint_diff_rows(
                     .diff_map()
                     .and_then(|dm| dm.base_line_staged(base_line));
                 let side = tints.as_ref().map(|t| t.side(staged.unwrap_or(false)));
-                if let Some(side) = side {
-                    let line_tint = if changes.iter().any(|(_, k)| matches!(k, ChangeKind::Moved)) {
-                        side.moved_line
-                    } else {
-                        side.removed_line
-                    };
-                    fill_line_tint(buf, left_text_x, y, left_content_w, line_tint);
-                }
                 paint_base_row(
                     buf,
                     left_text_x,
@@ -602,16 +584,6 @@ pub(crate) fn paint_diff_rows(
                     DiffStatus::Modified | DiffStatus::Moved => tints.as_ref().map(|t| t.bg),
                     _ => None,
                 };
-                if let Some(side) = side {
-                    let line_tint = match status {
-                        DiffStatus::Added | DiffStatus::Modified => Some(side.added_line),
-                        DiffStatus::Moved => Some(side.moved_line),
-                        DiffStatus::Unchanged => None,
-                    };
-                    if let Some(tint) = line_tint {
-                        fill_line_tint(buf, right_text_x, y, right_content_w, tint);
-                    }
-                }
                 paint_highlighted_row(
                     snapshot,
                     display_row,
@@ -719,7 +691,7 @@ pub(crate) fn paint_diff_rows(
     }
 }
 
-/// Background washes marking diff changes across [`paint_diff_rows`]' two
+/// Background washes marking the changed chars across [`paint_diff_rows`]' two
 /// columns, resolved once per paint from the theme's diff colors blended toward
 /// the editor background.
 ///
@@ -746,16 +718,12 @@ impl DiffTints {
     }
 }
 
-/// The six change washes for one staged state.
+/// The three change washes for one staged state.
 ///
-/// A line-level wash ([`LINE_TINT`]) fills a changed line and a stronger
-/// span-level wash ([`SPAN_TINT`]) marks the exact changed chars within it.
-/// `added` and `removed` key the buffer (right) and base (left) sides. `moved`
-/// keys relocated content on either side.
+/// Each marks the exact changed chars of a span at [`SPAN_TINT`]. `added` and
+/// `removed` key the buffer (right) and base (left) sides. `moved` keys
+/// relocated content on either side.
 struct ChangeTints {
-    added_line: [u8; 3],
-    removed_line: [u8; 3],
-    moved_line: [u8; 3],
     added_span: [u8; 3],
     removed_span: [u8; 3],
     moved_span: [u8; 3],
@@ -765,26 +733,23 @@ struct ChangeTints {
 /// when the background or any diff color is not an RGB color.
 ///
 /// A `None` disables tinting for the whole frame, so the diff view falls back to
-/// [`Modifier::UNDERLINED`] on change spans and skips line washes, keeping
-/// indexed-color themes marking changes.
+/// [`Modifier::UNDERLINED`] on change spans, keeping indexed-color themes
+/// marking changes.
 fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTints> {
     use crate::theme::scope as s;
     let bg = style_rgb(theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg))?;
     let added = style_rgb(theme.get(s::DIFF_ADDED).fg)?;
     let removed = style_rgb(theme.get(s::DIFF_DELETED).fg)?;
     let moved = style_rgb(theme.get(s::DIFF_MOVED).fg)?;
-    let set = |line: f32, span: f32| ChangeTints {
-        added_line: dim_rgb(added, bg, line),
-        removed_line: dim_rgb(removed, bg, line),
-        moved_line: dim_rgb(moved, bg, line),
+    let set = |span: f32| ChangeTints {
         added_span: dim_rgb(added, bg, span),
         removed_span: dim_rgb(removed, bg, span),
         moved_span: dim_rgb(moved, bg, span),
     };
     Some(DiffTints {
         bg,
-        unstaged: set(LINE_TINT, SPAN_TINT),
-        staged: set(STAGED_LINE_TINT, STAGED_SPAN_TINT),
+        unstaged: set(SPAN_TINT),
+        staged: set(STAGED_SPAN_TINT),
     })
 }
 
@@ -2637,11 +2602,11 @@ mod tests {
     }
 
     #[test]
-    fn diff_view_added_line_carries_the_added_wash() {
+    fn diff_view_added_line_takes_no_line_wash() {
         // The second line is a pure insertion, so nothing is refined.
         let h = diff_harness("fn a() {}\n", "fn a() {}\nfn b() {}\n");
 
-        let added_line = tint(&h.stoat.theme, crate::theme::scope::DIFF_ADDED, LINE_TINT);
+        let added_span = tint(&h.stoat.theme, crate::theme::scope::DIFF_ADDED, SPAN_TINT);
         let buf = h.rendered_buffer();
 
         let underlined = (0..buf.area.height).any(|y| {
@@ -2652,26 +2617,40 @@ mod tests {
         let row = (0..buf.area.height)
             .find(|&y| line_text(buf, y, 68..120).contains("fn b"))
             .expect("added line rendered on the right");
+        let context = (0..buf.area.height)
+            .find(|&y| line_text(buf, y, 68..120).contains("fn a"))
+            .expect("context line rendered on the right");
         assert!(
-            (68..120).all(|x| buf[(x, row)].bg == added_line),
-            "the added line's right-column cells all carry the added line wash"
+            (68..120).all(|x| buf[(x, row)].bg == buf[(x, context)].bg),
+            "the added line's cells carry the same background as an unchanged row"
+        );
+        assert!(
+            (68..120).all(|x| buf[(x, row)].bg != added_span),
+            "and nothing on it carries the added wash either"
         );
     }
 
     #[test]
-    fn diff_view_deleted_line_carries_the_removed_wash() {
+    fn diff_view_deleted_line_takes_no_line_wash() {
         // `old` is deleted, so it renders as a base-only block row on the left.
         let h = diff_harness("keep\nold\ntail\n", "keep\ntail\n");
 
-        let removed_line = tint(&h.stoat.theme, crate::theme::scope::DIFF_DELETED, LINE_TINT);
+        let removed_span = tint(&h.stoat.theme, crate::theme::scope::DIFF_DELETED, SPAN_TINT);
         let buf = h.rendered_buffer();
 
         let row = (0..buf.area.height)
             .find(|&y| line_text(buf, y, 8..59).contains("old"))
             .expect("deleted base line rendered on the left");
+        let context = (0..buf.area.height)
+            .find(|&y| line_text(buf, y, 8..59).contains("keep"))
+            .expect("unchanged base line mirrored on the left");
         assert!(
-            (8..59).all(|x| buf[(x, row)].bg == removed_line),
-            "the deleted base line's left-column cells all carry the removed line wash"
+            (8..59).all(|x| buf[(x, row)].bg == buf[(x, context)].bg),
+            "the deleted base line's cells carry the same background as a mirrored row"
+        );
+        assert!(
+            (8..59).all(|x| buf[(x, row)].bg != removed_span),
+            "and nothing on it carries the removed wash either"
         );
     }
 
@@ -2681,7 +2660,6 @@ mod tests {
         let h = diff_harness("keep\nold\ntail\n", "keep\ntail\n");
 
         use crate::theme::scope as sc;
-        let removed_line = tint(&h.stoat.theme, sc::DIFF_DELETED, LINE_TINT);
         let removed_span = tint(&h.stoat.theme, sc::DIFF_DELETED, SPAN_TINT);
         let buf = h.rendered_buffer();
 
@@ -2689,7 +2667,7 @@ mod tests {
             .find(|&y| line_text(buf, y, 7..59).contains("keep"))
             .expect("unchanged base line mirrored on the left");
         assert!(
-            (7..59).all(|x| buf[(x, row)].bg != removed_line && buf[(x, row)].bg != removed_span),
+            (7..59).all(|x| buf[(x, row)].bg != removed_span),
             "an unchanged mirrored base row carries no removed wash"
         );
     }
@@ -2728,7 +2706,6 @@ mod tests {
         render_diff_view(&mut editor, area, fallback, &theme, &mut buf, None);
 
         use crate::theme::scope as sc;
-        let moved_line = tint(&theme, sc::DIFF_MOVED, LINE_TINT);
         let moved_span = tint(&theme, sc::DIFF_MOVED, SPAN_TINT);
 
         // At this sub-threshold width the diff is unified, so the moved buffer
@@ -2751,50 +2728,8 @@ mod tests {
         );
         assert_eq!(
             buf[(rx + 3, 1)].bg,
-            moved_line,
-            "the rest of the moved line takes the moved line wash"
-        );
-    }
-
-    #[test]
-    fn diff_view_staged_line_wash_recedes_further_than_unstaged() {
-        use crate::theme::scope as sc;
-
-        // The base is a/b. The buffer inserts S before a and U before b. The
-        // index holds S but not U, so S is a staged add and U an unstaged one.
-        let mut editor = diff_editor_staged("a\nb\n", "S\na\nb\n", "S\na\nU\nb\n");
-        let area = Rect::new(0, 0, 40, 8);
-        let mut buf = Buffer::empty(area);
-        let theme = rgb_diff_theme();
-        render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, None);
-
-        let staged_line = tint(&theme, sc::DIFF_ADDED, STAGED_LINE_TINT);
-        let unstaged_line = tint(&theme, sc::DIFF_ADDED, LINE_TINT);
-        assert_ne!(
-            staged_line, unstaged_line,
-            "the staged wash must differ from the unstaged one"
-        );
-
-        let rx = right_text_x(area);
-        let row_of = |ch: char| {
-            (0..area.height)
-                .find(|&y| buf[(rx, y)].symbol().starts_with(ch))
-                .unwrap_or_else(|| panic!("no right-column row starts with {ch}"))
-        };
-        assert_eq!(
-            buf[(rx, row_of('S'))].bg,
-            staged_line,
-            "the staged added line takes the receding staged wash"
-        );
-        assert_eq!(
-            buf[(rx, row_of('U'))].bg,
-            unstaged_line,
-            "the unstaged added line takes the vivid unstaged wash"
-        );
-        let context = buf[(rx, row_of('a'))].bg;
-        assert!(
-            context != staged_line && context != unstaged_line,
-            "an unchanged context row carries no line wash"
+            buf[(rx, 0)].bg,
+            "the rest of the moved line carries an unchanged row's background"
         );
     }
 
