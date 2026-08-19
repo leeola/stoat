@@ -220,6 +220,41 @@ fn change_counts_tallies_each_side_independently() {
 }
 
 #[test]
+fn content_at_reads_the_named_commit_not_head() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "v1");
+    let first = tr.head_sha();
+    tr.commit_file("a.rs", "v2");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    assert_eq!(
+        repo.content_at(&first, &tr.join("a.rs")).as_deref(),
+        Some("v1")
+    );
+    assert_eq!(repo.head_content(&tr.join("a.rs")).as_deref(), Some("v2"));
+}
+
+#[test]
+fn content_at_is_none_off_the_commit() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "v1");
+    let first = tr.head_sha();
+    tr.commit_file("later.rs", "v1");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    assert_eq!(
+        repo.content_at(&first, &tr.join("later.rs")),
+        None,
+        "a file the commit predates is absent from its tree"
+    );
+    assert_eq!(
+        repo.content_at("dead0000", &tr.join("a.rs")),
+        None,
+        "and an unknown sha resolves to nothing"
+    );
+}
+
+#[test]
 fn change_counts_zero_on_a_clean_repo() {
     let tr = TestRepo::new();
     tr.commit_file("a.rs", "v1");

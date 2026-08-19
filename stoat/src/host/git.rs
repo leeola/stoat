@@ -167,6 +167,20 @@ pub trait GitRepo: Send + Sync {
         self.head_contents(&[path]).into_iter().next().flatten()
     }
 
+    /// Read the UTF-8 content of `path` as it appears in the commit `sha`.
+    ///
+    /// Returns `None` when the sha is unknown, `path` is absent from that
+    /// commit's tree, the blob is not valid UTF-8, or `path` lies outside the
+    /// workdir.
+    ///
+    /// The per-file counterpart to [`Self::commit_tree`]. Diffing open buffers
+    /// against a historical base asks one path at a time, and the tree walk
+    /// reads every file in the commit to answer each such question.
+    ///
+    /// Line terminators arrive normalized to bare `\n`, per
+    /// [`Self::head_contents`].
+    fn content_at(&self, sha: &str, path: &Path) -> Option<String>;
+
     /// Read the UTF-8 content of `path` as it appears in the index, i.e. the
     /// staged blob at stage 0.
     ///

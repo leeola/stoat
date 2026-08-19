@@ -194,6 +194,19 @@ impl GitRepo for LocalGitRepo {
             .collect()
     }
 
+    fn content_at(&self, sha: &str, path: &Path) -> Option<String> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let workdir = repo.workdir()?;
+        let rel = path.strip_prefix(workdir).ok()?;
+        let oid = git2::Oid::from_str(sha).ok()?;
+        let tree = repo.find_commit(oid).ok()?.tree().ok()?;
+        let entry = tree.get_path(rel).ok()?;
+        let blob = entry.to_object(&repo).ok()?.peel_to_blob().ok()?;
+        std::str::from_utf8(blob.content())
+            .ok()
+            .map(|text| LineEnding::normalize(text).into_owned())
+    }
+
     fn index_content(&self, path: &Path) -> Option<String> {
         let repo = self.repo.lock().expect("git repo lock");
         let workdir = repo.workdir()?;

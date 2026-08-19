@@ -868,6 +868,14 @@ impl GitRepo for FakeGitRepo {
             .collect()
     }
 
+    fn content_at(&self, sha: &str, path: &Path) -> Option<String> {
+        let mut state = self.state.lock().unwrap();
+        state.blob_reads += 1;
+        let rel = path.strip_prefix(&self.workdir).ok()?;
+        let text = state.commits.get(sha)?.tree.get(rel)?;
+        Some(LineEnding::normalize(text).into_owned())
+    }
+
     fn index_content(&self, path: &Path) -> Option<String> {
         let mut state = self.state.lock().unwrap();
         state.blob_reads += 1;
@@ -1563,6 +1571,30 @@ mod tests {
         assert_eq!(by_path.len(), 2);
         assert_eq!(by_path[0].0, workdir().join("a.rs"));
         assert_eq!(by_path[1].0, workdir().join("sub/b.rs"));
+    }
+
+    #[test]
+    fn content_at_reads_one_path_out_of_a_commit() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("sha1", &[("a.rs", "A"), ("sub/b.rs", "B")]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(
+            repo.content_at("sha1", &workdir().join("sub/b.rs"))
+                .as_deref(),
+            Some("B")
+        );
+        assert_eq!(
+            repo.content_at("sha1", &workdir().join("missing.rs")),
+            None,
+            "a path absent from the tree reads as nothing"
+        );
+        assert_eq!(
+            repo.content_at("nope", &workdir().join("a.rs")),
+            None,
+            "and so does an unknown sha"
+        );
     }
 
     #[test]
