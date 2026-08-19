@@ -264,6 +264,21 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Drop `rel_path`'s index entry, so [`GitRepo::index_content`] reports
+    /// it absent instead of falling back to HEAD.
+    ///
+    /// Combined with [`Self::head_file`] this models a staged deletion: the
+    /// file is in HEAD, `git rm` took it out of the index, and the working
+    /// tree no longer holds it.
+    pub fn remove_index_file(&mut self, rel_path: impl AsRef<Path>) -> &mut Self {
+        self.mutate_repo(|state| {
+            state
+                .removed_index_entries
+                .insert(rel_path.as_ref().to_path_buf());
+        });
+        self
+    }
+
     /// Record `rel_path` as modified in the working tree. Writes `working`
     /// to the attached [`FakeFs`] at the absolute path if one was attached.
     pub fn unstaged_file(&mut self, rel_path: impl AsRef<Path>, working: &str) -> &mut Self {
@@ -596,6 +611,11 @@ struct FakeRepoState {
     /// [`GitRepo::index_content`], which falls back to `head_contents` for
     /// paths absent here, so an unstaged file reads as its HEAD content.
     index_contents: HashMap<PathBuf, String>,
+    /// Repo-relative paths with no index entry at all, seeded via
+    /// [`FakeRepoBuilder::remove_index_file`]. Checked ahead of both maps, so
+    /// these read as absent rather than falling back to HEAD. This is what a
+    /// staged deletion looks like to [`GitRepo::index_content`].
+    removed_index_entries: HashSet<PathBuf>,
     changed: Vec<ChangedFile>,
     /// Absolute paths reported as untracked (working-tree new files), seeded via
     /// [`FakeRepoBuilder::untracked`]. Kept apart from `changed` so
@@ -842,6 +862,9 @@ impl GitRepo for FakeGitRepo {
         let mut state = self.state.lock().unwrap();
         state.blob_reads += 1;
         let rel = path.strip_prefix(&self.workdir).ok()?;
+        if state.removed_index_entries.contains(rel) {
+            return None;
+        }
         let text = state
             .index_contents
             .get(rel)

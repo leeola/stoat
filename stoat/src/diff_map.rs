@@ -896,7 +896,7 @@ impl DiffMap {
 /// An empty range (a deletion, which occupies no buffer rows) is treated as
 /// its anchor point, so a deletion hunk still matches an index change touching
 /// that point. Non-empty ranges use standard half-open overlap.
-pub(crate) fn ranges_overlap(a: &Range<u32>, b: &Range<u32>) -> bool {
+fn ranges_overlap(a: &Range<u32>, b: &Range<u32>) -> bool {
     if a.start == a.end || b.start == b.end {
         a.start <= b.end && b.start <= a.end
     } else {

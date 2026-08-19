@@ -17,10 +17,7 @@ use crate::{
     code_index::build::file_id,
     diff::{self, ReviewFileInput},
     diff_cache::ContentHash,
-    diff_map::{
-        changes_to_hunks, line_starts, ranges_overlap, BaseHighlights, DiffHunk, DiffHunkStatus,
-        DiffMap,
-    },
+    diff_map::{changes_to_hunks, line_starts, BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap},
     display_map::syntax_theme::SyntaxStyles,
     host::{FsHost, GitHost},
 };
@@ -516,17 +513,15 @@ pub(super) fn compute_diff_map(
         None => {
             let repo = git.discover(git_root)?;
             let head = Arc::new(repo.head_content(path)?);
-            // A file with no index entry shares HEAD's handle rather than a
-            // copy of its bytes, which the fingerprint below then reads off.
+            // A tracked file with no index entry is staged for deletion, so
+            // its index side is empty text. HEAD's bytes there mark the
+            // removal unstaged.
             let index = match repo.index_content(path) {
                 Some(index) => Arc::new(index),
-                None => head.clone(),
+                None => Arc::new(String::new()),
             };
             let head_hash = buffer_registry::fingerprint_bytes(&head);
-            let index_hash = match Arc::ptr_eq(&head, &index) {
-                true => head_hash,
-                false => buffer_registry::fingerprint_bytes(&index),
-            };
+            let index_hash = buffer_registry::fingerprint_bytes(&index);
             DiffBaseText {
                 head,
                 index,
@@ -562,9 +557,12 @@ pub(super) fn compute_diff_map(
     // tallies as two removals in the statusline.
     let mut diff_map = if buffer_removed(buffer_text) && !base_text.is_empty() {
         let anchor = 0..0;
-        let unstaged_lines = match index_changed.iter().any(|c| ranges_overlap(c, &anchor)) {
-            true => vec![anchor.clone()],
-            false => Vec::new(),
+        // The removal is staged once the index side is gone too. The line
+        // differ answers this wrong. Against an empty index it reads the
+        // removed buffer's lone newline as an added line.
+        let unstaged_lines = match buffer_removed(index_text) {
+            true => Vec::new(),
+            false => vec![anchor.clone()],
         };
         DiffMap::from_hunks(
             [DiffHunk {
@@ -1361,11 +1359,60 @@ mod tests {
     #[test]
     fn a_removed_file_is_one_deleted_hunk() {
         let head = "fn one() {}\n\nfn two() {}\n";
+        let (h, buffer_id) = removed_file_harness(head, false);
+
+        let ws = h.stoat.active_workspace();
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        let dm = guard.diff_map.as_ref().expect("diff map populated");
+
+        // A removal occupies no buffer rows, so the zero-width hunk never
+        // answers a range query. Read the tree itself instead.
+        assert_eq!(
+            dm.hunks()
+                .map(|h| (h.status, h.base_byte_range.clone()))
+                .collect::<Vec<_>>(),
+            vec![(DiffHunkStatus::Deleted, 0..head.len())],
+            "the removal is one hunk spanning the whole base"
+        );
+        assert_eq!(
+            dm.staged_counts(),
+            (0, 1),
+            "and the statusline tallies it as a single unstaged change"
+        );
+    }
+
+    #[test]
+    fn a_staged_removal_reads_staged() {
+        let (h, buffer_id) = removed_file_harness("fn one() {}\n\nfn two() {}\n", true);
+
+        let ws = h.stoat.active_workspace();
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        let dm = guard.diff_map.as_ref().expect("diff map populated");
+
+        assert_eq!(
+            dm.staged_counts(),
+            (1, 0),
+            "git rm already put the removal in the index"
+        );
+    }
+
+    /// A harness holding one repo file that HEAD has and the working tree does
+    /// not, with its diff map installed.
+    ///
+    /// `staged` also drops the index entry, which is what `git rm` leaves
+    /// behind. Without it the index keeps HEAD's content, as a plain `rm`
+    /// leaves it.
+    fn removed_file_harness(head: &str, staged: bool) -> (TestHarness, BufferId) {
         let mut h = TestHarness::with_size(80, 24);
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
         {
             let mut builder = h.fake_git().add_repo("/repo").with_fs(h.fake_fs());
             builder.head_file("gone.rs", head);
+            if staged {
+                builder.remove_index_file("gone.rs");
+            }
         }
         h.open_file(Path::new("/repo/gone.rs"));
 
@@ -1382,25 +1429,7 @@ mod tests {
             buffer_id,
         );
 
-        let ws = h.stoat.active_workspace();
-        let buffer = ws.buffers.get(buffer_id).expect("buffer");
-        let guard = buffer.read().expect("poisoned");
-        let dm = guard.diff_map.as_ref().expect("diff map populated");
-
-        // Read through hunks() rather than a range query: a removal occupies no
-        // buffer rows, so the zero-width hunk is invisible to hunks_in_range.
-        assert_eq!(
-            dm.hunks()
-                .map(|h| (h.status, h.base_byte_range.clone()))
-                .collect::<Vec<_>>(),
-            vec![(DiffHunkStatus::Deleted, 0..head.len())],
-            "the removal is one hunk spanning the whole base"
-        );
-        assert_eq!(
-            dm.staged_counts(),
-            (0, 1),
-            "and the statusline tallies it as a single unstaged change"
-        );
+        (h, buffer_id)
     }
 
     #[test]
