@@ -8,7 +8,7 @@ use crate::{
     host::{GitHost, GitRepo, WatchToken},
     pane::View,
     review::{line_count, MoveProvenance, ReviewFileInput, ReviewHunk, ReviewRow},
-    review_apply::{chunk_to_unified_diff, line_restricted_rows, rows_to_unified_diff},
+    review_apply::{hunk_to_patch, line_restricted_rows, rows_to_unified_diff},
     review_session::{
         ChunkIdentity, ChunkStatus, ReviewProgress, ReviewSession, ReviewSource, ReviewViewState,
     },
@@ -1121,10 +1121,11 @@ pub(super) enum HunkStage {
 /// cursor in the focused editor.
 ///
 /// The hunk is resolved by diffing the file's HEAD content against the live
-/// buffer and taking the chunk whose buffer rows contain the cursor, so the
+/// buffer and taking the one whose buffer rows hold the cursor, which is the
+/// rule the gutter marks by, so the staged unit is the one drawn there. The
 /// action works in any editor view on a git-tracked file. A missing repo, an
-/// untracked file, or a cursor away from any hunk sets a status message and
-/// changes nothing.
+/// untracked file, or a cursor on a row no hunk covers sets a status message
+/// and changes nothing.
 ///
 /// [`HunkStage::Toggle`] has no staged-state signal to read yet, so it stages
 /// by applying the forward patch and, only when that fails because the hunk is
@@ -1165,39 +1166,32 @@ pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
         return UpdateEffect::Redraw;
     };
 
-    let rel = path
-        .strip_prefix(&git_root)
-        .unwrap_or(&path)
-        .to_string_lossy()
-        .into_owned();
-    let mut session = ReviewSession::new(ReviewSource::InMemory {
-        files: Arc::new(Vec::new()),
-    });
-    session.add_files(vec![ReviewFileInput {
-        path,
-        rel_path: rel,
-        language: None,
-        base_text: Arc::new(base_text),
-        buffer_text: Arc::new(buffer_text),
-    }]);
+    let rel = path.strip_prefix(&git_root).unwrap_or(&path).to_path_buf();
+    let hunks = {
+        let result = stoat_language::structural_diff::diff(&base_text, &buffer_text);
+        crate::diff_map::changes_to_hunks(&result.changes, &base_text, &buffer_text)
+    };
 
-    let Some(chunk_id) = session
-        .order
-        .iter()
-        .copied()
-        .find(|id| session.chunks[id].buffer_line_range.contains(&cursor_row))
-    else {
+    // Resolved by the gutter's own rule, so the staged unit is the one drawn
+    // under the cursor. A zero-width range is a deletion or a move, which the
+    // gutter marks at its anchor row.
+    let Some(k) = hunks.iter().position(|hunk| {
+        let rows = &hunk.buffer_line_range;
+        match rows.is_empty() {
+            true => rows.start == cursor_row,
+            false => rows.contains(&cursor_row),
+        }
+    }) else {
         stoat.set_status("no hunk under the cursor");
         return UpdateEffect::Redraw;
     };
 
-    let (forward, reverse) = {
-        let chunk = &session.chunks[&chunk_id];
-        let file = &session.files[chunk.file_index];
-        (
-            chunk_to_unified_diff(file, chunk, &git_root, false),
-            chunk_to_unified_diff(file, chunk, &git_root, true),
-        )
+    let (Some(forward), Some(reverse)) = (
+        hunk_to_patch(&rel, &base_text, &buffer_text, &hunks, k, false),
+        hunk_to_patch(&rel, &base_text, &buffer_text, &hunks, k, true),
+    ) else {
+        stoat.set_status("no hunk under the cursor");
+        return UpdateEffect::Redraw;
     };
 
     let result = match mode {
@@ -2745,6 +2739,185 @@ mod tests {
         workdir
     }
 
+    /// Open a file with two modified lines four unchanged lines apart, cursor
+    /// on `row`. The gap is under the old chunk extraction's 6-row merge
+    /// window, so this is exactly the shape that used to stage both.
+    fn open_two_hunk_file_at(h: &mut TestHarness, row: u32) -> PathBuf {
+        let workdir = PathBuf::from("/work");
+        h.stage_review_scenario(
+            &workdir,
+            &[(
+                "a.rs",
+                "a\nb\nc\nd\ne\nf\ng\nh\n",
+                "a\nZ\nc\nd\ne\nf\nY\nh\n",
+            )],
+        );
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, row);
+        workdir
+    }
+
+    /// The staged unit is the hunk the gutter draws. Two hunks close enough to
+    /// share a context window still stage one at a time.
+    #[test]
+    fn staging_one_hunk_leaves_a_nearby_hunk_alone() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = open_two_hunk_file_at(&mut h, 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
+        let patch = &patches[0];
+        assert!(
+            patch.contains("-b\n"),
+            "removes the first base line: {patch}"
+        );
+        assert!(
+            patch.contains("+Z\n"),
+            "adds the first buffer line: {patch}"
+        );
+        assert!(
+            !patch.contains("-g\n") && !patch.contains("+Y\n"),
+            "and the second hunk's change is absent: {patch}"
+        );
+        // Context stops before the neighbor, so the patch never restates the
+        // second hunk's row as unchanged base text and silently reverts it.
+        assert!(
+            patch.contains("@@ -1,5 +1,5 @@"),
+            "and the context stops short of the second hunk: {patch}"
+        );
+    }
+
+    /// Hunks closer together than the context width. Context has to stop at the
+    /// neighbor rather than restating its changed row as unchanged base text,
+    /// which would silently revert the second change on apply.
+    #[test]
+    fn context_stops_at_a_hunk_closer_than_the_context_width() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\nd\ne\n", "a\nZ\nc\nd\nY\n")]);
+        h.open_file(&workdir.join("a.rs"));
+        {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            crate::action_handlers::movement::set_cursor_row(editor, 1);
+        }
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
+        let patch = &patches[0];
+        assert!(
+            !patch.contains("\n e\n"),
+            "the neighbor's base line is not carried as context: {patch}"
+        );
+        assert!(
+            patch.contains("@@ -1,4 +1,4 @@"),
+            "the patch stops one row short of the neighbor: {patch}"
+        );
+    }
+    /// The other hunk of the same pair stages on its own too, so the split is
+    /// the gutter's and not an artifact of which one comes first.
+    #[test]
+    fn staging_the_second_hunk_leaves_the_first_alone() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = open_two_hunk_file_at(&mut h, 6);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
+        let patch = &patches[0];
+        assert!(
+            patch.contains("-g\n"),
+            "removes the second base line: {patch}"
+        );
+        assert!(
+            patch.contains("+Y\n"),
+            "adds the second buffer line: {patch}"
+        );
+        assert!(
+            !patch.contains("-b\n") && !patch.contains("+Z\n"),
+            "and the first hunk's change is absent: {patch}"
+        );
+    }
+
+    /// A cursor on a plain context row stages nothing. The gutter is empty
+    /// there, so reaching for the nearest hunk would stage a unit the user
+    /// cannot see under the cursor.
+    #[test]
+    fn a_cursor_off_every_hunk_stages_nothing() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = open_two_hunk_file_at(&mut h, 3);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+
+        assert_eq!(
+            h.fake_git().applied_patches(&workdir),
+            Vec::<String>::new(),
+            "nothing was staged"
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("no hunk under the cursor"),
+            "and the message says why"
+        );
+    }
+
+    /// A pure addition has no base lines of its own, so its base anchor comes
+    /// from the lines before it. The header has to name that line, or the
+    /// index apply places the hunk somewhere else.
+    #[test]
+    fn a_mid_file_addition_anchors_its_header_at_the_derived_base_line() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\nd\n", "a\nb\nNEW\nc\nd\n")]);
+        h.open_file(&workdir.join("a.rs"));
+        {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            crate::action_handlers::movement::set_cursor_row(editor, 2);
+        }
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
+        let patch = &patches[0];
+        assert!(patch.contains("+NEW\n"), "adds the new line: {patch}");
+        assert!(
+            patch.contains("@@ -1,4 +1,5 @@"),
+            "the header counts from the file start with no base line consumed: {patch}"
+        );
+    }
+
+    /// A deletion's rows are zero-width in the buffer, so the gutter marks it
+    /// at its anchor row and the patch body carries only the removed lines.
+    #[test]
+    fn a_deletion_stages_from_its_anchor_row() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nGONE\nc\nd\n", "a\nb\nc\nd\n")]);
+        h.open_file(&workdir.join("a.rs"));
+        {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            crate::action_handlers::movement::set_cursor_row(editor, 2);
+        }
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
+        let patch = &patches[0];
+        assert!(patch.contains("-GONE\n"), "removes the base line: {patch}");
+        assert!(
+            !patch
+                .lines()
+                .any(|line| line.starts_with('+') && !line.starts_with("+++")),
+            "and adds nothing: {patch}"
+        );
+    }
     #[test]
     fn stage_hunk_applies_the_forward_patch_for_the_cursor_hunk() {
         let mut h = TestHarness::with_size(80, 14);
