@@ -1042,11 +1042,18 @@ pub(crate) fn frame(
         },
         Some(ActiveModal::Location) => {
             if let Some(picker) = &mut stoat.location_picker {
+                let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::LocationPicker);
+                let split = modal_split_percent(&stoat.modal_split, ModalKind::LocationPicker);
+                let git_root = ws.git_root.clone();
                 location_picker::render_location_picker(
                     picker,
-                    &ws.git_root,
+                    ws,
+                    &git_root,
                     &stoat.theme,
+                    chrome,
                     full,
+                    zoom,
+                    split,
                     buf,
                     &mut *scene,
                 );
@@ -1604,11 +1611,7 @@ mod themed_blank_tests {
 #[cfg(test)]
 mod dispatch_tests {
     use super::{hints_cache_key, Flags, FocusFlags};
-    use crate::{
-        app::Stoat,
-        keymap_state::modal_predicate,
-        location_picker::{LocationEntry, LocationPicker},
-    };
+    use crate::{app::Stoat, keymap_state::modal_predicate, location_picker::LocationEntry};
 
     /// The `modal` a frame painted, read back off the hints cache the painting arm
     /// populated.
@@ -1642,13 +1645,16 @@ mod dispatch_tests {
             "the finder alone paints the finder"
         );
 
-        h.stoat.location_picker = Some(LocationPicker::new(vec![LocationEntry {
-            path: std::path::PathBuf::from("/repo/a.rs"),
-            offset: 0,
-            line: 1,
-            column: 1,
-            text: "candidate".to_owned(),
-        }]));
+        h.stoat.location_picker = Some(crate::action_handlers::lsp::open_location_picker(
+            &mut h.stoat,
+            vec![LocationEntry {
+                path: std::path::PathBuf::from("/repo/a.rs"),
+                offset: 0,
+                line: 1,
+                column: 1,
+                text: "candidate".to_owned(),
+            }],
+        ));
         h.render_composited();
 
         assert_eq!(

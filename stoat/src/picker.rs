@@ -3,6 +3,7 @@ use crate::{
     editor_state::{EditorId, EditorState, ScrollGlide},
     fuzzy,
     host::FsHost,
+    input_view::InputView,
     paths,
     render::sanitize,
     workspace::Workspace,
@@ -1496,6 +1497,203 @@ fn replace_preview_text(ws: &mut Workspace, editor_id: EditorId, buffer_id: Buff
     }
 }
 
+/// A filterable, previewing list of jump targets.
+///
+/// The target lists differ only in what an entry holds and what text a query
+/// matches against. Everything around that — the prompt, the ranking, the
+/// selection cursor, the preview pane — is the same work, and writing it per
+/// picker is what let their behavior drift apart.
+///
+/// `E` is the entry type. The caller supplies one haystack string per entry at
+/// construction, since haystacks derive from entries that are written once.
+pub(crate) struct TargetPicker<E> {
+    pub(crate) input: InputView,
+    entries: Vec<E>,
+    /// What a query matches against, one per entry and parallel to them.
+    haystacks: Vec<String>,
+    /// Indices into `entries` in display order after filtering. An empty query
+    /// lists every entry in its original order.
+    filtered: Vec<usize>,
+    /// Matched character offsets per filtered row, parallel to
+    /// [`Self::filtered`], driving the row highlights.
+    match_indices: Vec<Vec<u32>>,
+    /// The parse behind the current ranking, so a painted row past the indexed
+    /// block derives its offsets rather than going unhighlighted.
+    last_pattern: Option<fuzzy::Pattern>,
+    /// Cursor into [`Self::filtered`].
+    selected: usize,
+    /// Query the current ranking came from, so a repeat call re-ranks nothing.
+    last_filter_query: Option<String>,
+    /// Rows the last render painted, read by [`Self::page`]. `None` until the
+    /// first frame lays the list out.
+    pub(crate) viewport_rows: Option<usize>,
+    /// The shared preview pane showing the selected entry's source.
+    pub(crate) preview: Preview,
+    /// Rows the preview pane rendered last, placing the target line within it.
+    pub(crate) preview_rows: Option<usize>,
+    /// The entry the preview currently shows, so an unchanged selection costs
+    /// no reload.
+    previewed: Option<usize>,
+}
+
+impl<E> TargetPicker<E> {
+    /// Build a picker over `entries`, matching queries against `haystack`.
+    ///
+    /// Panics when the two differ in length, since a haystack is meaningless
+    /// without the entry it describes.
+    pub(crate) fn new(
+        entries: Vec<E>,
+        haystacks: Vec<String>,
+        input: InputView,
+        preview: Preview,
+    ) -> Self {
+        assert_eq!(
+            entries.len(),
+            haystacks.len(),
+            "every entry needs one haystack"
+        );
+        let mut picker = Self {
+            input,
+            entries,
+            haystacks,
+            filtered: Vec::new(),
+            match_indices: Vec::new(),
+            last_pattern: None,
+            selected: 0,
+            last_filter_query: None,
+            viewport_rows: None,
+            preview,
+            preview_rows: None,
+            previewed: None,
+        };
+        picker.refilter("");
+        picker
+    }
+
+    pub(crate) fn entries(&self) -> &[E] {
+        &self.entries
+    }
+
+    pub(crate) fn filtered(&self) -> &[usize] {
+        &self.filtered
+    }
+
+    /// Cursor into [`Self::filtered`], not into the entries.
+    pub(crate) fn selected(&self) -> usize {
+        self.selected
+    }
+
+    /// The entry under the selection, or [`None`] when the filter matched
+    /// nothing.
+    pub(crate) fn selected_entry(&self) -> Option<&E> {
+        self.entries.get(*self.filtered.get(self.selected)?)
+    }
+
+    /// Rank the rows for `query`, keeping the selection inside the result.
+    ///
+    /// A repeat of the query the current ranking came from returns without
+    /// work, so a per-frame drive costs nothing while the prompt sits still.
+    pub(crate) fn refilter(&mut self, query: &str) {
+        if self.last_filter_query.as_deref() == Some(query) {
+            return;
+        }
+        self.last_filter_query = Some(query.to_owned());
+
+        let items = self
+            .haystacks
+            .iter()
+            .enumerate()
+            .map(|(idx, haystack)| (idx, haystack.as_str()));
+
+        self.last_pattern = rank_into(
+            query,
+            items,
+            self.entries.len(),
+            &mut self.filtered,
+            &mut self.match_indices,
+        );
+
+        nav_clamp(self.filtered.len(), &mut self.selected);
+        // The rows moved under the cursor, so whatever the preview shows is
+        // no longer what the selection names.
+        self.previewed = None;
+    }
+
+    /// Matched character offsets for display `row`, for the highlight pass.
+    ///
+    /// Rows past the eagerly indexed block derive their offsets here, one row
+    /// at a time into scratch the whole window shares, so a long list pays for
+    /// indices only on the rows it shows.
+    pub(crate) fn row_indices<'a>(
+        &'a self,
+        row: usize,
+        scratch: &'a mut Vec<u32>,
+        matching: &mut fuzzy::Scratch,
+    ) -> &'a [u32] {
+        let haystack = self
+            .filtered
+            .get(row)
+            .and_then(|&idx| self.haystacks.get(idx))
+            .map(String::as_str)
+            .unwrap_or_default();
+        row_indices(
+            &self.match_indices,
+            self.last_pattern.as_ref(),
+            row,
+            haystack,
+            scratch,
+            matching,
+        )
+    }
+
+    pub(crate) fn move_selection(&mut self, delta: i32) {
+        nav_move(self.filtered.len(), &mut self.selected, delta);
+    }
+
+    /// Page the selection by half the rendered list height in `dir`.
+    pub(crate) fn page(&mut self, dir: i32) {
+        self.move_selection(dir * nav_page_step(self.viewport_rows));
+    }
+
+    /// Whether the preview already shows what the selection names.
+    ///
+    /// A caller checks this before resolving a target, since resolving reads
+    /// the workspace and an unchanged selection needs no reload.
+    pub(crate) fn preview_current(&self) -> bool {
+        self.previewed == self.filtered.get(self.selected).copied()
+    }
+
+    /// Show `target` in the preview as the selection's source, scrolled so its
+    /// 0-based line sits a third of the way down the pane.
+    ///
+    /// A [`None`] target blanks the pane, which is what a selection with
+    /// nothing to show means. The caller resolves the target, because that
+    /// reads the workspace while this writes it.
+    pub(crate) fn sync_preview(
+        &mut self,
+        ws: &mut Workspace,
+        fs_host: &dyn FsHost,
+        language_registry: &LanguageRegistry,
+        target: Option<(PreviewSource, u32)>,
+    ) {
+        self.previewed = self.filtered.get(self.selected).copied();
+
+        let Some((source, line)) = target else {
+            self.preview.clear(ws);
+            return;
+        };
+        let rows = self.preview_rows.unwrap_or(Preview::ROWS_FALLBACK);
+        self.preview
+            .sync_at_line(ws, fs_host, language_registry, source, line, rows);
+    }
+
+    /// Release the input and preview editors this picker owns.
+    pub(crate) fn dispose(self, ws: &mut Workspace) {
+        self.input.dispose(ws);
+        self.preview.dispose(ws);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2574,5 +2772,100 @@ mod tests {
             "the rows named different paths under the old base, so they are dropped"
         );
         assert_eq!(list.filtered, from_scratch(&base[..base.len() / 2], "ma").0);
+    }
+
+    /// Every target list shares one selection cursor, so the bounds it holds
+    /// are worth pinning once here rather than per picker.
+    mod target_picker {
+        use super::super::{Preview, TargetPicker};
+        use crate::input_view::InputView;
+
+        fn picker(rows: &[&str]) -> TargetPicker<String> {
+            let entries: Vec<String> = rows.iter().map(|s| s.to_string()).collect();
+            let haystacks = entries.clone();
+            TargetPicker::new(
+                entries,
+                haystacks,
+                InputView::test_dummy(),
+                Preview::test_dummy(),
+            )
+        }
+
+        #[test]
+        fn an_empty_query_lists_every_row_in_order() {
+            let picker = picker(&["alpha", "beta", "gamma"]);
+            assert_eq!(
+                (
+                    picker.filtered(),
+                    picker.selected_entry().map(String::as_str)
+                ),
+                (&[0, 1, 2][..], Some("alpha")),
+                "nothing typed leaves the rows as given, on the first"
+            );
+        }
+
+        #[test]
+        fn a_query_narrows_the_rows_and_pulls_the_cursor_back_in() {
+            let mut picker = picker(&["alpha", "beta", "gamma"]);
+            picker.move_selection(2);
+            assert_eq!(picker.selected(), 2, "the cursor sits on the last row");
+
+            picker.refilter("beta");
+
+            assert_eq!(
+                (
+                    picker.filtered().len(),
+                    picker.selected_entry().map(String::as_str)
+                ),
+                (1, Some("beta")),
+                "a narrowed list drags the cursor onto a row that still exists"
+            );
+        }
+
+        #[test]
+        fn the_cursor_stops_at_both_ends() {
+            let mut picker = picker(&["alpha", "beta", "gamma"]);
+            picker.move_selection(-5);
+            let at_top = picker.selected();
+            picker.move_selection(99);
+
+            assert_eq!(
+                (at_top, picker.selected()),
+                (0, 2),
+                "stepping past either end lands on it rather than wrapping"
+            );
+        }
+
+        #[test]
+        fn a_page_moves_half_the_rendered_rows_and_stops_at_the_ends() {
+            let rows: Vec<String> = (0..40).map(|i| format!("row-{i}")).collect();
+            let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
+            let mut picker = picker(&refs);
+            picker.viewport_rows = Some(10);
+
+            picker.page(1);
+            let one_page = picker.selected();
+            picker.page(-9);
+            let at_top = picker.selected();
+            picker.page(99);
+
+            assert_eq!(
+                (one_page, at_top, picker.selected()),
+                (5, 0, 39),
+                "a page is half the rendered rows, and paging past an end lands on it"
+            );
+        }
+
+        #[test]
+        fn a_query_matching_nothing_leaves_no_selection() {
+            let mut picker = picker(&["alpha", "beta"]);
+            picker.refilter("zzz");
+
+            assert_eq!(
+                (picker.filtered().len(), picker.selected_entry()),
+                (0, None),
+                "an empty result has no entry under the cursor to act on"
+            );
+        }
     }
 }

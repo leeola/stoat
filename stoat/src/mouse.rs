@@ -253,14 +253,17 @@ fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
         },
         ActiveModal::Location => {
             let picker = stoat.location_picker.as_ref()?;
-            plain(
-                crate::render::location_picker::location_picker_layout(
-                    size,
-                    picker.entries().len(),
-                ),
-                picker.entries().len(),
-                picker.selected(),
-            )
+            let layout = crate::render::location_picker::location_picker_layout(
+                size,
+                zoom(ModalKind::LocationPicker),
+                split(ModalKind::LocationPicker),
+            )?;
+            Some(ModalSurfaces {
+                list: layout.list,
+                preview: layout.preview,
+                len: picker.filtered().len(),
+                selected: picker.selected(),
+            })
         },
         ActiveModal::WorkspacePicker => {
             let picker = stoat.workspace_picker.as_ref()?;
@@ -410,6 +413,10 @@ pub(crate) fn open_modal_box(stoat: &Stoat, kind: ModalKind, zoom: i8) -> Option
                 split,
             )?
             .modal
+        },
+        ModalKind::LocationPicker => {
+            stoat.location_picker.as_ref()?;
+            crate::render::location_picker::location_picker_layout(size, zoom, split)?.modal
         },
     };
 

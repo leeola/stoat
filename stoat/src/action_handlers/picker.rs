@@ -232,8 +232,48 @@ pub(super) fn location_picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect 
     UpdateEffect::Redraw
 }
 
+/// Re-rank the location picker for what is typed and sync its preview.
+///
+/// Driven once per frame beside the other picker syncs, so typing narrows the
+/// candidates and the pane follows the selection without an action of its own.
+pub(crate) fn sync_location_picker(stoat: &mut Stoat) {
+    if stoat.location_picker.is_none() {
+        return;
+    }
+    let query = {
+        let ws = stoat.active_workspace();
+        stoat
+            .location_picker
+            .as_ref()
+            .expect("location_picker present")
+            .input
+            .text(ws)
+    };
+
+    let active_idx = stoat.active_workspace;
+    let ws = &mut stoat.workspaces[active_idx];
+    let fs_host = &*stoat.fs_host;
+    let language_registry = &stoat.language_registry;
+    let Some(picker) = stoat.location_picker.as_mut() else {
+        return;
+    };
+    picker.refilter(&query);
+    if picker.preview_current() {
+        return;
+    }
+
+    // Resolving reads the workspace and the sync writes it, so the target is
+    // in hand before the picker takes its mutable borrow.
+    let target = picker
+        .selected_entry()
+        .and_then(|entry| crate::location_picker::location_target(ws, entry));
+    picker.sync_preview(ws, fs_host, language_registry, target);
+}
+
 pub(super) fn location_picker_close(stoat: &mut Stoat) -> UpdateEffect {
-    stoat.location_picker = None;
+    if let Some(picker) = stoat.location_picker.take() {
+        picker.dispose(stoat.active_workspace_mut());
+    }
     UpdateEffect::Redraw
 }
 
@@ -244,7 +284,9 @@ pub(crate) fn location_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let Some(picker) = stoat.location_picker.take() else {
         return UpdateEffect::None;
     };
-    let Some(entry) = picker.entries().get(picker.selected()).cloned() else {
+    let entry = picker.selected_entry().cloned();
+    picker.dispose(stoat.active_workspace_mut());
+    let Some(entry) = entry else {
         return UpdateEffect::Redraw;
     };
     super::lsp::apply_jump(stoat, &entry.path, entry.offset);

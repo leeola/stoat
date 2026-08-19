@@ -412,6 +412,7 @@ pub(crate) enum ModalKind {
     Palette,
     Help,
     SymbolFinder,
+    LocationPicker,
 }
 
 /// Rows one wheel notch moves the commit picker's diff preview.
@@ -4666,11 +4667,11 @@ impl Stoat {
             ActiveModal::SplitSelection => &self.split_selection_input.as_ref()?.input,
             ActiveModal::FilterSelections => &self.filter_selections_input.as_ref()?.input,
             ActiveModal::ShellInput => &self.shell_input.as_ref()?.input,
+            ActiveModal::Location => &self.location_picker.as_ref()?.input,
             ActiveModal::Run
             | ActiveModal::QuitConfirm
             | ActiveModal::Jumplist
-            | ActiveModal::Diagnostics
-            | ActiveModal::Location => return None,
+            | ActiveModal::Diagnostics => return None,
         };
 
         Some((input.editor_id, input.buffer_id))
@@ -6687,6 +6688,7 @@ impl Stoat {
         let diff_nav_jump = crate::code_index::nav::pump_diff_nav_jump(self);
         let lsp = crate::lsp::pump_all(self);
         action_handlers::workspace::sync_workspace_picker(self);
+        action_handlers::picker::sync_location_picker(self);
 
         let format_on_save = action_handlers::file::pump_format_on_save(self);
         let pending_save = action_handlers::file::pump_pending_save(self);
@@ -13022,28 +13024,42 @@ mod tests {
     /// behind it, leaving render painting one modal while keys route to another.
     #[test]
     fn normal_mode_bindings_stop_at_the_location_picker() {
-        use crate::location_picker::{LocationEntry, LocationPicker};
+        use crate::location_picker::LocationEntry;
 
         let mut h = Stoat::test();
         let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
         assert!(resolves(&h, &space()), "Space starts a chord in the editor");
         assert!(resolves(&h, &ctrl_d), "and Ctrl-d scrolls it");
 
-        h.stoat.location_picker = Some(LocationPicker::new(vec![LocationEntry {
-            path: PathBuf::from("/repo/a.rs"),
-            offset: 0,
-            line: 1,
-            column: 1,
-            text: "candidate".to_owned(),
-        }]));
+        h.stoat.location_picker = Some(action_handlers::lsp::open_location_picker(
+            &mut h.stoat,
+            vec![LocationEntry {
+                path: PathBuf::from("/repo/a.rs"),
+                offset: 0,
+                line: 1,
+                column: 1,
+                text: "candidate".to_owned(),
+            }],
+        ));
 
         assert!(
             !resolves(&h, &space()),
             "Space starts no chord over the picker"
         );
-        assert!(
-            !resolves(&h, &ctrl_d),
-            "and Ctrl-d does not scroll the editor behind it"
+
+        // The picker prompts in insert mode and binds Ctrl-d itself, so the key
+        // reaches its preview rather than the editor's half-page scroll.
+        let bound = {
+            let state = StoatKeymapState::from_stoat(&h.stoat);
+            h.stoat
+                .keymap
+                .lookup(&state, &ctrl_d)
+                .map(|actions| actions[0].name.clone())
+        };
+        assert_eq!(
+            bound.as_deref(),
+            Some("PickerDetailDown"),
+            "Ctrl-d scrolls the picker's preview, not the editor behind it"
         );
     }
 
@@ -16815,7 +16831,7 @@ mod tests {
     /// Open a location picker over `count` candidates in a seeded file, each
     /// row's text naming its 1-based position, and return the file's path.
     fn open_location_picker(h: &mut crate::test_harness::TestHarness, count: usize) -> PathBuf {
-        use crate::location_picker::{LocationEntry, LocationPicker};
+        use crate::location_picker::LocationEntry;
 
         let root = PathBuf::from("/loc-picker");
         let path = root.join("target.rs");
@@ -16833,23 +16849,118 @@ mod tests {
                 text: format!("candidate-{}", i + 1),
             })
             .collect();
-        h.stoat.location_picker = Some(LocationPicker::new(entries));
+        h.stoat.location_picker = Some(action_handlers::lsp::open_location_picker(
+            &mut h.stoat,
+            entries,
+        ));
         h.snapshot();
         path
     }
 
     /// The location picker's inner rows rect for the harness' screen size.
     fn location_picker_rows(h: &crate::test_harness::TestHarness) -> Rect {
-        let len = h
+        crate::render::location_picker::location_picker_layout(
+            h.stoat.size(),
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::LocationPicker),
+            modal_split_percent(&h.stoat.modal_split, ModalKind::LocationPicker),
+        )
+        .expect("picker laid out")
+        .list
+    }
+
+    /// The picker prompts like every other target list, so typing narrows the
+    /// candidates rather than reaching the buffer behind it.
+    #[test]
+    fn typing_narrows_the_location_candidates() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        open_location_picker(&mut h, 12);
+        let all = h
             .stoat
             .location_picker
             .as_ref()
-            .expect("picker open")
-            .entries()
+            .expect("open")
+            .filtered()
             .len();
-        crate::render::location_picker::location_picker_layout(h.stoat.size(), len)
-            .expect("picker laid out")
-            .1
+
+        h.type_text("candidate-7");
+        h.stoat.drive_background();
+
+        let narrowed = h
+            .stoat
+            .location_picker
+            .as_ref()
+            .expect("the picker stays open while typing")
+            .filtered()
+            .len();
+        assert_eq!(
+            (all, narrowed),
+            (12, 1),
+            "the query keeps only the candidate it names"
+        );
+    }
+
+    /// The preview shows the selected candidate's file, scrolled to the line it
+    /// points at, so a reader sees the target before committing to the jump.
+    #[test]
+    fn the_location_preview_follows_the_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        open_location_picker(&mut h, 40);
+        h.stoat.drive_background();
+        h.snapshot();
+
+        let preview_editor = h
+            .stoat
+            .location_picker
+            .as_ref()
+            .expect("open")
+            .preview
+            .editor;
+        let scroll = |h: &crate::test_harness::TestHarness| {
+            h.stoat
+                .active_workspace()
+                .editors
+                .get(preview_editor)
+                .expect("preview editor")
+                .scroll_row
+        };
+        let before = scroll(&h);
+
+        h.stoat
+            .location_picker
+            .as_mut()
+            .expect("open")
+            .move_selection(39);
+        h.stoat.drive_background();
+        h.snapshot();
+
+        assert!(
+            scroll(&h) > before,
+            "the preview scrolled toward the last candidate's line"
+        );
+    }
+
+    /// Escape closes the picker and releases the editors it owns, so a closed
+    /// picker leaves no scratch buffers behind.
+    #[test]
+    fn escape_closes_the_location_picker_and_disposes_it() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        let before = h.stoat.active_workspace().editors.len();
+        open_location_picker(&mut h, 4);
+        assert!(
+            h.stoat.active_workspace().editors.len() > before,
+            "the picker took editors for its prompt and preview"
+        );
+
+        h.type_keys("escape");
+
+        assert_eq!(
+            (
+                h.stoat.location_picker.is_some(),
+                h.stoat.active_workspace().editors.len()
+            ),
+            (false, before),
+            "closing gives back every editor the picker took"
+        );
     }
 
     #[test]
@@ -16957,12 +17068,14 @@ mod tests {
         // right-aligned and sized by the bindings it lists, sits clear of the
         // centered modal. At 80 columns it covers the rows this reads.
         let mut h = crate::test_harness::TestHarness::with_size(160, 40);
-        open_location_picker(&mut h, 15);
+        // More candidates than the box shows, so the window has to scroll to
+        // reach the last one.
+        open_location_picker(&mut h, 60);
         h.stoat
             .location_picker
             .as_mut()
             .expect("open")
-            .move_selection(14);
+            .move_selection(59);
         h.snapshot();
 
         // Rows are read individually rather than by scanning the whole frame.
@@ -16977,13 +17090,13 @@ mod tests {
         let last_row = rows.y + rows.height - 1;
 
         assert!(
-            row_text(rows.y).contains("candidate-4"),
-            "the window scrolled the first three candidates off: {}",
+            !row_text(rows.y).contains("candidate-1 "),
+            "the window scrolled the first candidates off: {}",
             row_text(rows.y)
         );
         assert!(
-            row_text(last_row).contains("15:1"),
-            "the selected 15th candidate paints on the last row: {}",
+            row_text(last_row).contains("60:1"),
+            "the selected 60th candidate paints on the last row: {}",
             row_text(last_row)
         );
 

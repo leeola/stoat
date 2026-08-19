@@ -1,6 +1,7 @@
 use crate::{
     location_picker::LocationPicker,
     render::table::{self, Column, Width},
+    workspace::Workspace,
 };
 use ratatui::{
     buffer::Buffer,
@@ -8,10 +9,6 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 use std::path::Path;
-
-/// Rows of candidates the modal shows at once. A longer candidate list scrolls
-/// under the selection rather than growing the box past a readable height.
-const MAX_ENTRY_ROWS: u16 = 12;
 
 /// The candidate's file, its line and column, and the line's text. Headerless,
 /// since three columns of obvious content need no labels over them.
@@ -30,69 +27,177 @@ const COLUMNS: [Column; 3] = [
     },
 ];
 
-/// Lay the location picker's modal out within `area`, returning its outer box
-/// and the inner rect holding the candidate rows, or [`None`] when `area` is
-/// too small to host it or there is nothing to list.
-///
-/// Painting and hit-testing both go through this, so a clicked row cannot
-/// disagree with the row drawn there.
-pub(crate) fn location_picker_layout(area: Rect, entries_len: usize) -> Option<(Rect, Rect)> {
-    if entries_len == 0 {
-        return None;
-    }
-    let entry_rows = (entries_len as u16).min(MAX_ENTRY_ROWS);
-    let modal = crate::render::chrome::modal_box(area, (0, 2 + entry_rows), (80, 3), (50, 3), 0)?;
-    Some((modal, Block::default().borders(Borders::ALL).inner(modal)))
+/// Rows of chrome the box spends before its list. The border takes two, the
+/// filter prompt one, and the rule under it one more.
+const CHROME_ROWS: u16 = 4;
+
+/// Where the location picker's parts sit inside `area`.
+pub(crate) struct LocationLayout {
+    /// The bordered modal box.
+    pub(crate) modal: Rect,
+    /// Inside the border, starting at the filter prompt.
+    pub(crate) inner: Rect,
+    /// The candidate rows.
+    pub(crate) list: Rect,
+    /// The selected candidate's file, when the box is wide enough to show one.
+    pub(crate) preview: Option<Rect>,
 }
 
+/// Lay the location picker out within `area`, or [`None`] when `area` is too
+/// small to host it.
+///
+/// Painting and hit-testing both go through this, so a clicked row names the
+/// row drawn there.
+pub(crate) fn location_picker_layout(
+    area: Rect,
+    zoom: i8,
+    list_percent: u16,
+) -> Option<LocationLayout> {
+    let modal = crate::render::chrome::modal_box(
+        area,
+        (120, 32u16.saturating_add(CHROME_ROWS)),
+        (120, 32),
+        (40, 12),
+        zoom,
+    )?;
+    let inner = Block::default().borders(Borders::ALL).inner(modal);
+
+    let body_top = inner.y + 2;
+    let body_height = (inner.y + inner.height).saturating_sub(body_top);
+    if body_height == 0 {
+        return None;
+    }
+    let (list, preview) = crate::render::picker::split_list_preview(
+        inner.x,
+        body_top,
+        inner.width,
+        body_height,
+        80,
+        crate::render::picker::MIN_PANE_COLUMNS,
+        list_percent,
+    );
+    Some(LocationLayout {
+        modal,
+        inner,
+        list,
+        preview,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_location_picker(
     picker: &mut LocationPicker,
+    ws: &mut Workspace,
     git_root: &Path,
     theme: &crate::theme::Theme,
+    chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
+    zoom: i8,
+    list_percent: u16,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let Some((modal_area, inner)) = location_picker_layout(area, picker.entries().len()) else {
+    let Some(layout) = location_picker_layout(area, zoom, list_percent) else {
         return;
     };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
-    crate::render::clear_themed(modal_area, buf, theme);
+    crate::render::clear_themed(layout.modal, buf, theme);
     crate::render::chrome::modal_frame(
         buf,
-        modal_area,
+        layout.modal,
         Some(" locations "),
         modal_style,
         theme,
-        scene,
+        &mut *scene,
     );
+
+    crate::render::picker::filter_header(
+        buf,
+        layout.inner,
+        ">",
+        &picker.input,
+        ws,
+        theme,
+        chrome,
+        &mut *scene,
+    );
+
+    if let Some(preview_rect) = layout.preview {
+        crate::render::chrome::vline(
+            buf,
+            layout.list.x + layout.list.width,
+            layout.list.y,
+            layout.list.height,
+            theme.get(crate::theme::scope::UI_BORDER_INACTIVE),
+            scene,
+        );
+        picker.preview_rows = Some(preview_rect.height as usize);
+        crate::render::picker::render_picker_preview(
+            &picker.preview,
+            preview_rect,
+            theme,
+            chrome,
+            ws,
+            buf,
+        );
+    }
+
+    paint_candidate_rows(picker, git_root, layout.list, theme, buf);
+}
+
+/// Paint the candidate rows into `area`, following the selection.
+///
+/// Each row shows the file dimmed as context, then the position it points at,
+/// then the target line. Matched characters carry the search-match style, so a
+/// filtered list shows why each row survived.
+fn paint_candidate_rows(
+    picker: &mut LocationPicker,
+    git_root: &Path,
+    area: Rect,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+) {
+    let rows = area.height as usize;
+    if rows == 0 {
+        return;
+    }
+    picker.viewport_rows = Some(rows);
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
     let muted_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
 
     // The table sits a column in from the border, and the path column carries
     // the whole width it asks for so a long path truncates rather than pushing
     // the position column around.
-    let table_x = inner.x + 1;
-    let table_width = inner.width.saturating_sub(1);
+    let table_x = area.x + 1;
+    let table_width = area.width.saturating_sub(1);
     let widths = table::resolve_widths(&COLUMNS, &[], table_width);
 
-    let rows = inner.height as usize;
-    picker.viewport_rows = Some(rows);
     let selected = picker.selected();
     let start = crate::render::picker::window_start(selected, rows);
 
-    for (i, entry) in picker.entries().iter().skip(start).take(rows).enumerate() {
-        let row = inner.y + i as u16;
-        let is_selected = start + i == selected;
-        let base_style = if is_selected {
-            selected_style
-        } else {
-            row_style
+    let mut derived = Vec::new();
+    let mut matching = crate::fuzzy::Scratch::default();
+
+    for offset in 0..rows.min(picker.filtered().len().saturating_sub(start)) {
+        let row_idx = start + offset;
+        let Some(entry) = picker
+            .filtered()
+            .get(row_idx)
+            .and_then(|&idx| picker.entries().get(idx))
+        else {
+            continue;
         };
-        for col in inner.x..inner.x + inner.width {
+        let row = area.y + offset as u16;
+        let is_selected = row_idx == selected;
+        let base_style = match is_selected {
+            true => selected_style,
+            false => row_style,
+        };
+        for col in area.x..area.x + area.width {
             buf[(col, row)].set_char(' ').set_style(base_style);
         }
 
@@ -113,81 +218,52 @@ pub(crate) fn render_location_picker(
                 _ => base_style,
             },
         );
+
+        // The haystack is `path:line text`, so its offsets index that joined
+        // string rather than any one column. Only offsets landing in the text
+        // column are painted, which is the part a query usually names.
+        let indices = picker.row_indices(row_idx, &mut derived, &mut matching);
+        if indices.is_empty() {
+            continue;
+        }
+        let text_x = table_x + widths[0] + widths[1] + 2;
+        let prefix_len = format!("{}:{} ", entry.path.display(), entry.line)
+            .chars()
+            .count() as u32;
+        let end_x = area.x + area.width;
+        for &index in indices {
+            let Some(col) = index.checked_sub(prefix_len) else {
+                continue;
+            };
+            let x = text_x + col as u16;
+            if x < end_x {
+                buf[(x, row)].set_style(match_style);
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{location_picker_layout, render_location_picker, MAX_ENTRY_ROWS};
-    use crate::{
-        location_picker::{LocationEntry, LocationPicker},
-        theme::Theme,
-    };
-    use ratatui::{buffer::Buffer, layout::Rect};
-    use std::path::{Path, PathBuf};
+    use super::location_picker_layout;
+    use ratatui::layout::Rect;
 
+    /// The box asks for a fixed size rather than growing with its candidates,
+    /// so a terminal too small to host it gets no picker rather than a
+    /// squeezed one.
     #[test]
-    fn paging_moves_by_half_the_rendered_rows_and_stops_at_the_ends() {
-        let entries = (0..20)
-            .map(|i| LocationEntry {
-                path: PathBuf::from(format!("/r/file{i:02}.rs")),
-                offset: 0,
-                line: i + 1,
-                column: 1,
-                text: format!("candidate {i}"),
-            })
-            .collect();
-        let mut picker = LocationPicker::new(entries);
-
-        let area = Rect::new(0, 0, 100, 30);
-        render_location_picker(
-            &mut picker,
-            Path::new("/r"),
-            &Theme::empty(),
-            area,
-            &mut Buffer::empty(area),
-            &mut stoat_widgets::ApcScene::new(),
-        );
-
-        let half = picker.viewport_rows.expect("the render stamped a viewport") / 2;
+    fn layout_is_none_when_the_terminal_cannot_host_the_box() {
         assert!(
-            half > 1,
-            "a meaningful page needs more than one row: {half}"
+            location_picker_layout(Rect::new(0, 0, 120, 40), 0, 40).is_some(),
+            "a full-size terminal hosts it"
         );
-
-        picker.page(1);
-        assert_eq!(picker.selected(), half, "a page down covers half a screen");
-        picker.page(-1);
-        assert_eq!(picker.selected(), 0, "and a page up returns");
-
-        for _ in 0..20 {
-            picker.page(1);
-        }
-        assert_eq!(picker.selected(), 19, "paging past the end stops on it");
-        for _ in 0..20 {
-            picker.page(-1);
-        }
-        assert_eq!(picker.selected(), 0, "and past the start stops there");
-    }
-
-    #[test]
-    fn layout_inner_holds_one_row_per_entry() {
-        let (modal, inner) = location_picker_layout(Rect::new(0, 0, 80, 24), 3).expect("layout");
-        assert_eq!(inner.height, 3, "one row per entry");
-        assert_eq!(modal.height, 5, "plus the border rows");
-        assert!(modal.width >= 50 && modal.width <= 80);
-    }
-
-    #[test]
-    fn layout_caps_the_rows_it_shows() {
-        let (_, inner) = location_picker_layout(Rect::new(0, 0, 100, 40), 30).expect("layout");
-        assert_eq!(inner.height, MAX_ENTRY_ROWS);
-    }
-
-    #[test]
-    fn layout_none_when_too_small_or_empty() {
-        assert_eq!(location_picker_layout(Rect::new(0, 0, 40, 24), 3), None);
-        assert_eq!(location_picker_layout(Rect::new(0, 0, 80, 4), 3), None);
-        assert_eq!(location_picker_layout(Rect::new(0, 0, 80, 24), 0), None);
+        assert_eq!(
+            (
+                location_picker_layout(Rect::new(0, 0, 20, 40), 0, 40).is_none(),
+                location_picker_layout(Rect::new(0, 0, 120, 4), 0, 40).is_none(),
+            ),
+            (true, true),
+            "too narrow and too short both refuse rather than painting a stub"
+        );
     }
 }

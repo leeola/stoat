@@ -15,7 +15,8 @@ use crate::{
     display_map::{DisplayPoint, DisplaySnapshot, InlayKind},
     editor_state::ScrollGlide,
     host::{LanguageServerFeature, LspHost, OffsetEncoding},
-    location_picker::{LocationEntry, LocationPicker},
+    input_view::{InputView, SubmitTarget},
+    location_picker::{location_haystack, LocationEntry, LocationPicker},
     lsp::stamp::DocumentStamp,
     symbol_finder::{SymbolFinder, SymbolFinderEntry, SymbolFinderScope, SymbolTarget},
 };
@@ -1268,13 +1269,13 @@ pub(crate) struct RenamePrep {
 }
 
 /// Open input-modal state for the rename flow. Carries the
-/// [`crate::input_view::InputView`] so render can paint the
+/// [`InputView`] so render can paint the
 /// embedded editor and submit can read the typed name; carries
 /// the symbol's URI and request position so submit can build the
 /// `RenameParams` without touching the editor again.
 #[derive(Debug)]
 pub(crate) struct RenameInputState {
-    pub(crate) input: crate::input_view::InputView,
+    pub(crate) input: InputView,
     pub(crate) source_uri: Uri,
     pub(crate) symbol_position: Position,
     pub(crate) anchor_offset: usize,
@@ -1370,7 +1371,7 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
 /// Poll any in-flight prepare-rename task and, on `Ready(Some)`, open
 /// the input modal seeded with the placeholder text. The input is born
 /// in insert mode so typing routes through `handle_insert_key` into the
-/// modal's [`crate::input_view::InputView`].
+/// modal's [`InputView`].
 pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
     let Some(mut task) = stoat.pending_prepare_rename.take() else {
         return false;
@@ -1392,10 +1393,10 @@ pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
             };
             let executor = stoat.executor.clone();
             let ws = stoat.active_workspace_mut();
-            let input = crate::input_view::InputView::create(
+            let input = InputView::create(
                 ws,
                 executor,
-                crate::input_view::SubmitTarget::RenameSymbol,
+                SubmitTarget::RenameSymbol,
                 &prep.placeholder,
                 "insert",
                 1,
@@ -1830,7 +1831,7 @@ fn workspace_finder_entry(entry: WorkspaceSymbolEntry) -> SymbolFinderEntry {
 /// advertise [`LanguageServerFeature::WorkspaceSymbols`], reports the
 /// language-server state to the status bar instead of opening. The input is
 /// born in insert mode so typing routes through `handle_insert_key` into the
-/// modal's [`crate::input_view::InputView`]. The modal seed is empty;
+/// modal's [`InputView`]. The modal seed is empty;
 /// submit fires the request, cancel disposes the input.
 pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
@@ -2222,6 +2223,30 @@ pub(crate) fn pump_lsp_format(stoat: &mut Stoat) -> bool {
     true
 }
 
+/// Build the multi-location picker over `entries`, with its prompt focused.
+///
+/// The input opens in insert mode so the reader narrows the candidates by
+/// typing, the way every other target list works.
+pub(crate) fn open_location_picker(
+    stoat: &mut Stoat,
+    entries: Vec<LocationEntry>,
+) -> LocationPicker {
+    let haystacks = entries.iter().map(location_haystack).collect();
+    let executor = stoat.executor.clone();
+    stoat.set_focused_mode("insert".into());
+    let ws = stoat.active_workspace_mut();
+    let input = InputView::create(
+        ws,
+        executor.clone(),
+        SubmitTarget::LocationPicker,
+        "",
+        "insert",
+        1,
+    );
+    let preview = crate::picker::Preview::new(ws, executor);
+    LocationPicker::new(entries, haystacks, input, preview)
+}
+
 /// Poll any in-flight LSP jump request ([`Stoat::pending_lsp_jump`])
 /// and dispatch on how many locations resolved. Zero locations reports
 /// "lsp: no {label} found" in the status bar, naming the jump kind. One
@@ -2244,7 +2269,7 @@ pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
                     apply_jump(stoat, &entry.path, entry.offset);
                 },
                 _ => {
-                    stoat.location_picker = Some(LocationPicker::new(entries));
+                    stoat.location_picker = Some(open_location_picker(stoat, entries));
                 },
             }
             true

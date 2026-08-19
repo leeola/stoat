@@ -369,7 +369,7 @@ on key {
         Enter -> SubmitPromptInput();
         Escape -> CancelPromptInput();
     }
-    modal == location {
+    modal == location && mode == insert {
         Up -> PickerPrev();
         Down -> PickerNext();
         Ctrl-p -> PickerPrev();
@@ -378,8 +378,8 @@ on key {
         Ctrl-b -> PickerPageUp();
         PageDown -> PickerPageDown();
         PageUp -> PickerPageUp();
-        Enter -> SubmitPromptInput();
-        Escape -> CancelPromptInput();
+        Ctrl-d -> PickerDetailDown();
+        Ctrl-u -> PickerDetailUp();
     }
     # Every normal-mode modal block above is self-contained, binding only the
     # keys it handles. Without the modal guard this block's bindings stay live

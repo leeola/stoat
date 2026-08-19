@@ -34,6 +34,20 @@ pub(crate) struct InputView {
     pub(crate) max_height: u16,
 }
 
+impl InputView {
+    /// An input holding no real workspace slots, for a unit test that builds a
+    /// picker but never renders or types into it.
+    #[cfg(test)]
+    pub(crate) fn test_dummy() -> Self {
+        Self {
+            editor_id: EditorId::default(),
+            buffer_id: BufferId::new(0),
+            target: SubmitTarget::PaletteFilter,
+            max_height: 1,
+        }
+    }
+}
+
 /// Identifies which consumer owns an [`InputView`], used by
 /// `SubmitPromptInput` to route submission to the correct handler. The
 /// concrete [`crate::run::RunId`] for targets that need it is resolved from
@@ -50,6 +64,7 @@ pub(crate) enum SubmitTarget {
     SymbolFinder,
     CommitPicker,
     WorkspacePicker,
+    LocationPicker,
     RenameSymbol,
     Search,
     CodeSearch,

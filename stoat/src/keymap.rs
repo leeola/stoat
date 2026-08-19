@@ -1858,8 +1858,9 @@ mod tests {
             "palette",
             "help",
             "workspace_picker",
+            "location",
         ];
-        let normal_modals = ["jumplist", "diagnostics", "location"];
+        let normal_modals = ["jumplist", "diagnostics"];
 
         let expected = [
             (KeyCode::Up, KeyModifiers::NONE, "PickerPrev"),
@@ -1900,6 +1901,7 @@ mod tests {
             ("palette", "insert"),
             ("help", "insert"),
             ("help", "normal"),
+            ("location", "insert"),
         ];
         for (modal, mode) in with_preview {
             let state = TestState::new()
