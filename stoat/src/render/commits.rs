@@ -1,16 +1,17 @@
 use crate::{
     commit_list::CommitListState,
+    diff_map::{BaseHighlights, ChangeKind},
     host::{CommitFileChange, CommitFileChangeKind},
     pane::Pane,
     render::{
         layout::split_pane_status,
         paint::{render_empty_num, render_side_num, render_side_text},
         pane::render_overlay_status,
-        review::{DiffColumns, DiffLayout},
+        review::{paint_base_row, resolve_diff_tints, DiffColumns, DiffLayout, DiffTints},
         text::{truncate_to_cols, write_str},
         FrameCtx,
     },
-    review::ReviewRow,
+    review::{ReviewRow, ReviewSide},
     review_session::ReviewSession,
 };
 use ratatui::{
@@ -269,6 +270,68 @@ pub(crate) fn preview_row_count(session: &ReviewSession) -> usize {
         .sum()
 }
 
+/// One side of a preview row, painted the way `:diff`'s base column paints.
+///
+/// Parity with `:diff` comes from calling its painter, not from copying its
+/// treatment, so the two surfaces cannot drift.
+///
+/// A commit preview has nothing staged, so every wash is the unstaged set.
+/// `spans` is reused across rows rather than allocated per row, and is left
+/// sorted for the painter's monotonic cursor.
+#[allow(clippy::too_many_arguments)]
+fn paint_preview_side(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    side: &ReviewSide,
+    width: usize,
+    highlights: Option<&BaseHighlights>,
+    tints: &DiffTints,
+    side_span_tint: [u8; 3],
+    context: bool,
+    spans: &mut Vec<(std::ops::Range<usize>, ChangeKind)>,
+) {
+    spans.clear();
+    spans.extend(
+        side.change_spans
+            .iter()
+            .map(|range| (range.clone(), ChangeKind::Replaced)),
+    );
+    spans.extend(
+        side.moved_spans
+            .iter()
+            .map(|range| (range.clone(), ChangeKind::Moved)),
+    );
+    spans.sort_by_key(|(range, _)| range.start);
+
+    // line_num is 1-based, and the highlight index is 0-based per line.
+    let token_spans = highlights
+        .and_then(|lines| lines.get(side.line_num.saturating_sub(1) as usize))
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    // A context row recedes whole. A changed row stays at full strength and
+    // instead softens only the chars outside its spans, so the refinement
+    // leads its own line.
+    let (soften_row, soften_gaps) = match context {
+        true => (Some(tints.bg), None),
+        false => (None, Some(tints.bg)),
+    };
+    paint_base_row(
+        buf,
+        x,
+        y,
+        &side.text,
+        width,
+        token_spans,
+        Style::default(),
+        spans,
+        Some(side_span_tint),
+        Some(tints.unstaged.moved_span),
+        soften_row,
+        soften_gaps,
+    );
+}
 /// Render a compact preview of a [`ReviewSession`]: each chunk's rows
 /// painted sequentially with a yellow file/chunk header, top-to-bottom
 /// within `area`. Does not rely on editor machinery; used by the
@@ -295,9 +358,13 @@ pub(crate) fn render_commit_preview(
     let add_hl = theme.get(s::DIFF_ADDED);
     let move_hl = theme.get(s::DIFF_MOVED).add_modifier(Modifier::ITALIC);
     let fallback_style = Style::default();
+    // A non-RGB theme cannot blend, so it keeps the fg-span marking below.
+    let tints = resolve_diff_tints(theme);
 
     // One buffer for every number this loop paints, rather than one per row.
     let mut num_text = String::new();
+    // Reused across rows the way num_text is, since every row rebuilds it.
+    let mut spans: Vec<(std::ops::Range<usize>, ChangeKind)> = Vec::new();
 
     let DiffColumns {
         left_num_x,
@@ -363,71 +430,314 @@ pub(crate) fn render_commit_preview(
                 match diff_row {
                     ReviewRow::Context { left, right } => {
                         render_side_num(buf, &mut num_text, left_num_x, y, left.line_num, dim);
-                        render_side_text(
-                            buf,
-                            left_text_x,
-                            y,
-                            &left.text,
-                            left_content_w,
-                            fallback_style,
-                            &[],
-                            fallback_style,
-                            &[],
-                            move_hl,
-                        );
                         render_side_num(buf, &mut num_text, right_num_x, y, right.line_num, dim);
-                        render_side_text(
-                            buf,
-                            right_text_x,
-                            y,
-                            &right.text,
-                            right_content_w,
-                            fallback_style,
-                            &[],
-                            fallback_style,
-                            &[],
-                            move_hl,
-                        );
+                        match &tints {
+                            Some(tints) => {
+                                paint_preview_side(
+                                    buf,
+                                    left_text_x,
+                                    y,
+                                    left,
+                                    left_content_w,
+                                    file.base_highlights.as_deref(),
+                                    tints,
+                                    tints.unstaged.removed_span,
+                                    true,
+                                    &mut spans,
+                                );
+                                paint_preview_side(
+                                    buf,
+                                    right_text_x,
+                                    y,
+                                    right,
+                                    right_content_w,
+                                    file.buffer_highlights.as_deref(),
+                                    tints,
+                                    tints.unstaged.added_span,
+                                    true,
+                                    &mut spans,
+                                );
+                            },
+                            None => {
+                                render_side_text(
+                                    buf,
+                                    left_text_x,
+                                    y,
+                                    &left.text,
+                                    left_content_w,
+                                    fallback_style,
+                                    &[],
+                                    fallback_style,
+                                    &[],
+                                    move_hl,
+                                );
+                                render_side_text(
+                                    buf,
+                                    right_text_x,
+                                    y,
+                                    &right.text,
+                                    right_content_w,
+                                    fallback_style,
+                                    &[],
+                                    fallback_style,
+                                    &[],
+                                    move_hl,
+                                );
+                            },
+                        }
                     },
                     ReviewRow::Changed { left, right } => {
-                        if let Some(l) = left {
-                            render_side_num(buf, &mut num_text, left_num_x, y, l.line_num, dim);
-                            render_side_text(
-                                buf,
-                                left_text_x,
-                                y,
-                                &l.text,
-                                left_content_w,
-                                fallback_style,
-                                &l.change_spans,
-                                del_hl,
-                                &l.moved_spans,
-                                move_hl,
-                            );
-                        } else {
-                            render_empty_num(buf, left_num_x, y, dim);
+                        match left {
+                            Some(l) => {
+                                render_side_num(buf, &mut num_text, left_num_x, y, l.line_num, dim);
+                                match &tints {
+                                    Some(tints) => paint_preview_side(
+                                        buf,
+                                        left_text_x,
+                                        y,
+                                        l,
+                                        left_content_w,
+                                        file.base_highlights.as_deref(),
+                                        tints,
+                                        tints.unstaged.removed_span,
+                                        false,
+                                        &mut spans,
+                                    ),
+                                    None => render_side_text(
+                                        buf,
+                                        left_text_x,
+                                        y,
+                                        &l.text,
+                                        left_content_w,
+                                        fallback_style,
+                                        &l.change_spans,
+                                        del_hl,
+                                        &l.moved_spans,
+                                        move_hl,
+                                    ),
+                                }
+                            },
+                            None => render_empty_num(buf, left_num_x, y, dim),
                         }
-                        if let Some(r) = right {
-                            render_side_num(buf, &mut num_text, right_num_x, y, r.line_num, dim);
-                            render_side_text(
-                                buf,
-                                right_text_x,
-                                y,
-                                &r.text,
-                                right_content_w,
-                                fallback_style,
-                                &r.change_spans,
-                                add_hl,
-                                &r.moved_spans,
-                                move_hl,
-                            );
-                        } else {
-                            render_empty_num(buf, right_num_x, y, dim);
+                        match right {
+                            Some(r) => {
+                                render_side_num(
+                                    buf,
+                                    &mut num_text,
+                                    right_num_x,
+                                    y,
+                                    r.line_num,
+                                    dim,
+                                );
+                                match &tints {
+                                    Some(tints) => paint_preview_side(
+                                        buf,
+                                        right_text_x,
+                                        y,
+                                        r,
+                                        right_content_w,
+                                        file.buffer_highlights.as_deref(),
+                                        tints,
+                                        tints.unstaged.added_span,
+                                        false,
+                                        &mut spans,
+                                    ),
+                                    None => render_side_text(
+                                        buf,
+                                        right_text_x,
+                                        y,
+                                        &r.text,
+                                        right_content_w,
+                                        fallback_style,
+                                        &r.change_spans,
+                                        add_hl,
+                                        &r.moved_spans,
+                                        move_hl,
+                                    ),
+                                }
+                            },
+                            None => render_empty_num(buf, right_num_x, y, dim),
                         }
                     },
                 }
                 y += 1;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_commit_preview;
+    use crate::{
+        display_map::highlights::HighlightStyle,
+        render::{
+            paint::dim_rgb,
+            review::{CONTEXT_SOFTEN, MODIFIED_ROW_SOFTEN},
+        },
+        review_session::{ReviewSession, ReviewSource},
+        theme::Theme,
+    };
+    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+    use std::{path::PathBuf, sync::Arc};
+
+    /// The same RGB theme the diff-view tests use, so the washes engage.
+    fn rgb_theme() -> Theme {
+        let src = r##"theme rgbtest {
+            diff.context.fg  = "#808080";
+            diff.added.fg    = "#00ff00";
+            diff.modified.fg = "#ffff00";
+            diff.deleted.fg  = "#ff0000";
+            diff.moved.fg    = "#0000ff";
+            diff.staged.fg   = "#00ffff";
+            diff.unstaged.fg = "#ff00ff";
+            ui.background.bg = "#282c34";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        Theme::from_config(&config.expect("theme config parses"), "rgbtest")
+            .expect("rgb theme builds")
+    }
+
+    const TOKEN_FG: [u8; 3] = [0x11, 0x99, 0x44];
+    const BG: [u8; 3] = [0x28, 0x2c, 0x34];
+
+    /// A session over one file, with `highlights` covering the first `lines`
+    /// lines of both sides at [`TOKEN_FG`] across the whole line.
+    fn session(base: &str, buffer: &str, highlights: bool) -> ReviewSession {
+        let mut session = ReviewSession::new(ReviewSource::InMemory {
+            files: Arc::new(Vec::new()),
+        });
+        session.add_file(
+            PathBuf::from("/w/a.rs"),
+            "a.rs".into(),
+            None,
+            Arc::new(base.to_string()),
+            Arc::new(buffer.to_string()),
+        );
+        if highlights {
+            let style = HighlightStyle {
+                foreground: Some(Color::Rgb(TOKEN_FG[0], TOKEN_FG[1], TOKEN_FG[2])),
+                ..HighlightStyle::default()
+            };
+            let spans_for = |text: &str| -> Arc<crate::diff_map::BaseHighlights> {
+                Arc::new(
+                    text.lines()
+                        .map(|line| vec![(0..line.len(), style.clone())])
+                        .collect(),
+                )
+            };
+            let file = &mut session.files[0];
+            file.base_highlights = Some(spans_for(base));
+            file.buffer_highlights = Some(spans_for(buffer));
+        }
+        session
+    }
+
+    /// Render into a wide buffer so both columns fit, and hand back the grid.
+    fn rendered(session: &ReviewSession, theme: &Theme) -> Buffer {
+        let area = Rect::new(0, 0, 120, 20);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        render_commit_preview(session, theme, area, 0, &mut buf, &mut scene);
+        buf
+    }
+
+    /// The first cell in `row` whose symbol is `ch`.
+    fn cell_with(buf: &Buffer, row: u16, ch: &str) -> ratatui::buffer::Cell {
+        let area = *buf.area();
+        (area.x..area.x + area.width)
+            .map(|x| buf[(x, row)].clone())
+            .find(|cell| cell.symbol() == ch)
+            .unwrap_or_else(|| panic!("no {ch:?} cell on row {row}"))
+    }
+
+    /// Context recedes so the changed rows around it lead, which is the whole
+    /// reason the preview carries syntax colors rather than flat text.
+    #[test]
+    fn a_context_token_softens_toward_the_background() {
+        let session = session("ctx\nold\n", "ctx\nnew\n", true);
+        let buf = rendered(&session, &rgb_theme());
+
+        // Row 0 is the file header, so the first content row is 1.
+        let cell = cell_with(&buf, 1, "c");
+        let softened = dim_rgb(TOKEN_FG, BG, CONTEXT_SOFTEN);
+        assert_eq!(
+            cell.style().fg,
+            Some(Color::Rgb(softened[0], softened[1], softened[2])),
+            "the context token carries its syntax color, softened"
+        );
+    }
+
+    /// A changed span keeps its token color and takes the wash as a
+    /// background, which is what makes a commit diff read like `:diff`.
+    #[test]
+    fn a_changed_span_keeps_its_token_color_over_the_wash() {
+        let session = session("ctx\nold\n", "ctx\nnew\n", true);
+        let buf = rendered(&session, &rgb_theme());
+
+        let cell = cell_with(&buf, 2, "n");
+        assert_eq!(
+            cell.style().fg,
+            Some(Color::Rgb(TOKEN_FG[0], TOKEN_FG[1], TOKEN_FG[2])),
+            "the changed token keeps full-strength syntax color"
+        );
+        assert!(
+            matches!(cell.style().bg, Some(Color::Rgb(..))),
+            "and carries a wash background: {:?}",
+            cell.style().bg
+        );
+    }
+
+    /// A file the build never attached highlights to still washes its spans,
+    /// over softened fallback text rather than nothing.
+    #[test]
+    fn a_file_without_highlights_still_washes_its_spans() {
+        let session = session("ctx\nold\n", "ctx\nnew\n", false);
+        let buf = rendered(&session, &rgb_theme());
+
+        let cell = cell_with(&buf, 2, "n");
+        assert!(
+            matches!(cell.style().bg, Some(Color::Rgb(..))),
+            "the wash lands without any token spans: {:?}",
+            cell.style().bg
+        );
+    }
+
+    /// A theme whose diff colors are not RGB cannot blend, so the preview keeps
+    /// marking changes by foreground exactly as it did before.
+    #[test]
+    fn a_non_rgb_theme_keeps_the_foreground_span_marking() {
+        let session = session("ctx\nold\n", "ctx\nnew\n", true);
+        let theme = Theme::empty();
+        let buf = rendered(&session, &theme);
+
+        let cell = cell_with(&buf, 2, "n");
+        assert!(
+            !matches!(cell.style().bg, Some(Color::Rgb(..))),
+            "nothing washes behind the span: {:?}",
+            cell.style().bg
+        );
+        assert_ne!(
+            cell.style().fg,
+            Some(Color::Rgb(TOKEN_FG[0], TOKEN_FG[1], TOKEN_FG[2])),
+            "and the token color never reaches the cell, so the marking is the theme's"
+        );
+    }
+
+    /// An unchanged char on a row the refinement split softens by the lighter
+    /// amount, so the changed chars lead their own line without the row
+    /// receding like context.
+    #[test]
+    fn an_unchanged_char_on_a_refined_row_softens_lightly() {
+        let session = session("ctx\nfoo_a\n", "ctx\nfoo_b\n", true);
+        let buf = rendered(&session, &rgb_theme());
+
+        let cell = cell_with(&buf, 2, "f");
+        let softened = dim_rgb(TOKEN_FG, BG, MODIFIED_ROW_SOFTEN);
+        assert_eq!(
+            cell.style().fg,
+            Some(Color::Rgb(softened[0], softened[1], softened[2])),
+            "the unchanged prefix softens lightly, not to context strength"
+        );
     }
 }

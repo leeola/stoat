@@ -1,4 +1,5 @@
 use crate::{
+    diff_map::BaseHighlights,
     editor_state::EditorId,
     host::WatchToken,
     review::{
@@ -125,6 +126,16 @@ pub(crate) struct ReviewFile {
     pub base_text: Arc<String>,
     pub buffer_text: Arc<String>,
     pub chunks: Vec<ReviewChunkId>,
+    /// Tree-sitter spans for each side, per 0-based line, so a preview paints
+    /// the same token colors the editor does.
+    ///
+    /// `None` until a preview build attaches them, and left `None` for a file
+    /// with no language or when syntax highlighting is off. The paint falls
+    /// back to untokenized text either way, which is what a syntax-off editor
+    /// shows. Baked against the theme in force at build, so a theme switch
+    /// drops the sessions holding them.
+    pub base_highlights: Option<Arc<BaseHighlights>>,
+    pub buffer_highlights: Option<Arc<BaseHighlights>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -482,6 +493,8 @@ impl ReviewSession {
             base_text: file.base_text,
             buffer_text: file.buffer_text,
             chunks: chunk_ids.clone(),
+            base_highlights: None,
+            buffer_highlights: None,
         });
 
         chunk_ids

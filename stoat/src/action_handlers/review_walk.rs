@@ -597,6 +597,7 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
         sha.clone(),
         stoat.language_registry.clone(),
         stoat.redraw_notify.clone(),
+        super::commits::PreviewHighlights::from_stoat(stoat),
     );
 
     if let Some(picker) = stoat.commit_picker.as_mut() {
@@ -655,6 +656,7 @@ fn spawn_preview_load(
     sha: String,
     language_registry: Arc<stoat_language::LanguageRegistry>,
     redraw: Arc<tokio::sync::Notify>,
+    highlights: super::commits::PreviewHighlights,
 ) -> stoat_scheduler::Task<Option<ReviewSession>> {
     executor.spawn_blocking(move || {
         let parent = repo.parent_sha(&sha);
@@ -670,6 +672,10 @@ fn spawn_preview_load(
                     &workdir,
                     changes,
                 )
+                .map(|mut session| {
+                    highlights.attach(&mut session);
+                    session
+                })
             },
             None => None,
         };

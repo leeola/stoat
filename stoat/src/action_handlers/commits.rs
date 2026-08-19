@@ -1,6 +1,8 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    display_map::syntax_theme::SyntaxStyles,
     review_session::{ReviewSession, ReviewSource},
+    workspace::diff::BaseHighlightCache,
 };
 use std::sync::Arc;
 
@@ -194,6 +196,7 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
     };
     let preview_task = if need_preview {
         let language_registry = stoat.language_registry.clone();
+        let highlights = PreviewHighlights::from_stoat(stoat);
         Some(spawn_commit_preview_load(
             &stoat.executor,
             repo.clone(),
@@ -201,6 +204,7 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
             sha.clone(),
             language_registry,
             stoat.redraw_notify.clone(),
+            highlights,
         ))
     } else {
         None
@@ -284,6 +288,38 @@ fn spawn_commit_log_load(
     })
 }
 
+/// What a preview build needs to bake syntax colors into its session.
+///
+/// The three pieces travel together because they are only ever used together,
+/// and they cross into a blocking closure, so they are owned rather than
+/// borrowed. An `attach` with highlighting off is a no-op, which is what makes
+/// a preview match a syntax-off editor.
+#[derive(Clone)]
+pub(super) struct PreviewHighlights {
+    pub(super) styles: SyntaxStyles,
+    pub(super) cache: BaseHighlightCache,
+    pub(super) enabled: bool,
+}
+
+impl PreviewHighlights {
+    /// Read what a preview build needs off `stoat`.
+    pub(super) fn from_stoat(stoat: &Stoat) -> Self {
+        Self {
+            styles: stoat.syntax_styles.clone(),
+            cache: stoat.base_highlights_cache.clone(),
+            enabled: stoat.syntax_highlight,
+        }
+    }
+
+    /// Bake both sides' spans into `session`, or nothing when highlighting is
+    /// off.
+    pub(super) fn attach(&self, session: &mut ReviewSession) {
+        if !self.enabled {
+            return;
+        }
+        super::review::attach_preview_highlights(session, &self.styles, &self.cache);
+    }
+}
 /// Spawn the blocking diff build for `sha`, waking the run loop through `redraw`
 /// when it lands.
 ///
@@ -297,6 +333,7 @@ fn spawn_commit_preview_load(
     sha: String,
     language_registry: Arc<stoat_language::LanguageRegistry>,
     redraw: Arc<tokio::sync::Notify>,
+    highlights: PreviewHighlights,
 ) -> stoat_scheduler::Task<Option<ReviewSession>> {
     executor.spawn_blocking(move || {
         let parent = repo.parent_sha(&sha);
@@ -312,6 +349,10 @@ fn spawn_commit_preview_load(
                     &workdir,
                     changes,
                 )
+                .map(|mut session| {
+                    highlights.attach(&mut session);
+                    session
+                })
             },
             None => None,
         };

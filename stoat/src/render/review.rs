@@ -49,7 +49,7 @@ const STAGED_SPAN_TINT: f32 = 0.86;
 /// itself painting its syntax colors at full strength. Nothing washes a whole
 /// line, so the palette carries the emphasis and the eye lands on the rows
 /// still at full strength.
-const CONTEXT_SOFTEN: f32 = 0.40;
+pub(crate) const CONTEXT_SOFTEN: f32 = 0.40;
 
 /// Fraction the unchanged chars of a token-refined row blend toward the editor
 /// background, leaving 75% of the syntax color.
@@ -57,7 +57,7 @@ const CONTEXT_SOFTEN: f32 = 0.40;
 /// Lighter than [`CONTEXT_SOFTEN`] on purpose. The row is changed content, so
 /// it must still read as ahead of the context around it, while the chars the
 /// refinement marks pop hardest inside their own line.
-const MODIFIED_ROW_SOFTEN: f32 = 0.25;
+pub(crate) const MODIFIED_ROW_SOFTEN: f32 = 0.25;
 
 pub(crate) fn render_review(
     editor: &mut EditorState,
@@ -702,9 +702,9 @@ pub(crate) fn paint_diff_rows(
 /// `bg` is the editor background every wash blends toward. It rides along so
 /// foreground softening ([`soften_style`]) shares this type's RGB gate instead
 /// of resolving the background a second time.
-struct DiffTints {
-    bg: [u8; 3],
-    unstaged: ChangeTints,
+pub(crate) struct DiffTints {
+    pub(crate) bg: [u8; 3],
+    pub(crate) unstaged: ChangeTints,
     staged: ChangeTints,
 }
 
@@ -723,10 +723,10 @@ impl DiffTints {
 /// Each marks the exact changed chars of a span at [`SPAN_TINT`]. `added` and
 /// `removed` key the buffer (right) and base (left) sides. `moved` keys
 /// relocated content on either side.
-struct ChangeTints {
-    added_span: [u8; 3],
-    removed_span: [u8; 3],
-    moved_span: [u8; 3],
+pub(crate) struct ChangeTints {
+    pub(crate) added_span: [u8; 3],
+    pub(crate) removed_span: [u8; 3],
+    pub(crate) moved_span: [u8; 3],
 }
 
 /// Resolve the staged and unstaged diff-change washes from the theme, or `None`
@@ -735,7 +735,7 @@ struct ChangeTints {
 /// A `None` disables tinting for the whole frame, so the diff view falls back to
 /// [`Modifier::UNDERLINED`] on change spans, keeping indexed-color themes
 /// marking changes.
-fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTints> {
+pub(crate) fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTints> {
     use crate::theme::scope as s;
     let bg = style_rgb(theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg))?;
     let added = style_rgb(theme.get(s::DIFF_ADDED).fg)?;
@@ -813,7 +813,7 @@ fn soften_style(style: Style, bg: [u8; 3], amount: f32) -> Style {
 /// own line. An empty `change_spans` no-ops it, which keeps a row the
 /// refinement never reached at full strength.
 #[allow(clippy::too_many_arguments)]
-fn paint_base_row(
+pub(crate) fn paint_base_row(
     buf: &mut Buffer,
     start_x: u16,
     y: u16,

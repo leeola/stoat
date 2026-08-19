@@ -754,7 +754,7 @@ fn buffer_removed(buffer_text: &str) -> bool {
 /// and its spans are resolved and bucketed once per theme, so a keystroke burst
 /// that leaves the base alone costs two hash lookups rather than a walk over
 /// every span with a style clone per line it touches.
-fn compute_base_highlights(
+pub(crate) fn compute_base_highlights(
     base_text: &str,
     language: &Arc<Language>,
     syntax_styles: &SyntaxStyles,

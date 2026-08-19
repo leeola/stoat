@@ -1325,6 +1325,21 @@ fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
                 }
             }
 
+            // A preview session bakes its per-line styles at build, so the
+            // cached ones and any build already in flight carry the old theme.
+            for (_, ws) in stoat.workspaces.iter_mut() {
+                if let Some(commits) = ws.commits.as_mut() {
+                    commits.preview_sessions.clear();
+                    commits.pending_preview = None;
+                    commits.requested_preview = None;
+                }
+            }
+            if let Some(picker) = stoat.commit_picker.as_mut() {
+                picker.preview_sessions.clear();
+                picker.pending_preview = None;
+                picker.requested_preview = None;
+            }
+
             stoat.minimap_class_table = crate::minimap::ClassTable::from_theme(&stoat.theme);
             stoat.minimap_content.clear();
             stoat.theme_epoch += 1;
@@ -1518,6 +1533,49 @@ mod tests {
         stoat
     }
 
+    /// A preview session bakes its syntax colors at build, so a theme switch
+    /// has to drop the cached ones and anything already building. Leaving them
+    /// would paint the old theme's colors under the new one.
+    #[test]
+    fn set_theme_drops_the_cached_commit_previews() {
+        let mut h = Stoat::test();
+        h.seed_linear_history("/repo", &[("a1b2c3d4", "one", &[("a.rs", "fn a() {}\n")])]);
+        h.open_commits("/repo");
+
+        {
+            let ws = h.stoat.active_workspace_mut();
+            let commits = ws.commits.as_mut().expect("the commits view is open");
+            let session = Arc::new(crate::review_session::ReviewSession::new(
+                crate::review_session::ReviewSource::InMemory {
+                    files: Arc::new(Vec::new()),
+                },
+            ));
+            commits.preview_sessions.insert("a1b2c3d4".into(), session);
+            commits.requested_preview = Some("a1b2c3d4".into());
+            assert!(
+                commits.preview_sessions.mark_used("a1b2c3d4"),
+                "the session is cached before the switch"
+            );
+        }
+
+        dispatch(
+            &mut h.stoat,
+            &SetTheme {
+                name: "default_dark".into(),
+            },
+        );
+
+        let ws = h.stoat.active_workspace_mut();
+        let commits = ws.commits.as_mut().expect("still open");
+        assert_eq!(
+            (
+                commits.preview_sessions.mark_used("a1b2c3d4"),
+                commits.requested_preview.is_some(),
+            ),
+            (false, false),
+            "the switch dropped the cached session and the pending request"
+        );
+    }
     #[test]
     fn set_theme_switches_active_theme() {
         use crate::theme::scope::UI_TEXT;

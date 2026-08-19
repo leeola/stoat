@@ -3,7 +3,9 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
     diff_cache::{DiffCache, DiffCacheKey},
-    display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
+    display_map::{
+        syntax_theme::SyntaxStyles, BlockPlacement, BlockProperties, BlockStyle, RenderBlock,
+    },
     editor_state::{EditorId, EditorState, ScrollGlide},
     host::{GitHost, GitRepo, WatchToken},
     pane::View,
@@ -15,7 +17,10 @@ use crate::{
     review_session::{
         ChunkIdentity, ChunkStatus, ReviewProgress, ReviewSession, ReviewSource, ReviewViewState,
     },
-    workspace::Workspace,
+    workspace::{
+        diff::{compute_base_highlights, BaseHighlightCache},
+        Workspace,
+    },
 };
 use ratatui::{
     style::{Color, Style},
@@ -2015,6 +2020,42 @@ pub(super) fn build_session_from_changes(
     Some(session)
 }
 
+/// Bake tree-sitter spans for both sides of every file the session holds.
+///
+/// A preview paints the same token colors the editor does, so the spans have
+/// to exist before paint. They are resolved here, on the blocking pool that
+/// builds the session, rather than at paint time on the UI thread.
+///
+/// The memoized pipeline means an unchanged text parses once and resolves once
+/// per theme, so a session over files the last preview already read costs hash
+/// lookups. A file with no language is skipped and keeps `None`, which paints
+/// untokenized, matching a syntax-off editor.
+///
+/// The styles bake against the theme in force here, so whoever switches themes
+/// drops the sessions holding them.
+pub(super) fn attach_preview_highlights(
+    session: &mut ReviewSession,
+    styles: &SyntaxStyles,
+    cache: &BaseHighlightCache,
+) {
+    for file in &mut session.files {
+        let Some(language) = file.language.clone() else {
+            continue;
+        };
+        file.base_highlights = Some(compute_base_highlights(
+            &file.base_text,
+            &language,
+            styles,
+            cache,
+        ));
+        file.buffer_highlights = Some(compute_base_highlights(
+            &file.buffer_text,
+            &language,
+            styles,
+            cache,
+        ));
+    }
+}
 /// Build a flattened [`ReviewViewState`] and chunk-header [`BlockProperties`]
 /// from the session, spawn a placeholder buffer + editor to host the view,
 /// and swap it into the focused pane. The session is stored on the
