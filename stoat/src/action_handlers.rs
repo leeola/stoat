@@ -1147,12 +1147,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SubmitPromptInput => prompt::submit_prompt_input(stoat),
         ActionKind::CancelPromptInput => prompt::cancel_prompt_input(stoat),
         ActionKind::PromptInsertNewline => prompt::prompt_insert_newline(stoat),
-        ActionKind::PaletteHistoryPrev => {
-            palette::palette_history_prev(stoat).unwrap_or(UpdateEffect::None)
-        },
-        ActionKind::PaletteHistoryNext => {
-            palette::palette_history_next(stoat).unwrap_or(UpdateEffect::None)
-        },
+        ActionKind::PromptHistoryPrev => prompt::prompt_history_prev(stoat),
+        ActionKind::PromptHistoryNext => prompt::prompt_history_next(stoat),
         ActionKind::PaletteScopeToggle => palette::palette_scope_toggle(stoat),
         ActionKind::OpenLastPicker => open_last_picker(stoat),
     };

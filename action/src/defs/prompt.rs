@@ -38,28 +38,27 @@ define_action!(
 );
 
 define_action!(
-    PaletteHistoryPrevDef,
-    PaletteHistoryPrev,
-    "PaletteHistoryPrev",
-    ActionKind::PaletteHistoryPrev,
-    "recall older palette history",
-    "Recall the previous command from palette history, fish-style: the \
-     already-typed text is a substring needle that filters matches. Bound \
-     by default to Up while the command palette is open.",
+    PromptHistoryPrevDef,
+    PromptHistoryPrev,
+    "PromptHistoryPrev",
+    ActionKind::PromptHistoryPrev,
+    "recall older prompt history",
+    "Recall the previous entry from the open prompt's history, fish-style: \
+     the already-typed text is a substring needle that filters matches. A \
+     prompt that keeps no history does nothing. Bound by default to Alt-Up.",
     ActionPriority::Normal,
     palette_visible = false
 );
 
 define_action!(
-    PaletteHistoryNextDef,
-    PaletteHistoryNext,
-    "PaletteHistoryNext",
-    ActionKind::PaletteHistoryNext,
-    "recall newer palette history",
-    "Recall the next command toward the newest in palette history, under \
-     the same substring needle. Stepping past the newest restores the \
-     originally-typed text. Bound by default to Down while the command \
-     palette is open.",
+    PromptHistoryNextDef,
+    PromptHistoryNext,
+    "PromptHistoryNext",
+    ActionKind::PromptHistoryNext,
+    "recall newer prompt history",
+    "Recall the next entry toward the newest in the open prompt's history, \
+     under the same substring needle. Stepping past the newest restores the \
+     originally-typed text. Bound by default to Alt-Down.",
     ActionPriority::Normal,
     palette_visible = false
 );

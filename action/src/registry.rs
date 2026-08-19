@@ -92,7 +92,7 @@ use crate::{
             PickerLast, PickerNext, PickerPageDown, PickerPageUp, PickerPrev,
         },
         prompt::{
-            CancelPromptInput, PaletteHistoryNext, PaletteHistoryPrev, PaletteScopeToggle,
+            CancelPromptInput, PaletteScopeToggle, PromptHistoryNext, PromptHistoryPrev,
             PromptInsertNewline, SubmitPromptInput,
         },
         rebase::{
@@ -1073,12 +1073,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(PromptInsertNewline::DEF, |_| {
         Ok(Box::new(PromptInsertNewline))
     });
-    add(PaletteHistoryPrev::DEF, |_| {
-        Ok(Box::new(PaletteHistoryPrev))
-    });
-    add(PaletteHistoryNext::DEF, |_| {
-        Ok(Box::new(PaletteHistoryNext))
-    });
+    add(PromptHistoryPrev::DEF, |_| Ok(Box::new(PromptHistoryPrev)));
+    add(PromptHistoryNext::DEF, |_| Ok(Box::new(PromptHistoryNext)));
     add(PaletteScopeToggle::DEF, |_| {
         Ok(Box::new(PaletteScopeToggle))
     });
@@ -1759,7 +1755,7 @@ mod tests {
         // + 1 AutoReloadConfig.
         // + 1 .
         // + 1 FocusPane.
-        // + 2 PaletteHistoryPrev/Next.
+        // + 2 PromptHistoryPrev/Next.
         // + 1 SetTheme.
         // + 2 DetachPane, ReattachPane.
         // + 6 MovePane{Left,Down,Up,Right,Next,Prev}.

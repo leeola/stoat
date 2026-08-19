@@ -47,6 +47,32 @@ pub(crate) fn submit_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::None
 }
 
+/// Recall the previous entry from the open prompt's history.
+///
+/// One verb over every prompt that keeps a history. Only the palette keeps one
+/// today, so every other modal is absent and its Alt-Up does nothing rather
+/// than reaching the surface underneath.
+pub(crate) fn prompt_history_prev(stoat: &mut Stoat) -> UpdateEffect {
+    match active_modal(stoat) {
+        Some(ActiveModal::Palette) => {
+            super::palette::palette_history_prev(stoat).unwrap_or(UpdateEffect::None)
+        },
+        _ => UpdateEffect::None,
+    }
+}
+
+/// Recall the next entry toward the newest in the open prompt's history.
+///
+/// The counterpart to [`prompt_history_prev`], over the same set of prompts.
+pub(crate) fn prompt_history_next(stoat: &mut Stoat) -> UpdateEffect {
+    match active_modal(stoat) {
+        Some(ActiveModal::Palette) => {
+            super::palette::palette_history_next(stoat).unwrap_or(UpdateEffect::None)
+        },
+        _ => UpdateEffect::None,
+    }
+}
+
 /// Take the open list modal's selection, or `None` when no such modal is open.
 ///
 /// The four small pickers ride the shared prompt actions rather than carrying
@@ -136,4 +162,54 @@ pub(super) fn prompt_insert_newline(stoat: &mut Stoat) -> UpdateEffect {
         return effect;
     }
     UpdateEffect::None
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{app::UpdateEffect, input_history::InputHistory, Stoat};
+    use stoat_action::{OpenFileFinder, PromptHistoryPrev};
+
+    /// The generic verb reaches the palette's history rather than naming it.
+    ///
+    /// The Alt-Up tests drive the binding; this drives the action itself, so a
+    /// later prompt gaining history cannot quietly drop the palette arm.
+    #[test]
+    fn the_generic_verb_walks_the_palette_history() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().palette_history =
+            InputHistory::from_entries(vec!["w".to_string()]);
+        h.type_text(":");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &PromptHistoryPrev);
+
+        let palette = h.stoat.command_palette.as_ref().expect("open");
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            palette.input.text(ws),
+            "w",
+            "the generic verb recalled the palette's newest entry"
+        );
+    }
+
+    /// A prompt with no history absorbs the verb rather than passing it on, so
+    /// Alt-Up over the finder never reaches the editor behind it.
+    #[test]
+    fn the_generic_verb_is_inert_over_a_prompt_without_history() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("alpha\nbeta\n");
+        crate::action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+
+        let effect = crate::action_handlers::dispatch(&mut h.stoat, &PromptHistoryPrev);
+
+        assert_eq!(
+            effect,
+            UpdateEffect::None,
+            "the finder answers with nothing"
+        );
+        assert!(
+            h.stoat.file_finder.is_some(),
+            "and the finder is still the open modal"
+        );
+    }
 }

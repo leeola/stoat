@@ -1029,8 +1029,8 @@ on key {
     modal == palette && mode == insert {
         Up -> PickerPrev();
         Down -> PickerNext();
-        Alt-Up -> PaletteHistoryPrev();
-        Alt-Down -> PaletteHistoryNext();
+        Alt-Up -> PromptHistoryPrev();
+        Alt-Down -> PromptHistoryNext();
         Ctrl-p -> PickerPrev();
         Ctrl-n -> PickerNext();
         Ctrl-f -> PickerPageDown();
