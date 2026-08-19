@@ -1716,25 +1716,68 @@ mod tests {
     }
 
     #[test]
-    fn the_commits_list_walks_on_the_arrows_as_well_as_j_and_k() {
+    fn the_list_views_walk_on_the_arrows_as_well_as_j_and_k() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
-        let in_commits = TestState::new()
-            .set("mode", StateValue::String("normal".into()))
-            .set("view", StateValue::String("commits".into()));
-        let bound = |code| {
+        let bound = |view: &str, code, mods| {
+            let state = TestState::new()
+                .set("mode", StateValue::String("normal".into()))
+                .set("view", StateValue::String(view.into()));
             keymap
-                .lookup(&in_commits, &KeyEvent::new(code, KeyModifiers::NONE))
-                .expect("the arrow is bound in the commits view")[0]
+                .lookup(&state, &KeyEvent::new(code, mods))
+                .unwrap_or_else(|| panic!("{view} leaves the arrow unbound"))[0]
                 .name
                 .clone()
         };
+        let plain = |view, code| bound(view, code, KeyModifiers::NONE);
 
         assert_eq!(
-            (bound(KeyCode::Down), bound(KeyCode::Up)),
+            (
+                plain("commits", KeyCode::Down),
+                plain("commits", KeyCode::Up)
+            ),
             ("CommitsNext".to_string(), "CommitsPrev".to_string()),
-            "the arrows step the selection the way j and k do"
+            "the arrows step the commit selection the way j and k do"
+        );
+        assert_eq!(
+            (plain("rebase", KeyCode::Down), plain("rebase", KeyCode::Up)),
+            ("RebaseNext".to_string(), "RebasePrev".to_string()),
+            "and the rebase selection"
+        );
+        assert_eq!(
+            (
+                bound("rebase", KeyCode::Down, KeyModifiers::SHIFT),
+                bound("rebase", KeyCode::Up, KeyModifiers::SHIFT),
+            ),
+            ("RebaseMoveDown".to_string(), "RebaseMoveUp".to_string()),
+            "a shifted arrow moves the entry, mirroring shifted j and k"
+        );
+        assert_eq!(
+            (
+                plain("rebase_conflict", KeyCode::Down),
+                plain("rebase_conflict", KeyCode::Up),
+            ),
+            (
+                "RebaseConflictNextFile".to_string(),
+                "RebaseConflictPrevFile".to_string(),
+            ),
+            "and the conflict view's file list"
+        );
+        assert_eq!(
+            (
+                plain("reword", KeyCode::Left),
+                plain("reword", KeyCode::Down),
+                plain("reword", KeyCode::Up),
+                plain("reword", KeyCode::Right),
+            ),
+            (
+                "MoveLeft".to_string(),
+                "MoveDown".to_string(),
+                "MoveUp".to_string(),
+                "MoveRight".to_string(),
+            ),
+            "reword takes all four arrows, as it takes h/j/k/l"
         );
     }
 

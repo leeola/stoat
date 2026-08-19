@@ -823,8 +823,12 @@ on key {
         q -> AbortRebase();
         j -> RebaseNext();
         k -> RebasePrev();
+        Down -> RebaseNext();
+        Up -> RebasePrev();
         K -> RebaseMoveUp();
         J -> RebaseMoveDown();
+        Shift-Up -> RebaseMoveUp();
+        Shift-Down -> RebaseMoveDown();
         p -> SetRebaseOpPick();
         s -> SetRebaseOpSquash();
         f -> SetRebaseOpFixup();
@@ -843,6 +847,10 @@ on key {
         j -> MoveDown();
         k -> MoveUp();
         l -> MoveRight();
+        Left -> MoveLeft();
+        Down -> MoveDown();
+        Up -> MoveUp();
+        Right -> MoveRight();
         w -> MoveNextWordStart();
         e -> MoveNextWordEnd();
         b -> MovePrevWordStart();
@@ -857,6 +865,8 @@ on key {
         a -> RebaseConflictAbort();
         j -> RebaseConflictNextFile();
         k -> RebaseConflictPrevFile();
+        Down -> RebaseConflictNextFile();
+        Up -> RebaseConflictPrevFile();
         o -> RebaseConflictTakeOurs();
         t -> RebaseConflictTakeTheirs();
         s -> RebaseConflictSkipEntry();
