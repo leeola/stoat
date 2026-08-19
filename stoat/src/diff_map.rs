@@ -231,6 +231,36 @@ impl<'a> LiveHunks<'a> {
         }
     }
 
+    /// The row ranges change navigation stops on, in document order.
+    ///
+    /// A refined hunk contributes one range per marked run, so `n` inside a
+    /// hundred-line reindent walks the handful of rows that actually changed
+    /// rather than stepping over the whole block in one press. A hunk the tree
+    /// pass never narrowed contributes its full live rows, which is the stop it
+    /// has always been.
+    ///
+    /// A zero-width `Deleted` or `Moved` seam keeps its empty range. That is
+    /// what a caller turns into a single-cell landing at the seam row.
+    pub fn change_stops(&self) -> Vec<Range<u32>> {
+        let mut stops = Vec::with_capacity(self.hunks.len());
+        for live in &self.hunks {
+            match live.hunk.refined() {
+                // The runs are the hunk's own coordinates, so they shift with
+                // it the same way its live rows did.
+                true => {
+                    let shift = live.rows.start as i64 - live.hunk.buffer_line_range.start as i64;
+                    stops.extend(live.hunk.marked_rows.iter().map(|run| {
+                        let start = (run.start as i64 + shift).max(0) as u32;
+                        let end = (run.end as i64 + shift).max(0) as u32;
+                        start..end
+                    }));
+                },
+                false => stops.push(live.rows.clone()),
+            }
+        }
+        stops.sort_by_key(|run| (run.start, run.end));
+        stops
+    }
     /// The hunks meeting `rows`, each with the rows it now covers.
     ///
     /// A hunk covering no rows -- a deletion or move seam -- is included when
@@ -2474,6 +2504,58 @@ mod tests {
         }
     }
 
+    /// The stops a map offers over `text`.
+    fn stops_of(hunks: Vec<DiffHunk>, text: &str) -> Vec<std::ops::Range<u32>> {
+        use crate::{
+            buffer::{BufferId, TextBuffer},
+            multi_buffer::MultiBuffer,
+        };
+        let map = DiffMap::from_hunks(hunks, Some(Arc::new(text.to_string())));
+        let tb = TextBuffer::with_text(BufferId::new(0), text);
+        let multi = MultiBuffer::singleton(BufferId::new(0), Arc::new(std::sync::RwLock::new(tb)));
+        map.live_hunks(&multi.snapshot()).change_stops()
+    }
+
+    /// Navigation stops on what changed. One refined hunk over a block offers a
+    /// stop per run, so a walk crosses the changed rows rather than stepping
+    /// over the whole block in one press.
+    #[test]
+    fn a_refined_hunk_offers_a_stop_per_marked_run() {
+        let text = "0\n1\n2\n3\n4\n5\n";
+        assert_eq!(
+            stops_of(vec![refined_hunk(0..6, vec![1..2, 4..5])], text),
+            [1..2, 4..5],
+            "each run is its own stop"
+        );
+    }
+
+    /// A hunk the tree pass never narrowed keeps offering itself whole, which
+    /// is the stop it has always been.
+    #[test]
+    fn an_unrefined_hunk_offers_its_whole_range_as_one_stop() {
+        let text = "0\n1\n2\n3\n";
+        assert_eq!(
+            stops_of(vec![refined_hunk(1..3, Vec::new())], text),
+            std::iter::once(1..3).collect::<Vec<_>>(),
+            "the whole range is one stop"
+        );
+    }
+
+    /// Stops come back in document order however the hunks and runs arrive, so
+    /// a walk never doubles back.
+    #[test]
+    fn stops_arrive_in_document_order() {
+        let text = "0\n1\n2\n3\n4\n5\n6\n7\n";
+        let hunks = vec![
+            refined_hunk(0..3, vec![2..3, 0..1]),
+            refined_hunk(4..7, std::iter::once(5..6).collect()),
+        ];
+        assert_eq!(
+            stops_of(hunks, text),
+            [0..1, 2..3, 5..6],
+            "runs from both hunks interleave in row order"
+        );
+    }
     /// The whole point: a hunk whose real change is two tokens marks two rows,
     /// not the hundred its extents cover.
     #[test]

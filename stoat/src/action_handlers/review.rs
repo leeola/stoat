@@ -1018,11 +1018,14 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
     let jumped = super::focused_editor_mut(stoat).is_some_and(|editor| {
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
+        // The first stop rather than the first hunk, so opening over a refined
+        // block lands on the row that changed instead of the block's top.
         let target_row = display_snapshot.diff_map().and_then(|diff_map| {
             diff_map
-                .hunks_in_range(0..u32::MAX)
+                .live_hunks(buffer_snapshot)
+                .change_stops()
                 .first()
-                .map(|hunk| hunk.buffer_start_line)
+                .map(|stop| stop.start)
         });
         let Some(target_row) = target_row else {
             return false;

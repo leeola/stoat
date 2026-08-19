@@ -4998,6 +4998,125 @@ fn install_diff_hunk_rows(h: &mut TestHarness, rows: &[Range<u32>]) {
     guard.diff_map = Some(dm);
 }
 
+/// Install one hunk over `rows`, refined to `marked`, anchored as a diff job
+/// leaves it.
+fn install_refined_hunk(h: &mut TestHarness, rows: Range<u32>, marked: &[Range<u32>]) {
+    use crate::diff_map::{DiffHunk, DiffHunkStatus, DiffMap};
+    let mut dm = DiffMap::from_hunks(
+        [DiffHunk {
+            status: DiffHunkStatus::Modified,
+            unstaged_lines: std::iter::once(rows.clone()).collect(),
+            marked_rows: marked.to_vec(),
+            buffer_start_line: rows.start,
+            buffer_line_range: rows,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: None,
+        }],
+        None,
+    );
+    let ws = h.stoat.active_workspace();
+    let focused = ws.panes.focus();
+    let crate::pane::View::Editor(editor_id) = ws.panes.pane(focused).view else {
+        panic!("focused pane is not an editor");
+    };
+    let buffer_id = ws.editors[editor_id].buffer_id;
+    let buffer = ws.buffers.get(buffer_id).expect("buffer");
+    let mut guard = buffer.write().expect("poisoned");
+    dm.anchor_hunks(&guard.snapshot);
+    guard.diff_map = Some(dm);
+}
+
+/// A block hunk whose real changes are two rows far apart. Walking it has to
+/// reach both, not step over the block in one press.
+#[test]
+fn goto_change_walks_the_marked_runs_inside_one_hunk() {
+    let mut h = TestHarness::with_size(20, 24);
+    let text: String = (0..20).map(|i| format!("line {i}\n")).collect();
+    let path = h.write_file("s.txt", &text);
+    h.open_file(&path);
+    install_refined_hunk(&mut h, 0..20, &[2..3, 18..19]);
+
+    let row_of = |h: &mut TestHarness| h.selection_spans().first().map(|(start, _, _)| *start);
+
+    dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+    let first = row_of(&mut h);
+    dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+    let second = row_of(&mut h);
+    assert!(
+        first < second,
+        "a second press moves to the later run rather than staying put: {first:?} then {second:?}"
+    );
+
+    dispatch(&mut h.stoat, &stoat_action::GotoPrevChange);
+    assert_eq!(
+        row_of(&mut h),
+        first,
+        "and stepping back returns to the earlier run"
+    );
+}
+
+/// A count skips runs the way it skips hunks, so `2n` reaches the second one
+/// directly.
+#[test]
+fn a_count_skips_to_the_later_marked_run() {
+    let mut h = TestHarness::with_size(20, 24);
+    let text: String = (0..20).map(|i| format!("line {i}\n")).collect();
+    let path = h.write_file("s.txt", &text);
+    h.open_file(&path);
+    install_refined_hunk(&mut h, 0..20, &[2..3, 18..19]);
+
+    let once = {
+        dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        h.selection_spans()
+    };
+    let stepped = {
+        dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        h.selection_spans()
+    };
+    assert_ne!(
+        once, stepped,
+        "test setup: the two runs are separate stops, so two presses differ from one"
+    );
+
+    let mut counted = TestHarness::with_size(20, 24);
+    let path = counted.write_file("s.txt", &text);
+    counted.open_file(&path);
+    install_refined_hunk(&mut counted, 0..20, &[2..3, 18..19]);
+    counted.type_keys("2 space g n");
+
+    assert_eq!(
+        counted.selection_spans(),
+        stepped,
+        "one counted press lands where two single presses did"
+    );
+}
+
+/// The ends of the walk are the first and last run, not the block's edges.
+#[test]
+fn goto_edge_change_lands_on_the_outer_marked_runs() {
+    let mut h = TestHarness::with_size(20, 24);
+    let text: String = (0..20).map(|i| format!("line {i}\n")).collect();
+    let path = h.write_file("s.txt", &text);
+    h.open_file(&path);
+    install_refined_hunk(&mut h, 0..20, &[2..3, 18..19]);
+
+    dispatch(&mut h.stoat, &stoat_action::GotoLastChange);
+    let last = h.selection_spans();
+    dispatch(&mut h.stoat, &stoat_action::GotoFirstChange);
+    let first = h.selection_spans();
+
+    assert!(
+        first < last,
+        "the two edges are different runs: {first:?} then {last:?}"
+    );
+    dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+    assert_eq!(
+        h.selection_spans(),
+        last,
+        "and one step from the first edge reaches the last"
+    );
+}
 /// The ends of the list are taken whatever the cursor is near, so a cursor on
 /// the first hunk still reaches the last.
 #[test]

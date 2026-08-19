@@ -4101,29 +4101,19 @@ fn nth_hunk_rows(
     }
 }
 
-/// Byte span a hunk's rows cover, from the first row through the start of the
-/// row after the last.
+/// Row ranges change navigation stops on, in document order.
 ///
-/// A deletion hunk holds no rows, so it gets the one cell where the removed
-/// text was. The block cursor has no place to sit in an empty span.
-/// Row ranges of the buffer's change hunks, in document order.
-///
-/// Where the hunks sit now, not where the last diff job left them, so a jump
-/// reaches the row the gutter paints its mark on. A buffer with no diff map at
-/// all answers empty.
+/// Where the changes sit now, not where the last diff job left them, so a jump
+/// reaches the row the gutter paints its mark on. A refined hunk offers one
+/// stop per marked run, so a walk crosses the rows that changed rather than
+/// the block that holds them. A buffer with no diff map at all answers empty.
 fn live_hunk_rows(
     display_snapshot: &DisplaySnapshot,
     buffer_snapshot: &MultiBufferSnapshot,
 ) -> Vec<Range<u32>> {
     display_snapshot
         .diff_map()
-        .map(|diff_map| {
-            diff_map
-                .live_hunks(buffer_snapshot)
-                .in_range(0..u32::MAX)
-                .map(|(_, rows)| rows)
-                .collect()
-        })
+        .map(|diff_map| diff_map.live_hunks(buffer_snapshot).change_stops())
         .unwrap_or_default()
 }
 
@@ -4176,6 +4166,11 @@ fn goto_edge_change(stoat: &mut Stoat, last: bool) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Byte span a stop's rows cover, from the first row through the start of the
+/// row after the last.
+///
+/// A deletion stop holds no rows, so it gets the one cell where the removed
+/// text was. The block cursor has no place to sit in an empty span.
 fn hunk_span(rope: &Rope, rows: Range<u32>) -> Range<usize> {
     let start = rope.point_to_offset(Point::new(rows.start, 0));
     let end = if rows.is_empty() {
@@ -4322,9 +4317,22 @@ fn first_hunk_row(
 
     let result = structural_diff::diff(&base, &working);
     let hunks = diff_map::changes_to_hunks(&result.changes, &base, &working);
+    // The file is not open, so there is no LiveHunks to read stops from. The
+    // runs and buffer_start_line are both stored coordinates, which is the
+    // space this answer travels in, so reading them here needs no shift.
+    let stop_row = |hunk: &diff_map::DiffHunk, last: bool| match last {
+        true => hunk
+            .marked_rows
+            .last()
+            .map_or(hunk.buffer_start_line, |run| run.start),
+        false => hunk
+            .marked_rows
+            .first()
+            .map_or(hunk.buffer_start_line, |run| run.start),
+    };
     match dir {
-        ChangeDir::Next => hunks.first().map(|h| h.buffer_start_line),
-        ChangeDir::Prev => hunks.last().map(|h| h.buffer_start_line),
+        ChangeDir::Next => hunks.first().map(|hunk| stop_row(hunk, false)),
+        ChangeDir::Prev => hunks.last().map(|hunk| stop_row(hunk, true)),
     }
 }
 
