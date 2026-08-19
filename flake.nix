@@ -7,6 +7,7 @@
 
   outputs =
     {
+      self,
       nixpkgs,
       rust-overlay,
       flake-utils,
@@ -22,8 +23,107 @@
         rust-toolchain = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
           extensions = [ "rust-analysis" ];
         };
+
+        rustPlatform = pkgs.makeRustPlatform {
+          cargo = rust-toolchain;
+          rustc = rust-toolchain;
+        };
+
+        # winit and wgpu dlopen these at runtime, so nothing links them at
+        # build time and an RPATH on the installed binary is what finds them.
+        runtimeLibs = with pkgs; [
+          wayland
+          libxkbcommon
+          libGL
+          vulkan-loader
+          xorg.libX11
+          xorg.libXcursor
+          xorg.libXrandr
+          xorg.libXi
+        ];
+
+        # pkg-config and zlib serve libgit2-sys and libz-sys, the workspace's
+        # only crates that link native code.
+        commonPackage = {
+          version = "0.1.0";
+          # A git flake's source holds only tracked and staged files, so
+          # `target/` and the untracked `.cargo/config.toml` (whose job limit
+          # would throttle a Nix build) never reach the store.
+          src = self;
+          cargoLock.lockFile = ./Cargo.lock;
+          nativeBuildInputs = [ pkgs.pkg-config ];
+          buildInputs = [ pkgs.zlib ];
+          # The four project commands own testing, and the workspace tests need
+          # the devshell's software-rasterizer setup.
+          doCheck = false;
+        };
+
+        packages = rec {
+          stoat = rustPlatform.buildRustPackage (
+            commonPackage
+            // {
+              pname = "stoat";
+              cargoBuildFlags = [
+                "-p"
+                "stoat_bin"
+              ];
+              meta = {
+                description = "The stoat editor CLI";
+                mainProgram = "stoat";
+              };
+            }
+          );
+
+          # Both binaries in one derivation. stoatty resolves `stoat` as a
+          # sibling of its own executable before consulting PATH, so shipping
+          # them together needs no wrapper and cannot skew versions.
+          stoatty = rustPlatform.buildRustPackage (
+            commonPackage
+            // {
+              pname = "stoatty";
+              cargoBuildFlags = [
+                "-p"
+                "stoatty"
+                "-p"
+                "stoat_bin"
+              ];
+
+              postInstall = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                install -Dm444 assets/stoatty.desktop $out/share/applications/stoatty.desktop
+                install -Dm444 assets/stoatty.svg $out/share/icons/hicolor/scalable/apps/stoatty.svg
+              '';
+
+              # An RPATH rather than a wrapper that sets a library path.
+              # stoatty spawns shells, and a wrapper's environment leaks into
+              # every child process the user starts from one.
+              postFixup = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                patchelf --add-rpath "${pkgs.lib.makeLibraryPath runtimeLibs}" $out/bin/stoatty
+              '';
+
+              meta = {
+                description = "GPU terminal hosting the stoat editor";
+                mainProgram = "stoatty";
+              };
+            }
+          );
+
+          default = stoatty;
+        };
       in
       {
+        inherit packages;
+
+        apps = {
+          stoat = {
+            type = "app";
+            program = "${packages.stoat}/bin/stoat";
+          };
+          stoatty = {
+            type = "app";
+            program = "${packages.stoatty}/bin/stoatty";
+          };
+        };
+
         devShell = pkgs.mkShell (
           rec {
             buildInputs =
