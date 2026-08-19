@@ -74,16 +74,14 @@ pub(crate) fn prev_annotation(stoat: &mut Stoat) -> UpdateEffect {
 /// The narration shares the hover popup, so the next key press takes it down.
 /// This puts it back without moving the reader off the stop.
 pub(crate) fn show_narration_again(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(run) = stoat.active_workspace().walkthrough.as_ref() else {
+    if stoat.active_workspace().walkthrough.is_none() {
         stoat.set_status("no walkthrough is playing");
         return UpdateEffect::Redraw;
-    };
-    let point = current_anchor(run).range.start;
+    }
 
-    let Some(offset) = focused_offset_of(stoat, point) else {
+    if !refresh_narration(stoat) {
         return UpdateEffect::None;
-    };
-    show_narration(stoat, offset);
+    }
 
     if stoat.pending_hover.is_none() {
         stoat.set_status("this stop has no narration");
@@ -107,6 +105,23 @@ pub(crate) fn done(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Raise the current stop's narration, reporting whether the stop's location
+/// resolved into the focused buffer.
+///
+/// A caller with no popup to show afterwards knows the stop is silent rather
+/// than unreachable, which is the difference the returned flag carries.
+///
+/// The caller must have checked that a walkthrough is playing.
+fn refresh_narration(stoat: &mut Stoat) -> bool {
+    let point = current_anchor(run_of(stoat)).range.start;
+
+    let Some(offset) = focused_offset_of(stoat, point) else {
+        return false;
+    };
+    show_narration(stoat, offset);
+    true
+}
+
 /// Move `delta` stops, lay the trail between the two, and jump to where that
 /// lands.
 ///
@@ -123,6 +138,7 @@ fn step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     if !run.step(delta) {
         let end = if delta < 0 { "first" } else { "last" };
         stoat.set_status(format!("already on the {end} stop"));
+        refresh_narration(stoat);
         return UpdateEffect::Redraw;
     }
 
@@ -145,12 +161,14 @@ fn step_annotation(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
 
     if run.current_stop().annotations.is_empty() {
         stoat.set_status("this stop has no annotations");
+        refresh_narration(stoat);
         return UpdateEffect::Redraw;
     }
 
     if !run.step_annotation(delta) {
         let end = if delta < 0 { "stop" } else { "last annotation" };
         stoat.set_status(format!("already on the {end}"));
+        refresh_narration(stoat);
         return UpdateEffect::Redraw;
     }
 
@@ -447,6 +465,7 @@ mod tests {
         app::Stoat,
         code_index::{build, nav},
         host::FakeFs,
+        test_harness::TestHarness,
         walkthrough::{Location, Point, Range, Walkthrough},
     };
     use codegraph::{Confidence, Edge, EdgeKind, FileId, FileShard, Symbol, SymbolKey, Target};
@@ -902,5 +921,122 @@ mod tests {
             stoat.pending_message.as_deref(),
             Some("stop s1 drifted from its capture")
         );
+    }
+
+    /// The tour of [`stoat_with_tour`] over a [`TestHarness`], so a test can
+    /// reach it the way a reader does, through the keymap rather than by
+    /// calling the handler. Both stops narrate here, because the popup is what
+    /// these tests watch.
+    fn harness_with_tour() -> TestHarness {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+
+        let mut walkthrough = Walkthrough::new("tour".to_owned(), "Tour".to_owned(), None);
+        walkthrough
+            .add_stop(
+                Some("first".to_owned()),
+                NARRATION.to_owned(),
+                location("a.rs", 2, (1, 11), "fn two() {}"),
+                None,
+            )
+            .expect("append");
+        walkthrough
+            .add_stop(
+                Some("second".to_owned()),
+                "The **exit**.".to_owned(),
+                location("b.rs", 1, (1, 13), "fn three() {}"),
+                None,
+            )
+            .expect("append");
+        // Only stop 1 carries an annotation, so one tour reaches both annotation
+        // branches. A step onto it clamps there, and stop 2 has none to step onto.
+        walkthrough
+            .add_annotation(
+                "s1",
+                None,
+                range_of(1, (1, 11)),
+                "fn one() {}".to_owned(),
+                "the neighbor".to_owned(),
+            )
+            .expect("s1 exists");
+
+        h.fake_fs().insert_file("/repo/a.rs", FIRST);
+        h.fake_fs().insert_file("/repo/b.rs", SECOND);
+        h.fake_fs().insert_file(
+            "/repo/.stoat/walkthroughs/tour.json",
+            serde_json::to_string(&walkthrough).expect("serialize"),
+        );
+        h
+    }
+
+    /// The narration shares the hover popup, which any key takes down, and the
+    /// chord that raises it is itself a key press. A popup this dispatch put up
+    /// is the one case that clear must leave alone, or no reader ever sees it.
+    #[test]
+    fn the_chord_that_raises_the_narration_leaves_it_up() {
+        let mut h = harness_with_tour();
+        open(&mut h.stoat, "tour");
+        h.stoat.pending_hover = None;
+
+        h.type_keys("space W s");
+
+        assert_eq!(popup_lines(&h.stoat), ["first - 1/2", "The entry point."]);
+    }
+
+    #[test]
+    fn stepping_by_chord_shows_the_stop_it_lands_on() {
+        let mut h = harness_with_tour();
+        open(&mut h.stoat, "tour");
+
+        h.type_keys("space W n");
+
+        assert_eq!(popup_lines(&h.stoat), ["second - 2/2", "The exit."]);
+    }
+
+    /// A step off the end moves nobody, so nothing raises a popup and the
+    /// reader would lose the narration of the stop they are still on.
+    #[test]
+    fn a_clamped_step_keeps_the_narration_of_the_stop_it_stays_on() {
+        let mut h = harness_with_tour();
+        open(&mut h.stoat, "tour");
+        h.type_keys("space W n");
+
+        h.type_keys("space W n");
+
+        assert_eq!(popup_lines(&h.stoat), ["second - 2/2", "The exit."]);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("already on the last stop"),
+        );
+    }
+
+    /// The same hold covers the annotation walk, whose two no-move branches
+    /// leave the reader on a stop whose narration they still need.
+    #[test]
+    fn a_no_move_annotation_step_keeps_the_narration_up() {
+        for (keys, status, popup) in [
+            (
+                "space W a space W a",
+                "already on the last annotation",
+                ["first - 1/2", "The entry point."],
+            ),
+            (
+                "space W n space W a",
+                "this stop has no annotations",
+                ["second - 2/2", "The exit."],
+            ),
+        ] {
+            let mut h = harness_with_tour();
+            open(&mut h.stoat, "tour");
+
+            h.type_keys(keys);
+
+            assert_eq!(
+                popup_lines(&h.stoat),
+                popup,
+                "{keys} leaves the reader on a narrated stop",
+            );
+            assert_eq!(h.stoat.pending_message.as_deref(), Some(status));
+        }
     }
 }

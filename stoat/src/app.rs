@@ -4368,6 +4368,10 @@ impl Stoat {
         let mut dispatched_code_action = false;
         let mut dispatched_rename_symbol = false;
         let mut dispatched_symbol_picker = false;
+        // A dispatch that raises its own popup keeps it. An unchanged generation
+        // means every popup on screen predates the chord, which is what the
+        // post-dispatch clear below is for.
+        let hover_before = self.pending_hover.as_ref().map(|popup| popup.generation);
         // The editing half of an insert-entry chord runs before the mode
         // switch, so it has to know the switch follows and leave its undo
         // group open for the session to adopt.
@@ -4420,7 +4424,9 @@ impl Stoat {
         if dispatched_action {
             self.pending_count = None;
             if !dispatched_hover {
-                self.pending_hover = None;
+                if self.pending_hover.as_ref().map(|popup| popup.generation) == hover_before {
+                    self.pending_hover = None;
+                }
                 self.pending_hover_request = None;
             }
             if !dispatched_code_action {
