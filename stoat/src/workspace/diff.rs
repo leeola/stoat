@@ -92,6 +92,13 @@ pub(crate) struct DiffState {
     /// which the `.git` watcher drives, so an entry cannot outlive the git
     /// state it was read from.
     pub(super) base_text: HashMap<PathBuf, DiffBaseText>,
+    /// Files with staged and with unstaged changes across the whole repo, as
+    /// the status bar's repo-wide tally reads them.
+    ///
+    /// `None` until a diff lands, and for a workspace root outside any repo.
+    /// Refreshed wherever a diff map does, since the same events move both: an
+    /// edit, a save, a staging action, and a write under `.git`.
+    pub(super) repo_change_counts: Option<(usize, usize)>,
     /// The version each buffer is currently settling on, and when that version
     /// was first seen. Read by [`Self::settled`].
     settle: HashMap<BufferId, (u64, Instant)>,
@@ -258,6 +265,10 @@ impl DiffState {
             shared.write().expect("buffer poisoned").diff_map = diff_map;
         }
 
+        if let Some(repo) = git_host.discover(git_root) {
+            self.repo_change_counts = Some(repo.change_counts());
+        }
+
         // A file with no language has no colors to wait for, so its map is
         // already whole and nothing has to recompute it.
         if language_registry.for_path(&path).is_none() {
@@ -324,6 +335,9 @@ impl DiffState {
             }
         });
         for out in completed {
+            if let Some(counts) = out.repo_change_counts {
+                self.repo_change_counts = Some(counts);
+            }
             if let Some(base) = out.base {
                 self.base_text.insert(out.path, base);
             }
@@ -406,6 +420,9 @@ impl DiffState {
                         diff_map.anchor_hunks(&buffer_snapshot);
                         (diff_map, base)
                     });
+                    let repo_change_counts = git_host
+                        .discover(&git_root)
+                        .map(|repo| repo.change_counts());
                     redraw.notify_one();
                     let (diff_map, base) = match computed {
                         Some((diff_map, base)) => (Some(diff_map), Some(base)),
@@ -417,6 +434,7 @@ impl DiffState {
                         target_version: cur_version,
                         diff_map,
                         base,
+                        repo_change_counts,
                     }
                 }
             });
@@ -446,6 +464,10 @@ pub(super) struct DiffJobOutput {
     /// The blobs the diff ran against, `None` when the repo or the file's HEAD
     /// content could not be read and there was nothing to diff.
     pub(super) base: Option<DiffBaseText>,
+    /// The repo-wide tally read while the job held the repo, `None` outside a
+    /// repo. Read here rather than on the run loop, since it costs a full
+    /// `git status` walk.
+    pub(super) repo_change_counts: Option<(usize, usize)>,
 }
 
 /// A file's HEAD and index blobs as git last reported them.

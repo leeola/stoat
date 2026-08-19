@@ -118,6 +118,16 @@ pub trait GitRepo: Send + Sync {
     fn workdir(&self) -> Option<PathBuf>;
     fn changed_files(&self) -> Vec<ChangedFile>;
 
+    /// How many files carry staged changes and how many carry unstaged ones,
+    /// as `(staged, unstaged)`.
+    ///
+    /// The two sides are counted independently, so a partly staged file counts
+    /// in both. This is what the status bar's repo-wide tally reads, where the
+    /// question is how much work sits on each side rather than how many files
+    /// are touched. Untracked files count as unstaged, matching
+    /// [`Self::changed_files`].
+    fn change_counts(&self) -> (usize, usize);
+
     /// Whether the repository has index or working-tree changes to *tracked*
     /// files. Untracked files are excluded, because no stoat git operation
     /// writes the working tree, so an untracked file is never at risk.

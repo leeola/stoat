@@ -676,6 +676,17 @@ impl Workspace {
         );
     }
 
+    /// Files with staged and with unstaged changes across the repo, as
+    /// `(staged, unstaged)`, or `None` before the first diff lands and for a
+    /// root outside any repo.
+    ///
+    /// Refreshed by the diff pipeline rather than read on demand, since the
+    /// answer costs a full `git status` walk and the status bar asks every
+    /// frame.
+    pub(crate) fn repo_change_counts(&self) -> Option<(usize, usize)> {
+        self.diff.repo_change_counts
+    }
+
     /// Install `diff_map` on `id` as if a job had produced it. See
     /// [`DiffState::install_test`].
     #[cfg(test)]

@@ -840,6 +840,16 @@ impl GitRepo for FakeGitRepo {
         staged
     }
 
+    /// Counted off the same `changed` and `untracked` registrations
+    /// [`Self::changed_files`] reports, so the two never disagree. A
+    /// registration carries one side, so no fake file counts in both.
+    fn change_counts(&self) -> (usize, usize) {
+        let state = self.state.lock().unwrap();
+        let staged = state.changed.iter().filter(|f| f.staged).count();
+        let unstaged = state.changed.iter().filter(|f| !f.staged).count() + state.untracked.len();
+        (staged, unstaged)
+    }
+
     fn has_tracked_changes(&self) -> bool {
         let state = self.state.lock().unwrap();
         !state.changed.is_empty()

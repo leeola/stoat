@@ -241,6 +241,11 @@ pub(crate) struct FrameCtx<'a> {
     /// True while a background diff warm runs, driving the focused pane's
     /// transient ` <spinner> diff ` status-bar segment. False when idle.
     pub(crate) diff_warm_busy: bool,
+    /// Files with staged and with unstaged changes across the repo, which the
+    /// focused pane's bar leads its staged segment with. `None` before the
+    /// first diff lands and outside a repo, which drops the segment back to the
+    /// focused file's own hunk counts.
+    pub(crate) repo_change_counts: Option<(usize, usize)>,
     /// Label of the explicit LSP request still in flight, so the status bar
     /// shows a "lsp: {label}..." segment until the response lands. `None` when no
     /// such request is pending. See [`crate::lsp::lsp_pending_label`].
@@ -653,6 +658,7 @@ pub(crate) fn frame(
         spinner_phase: app::spinner_phase(stoat.spinner_clock),
         lsp_servers,
         diff_warm_busy,
+        repo_change_counts: ws.repo_change_counts(),
         lsp_pending,
         lsp_message: stoat
             .lsp_message

@@ -140,6 +140,26 @@ impl GitRepo for LocalGitRepo {
         staged
     }
 
+    fn change_counts(&self) -> (usize, usize) {
+        let repo = self.repo.lock().expect("git repo lock");
+        let statuses = {
+            let mut opts = StatusOptions::new();
+            opts.include_untracked(true).recurse_untracked_dirs(true);
+            match repo.statuses(Some(&mut opts)) {
+                Ok(s) => s,
+                Err(_) => return (0, 0),
+            }
+        };
+
+        statuses.iter().fold((0, 0), |(staged, unstaged), entry| {
+            let status = entry.status();
+            (
+                staged + usize::from(status.intersects(STAGED)),
+                unstaged + usize::from(status.intersects(UNSTAGED)),
+            )
+        })
+    }
+
     fn has_tracked_changes(&self) -> bool {
         let repo = self.repo.lock().expect("git repo lock");
         let mut opts = StatusOptions::new();

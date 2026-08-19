@@ -266,6 +266,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
         spinner_phase: 0,
         lsp_servers: &[],
         diff_warm_busy: false,
+        repo_change_counts: ws.repo_change_counts(),
         lsp_pending,
         lsp_message: stoat
             .lsp_message

@@ -196,6 +196,37 @@ fn changed_files_deduplicates_staged_and_unstaged() {
     assert!(files[0].staged);
 }
 
+/// The two sides are counted apart, unlike `changed_files`, which resolves each
+/// file to one side. A half-staged file is work waiting on both, so the bar's
+/// tally has to see it twice.
+#[test]
+fn change_counts_tallies_each_side_independently() {
+    let tr = TestRepo::new();
+    tr.commit_file("staged.rs", "v1")
+        .commit_file("unstaged.rs", "v1")
+        .commit_file("both.rs", "v1");
+
+    tr.write_and_stage("staged.rs", "v2");
+    tr.write("unstaged.rs", "v2");
+    tr.write("untracked.rs", "v1");
+    tr.write_and_stage("both.rs", "v2").write("both.rs", "v3");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    assert_eq!(
+        repo.change_counts(),
+        (2, 3),
+        "both.rs counts on each side, and the untracked file counts as unstaged"
+    );
+}
+
+#[test]
+fn change_counts_zero_on_a_clean_repo() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "v1");
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    assert_eq!(repo.change_counts(), (0, 0));
+}
+
 #[test]
 fn changed_files_reports_untracked_on_no_commits() {
     let tr = TestRepo::new();

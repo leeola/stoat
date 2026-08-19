@@ -909,7 +909,7 @@ fn status_segments(
                 right_anchor = start;
             }
         }
-        if let Some(text) = focused_staged_label(status.staged_counts) {
+        if let Some(text) = focused_staged_label(frame.repo_change_counts, status.staged_counts) {
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
             if start >= cursor {
@@ -1101,14 +1101,36 @@ fn focused_diagnostic_label(
     Some((format!(" {} ", parts.join(" ")), worst))
 }
 
-/// Statusline label counting the focused buffer's staged and unstaged diff
-/// hunks, or `None` when the buffer has no diff map or no hunks.
-fn focused_staged_label(counts: Option<(usize, usize)>) -> Option<String> {
-    let (staged, unstaged) = counts?;
-    if staged == 0 && unstaged == 0 {
+/// Statusline label leading with the repo's changed-file counts and appending
+/// the focused buffer's hunk counts, or `None` when neither has anything.
+///
+/// `repo` counts files on each side, `file` counts diff hunks, so the label
+/// names both rather than running them together. A repo with nothing changed
+/// still shows while the focused file has hunks, since a tally the file
+/// contradicts is worth seeing.
+///
+/// With no repo pair the label falls back to the file's counts alone. That
+/// covers a buffer outside a repo and the window before the first diff lands,
+/// where leading with `repo 0 staged` would read as a clean repo.
+fn focused_staged_label(
+    repo: Option<(usize, usize)>,
+    file: Option<(usize, usize)>,
+) -> Option<String> {
+    let file = file.filter(|&(staged, unstaged)| staged > 0 || unstaged > 0);
+
+    let Some((repo_staged, repo_unstaged)) = repo else {
+        let (staged, unstaged) = file?;
+        return Some(format!(" {staged} staged / {unstaged} unstaged "));
+    };
+    if repo_staged == 0 && repo_unstaged == 0 && file.is_none() {
         return None;
     }
-    Some(format!(" {staged} staged / {unstaged} unstaged "))
+
+    let repo_part = format!(" repo {repo_staged} staged / {repo_unstaged} unstaged");
+    Some(match file {
+        Some((staged, unstaged)) => format!("{repo_part} · file {staged}/{unstaged} "),
+        None => format!("{repo_part} "),
+    })
 }
 
 fn diagnostic_severity_scope(severity: DiagnosticSeverity) -> &'static str {
@@ -1340,7 +1362,7 @@ fn status_filename<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::status_filename;
+    use super::{focused_staged_label, status_filename};
     use crate::{
         action_handlers::dispatch,
         buffer::{BufferId, TextBuffer},
@@ -1815,12 +1837,55 @@ mod tests {
     }
 
     #[test]
+    fn the_staged_label_pairs_repo_files_with_the_focused_file() {
+        assert_eq!(
+            focused_staged_label(Some((2, 3)), Some((1, 4))).as_deref(),
+            Some(" repo 2 staged / 3 unstaged · file 1/4 "),
+            "both pairs read side by side"
+        );
+        assert_eq!(
+            focused_staged_label(Some((2, 3)), None).as_deref(),
+            Some(" repo 2 staged / 3 unstaged "),
+            "a file with no diff map drops its half"
+        );
+        assert_eq!(
+            focused_staged_label(Some((2, 3)), Some((0, 0))).as_deref(),
+            Some(" repo 2 staged / 3 unstaged "),
+            "and so does a file whose diff map holds no hunks"
+        );
+        assert_eq!(
+            focused_staged_label(None, Some((1, 4))).as_deref(),
+            Some(" 1 staged / 4 unstaged "),
+            "no repo tally yet falls back to the file's own counts"
+        );
+        assert_eq!(
+            focused_staged_label(None, None),
+            None,
+            "nothing to say without either"
+        );
+        assert_eq!(
+            focused_staged_label(Some((0, 0)), Some((0, 0))),
+            None,
+            "a clean repo and an unchanged file hide the segment"
+        );
+        assert_eq!(
+            focused_staged_label(Some((0, 0)), Some((1, 0))).as_deref(),
+            Some(" repo 0 staged / 0 unstaged · file 1/0 "),
+            "a stale zero tally still shows against a file that has hunks"
+        );
+    }
+
+    #[test]
     fn statusline_shows_staged_and_unstaged_counts() {
         let mut h = crate::test_harness::TestHarness::with_size(100, 12);
         h.stage_index_scenario(
             "/repo",
             &[("f.txt", "a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n")],
         );
+        // The repo pair counts files off git status, where the file pair counts
+        // hunks off the diff map, so the fixture registers a second file to
+        // tell the two apart in the bar.
+        h.fake_git().add_repo("/repo").staged_file("g.txt", "x\n");
         h.stoat.set_diff_warm_auto(true);
         h.open_file(Path::new("/repo/f.txt"));
         h.settle_diff_jobs();
@@ -1839,8 +1904,10 @@ mod tests {
         // the inter-token spaces read back as `─`. Normalize them to recover the
         // logical segment text.
         assert!(
-            rendered.replace('─', " ").contains("1 staged / 1 unstaged"),
-            "statusline reports the hunk counts:\n{rendered}"
+            rendered
+                .replace('─', " ")
+                .contains("repo 1 staged / 1 unstaged · file 1/1"),
+            "statusline reports the repo's files and the focused file's hunks:\n{rendered}"
         );
     }
 
