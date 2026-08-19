@@ -31,6 +31,12 @@ pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     };
 
+    // The commits screen ranks below the diff screen, so a list installed over
+    // an open diff would never paint. Leaving the diff first is what the user
+    // otherwise does by hand. The helper gates itself, so a plain pane, widened
+    // or not, is untouched.
+    super::review::exit_diff_view(stoat);
+
     let mut state = CommitListState::new(workdir);
     state.pending_load = Some(spawn_commit_log_load(
         &stoat.executor,
@@ -318,6 +324,53 @@ fn spawn_commit_preview_load(
 mod tests {
     use crate::app::Stoat;
 
+    /// The commits screen ranks below the diff screen, so a list opened over an
+    /// open diff would install its state and never paint. Opening the list
+    /// exits the diff first, which is the close-then-see the user had to do by
+    /// hand.
+    #[test]
+    fn opening_the_commits_list_exits_an_open_diff() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "one", &[("a.rs", "1\n")]),
+                ("b2c3d4e5", "two", &[("a.rs", "2\n")]),
+            ],
+        );
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        h.seed_focused_buffer("changed\n");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
+        h.settle();
+        assert_eq!(
+            h.stoat.current_view(),
+            Some("diff"),
+            "the diff screen is what the frame paints"
+        );
+
+        h.open_commits("/repo");
+
+        let ws = h.stoat.active_workspace();
+        let latched = ws.panes.pane(ws.panes.focus()).diff_mode;
+        let widened = ws.panes.widened();
+        let diff_view = h
+            .stoat
+            .focused_editor_ids()
+            .and_then(|(id, _)| h.stoat.active_workspace().editors.get(id))
+            .is_some_and(|editor| editor.diff_view);
+        assert_eq!(
+            (
+                h.stoat.current_view(),
+                diff_view,
+                latched,
+                widened.is_some()
+            ),
+            (Some("commits"), false, false, false),
+            "the list paints, and the diff left no flag, latch, or widen behind"
+        );
+    }
     #[test]
     fn the_arrows_step_the_commits_selection() {
         let mut h = Stoat::test();

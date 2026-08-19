@@ -931,6 +931,37 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Leave the diff view, reporting whether there was one to leave.
+///
+/// Clears the focused editor's flag, the focused pane's latch, and the widen
+/// the view took, which is every piece of state entering it set. Returns false
+/// and touches nothing when no editor is focused or neither half is set, so a
+/// caller can offer the exit unconditionally.
+///
+/// Either half being set counts as on, so this leaves a latched pane showing a
+/// clean file as readily as a diff itself.
+pub(super) fn exit_diff_view(stoat: &mut Stoat) -> bool {
+    let latched = {
+        let panes = &stoat.active_workspace().panes;
+        panes.pane(panes.focus()).diff_mode
+    };
+    let Some(editor) = super::focused_editor_mut(stoat) else {
+        return false;
+    };
+    if !(latched || editor.diff_view) {
+        return false;
+    }
+    editor.set_diff_view(false);
+
+    let panes = &mut stoat.active_workspace_mut().panes;
+    let focus = panes.focus();
+    panes.pane_mut(focus).diff_mode = false;
+    if panes.widened() == Some(focus) {
+        panes.unwiden();
+    }
+    true
+}
+
 /// Toggle the live per-file diff view on the focused editor, driven by
 /// [`stoat_action::Diff`].
 ///
@@ -945,46 +976,31 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
 /// buffer has no changes of its own, opening the view instead crosses into the
 /// first changed file and lands on its first hunk. Toggling the view off leaves
 /// the cursor untouched.
+///
+/// See also:
+/// - [`exit_diff_view`], the exit half, which other screens reuse.
 pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
     let origin = super::jump::live_entry(stoat);
     let Some(buffer_id) = super::focused_editor_mut(stoat).map(|editor| editor.buffer_id) else {
         return;
     };
 
-    // Either half being set means review is on, so `:diff` exits from a latched
-    // pane showing a clean file plain as readily as from a diff itself.
-    let turned_on = {
-        let latched = {
-            let panes = &stoat.active_workspace().panes;
-            panes.pane(panes.focus()).diff_mode
-        };
+    if exit_diff_view(stoat) {
+        return;
+    }
+
+    {
         let Some(editor) = super::focused_editor_mut(stoat) else {
             return;
         };
-        let on = !(latched || editor.diff_view);
-        editor.set_diff_view(on);
+        editor.set_diff_view(true);
 
+        // Give the diff its own full width. An unwidenable layout stays put and
+        // rides the unified fallback.
         let panes = &mut stoat.active_workspace_mut().panes;
         let focus = panes.focus();
-        panes.pane_mut(focus).diff_mode = on;
-        on
-    };
-
-    // Give the diff its own full width. Opening widens the focused pane when the
-    // layout allows a clean cover. An unwidenable layout stays put and rides the
-    // unified fallback. Closing restores only when this pane is the widened one.
-    {
-        let panes = &mut stoat.active_workspace_mut().panes;
-        let focus = panes.focus();
-        if turned_on {
-            panes.widen(focus);
-        } else if panes.widened() == Some(focus) {
-            panes.unwiden();
-        }
-    }
-
-    if !turned_on {
-        return;
+        panes.pane_mut(focus).diff_mode = true;
+        panes.widen(focus);
     }
 
     if let Some((editor_id, _)) = stoat.focused_editor_ids() {
