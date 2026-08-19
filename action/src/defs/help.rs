@@ -42,42 +42,6 @@ define_action!(
 );
 
 define_action!(
-    HelpSelectPrevDef,
-    HelpSelectPrev,
-    "HelpSelectPrev",
-    ActionKind::HelpSelectPrev,
-    "previous help entry",
-    "Move the help selection up by one row while the help modal is open.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
-    HelpSelectNextDef,
-    HelpSelectNext,
-    "HelpSelectNext",
-    ActionKind::HelpSelectNext,
-    "next help entry",
-    "Move the help selection down by one row while the help modal is open.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
-    HelpCompleteDef,
-    HelpComplete,
-    "HelpComplete",
-    ActionKind::HelpComplete,
-    "complete selected help entry",
-    "Complete the highlighted action's name into the help search input, \
-     replacing what was typed. The completed action stays selected. Bound by \
-     default to Tab while the help modal's search input is focused; a no-op \
-     when the list is empty.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
     HelpScopeToggleDef,
     HelpScopeToggle,
     "HelpScopeToggle",
@@ -106,28 +70,6 @@ define_action!(
     ActionKind::HelpScrollDetailDown,
     "scroll help detail down",
     "Scroll the help detail pane toward the bottom by five rows.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
-    HelpJumpFirstDef,
-    HelpJumpFirst,
-    "HelpJumpFirst",
-    ActionKind::HelpJumpFirst,
-    "jump to first help entry",
-    "Move the help selection to the first entry in the current filter.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
-    HelpJumpLastDef,
-    HelpJumpLast,
-    "HelpJumpLast",
-    ActionKind::HelpJumpLast,
-    "jump to last help entry",
-    "Move the help selection to the last entry in the current filter.",
     ActionPriority::Normal,
     palette_visible = false
 );

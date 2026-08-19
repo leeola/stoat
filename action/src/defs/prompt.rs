@@ -38,30 +38,6 @@ define_action!(
 );
 
 define_action!(
-    PaletteSelectPrevDef,
-    PaletteSelectPrev,
-    "PaletteSelectPrev",
-    ActionKind::PaletteSelectPrev,
-    "select previous palette entry",
-    "Move the palette selection up by one row. Bound by default to Up and \
-     Ctrl-P while the command palette is open.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
-    PaletteSelectNextDef,
-    PaletteSelectNext,
-    "PaletteSelectNext",
-    ActionKind::PaletteSelectNext,
-    "select next palette entry",
-    "Move the palette selection down by one row. Bound by default to Down \
-     and Ctrl-N while the command palette is open.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
     PaletteHistoryPrevDef,
     PaletteHistoryPrev,
     "PaletteHistoryPrev",
@@ -84,46 +60,6 @@ define_action!(
      the same substring needle. Stepping past the newest restores the \
      originally-typed text. Bound by default to Down while the command \
      palette is open.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
-    PaletteCompleteDef,
-    PaletteComplete,
-    "PaletteComplete",
-    ActionKind::PaletteComplete,
-    "complete selected palette entry",
-    "Complete the highlighted candidate into the palette input. From the \
-     command list this is the selected command, completed with a trailing \
-     space when it takes arguments so the argument picker opens. From an \
-     argument list it is the selected row, for every picker-backed argument \
-     such as a file, buffer, theme, or directory. Bound by default to Tab; \
-     a no-op when the list is empty.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
-    PalettePageUpDef,
-    PalettePageUp,
-    "PalettePageUp",
-    ActionKind::PalettePageUp,
-    "page palette up",
-    "Move the palette selection up by half the visible list height. \
-     Bound by default to Ctrl-B while the command palette is open.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
-    PalettePageDownDef,
-    PalettePageDown,
-    "PalettePageDown",
-    ActionKind::PalettePageDown,
-    "page palette down",
-    "Move the palette selection down by half the visible list height. \
-     Bound by default to Ctrl-F while the command palette is open.",
     ActionPriority::Normal,
     palette_visible = false
 );

@@ -76,30 +76,6 @@ define_action!(
 );
 
 define_action!(
-    FileFinderSelectPrevDef,
-    FileFinderSelectPrev,
-    "FileFinderSelectPrev",
-    ActionKind::FileFinderSelectPrev,
-    "select previous file",
-    "Move the file finder selection up by one row. Bound by default to Up \
-     and Ctrl-P while the file finder is open.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
-    FileFinderSelectNextDef,
-    FileFinderSelectNext,
-    "FileFinderSelectNext",
-    ActionKind::FileFinderSelectNext,
-    "select next file",
-    "Move the file finder selection down by one row. Bound by default to \
-     Down and Ctrl-N while the file finder is open.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
     FileFinderScopeToggleDef,
     FileFinderScopeToggle,
     "FileFinderScopeToggle",
@@ -108,45 +84,6 @@ define_action!(
     "Flip the file finder between All scope (every tracked file in the \
      workspace) and Modified scope (files with uncommitted git changes). \
      Bound by default to Shift-Tab while the finder is open.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
-    FileFinderCompleteDef,
-    FileFinderComplete,
-    "FileFinderComplete",
-    ActionKind::FileFinderComplete,
-    "complete selected file",
-    "Complete the highlighted row into the file finder query, replacing \
-     what was typed with the row's path. Browsing a directory completes \
-     the typed prefix plus the row's name, so a following Enter opens that \
-     entry. Bound by default to Tab while the finder is open; a no-op when \
-     the list is empty.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
-    FileFinderPageUpDef,
-    FileFinderPageUp,
-    "FileFinderPageUp",
-    ActionKind::FileFinderPageUp,
-    "page file finder up",
-    "Move the file finder selection up by half the visible list height. \
-     Bound by default to Ctrl-B while the file finder is open.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
-    FileFinderPageDownDef,
-    FileFinderPageDown,
-    "FileFinderPageDown",
-    ActionKind::FileFinderPageDown,
-    "page file finder down",
-    "Move the file finder selection down by half the visible list height. \
-     Bound by default to Ctrl-F while the file finder is open.",
     ActionPriority::Normal,
     palette_visible = false
 );
@@ -199,32 +136,11 @@ mod tests {
         assert!(OpenWorkspaceFileFinder.def().palette_visible());
 
         assert_eq!(
-            FileFinderSelectPrev.kind(),
-            ActionKind::FileFinderSelectPrev
-        );
-        assert_eq!(
-            FileFinderSelectNext.kind(),
-            ActionKind::FileFinderSelectNext
-        );
-        assert_eq!(FileFinderPageUp.kind(), ActionKind::FileFinderPageUp);
-        assert_eq!(FileFinderPageDown.kind(), ActionKind::FileFinderPageDown);
-        assert_eq!(
             FileFinderScopeToggle.kind(),
             ActionKind::FileFinderScopeToggle
         );
-        assert_eq!(FileFinderComplete.kind(), ActionKind::FileFinderComplete);
-        assert_eq!(FileFinderComplete.def().name(), "FileFinderComplete");
-        assert!(FileFinderComplete.def().params().is_empty());
-
-        for def in [
-            FileFinderSelectPrev.def(),
-            FileFinderSelectNext.def(),
-            FileFinderPageUp.def(),
-            FileFinderPageDown.def(),
-            FileFinderScopeToggle.def(),
-            FileFinderComplete.def(),
-        ] {
-            assert!(!def.palette_visible());
-        }
+        assert_eq!(FileFinderScopeToggle.def().name(), "FileFinderScopeToggle");
+        assert!(FileFinderScopeToggle.def().params().is_empty());
+        assert!(!FileFinderScopeToggle.def().palette_visible());
     }
 }

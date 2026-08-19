@@ -168,68 +168,6 @@ define_action!(
 );
 
 define_action!(
-    SymbolFinderSelectPrevDef,
-    SymbolFinderSelectPrev,
-    "SymbolFinderSelectPrev",
-    ActionKind::SymbolFinderSelectPrev,
-    "select previous symbol",
-    "Move the symbol finder selection up by one row. Bound by default to \
-     Up and Ctrl-P while the symbol finder is open.",
-    ActionPriority::Rare,
-    palette_visible = false
-);
-
-define_action!(
-    SymbolFinderSelectNextDef,
-    SymbolFinderSelectNext,
-    "SymbolFinderSelectNext",
-    ActionKind::SymbolFinderSelectNext,
-    "select next symbol",
-    "Move the symbol finder selection down by one row. Bound by default to \
-     Down and Ctrl-N while the symbol finder is open.",
-    ActionPriority::Rare,
-    palette_visible = false
-);
-
-define_action!(
-    SymbolFinderCompleteDef,
-    SymbolFinderComplete,
-    "SymbolFinderComplete",
-    ActionKind::SymbolFinderComplete,
-    "complete selected symbol",
-    "Complete the highlighted symbol's title into the symbol finder input, \
-     replacing what was typed. The completed symbol stays selected, so a \
-     following Enter jumps to it. Bound by default to Tab while the symbol \
-     finder is open; a no-op when the list is empty.",
-    ActionPriority::Rare,
-    palette_visible = false
-);
-
-define_action!(
-    SymbolFinderPageUpDef,
-    SymbolFinderPageUp,
-    "SymbolFinderPageUp",
-    ActionKind::SymbolFinderPageUp,
-    "page symbol finder up",
-    "Move the symbol finder selection up by half the visible list height. \
-     Bound by default to Ctrl-B while the symbol finder is open.",
-    ActionPriority::Rare,
-    palette_visible = false
-);
-
-define_action!(
-    SymbolFinderPageDownDef,
-    SymbolFinderPageDown,
-    "SymbolFinderPageDown",
-    ActionKind::SymbolFinderPageDown,
-    "page symbol finder down",
-    "Move the symbol finder selection down by half the visible list height. \
-     Bound by default to Ctrl-F while the symbol finder is open.",
-    ActionPriority::Rare,
-    palette_visible = false
-);
-
-define_action!(
     OpenWorkspaceSymbolPickerDef,
     OpenWorkspaceSymbolPicker,
     "OpenWorkspaceSymbolPicker",

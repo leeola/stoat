@@ -10,15 +10,41 @@ use crate::{
 /// One verb for every small picker, since they differ only in which state
 /// holds the list. A modal with no list, or none open at all, does nothing.
 pub(super) fn picker_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
-    match (active_modal(stoat), delta) {
-        (Some(ActiveModal::Jumplist), 1) => jumplist_picker_next(stoat),
-        (Some(ActiveModal::Jumplist), _) => jumplist_picker_prev(stoat),
-        (Some(ActiveModal::Diagnostics), 1) => diagnostics_picker_next(stoat),
-        (Some(ActiveModal::Diagnostics), _) => diagnostics_picker_prev(stoat),
-        (Some(ActiveModal::Location), 1) => location_picker_next(stoat),
-        (Some(ActiveModal::Location), _) => location_picker_prev(stoat),
-        (Some(ActiveModal::WorkspacePicker), 1) => super::workspace::workspace_picker_next(stoat),
-        (Some(ActiveModal::WorkspacePicker), _) => super::workspace::workspace_picker_prev(stoat),
+    let forward = delta > 0;
+    match active_modal(stoat) {
+        Some(ActiveModal::Jumplist) => match forward {
+            true => jumplist_picker_next(stoat),
+            false => jumplist_picker_prev(stoat),
+        },
+        Some(ActiveModal::Diagnostics) => match forward {
+            true => diagnostics_picker_next(stoat),
+            false => diagnostics_picker_prev(stoat),
+        },
+        Some(ActiveModal::Location) => match forward {
+            true => location_picker_next(stoat),
+            false => location_picker_prev(stoat),
+        },
+        Some(ActiveModal::WorkspacePicker) => match forward {
+            true => super::workspace::workspace_picker_next(stoat),
+            false => super::workspace::workspace_picker_prev(stoat),
+        },
+        Some(ActiveModal::FileFinder) => super::file_finder_move_selection(stoat, delta),
+        Some(ActiveModal::SymbolFinder) => {
+            crate::symbol_finder::symbol_finder_move_selection(stoat, delta)
+        },
+        Some(ActiveModal::CommitPicker) => super::review_walk::commit_picker_step(stoat, delta),
+        Some(ActiveModal::CodeSearch) => match forward {
+            true => super::code_search::code_search_next(stoat),
+            false => super::code_search::code_search_prev(stoat),
+        },
+        Some(ActiveModal::Palette) => match forward {
+            true => super::prompt::palette_select_next(stoat),
+            false => super::prompt::palette_select_prev(stoat),
+        },
+        Some(ActiveModal::Help) => match forward {
+            true => super::help::help_select_next(stoat),
+            false => super::help::help_select_prev(stoat),
+        },
         _ => UpdateEffect::None,
     }
 }
@@ -30,17 +56,39 @@ pub(super) fn picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
         Some(ActiveModal::Diagnostics) => diagnostics_picker_page(stoat, dir),
         Some(ActiveModal::Location) => location_picker_page(stoat, dir),
         Some(ActiveModal::WorkspacePicker) => super::workspace::workspace_picker_page(stoat, dir),
+        Some(ActiveModal::FileFinder) => super::file_finder::file_finder_page(stoat, dir),
+        Some(ActiveModal::SymbolFinder) => crate::symbol_finder::symbol_finder_page(stoat, dir),
+        Some(ActiveModal::CommitPicker) => super::review_walk::commit_picker_page(stoat, dir),
+        Some(ActiveModal::CodeSearch) => super::code_search::code_search_page(stoat, dir),
+        Some(ActiveModal::Palette) => super::palette::palette_page(stoat, dir),
+        Some(ActiveModal::Help) => super::help::help_page(stoat, dir),
         _ => UpdateEffect::None,
     }
 }
 
 /// Fill the open list modal's prompt from its selection.
 ///
-/// Only the workspace picker carries a prompt to complete into. The others
-/// have nothing to fill, so they do nothing rather than reporting an error.
+/// Only a modal whose prompt names what the list holds has something to fill.
+/// The rest do nothing rather than reporting an error.
 pub(super) fn picker_complete(stoat: &mut Stoat) -> UpdateEffect {
     match active_modal(stoat) {
         Some(ActiveModal::WorkspacePicker) => super::workspace::workspace_picker_complete(stoat),
+        Some(ActiveModal::FileFinder) => super::file_finder::file_finder_complete(stoat),
+        Some(ActiveModal::SymbolFinder) => crate::symbol_finder::symbol_finder_complete(stoat),
+        Some(ActiveModal::Palette) => super::palette::palette_complete(stoat),
+        Some(ActiveModal::Help) => super::help::help_complete(stoat),
+        _ => UpdateEffect::None,
+    }
+}
+
+/// Move the open list modal's selection to its first or last row.
+///
+/// Only help binds these today. Every other picker keeps its prompt in insert
+/// mode, where g and G reach the list as typed text.
+pub(super) fn picker_end(stoat: &mut Stoat, last: bool) -> UpdateEffect {
+    match (active_modal(stoat), last) {
+        (Some(ActiveModal::Help), false) => super::help::help_jump_first(stoat),
+        (Some(ActiveModal::Help), true) => super::help::help_jump_last(stoat),
         _ => UpdateEffect::None,
     }
 }

@@ -308,16 +308,20 @@ on key {
         i -> SetMode(insert);
         a -> SetMode(insert);
         Enter -> SubmitPromptInput();
-        j -> HelpSelectNext();
-        k -> HelpSelectPrev();
-        Up -> HelpSelectPrev();
-        Down -> HelpSelectNext();
-        g -> HelpJumpFirst();
-        G -> HelpJumpLast();
+        j -> PickerNext();
+        k -> PickerPrev();
+        Up -> PickerPrev();
+        Down -> PickerNext();
+        g -> PickerFirst();
+        G -> PickerLast();
+        Ctrl-f -> PickerPageDown();
+        Ctrl-b -> PickerPageUp();
+        PageDown -> PickerPageDown();
+        PageUp -> PickerPageUp();
+        # Ctrl-u/Ctrl-d keep the detail pane, where every other list modal
+        # scrolls its own preview with them.
         Ctrl-u -> HelpScrollDetailUp();
         Ctrl-d -> HelpScrollDetailDown();
-        PageUp -> HelpScrollDetailUp();
-        PageDown -> HelpScrollDetailDown();
         BackTab -> HelpScopeToggle();
     }
     modal == workspace_picker && mode == insert {
@@ -327,6 +331,8 @@ on key {
         Ctrl-n -> PickerNext();
         Ctrl-f -> PickerPageDown();
         Ctrl-b -> PickerPageUp();
+        PageDown -> PickerPageDown();
+        PageUp -> PickerPageUp();
         Tab -> PickerComplete();
         Enter -> SubmitPromptInput();
         Escape -> CancelPromptInput();
@@ -346,6 +352,8 @@ on key {
         Ctrl-n -> PickerNext();
         Ctrl-f -> PickerPageDown();
         Ctrl-b -> PickerPageUp();
+        PageDown -> PickerPageDown();
+        PageUp -> PickerPageUp();
         Enter -> SubmitPromptInput();
         Escape -> CancelPromptInput();
     }
@@ -356,6 +364,8 @@ on key {
         Ctrl-n -> PickerNext();
         Ctrl-f -> PickerPageDown();
         Ctrl-b -> PickerPageUp();
+        PageDown -> PickerPageDown();
+        PageUp -> PickerPageUp();
         Enter -> SubmitPromptInput();
         Escape -> CancelPromptInput();
     }
@@ -366,6 +376,8 @@ on key {
         Ctrl-n -> PickerNext();
         Ctrl-f -> PickerPageDown();
         Ctrl-b -> PickerPageUp();
+        PageDown -> PickerPageDown();
+        PageUp -> PickerPageUp();
         Enter -> SubmitPromptInput();
         Escape -> CancelPromptInput();
     }
@@ -956,70 +968,82 @@ on key {
         Ctrl-a -> SetMode(prefix);
     }
     modal == finder && mode == insert {
-        Up -> FileFinderSelectPrev();
-        Down -> FileFinderSelectNext();
-        Ctrl-p -> FileFinderSelectPrev();
-        Ctrl-n -> FileFinderSelectNext();
-        Ctrl-f -> FileFinderPageDown();
-        Ctrl-b -> FileFinderPageUp();
-        Tab -> FileFinderComplete();
+        Up -> PickerPrev();
+        Down -> PickerNext();
+        Ctrl-p -> PickerPrev();
+        Ctrl-n -> PickerNext();
+        Ctrl-f -> PickerPageDown();
+        Ctrl-b -> PickerPageUp();
+        PageDown -> PickerPageDown();
+        PageUp -> PickerPageUp();
+        Tab -> PickerComplete();
         BackTab -> FileFinderScopeToggle();
     }
     modal == symbols && mode == insert {
-        Up -> SymbolFinderSelectPrev();
-        Down -> SymbolFinderSelectNext();
-        Ctrl-p -> SymbolFinderSelectPrev();
-        Ctrl-n -> SymbolFinderSelectNext();
-        Ctrl-f -> SymbolFinderPageDown();
-        Ctrl-b -> SymbolFinderPageUp();
-        Tab -> SymbolFinderComplete();
+        Up -> PickerPrev();
+        Down -> PickerNext();
+        Ctrl-p -> PickerPrev();
+        Ctrl-n -> PickerNext();
+        Ctrl-f -> PickerPageDown();
+        Ctrl-b -> PickerPageUp();
+        PageDown -> PickerPageDown();
+        PageUp -> PickerPageUp();
+        Tab -> PickerComplete();
     }
     modal == commit_picker && mode == insert {
-        Up -> CommitPickerPrev();
-        Down -> CommitPickerNext();
-        Ctrl-p -> CommitPickerPrev();
-        Ctrl-n -> CommitPickerNext();
-        Ctrl-f -> CommitPickerPageDown();
-        Ctrl-b -> CommitPickerPageUp();
+        Up -> PickerPrev();
+        Down -> PickerNext();
+        Ctrl-p -> PickerPrev();
+        Ctrl-n -> PickerNext();
+        Ctrl-f -> PickerPageDown();
+        Ctrl-b -> PickerPageUp();
+        PageDown -> PickerPageDown();
+        PageUp -> PickerPageUp();
         Ctrl-Up -> CommitPickerPrevBranch();
         Ctrl-Down -> CommitPickerNextBranch();
         BackTab -> CommitPickerColumnCycle();
         Alt-Right -> CommitPickerDrillIn();
         Alt-Left -> CommitPickerBack();
-        Enter -> CommitPickerSelect();
-        Escape -> CommitPickerClose();
+        Enter -> SubmitPromptInput();
+        Escape -> CancelPromptInput();
     }
     modal == code_search && mode == insert {
-        Up -> CodeSearchPrev();
-        Down -> CodeSearchNext();
-        Ctrl-p -> CodeSearchPrev();
-        Ctrl-n -> CodeSearchNext();
-        Ctrl-f -> CodeSearchPageDown();
-        Ctrl-b -> CodeSearchPageUp();
+        Up -> PickerPrev();
+        Down -> PickerNext();
+        Ctrl-p -> PickerPrev();
+        Ctrl-n -> PickerNext();
+        Ctrl-f -> PickerPageDown();
+        Ctrl-b -> PickerPageUp();
+        PageDown -> PickerPageDown();
+        PageUp -> PickerPageUp();
         BackTab -> CodeSearchModeToggle();
     }
     modal == palette && mode == insert {
-        Up -> PaletteSelectPrev();
-        Down -> PaletteSelectNext();
+        Up -> PickerPrev();
+        Down -> PickerNext();
         Alt-Up -> PaletteHistoryPrev();
         Alt-Down -> PaletteHistoryNext();
-        Ctrl-p -> PaletteSelectPrev();
-        Ctrl-n -> PaletteSelectNext();
-        Ctrl-f -> PalettePageDown();
-        Ctrl-b -> PalettePageUp();
-        Tab -> PaletteComplete();
+        Ctrl-p -> PickerPrev();
+        Ctrl-n -> PickerNext();
+        Ctrl-f -> PickerPageDown();
+        Ctrl-b -> PickerPageUp();
+        PageDown -> PickerPageDown();
+        PageUp -> PickerPageUp();
+        Tab -> PickerComplete();
         BackTab -> PaletteScopeToggle();
     }
     modal == help && mode == insert {
-        Up -> HelpSelectPrev();
-        Down -> HelpSelectNext();
-        Ctrl-p -> HelpSelectPrev();
-        Ctrl-n -> HelpSelectNext();
+        Up -> PickerPrev();
+        Down -> PickerNext();
+        Ctrl-p -> PickerPrev();
+        Ctrl-n -> PickerNext();
+        Ctrl-f -> PickerPageDown();
+        Ctrl-b -> PickerPageUp();
+        PageDown -> PickerPageDown();
+        PageUp -> PickerPageUp();
         Ctrl-u -> HelpScrollDetailUp();
         Ctrl-d -> HelpScrollDetailDown();
-        PageUp -> HelpScrollDetailUp();
-        PageDown -> HelpScrollDetailDown();
-        Tab -> HelpComplete();
+        Tab -> PickerComplete();
         BackTab -> HelpScopeToggle();
     }
     modal && mode == insert {

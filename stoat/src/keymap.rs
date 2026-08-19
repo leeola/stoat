@@ -1839,6 +1839,58 @@ mod tests {
         );
     }
 
+    /// Every list modal answers the same keys with the same verbs.
+    ///
+    /// The scheme drifted once already, each picker minting its own actions
+    /// and its own paging keys. This is what holds the parity: a new modal
+    /// that binds its own verbs, or an old one that loses a key, fails here.
+    #[test]
+    fn every_picker_modal_answers_the_same_keys() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        // The finder family prompts in insert mode. The rest take normal keys.
+        let insert_modals = [
+            "finder",
+            "symbols",
+            "commit_picker",
+            "code_search",
+            "palette",
+            "help",
+            "workspace_picker",
+        ];
+        let normal_modals = ["jumplist", "diagnostics", "location"];
+
+        let expected = [
+            (KeyCode::Up, KeyModifiers::NONE, "PickerPrev"),
+            (KeyCode::Down, KeyModifiers::NONE, "PickerNext"),
+            (KeyCode::Char('p'), KeyModifiers::CONTROL, "PickerPrev"),
+            (KeyCode::Char('n'), KeyModifiers::CONTROL, "PickerNext"),
+            (KeyCode::Char('f'), KeyModifiers::CONTROL, "PickerPageDown"),
+            (KeyCode::Char('b'), KeyModifiers::CONTROL, "PickerPageUp"),
+            (KeyCode::PageDown, KeyModifiers::NONE, "PickerPageDown"),
+            (KeyCode::PageUp, KeyModifiers::NONE, "PickerPageUp"),
+        ];
+
+        for (modal, mode) in insert_modals
+            .iter()
+            .map(|m| (*m, "insert"))
+            .chain(normal_modals.iter().map(|m| (*m, "normal")))
+        {
+            let state = TestState::new()
+                .set("modal", StateValue::String(modal.into()))
+                .set("mode", StateValue::String(mode.into()));
+            for (code, mods, action) in expected {
+                let bound = keymap
+                    .lookup(&state, &KeyEvent::new(code, mods))
+                    .unwrap_or_else(|| panic!("{modal} leaves {code:?} unbound"))[0]
+                    .name
+                    .clone();
+                assert_eq!(bound, action, "{modal} answers {code:?} with {action}");
+            }
+        }
+    }
+
     #[test]
     fn space_pane_display_binds_digits_to_focus_pane() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);

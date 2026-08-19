@@ -56,34 +56,23 @@ define_action!(
 );
 
 define_action!(
-    CommitPickerNextDef,
-    CommitPickerNext,
-    "CommitPickerNext",
-    ActionKind::CommitPickerNext,
-    "next commit row",
-    "Move the commit picker's selection to the next row.",
+    PickerFirstDef,
+    PickerFirst,
+    "PickerFirst",
+    ActionKind::PickerFirst,
+    "first picker row",
+    "Move the open list modal's selection to the first row. Bound only where the modal takes normal-mode keys, since a prompt in insert mode reads g as text.",
     ActionPriority::Common,
     palette_visible = false
 );
 
 define_action!(
-    CommitPickerPageDownDef,
-    CommitPickerPageDown,
-    "CommitPickerPageDown",
-    ActionKind::CommitPickerPageDown,
-    "page the commit list down",
-    "Move the commit picker's selection down by half the visible rows, matching how every other modal list pages.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    CommitPickerPageUpDef,
-    CommitPickerPageUp,
-    "CommitPickerPageUp",
-    ActionKind::CommitPickerPageUp,
-    "page the commit list up",
-    "Move the commit picker's selection up by half the visible rows, the counterpart to CommitPickerPageDown.",
+    PickerLastDef,
+    PickerLast,
+    "PickerLast",
+    ActionKind::PickerLast,
+    "last picker row",
+    "Move the open list modal's selection to the last row, the counterpart to PickerFirst.",
     ActionPriority::Common,
     palette_visible = false
 );
@@ -139,85 +128,6 @@ define_action!(
     ActionKind::CommitPickerBack,
     "leave the drilled commit scope",
     "Return to the commit list a drill re-scoped away from, restoring its selection and query. Does nothing at the outermost scope.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    CommitPickerPrevDef,
-    CommitPickerPrev,
-    "CommitPickerPrev",
-    ActionKind::CommitPickerPrev,
-    "previous commit row",
-    "Move the commit picker's selection to the previous row.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    CommitPickerSelectDef,
-    CommitPickerSelect,
-    "CommitPickerSelect",
-    ActionKind::CommitPickerSelect,
-    "review from the selected commit",
-    "Take the commit under the picker's selection as the review base.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    CommitPickerCloseDef,
-    CommitPickerClose,
-    "CommitPickerClose",
-    ActionKind::CommitPickerClose,
-    "close commit picker",
-    "Dismiss the commit picker without starting a review.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    CodeSearchNextDef,
-    CodeSearchNext,
-    "CodeSearchNext",
-    ActionKind::CodeSearchNext,
-    "next code-search result",
-    "Move the code-search modal's selection to the next match.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    CodeSearchPrevDef,
-    CodeSearchPrev,
-    "CodeSearchPrev",
-    ActionKind::CodeSearchPrev,
-    "previous code-search result",
-    "Move the code-search modal's selection to the previous match.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    CodeSearchPageDownDef,
-    CodeSearchPageDown,
-    "CodeSearchPageDown",
-    ActionKind::CodeSearchPageDown,
-    "page code search down",
-    "Move the code-search modal's selection down by half the visible list \
-     height. Bound by default to Ctrl-F while the modal is open.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    CodeSearchPageUpDef,
-    CodeSearchPageUp,
-    "CodeSearchPageUp",
-    ActionKind::CodeSearchPageUp,
-    "page code search up",
-    "Move the code-search modal's selection up by half the visible list \
-     height. Bound by default to Ctrl-B while the modal is open.",
     ActionPriority::Common,
     palette_visible = false
 );

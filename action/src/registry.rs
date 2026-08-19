@@ -68,21 +68,18 @@ use crate::{
             ReloadBuffer, ToggleMinimap, ToggleWrap,
         },
         file_finder::{
-            FileFinderComplete, FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle,
-            FileFinderSelectNext, FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker,
-            OpenFileFinder, OpenFileFinderHSplit, OpenFileFinderVSplit, OpenWorkspaceFileFinder,
+            FileFinderScopeToggle, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
+            OpenFileFinderHSplit, OpenFileFinderVSplit, OpenWorkspaceFileFinder,
         },
         help::{
-            CloseHelp, DismissKeyHints, HelpComplete, HelpJumpFirst, HelpJumpLast, HelpScopeToggle,
-            HelpScrollDetailDown, HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
-            ToggleKeyHints,
+            CloseHelp, DismissKeyHints, HelpScopeToggle, HelpScrollDetailDown, HelpScrollDetailUp,
+            OpenHelp, ToggleKeyHints,
         },
         lsp::{
             CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition,
             GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic, GotoTypeDefinition, Hover,
             OpenDiagnosticsPicker, OpenSymbolPicker, OpenWorkspaceDiagnosticsPicker,
-            OpenWorkspaceSymbolPicker, RenameSymbol, SymbolFinderComplete, SymbolFinderPageDown,
-            SymbolFinderPageUp, SymbolFinderSelectNext, SymbolFinderSelectPrev,
+            OpenWorkspaceSymbolPicker, RenameSymbol,
         },
         palette::OpenCommandPalette,
         pane::{
@@ -92,17 +89,14 @@ use crate::{
             SplitRight, ToggleDockLeft, ToggleDockRight, TogglePaneWiden,
         },
         picker::{
-            CodeSearchClose, CodeSearchModeToggle, CodeSearchNext, CodeSearchPageDown,
-            CodeSearchPageUp, CodeSearchPrev, CodeSearchSelect, CommitPickerBack,
-            CommitPickerClose, CommitPickerColumnCycle, CommitPickerDrillIn, CommitPickerNext,
-            CommitPickerNextBranch, CommitPickerPageDown, CommitPickerPageUp, CommitPickerPrev,
-            CommitPickerPrevBranch, CommitPickerSelect, PickerComplete, PickerNext, PickerPageDown,
-            PickerPageUp, PickerPrev,
+            CodeSearchClose, CodeSearchModeToggle, CodeSearchSelect, CommitPickerBack,
+            CommitPickerColumnCycle, CommitPickerDrillIn, CommitPickerNextBranch,
+            CommitPickerPrevBranch, PickerComplete, PickerFirst, PickerLast, PickerNext,
+            PickerPageDown, PickerPageUp, PickerPrev,
         },
         prompt::{
-            CancelPromptInput, PaletteComplete, PaletteHistoryNext, PaletteHistoryPrev,
-            PalettePageDown, PalettePageUp, PaletteScopeToggle, PaletteSelectNext,
-            PaletteSelectPrev, PromptInsertNewline, SubmitPromptInput,
+            CancelPromptInput, PaletteHistoryNext, PaletteHistoryPrev, PaletteScopeToggle,
+            PromptInsertNewline, SubmitPromptInput,
         },
         rebase::{
             AbortRebase, EnterRebase, ExecuteRebase, RebaseConflictAbort, RebaseConflictApply,
@@ -294,21 +288,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenWorkspaceFileFinder::DEF, |_| {
         Ok(Box::new(OpenWorkspaceFileFinder))
     });
-    add(FileFinderSelectPrev::DEF, |_| {
-        Ok(Box::new(FileFinderSelectPrev))
-    });
-    add(FileFinderSelectNext::DEF, |_| {
-        Ok(Box::new(FileFinderSelectNext))
-    });
-    add(FileFinderPageUp::DEF, |_| Ok(Box::new(FileFinderPageUp)));
-    add(FileFinderPageDown::DEF, |_| {
-        Ok(Box::new(FileFinderPageDown))
-    });
     add(FileFinderScopeToggle::DEF, |_| {
         Ok(Box::new(FileFinderScopeToggle))
-    });
-    add(FileFinderComplete::DEF, |_| {
-        Ok(Box::new(FileFinderComplete))
     });
     add(OpenHelp::DEF, |_| Ok(Box::new(OpenHelp)));
     add(Diff::DEF, |_| Ok(Box::new(Diff)));
@@ -369,21 +350,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CodeAction::DEF, |_| Ok(Box::new(CodeAction)));
     add(RenameSymbol::DEF, |_| Ok(Box::new(RenameSymbol)));
     add(OpenSymbolPicker::DEF, |_| Ok(Box::new(OpenSymbolPicker)));
-    add(SymbolFinderSelectPrev::DEF, |_| {
-        Ok(Box::new(SymbolFinderSelectPrev))
-    });
-    add(SymbolFinderSelectNext::DEF, |_| {
-        Ok(Box::new(SymbolFinderSelectNext))
-    });
-    add(SymbolFinderComplete::DEF, |_| {
-        Ok(Box::new(SymbolFinderComplete))
-    });
-    add(SymbolFinderPageUp::DEF, |_| {
-        Ok(Box::new(SymbolFinderPageUp))
-    });
-    add(SymbolFinderPageDown::DEF, |_| {
-        Ok(Box::new(SymbolFinderPageDown))
-    });
     add(OpenWorkspaceSymbolPicker::DEF, |_| {
         Ok(Box::new(OpenWorkspaceSymbolPicker))
     });
@@ -540,12 +506,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenWorkspaceDiagnosticsPicker))
     });
     add(OpenCodeSearch::DEF, |_| Ok(Box::new(OpenCodeSearch)));
-    add(CodeSearchNext::DEF, |_| Ok(Box::new(CodeSearchNext)));
-    add(CodeSearchPrev::DEF, |_| Ok(Box::new(CodeSearchPrev)));
-    add(CodeSearchPageDown::DEF, |_| {
-        Ok(Box::new(CodeSearchPageDown))
-    });
-    add(CodeSearchPageUp::DEF, |_| Ok(Box::new(CodeSearchPageUp)));
     add(CodeSearchSelect::DEF, |_| Ok(Box::new(CodeSearchSelect)));
     add(CodeSearchClose::DEF, |_| Ok(Box::new(CodeSearchClose)));
     add(CodeSearchModeToggle::DEF, |_| {
@@ -556,14 +516,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(PickerPageDown::DEF, |_| Ok(Box::new(PickerPageDown)));
     add(PickerPageUp::DEF, |_| Ok(Box::new(PickerPageUp)));
     add(PickerComplete::DEF, |_| Ok(Box::new(PickerComplete)));
-    add(CommitPickerNext::DEF, |_| Ok(Box::new(CommitPickerNext)));
-    add(CommitPickerPrev::DEF, |_| Ok(Box::new(CommitPickerPrev)));
-    add(CommitPickerPageDown::DEF, |_| {
-        Ok(Box::new(CommitPickerPageDown))
-    });
-    add(CommitPickerPageUp::DEF, |_| {
-        Ok(Box::new(CommitPickerPageUp))
-    });
+    add(PickerFirst::DEF, |_| Ok(Box::new(PickerFirst)));
+    add(PickerLast::DEF, |_| Ok(Box::new(PickerLast)));
     add(CommitPickerNextBranch::DEF, |_| {
         Ok(Box::new(CommitPickerNextBranch))
     });
@@ -577,10 +531,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(CommitPickerDrillIn))
     });
     add(CommitPickerBack::DEF, |_| Ok(Box::new(CommitPickerBack)));
-    add(CommitPickerSelect::DEF, |_| {
-        Ok(Box::new(CommitPickerSelect))
-    });
-    add(CommitPickerClose::DEF, |_| Ok(Box::new(CommitPickerClose)));
     add(SplitSelection::DEF, |_| Ok(Box::new(SplitSelection)));
     add(SelectRegex::DEF, |_| Ok(Box::new(SelectRegex)));
     add(KeepSelections::DEF, |_| Ok(Box::new(KeepSelections)));
@@ -980,9 +930,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(RunModalDismiss::DEF, |_| Ok(Box::new(RunModalDismiss)));
     add(RunHistoryPrev::DEF, |_| Ok(Box::new(RunHistoryPrev)));
     add(RunHistoryNext::DEF, |_| Ok(Box::new(RunHistoryNext)));
-    add(HelpSelectPrev::DEF, |_| Ok(Box::new(HelpSelectPrev)));
-    add(HelpSelectNext::DEF, |_| Ok(Box::new(HelpSelectNext)));
-    add(HelpComplete::DEF, |_| Ok(Box::new(HelpComplete)));
     add(HelpScopeToggle::DEF, |_| Ok(Box::new(HelpScopeToggle)));
     add(HelpScrollDetailUp::DEF, |_| {
         Ok(Box::new(HelpScrollDetailUp))
@@ -990,8 +937,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(HelpScrollDetailDown::DEF, |_| {
         Ok(Box::new(HelpScrollDetailDown))
     });
-    add(HelpJumpFirst::DEF, |_| Ok(Box::new(HelpJumpFirst)));
-    add(HelpJumpLast::DEF, |_| Ok(Box::new(HelpJumpLast)));
     add(CloseHelp::DEF, |_| Ok(Box::new(CloseHelp)));
     add(ToggleDockRight::DEF, |_| Ok(Box::new(ToggleDockRight)));
     add(ToggleDockLeft::DEF, |_| Ok(Box::new(ToggleDockLeft)));
@@ -1135,20 +1080,15 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(PromptInsertNewline::DEF, |_| {
         Ok(Box::new(PromptInsertNewline))
     });
-    add(PaletteSelectPrev::DEF, |_| Ok(Box::new(PaletteSelectPrev)));
-    add(PaletteSelectNext::DEF, |_| Ok(Box::new(PaletteSelectNext)));
     add(PaletteHistoryPrev::DEF, |_| {
         Ok(Box::new(PaletteHistoryPrev))
     });
     add(PaletteHistoryNext::DEF, |_| {
         Ok(Box::new(PaletteHistoryNext))
     });
-    add(PalettePageUp::DEF, |_| Ok(Box::new(PalettePageUp)));
-    add(PalettePageDown::DEF, |_| Ok(Box::new(PalettePageDown)));
     add(PaletteScopeToggle::DEF, |_| {
         Ok(Box::new(PaletteScopeToggle))
     });
-    add(PaletteComplete::DEF, |_| Ok(Box::new(PaletteComplete)));
 
     map
 }
@@ -1217,12 +1157,7 @@ mod tests {
         "OpenChangedFilePicker",
         "OpenBufferPicker",
         "OpenWorkspaceFileFinder",
-        "FileFinderSelectPrev",
-        "FileFinderSelectNext",
-        "FileFinderPageUp",
-        "FileFinderPageDown",
         "FileFinderScopeToggle",
-        "FileFinderComplete",
         "OpenHelp",
         "Diff",
         "ToggleDiff",
@@ -1386,45 +1321,27 @@ mod tests {
         "PickerPageDown",
         "PickerPageUp",
         "PickerComplete",
-        "CommitPickerNext",
-        "CommitPickerPrev",
-        "CommitPickerPageDown",
-        "CommitPickerPageUp",
+        "PickerFirst",
+        "PickerLast",
         "CommitPickerNextBranch",
         "CommitPickerPrevBranch",
         "CommitPickerColumnCycle",
         "CommitPickerDrillIn",
         "CommitPickerBack",
-        "CommitPickerSelect",
-        "CommitPickerClose",
         "OpenCodeSearch",
-        "CodeSearchNext",
-        "CodeSearchPrev",
-        "CodeSearchPageDown",
-        "CodeSearchPageUp",
         "CodeSearchSelect",
         "CodeSearchClose",
         "CodeSearchModeToggle",
         "CloseWorkspace",
         "ShowCwd",
         "ReloadEnv",
-        "HelpSelectPrev",
-        "HelpSelectNext",
-        "HelpComplete",
         "HelpScopeToggle",
         "HelpScrollDetailUp",
         "HelpScrollDetailDown",
-        "HelpJumpFirst",
-        "HelpJumpLast",
         "SubmitPromptInput",
         "CancelPromptInput",
         "PromptInsertNewline",
-        "PaletteSelectPrev",
-        "PaletteSelectNext",
-        "PalettePageUp",
-        "PalettePageDown",
         "PaletteScopeToggle",
-        "PaletteComplete",
         "ReloadBuffer",
         "ForceReloadBuffer",
         "ReloadAll",
@@ -1780,14 +1697,14 @@ mod tests {
         // + 1 RenameSymbol.
         // + 1 OpenSymbolPicker.
         // + 4 SymbolFinder SelectPrev/Next/PageUp/PageDown.
-        // + 1 SymbolFinderComplete.
-        // + 1 HelpComplete.
+        // + 1 .
+        // + 1 .
         // + 1 WorkspacePickerComplete.
         // + 4 NewTab, CloseTab, GotoTab, ToggleTab.
         // + 1 ToggleTabBar.
         // + 1 RenameTab.
         // + 2 NextTab, PrevTab.
-        // + 2 CodeSearchPageDown, CodeSearchPageUp.
+        // + 2 .
         // + 1 OpenWorkspaceSymbolPicker.
         // + 1 FormatSelections.
         // + 1 Format.
@@ -1811,9 +1728,9 @@ mod tests {
         // + 2 GotoDiffCallerUp, GotoDiffCalleeDown.
         // + 5 MarkTrailStart, MarkTrailEnd, TrailNext, TrailPrev, TrailClear.
         // + 7 WalkthroughOpen/Next/Prev/NextAnnotation/PrevAnnotation/ShowNarration/Done.
-        // + 2 FileFinderPageUp, FileFinderPageDown.
-        // + 1 FileFinderComplete.
-        // + 2 PalettePageUp, PalettePageDown.
+        // + 2 .
+        // + 1 .
+        // + 2 .
         // + 1 OpenBuffer.
         // + 1 ToggleDiff.
         // + 3 StageHunk, UnstageHunk, ToggleStageHunk.
@@ -1847,7 +1764,7 @@ mod tests {
         // + 2 JoinSelections / JoinSelectionsSpace.
         // + 1 AutoReload.
         // + 1 AutoReloadConfig.
-        // + 1 PaletteComplete.
+        // + 1 .
         // + 1 FocusPane.
         // + 2 PaletteHistoryPrev/Next.
         // + 1 SetTheme.
@@ -1862,12 +1779,12 @@ mod tests {
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        // + 4 CommitPickerNext/Prev/Select/Close.
+        // + 4 /Prev/Select/Close.
         // + 1 GitReview.
         // + 3 ReviewNextCommit/ReviewPrevCommit/ReviewDone.
         // + 1 GitLs.
         // + 2 FontSizeInc/FontSizeDec.
-        // + 3 CommitPickerPageDown/PageUp/ColumnCycle.
+        // + 3 /PageUp/ColumnCycle.
         // + 8 Jumplist/Diagnostics/Location/WorkspacePicker PageDown/PageUp.
         // + 2 CommitPickerDrillIn/CommitPickerBack.
         // + 2 CommitPickerNextBranch/CommitPickerPrevBranch.
@@ -1879,7 +1796,7 @@ mod tests {
         // + 1 ReplaceWithClipboard.
         // + 2 ToggleLineComments/ToggleBlockComments.
         // + 4 the long-word extends.
-        assert_eq!(all().count(), 455);
+        assert_eq!(all().count(), 427);
     }
 
     #[test]

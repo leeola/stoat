@@ -58,6 +58,7 @@ fn picker_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
         ActiveModal::Diagnostics => Some(super::picker::diagnostics_picker_select(stoat)),
         ActiveModal::Location => Some(super::picker::location_picker_select(stoat)),
         ActiveModal::WorkspacePicker => Some(super::workspace::workspace_picker_select(stoat)),
+        ActiveModal::CommitPicker => Some(super::review_walk::commit_picker_select(stoat)),
         _ => None,
     }
 }
@@ -69,6 +70,7 @@ fn picker_cancel(stoat: &mut Stoat) -> Option<UpdateEffect> {
         ActiveModal::Diagnostics => Some(super::picker::diagnostics_picker_close(stoat)),
         ActiveModal::Location => Some(super::picker::location_picker_close(stoat)),
         ActiveModal::WorkspacePicker => Some(super::workspace::workspace_picker_close(stoat)),
+        ActiveModal::CommitPicker => Some(super::review_walk::commit_picker_close(stoat)),
         _ => None,
     }
 }

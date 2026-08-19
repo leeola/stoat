@@ -14,6 +14,18 @@ pub(super) fn help_select_next(stoat: &mut Stoat) -> UpdateEffect {
     apply_to_help(stoat, |h| h.move_selection(1))
 }
 
+/// Rows a help list page covers.
+///
+/// A fixed step, where the other list modals derive one from the rows their
+/// viewport shows. [`Help`] tracks no row count, and its detail pane already
+/// scrolls by a fixed step for the same reason.
+const HELP_PAGE_ROWS: i32 = 5;
+
+/// Page the help list's selection by [`HELP_PAGE_ROWS`] in `dir`.
+pub(super) fn help_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    apply_to_help(stoat, |h| h.move_selection(dir * HELP_PAGE_ROWS))
+}
+
 pub(super) fn help_complete(stoat: &mut Stoat) -> UpdateEffect {
     let active_idx = stoat.active_workspace;
     let workspaces = &mut stoat.workspaces;

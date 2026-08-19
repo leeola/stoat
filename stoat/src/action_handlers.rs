@@ -377,12 +377,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             crate::file_finder::OpenIntent::Replace,
             Some(crate::file_finder::FinderScope::AllWorkspaces),
         ),
-        ActionKind::FileFinderSelectPrev => file_finder_move_selection(stoat, -1),
-        ActionKind::FileFinderSelectNext => file_finder_move_selection(stoat, 1),
-        ActionKind::FileFinderPageUp => file_finder::file_finder_page(stoat, -1),
-        ActionKind::FileFinderPageDown => file_finder::file_finder_page(stoat, 1),
         ActionKind::FileFinderScopeToggle => file_finder::file_finder_scope_toggle(stoat),
-        ActionKind::FileFinderComplete => file_finder::file_finder_complete(stoat),
         ActionKind::OpenCommandPalette => {
             let executor = stoat.executor.clone();
             let availability = crate::command_palette::Availability::from_stoat(stoat);
@@ -679,6 +674,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PickerPageDown => picker::picker_page(stoat, 1),
         ActionKind::PickerPageUp => picker::picker_page(stoat, -1),
         ActionKind::PickerComplete => picker::picker_complete(stoat),
+        ActionKind::PickerFirst => picker::picker_end(stoat, false),
+        ActionKind::PickerLast => picker::picker_end(stoat, true),
         ActionKind::GitReview => {
             let action = action
                 .as_any()
@@ -696,22 +693,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ReviewNextCommit => review_walk::review_next_commit(stoat),
         ActionKind::ReviewPrevCommit => review_walk::review_prev_commit(stoat),
         ActionKind::ReviewDone => review_walk::review_done(stoat),
-        ActionKind::CommitPickerNext => review_walk::commit_picker_step(stoat, 1),
-        ActionKind::CommitPickerPrev => review_walk::commit_picker_step(stoat, -1),
-        ActionKind::CommitPickerPageDown => review_walk::commit_picker_page(stoat, 1),
-        ActionKind::CommitPickerPageUp => review_walk::commit_picker_page(stoat, -1),
         ActionKind::CommitPickerNextBranch => review_walk::commit_picker_branch(stoat, 1),
         ActionKind::CommitPickerPrevBranch => review_walk::commit_picker_branch(stoat, -1),
         ActionKind::CommitPickerColumnCycle => review_walk::commit_picker_column_cycle(stoat),
         ActionKind::CommitPickerDrillIn => review_walk::commit_picker_drill_in(stoat),
         ActionKind::CommitPickerBack => review_walk::commit_picker_back(stoat),
-        ActionKind::CommitPickerSelect => review_walk::commit_picker_select(stoat),
-        ActionKind::CommitPickerClose => review_walk::commit_picker_close(stoat),
         ActionKind::OpenCodeSearch => code_search::open_code_search(stoat),
-        ActionKind::CodeSearchNext => code_search::code_search_next(stoat),
-        ActionKind::CodeSearchPrev => code_search::code_search_prev(stoat),
-        ActionKind::CodeSearchPageDown => code_search::code_search_page(stoat, 1),
-        ActionKind::CodeSearchPageUp => code_search::code_search_page(stoat, -1),
         ActionKind::CodeSearchSelect => {
             code_search::code_search_select(stoat);
             UpdateEffect::Redraw
@@ -903,14 +890,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::RunModalDismiss => run::run_modal_dismiss(stoat),
         ActionKind::RunHistoryPrev => run::run_history_prev(stoat),
         ActionKind::RunHistoryNext => run::run_history_next(stoat),
-        ActionKind::HelpSelectPrev => help::help_select_prev(stoat),
-        ActionKind::HelpSelectNext => help::help_select_next(stoat),
-        ActionKind::HelpComplete => help::help_complete(stoat),
         ActionKind::HelpScopeToggle => help::help_scope_toggle(stoat),
         ActionKind::HelpScrollDetailUp => help::help_scroll_detail_up(stoat),
         ActionKind::HelpScrollDetailDown => help::help_scroll_detail_down(stoat),
-        ActionKind::HelpJumpFirst => help::help_jump_first(stoat),
-        ActionKind::HelpJumpLast => help::help_jump_last(stoat),
         ActionKind::CloseHelp => help::help_cancel(stoat),
         ActionKind::Run => {
             let cmd = action
@@ -1004,15 +986,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::CodeAction => lsp::code_action(stoat),
         ActionKind::RenameSymbol => lsp::rename_symbol(stoat),
         ActionKind::OpenSymbolPicker => lsp::open_symbol_picker(stoat),
-        ActionKind::SymbolFinderSelectPrev => {
-            crate::symbol_finder::symbol_finder_move_selection(stoat, -1)
-        },
-        ActionKind::SymbolFinderSelectNext => {
-            crate::symbol_finder::symbol_finder_move_selection(stoat, 1)
-        },
-        ActionKind::SymbolFinderComplete => crate::symbol_finder::symbol_finder_complete(stoat),
-        ActionKind::SymbolFinderPageUp => crate::symbol_finder::symbol_finder_page(stoat, -1),
-        ActionKind::SymbolFinderPageDown => crate::symbol_finder::symbol_finder_page(stoat, 1),
         ActionKind::OpenWorkspaceSymbolPicker => lsp::open_workspace_symbol_picker(stoat),
         ActionKind::FormatSelections => lsp::format_selections(stoat),
         ActionKind::Format => lsp::format_document(stoat),
@@ -1174,18 +1147,13 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SubmitPromptInput => prompt::submit_prompt_input(stoat),
         ActionKind::CancelPromptInput => prompt::cancel_prompt_input(stoat),
         ActionKind::PromptInsertNewline => prompt::prompt_insert_newline(stoat),
-        ActionKind::PaletteSelectPrev => prompt::palette_select_prev(stoat),
-        ActionKind::PaletteSelectNext => prompt::palette_select_next(stoat),
         ActionKind::PaletteHistoryPrev => {
             palette::palette_history_prev(stoat).unwrap_or(UpdateEffect::None)
         },
         ActionKind::PaletteHistoryNext => {
             palette::palette_history_next(stoat).unwrap_or(UpdateEffect::None)
         },
-        ActionKind::PalettePageUp => palette::palette_page(stoat, -1),
-        ActionKind::PalettePageDown => palette::palette_page(stoat, 1),
         ActionKind::PaletteScopeToggle => palette::palette_scope_toggle(stoat),
-        ActionKind::PaletteComplete => palette::palette_complete(stoat),
         ActionKind::OpenLastPicker => open_last_picker(stoat),
     };
     end_action_group(stoat, group_buffer);
