@@ -17,7 +17,10 @@ use crate::{
     code_index::build::file_id,
     diff::{self, ReviewFileInput},
     diff_cache::ContentHash,
-    diff_map::{changes_to_hunks, line_starts, BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap},
+    diff_map::{
+        changes_to_hunks, line_starts, mark_staged, merge_structural_detail, BaseHighlights,
+        DiffHunk, DiffHunkStatus, DiffMap,
+    },
     display_map::syntax_theme::SyntaxStyles,
     host::{FsHost, GitHost, GitRepo},
 };
@@ -33,7 +36,8 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat_language::{
-    extract_highlights, parse, structural_diff, HighlightSpan, Language, LanguageRegistry,
+    extract_highlights, parse, structural_diff, structural_diff::TreeCache, HighlightSpan,
+    Language, LanguageRegistry,
 };
 use stoat_scheduler::{Executor, Task};
 use tokio::sync::Notify;
@@ -122,6 +126,13 @@ pub(crate) struct DiffState {
     /// Set through [`super::Workspace::set_diff_base`], which invalidates
     /// every buffer, since a base change moves every diff in the workspace.
     pub(super) base_override: Option<DiffBase>,
+    /// Parsed trees the structural refinement reuses across settles.
+    ///
+    /// A settle re-parses the same base and the same buffer prefix the last one
+    /// read, so the memo turns the per-keystroke refinement into one parse of
+    /// what actually changed. Shared with the blocking job, which is where the
+    /// parses run.
+    pub(super) tree_cache: TreeCache,
     /// Files with staged and with unstaged changes across the whole repo, as
     /// the status bar's repo-wide tally reads them.
     ///
@@ -287,6 +298,9 @@ impl DiffState {
             base_cache,
             self.base_text.get(&path).cloned(),
             self.base_override.as_ref(),
+            // The sync open stays line-only so it lands in one frame. The
+            // structural refinement arrives at the background settle.
+            None,
         );
         let diff_map = computed.map(|(diff_map, base)| {
             self.base_text.insert(path.clone(), base);
@@ -434,6 +448,7 @@ impl DiffState {
                 let base_cache = base_cache.clone();
                 let path = path.clone();
                 let base_override = self.base_override.clone();
+                let tree_cache = self.tree_cache.clone();
                 move || {
                     // Materialize the rope only now that the diff is confirmed
                     // stale and a job is committed, off the event-loop thread.
@@ -448,6 +463,7 @@ impl DiffState {
                         &base_cache,
                         cached_base,
                         base_override.as_ref(),
+                        Some(&tree_cache),
                     )
                     .map(|(mut diff_map, base)| {
                         diff_map.anchor_hunks(&buffer_snapshot);
@@ -550,8 +566,15 @@ pub(crate) type BaseHighlightCache = Arc<Mutex<BaseHighlightMemo>>;
 /// no HEAD content to diff against.
 ///
 /// Both `discover` and `head_content` do git and filesystem IO, so this must
-/// run on a blocking thread. Uses the language-agnostic line diff, matching
-/// [`changed_byte_ranges`].
+/// run on a blocking thread.
+///
+/// Two differs answer two questions. The language-agnostic line pass owns the
+/// extents and the staged marks, matching [`changed_byte_ranges`], so the
+/// gutter and staging read line boundaries. With a `language` and a
+/// `tree_memo`, a tree-sitter pass then owns the token detail, so a reindented
+/// block washes what it actually changed rather than every line's prefix.
+/// Without either, or when the tree pass falls back to lines, the line pass's
+/// char-refined spans stand.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compute_diff_map(
     git: &dyn GitHost,
@@ -563,6 +586,7 @@ pub(super) fn compute_diff_map(
     base_cache: &BaseHighlightCache,
     cached_base: Option<DiffBaseText>,
     base_override: Option<&DiffBase>,
+    tree_memo: Option<&TreeCache>,
 ) -> Option<(DiffMap, DiffBaseText)> {
     // Reading the blobs is what costs. It takes the repo mutex and then
     // decompresses bytes that a keystroke cannot have changed. The pair is
@@ -618,12 +642,25 @@ pub(super) fn compute_diff_map(
             Some(base.head.clone()),
         )
     } else {
-        DiffMap::from_structural_changes_staged(
-            result,
-            base.head.clone(),
-            buffer_text,
-            &index_changed,
-        )
+        let mut hunks = changes_to_hunks(&result.changes, base_text, buffer_text);
+        mark_staged(&mut hunks, &index_changed);
+
+        // The tree pass answers only what the washes should mark. A parse
+        // failure or a fall back to lines leaves the line pass's char-refined
+        // spans in place, which is what the view showed before this ran.
+        if let Some(language) = language
+            && let Some(tree) = structural_diff::diff_with_language_cancellable(
+                language,
+                base_text,
+                buffer_text,
+                None,
+                tree_memo,
+            )
+            && !tree.fell_back_to_line_diff
+        {
+            merge_structural_detail(&mut hunks, &tree.changes, buffer_text);
+        }
+        DiffMap::from_hunks(hunks, Some(base.head.clone()))
     };
     if let Some(language) = language {
         diff_map.set_base_highlights(compute_base_highlights(
@@ -1276,6 +1313,102 @@ mod tests {
         );
     }
 
+    /// Every hunk's buffer spans, keyed by the first buffer row it covers.
+    fn detail_spans_of(h: &TestHarness, buffer_id: BufferId) -> Vec<(u32, usize)> {
+        let ws = h.stoat.active_workspace();
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        let dm = guard.diff_map.as_ref().expect("diff map populated");
+        dm.hunks()
+            .map(|hunk| {
+                let spans = hunk
+                    .token_detail
+                    .as_ref()
+                    .map_or(0, |detail| detail.buffer_spans.len());
+                (hunk.buffer_start_line, spans)
+            })
+            .collect()
+    }
+
+    /// Open `contents` as a rust file diffed against `base`, and settle the
+    /// background job that carries the structural refinement.
+    fn settled_rust_diff(base: &str, buffer: &str) -> (TestHarness, BufferId) {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.rs", base, buffer)]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.rs"));
+        h.settle_diff_jobs();
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        (h, buffer_id)
+    }
+
+    /// A reindent under a new block is what the structural pass exists for. The
+    /// line differ sees every moved line's prefix rewritten and washes it; the
+    /// tree differ sees unchanged statements and marks only the braces.
+    #[test]
+    fn a_reindent_under_a_new_block_washes_only_the_braces() {
+        const BASE: &str = "fn f() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\n";
+        const BUFFER: &str =
+            "fn f() {\n    if x {\n        let a = 1;\n        let b = 2;\n        let c = 3;\n    }\n}\n";
+
+        let (h, buffer_id) = settled_rust_diff(BASE, BUFFER);
+        let spans = detail_spans_of(&h, buffer_id);
+        // Only the two tokens the block itself added. The line differ washes
+        // nine spans here, one per rewritten indent.
+        assert_eq!(
+            spans,
+            [(1, 2)],
+            "the reindented statements wash nothing, and only `if x` marks"
+        );
+    }
+
+    /// A whitespace-only edit marks the row in the gutter but washes nothing,
+    /// which is an empty detail rather than an absent one.
+    #[test]
+    fn a_whitespace_only_edit_carries_empty_detail() {
+        const BASE: &str = "fn f() {\n    let a = 1;\n}\n";
+        const BUFFER: &str = "fn f() {\n        let a = 1;\n}\n";
+
+        let (h, buffer_id) = settled_rust_diff(BASE, BUFFER);
+        let ws = h.stoat.active_workspace();
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        let dm = guard.diff_map.as_ref().expect("diff map populated");
+        let modified: Vec<_> = dm
+            .hunks()
+            .filter(|hunk| hunk.status == DiffHunkStatus::Modified)
+            .collect();
+        assert_eq!(modified.len(), 1, "one modified hunk: {modified:?}");
+        let detail = modified[0]
+            .token_detail
+            .as_ref()
+            .expect("a modified hunk carries detail, empty or not");
+        assert_eq!(
+            (detail.buffer_spans.len(), detail.base_spans.len()),
+            (0, 0),
+            "the reindented row washes nothing"
+        );
+    }
+
+    /// A file with no language never reaches the tree differ, so its washes
+    /// stay the line pass's char-refined spans.
+    #[test]
+    fn a_file_with_no_language_keeps_the_char_refined_spans() {
+        let (h, buffer_id) = {
+            let mut h = TestHarness::with_size(80, 24);
+            h.stage_review_scenario("/repo", &[("a.unknownext", "alpha\n", "alPHa\n")]);
+            h.stoat.set_diff_warm_auto(true);
+            h.open_file(Path::new("/repo/a.unknownext"));
+            h.settle_diff_jobs();
+            let id = h.stoat.focused_editor_ids().expect("focused editor").1;
+            (h, id)
+        };
+        let spans = detail_spans_of(&h, buffer_id);
+        assert!(
+            spans.iter().any(|(_, count)| *count > 0),
+            "the line pass still refines the changed characters: {spans:?}"
+        );
+    }
     /// The base text of `buffer_id`'s installed diff map.
     fn base_text_of(h: &TestHarness, buffer_id: BufferId) -> String {
         let ws = h.stoat.active_workspace();

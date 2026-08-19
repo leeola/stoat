@@ -453,21 +453,7 @@ impl DiffMap {
         index_changed: &[Range<u32>],
     ) -> Self {
         let mut hunks = changes_to_hunks(&result.changes, &lhs, rhs_text);
-        for hunk in &mut hunks {
-            let range = hunk.buffer_line_range.clone();
-            if range.start == range.end {
-                // Zero-width hunk (deletion seam or move anchor): unstaged when
-                // an index change touches its anchor, stored as the anchor.
-                let unstaged = index_changed.iter().any(|c| ranges_overlap(c, &range));
-                hunk.unstaged_lines = if unstaged { vec![range] } else { Vec::new() };
-            } else {
-                hunk.unstaged_lines = index_changed
-                    .iter()
-                    .filter(|c| ranges_overlap(c, &range))
-                    .map(|c| c.start.max(range.start)..c.end.min(range.end))
-                    .collect();
-            }
-        }
+        mark_staged(&mut hunks, index_changed);
         Self::from_hunks(hunks, Some(lhs))
     }
 
@@ -904,6 +890,30 @@ fn ranges_overlap(a: &Range<u32>, b: &Range<u32>) -> bool {
     }
 }
 
+/// Record which of each hunk's rows still differ from the git index.
+///
+/// `index_changed` is the buffer-row set an index-vs-buffer diff reported, so a
+/// row absent from it is already applied to the index. A zero-width hunk is a
+/// deletion seam or a move anchor and has no rows to intersect, so it stores
+/// its anchor point when an index change touches it and nothing when not.
+pub(crate) fn mark_staged(hunks: &mut [DiffHunk], index_changed: &[Range<u32>]) {
+    for hunk in hunks.iter_mut() {
+        let range = hunk.buffer_line_range.clone();
+        if range.start == range.end {
+            let unstaged = index_changed.iter().any(|c| ranges_overlap(c, &range));
+            hunk.unstaged_lines = match unstaged {
+                true => vec![range],
+                false => Vec::new(),
+            };
+        } else {
+            hunk.unstaged_lines = index_changed
+                .iter()
+                .filter(|c| ranges_overlap(c, &range))
+                .map(|c| c.start.max(range.start)..c.end.min(range.end))
+                .collect();
+        }
+    }
+}
 /// Fold a structural diff's changes into hunks, in buffer-line order.
 ///
 /// Also reachable on its own for a caller that wants the hunks and nothing
@@ -1136,6 +1146,112 @@ pub(crate) fn changes_to_hunks(
     hunks
 }
 
+/// Replace each `Modified` hunk's token detail with the tree differ's spans,
+/// clipped to that hunk.
+///
+/// The two differs answer different questions and this is where they meet. The
+/// line pass owns extents and staged marks, so the gutter, staging, and
+/// navigation are unchanged. The tree pass owns detail, which is what stops a
+/// reindent under a new block from washing every moved line's leading
+/// whitespace: tree-sitter sees the statements as unchanged nodes that moved,
+/// where the line differ sees every line's prefix rewritten.
+///
+/// A `Modified` hunk the tree pass finds nothing in takes an empty
+/// [`TokenDetail`] rather than `None`. The renderer washes nothing and softens
+/// nothing for an empty span list, which is the intended reading of a
+/// whitespace-only row: gutter-marked, full strength, wash-free. `None` would
+/// instead mean "no detail resolved" and leave the row to the caller's default.
+///
+/// `Added` and `Deleted` hunks keep `None`, which is what suppresses a
+/// whole-line wash on them.
+///
+/// Spans stay file-absolute, exactly as [`replaced_change_spans`] leaves them.
+pub(crate) fn merge_structural_detail(
+    hunks: &mut [DiffHunk],
+    tree_changes: &[stoat_language::structural_diff::DiffChange],
+    buffer_text: &str,
+) {
+    use stoat_language::structural_diff::{ChangeKind as LangChangeKind, Side};
+
+    let buffer_starts = line_starts(buffer_text);
+    for hunk in hunks.iter_mut() {
+        if hunk.status != DiffHunkStatus::Modified {
+            continue;
+        }
+        let buffer_bytes =
+            line_range_to_byte_range(&buffer_starts, buffer_text.len(), &hunk.buffer_line_range);
+        let mut buffer_spans = Vec::new();
+        let mut base_spans = Vec::new();
+        for change in tree_changes {
+            // A relocation is not a content change. The tree differ reports every
+            // token of a reindented block as moved, so washing those would mark
+            // a run of untouched statements more heavily than the line differ
+            // did -- the clutter this pass exists to remove. Whole-hunk moves
+            // are a separate status and keep their own cyan wash.
+            if change.kind == LangChangeKind::Moved {
+                continue;
+            }
+            let (bounds, out) = match change.side {
+                Side::Rhs => (&buffer_bytes, &mut buffer_spans),
+                Side::Lhs => (&hunk.base_byte_range, &mut base_spans),
+            };
+            out.extend(
+                effective_ranges(change)
+                    .iter()
+                    .filter(|range| range.start < bounds.end && bounds.start < range.end)
+                    .map(|range| ChangeSpan {
+                        byte_range: range.clone(),
+                        kind: span_kind(change),
+                        move_metadata: change.move_metadata.clone(),
+                    }),
+            );
+        }
+        hunk.token_detail = Some(Arc::new(TokenDetail {
+            buffer_spans,
+            base_spans,
+        }));
+    }
+}
+
+/// The byte ranges a change actually marks.
+///
+/// `refined_spans` when the differ narrowed the change to the characters that
+/// differ, else the whole `byte_range`, the same preference
+/// [`replaced_change_spans`] makes.
+fn effective_ranges(change: &stoat_language::structural_diff::DiffChange) -> &[Range<usize>] {
+    match change.refined_spans.is_empty() {
+        true => std::slice::from_ref(&change.byte_range),
+        false => change.refined_spans.as_slice(),
+    }
+}
+
+/// How a tree change washes.
+///
+/// Only the two content kinds reach this. A moved change never becomes a span.
+fn span_kind(change: &stoat_language::structural_diff::DiffChange) -> ChangeKind {
+    use stoat_language::structural_diff::ChangeKind as LangChangeKind;
+    match change.kind {
+        LangChangeKind::Replaced => ChangeKind::Replaced,
+        LangChangeKind::Novel | LangChangeKind::Moved => ChangeKind::Novel,
+    }
+}
+
+/// The byte span buffer lines `range` covers.
+fn line_range_to_byte_range(
+    line_starts: &[usize],
+    text_len: usize,
+    range: &Range<u32>,
+) -> Range<usize> {
+    let start = line_starts
+        .get(range.start as usize)
+        .copied()
+        .unwrap_or(text_len);
+    let end = line_starts
+        .get(range.end as usize)
+        .copied()
+        .unwrap_or(text_len);
+    start..end.max(start)
+}
 /// The changed sub-ranges of one side of a `Replaced` pair, as
 /// [`ChangeKind::Replaced`] [`ChangeSpan`]s.
 ///
@@ -2222,6 +2338,40 @@ mod tests {
         );
     }
 
+    /// The two-phase contract rests on this. The sync open installs a
+    /// line-only map and the settle installs the refined one, which differ in
+    /// nothing but their spans, so a comparison blind to detail would skip the
+    /// install and the refinement would never reach the screen.
+    #[test]
+    fn a_detail_only_difference_is_not_the_same_render() {
+        let hunk = |spans: Vec<ChangeSpan>| DiffHunk {
+            status: DiffHunkStatus::Modified,
+            buffer_start_line: 1,
+            buffer_line_range: 1..2,
+            base_byte_range: 2..4,
+            anchor_range: None,
+            token_detail: Some(Arc::new(TokenDetail {
+                buffer_spans: spans,
+                base_spans: Vec::new(),
+            })),
+            unstaged_lines: std::iter::once(1..2).collect(),
+        };
+        let base = Arc::new("a\nb\n".to_string());
+        let line_pass = DiffMap::from_hunks(
+            [hunk(vec![ChangeSpan {
+                byte_range: 2..3,
+                kind: ChangeKind::Replaced,
+                move_metadata: None,
+            }])],
+            Some(base.clone()),
+        );
+        let tree_pass = DiffMap::from_hunks([hunk(Vec::new())], Some(base));
+
+        assert!(
+            !line_pass.renders_same_as(&tree_pass),
+            "a map whose only difference is its spans still has to install"
+        );
+    }
     #[test]
     fn from_structural_changes_staged_marks_by_index_overlap() {
         // HEAD a/b/c/d; buffer changes line 1 (B) and line 3 (D). The index
