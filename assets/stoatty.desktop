@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Stoatty
+Comment=GPU terminal hosting the stoat editor
+Exec=stoatty
+Icon=stoatty
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupWMClass=stoatty
