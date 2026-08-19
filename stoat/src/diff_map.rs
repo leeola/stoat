@@ -53,6 +53,45 @@ pub struct TokenDetail {
     pub base_spans: Vec<ChangeSpan>,
 }
 
+/// The buffer rows a refined hunk's spans actually touch, as merged runs.
+///
+/// A hunk's extents stay line-accurate so staging and navigation keep working
+/// on whole hunks, but its washes come from the tree differ, which marks
+/// tokens rather than lines. Without this the gutter marks all hundred rows of
+/// a reindent whose only real change is two tokens.
+///
+/// `line_of` maps a buffer byte offset to its row. It is a closure because the
+/// caller already holds the rope and has to clamp stale offsets against it.
+///
+/// Runs come back sorted and merged, with adjacent runs joined, so a caller
+/// can binary-search them and a full-hunk refinement collapses to one run.
+fn marked_row_runs(spans: &[ChangeSpan], line_of: impl Fn(usize) -> u32) -> Vec<Range<u32>> {
+    let mut runs: Vec<Range<u32>> = spans
+        .iter()
+        .filter(|span| !span.byte_range.is_empty())
+        .map(|span| {
+            let start = line_of(span.byte_range.start);
+            // The end is exclusive, so the last byte inside it names the last
+            // row. A span ending at a row start must not claim the next row.
+            let end = line_of(span.byte_range.end - 1);
+            start..end + 1
+        })
+        .collect();
+    runs.sort_by_key(|run| run.start);
+
+    let mut merged: Vec<Range<u32>> = Vec::with_capacity(runs.len());
+    for run in runs {
+        match merged.last_mut() {
+            // Adjacent runs join too. Two spans on consecutive rows describe
+            // one marked region, and leaving a seam would let a caller read a
+            // gap that is not there.
+            Some(last) if run.start <= last.end => last.end = last.end.max(run.end),
+            _ => merged.push(run),
+        }
+    }
+    merged
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiffHunk {
     pub status: DiffHunkStatus,
@@ -71,6 +110,19 @@ pub struct DiffHunk {
     /// unstaged. Read through [`Self::staged`] and [`Self::line_staged`], never
     /// as raw ranges.
     pub(crate) unstaged_lines: Vec<Range<u32>>,
+    /// Buffer rows inside [`Self::buffer_line_range`] the hunk's structural
+    /// spans touch, in the same stored coordinates that range uses.
+    ///
+    /// Empty means unrefined, and an unrefined hunk marks its whole range.
+    /// Only the tree pass fills this. The line differ's spans cover chars on
+    /// lines it already called changed, so every row of such a hunk is marked
+    /// either way and narrowing costs a walk to reach the same answer.
+    ///
+    /// Stored rather than resolved per frame because the spans are byte offsets
+    /// into the text the diff ran against. Mapping them through the current
+    /// rope drifts from the anchor-tracked live rows after any edit above the
+    /// hunk.
+    pub(crate) marked_rows: Vec<Range<u32>>,
 }
 
 impl DiffHunk {
@@ -80,6 +132,17 @@ impl DiffHunk {
     /// [`Self::unstaged_lines`], so it reads as not fully staged.
     pub(crate) fn staged(&self) -> bool {
         self.unstaged_lines.is_empty()
+    }
+
+    /// Whether the tree pass narrowed this hunk to particular rows.
+    ///
+    /// False for a hunk it never reached and for one whose spans it found
+    /// nothing in. Both mark their whole range, which is what a caller wants:
+    /// an `Added` or `Deleted` hunk never gets structural detail, and a
+    /// whitespace-only row deliberately gets an empty one. Neither has rows to
+    /// narrow to.
+    pub(crate) fn refined(&self) -> bool {
+        !self.marked_rows.is_empty()
     }
 
     /// Whether buffer `row` is applied to the git index.
@@ -101,7 +164,13 @@ impl DiffHunk {
 /// anchors once, so a caller painting a screenful of rows pays for that walk
 /// once rather than per row.
 pub struct LiveHunks<'a> {
-    hunks: Vec<(&'a DiffHunk, Range<u32>)>,
+    hunks: Vec<LiveHunk<'a>>,
+}
+
+/// One hunk as it sits in the buffer now.
+struct LiveHunk<'a> {
+    hunk: &'a DiffHunk,
+    rows: Range<u32>,
 }
 
 impl<'a> LiveHunks<'a> {
@@ -109,23 +178,32 @@ impl<'a> LiveHunks<'a> {
     /// no hunk touches it. The row-level counterpart of
     /// [`DiffMap::gutter_mark_for_line`], reading live rows rather than stored
     /// ones.
+    ///
+    /// A refined hunk marks only the rows its spans touch, so a reindent whose
+    /// real change is two tokens paints two marks rather than a hundred. A hunk
+    /// with no refinement marks its whole range.
     pub fn gutter_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, bool)> {
         let index = self
             .hunks
-            .partition_point(|(_, rows)| rows.start <= line)
+            .partition_point(|live| live.rows.start <= line)
             .checked_sub(1)?;
-        let (hunk, rows) = &self.hunks[index];
+        let live = &self.hunks[index];
+        let hunk = live.hunk;
 
-        if rows.contains(&line) {
-            // The staged rows are recorded in the hunk's own coordinates, so
-            // the live row steps back by however far the hunk has moved.
-            let stored = (line + hunk.buffer_line_range.start).saturating_sub(rows.start);
+        if live.rows.contains(&line) {
+            // The staged rows and the marked runs are both recorded in the
+            // hunk's own coordinates, so the live row steps back by however far
+            // the hunk has moved before either is read.
+            let stored = (line + hunk.buffer_line_range.start).saturating_sub(live.rows.start);
+            if hunk.refined() && !hunk.marked_rows.iter().any(|run| run.contains(&stored)) {
+                return None;
+            }
             return Some((hunk.status, hunk.line_staged(stored)));
         }
-        if hunk.status == DiffHunkStatus::Deleted && rows.start == line {
+        if hunk.status == DiffHunkStatus::Deleted && live.rows.start == line {
             return Some((DiffHunkStatus::Deleted, hunk.staged()));
         }
-        if hunk.status == DiffHunkStatus::Moved && rows.is_empty() && rows.start == line {
+        if hunk.status == DiffHunkStatus::Moved && live.rows.is_empty() && live.rows.start == line {
             return Some((DiffHunkStatus::Moved, hunk.staged()));
         }
         None
@@ -136,16 +214,16 @@ impl<'a> LiveHunks<'a> {
     pub fn status_for_line(&self, line: u32) -> DiffStatus {
         let Some(index) = self
             .hunks
-            .partition_point(|(_, rows)| rows.start <= line)
+            .partition_point(|live| live.rows.start <= line)
             .checked_sub(1)
         else {
             return DiffStatus::Unchanged;
         };
-        let (hunk, rows) = &self.hunks[index];
-        if !rows.contains(&line) {
+        let live = &self.hunks[index];
+        if !live.rows.contains(&line) {
             return DiffStatus::Unchanged;
         }
-        match hunk.status {
+        match live.hunk.status {
             DiffHunkStatus::Added => DiffStatus::Added,
             DiffHunkStatus::Modified => DiffStatus::Modified,
             DiffHunkStatus::Moved => DiffStatus::Moved,
@@ -160,11 +238,11 @@ impl<'a> LiveHunks<'a> {
     pub fn in_range(&self, rows: Range<u32>) -> impl Iterator<Item = (&'a DiffHunk, Range<u32>)> {
         let from = self
             .hunks
-            .partition_point(|(_, live)| live.end < rows.start);
+            .partition_point(|live| live.rows.end < rows.start);
         self.hunks[from..]
             .iter()
-            .take_while(move |(_, live)| live.start < rows.end)
-            .map(|(hunk, live)| (*hunk, live.clone()))
+            .take_while(move |live| live.rows.start < rows.end)
+            .map(|live| (live.hunk, live.rows.clone()))
     }
 }
 
@@ -477,7 +555,10 @@ impl DiffMap {
                 hunks: held
                     .order
                     .iter()
-                    .map(|&i| (hunks[i], held.rows[i].clone()))
+                    .map(|&i| LiveHunk {
+                        hunk: hunks[i],
+                        rows: held.rows[i].clone(),
+                    })
                     .collect(),
             };
         }
@@ -530,7 +611,10 @@ impl DiffMap {
             hunks: held
                 .order
                 .iter()
-                .map(|&i| (live[i].0, held.rows[i].clone()))
+                .map(|&i| LiveHunk {
+                    hunk: live[i].0,
+                    rows: held.rows[i].clone(),
+                })
                 .collect(),
         }
     }
@@ -594,6 +678,10 @@ impl DiffMap {
     /// rendered just above -- reports `Deleted`, the deletion seam. The bool is
     /// the row's git-index staged state for a contained row, or the whole
     /// hunk's for a deletion or move seam.
+    ///
+    /// Reports whole hunk ranges. The live counterpart
+    /// [`LiveHunks::gutter_mark_for_line`] narrows a refined hunk to the rows
+    /// its runs name, which is what the render paths read.
     pub fn gutter_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, bool)> {
         let target = HunkKeyRef(Some(&line));
         let mut cursor = self.hunks.cursor::<HunkKeyRef<'_>>(());
@@ -1008,6 +1096,7 @@ pub(crate) fn changes_to_hunks(
             hunks.push(DiffHunk {
                 status: DiffHunkStatus::Moved,
                 unstaged_lines: Vec::new(),
+                marked_rows: Vec::new(),
                 buffer_start_line: line_range.start,
                 buffer_line_range: line_range,
                 base_byte_range: base_range,
@@ -1046,6 +1135,7 @@ pub(crate) fn changes_to_hunks(
             hunks.push(DiffHunk {
                 status: DiffHunkStatus::Moved,
                 unstaged_lines: Vec::new(),
+                marked_rows: Vec::new(),
                 buffer_start_line: lhs_line,
                 buffer_line_range: lhs_line..lhs_line,
                 base_byte_range: full_range,
@@ -1088,6 +1178,7 @@ pub(crate) fn changes_to_hunks(
         hunks.push(DiffHunk {
             status: DiffHunkStatus::Modified,
             unstaged_lines: Vec::new(),
+            marked_rows: Vec::new(),
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range: lhs_change.byte_range.clone(),
@@ -1112,6 +1203,7 @@ pub(crate) fn changes_to_hunks(
                 hunks.push(DiffHunk {
                     status: DiffHunkStatus::Added,
                     unstaged_lines: Vec::new(),
+                    marked_rows: Vec::new(),
                     buffer_start_line: line_range.start,
                     buffer_line_range: line_range,
                     base_byte_range: 0..0,
@@ -1130,6 +1222,7 @@ pub(crate) fn changes_to_hunks(
                 hunks.push(DiffHunk {
                     status: DiffHunkStatus::Deleted,
                     unstaged_lines: Vec::new(),
+                    marked_rows: Vec::new(),
                     buffer_start_line: buffer_line,
                     buffer_line_range: buffer_line..buffer_line,
                     base_byte_range: cur.byte_range.clone(),
@@ -1206,6 +1299,9 @@ pub(crate) fn merge_structural_detail(
                     }),
             );
         }
+        hunk.marked_rows = marked_row_runs(&buffer_spans, |off| {
+            line_of(&buffer_starts, off.min(buffer_text.len()))
+        });
         hunk.token_detail = Some(Arc::new(TokenDetail {
             buffer_spans,
             base_spans,
@@ -1455,6 +1551,7 @@ mod tests {
         DiffHunk {
             status: DiffHunkStatus::Added,
             unstaged_lines: vec![line_range.clone()],
+            marked_rows: Vec::new(),
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range: 0..0,
@@ -1660,6 +1757,7 @@ mod tests {
         let moved = DiffHunk {
             status: DiffHunkStatus::Moved,
             unstaged_lines: std::iter::once(5..5).collect(),
+            marked_rows: Vec::new(),
             buffer_start_line: 5,
             buffer_line_range: 5..5,
             base_byte_range: 0..0,
@@ -1729,6 +1827,7 @@ mod tests {
     fn pushing_a_hunk_steps_the_staged_tally() {
         let staged = DiffHunk {
             unstaged_lines: Vec::new(),
+            marked_rows: Vec::new(),
             ..added_hunk(1..2)
         };
         let recount = |dm: &DiffMap| {
@@ -1762,6 +1861,7 @@ mod tests {
 
         dm.push_hunk(DiffHunk {
             unstaged_lines: Vec::new(),
+            marked_rows: Vec::new(),
             ..added_hunk(5..6)
         });
         assert_eq!(dm.staged_counts(), (2, 1));
@@ -1772,6 +1872,7 @@ mod tests {
         DiffHunk {
             status: DiffHunkStatus::Deleted,
             unstaged_lines: std::iter::once((after_line + 1)..(after_line + 1)).collect(),
+            marked_rows: Vec::new(),
             buffer_start_line: after_line + 1,
             buffer_line_range: (after_line + 1)..(after_line + 1),
             base_byte_range,
@@ -1787,6 +1888,7 @@ mod tests {
         DiffHunk {
             status: DiffHunkStatus::Modified,
             unstaged_lines: vec![line_range.clone()],
+            marked_rows: Vec::new(),
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range,
@@ -1837,6 +1939,7 @@ mod tests {
         let seam = DiffHunk {
             status: DiffHunkStatus::Moved,
             unstaged_lines: std::iter::once(3..3).collect(),
+            marked_rows: Vec::new(),
             buffer_start_line: 3,
             buffer_line_range: 3..3,
             base_byte_range: 0..0,
@@ -2338,6 +2441,106 @@ mod tests {
         );
     }
 
+    /// Marks for every row of `hunks`' combined range, `None` where unmarked.
+    fn marks_over(
+        hunks: Vec<DiffHunk>,
+        rows: std::ops::Range<u32>,
+        text: &str,
+    ) -> Vec<Option<DiffHunkStatus>> {
+        use crate::{
+            buffer::{BufferId, TextBuffer},
+            multi_buffer::MultiBuffer,
+        };
+        let map = DiffMap::from_hunks(hunks, Some(Arc::new(text.to_string())));
+        let tb = TextBuffer::with_text(BufferId::new(0), text);
+        let multi = MultiBuffer::singleton(BufferId::new(0), Arc::new(std::sync::RwLock::new(tb)));
+        let snapshot = multi.snapshot();
+        let live = map.live_hunks(&snapshot);
+        rows.map(|row| live.gutter_mark_for_line(row).map(|(status, _)| status))
+            .collect()
+    }
+
+    /// A hunk over `rows`, refined to `marked` when non-empty.
+    fn refined_hunk(rows: std::ops::Range<u32>, marked: Vec<std::ops::Range<u32>>) -> DiffHunk {
+        DiffHunk {
+            status: DiffHunkStatus::Modified,
+            buffer_start_line: rows.start,
+            buffer_line_range: rows.clone(),
+            base_byte_range: 0..1,
+            anchor_range: None,
+            token_detail: None,
+            unstaged_lines: std::iter::once(rows).collect(),
+            marked_rows: marked,
+        }
+    }
+
+    /// The whole point: a hunk whose real change is two tokens marks two rows,
+    /// not the hundred its extents cover.
+    #[test]
+    fn a_refined_hunk_marks_only_the_rows_its_spans_touch() {
+        let text = "0\n1\n2\n3\n4\n5\n";
+        let hunk = refined_hunk(0..6, vec![1..2, 4..5]);
+
+        assert_eq!(
+            marks_over(vec![hunk], 0..6, text),
+            [
+                None,
+                Some(DiffHunkStatus::Modified),
+                None,
+                None,
+                Some(DiffHunkStatus::Modified),
+                None,
+            ],
+            "only the marked runs paint"
+        );
+    }
+
+    /// A hunk the tree pass never narrowed keeps marking whole, so nothing that
+    /// gets no structural detail loses its gutter.
+    #[test]
+    fn an_unrefined_hunk_still_marks_its_whole_range() {
+        let text = "0\n1\n2\n3\n";
+        let hunk = refined_hunk(1..3, Vec::new());
+
+        assert_eq!(
+            marks_over(vec![hunk], 0..4, text),
+            [
+                None,
+                Some(DiffHunkStatus::Modified),
+                Some(DiffHunkStatus::Modified),
+                None,
+            ],
+            "every row of the range marks"
+        );
+    }
+
+    /// An added run never gets structural detail, so it marks whole the way it
+    /// always did.
+    #[test]
+    fn an_added_hunk_marks_its_whole_range() {
+        let text = "0\n1\n2\n3\n";
+        let hunk = DiffHunk {
+            status: DiffHunkStatus::Added,
+            buffer_start_line: 1,
+            buffer_line_range: 1..3,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: None,
+            unstaged_lines: std::iter::once(1..3).collect(),
+            marked_rows: Vec::new(),
+        };
+
+        assert_eq!(
+            marks_over(vec![hunk], 0..4, text),
+            [
+                None,
+                Some(DiffHunkStatus::Added),
+                Some(DiffHunkStatus::Added),
+                None,
+            ],
+            "an addition marks every row it added"
+        );
+    }
     /// The two-phase contract rests on this. The sync open installs a
     /// line-only map and the settle installs the refined one, which differ in
     /// nothing but their spans, so a comparison blind to detail would skip the
@@ -2355,6 +2558,7 @@ mod tests {
                 base_spans: Vec::new(),
             })),
             unstaged_lines: std::iter::once(1..2).collect(),
+            marked_rows: Vec::new(),
         };
         let base = Arc::new("a\nb\n".to_string());
         let line_pass = DiffMap::from_hunks(

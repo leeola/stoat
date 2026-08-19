@@ -638,6 +638,7 @@ pub(super) fn compute_diff_map(
                 anchor_range: None,
                 token_detail: None,
                 unstaged_lines,
+                marked_rows: Vec::new(),
             }],
             Some(base.head.clone()),
         )

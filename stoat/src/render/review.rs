@@ -248,13 +248,24 @@ fn build_diff_row_states(
             };
         };
         let mut change_spans = Vec::new();
-        write_buffer_row_change_spans(snapshot, buffer_row, &mut hunk_scratch, &mut change_spans);
+        // A refined hunk narrows the change to the rows its runs name, so a row
+        // inside one that names none has nothing to bar.
+        let marked = write_buffer_row_change_spans(
+            snapshot,
+            buffer_row,
+            &mut hunk_scratch,
+            &mut change_spans,
+        );
         DiffRowState {
             kind,
             status: snapshot.line_diff_status(buffer_row),
-            staged: snapshot
-                .diff_map()
-                .and_then(|dm| dm.staged_for_line(buffer_row)),
+            staged: marked
+                .then(|| {
+                    snapshot
+                        .diff_map()
+                        .and_then(|dm| dm.staged_for_line(buffer_row))
+                })
+                .flatten(),
             change_spans,
         }
     })
@@ -1023,22 +1034,30 @@ pub(crate) fn paint_highlighted_row(
 /// Both vectors belong to the caller and are reused across the rows of one
 /// paint, so each is cleared before being filled. A row no hunk refines leaves
 /// `out` empty rather than carrying the previous row's spans.
+///
+/// Returns whether the row is marked, by the same rule the gutter applies: a
+/// covering hunk the tree pass never narrowed marks every row it spans, and a
+/// narrowed one marks only the rows its runs name. A caller reads this rather
+/// than `out` being non-empty, so the bars and the gutter cannot disagree.
 fn write_buffer_row_change_spans<'a>(
     snapshot: &'a DisplaySnapshot,
     buffer_row: u32,
     hunks: &mut Vec<&'a DiffHunk>,
     out: &mut Vec<(std::ops::Range<usize>, ChangeKind)>,
-) {
+) -> bool {
     out.clear();
     hunks.clear();
 
     let Some(diff_map) = snapshot.diff_map() else {
-        return;
+        return false;
     };
     diff_map.hunks_in_range_into(buffer_row..buffer_row + 1, hunks);
     if hunks.is_empty() {
-        return;
+        return false;
     }
+    let marked = hunks.iter().any(|hunk| {
+        !hunk.refined() || hunk.marked_rows.iter().any(|run| run.contains(&buffer_row))
+    });
 
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
@@ -1065,6 +1084,7 @@ fn write_buffer_row_change_spans<'a>(
     // Spans arrive per hunk and are not otherwise ordered. Start-sorting them
     // makes the painter's monotonic span cursor correct.
     out.sort_by_key(|(range, _)| range.start);
+    marked
 }
 
 /// The origin of a moved buffer row, for the diff view's move chip.
@@ -2095,6 +2115,57 @@ mod tests {
         );
     }
 
+    /// A refined hunk narrows the change to its span rows, and the status bars
+    /// follow. Without this a reindent bars every row it moved, which is the
+    /// clutter the refinement exists to remove.
+    #[test]
+    fn a_refined_hunk_bars_only_its_marked_rows() {
+        // One hunk over the whole block, refined to its middle row alone.
+        let text = "a\nb\nc\nd\n";
+        let mut editor = {
+            let executor = Executor::new(Arc::new(TestScheduler::new()));
+            let mut tb = TextBuffer::with_text(BufferId::new(0), text);
+            tb.diff_map = Some(DiffMap::from_hunks(
+                [DiffHunk {
+                    status: DiffHunkStatus::Modified,
+                    buffer_start_line: 0,
+                    buffer_line_range: 0..4,
+                    base_byte_range: 0..8,
+                    anchor_range: None,
+                    token_detail: None,
+                    unstaged_lines: std::iter::once(0..4).collect(),
+                    marked_rows: std::iter::once(2..3).collect(),
+                }],
+                Some(Arc::new(text.to_string())),
+            ));
+            let shared = Arc::new(RwLock::new(tb));
+            let mut editor =
+                EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
+            editor.set_diff_view(true);
+            editor
+        };
+
+        let area = Rect::new(0, 0, 120, 8);
+        let mut buf = Buffer::empty(area);
+        let theme = rgb_diff_theme();
+        render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, None);
+
+        let change_col = ((120 - 1) / 2 + 1 + 5) as u16;
+        let barred: Vec<u16> = (0..area.height)
+            .filter(|&y| buf[(change_col, y)].symbol() == "▎")
+            .collect();
+        // The diff view stacks base rows, so the screen row is found by what it
+        // shows rather than assumed equal to the buffer row.
+        let marked_screen_row = (0..area.height)
+            .find(|&y| line_text(&buf, y, 68..120).trim() == "c")
+            .expect("the marked buffer row is on screen");
+        assert_eq!(
+            barred,
+            [marked_screen_row],
+            "only the marked row bars, not every row the hunk spans"
+        );
+    }
+
     #[test]
     fn diff_view_rich_gutter_emits_bars_and_suppresses_ascii() {
         use stoatty_protocol::command::{encode_bar, BarCommand};
@@ -2689,6 +2760,7 @@ mod tests {
                 [DiffHunk {
                     status: DiffHunkStatus::Moved,
                     unstaged_lines: std::iter::once(1..2).collect(),
+                    marked_rows: Vec::new(),
                     buffer_start_line: 1,
                     buffer_line_range: 1..2,
                     base_byte_range: 0..0,
@@ -2752,6 +2824,7 @@ mod tests {
                 [DiffHunk {
                     status: DiffHunkStatus::Modified,
                     unstaged_lines: Vec::new(),
+                    marked_rows: Vec::new(),
                     buffer_start_line: 1,
                     buffer_line_range: 1..2,
                     base_byte_range: 0..0,
@@ -2799,6 +2872,7 @@ mod tests {
             [DiffHunk {
                 status: DiffHunkStatus::Modified,
                 unstaged_lines: std::iter::once(1..2).collect(),
+                marked_rows: Vec::new(),
                 buffer_start_line: 1,
                 buffer_line_range: 1..2,
                 base_byte_range: 0..0,
@@ -2845,6 +2919,7 @@ mod tests {
             [DiffHunk {
                 status: DiffHunkStatus::Moved,
                 unstaged_lines: std::iter::once(1..2).collect(),
+                marked_rows: Vec::new(),
                 buffer_start_line: 1,
                 buffer_line_range: 1..2,
                 base_byte_range: 0..0,

@@ -1869,6 +1869,7 @@ mod tests {
         dm.push_hunk(DiffHunk {
             status: DiffHunkStatus::Deleted,
             unstaged_lines: std::iter::once((after_line + 1)..(after_line + 1)).collect(),
+            marked_rows: Vec::new(),
             buffer_start_line: after_line + 1,
             buffer_line_range: (after_line + 1)..(after_line + 1),
             base_byte_range: byte_range,
@@ -1929,6 +1930,7 @@ mod tests {
         grown.push_hunk(DiffHunk {
             status: DiffHunkStatus::Deleted,
             unstaged_lines: std::iter::once(2..2).collect(),
+            marked_rows: Vec::new(),
             buffer_start_line: 2,
             buffer_line_range: 2..2,
             base_byte_range: 19..24,
@@ -3724,6 +3726,7 @@ mod tests {
             [DiffHunk {
                 status: DiffHunkStatus::Deleted,
                 unstaged_lines: std::iter::once(2..2).collect(),
+                marked_rows: Vec::new(),
                 buffer_start_line: 2,
                 buffer_line_range: 2..2,
                 base_byte_range: 0..7,

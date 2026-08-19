@@ -4976,6 +4976,7 @@ fn install_diff_hunk_rows(h: &mut TestHarness, rows: &[Range<u32>]) {
                 DiffHunkStatus::Added
             },
             unstaged_lines: std::iter::once(range.clone()).collect(),
+            marked_rows: Vec::new(),
             buffer_start_line: range.start,
             buffer_line_range: range.clone(),
             base_byte_range: 0..0,

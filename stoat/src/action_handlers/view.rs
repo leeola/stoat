@@ -746,6 +746,7 @@ mod tests {
             dm.push_hunk(DiffHunk {
                 status: DiffHunkStatus::Deleted,
                 unstaged_lines: std::iter::once(1..1).collect(),
+                marked_rows: Vec::new(),
                 buffer_start_line: 1,
                 buffer_line_range: 1..1,
                 base_byte_range: 0..5,
