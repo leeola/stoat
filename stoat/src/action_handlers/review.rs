@@ -8,7 +8,10 @@ use crate::{
     host::{GitHost, GitRepo, WatchToken},
     pane::View,
     review::{line_count, MoveProvenance, ReviewFileInput, ReviewHunk, ReviewRow},
-    review_apply::{hunk_to_patch, line_restricted_rows, rows_to_unified_diff},
+    review_apply::{
+        base_line_range, hunk_rows, hunk_to_patch, line_restricted_rows, rows_to_unified_diff,
+        HUNK_CONTEXT,
+    },
     review_session::{
         ChunkIdentity, ChunkStatus, ReviewProgress, ReviewSession, ReviewSource, ReviewViewState,
     },
@@ -1267,17 +1270,8 @@ pub(super) fn stage_line(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
         .to_string_lossy()
         .into_owned();
 
-    let stage = || stage_line_patch(&path, &rel, &index_text, &buffer_text, cursor_row);
-    let unstage = || {
-        unstage_line_patch(
-            &path,
-            &rel,
-            &index_text,
-            &head_text,
-            &buffer_text,
-            cursor_row,
-        )
-    };
+    let stage = || stage_line_patch(&rel, &index_text, &buffer_text, cursor_row);
+    let unstage = || unstage_line_patch(&rel, &index_text, &head_text, &buffer_text, cursor_row);
     let patch_and_message = match mode {
         HunkStage::Stage => stage().map(|patch| (patch, "staged line")),
         HunkStage::Unstage => unstage().map(|patch| (patch, "unstaged line")),
@@ -1302,24 +1296,29 @@ pub(super) fn stage_line(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Line hunks between `base` and `buffer`, the extents every staging path
+/// resolves against.
+fn line_hunks(base: &str, buffer: &str) -> Vec<crate::diff_map::DiffHunk> {
+    let result = stoat_language::structural_diff::diff(base, buffer);
+    crate::diff_map::changes_to_hunks(&result.changes, base, buffer)
+}
+
 /// Build the patch that stages only the cursor line by diffing the git index
 /// against the live buffer and keeping the cursor row's change.
 ///
 /// `None` when the cursor sits on no index-vs-buffer change.
 fn stage_line_patch(
-    path: &Path,
     rel: &str,
     index_text: &str,
     buffer_text: &str,
     cursor_row: u32,
 ) -> Option<String> {
-    let session = ephemeral_diff_session(path, rel, index_text, buffer_text);
-    let chunk_id = session
-        .order
+    let hunks = line_hunks(index_text, buffer_text);
+    let k = hunks
         .iter()
-        .copied()
-        .find(|id| session.chunks[id].buffer_line_range.contains(&cursor_row))?;
-    let rows = line_restricted_rows(&session.chunks[&chunk_id].hunk.rows, cursor_row + 1, true)?;
+        .position(|hunk| hunk.buffer_line_range.contains(&cursor_row))?;
+    let hunk_rows = hunk_rows(index_text, buffer_text, &hunks, k, HUNK_CONTEXT)?;
+    let rows = line_restricted_rows(&hunk_rows, cursor_row + 1, true)?;
     Some(rows_to_unified_diff(
         Path::new(rel),
         index_text,
@@ -1337,21 +1336,21 @@ fn stage_line_patch(
 /// index-side row, and the forward patch reverts that one row to HEAD. `None`
 /// when the mapped row carries no staged change.
 fn unstage_line_patch(
-    path: &Path,
     rel: &str,
     index_text: &str,
     head_text: &str,
     buffer_text: &str,
     cursor_row: u32,
 ) -> Option<String> {
-    let index_row = map_buffer_row_to_index(path, rel, index_text, buffer_text, cursor_row);
-    let session = ephemeral_diff_session(path, rel, index_text, head_text);
-    let chunk_id = session
-        .order
-        .iter()
-        .copied()
-        .find(|id| session.chunks[id].base_line_range.contains(&index_row))?;
-    let rows = line_restricted_rows(&session.chunks[&chunk_id].hunk.rows, index_row + 1, false)?;
+    let index_row = map_buffer_row_to_index(index_text, buffer_text, cursor_row);
+    // The emitted patch runs index to HEAD, so the index is this diff's base
+    // side and the staged row is a base row. DiffHunk records base bytes rather
+    // than base lines, so the range comes from base_line_range.
+    let hunks = line_hunks(index_text, head_text);
+    let k =
+        (0..hunks.len()).find(|&k| base_line_range(index_text, &hunks, k).contains(&index_row))?;
+    let hunk_rows = hunk_rows(index_text, head_text, &hunks, k, HUNK_CONTEXT)?;
+    let rows = line_restricted_rows(&hunk_rows, index_row + 1, false)?;
     Some(rows_to_unified_diff(
         Path::new(rel),
         index_text,
@@ -1366,41 +1365,17 @@ fn unstage_line_patch(
 /// index by its added-minus-removed line count, so subtracting that shift
 /// recovers the index row. The `index_text` slicing keys off each hunk's base
 /// byte range to count its index lines.
-fn map_buffer_row_to_index(
-    path: &Path,
-    rel: &str,
-    index_text: &str,
-    buffer_text: &str,
-    cursor_row: u32,
-) -> u32 {
-    let session = ephemeral_diff_session(path, rel, index_text, buffer_text);
+fn map_buffer_row_to_index(index_text: &str, buffer_text: &str, cursor_row: u32) -> u32 {
     let mut shift: i64 = 0;
-    for id in &session.order {
-        let chunk = &session.chunks[id];
-        if chunk.buffer_line_range.end <= cursor_row {
-            let buffer_len = (chunk.buffer_line_range.end - chunk.buffer_line_range.start) as i64;
+    for hunk in line_hunks(index_text, buffer_text) {
+        if hunk.buffer_line_range.end <= cursor_row {
+            let buffer_len = (hunk.buffer_line_range.end - hunk.buffer_line_range.start) as i64;
             let index_len =
-                line_count(index_text.get(chunk.base_byte_range.clone()).unwrap_or("")) as i64;
+                line_count(index_text.get(hunk.base_byte_range.clone()).unwrap_or("")) as i64;
             shift += buffer_len - index_len;
         }
     }
     (cursor_row as i64 - shift).max(0) as u32
-}
-
-/// Diff `base` against `buffer` into a single-file [`ReviewSession`] whose
-/// chunks and rows drive line-restricted patch emission.
-fn ephemeral_diff_session(path: &Path, rel: &str, base: &str, buffer: &str) -> ReviewSession {
-    let mut session = ReviewSession::new(ReviewSource::InMemory {
-        files: Arc::new(Vec::new()),
-    });
-    session.add_files(vec![ReviewFileInput {
-        path: path.to_path_buf(),
-        rel_path: rel.to_string(),
-        language: None,
-        base_text: Arc::new(base.to_string()),
-        buffer_text: Arc::new(buffer.to_string()),
-    }]);
-    session
 }
 
 /// Toggle the focused pane between the side-by-side diff and a plain editor
@@ -3017,6 +2992,47 @@ mod tests {
         );
     }
 
+    /// The line stage resolves its hunk from bare extents now, so a second hunk
+    /// close enough that the old chunk extraction would have merged the two is
+    /// absent from the patch rather than riding along as context.
+    #[test]
+    fn stage_line_ignores_a_hunk_the_old_chunking_would_have_merged() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_review_scenario(
+            &workdir,
+            &[(
+                "a.rs",
+                "a\nb\nc\nd\ne\nf\ng\nh\n",
+                "a\nZ\nc\nd\ne\nf\nY\nh\n",
+            )],
+        );
+        h.open_file(&workdir.join("a.rs"));
+        {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            crate::action_handlers::movement::set_cursor_row(editor, 1);
+        }
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(patches.len(), 1, "one patch: {patches:?}");
+        let patch = &patches[0];
+        assert!(
+            patch.contains("-b\n") && patch.contains("+Z\n"),
+            "stages the cursor line: {patch}"
+        );
+        // Context that ran into the far hunk would carry its buffer text as an
+        // unchanged line, telling git the index already holds the change.
+        assert!(
+            !patch.contains("\n Y\n"),
+            "the far hunk's text is not carried as context: {patch}"
+        );
+        assert!(
+            patch.contains("@@ -1,5 +1,5 @@"),
+            "and the patch stops well short of it: {patch}"
+        );
+    }
     #[test]
     fn unstage_line_reverts_the_staged_line_to_head() {
         let mut h = TestHarness::with_size(80, 14);

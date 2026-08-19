@@ -11,13 +11,13 @@ use crate::{
     review::{line_count, ReviewRow, ReviewSide},
     review_session::{ReviewChunk, ReviewFile},
 };
-use std::path::Path;
+use std::{ops::Range, path::Path};
 
 /// Unchanged rows a staged patch carries on each side of its hunk.
 ///
 /// Three is what git emits by default, and enough for the index apply to place
 /// the hunk when the file has moved under it.
-const HUNK_CONTEXT: u32 = 3;
+pub(crate) const HUNK_CONTEXT: u32 = 3;
 
 const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file\n";
 
@@ -49,6 +49,36 @@ pub(crate) fn chunk_to_unified_diff(
     }
 }
 
+/// 0-based base line that hunk `k` starts at.
+///
+/// [`DiffHunk`] records buffer rows and base bytes but no base line, so the
+/// anchor comes from the buffer start less every line the prior hunks added or
+/// removed. An `Added` hunk contributes nothing to that walk, which is what
+/// makes the anchor right for a pure insertion.
+fn base_line_start(base_text: &str, hunks: &[DiffHunk], k: usize) -> u32 {
+    let mut delta: i64 = 0;
+    for prior in &hunks[..k] {
+        let buffer_len = prior.buffer_line_range.end - prior.buffer_line_range.start;
+        let base_len = base_span_lines(base_text, prior);
+        delta += i64::from(buffer_len) - i64::from(base_len);
+    }
+    let start = hunks.get(k).map_or(0, |hunk| hunk.buffer_line_range.start);
+    (i64::from(start) - delta).max(0) as u32
+}
+
+/// 0-based base lines hunk `k` covers.
+///
+/// Empty for an `Added` hunk, which replaces no base line. A caller resolving
+/// a hunk by index row reads this the way the gutter reads
+/// [`DiffHunk::buffer_line_range`].
+pub(crate) fn base_line_range(base_text: &str, hunks: &[DiffHunk], k: usize) -> Range<u32> {
+    let start = base_line_start(base_text, hunks, k);
+    let len = hunks
+        .get(k)
+        .map_or(0, |hunk| base_span_lines(base_text, hunk));
+    start..start + len
+}
+
 /// Rows covering line hunk `k` alone, with up to `context` unchanged rows on
 /// each side.
 ///
@@ -78,17 +108,7 @@ pub(crate) fn hunk_rows(
     let base_lines: Vec<&str> = split_lines(base_text);
     let buffer_lines: Vec<&str> = split_lines(buffer_text);
 
-    // 0-based base line the hunk starts at, from the buffer start less every
-    // line the prior hunks added or removed.
-    let base_start = {
-        let mut delta: i64 = 0;
-        for prior in &hunks[..k] {
-            let buffer_len = prior.buffer_line_range.end - prior.buffer_line_range.start;
-            let base_len = base_span_lines(base_text, prior);
-            delta += i64::from(buffer_len) - i64::from(base_len);
-        }
-        (i64::from(hunk.buffer_line_range.start) - delta).max(0) as u32
-    };
+    let base_start = base_line_start(base_text, hunks, k);
     let base_len = base_span_lines(base_text, hunk);
     let buffer_start = hunk.buffer_line_range.start;
     let buffer_len = hunk.buffer_line_range.end - buffer_start;
