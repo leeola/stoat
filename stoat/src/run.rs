@@ -2,6 +2,7 @@ pub mod pty;
 pub mod vterm;
 
 use crate::{
+    input_history::InputHistory,
     input_view::{InputView, SubmitTarget},
     workspace::Workspace,
 };
@@ -28,8 +29,13 @@ pub struct RunState {
     pub scroll_offset: usize,
     pub cwd: PathBuf,
     pub shell_handle: Option<ShellHandle>,
-    pub history: Vec<String>,
-    pub history_cursor: Option<usize>,
+    /// Fish-style recall history of commands run in this pane, walked by
+    /// Up/Down in the prompt.
+    ///
+    /// Session-scoped rather than persisted. A shell line is bound to the
+    /// state the pane was in when it ran, so it is worth recalling within a
+    /// session and misleading across a restart.
+    pub(crate) history: InputHistory,
     pub title: Option<String>,
 }
 
@@ -45,8 +51,7 @@ impl RunState {
             scroll_offset: 0,
             cwd,
             shell_handle: None,
-            history: Vec::new(),
-            history_cursor: None,
+            history: InputHistory::default(),
             title: None,
         }
     }
@@ -63,32 +68,21 @@ impl RunState {
         self.blocks.last().is_some_and(|b| !b.finished)
     }
 
-    pub fn history_up(&mut self, ws: &mut Workspace) {
-        if self.history.is_empty() {
-            return;
-        }
-        let idx = match self.history_cursor {
-            Some(i) if i > 0 => i - 1,
-            Some(_) => return,
-            None => self.history.len() - 1,
-        };
-        self.history_cursor = Some(idx);
-        let entry = self.history[idx].clone();
-        self.input.replace_text(ws, &entry);
+    /// Recall the previous command against the needle `current`, or [`None`] to
+    /// leave the prompt unchanged.
+    ///
+    /// Returns the line rather than writing it, because the prompt's
+    /// [`InputView`] writes through the workspace this state lives in.
+    pub(crate) fn history_prev(&mut self, current: &str) -> Option<String> {
+        self.history.reset_if_edited(current);
+        self.history.prev(current)
     }
 
-    pub fn history_down(&mut self, ws: &mut Workspace) {
-        let Some(idx) = self.history_cursor else {
-            return;
-        };
-        if idx + 1 < self.history.len() {
-            self.history_cursor = Some(idx + 1);
-            let entry = self.history[idx + 1].clone();
-            self.input.replace_text(ws, &entry);
-        } else {
-            self.history_cursor = None;
-            self.input.replace_text(ws, "");
-        }
+    /// Recall the next command toward the newest, restoring the
+    /// originally-typed text past the newest match.
+    pub(crate) fn history_next(&mut self, current: &str) -> Option<String> {
+        self.history.reset_if_edited(current);
+        self.history.next(current)
     }
 
     /// Remove the run's [`InputView`] scratch editor. Called on pane close to
@@ -637,8 +631,7 @@ mod tests {
             scroll_offset,
             cwd: PathBuf::from("/repo"),
             shell_handle: None,
-            history: Vec::new(),
-            history_cursor: None,
+            history: InputHistory::default(),
             title: None,
         };
         for n in 0..blocks {
@@ -695,6 +688,108 @@ mod tests {
         assert_eq!(
             block.selection, None,
             "a selection on rows long since scrolled off is dropped"
+        );
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use crate::{pane::View, test_harness::TestHarness, Stoat};
+
+    /// The run prompt's text, for asserting what a recall wrote into it.
+    fn prompt_text(h: &TestHarness) -> String {
+        let ws = h.stoat.active_workspace();
+        let focused = ws.panes.focus();
+        let View::Run(id) = ws.panes.pane(focused).view else {
+            panic!("the focused pane is not a run pane");
+        };
+        ws.runs.get(id).expect("run state").input.text(ws)
+    }
+
+    /// A run pane with `commands` already submitted in it.
+    fn ran(commands: &[&str]) -> TestHarness {
+        let mut h = Stoat::test();
+        h.open_run();
+        for command in commands {
+            h.submit_run(command);
+        }
+        h
+    }
+
+    /// Up walks back through the commands run in this pane, newest first, and
+    /// Down walks toward the newest again.
+    #[test]
+    fn up_and_down_walk_the_commands_this_pane_ran() {
+        let mut h = ran(&["ls", "cargo build"]);
+
+        h.type_keys("up");
+        assert_eq!(
+            prompt_text(&h),
+            "cargo build",
+            "the newest comes back first"
+        );
+        h.type_keys("up");
+        assert_eq!(prompt_text(&h), "ls", "and the one before it next");
+        h.type_keys("down");
+        assert_eq!(
+            prompt_text(&h),
+            "cargo build",
+            "Down walks toward the newest"
+        );
+        h.type_keys("down");
+        assert_eq!(
+            prompt_text(&h),
+            "",
+            "and past the newest restores the empty prompt"
+        );
+    }
+
+    /// Running the same command twice keeps one entry, so a repeated build
+    /// does not push the rest of the history out of reach.
+    #[test]
+    fn a_repeated_command_collapses_to_one_entry() {
+        let mut h = ran(&["ls", "cargo build", "cargo build"]);
+
+        h.type_keys("up");
+        assert_eq!(prompt_text(&h), "cargo build");
+        h.type_keys("up");
+        assert_eq!(
+            prompt_text(&h),
+            "ls",
+            "one step past the build reaches what came before it"
+        );
+    }
+
+    /// The typed text is the needle, so a prefix narrows the walk to the
+    /// commands that carry it.
+    #[test]
+    fn the_typed_text_is_the_needle_the_walk_filters_on() {
+        let mut h = ran(&["cargo build", "ls"]);
+
+        h.type_text("car");
+        h.type_keys("up");
+        assert_eq!(
+            prompt_text(&h),
+            "cargo build",
+            "the needle skips the newer command it does not match"
+        );
+    }
+
+    /// Editing during a walk ends it, so the next Up captures the edited text
+    /// as a fresh needle rather than continuing the old walk.
+    #[test]
+    fn typing_after_a_recall_recaptures_the_needle() {
+        let mut h = ran(&["alpha", "beta"]);
+
+        h.type_keys("up");
+        assert_eq!(prompt_text(&h), "beta", "the walk starts at the newest");
+
+        h.type_text("x");
+        h.type_keys("up");
+        assert_eq!(
+            prompt_text(&h),
+            "betax",
+            "the edit ends the walk, and the new needle matches nothing"
         );
     }
 }

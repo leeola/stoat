@@ -55,7 +55,7 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
             return UpdateEffect::None;
         };
         run_state.history.push(text.clone());
-        run_state.history_cursor = None;
+        run_state.history.reset();
     }
 
     let input_ref = {
@@ -121,70 +121,42 @@ pub(super) fn run_modal_dismiss(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Recall the previous command in the focused run pane's prompt.
 pub(super) fn run_history_prev(stoat: &mut Stoat) -> UpdateEffect {
-    let active_idx = stoat.active_workspace;
-    let ws = &mut stoat.workspaces[active_idx];
-    let focused = ws.panes.focus();
-    let View::Run(id) = ws.panes.pane(focused).view else {
-        return UpdateEffect::None;
-    };
-    let input_state = {
-        let Some(run_state) = ws.runs.get(id) else {
-            return UpdateEffect::None;
-        };
-        (
-            run_state.history.clone(),
-            run_state.history_cursor,
-            run_state.input.clone(),
-        )
-    };
-    let (history, cursor, input) = input_state;
-    if history.is_empty() {
-        return UpdateEffect::None;
-    }
-    let next = match cursor {
-        Some(i) if i > 0 => i - 1,
-        Some(_) => return UpdateEffect::None,
-        None => history.len() - 1,
-    };
-    if let Some(run_state) = ws.runs.get_mut(id) {
-        run_state.history_cursor = Some(next);
-    }
-    input.replace_text(ws, &history[next]);
-    UpdateEffect::Redraw
+    walk_focused_run(stoat, RunState::history_prev)
 }
 
+/// Recall the next command toward the newest in the focused run pane's prompt.
 pub(super) fn run_history_next(stoat: &mut Stoat) -> UpdateEffect {
+    walk_focused_run(stoat, RunState::history_next)
+}
+
+/// Walk the focused run pane's history with `step` and write the result into
+/// its prompt. No-op when focus is not on a run pane.
+///
+/// The prompt's [`crate::input_view::InputView`] is a pair of ids, so it comes
+/// out by clone. That ends the borrow of the run state before the write, which
+/// needs the workspace the state lives in.
+fn walk_focused_run(
+    stoat: &mut Stoat,
+    step: impl FnOnce(&mut RunState, &str) -> Option<String>,
+) -> UpdateEffect {
     let active_idx = stoat.active_workspace;
     let ws = &mut stoat.workspaces[active_idx];
     let focused = ws.panes.focus();
     let View::Run(id) = ws.panes.pane(focused).view else {
         return UpdateEffect::None;
     };
-    let input_state = {
-        let Some(run_state) = ws.runs.get(id) else {
-            return UpdateEffect::None;
-        };
-        (
-            run_state.history.clone(),
-            run_state.history_cursor,
-            run_state.input.clone(),
-        )
-    };
-    let (history, cursor, input) = input_state;
-    let Some(idx) = cursor else {
+    let Some(input) = ws.runs.get(id).map(|run_state| run_state.input.clone()) else {
         return UpdateEffect::None;
     };
-    if idx + 1 < history.len() {
-        if let Some(run_state) = ws.runs.get_mut(id) {
-            run_state.history_cursor = Some(idx + 1);
-        }
-        input.replace_text(ws, &history[idx + 1]);
-    } else {
-        if let Some(run_state) = ws.runs.get_mut(id) {
-            run_state.history_cursor = None;
-        }
-        input.replace_text(ws, "");
+
+    let current = input.text(ws);
+    let Some(run_state) = ws.runs.get_mut(id) else {
+        return UpdateEffect::None;
+    };
+    if let Some(recalled) = step(run_state, &current) {
+        input.replace_text(ws, &recalled);
     }
     UpdateEffect::Redraw
 }
