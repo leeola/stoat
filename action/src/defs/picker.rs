@@ -78,6 +78,28 @@ define_action!(
 );
 
 define_action!(
+    PickerDetailDownDef,
+    PickerDetailDown,
+    "PickerDetailDown",
+    ActionKind::PickerDetailDown,
+    "scroll the picker preview down",
+    "Scroll the open list modal's preview pane down by half its rows, leaving the selection where it is. A modal with no preview does nothing.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    PickerDetailUpDef,
+    PickerDetailUp,
+    "PickerDetailUp",
+    ActionKind::PickerDetailUp,
+    "scroll the picker preview up",
+    "Scroll the open list modal's preview pane up by half its rows, the counterpart to PickerDetailDown.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
     CommitPickerNextBranchDef,
     CommitPickerNextBranch,
     "CommitPickerNextBranch",

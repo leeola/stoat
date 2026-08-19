@@ -170,6 +170,12 @@ fn sync_code_search_preview(stoat: &mut Stoat) {
         .and_then(|finder| finder.selected_match())
         .map(|m| (m.path.clone(), m.line));
 
+    let rows = stoat
+        .code_search
+        .as_ref()
+        .and_then(|f| f.preview_rows)
+        .unwrap_or(crate::picker::Preview::ROWS_FALLBACK);
+
     let active_idx = stoat.active_workspace;
     let ws = &mut stoat.workspaces[active_idx];
     let fs_host = &*stoat.fs_host;
@@ -186,8 +192,14 @@ fn sync_code_search_preview(stoat: &mut Stoat) {
                 Some(id) => PreviewSource::Buffer(id),
                 None => PreviewSource::File(path.to_path_buf()),
             };
-            finder.preview.sync(ws, fs_host, language_registry, source);
-            finder.preview.scroll_to_line(ws, line.saturating_sub(1));
+            finder.preview.sync_at_line(
+                ws,
+                fs_host,
+                language_registry,
+                source,
+                line.saturating_sub(1),
+                rows,
+            );
         },
         None => finder.preview.clear(ws),
     }

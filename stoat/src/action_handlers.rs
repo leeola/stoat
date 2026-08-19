@@ -676,6 +676,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PickerComplete => picker::picker_complete(stoat),
         ActionKind::PickerFirst => picker::picker_end(stoat, false),
         ActionKind::PickerLast => picker::picker_end(stoat, true),
+        ActionKind::PickerDetailDown => picker::picker_detail(stoat, 1),
+        ActionKind::PickerDetailUp => picker::picker_detail(stoat, -1),
         ActionKind::GitReview => {
             let action = action
                 .as_any()
@@ -891,8 +893,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::RunHistoryPrev => run::run_history_prev(stoat),
         ActionKind::RunHistoryNext => run::run_history_next(stoat),
         ActionKind::HelpScopeToggle => help::help_scope_toggle(stoat),
-        ActionKind::HelpScrollDetailUp => help::help_scroll_detail_up(stoat),
-        ActionKind::HelpScrollDetailDown => help::help_scroll_detail_down(stoat),
         ActionKind::CloseHelp => help::help_cancel(stoat),
         ActionKind::Run => {
             let cmd = action

@@ -79,6 +79,7 @@ pub(crate) fn render_code_search(
     }
 
     finder.viewport_rows = Some(layout.list.height as usize);
+    finder.preview_rows = layout.preview.map(|rect| rect.height as usize);
     paint_match_rows(finder, layout.list, &git_root, theme, buf);
 }
 

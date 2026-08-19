@@ -144,6 +144,8 @@ action_kinds! {
     PickerComplete,
     PickerFirst,
     PickerLast,
+    PickerDetailDown,
+    PickerDetailUp,
     CommitPickerNextBranch,
     CommitPickerPrevBranch,
     CommitPickerColumnCycle,
@@ -444,7 +446,5 @@ action_kinds! {
     RunHistoryPrev,
     RunHistoryNext,
     HelpScopeToggle,
-    HelpScrollDetailUp,
-    HelpScrollDetailDown,
     CloseHelp,
 }

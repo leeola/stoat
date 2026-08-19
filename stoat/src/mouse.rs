@@ -90,6 +90,16 @@ impl ModalSurfaces {
     }
 }
 
+/// Rows the open modal's preview pane covers, or [`None`] without one.
+///
+/// The keyboard's preview scrolling sizes its step from this, so a half-pane
+/// key step and a wheel over the same pane read one geometry.
+pub(crate) fn modal_preview_rows(stoat: &Stoat) -> Option<usize> {
+    boxed_modal_surfaces(stoat)
+        .and_then(|surfaces| surfaces.preview)
+        .map(|rect| rect.height as usize)
+}
+
 /// The open boxed modal's surfaces, or [`None`] when none is open.
 ///
 /// A boxed modal is one drawn as a bordered box over the editor. The

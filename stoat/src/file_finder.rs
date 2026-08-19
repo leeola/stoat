@@ -2273,4 +2273,53 @@ mod tests {
 
         preview.dispose(ws);
     }
+
+    /// The preview pane scrolls from the keyboard, not the wheel alone, and
+    /// doing so leaves the list where it is.
+    #[test]
+    fn ctrl_d_scrolls_the_preview_and_leaves_the_selection() {
+        let mut h = TestHarness::with_size(120, 40);
+        let body: String = (0..400).map(|i| format!("line {i}\n")).collect();
+        seed_finder_workspace(&mut h, &[("a.rs", &body), ("b.rs", "")]);
+        h.type_keys("space p");
+        h.snapshot();
+
+        let preview_editor = {
+            let finder = h.stoat.file_finder.as_ref().expect("finder open");
+            finder.active_core_ref().preview.editor
+        };
+        let scroll = |h: &TestHarness| {
+            h.stoat
+                .active_workspace()
+                .editors
+                .get(preview_editor)
+                .expect("preview editor")
+                .scroll_row
+        };
+        let selected_before = h
+            .stoat
+            .file_finder
+            .as_ref()
+            .expect("finder open")
+            .active_core_ref()
+            .picklist
+            .selected;
+        assert_eq!(scroll(&h), 0, "the preview starts at the top");
+
+        h.type_keys("Ctrl-d");
+
+        let selected_after = h
+            .stoat
+            .file_finder
+            .as_ref()
+            .expect("the key does not close the finder")
+            .active_core_ref()
+            .picklist
+            .selected;
+        assert_eq!(
+            (scroll(&h) > 0, selected_after),
+            (true, selected_before),
+            "the preview scrolls down and the list selection holds"
+        );
+    }
 }

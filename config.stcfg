@@ -320,8 +320,8 @@ on key {
         PageUp -> PickerPageUp();
         # Ctrl-u/Ctrl-d keep the detail pane, where every other list modal
         # scrolls its own preview with them.
-        Ctrl-u -> HelpScrollDetailUp();
-        Ctrl-d -> HelpScrollDetailDown();
+        Ctrl-u -> PickerDetailUp();
+        Ctrl-d -> PickerDetailDown();
         BackTab -> HelpScopeToggle();
     }
     modal == workspace_picker && mode == insert {
@@ -974,6 +974,8 @@ on key {
         Ctrl-n -> PickerNext();
         Ctrl-f -> PickerPageDown();
         Ctrl-b -> PickerPageUp();
+        Ctrl-d -> PickerDetailDown();
+        Ctrl-u -> PickerDetailUp();
         PageDown -> PickerPageDown();
         PageUp -> PickerPageUp();
         Tab -> PickerComplete();
@@ -986,6 +988,8 @@ on key {
         Ctrl-n -> PickerNext();
         Ctrl-f -> PickerPageDown();
         Ctrl-b -> PickerPageUp();
+        Ctrl-d -> PickerDetailDown();
+        Ctrl-u -> PickerDetailUp();
         PageDown -> PickerPageDown();
         PageUp -> PickerPageUp();
         Tab -> PickerComplete();
@@ -997,6 +1001,8 @@ on key {
         Ctrl-n -> PickerNext();
         Ctrl-f -> PickerPageDown();
         Ctrl-b -> PickerPageUp();
+        Ctrl-d -> PickerDetailDown();
+        Ctrl-u -> PickerDetailUp();
         PageDown -> PickerPageDown();
         PageUp -> PickerPageUp();
         Ctrl-Up -> CommitPickerPrevBranch();
@@ -1014,6 +1020,8 @@ on key {
         Ctrl-n -> PickerNext();
         Ctrl-f -> PickerPageDown();
         Ctrl-b -> PickerPageUp();
+        Ctrl-d -> PickerDetailDown();
+        Ctrl-u -> PickerDetailUp();
         PageDown -> PickerPageDown();
         PageUp -> PickerPageUp();
         BackTab -> CodeSearchModeToggle();
@@ -1027,6 +1035,8 @@ on key {
         Ctrl-n -> PickerNext();
         Ctrl-f -> PickerPageDown();
         Ctrl-b -> PickerPageUp();
+        Ctrl-d -> PickerDetailDown();
+        Ctrl-u -> PickerDetailUp();
         PageDown -> PickerPageDown();
         PageUp -> PickerPageUp();
         Tab -> PickerComplete();
@@ -1041,8 +1051,8 @@ on key {
         Ctrl-b -> PickerPageUp();
         PageDown -> PickerPageDown();
         PageUp -> PickerPageUp();
-        Ctrl-u -> HelpScrollDetailUp();
-        Ctrl-d -> HelpScrollDetailDown();
+        Ctrl-u -> PickerDetailUp();
+        Ctrl-d -> PickerDetailDown();
         Tab -> PickerComplete();
         BackTab -> HelpScopeToggle();
     }

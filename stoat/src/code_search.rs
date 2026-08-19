@@ -75,6 +75,9 @@ pub struct CodeSearchFinder {
     /// Rows the match list rendered last, driving the page step. `None` until
     /// the first render lays the pane out.
     pub(crate) viewport_rows: Option<usize>,
+    /// Rows the preview pane rendered last, driving where a match line sits
+    /// in it. `None` until the first render lays the pane out.
+    pub(crate) preview_rows: Option<usize>,
     /// Parses the AST scan reuses while this modal is open, shared with the
     /// scan task. Held here so closing the finder drops a workspace's worth of
     /// syntax trees rather than leaving them for the process's lifetime.
@@ -127,6 +130,7 @@ impl CodeSearchFinder {
             target_lang,
             invalid_pattern: false,
             viewport_rows: None,
+            preview_rows: None,
             parse_cache: Arc::new(std::array::from_fn(|_| {
                 Mutex::new(ast::AstParseCache::new(ast::PARSE_CACHE_SHARD_CAP))
             })),
@@ -816,9 +820,13 @@ mod tests {
             .get(preview_editor)
             .expect("preview editor")
             .scroll_row;
+        // The match sits on line 14, and the preview puts it a third of the
+        // way down its pane. No frame has measured the pane here, so the
+        // third comes off Preview::ROWS_FALLBACK.
         assert_eq!(
-            scroll_row, 9,
-            "the preview scrolls the match line a few rows down"
+            scroll_row,
+            14 - (crate::picker::Preview::ROWS_FALLBACK / 3) as u32,
+            "the preview scrolls the match line a third of the way down"
         );
     }
 

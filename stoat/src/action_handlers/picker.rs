@@ -75,6 +75,65 @@ pub(super) fn picker_complete(stoat: &mut Stoat) -> UpdateEffect {
     }
 }
 
+/// Scroll the open list modal's preview pane half a pane in `dir`.
+///
+/// Each modal holds its preview differently. Help and the commit picker keep
+/// their own row offset, since neither preview is a buffer. The rest back one
+/// with a real editor and scroll it the way an editor pane scrolls.
+///
+/// The pane's height comes from the same surfaces lookup the pointer uses, so
+/// a half-pane step matches the pane on screen.
+pub(super) fn picker_detail(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    let Some(rows) = crate::mouse::modal_preview_rows(stoat) else {
+        return UpdateEffect::None;
+    };
+    let step = (rows / 2).max(1) as i32 * dir;
+
+    let editor = match active_modal(stoat) {
+        Some(ActiveModal::Help) => {
+            return match dir > 0 {
+                true => super::help::help_scroll_detail_down(stoat),
+                false => super::help::help_scroll_detail_up(stoat),
+            };
+        },
+        Some(ActiveModal::CommitPicker) => {
+            let Some(picker) = stoat.commit_picker.as_mut() else {
+                return UpdateEffect::None;
+            };
+            let rows = step.unsigned_abs() as usize;
+            picker.preview_scroll = match dir > 0 {
+                true => picker.preview_scroll.saturating_add(rows),
+                false => picker.preview_scroll.saturating_sub(rows),
+            };
+            return UpdateEffect::Redraw;
+        },
+        Some(ActiveModal::FileFinder) => stoat
+            .file_finder
+            .as_ref()
+            .map(|f| f.active_core_ref().preview.editor),
+        Some(ActiveModal::CodeSearch) => stoat.code_search.as_ref().map(|f| f.preview.editor),
+        Some(ActiveModal::SymbolFinder) => stoat.symbol_finder.as_ref().map(|f| f.preview.editor),
+        Some(ActiveModal::Palette) => stoat
+            .command_palette
+            .as_ref()
+            .and_then(|p| p.arg_picker.as_ref())
+            .map(|p| p.active_core_ref().preview.editor),
+        _ => None,
+    };
+
+    let Some(editor_id) = editor else {
+        return UpdateEffect::None;
+    };
+    let Some(editor) = stoat.active_workspace_mut().editors.get_mut(editor_id) else {
+        return UpdateEffect::None;
+    };
+    let scroll_row = editor.scroll_row.saturating_add_signed(step);
+    editor.scroll_row = scroll_row;
+    editor.scroll_offset = scroll_row as f32;
+    editor.scroll_glide = crate::editor_state::ScrollGlide::Page;
+    UpdateEffect::Redraw
+}
+
 /// Move the open list modal's selection to its first or last row.
 ///
 /// Only help binds these today. Every other picker keeps its prompt in insert

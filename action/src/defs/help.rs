@@ -53,28 +53,6 @@ define_action!(
 );
 
 define_action!(
-    HelpScrollDetailUpDef,
-    HelpScrollDetailUp,
-    "HelpScrollDetailUp",
-    ActionKind::HelpScrollDetailUp,
-    "scroll help detail up",
-    "Scroll the help detail pane toward the top by five rows.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
-    HelpScrollDetailDownDef,
-    HelpScrollDetailDown,
-    "HelpScrollDetailDown",
-    ActionKind::HelpScrollDetailDown,
-    "scroll help detail down",
-    "Scroll the help detail pane toward the bottom by five rows.",
-    ActionPriority::Normal,
-    palette_visible = false
-);
-
-define_action!(
     CloseHelpDef,
     CloseHelp,
     "CloseHelp",

@@ -1889,6 +1889,38 @@ mod tests {
                 assert_eq!(bound, action, "{modal} answers {code:?} with {action}");
             }
         }
+
+        // Ctrl-d and Ctrl-u belong to the preview, so only the modals that
+        // show one bind them. The three small pickers have no preview.
+        let with_preview = [
+            ("finder", "insert"),
+            ("symbols", "insert"),
+            ("commit_picker", "insert"),
+            ("code_search", "insert"),
+            ("palette", "insert"),
+            ("help", "insert"),
+            ("help", "normal"),
+        ];
+        for (modal, mode) in with_preview {
+            let state = TestState::new()
+                .set("modal", StateValue::String(modal.into()))
+                .set("mode", StateValue::String(mode.into()));
+            let bound = |ch| {
+                keymap
+                    .lookup(
+                        &state,
+                        &KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL),
+                    )
+                    .unwrap_or_else(|| panic!("{modal} leaves C-{ch} unbound"))[0]
+                    .name
+                    .clone()
+            };
+            assert_eq!(
+                (bound('d'), bound('u')),
+                ("PickerDetailDown".to_string(), "PickerDetailUp".to_string()),
+                "{modal} scrolls its preview on C-d and C-u"
+            );
+        }
     }
 
     #[test]

@@ -364,7 +364,7 @@ pub(crate) struct SymbolPicker {
 /// would otherwise redo all of it every frame the modal stays open.
 pub(crate) fn sync_symbol_finder_preview(stoat: &mut Stoat) {
     let Some((buffer_id, rows, entry)) = stoat.symbol_finder.as_mut().and_then(|finder| {
-        let rows = finder.preview_rows.unwrap_or(24);
+        let rows = finder.preview_rows.unwrap_or(Preview::ROWS_FALLBACK);
         finder.preview_needs_sync(rows).then(|| {
             (
                 finder.buffer_id,
@@ -396,14 +396,12 @@ pub(crate) fn sync_symbol_finder_preview(stoat: &mut Stoat) {
             None => PreviewSource::File(path.clone()),
         },
     };
-    finder.preview.sync(ws, fs_host, language_registry, source);
+    finder
+        .preview
+        .sync_at_line(ws, fs_host, language_registry, source, line, rows);
 
-    let scroll_row = line.saturating_sub((rows / 3) as u32);
     let editor_id = finder.preview.editor;
     if let Some(editor) = ws.editors.get_mut(editor_id) {
-        editor.scroll_row = scroll_row;
-        editor.scroll_offset = scroll_row as f32;
-
         let offset = {
             let snapshot = editor.display_map.snapshot();
             let buf_snap = snapshot.buffer_snapshot();

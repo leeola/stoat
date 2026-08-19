@@ -71,10 +71,7 @@ use crate::{
             FileFinderScopeToggle, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
             OpenFileFinderHSplit, OpenFileFinderVSplit, OpenWorkspaceFileFinder,
         },
-        help::{
-            CloseHelp, DismissKeyHints, HelpScopeToggle, HelpScrollDetailDown, HelpScrollDetailUp,
-            OpenHelp, ToggleKeyHints,
-        },
+        help::{CloseHelp, DismissKeyHints, HelpScopeToggle, OpenHelp, ToggleKeyHints},
         lsp::{
             CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition,
             GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic, GotoTypeDefinition, Hover,
@@ -91,8 +88,8 @@ use crate::{
         picker::{
             CodeSearchClose, CodeSearchModeToggle, CodeSearchSelect, CommitPickerBack,
             CommitPickerColumnCycle, CommitPickerDrillIn, CommitPickerNextBranch,
-            CommitPickerPrevBranch, PickerComplete, PickerFirst, PickerLast, PickerNext,
-            PickerPageDown, PickerPageUp, PickerPrev,
+            CommitPickerPrevBranch, PickerComplete, PickerDetailDown, PickerDetailUp, PickerFirst,
+            PickerLast, PickerNext, PickerPageDown, PickerPageUp, PickerPrev,
         },
         prompt::{
             CancelPromptInput, PaletteHistoryNext, PaletteHistoryPrev, PaletteScopeToggle,
@@ -518,6 +515,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(PickerComplete::DEF, |_| Ok(Box::new(PickerComplete)));
     add(PickerFirst::DEF, |_| Ok(Box::new(PickerFirst)));
     add(PickerLast::DEF, |_| Ok(Box::new(PickerLast)));
+    add(PickerDetailDown::DEF, |_| Ok(Box::new(PickerDetailDown)));
+    add(PickerDetailUp::DEF, |_| Ok(Box::new(PickerDetailUp)));
     add(CommitPickerNextBranch::DEF, |_| {
         Ok(Box::new(CommitPickerNextBranch))
     });
@@ -931,12 +930,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(RunHistoryPrev::DEF, |_| Ok(Box::new(RunHistoryPrev)));
     add(RunHistoryNext::DEF, |_| Ok(Box::new(RunHistoryNext)));
     add(HelpScopeToggle::DEF, |_| Ok(Box::new(HelpScopeToggle)));
-    add(HelpScrollDetailUp::DEF, |_| {
-        Ok(Box::new(HelpScrollDetailUp))
-    });
-    add(HelpScrollDetailDown::DEF, |_| {
-        Ok(Box::new(HelpScrollDetailDown))
-    });
     add(CloseHelp::DEF, |_| Ok(Box::new(CloseHelp)));
     add(ToggleDockRight::DEF, |_| Ok(Box::new(ToggleDockRight)));
     add(ToggleDockLeft::DEF, |_| Ok(Box::new(ToggleDockLeft)));
@@ -1323,6 +1316,8 @@ mod tests {
         "PickerComplete",
         "PickerFirst",
         "PickerLast",
+        "PickerDetailDown",
+        "PickerDetailUp",
         "CommitPickerNextBranch",
         "CommitPickerPrevBranch",
         "CommitPickerColumnCycle",
@@ -1336,8 +1331,6 @@ mod tests {
         "ShowCwd",
         "ReloadEnv",
         "HelpScopeToggle",
-        "HelpScrollDetailUp",
-        "HelpScrollDetailDown",
         "SubmitPromptInput",
         "CancelPromptInput",
         "PromptInsertNewline",

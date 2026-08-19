@@ -1393,11 +1393,32 @@ impl Preview {
         }
     }
 
-    /// Scroll the preview so 0-based `line` sits a few rows below the top, for a
-    /// picker whose selection points at a line rather than a whole file.
-    pub(crate) fn scroll_to_line(&self, ws: &mut Workspace, line: u32) {
+    /// Rows to assume for a preview pane the render has not laid out yet.
+    ///
+    /// A sync runs before the first frame stamps a real height, and a scroll
+    /// computed from zero rows puts the line flush against the top. The next
+    /// frame re-syncs against the measured pane.
+    pub(crate) const ROWS_FALLBACK: usize = 24;
+
+    /// Load `source` and scroll it so 0-based `line` sits a third of the way
+    /// down a pane `rows` tall.
+    ///
+    /// For a picker whose selection names a line rather than a whole file. The
+    /// third leaves the lines above the match in view as context while keeping
+    /// most of the pane for what follows it. The share holds at any pane
+    /// height, where a fixed offset drifts with it.
+    pub(crate) fn sync_at_line(
+        &mut self,
+        ws: &mut Workspace,
+        fs_host: &dyn FsHost,
+        language_registry: &LanguageRegistry,
+        source: PreviewSource,
+        line: u32,
+        rows: usize,
+    ) {
+        self.sync(ws, fs_host, language_registry, source);
         if let Some(editor) = ws.editors.get_mut(self.editor) {
-            let scroll_row = line.saturating_sub(5);
+            let scroll_row = line.saturating_sub((rows / 3) as u32);
             editor.scroll_row = scroll_row;
             editor.scroll_offset = scroll_row as f32;
             editor.scroll_glide = ScrollGlide::None;
