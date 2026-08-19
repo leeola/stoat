@@ -26,7 +26,9 @@ pub(crate) fn picker_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
 
     match active_modal(stoat) {
         Some(ActiveModal::Jumplist) => shift!(stoat.jumplist_picker.as_mut()),
-        Some(ActiveModal::Diagnostics) => shift!(stoat.diagnostics_picker.as_mut()),
+        Some(ActiveModal::Diagnostics) => {
+            shift!(stoat.diagnostics_picker.as_mut().map(|p| &mut p.picker))
+        },
         Some(ActiveModal::Location) => shift!(stoat.location_picker.as_mut()),
         Some(ActiveModal::WorkspacePicker) => shift!(stoat.workspace_picker.as_mut()),
         Some(ActiveModal::CodeSearch) => shift!(stoat.code_search.as_mut()),
@@ -188,7 +190,9 @@ pub(super) fn diagnostics_picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffe
 }
 
 pub(super) fn diagnostics_picker_close(stoat: &mut Stoat) -> UpdateEffect {
-    stoat.diagnostics_picker = None;
+    if let Some(picker) = stoat.diagnostics_picker.take() {
+        picker.dispose(stoat.active_workspace_mut());
+    }
     UpdateEffect::Redraw
 }
 
@@ -200,15 +204,19 @@ pub(super) fn diagnostics_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let Some(picker) = stoat.diagnostics_picker.take() else {
         return UpdateEffect::None;
     };
-    let idx = picker.selected();
-    let Some(entry) = picker.entries().get(idx) else {
+    let target = picker.selected_entry().map(|entry| {
+        (
+            entry.path.clone(),
+            entry.line.saturating_sub(1),
+            entry.column.saturating_sub(1),
+            entry.offset,
+            entry.encoding,
+        )
+    });
+    picker.dispose(stoat.active_workspace_mut());
+    let Some((path, line, column, local_offset, encoding)) = target else {
         return UpdateEffect::Redraw;
     };
-    let path = entry.path.clone();
-    let line = entry.line.saturating_sub(1);
-    let column = entry.column.saturating_sub(1);
-    let local_offset = entry.offset;
-    let encoding = entry.encoding;
 
     super::jump::push_jump(stoat);
     let offset = match path {
@@ -230,6 +238,48 @@ pub(super) fn location_picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect 
         picker.page(dir);
     }
     UpdateEffect::Redraw
+}
+
+/// Re-rank the diagnostics picker for what is typed and sync its preview.
+///
+/// Driven once per frame beside the other picker syncs, so typing narrows the
+/// list and the pane follows the selection without an action of its own.
+pub(crate) fn sync_diagnostics_picker(stoat: &mut Stoat) {
+    if stoat.diagnostics_picker.is_none() {
+        return;
+    }
+    let query = {
+        let ws = stoat.active_workspace();
+        stoat
+            .diagnostics_picker
+            .as_ref()
+            .expect("diagnostics_picker present")
+            .picker
+            .input
+            .text(ws)
+    };
+
+    let active_idx = stoat.active_workspace;
+    let ws = &mut stoat.workspaces[active_idx];
+    let fs_host = &*stoat.fs_host;
+    let language_registry = &stoat.language_registry;
+    let Some(picker) = stoat.diagnostics_picker.as_mut() else {
+        return;
+    };
+    picker.picker.refilter(&query);
+    if picker.picker.preview_current() {
+        return;
+    }
+
+    // Resolving reads the workspace and the sync writes it, so the target is
+    // in hand before the picker takes its mutable borrow.
+    let scope = picker.scope();
+    let target = picker
+        .selected_entry()
+        .and_then(|entry| crate::diagnostics_picker::diagnostic_target(ws, scope, entry));
+    picker
+        .picker
+        .sync_preview(ws, fs_host, language_registry, target);
 }
 
 /// Re-rank the location picker for what is typed and sync its preview.
@@ -320,13 +370,43 @@ pub(super) fn open_workspace_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffe
         return UpdateEffect::None;
     }
     let encodings = stoat.lsp_registry.offset_encodings();
-    let picker =
-        crate::diagnostics_picker::DiagnosticsPicker::workspace(&stoat.diagnostics, &encodings);
-    if picker.entries().is_empty() {
+    let entries = crate::diagnostics_picker::DiagnosticsPicker::workspace_entries(
+        &stoat.diagnostics,
+        &encodings,
+    );
+    if entries.is_empty() {
         return UpdateEffect::None;
     }
-    stoat.diagnostics_picker = Some(picker);
+    stoat.diagnostics_picker = Some(build_diagnostics_picker(
+        stoat,
+        entries,
+        crate::diagnostics_picker::PickerScope::Workspace,
+    ));
     UpdateEffect::Redraw
+}
+
+/// Wrap `entries` in a diagnostics picker with its prompt focused.
+///
+/// The input opens in insert mode so the reader narrows the list by typing,
+/// the way every other target list works.
+fn build_diagnostics_picker(
+    stoat: &mut Stoat,
+    entries: Vec<crate::diagnostics_picker::DiagnosticsEntry>,
+    scope: crate::diagnostics_picker::PickerScope,
+) -> crate::diagnostics_picker::DiagnosticsPicker {
+    let executor = stoat.executor.clone();
+    stoat.set_focused_mode("insert".into());
+    let ws = stoat.active_workspace_mut();
+    let input = crate::input_view::InputView::create(
+        ws,
+        executor.clone(),
+        crate::input_view::SubmitTarget::DiagnosticsPicker,
+        "",
+        "insert",
+        1,
+    );
+    let preview = crate::picker::Preview::new(ws, executor);
+    crate::diagnostics_picker::DiagnosticsPicker::from_entries(entries, scope, input, preview)
 }
 
 /// Drive [`ActionKind::OpenDiagnosticsPicker`]. Snapshots the
@@ -371,11 +451,15 @@ pub(super) fn open_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
         Some(b) => b,
         None => return UpdateEffect::None,
     };
-    let picker = {
+    let entries = {
         let guard = buffer.read().expect("buffer poisoned");
-        crate::diagnostics_picker::DiagnosticsPicker::new(&diagnostics, &guard)
+        crate::diagnostics_picker::DiagnosticsPicker::local_entries(&diagnostics, &guard)
     };
-    stoat.diagnostics_picker = Some(picker);
+    stoat.diagnostics_picker = Some(build_diagnostics_picker(
+        stoat,
+        entries,
+        crate::diagnostics_picker::PickerScope::Local(path),
+    ));
     UpdateEffect::Redraw
 }
 

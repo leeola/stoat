@@ -1859,8 +1859,9 @@ mod tests {
             "help",
             "workspace_picker",
             "location",
+            "diagnostics",
         ];
-        let normal_modals = ["jumplist", "diagnostics"];
+        let normal_modals = ["jumplist"];
 
         let expected = [
             (KeyCode::Up, KeyModifiers::NONE, "PickerPrev"),
@@ -1892,7 +1893,7 @@ mod tests {
         }
 
         // Ctrl-d and Ctrl-u belong to the preview, so only the modals that
-        // show one bind them. The three small pickers have no preview.
+        // show one bind them. The jumplist and workspace pickers have none.
         let with_preview = [
             ("finder", "insert"),
             ("symbols", "insert"),
@@ -1902,6 +1903,7 @@ mod tests {
             ("help", "insert"),
             ("help", "normal"),
             ("location", "insert"),
+            ("diagnostics", "insert"),
         ];
         for (modal, mode) in with_preview {
             let state = TestState::new()

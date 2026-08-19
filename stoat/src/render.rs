@@ -991,11 +991,18 @@ pub(crate) fn frame(
         },
         Some(ActiveModal::Diagnostics) => {
             if let Some(picker) = &mut stoat.diagnostics_picker {
+                let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::DiagnosticsPicker);
+                let split = modal_split_percent(&stoat.modal_split, ModalKind::DiagnosticsPicker);
+                let git_root = ws.git_root.clone();
                 diagnostics_picker::render_diagnostics_picker(
                     picker,
-                    &ws.git_root,
+                    ws,
+                    &git_root,
                     &stoat.theme,
+                    chrome,
                     full,
+                    zoom,
+                    split,
                     buf,
                     &mut *scene,
                 );

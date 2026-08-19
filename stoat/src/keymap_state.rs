@@ -539,7 +539,9 @@ pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
             stoat.jumplist_picker = None;
         },
         ActiveModal::Diagnostics => {
-            stoat.diagnostics_picker = None;
+            if let Some(picker) = stoat.diagnostics_picker.take() {
+                picker.dispose(stoat.active_workspace_mut());
+            }
         },
         ActiveModal::CommitPicker => {
             action_handlers::review_walk::commit_picker_close(stoat);

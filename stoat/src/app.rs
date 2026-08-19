@@ -399,9 +399,8 @@ enum WindowIpc {
 ///
 /// The zoom combo is context-relative, so a step has to land on whichever modal
 /// the user is looking at rather than on a single global level. This names that
-/// target. Modals sized entirely by their content already (the location,
-/// diagnostics, jumplist, and workspace pickers) have nothing to zoom and are
-/// absent.
+/// target. Modals sized entirely by their content already (the jumplist and
+/// workspace pickers) have nothing to zoom and are absent.
 ///
 /// Every kind here sizes its box against its own [`Stoat::modal_zoom`] entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -413,6 +412,7 @@ pub(crate) enum ModalKind {
     Help,
     SymbolFinder,
     LocationPicker,
+    DiagnosticsPicker,
 }
 
 /// Rows one wheel notch moves the commit picker's diff preview.
@@ -4668,10 +4668,8 @@ impl Stoat {
             ActiveModal::FilterSelections => &self.filter_selections_input.as_ref()?.input,
             ActiveModal::ShellInput => &self.shell_input.as_ref()?.input,
             ActiveModal::Location => &self.location_picker.as_ref()?.input,
-            ActiveModal::Run
-            | ActiveModal::QuitConfirm
-            | ActiveModal::Jumplist
-            | ActiveModal::Diagnostics => return None,
+            ActiveModal::Diagnostics => &self.diagnostics_picker.as_ref()?.picker.input,
+            ActiveModal::Run | ActiveModal::QuitConfirm | ActiveModal::Jumplist => return None,
         };
 
         Some((input.editor_id, input.buffer_id))
@@ -6689,6 +6687,7 @@ impl Stoat {
         let lsp = crate::lsp::pump_all(self);
         action_handlers::workspace::sync_workspace_picker(self);
         action_handlers::picker::sync_location_picker(self);
+        action_handlers::picker::sync_diagnostics_picker(self);
 
         let format_on_save = action_handlers::file::pump_format_on_save(self);
         let pending_save = action_handlers::file::pump_pending_save(self);
@@ -16859,7 +16858,7 @@ mod tests {
 
     /// The location picker's inner rows rect for the harness' screen size.
     fn location_picker_rows(h: &crate::test_harness::TestHarness) -> Rect {
-        crate::render::location_picker::location_picker_layout(
+        crate::render::picker::target_picker_layout(
             h.stoat.size(),
             modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::LocationPicker),
             modal_split_percent(&h.stoat.modal_split, ModalKind::LocationPicker),
@@ -17108,6 +17107,243 @@ mod tests {
         );
     }
 
+    /// Open a workspace-scope diagnostics picker over `count` diagnostics, one
+    /// per line of a seeded file, each message naming its 1-based line so a
+    /// painted row is identifiable. Returns the file's path.
+    fn open_diagnostics_picker(h: &mut crate::test_harness::TestHarness, count: u32) -> PathBuf {
+        use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+
+        let root = PathBuf::from("/diag-picker");
+        let path = root.join("target.rs");
+        let text: String = (0..count.max(1)).map(|i| format!("line {i}\n")).collect();
+        h.fake_fs()
+            .insert_files(std::iter::once((path.clone(), text.as_bytes())));
+        h.stoat.active_workspace_mut().git_root = root;
+
+        let diagnostics = (0..count)
+            .map(|line| {
+                let position = Position { line, character: 0 };
+                Diagnostic {
+                    range: Range {
+                        start: position,
+                        end: position,
+                    },
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    message: format!("diagnostic-{}", line + 1),
+                    ..Diagnostic::default()
+                }
+            })
+            .collect();
+        h.stoat
+            .diagnostics
+            .replace_for_path(path.clone(), diagnostics);
+
+        action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenWorkspaceDiagnosticsPicker {},
+        );
+        h.snapshot();
+        path
+    }
+
+    /// The diagnostics picker's inner rows rect for the harness' screen size.
+    fn diagnostics_picker_rows(h: &crate::test_harness::TestHarness) -> Rect {
+        crate::render::picker::target_picker_layout(
+            h.stoat.size(),
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::DiagnosticsPicker),
+            modal_split_percent(&h.stoat.modal_split, ModalKind::DiagnosticsPicker),
+        )
+        .expect("picker laid out")
+        .list
+    }
+
+    /// The picker prompts like every other target list, so typing narrows the
+    /// diagnostics rather than reaching the buffer behind it.
+    #[test]
+    fn typing_narrows_the_diagnostics() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        open_diagnostics_picker(&mut h, 12);
+        let all = h
+            .stoat
+            .diagnostics_picker
+            .as_ref()
+            .expect("open")
+            .filtered()
+            .len();
+
+        h.type_text("diagnostic-7");
+        h.stoat.drive_background();
+
+        let narrowed = h
+            .stoat
+            .diagnostics_picker
+            .as_ref()
+            .expect("the picker stays open while typing")
+            .filtered()
+            .len();
+        assert_eq!(
+            (all, narrowed),
+            (12, 1),
+            "the query keeps only the diagnostic it names"
+        );
+    }
+
+    /// The preview shows the selected diagnostic's file, scrolled to the line it
+    /// points at, so a reader sees the offending code before jumping to it.
+    #[test]
+    fn the_diagnostics_preview_follows_the_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        open_diagnostics_picker(&mut h, 40);
+        h.stoat.drive_background();
+        h.snapshot();
+
+        let preview_editor = h
+            .stoat
+            .diagnostics_picker
+            .as_ref()
+            .expect("open")
+            .picker
+            .preview
+            .editor;
+        let scroll = |h: &crate::test_harness::TestHarness| {
+            h.stoat
+                .active_workspace()
+                .editors
+                .get(preview_editor)
+                .expect("preview editor")
+                .scroll_row
+        };
+        let before = scroll(&h);
+
+        h.stoat
+            .diagnostics_picker
+            .as_mut()
+            .expect("open")
+            .picker
+            .move_selection(39);
+        h.stoat.drive_background();
+        h.snapshot();
+
+        assert!(
+            scroll(&h) > before,
+            "the preview scrolled toward the last diagnostic's line"
+        );
+    }
+
+    /// Escape closes the picker and releases the editors it owns, so a closed
+    /// picker leaves no scratch buffers behind.
+    #[test]
+    fn escape_closes_the_diagnostics_picker_and_disposes_it() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        let before = h.stoat.active_workspace().editors.len();
+        open_diagnostics_picker(&mut h, 4);
+        assert!(
+            h.stoat.active_workspace().editors.len() > before,
+            "the picker took editors for its prompt and preview"
+        );
+
+        h.type_keys("escape");
+
+        assert_eq!(
+            (
+                h.stoat.diagnostics_picker.is_some(),
+                h.stoat.active_workspace().editors.len()
+            ),
+            (false, before),
+            "closing gives back every editor the picker took"
+        );
+    }
+
+    /// A page covers half the rows the render stamped, and stops at each end
+    /// rather than wrapping.
+    #[test]
+    fn diagnostics_picker_pages_by_half_a_screen_and_stops_at_the_ends() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        open_diagnostics_picker(&mut h, 20);
+
+        let half = h
+            .stoat
+            .diagnostics_picker
+            .as_ref()
+            .expect("open")
+            .picker
+            .viewport_rows
+            .expect("the render stamped a viewport")
+            / 2;
+        assert!(
+            half > 1,
+            "a meaningful page needs more than one row: {half}"
+        );
+
+        let page = |h: &mut crate::test_harness::TestHarness, dir: i32| {
+            h.stoat.diagnostics_picker.as_mut().expect("open").page(dir);
+        };
+        let selected = |h: &crate::test_harness::TestHarness| {
+            h.stoat
+                .diagnostics_picker
+                .as_ref()
+                .expect("open")
+                .selected()
+        };
+
+        page(&mut h, 1);
+        assert_eq!(selected(&h), half, "a page down covers half a screen");
+        page(&mut h, -1);
+        assert_eq!(selected(&h), 0, "and a page up returns");
+
+        for _ in 0..20 {
+            page(&mut h, 1);
+        }
+        assert_eq!(selected(&h), 19, "paging past the end stops on it");
+        for _ in 0..20 {
+            page(&mut h, -1);
+        }
+        assert_eq!(selected(&h), 0, "and past the start stops there");
+    }
+
+    /// More diagnostics than the box shows means the window has to scroll to
+    /// reach the last one, and the row it lands on paints as selected.
+    #[test]
+    fn diagnostics_picker_renders_a_selection_past_the_visible_rows() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        open_diagnostics_picker(&mut h, 60);
+        h.stoat
+            .diagnostics_picker
+            .as_mut()
+            .expect("open")
+            .picker
+            .move_selection(59);
+        h.snapshot();
+
+        // Rows are read individually rather than by scanning the whole frame.
+        // The key hints overlay paints across the right end of the bottom rows.
+        let rows = diagnostics_picker_rows(&h);
+        let row_text = |row: u16| -> String {
+            let buf = h.rendered_buffer();
+            (rows.x..rows.x + rows.width)
+                .map(|col| buf[(col, row)].symbol())
+                .collect()
+        };
+        let last_row = rows.y + rows.height - 1;
+
+        assert!(
+            !row_text(rows.y).contains("diagnostic-1 "),
+            "the window scrolled the first diagnostics off: {}",
+            row_text(rows.y)
+        );
+        assert!(
+            row_text(last_row).contains("diagnostic-60"),
+            "the selected 60th diagnostic paints on the last row: {}",
+            row_text(last_row)
+        );
+
+        let selection = h.stoat.theme.get(crate::theme::scope::UI_SELECTION);
+        assert_eq!(
+            h.rendered_buffer()[(rows.x + 1, last_row)].style().bg,
+            selection.bg,
+            "the selected diagnostic is painted as selected"
+        );
+    }
     /// Seed a definition-capable fake server, open `main.rs` holding
     /// `abc\ndef\nghi\n`, and return its path.
     fn open_file_with_lsp(h: &mut crate::test_harness::TestHarness) -> PathBuf {

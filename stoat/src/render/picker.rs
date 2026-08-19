@@ -16,7 +16,11 @@ use crate::{
     theme::{scope, Theme},
     workspace::Workspace,
 };
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    widgets::{Block, Borders},
+};
 use std::{collections::BTreeMap, path::Path};
 
 /// Paint a filter modal's header, which is the prompt glyph, the live input
@@ -74,6 +78,66 @@ pub(crate) fn filter_header(
 /// safe to call before knowing whether scrolling is needed at all.
 pub(crate) fn window_start(selected: usize, rows: usize) -> usize {
     selected.saturating_sub(rows.saturating_sub(1))
+}
+
+/// Rows of chrome the box spends before its list. The border takes two, the
+/// filter prompt one, and the rule under it one more.
+const CHROME_ROWS: u16 = 4;
+
+/// Where a target picker's parts sit inside `area`.
+///
+/// One shape for every jump-target list, so they open the same size and split
+/// their body the same way.
+pub(crate) struct PickerLayout {
+    /// The bordered modal box.
+    pub(crate) modal: Rect,
+    /// Inside the border, starting at the filter prompt.
+    pub(crate) inner: Rect,
+    /// The candidate rows.
+    pub(crate) list: Rect,
+    /// The selected candidate's file, when the box is wide enough to show one.
+    pub(crate) preview: Option<Rect>,
+}
+
+/// Lay a target picker out within `area`, or [`None`] when `area` is too small
+/// to host it.
+///
+/// Painting and hit-testing both go through this, so a clicked row names the
+/// row drawn there.
+pub(crate) fn target_picker_layout(
+    area: Rect,
+    zoom: i8,
+    list_percent: u16,
+) -> Option<PickerLayout> {
+    let modal = crate::render::chrome::modal_box(
+        area,
+        (120, 32u16.saturating_add(CHROME_ROWS)),
+        (120, 32),
+        (40, 12),
+        zoom,
+    )?;
+    let inner = Block::default().borders(Borders::ALL).inner(modal);
+
+    let body_top = inner.y + 2;
+    let body_height = (inner.y + inner.height).saturating_sub(body_top);
+    if body_height == 0 {
+        return None;
+    }
+    let (list, preview) = split_list_preview(
+        inner.x,
+        body_top,
+        inner.width,
+        body_height,
+        80,
+        MIN_PANE_COLUMNS,
+        list_percent,
+    );
+    Some(PickerLayout {
+        modal,
+        inner,
+        list,
+        preview,
+    })
 }
 
 /// Fixtures for asserting which screen row a picker paints its selection on.
@@ -504,6 +568,25 @@ mod tests {
         assert_eq!(
             highlighted, 5,
             "the query's five characters highlight on a row whose offsets were derived at paint"
+        );
+    }
+
+    /// The box asks for a fixed size rather than growing with its candidates,
+    /// so a terminal too small to host it gets no picker rather than a
+    /// squeezed one.
+    #[test]
+    fn layout_is_none_when_the_terminal_cannot_host_the_box() {
+        assert!(
+            target_picker_layout(Rect::new(0, 0, 120, 40), 0, 40).is_some(),
+            "a full-size terminal hosts it"
+        );
+        assert_eq!(
+            (
+                target_picker_layout(Rect::new(0, 0, 20, 40), 0, 40).is_none(),
+                target_picker_layout(Rect::new(0, 0, 120, 4), 0, 40).is_none(),
+            ),
+            (true, true),
+            "too narrow and too short both refuse rather than painting a stub"
         );
     }
 }

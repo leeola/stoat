@@ -242,18 +242,21 @@ fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
         },
         ActiveModal::Diagnostics => {
             let picker = stoat.diagnostics_picker.as_ref()?;
-            plain(
-                crate::render::diagnostics_picker::diagnostics_picker_layout(
-                    size,
-                    picker.entries().len(),
-                ),
-                picker.entries().len(),
-                picker.selected(),
-            )
+            let layout = crate::render::picker::target_picker_layout(
+                size,
+                zoom(ModalKind::DiagnosticsPicker),
+                split(ModalKind::DiagnosticsPicker),
+            )?;
+            Some(ModalSurfaces {
+                list: layout.list,
+                preview: layout.preview,
+                len: picker.filtered().len(),
+                selected: picker.selected(),
+            })
         },
         ActiveModal::Location => {
             let picker = stoat.location_picker.as_ref()?;
-            let layout = crate::render::location_picker::location_picker_layout(
+            let layout = crate::render::picker::target_picker_layout(
                 size,
                 zoom(ModalKind::LocationPicker),
                 split(ModalKind::LocationPicker),
@@ -416,7 +419,11 @@ pub(crate) fn open_modal_box(stoat: &Stoat, kind: ModalKind, zoom: i8) -> Option
         },
         ModalKind::LocationPicker => {
             stoat.location_picker.as_ref()?;
-            crate::render::location_picker::location_picker_layout(size, zoom, split)?.modal
+            crate::render::picker::target_picker_layout(size, zoom, split)?.modal
+        },
+        ModalKind::DiagnosticsPicker => {
+            stoat.diagnostics_picker.as_ref()?;
+            crate::render::picker::target_picker_layout(size, zoom, split)?.modal
         },
     };
 

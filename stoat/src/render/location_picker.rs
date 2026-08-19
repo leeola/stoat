@@ -3,86 +3,29 @@ use crate::{
     render::table::{self, Column, Width},
     workspace::Workspace,
 };
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    widgets::{Block, Borders},
-};
+use ratatui::{buffer::Buffer, layout::Rect};
 use std::path::Path;
 
 /// The candidate's file, its line and column, and the line's text. Headerless,
 /// since three columns of obvious content need no labels over them.
+///
+/// The sized columns stay narrow because the list shares its body with a
+/// preview. A path and a position wide enough to read whole would leave the
+/// candidate text, which is what a query names, nothing at all.
 const COLUMNS: [Column; 3] = [
     Column {
         label: "path",
-        width: Width::Fixed(32),
+        width: Width::Fixed(18),
     },
     Column {
         label: "position",
-        width: Width::Fixed(12),
+        width: Width::Fixed(8),
     },
     Column {
         label: "text",
         width: Width::Fill,
     },
 ];
-
-/// Rows of chrome the box spends before its list. The border takes two, the
-/// filter prompt one, and the rule under it one more.
-const CHROME_ROWS: u16 = 4;
-
-/// Where the location picker's parts sit inside `area`.
-pub(crate) struct LocationLayout {
-    /// The bordered modal box.
-    pub(crate) modal: Rect,
-    /// Inside the border, starting at the filter prompt.
-    pub(crate) inner: Rect,
-    /// The candidate rows.
-    pub(crate) list: Rect,
-    /// The selected candidate's file, when the box is wide enough to show one.
-    pub(crate) preview: Option<Rect>,
-}
-
-/// Lay the location picker out within `area`, or [`None`] when `area` is too
-/// small to host it.
-///
-/// Painting and hit-testing both go through this, so a clicked row names the
-/// row drawn there.
-pub(crate) fn location_picker_layout(
-    area: Rect,
-    zoom: i8,
-    list_percent: u16,
-) -> Option<LocationLayout> {
-    let modal = crate::render::chrome::modal_box(
-        area,
-        (120, 32u16.saturating_add(CHROME_ROWS)),
-        (120, 32),
-        (40, 12),
-        zoom,
-    )?;
-    let inner = Block::default().borders(Borders::ALL).inner(modal);
-
-    let body_top = inner.y + 2;
-    let body_height = (inner.y + inner.height).saturating_sub(body_top);
-    if body_height == 0 {
-        return None;
-    }
-    let (list, preview) = crate::render::picker::split_list_preview(
-        inner.x,
-        body_top,
-        inner.width,
-        body_height,
-        80,
-        crate::render::picker::MIN_PANE_COLUMNS,
-        list_percent,
-    );
-    Some(LocationLayout {
-        modal,
-        inner,
-        list,
-        preview,
-    })
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_location_picker(
@@ -97,7 +40,7 @@ pub(crate) fn render_location_picker(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let Some(layout) = location_picker_layout(area, zoom, list_percent) else {
+    let Some(layout) = crate::render::picker::target_picker_layout(area, zoom, list_percent) else {
         return;
     };
 
@@ -226,7 +169,7 @@ fn paint_candidate_rows(
         if indices.is_empty() {
             continue;
         }
-        let text_x = table_x + widths[0] + widths[1] + 2;
+        let text_x = table_x + table::column_starts(&widths)[2];
         let prefix_len = format!("{}:{} ", entry.path.display(), entry.line)
             .chars()
             .count() as u32;
@@ -240,30 +183,5 @@ fn paint_candidate_rows(
                 buf[(x, row)].set_style(match_style);
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::location_picker_layout;
-    use ratatui::layout::Rect;
-
-    /// The box asks for a fixed size rather than growing with its candidates,
-    /// so a terminal too small to host it gets no picker rather than a
-    /// squeezed one.
-    #[test]
-    fn layout_is_none_when_the_terminal_cannot_host_the_box() {
-        assert!(
-            location_picker_layout(Rect::new(0, 0, 120, 40), 0, 40).is_some(),
-            "a full-size terminal hosts it"
-        );
-        assert_eq!(
-            (
-                location_picker_layout(Rect::new(0, 0, 20, 40), 0, 40).is_none(),
-                location_picker_layout(Rect::new(0, 0, 120, 4), 0, 40).is_none(),
-            ),
-            (true, true),
-            "too narrow and too short both refuse rather than painting a stub"
-        );
     }
 }

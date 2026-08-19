@@ -65,6 +65,7 @@ pub(crate) enum SubmitTarget {
     CommitPicker,
     WorkspacePicker,
     LocationPicker,
+    DiagnosticsPicker,
     RenameSymbol,
     Search,
     CodeSearch,

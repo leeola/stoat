@@ -1,4 +1,10 @@
-use crate::{buffer::TextBuffer, diagnostics::DiagnosticSet, host::OffsetEncoding};
+use crate::{
+    buffer::TextBuffer,
+    diagnostics::DiagnosticSet,
+    host::OffsetEncoding,
+    input_view::InputView,
+    picker::{Preview, PreviewSource, TargetPicker},
+};
 use lsp_types::{Diagnostic, DiagnosticSeverity};
 use std::{collections::HashMap, path::PathBuf};
 
@@ -7,9 +13,13 @@ use std::{collections::HashMap, path::PathBuf};
 /// renderer paints a path column when scope is `Workspace`,
 /// and selecting a `Workspace` entry opens its file before
 /// jumping.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// A local entry carries no path of its own, which is what marks it local to
+/// the jump. The scope holds the one path they all share, so the preview still
+/// knows which file to read.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PickerScope {
-    Local,
+    Local(PathBuf),
     Workspace,
 }
 
@@ -20,17 +30,16 @@ pub enum PickerScope {
 /// Selecting an entry collapses the focused editor's cursor at
 /// its diagnostic. Workspace entries open the target file first.
 ///
-/// Navigation and selection route through the `modal == diagnostics`
-/// keymap block. [`Self::select_next`] and [`Self::select_prev`] move
-/// the highlight, and [`Self::selected`] reports the row to jump to.
+/// Navigation, filtering, and selection route through the
+/// `modal == diagnostics && mode == insert` keymap block. A query narrows the
+/// list against [`diagnostic_haystack`], and [`Self::selected_entry`] reports
+/// the surviving diagnostic to jump to.
 pub struct DiagnosticsPicker {
-    entries: Vec<DiagnosticsEntry>,
-    selected: usize,
+    /// The filter, selection, and preview every target list shares.
+    pub(crate) picker: TargetPicker<DiagnosticsEntry>,
+    /// Which diagnostics the list was built from. Two open commands set this,
+    /// and the title and the jump both read it.
     scope: PickerScope,
-    /// Rows the last render painted, stamped by the renderer and read by
-    /// [`Self::page`]. `None` until the first frame, since the modal sizes
-    /// itself to its entries and only render knows how many fit.
-    pub(crate) viewport_rows: Option<usize>,
 }
 
 pub struct DiagnosticsEntry {
@@ -58,15 +67,63 @@ pub struct DiagnosticsEntry {
 const MESSAGE_MAX_CHARS: usize = 80;
 
 impl DiagnosticsPicker {
-    /// Build a picker from a buffer's diagnostics, each paired with the offset
+    /// Wrap `entries` with the prompt and preview, tagged with `scope`.
+    pub(crate) fn from_entries(
+        entries: Vec<DiagnosticsEntry>,
+        scope: PickerScope,
+        input: InputView,
+        preview: Preview,
+    ) -> Self {
+        let haystacks = entries.iter().map(diagnostic_haystack).collect();
+        Self {
+            picker: TargetPicker::new(entries, haystacks, input, preview),
+            scope,
+        }
+    }
+
+    pub fn scope(&self) -> &PickerScope {
+        &self.scope
+    }
+
+    pub fn entries(&self) -> &[DiagnosticsEntry] {
+        self.picker.entries()
+    }
+
+    pub(crate) fn filtered(&self) -> &[usize] {
+        self.picker.filtered()
+    }
+
+    /// The diagnostic under the selection, or [`None`] when the filter matched
+    /// nothing.
+    pub(crate) fn selected_entry(&self) -> Option<&DiagnosticsEntry> {
+        self.picker.selected_entry()
+    }
+
+    /// Cursor into the filtered rows, not into the entries. A caller wanting
+    /// the entry itself takes [`Self::selected_entry`].
+    pub(crate) fn selected(&self) -> usize {
+        self.picker.selected()
+    }
+
+    pub(crate) fn page(&mut self, dir: i32) {
+        self.picker.page(dir);
+    }
+
+    pub(crate) fn dispose(self, ws: &mut crate::workspace::Workspace) {
+        self.picker.dispose(ws);
+    }
+
+    /// One entry per diagnostic in a buffer, each paired with the offset
     /// encoding of the server that published it.
     ///
-    /// Each `range.start` is converted to a byte offset through its server's
-    /// encoding plus a `(line, column)` pair shown in the position column. The
-    /// message is truncated to [`MESSAGE_MAX_CHARS`] and stripped of any embedded
-    /// newlines so it fits the single-row layout. Entries are sorted by
-    /// `(line, column)` ascending.
-    pub fn new(diagnostics: &[(OffsetEncoding, Diagnostic)], buffer: &TextBuffer) -> Self {
+    /// Each `range.start` becomes a byte offset through its server's encoding
+    /// plus a `(line, column)` pair the position column shows. The message is
+    /// truncated to [`MESSAGE_MAX_CHARS`] and stripped of embedded newlines so
+    /// it fits a single row. Entries are sorted by `(line, column)` ascending.
+    pub fn local_entries(
+        diagnostics: &[(OffsetEncoding, Diagnostic)],
+        buffer: &TextBuffer,
+    ) -> Vec<DiagnosticsEntry> {
         let rope = buffer.rope();
         let mut entries: Vec<DiagnosticsEntry> = diagnostics
             .iter()
@@ -87,24 +144,20 @@ impl DiagnosticsPicker {
             })
             .collect();
         entries.sort_by_key(|e| (e.line, e.column));
-        Self {
-            entries,
-            selected: 0,
-            scope: PickerScope::Local,
-            viewport_rows: None,
-        }
+        entries
     }
 
-    /// Build a picker over every `(path, diagnostic)` pair in
-    /// the workspace's diagnostic set. The `offset` field on
-    /// each entry is a sentinel `0`; the dispatch arm
-    /// recomputes the real byte offset after opening the
-    /// target file. Entries are sorted by `(path, line,
-    /// column)` so the picker reads predictably.
-    pub fn workspace(
+    /// One entry per `(path, diagnostic)` pair in the workspace's diagnostic
+    /// set.
+    ///
+    /// Every `offset` is a sentinel `0`, because the target file need not be
+    /// open yet. The select handler recomputes the real byte offset after
+    /// opening it. Entries are sorted by `(path, line, column)` so the list
+    /// reads predictably.
+    pub fn workspace_entries(
         diagnostics: &DiagnosticSet,
         encodings: &HashMap<String, OffsetEncoding>,
-    ) -> Self {
+    ) -> Vec<DiagnosticsEntry> {
         let mut entries: Vec<DiagnosticsEntry> = diagnostics
             .iter_attributed()
             .map(|(path, server, diag)| {
@@ -132,36 +185,49 @@ impl DiagnosticsPicker {
                 .then_with(|| a.line.cmp(&b.line))
                 .then_with(|| a.column.cmp(&b.column))
         });
-        Self {
-            entries,
-            selected: 0,
-            scope: PickerScope::Workspace,
-            viewport_rows: None,
-        }
+        entries
     }
+}
 
-    pub fn scope(&self) -> PickerScope {
-        self.scope
+/// What a query matches a diagnostic against. The haystack names where it is
+/// and what it says, which is what the row shows.
+fn diagnostic_haystack(entry: &DiagnosticsEntry) -> String {
+    match &entry.path {
+        Some(path) => format!("{}:{} {}", path.display(), entry.line, entry.message),
+        None => format!("{} {}", entry.line, entry.message),
     }
+}
 
-    pub fn entries(&self) -> &[DiagnosticsEntry] {
-        &self.entries
-    }
+/// Characters of [`diagnostic_haystack`] that come before the message.
+///
+/// The renderer highlights only the matched characters that fall in the message
+/// column, so it subtracts this from every match offset.
+pub(crate) fn haystack_prefix_len(entry: &DiagnosticsEntry) -> u32 {
+    let haystack = diagnostic_haystack(entry);
+    (haystack.chars().count() - entry.message.chars().count()) as u32
+}
 
-    pub fn selected(&self) -> usize {
-        self.selected
-    }
-
-    /// Page the selection by half the rendered list height in `dir` (negative
-    /// up, positive down). Falls back to a single row before the first render
-    /// sets [`Self::viewport_rows`].
-    pub(crate) fn page(&mut self, dir: i32) {
-        self.move_selection(dir * crate::picker::nav_page_step(self.viewport_rows));
-    }
-
-    pub(crate) fn move_selection(&mut self, delta: i32) {
-        crate::picker::nav_move(self.entries.len(), &mut self.selected, delta);
-    }
+/// Where a diagnostic's preview reads from and which 0-based line it centres
+/// on.
+///
+/// A workspace entry names its own file. A local one does not, so the scope's
+/// path stands in for it. An open buffer wins over the file either way, so a
+/// diagnostic in edited text previews what the reader has on screen.
+pub(crate) fn diagnostic_target(
+    ws: &crate::workspace::Workspace,
+    scope: &PickerScope,
+    entry: &DiagnosticsEntry,
+) -> Option<(PreviewSource, u32)> {
+    let path = match (&entry.path, scope) {
+        (Some(path), _) => path,
+        (None, PickerScope::Local(path)) => path,
+        (None, PickerScope::Workspace) => return None,
+    };
+    let source = match ws.buffers.id_for_path(path) {
+        Some(id) => PreviewSource::Buffer(id),
+        None => PreviewSource::File(path.clone()),
+    };
+    Some((source, entry.line.saturating_sub(1)))
 }
 
 fn render_message(raw: &str) -> String {
@@ -176,6 +242,7 @@ mod tests {
     use super::*;
     use crate::buffer::BufferId;
     use lsp_types::{Position, Range};
+    use stoat_scheduler::{Executor, TestScheduler};
 
     fn buf(text: &str) -> TextBuffer {
         TextBuffer::with_text(BufferId::new(1), text)
@@ -215,28 +282,27 @@ mod tests {
     }
 
     #[test]
-    fn new_lists_every_diagnostic_with_position() {
+    fn local_entries_list_every_diagnostic_with_position() {
         let buffer = buf("alpha\nbeta\ngamma\n");
         let diagnostics = utf16(vec![
             diag(0, 0, "first", DiagnosticSeverity::ERROR),
             diag(2, 2, "third", DiagnosticSeverity::WARNING),
             diag(1, 1, "second", DiagnosticSeverity::INFORMATION),
         ]);
-        let picker = DiagnosticsPicker::new(&diagnostics, &buffer);
-        let entries = picker.entries();
-        assert_eq!(entries.len(), 3);
-        assert_eq!((entries[0].line, entries[0].column), (1, 1));
-        assert_eq!(entries[0].message, "first");
-        assert_eq!((entries[1].line, entries[1].column), (2, 2));
-        assert_eq!(entries[1].message, "second");
-        assert_eq!((entries[2].line, entries[2].column), (3, 3));
-        assert_eq!(entries[2].message, "third");
-        assert_eq!(picker.scope(), PickerScope::Local);
+        let entries = DiagnosticsPicker::local_entries(&diagnostics, &buffer);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| (e.line, e.column, e.message.as_str()))
+                .collect::<Vec<_>>(),
+            [(1, 1, "first"), (2, 2, "second"), (3, 3, "third")],
+            "entries sort by position"
+        );
         assert!(entries.iter().all(|e| e.path.is_none()));
     }
 
     #[test]
-    fn workspace_lists_pairs_from_every_path() {
+    fn workspace_entries_list_pairs_from_every_path() {
         use std::path::PathBuf;
         let mut set = DiagnosticSet::new();
         set.replace_for_path(
@@ -257,52 +323,88 @@ mod tests {
                 diag(2, 0, "a-second", DiagnosticSeverity::ERROR),
             ],
         );
-        let picker = DiagnosticsPicker::workspace(&set, &HashMap::new());
-        assert_eq!(picker.scope(), PickerScope::Workspace);
-        let entries = picker.entries();
-        assert_eq!(entries.len(), 4);
+        let entries = DiagnosticsPicker::workspace_entries(&set, &HashMap::new());
         assert_eq!(
-            entries[0].path.as_deref(),
-            Some(std::path::Path::new("/ws/a.rs"))
+            entries
+                .iter()
+                .map(|e| (
+                    e.path.as_deref().map(|p| p.to_string_lossy().into_owned()),
+                    e.message.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (Some("/ws/a.rs".to_string()), "a-first"),
+                (Some("/ws/a.rs".to_string()), "a-second"),
+                (Some("/ws/b.rs".to_string()), "b-first"),
+                (Some("/ws/b.rs".to_string()), "b-second"),
+            ],
+            "entries sort by path then position"
         );
-        assert_eq!(entries[0].message, "a-first");
-        assert_eq!(entries[1].message, "a-second");
-        assert_eq!(
-            entries[2].path.as_deref(),
-            Some(std::path::Path::new("/ws/b.rs"))
-        );
-        assert_eq!(entries[2].message, "b-first");
-        assert_eq!(entries[3].message, "b-second");
         assert!(entries.iter().all(|e| e.offset == 0));
     }
 
     #[test]
-    fn new_truncates_long_messages_and_strips_newlines() {
+    fn local_entries_truncate_long_messages_and_strip_newlines() {
         let buffer = buf("x\n");
         let long = "a".repeat(200);
         let multi = format!("first\nsecond\n{long}");
         let diagnostics = utf16(vec![diag(0, 0, &multi, DiagnosticSeverity::ERROR)]);
-        let picker = DiagnosticsPicker::new(&diagnostics, &buffer);
-        let entry = &picker.entries()[0];
-        assert_eq!(entry.message.chars().count(), MESSAGE_MAX_CHARS);
-        assert!(!entry.message.contains('\n'));
+        let entries = DiagnosticsPicker::local_entries(&diagnostics, &buffer);
+        assert_eq!(entries[0].message.chars().count(), MESSAGE_MAX_CHARS);
+        assert!(!entries[0].message.contains('\n'));
     }
 
+    /// The renderer subtracts this from a match offset to find the column in
+    /// the message, so it has to count exactly what the haystack puts ahead of
+    /// the message and no more.
     #[test]
-    fn select_next_prev_clamp_at_ends() {
-        let buffer = buf("a\nb\nc\n");
-        let diagnostics = utf16(vec![
-            diag(0, 0, "first", DiagnosticSeverity::ERROR),
-            diag(1, 0, "second", DiagnosticSeverity::ERROR),
-            diag(2, 0, "third", DiagnosticSeverity::ERROR),
-        ]);
-        let mut picker = DiagnosticsPicker::new(&diagnostics, &buffer);
-        picker.move_selection(-1);
-        picker.move_selection(-1);
-        assert_eq!(picker.selected(), 0);
-        picker.move_selection(1);
-        picker.move_selection(1);
-        picker.move_selection(1);
-        assert_eq!(picker.selected(), 2);
+    fn the_haystack_prefix_covers_everything_before_the_message() {
+        let entry = |path: Option<&str>| DiagnosticsEntry {
+            offset: 0,
+            line: 12,
+            column: 1,
+            severity: None,
+            message: "unresolved import".to_string(),
+            path: path.map(PathBuf::from),
+            encoding: OffsetEncoding::Utf16,
+        };
+        let local = entry(None);
+        let workspace = entry(Some("/ws/a.rs"));
+        assert_eq!(
+            (haystack_prefix_len(&local), haystack_prefix_len(&workspace)),
+            (3, 12),
+            "`12 ` and `/ws/a.rs:12 ` are what precede the message"
+        );
+    }
+
+    /// A local entry names no file, which is what marks its jump local. The
+    /// preview still has to find one, so it falls back on the scope's path.
+    #[test]
+    fn a_local_target_reads_the_file_the_scope_names() {
+        let executor = Executor::new(std::sync::Arc::new(TestScheduler::new()));
+        let ws =
+            crate::workspace::Workspace::new(PathBuf::from("/ws"), &executor, crate::test_notify());
+        let entry = DiagnosticsEntry {
+            offset: 0,
+            line: 12,
+            column: 1,
+            severity: None,
+            message: "unresolved import".to_string(),
+            path: None,
+            encoding: OffsetEncoding::Utf16,
+        };
+
+        let local = diagnostic_target(&ws, &PickerScope::Local(PathBuf::from("/ws/a.rs")), &entry);
+        assert!(
+            matches!(
+                local,
+                Some((PreviewSource::File(ref path), 11)) if path == std::path::Path::new("/ws/a.rs")
+            ),
+            "the scope's file previews at the diagnostic's 0-based line"
+        );
+        assert!(
+            diagnostic_target(&ws, &PickerScope::Workspace, &entry).is_none(),
+            "a workspace entry without a path of its own has nothing to read"
+        );
     }
 }

@@ -357,7 +357,7 @@ on key {
         Enter -> SubmitPromptInput();
         Escape -> CancelPromptInput();
     }
-    modal == diagnostics {
+    modal == diagnostics && mode == insert {
         Up -> PickerPrev();
         Down -> PickerNext();
         Ctrl-p -> PickerPrev();
@@ -366,8 +366,8 @@ on key {
         Ctrl-b -> PickerPageUp();
         PageDown -> PickerPageDown();
         PageUp -> PickerPageUp();
-        Enter -> SubmitPromptInput();
-        Escape -> CancelPromptInput();
+        Ctrl-d -> PickerDetailDown();
+        Ctrl-u -> PickerDetailUp();
     }
     modal == location && mode == insert {
         Up -> PickerPrev();
@@ -1189,13 +1189,13 @@ on key {
         n -> [TrailNext(), SetMode(normal)];
         p -> [TrailPrev(), SetMode(normal)];
         x -> [TrailClear(), SetMode(normal)];
-        D -> [OpenWorkspaceDiagnosticsPicker(), SetMode(normal)];
+        D -> [SetMode(normal), OpenWorkspaceDiagnosticsPicker()];
         l -> [ToggleLspStatus(), SetMode(normal)];
 
         diags {
             w -> [GotoNextDiagnostic(), SetMode(normal)];
             W -> [GotoPrevDiagnostic(), SetMode(normal)];
-            d -> [OpenDiagnosticsPicker(), SetMode(normal)];
+            d -> [SetMode(normal), OpenDiagnosticsPicker()];
         }
 
         lsp {
