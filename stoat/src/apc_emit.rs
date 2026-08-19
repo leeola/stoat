@@ -249,6 +249,8 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
     let focus_target = ws.focus;
     let focus_id = ws.panes.focus();
 
+    let diff_base_lead = ws.diff_base().map(crate::render::pane::diff_base_lead);
+
     let frame = crate::render::FrameCtx {
         workspace_name: &workspace_name,
         workspace_root: &ws.git_root,
@@ -267,6 +269,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
         lsp_servers: &[],
         diff_warm_busy: false,
         repo_change_counts: ws.repo_change_counts(),
+        diff_base: diff_base_lead.as_deref(),
         lsp_pending,
         lsp_message: stoat
             .lsp_message

@@ -246,6 +246,10 @@ pub(crate) struct FrameCtx<'a> {
     /// first diff lands and outside a repo, which drops the segment back to the
     /// focused file's own hunk counts.
     pub(crate) repo_change_counts: Option<(usize, usize)>,
+    /// What the bar names the workspace's diff base, when that is not the
+    /// working tree. It replaces [`Self::repo_change_counts`], which describes
+    /// a working tree the pane is then not showing.
+    pub(crate) diff_base: Option<&'a str>,
     /// Label of the explicit LSP request still in flight, so the status bar
     /// shows a "lsp: {label}..." segment until the response lands. `None` when no
     /// such request is pending. See [`crate::lsp::lsp_pending_label`].
@@ -637,6 +641,10 @@ pub(crate) fn frame(
         false => Vec::new(),
     };
 
+    // Resolved before the frame so the bar carries the text rather than a
+    // borrow of the workspace, which the pane loop mutates as it paints.
+    let diff_base_lead = ws.diff_base().map(pane::diff_base_lead);
+
     let frame = FrameCtx {
         workspace_name,
         workspace_root: &ws.git_root,
@@ -659,6 +667,7 @@ pub(crate) fn frame(
         lsp_servers,
         diff_warm_busy,
         repo_change_counts: ws.repo_change_counts(),
+        diff_base: diff_base_lead.as_deref(),
         lsp_pending,
         lsp_message: stoat
             .lsp_message

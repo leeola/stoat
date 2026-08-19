@@ -18,7 +18,7 @@ use crate::{
         undercurl::UndercurlBatch,
         FrameCtx, PaneCtx, TEXT_SCALE_COMPACT, TEXT_SCALE_FULL,
     },
-    workspace::Workspace,
+    workspace::{diff::DiffBase, Workspace},
 };
 use lsp_types::DiagnosticSeverity;
 use ratatui::{
@@ -909,7 +909,11 @@ fn status_segments(
                 right_anchor = start;
             }
         }
-        if let Some(text) = focused_staged_label(frame.repo_change_counts, status.staged_counts) {
+        if let Some(text) = focused_staged_label(
+            frame.diff_base,
+            frame.repo_change_counts,
+            status.staged_counts,
+        ) {
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
             if start >= cursor {
@@ -1112,11 +1116,24 @@ fn focused_diagnostic_label(
 /// With no repo pair the label falls back to the file's counts alone. That
 /// covers a buffer outside a repo and the window before the first diff lands,
 /// where leading with `repo 0 staged` would read as a clean repo.
+///
+/// A `base_lead` naming a base off the working tree replaces the repo pair
+/// rather than joining it. The tally counts what git status reports, which
+/// describes a working tree the pane is then not showing. The base always
+/// shows, even for a file with no hunks, since it says what is under review.
 fn focused_staged_label(
+    base_lead: Option<&str>,
     repo: Option<(usize, usize)>,
     file: Option<(usize, usize)>,
 ) -> Option<String> {
     let file = file.filter(|&(staged, unstaged)| staged > 0 || unstaged > 0);
+
+    if let Some(lead) = base_lead {
+        return Some(match file {
+            Some((staged, unstaged)) => format!(" {lead} · file {staged}/{unstaged} "),
+            None => format!(" {lead} "),
+        });
+    }
 
     let Some((repo_staged, repo_unstaged)) = repo else {
         let (staged, unstaged) = file?;
@@ -1131,6 +1148,24 @@ fn focused_staged_label(
         Some((staged, unstaged)) => format!("{repo_part} · file {staged}/{unstaged} "),
         None => format!("{repo_part} "),
     })
+}
+
+/// What the status bar names an overridden diff base.
+///
+/// Every override names itself, so the bar never leaves a reader guessing
+/// which base the hunks on screen were measured against.
+pub(crate) fn diff_base_lead(base: &DiffBase) -> String {
+    match base {
+        DiffBase::Rev { sha: Some(sha) } => {
+            let short: String = sha.chars().take(7).collect();
+            format!("diff vs {short}")
+        },
+        // A root commit's parent, against which every line reads added.
+        DiffBase::Rev { sha: None } => "diff vs empty".to_string(),
+        // An agent's proposal sits under no revision. The base is the file as
+        // it stood before the proposal, which is what "original" names.
+        DiffBase::Memory { .. } => "diff vs original".to_string(),
+    }
 }
 
 fn diagnostic_severity_scope(severity: DiagnosticSeverity) -> &'static str {
@@ -1362,15 +1397,17 @@ fn status_filename<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{focused_staged_label, status_filename};
+    use super::{diff_base_lead, focused_staged_label, status_filename};
     use crate::{
         action_handlers::dispatch,
         buffer::{BufferId, TextBuffer},
         editor_state::EditorState,
+        workspace::diff::DiffBase,
         Stoat,
     };
     use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
     use std::{
+        collections::HashMap,
         path::{Path, PathBuf},
         sync::{Arc, RwLock},
     };
@@ -1839,39 +1876,81 @@ mod tests {
     #[test]
     fn the_staged_label_pairs_repo_files_with_the_focused_file() {
         assert_eq!(
-            focused_staged_label(Some((2, 3)), Some((1, 4))).as_deref(),
+            focused_staged_label(None, Some((2, 3)), Some((1, 4))).as_deref(),
             Some(" repo 2 staged / 3 unstaged · file 1/4 "),
             "both pairs read side by side"
         );
         assert_eq!(
-            focused_staged_label(Some((2, 3)), None).as_deref(),
+            focused_staged_label(None, Some((2, 3)), None).as_deref(),
             Some(" repo 2 staged / 3 unstaged "),
             "a file with no diff map drops its half"
         );
         assert_eq!(
-            focused_staged_label(Some((2, 3)), Some((0, 0))).as_deref(),
+            focused_staged_label(None, Some((2, 3)), Some((0, 0))).as_deref(),
             Some(" repo 2 staged / 3 unstaged "),
             "and so does a file whose diff map holds no hunks"
         );
         assert_eq!(
-            focused_staged_label(None, Some((1, 4))).as_deref(),
+            focused_staged_label(None, None, Some((1, 4))).as_deref(),
             Some(" 1 staged / 4 unstaged "),
             "no repo tally yet falls back to the file's own counts"
         );
         assert_eq!(
-            focused_staged_label(None, None),
+            focused_staged_label(None, None, None),
             None,
             "nothing to say without either"
         );
         assert_eq!(
-            focused_staged_label(Some((0, 0)), Some((0, 0))),
+            focused_staged_label(None, Some((0, 0)), Some((0, 0))),
             None,
             "a clean repo and an unchanged file hide the segment"
         );
         assert_eq!(
-            focused_staged_label(Some((0, 0)), Some((1, 0))).as_deref(),
+            focused_staged_label(None, Some((0, 0)), Some((1, 0))).as_deref(),
             Some(" repo 0 staged / 0 unstaged · file 1/0 "),
             "a stale zero tally still shows against a file that has hunks"
+        );
+    }
+
+    #[test]
+    fn a_diff_base_takes_the_repo_tally_s_place_in_the_label() {
+        assert_eq!(
+            focused_staged_label(Some("diff vs abc1234"), Some((2, 3)), Some((1, 4))).as_deref(),
+            Some(" diff vs abc1234 · file 1/4 "),
+            "the base replaces the repo pair rather than joining it"
+        );
+        assert_eq!(
+            focused_staged_label(Some("diff vs abc1234"), Some((2, 3)), None).as_deref(),
+            Some(" diff vs abc1234 "),
+            "a file with no hunks still says what is under review"
+        );
+        assert_eq!(
+            focused_staged_label(Some("diff vs abc1234"), None, Some((0, 0))).as_deref(),
+            Some(" diff vs abc1234 "),
+            "and so does one whose diff map holds none"
+        );
+    }
+
+    #[test]
+    fn every_diff_base_names_itself() {
+        assert_eq!(
+            diff_base_lead(&DiffBase::Rev {
+                sha: Some("abc1234def5678".into())
+            }),
+            "diff vs abc1234",
+            "a revision shows its short sha"
+        );
+        assert_eq!(
+            diff_base_lead(&DiffBase::Rev { sha: None }),
+            "diff vs empty",
+            "a root commit's parent is the empty tree"
+        );
+        assert_eq!(
+            diff_base_lead(&DiffBase::Memory {
+                files: HashMap::new()
+            }),
+            "diff vs original",
+            "a proposal has no revision, so it names what it replaced"
         );
     }
 

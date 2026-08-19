@@ -691,6 +691,12 @@ impl Workspace {
         self.diff.invalidate_all();
     }
 
+    /// What buffers currently diff against, `None` for the working tree's own
+    /// HEAD-plus-index.
+    pub(crate) fn diff_base(&self) -> Option<&DiffBase> {
+        self.diff.base_override.as_ref()
+    }
+
     /// Files with staged and with unstaged changes across the repo, as
     /// `(staged, unstaged)`, or `None` before the first diff lands and for a
     /// root outside any repo.
