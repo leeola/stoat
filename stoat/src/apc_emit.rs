@@ -515,6 +515,19 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         })
         .map(|layout| layout.list);
 
+    // Every boxed modal previews through a scratch editor pane, and only one
+    // modal is ever open, so one pool serves whichever is up. The pairing
+    // excludes the modals whose preview is not an editor: the commit picker
+    // pools its diff separately, and help and the run modal keep row offsets
+    // rather than a buffer.
+    let modal_preview = (!overlay)
+        .then(|| {
+            let rect = crate::mouse::boxed_modal_surfaces(stoat)?.preview?;
+            let editor = crate::mouse::modal_preview_editor(stoat)?;
+            (rect.width > 0 && rect.height > 0).then_some((rect, editor))
+        })
+        .flatten();
+
     // Code search asks for the whole area rather than measuring a match list it
     // would only ever outgrow, so its list rect comes from the finder layout at
     // an unbounded content size, exactly as its render asks for it.
@@ -710,6 +723,9 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     }
     if symbol_finder_list.is_some() {
         active.push(crate::smooth_scroll::non_pane_pool::SYMBOL_FINDER_LIST);
+    }
+    if modal_preview.is_some() {
+        active.push(crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW);
     }
     if commits_region.is_some() {
         active.push(crate::smooth_scroll::non_pane_pool::COMMITS);
@@ -1070,6 +1086,86 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 )
             },
         );
+    }
+
+    // The preview pane is an editor, so it pools exactly as a split pane does:
+    // the same eased scroll target, the same content version, and pages filled
+    // asynchronously through the editor fill path below.
+    if let Some((rect, editor_id)) = modal_preview {
+        let region = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW,
+            top: rect.y,
+            left: rect.x,
+            width: rect.width,
+            height: rect.height,
+            window: 0,
+        };
+        let active_idx = stoat.active_workspace;
+        if let Some(editor) = stoat.workspaces[active_idx].editors.get_mut(editor_id) {
+            // Same rule the pane loop follows: the sub-row offset is the truth
+            // while it still floors to scroll_row, and throughout a glide where
+            // scroll_row has already jumped to the target.
+            let scroll_offset = if editor.scroll_glide != ScrollGlide::None
+                || editor.scroll_offset.floor() as u32 == editor.scroll_row
+            {
+                editor.scroll_offset
+            } else {
+                editor.scroll_row as f32
+            };
+            let content_version = editor_page_content_version(
+                syntax_highlight,
+                editor.gutter_width,
+                editor.display_map.wrap_width(),
+                None,
+                editor
+                    .gutter_severity_cache
+                    .as_ref()
+                    .map_or(0, |cache| cache.version),
+                editor.diff_view,
+                editor.display_map.diff_version(),
+                0.0,
+                editor.display_map.buffer_snapshot().version(),
+                editor.display_map.snapshot().paint_version(),
+                theme_epoch,
+            );
+            let snapshot = editor.display_map.snapshot();
+            let severity = editor
+                .gutter_severity_cache
+                .as_ref()
+                .map(|cache| cache.map.clone())
+                .unwrap_or_default();
+            let diff_view = editor.diff_view;
+
+            let entered = pool::emit_into(
+                &mut out,
+                &mut stoat.smooth_scroll,
+                region,
+                scroll_offset,
+                content_version,
+                // A preview reloads on every selection step, so it holds the
+                // window until the glide starts, as an editor pane does.
+                true,
+                |_| Vec::new(),
+            );
+            if !entered.is_empty() {
+                async_jobs.push(PoolFill::Editor {
+                    snapshot,
+                    pages: entered,
+                    pool: region.pool,
+                    width: region.width,
+                    height: region.height,
+                    gutter: crate::smooth_scroll::PageGutter::new(
+                        line_numbers != LineNumbers::Off,
+                        severity,
+                        theme.clone(),
+                        base_rich.clone(),
+                        None,
+                    ),
+                    diff_view,
+                    dim: 0.0,
+                });
+            }
+        }
     }
 
     if let (Some(list), Some(finder)) = (code_search_list, stoat.code_search.as_ref()) {
@@ -3541,6 +3637,128 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_modal_preview_is_pooled_and_retired() {
+        use stoat_action::OpenFileFinder;
+        use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/preview-pool");
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            h.fake_fs()
+                .insert_file(root.join(name), b"one\ntwo\nthree\n");
+        }
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        emit_smooth_scroll(&mut h.stoat);
+        let preview = finder_layout(&h)
+            .preview
+            .expect("the test terminal is wide enough for a preview");
+        let expected = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW,
+            top: preview.y,
+            left: preview.x,
+            width: preview.width,
+            height: preview.height,
+            window: 0,
+        };
+        assert!(
+            drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
+            "the finder preview declares a pool at its preview rect"
+        );
+
+        // The pool has to stay in the active set while the modal is up, or the
+        // next frame retires it out from under the open preview.
+        emit_smooth_scroll(&mut h.stoat);
+        assert!(
+            !drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
+                pool: crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW,
+            })),
+            "and keeps it across a frame the modal stays open for"
+        );
+
+        h.stoat.file_finder = None;
+        emit_smooth_scroll(&mut h.stoat);
+        assert!(
+            drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
+                pool: crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW,
+            })),
+            "closing the finder retires its preview pool"
+        );
+    }
+
+    /// The whole point of the pool: a wheel over the preview has to move the
+    /// pool's scroll target, or the terminal has nothing to ease toward and the
+    /// glide paints nothing.
+    #[test]
+    fn a_wheel_over_the_preview_moves_the_pool_scroll_target() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        use stoat_action::OpenFileFinder;
+        use stoatty_protocol::command::Command;
+
+        // A short glide moves within one page, so the fraction carries it. The
+        // page index alone reads as standing still.
+        fn scroll_targets(cmds: &[Command]) -> Vec<(u64, u16)> {
+            cmds.iter()
+                .filter_map(|cmd| match cmd {
+                    Command::Scroll(scroll)
+                        if scroll.pool == crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW =>
+                    {
+                        Some((scroll.page, scroll.fraction))
+                    },
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/preview-wheel");
+        let long: String = (0..400).map(|i| format!("line {i}\n")).collect();
+        h.fake_fs().insert_file(root.join("a.rs"), long.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+        h.stoat.drive_background();
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        emit_smooth_scroll(&mut h.stoat);
+        let before = scroll_targets(&drain_apc(&mut rx));
+
+        let preview = finder_layout(&h)
+            .preview
+            .expect("the test terminal is wide enough for a preview");
+        for _ in 0..12 {
+            h.stoat.update(crossterm::event::Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: preview.x + 2,
+                row: preview.y + 2,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }));
+        }
+        h.settle();
+        // The wheel arms a glide and the pool follows the eased offset, not the
+        // jumped row, so the target only moves once the animation ticks.
+        h.stoat.tick_scroll_anim(0.016);
+
+        emit_smooth_scroll(&mut h.stoat);
+        let after = scroll_targets(&drain_apc(&mut rx));
+        assert!(
+            after.last() > before.last(),
+            "the wheel moved the pool target past {before:?}, got {after:?}"
+        );
+    }
     #[test]
     fn file_finder_list_is_pooled_and_retired() {
         use stoat_action::OpenFileFinder;

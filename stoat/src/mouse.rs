@@ -66,8 +66,9 @@ pub(crate) struct ModalSurfaces {
     /// Rows the list occupies. A press here resolves to a row index.
     list: Rect,
     /// The preview or detail pane, when the modal shows one. A wheel here
-    /// scrolls that pane instead of stepping the list.
-    preview: Option<Rect>,
+    /// scrolls that pane instead of stepping the list, and the pooled page
+    /// covers exactly this rect.
+    pub(crate) preview: Option<Rect>,
     /// Rows the list currently holds, which bounds a resolved index.
     len: usize,
     /// The selected row, which fixes the list's scroll window.
@@ -142,7 +143,7 @@ pub(crate) fn modal_preview_editor(stoat: &Stoat) -> Option<EditorId> {
 /// `quit_confirm` and the run modal report no list. They own the pointer all
 /// the same, since the gate reads "some modal is open" from this returning
 /// `Some`.
-fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
+pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
     let size = stoat.size();
     let zoom = |kind| modal_zoom_steps(&stoat.modal_zoom, kind);
     let split = |kind| modal_split_percent(&stoat.modal_split, kind);

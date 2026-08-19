@@ -3096,7 +3096,7 @@ impl Stoat {
     /// fast. Once the glide slows below a velocity threshold the cursor re-homes
     /// into the scrolloff band mid-flight, repeating as a slow crawl drifts the
     /// viewport, so it comes into frame before the glide settles.
-    fn tick_scroll_anim(&mut self, dt: f32) -> bool {
+    pub(crate) fn tick_scroll_anim(&mut self, dt: f32) -> bool {
         const PAGE_EASE: f32 = 0.35;
         // Slow enough that >=10Hz wheel report trains overlap into continuous
         // motion instead of pulse-stall-pulse, fast enough that a lone notch's
