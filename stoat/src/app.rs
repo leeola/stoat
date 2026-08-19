@@ -17640,6 +17640,91 @@ mod tests {
             "scrolling the list repaints only cells inside the box"
         );
     }
+
+    /// The preview editor behind the open location picker, and its scroll row.
+    fn location_preview_scroll(h: &crate::test_harness::TestHarness) -> u32 {
+        let editor = h
+            .stoat
+            .location_picker
+            .as_ref()
+            .expect("open")
+            .preview
+            .editor;
+        h.stoat
+            .active_workspace()
+            .editors
+            .get(editor)
+            .expect("preview editor")
+            .scroll_row
+    }
+
+    /// Ctrl-d is bound over every target picker, so it has to reach the pane it
+    /// names. The three converted pickers were bound before the handler knew
+    /// which editor backs their preview.
+    #[test]
+    fn ctrl_d_scrolls_the_location_preview() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        open_location_picker(&mut h, 200);
+        h.stoat.drive_background();
+        h.snapshot();
+        let before = location_preview_scroll(&h);
+
+        h.type_keys("ctrl-d");
+        h.snapshot();
+
+        assert!(
+            location_preview_scroll(&h) > before,
+            "Ctrl-d scrolled the preview down from {before}"
+        );
+    }
+
+    /// A wheel over the preview scrolls that pane, the same as over any editor.
+    #[test]
+    fn a_wheel_over_the_diagnostics_preview_scrolls_it() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        open_diagnostics_picker(&mut h, 200);
+        h.stoat.drive_background();
+        h.snapshot();
+
+        let preview = crate::render::picker::target_picker_layout(
+            h.stoat.size(),
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::DiagnosticsPicker),
+            modal_split_percent(&h.stoat.modal_split, ModalKind::DiagnosticsPicker),
+        )
+        .expect("picker laid out")
+        .preview
+        .expect("the terminal is wide enough for a preview");
+
+        let scroll = |h: &crate::test_harness::TestHarness| {
+            let editor = h
+                .stoat
+                .diagnostics_picker
+                .as_ref()
+                .expect("open")
+                .picker
+                .preview
+                .editor;
+            h.stoat
+                .active_workspace()
+                .editors
+                .get(editor)
+                .expect("preview editor")
+                .scroll_row
+        };
+        let before = scroll(&h);
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::ScrollDown,
+            preview.x + 2,
+            preview.y + 2,
+        ));
+        h.snapshot();
+
+        assert!(
+            scroll(&h) > before,
+            "the wheel scrolled the preview down from {before}"
+        );
+    }
     /// Seed a definition-capable fake server, open `main.rs` holding
     /// `abc\ndef\nghi\n`, and return its path.
     fn open_file_with_lsp(h: &mut crate::test_harness::TestHarness) -> PathBuf {

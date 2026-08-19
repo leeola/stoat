@@ -111,18 +111,7 @@ pub(super) fn picker_detail(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
             };
             return UpdateEffect::Redraw;
         },
-        Some(ActiveModal::FileFinder) => stoat
-            .file_finder
-            .as_ref()
-            .map(|f| f.active_core_ref().preview.editor),
-        Some(ActiveModal::CodeSearch) => stoat.code_search.as_ref().map(|f| f.preview.editor),
-        Some(ActiveModal::SymbolFinder) => stoat.symbol_finder.as_ref().map(|f| f.preview.editor),
-        Some(ActiveModal::Palette) => stoat
-            .command_palette
-            .as_ref()
-            .and_then(|p| p.arg_picker.as_ref())
-            .map(|p| p.active_core_ref().preview.editor),
-        _ => None,
+        _ => crate::mouse::modal_preview_editor(stoat),
     };
 
     let Some(editor_id) = editor else {

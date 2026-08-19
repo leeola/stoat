@@ -100,6 +100,39 @@ pub(crate) fn modal_preview_rows(stoat: &Stoat) -> Option<usize> {
         .map(|rect| rect.height as usize)
 }
 
+/// The editor backing the open modal's preview pane, or [`None`] when no modal
+/// is open or its preview is not an editor.
+///
+/// Every target list previews through a scratch editor, so a wheel, a keyboard
+/// half-page, and a pooled page all want the same one. The commit picker, help,
+/// and the run modal keep their own row offset instead and are absent here; each
+/// caller handles those where it handles this.
+pub(crate) fn modal_preview_editor(stoat: &Stoat) -> Option<EditorId> {
+    match active_modal(stoat)? {
+        ActiveModal::FileFinder => stoat
+            .file_finder
+            .as_ref()
+            .map(|f| f.active_core_ref().preview.editor),
+        ActiveModal::CodeSearch => stoat.code_search.as_ref().map(|f| f.preview.editor),
+        ActiveModal::SymbolFinder => stoat.symbol_finder.as_ref().map(|f| f.preview.editor),
+        ActiveModal::Palette => stoat
+            .command_palette
+            .as_ref()
+            .and_then(|p| p.arg_picker.as_ref())
+            .map(|p| p.active_core_ref().preview.editor),
+        ActiveModal::Location => stoat.location_picker.as_ref().map(|p| p.preview.editor),
+        ActiveModal::Diagnostics => stoat
+            .diagnostics_picker
+            .as_ref()
+            .map(|p| p.picker.preview.editor),
+        ActiveModal::Jumplist => stoat
+            .jumplist_picker
+            .as_ref()
+            .map(|p| p.picker.preview.editor),
+        _ => None,
+    }
+}
+
 /// The open boxed modal's surfaces, or [`None`] when none is open.
 ///
 /// A boxed modal is one drawn as a bordered box over the editor. The
@@ -959,17 +992,6 @@ fn wheel_binding(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
 /// help keep their own row offset instead, since neither preview is a buffer.
 fn scroll_modal_preview(stoat: &mut Stoat, down: bool) -> UpdateEffect {
     let editor = match active_modal(stoat) {
-        Some(ActiveModal::FileFinder) => stoat
-            .file_finder
-            .as_ref()
-            .map(|f| f.active_core_ref().preview.editor),
-        Some(ActiveModal::CodeSearch) => stoat.code_search.as_ref().map(|f| f.preview.editor),
-        Some(ActiveModal::SymbolFinder) => stoat.symbol_finder.as_ref().map(|f| f.preview.editor),
-        Some(ActiveModal::Palette) => stoat
-            .command_palette
-            .as_ref()
-            .and_then(|p| p.arg_picker.as_ref())
-            .map(|p| p.active_core_ref().preview.editor),
         Some(ActiveModal::CommitPicker) => {
             let Some(picker) = stoat.commit_picker.as_mut() else {
                 return UpdateEffect::None;
@@ -998,7 +1020,7 @@ fn scroll_modal_preview(stoat: &mut Stoat, down: bool) -> UpdateEffect {
             run_state.wheel_scroll(down, rows);
             return UpdateEffect::Redraw;
         },
-        _ => None,
+        _ => modal_preview_editor(stoat),
     };
 
     let Some(editor_id) = editor else {
