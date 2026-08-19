@@ -540,6 +540,7 @@ mod tests {
     use codegraph::{
         Confidence, Dir, Edge, EdgeKind, FileId, FileShard, Symbol, SymbolKey, Target,
     };
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use std::{ops::Range, path::PathBuf, sync::Arc};
     use stoat_action::GotoDiffCalleeDown;
     use stoat_config::Settings;
@@ -657,6 +658,43 @@ mod tests {
             picker.entries.iter().map(|e| e.symbol).collect::<Vec<_>>(),
             vec![foo, bar],
             "nav picker entries carry their symbol key",
+        );
+    }
+
+    /// The picker guard reads keys ahead of the keymap and closes on anything
+    /// it does not name, so an arrow it does not name dismisses the picker.
+    #[test]
+    fn the_symbol_picker_steps_on_the_arrows() {
+        let mut stoat = stoat_with_repo();
+        let file = build::file_id("src/a.rs");
+        let (foo, bar) = (SymbolKey([1u8; 16]), SymbolKey([2u8; 16]));
+        {
+            let ws = stoat.active_workspace_mut();
+            ws.code_graph.insert_shard(FileShard {
+                content_hash: [0u8; 32],
+                symbols: vec![sym(1, file, "foo", 0..11), sym(2, file, "bar", 12..23)],
+                edges: vec![],
+            });
+            ws.file_paths.insert(file, PathBuf::from("src/a.rs"));
+        }
+        present_or_pick(&mut stoat, vec![foo, bar]);
+
+        let press = |stoat: &mut Stoat, code| {
+            stoat.update(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+            stoat
+                .pending_symbol_picker
+                .as_ref()
+                .expect("the arrow steps the picker rather than closing it")
+                .selected_idx
+        };
+
+        let after_down = press(&mut stoat, KeyCode::Down);
+        let after_up = press(&mut stoat, KeyCode::Up);
+
+        assert_eq!(
+            (after_down, after_up),
+            (1, 0),
+            "down walks toward the last entry and up walks back"
         );
     }
 

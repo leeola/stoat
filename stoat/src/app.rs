@@ -3990,6 +3990,19 @@ impl Stoat {
                     return UpdateEffect::Redraw;
                 }
             }
+            if matches!(key.code, KeyCode::Down) {
+                if let Some(picker) = self.pending_code_action_picker.as_mut() {
+                    let max = picker.entries.len().saturating_sub(1);
+                    picker.selected_idx = (picker.selected_idx + 1).min(max);
+                }
+                return UpdateEffect::Redraw;
+            }
+            if matches!(key.code, KeyCode::Up) {
+                if let Some(picker) = self.pending_code_action_picker.as_mut() {
+                    picker.selected_idx = picker.selected_idx.saturating_sub(1);
+                }
+                return UpdateEffect::Redraw;
+            }
             if matches!(key.code, KeyCode::Enter) {
                 let index = self
                     .pending_code_action_picker
@@ -4044,6 +4057,19 @@ impl Stoat {
                     action_handlers::lsp::pick_symbol(self, index);
                     return UpdateEffect::Redraw;
                 }
+            }
+            if matches!(key.code, KeyCode::Down) {
+                if let Some(picker) = self.pending_symbol_picker.as_mut() {
+                    let max = picker.entries.len().saturating_sub(1);
+                    picker.selected_idx = (picker.selected_idx + 1).min(max);
+                }
+                return UpdateEffect::Redraw;
+            }
+            if matches!(key.code, KeyCode::Up) {
+                if let Some(picker) = self.pending_symbol_picker.as_mut() {
+                    picker.selected_idx = picker.selected_idx.saturating_sub(1);
+                }
+                return UpdateEffect::Redraw;
             }
             if matches!(key.code, KeyCode::Enter) {
                 let index = self.pending_symbol_picker.as_ref().map(|p| p.selected_idx);

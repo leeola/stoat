@@ -3762,6 +3762,51 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "// 11\nabc\n");
     }
 
+    /// The guard reads keys ahead of the keymap and closes on anything it does
+    /// not name, so an arrow it does not name dismisses the picker.
+    #[test]
+    fn code_action_navigates_with_the_arrows() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_code_action(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        let actions: Vec<lsp_types::CodeActionOrCommand> = (0..3)
+            .map(|i| {
+                direct_action(
+                    &format!("Action {i}"),
+                    path.to_str().unwrap(),
+                    0,
+                    0,
+                    &format!("// {i}\n"),
+                )
+            })
+            .collect();
+        h.fake_lsp()
+            .set_code_actions(path.to_str().unwrap(), actions);
+        h.type_keys("space l a");
+        h.settle();
+
+        let selected = |h: &TestHarness| {
+            h.stoat
+                .pending_code_action_picker
+                .as_ref()
+                .expect("the arrow steps the picker rather than closing it")
+                .selected_idx
+        };
+
+        h.type_keys("down");
+        h.type_keys("down");
+        let after_down = selected(&h);
+        h.type_keys("up");
+
+        assert_eq!(
+            (after_down, selected(&h)),
+            (2, 1),
+            "down walks toward the last entry and up walks back"
+        );
+    }
+
     #[test]
     fn code_action_pick_one_applies_edit() {
         let mut h = TestHarness::with_size(80, 24);
