@@ -1781,6 +1781,64 @@ mod tests {
         );
     }
 
+    /// A view block scores two atoms against the base block's one, since the
+    /// `!modal` negation adds none, so giving the base modes arrows leaves
+    /// every list view's own arrows on top.
+    #[test]
+    fn the_base_modes_move_on_the_arrows_and_extend_on_them_in_select() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let bound = |mode: &str, code, mods| {
+            let state = TestState::new().set("mode", StateValue::String(mode.into()));
+            keymap
+                .lookup(&state, &KeyEvent::new(code, mods))
+                .unwrap_or_else(|| panic!("{mode} leaves the arrow unbound"))[0]
+                .name
+                .clone()
+        };
+        let plain = |mode, code| bound(mode, code, KeyModifiers::NONE);
+
+        assert_eq!(
+            (
+                plain("normal", KeyCode::Left),
+                plain("normal", KeyCode::Down),
+                plain("normal", KeyCode::Up),
+                plain("normal", KeyCode::Right),
+            ),
+            (
+                "MoveLeft".to_string(),
+                "MoveDown".to_string(),
+                "MoveUp".to_string(),
+                "MoveRight".to_string(),
+            ),
+            "an arrow moves the cursor in normal mode"
+        );
+        assert_eq!(
+            (
+                plain("select", KeyCode::Left),
+                plain("select", KeyCode::Down),
+                plain("select", KeyCode::Up),
+                plain("select", KeyCode::Right),
+            ),
+            (
+                "ExtendLeft".to_string(),
+                "ExtendDown".to_string(),
+                "ExtendUp".to_string(),
+                "ExtendRight".to_string(),
+            ),
+            "and extends the selection in select mode"
+        );
+        assert_eq!(
+            (
+                bound("normal", KeyCode::Down, KeyModifiers::ALT),
+                bound("normal", KeyCode::Up, KeyModifiers::ALT),
+            ),
+            ("ShrinkSelection".to_string(), "ExpandSelection".to_string()),
+            "a held Alt still walks the syntax tree, the modifier keying its own binding"
+        );
+    }
+
     #[test]
     fn space_pane_display_binds_digits_to_focus_pane() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);

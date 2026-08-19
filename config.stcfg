@@ -410,6 +410,10 @@ on key {
         j -> MoveDown();
         k -> MoveUp();
         l -> MoveRight();
+        Left -> MoveLeft();
+        Down -> MoveDown();
+        Up -> MoveUp();
+        Right -> MoveRight();
         # Ctrl-f/Ctrl-b scroll a page and leave the cursor where it is,
         # while Ctrl-u/Ctrl-d carry it along by half of one.
         Ctrl-b -> PageUp();
@@ -663,6 +667,10 @@ on key {
         j -> ExtendDown();
         k -> ExtendUp();
         l -> ExtendRight();
+        Left -> ExtendLeft();
+        Down -> ExtendDown();
+        Up -> ExtendUp();
+        Right -> ExtendRight();
         # Ctrl-f/Ctrl-b scroll a page and leave the cursor where it is,
         # while Ctrl-u/Ctrl-d carry it along by half of one.
         Ctrl-b -> PageUp();
