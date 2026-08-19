@@ -49,13 +49,16 @@ pub(crate) fn submit_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Recall the previous entry from the open prompt's history.
 ///
-/// One verb over every prompt that keeps a history. Only the palette keeps one
-/// today, so every other modal is absent and its Alt-Up does nothing rather
-/// than reaching the surface underneath.
+/// One verb over every prompt that keeps a history. A prompt that keeps none is
+/// absent here, so its Alt-Up does nothing rather than reaching the surface
+/// underneath.
 pub(crate) fn prompt_history_prev(stoat: &mut Stoat) -> UpdateEffect {
     match active_modal(stoat) {
         Some(ActiveModal::Palette) => {
             super::palette::palette_history_prev(stoat).unwrap_or(UpdateEffect::None)
+        },
+        Some(ActiveModal::Search) => {
+            super::search::search_history_prev(stoat).unwrap_or(UpdateEffect::None)
         },
         _ => UpdateEffect::None,
     }
@@ -68,6 +71,9 @@ pub(crate) fn prompt_history_next(stoat: &mut Stoat) -> UpdateEffect {
     match active_modal(stoat) {
         Some(ActiveModal::Palette) => {
             super::palette::palette_history_next(stoat).unwrap_or(UpdateEffect::None)
+        },
+        Some(ActiveModal::Search) => {
+            super::search::search_history_next(stoat).unwrap_or(UpdateEffect::None)
         },
         _ => UpdateEffect::None,
     }

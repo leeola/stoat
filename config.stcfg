@@ -1042,6 +1042,10 @@ on key {
         Tab -> PickerComplete();
         BackTab -> PaletteScopeToggle();
     }
+    modal == isearch && mode == insert {
+        Alt-Up -> PromptHistoryPrev();
+        Alt-Down -> PromptHistoryNext();
+    }
     modal == help && mode == insert {
         Up -> PickerPrev();
         Down -> PickerNext();

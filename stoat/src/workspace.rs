@@ -163,6 +163,12 @@ pub struct Workspace {
     /// Fish-style recall history of executed command-palette lines, walked by
     /// bare Up/Down in the palette. Persisted per workspace.
     pub(crate) palette_history: InputHistory,
+    /// Fish-style recall history of submitted search patterns, walked by
+    /// Alt-Up/Alt-Down in the `/` and `?` prompts. Persisted per workspace.
+    ///
+    /// One list serves both directions. A pattern is worth recalling wherever
+    /// it was typed, and the prompt that recalls it decides which way to run.
+    pub(crate) search_history: InputHistory,
     /// The active tab's pane layout. Every render, focus, and navigation site
     /// reads this and never sees the parked tabs.
     pub panes: PaneTree,
@@ -349,6 +355,7 @@ impl Workspace {
             diff_warmed: false,
             last_finder_scope: None,
             palette_history: InputHistory::default(),
+            search_history: InputHistory::default(),
             panes,
             tabs: vec![Tab {
                 parked: None,

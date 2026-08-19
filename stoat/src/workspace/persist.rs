@@ -83,6 +83,10 @@ pub(crate) struct WorkspaceStateV1 {
     /// survives a restart. Empty on legacy files that predate the field.
     #[serde(default)]
     pub palette_history: Vec<String>,
+    /// Search patterns the `/` and `?` prompts recall, oldest first. Empty on
+    /// legacy files that predate the field.
+    #[serde(default)]
+    pub search_history: Vec<String>,
     /// One entry per tab in display order, mirroring the in-memory shape: the
     /// entry at [`Self::active_tab`] is `None` because that tree is saved in
     /// [`Self::panes`]. Empty on legacy files, which restore as a single tab.
@@ -252,6 +256,7 @@ impl Workspace {
             name: self.name.clone(),
             last_finder_scope: self.last_finder_scope.clone(),
             palette_history: self.palette_history.entries().to_vec(),
+            search_history: self.search_history.entries().to_vec(),
             tabs: self
                 .tabs
                 .iter()
@@ -385,6 +390,7 @@ impl Workspace {
         };
         self.last_finder_scope = state.last_finder_scope;
         self.palette_history = InputHistory::from_entries(state.palette_history);
+        self.search_history = InputHistory::from_entries(state.search_history);
 
         // Exactly the active slot may be empty, since that tree is in `panes`.
         let coherent = parked.len() > 1
@@ -1555,6 +1561,46 @@ mod tests {
         assert!(state.palette_history.is_empty());
     }
 
+    #[test]
+    fn search_history_round_trips_through_save_and_restore() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        ws.search_history = InputHistory::from_entries(vec!["fn main".into(), "unwrap".into()]);
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
+        assert!(
+            fresh.search_history.entries().is_empty(),
+            "fresh workspace remembers nothing"
+        );
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+        assert_eq!(
+            fresh.search_history.entries().to_vec(),
+            ["fn main", "unwrap"]
+        );
+    }
+
+    #[test]
+    fn legacy_state_without_search_history_loads_empty() {
+        let exec = executor();
+        let ws = new_laid_out_workspace(PathBuf::from("/test"), &exec);
+
+        let body =
+            ron::ser::to_string_pretty(&ws.to_state(), ron::ser::PrettyConfig::default()).unwrap();
+        let legacy: String = body
+            .lines()
+            .filter(|line| !line.contains("search_history"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let state: WorkspaceStateV1 =
+            ron::from_str(&legacy).expect("a file without search_history still loads");
+        assert!(state.search_history.is_empty());
+    }
     #[test]
     fn legacy_empty_name_regenerates_default_from_uid() {
         let fake = FakeFs::new();

@@ -1,6 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     editor_state::{EditorState, ScrollGlide},
+    input_history::InputHistory,
     input_view::{InputView, SubmitTarget},
     jumplist::JumpEntry,
     pane::View,
@@ -262,7 +263,14 @@ pub(crate) fn sync_search_preview(stoat: &mut Stoat) {
         return;
     };
     let query = state.input.text(stoat.active_workspace());
-    if state.previewed.as_deref() == Some(query.as_str()) {
+    let previewed = state.previewed.as_deref() == Some(query.as_str());
+    // Typing after a recall ends the walk, so the next Alt-Up captures the
+    // edited text as a fresh needle.
+    stoat
+        .active_workspace_mut()
+        .search_history
+        .reset_if_edited(&query);
+    if previewed {
         return;
     }
 
@@ -317,6 +325,11 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
         return true;
     }
 
+    stoat
+        .active_workspace_mut()
+        .search_history
+        .push(query.clone());
+
     let last = LastSearch::new(query, direction, smart_case(stoat));
     if let Some(regex) = last.regex.as_ref()
         && jump_to_match(stoat, regex, direction, extend).moved()
@@ -332,6 +345,39 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     stoat.paint_generation += 1;
     stoat.last_search = Some(last);
     true
+}
+
+/// Recall the previous submitted pattern into the search prompt, fish-style.
+///
+/// Returns `None` when no search prompt is open. The already-typed text is the
+/// substring needle. The live preview reads the prompt's text on the next sync,
+/// so a recalled pattern previews exactly as a typed one does.
+pub(crate) fn search_history_prev(stoat: &mut Stoat) -> Option<UpdateEffect> {
+    recall(stoat, |history, current| history.prev(current))
+}
+
+/// Recall the next pattern toward the newest, restoring the originally-typed
+/// text past the newest match. Returns `None` when no search prompt is open.
+pub(crate) fn search_history_next(stoat: &mut Stoat) -> Option<UpdateEffect> {
+    recall(stoat, |history, current| history.next(current))
+}
+
+/// Walk the search history with `step` and write the result into the prompt.
+fn recall(
+    stoat: &mut Stoat,
+    step: impl FnOnce(&mut InputHistory, &str) -> Option<String>,
+) -> Option<UpdateEffect> {
+    let active_idx = stoat.active_workspace;
+    let current = {
+        let ws = &stoat.workspaces[active_idx];
+        stoat.search_input.as_ref()?.input.text(ws)
+    };
+
+    let ws = &mut stoat.workspaces[active_idx];
+    let recalled = step(&mut ws.search_history, &current)?;
+    let state = stoat.search_input.as_mut()?;
+    state.input.replace_text(ws, &recalled);
+    Some(UpdateEffect::Redraw)
 }
 
 /// Cancel the input modal, putting the pane editor back where the prompt found
@@ -1622,6 +1668,122 @@ mod tests {
         super::sync_search_preview(&mut h.stoat);
     }
 
+    /// The prompt's text, for asserting what a recall wrote into it.
+    fn prompt_text(h: &TestHarness) -> String {
+        let ws = h.stoat.active_workspace();
+        h.stoat
+            .search_input
+            .as_ref()
+            .expect("the prompt is open")
+            .input
+            .text(ws)
+    }
+
+    /// Submit `query` through the `/` prompt, so it lands in the history.
+    fn submit(h: &mut TestHarness, query: &str) {
+        h.type_keys("/");
+        h.type_text(query);
+        h.type_keys("enter");
+    }
+
+    /// Alt-Up walks back through submitted patterns, newest first, and
+    /// Alt-Down walks toward the newest again.
+    #[test]
+    fn alt_up_and_alt_down_walk_the_submitted_patterns() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def ghi\n");
+        submit(&mut h, "abc");
+        submit(&mut h, "def");
+
+        h.type_keys("/");
+        h.type_keys("alt-up");
+        assert_eq!(
+            prompt_text(&h),
+            "def",
+            "the newest pattern comes back first"
+        );
+        h.type_keys("alt-up");
+        assert_eq!(prompt_text(&h), "abc", "and the one before it next");
+        h.type_keys("alt-down");
+        assert_eq!(prompt_text(&h), "def", "Alt-Down walks toward the newest");
+    }
+
+    /// A recalled pattern reaches the preview the way a typed one does, so the
+    /// editor sits on its match before Enter.
+    #[test]
+    fn a_recalled_pattern_drives_the_preview() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc\n");
+        submit(&mut h, "def");
+
+        h.type_keys("/");
+        h.type_keys("alt-up");
+        super::sync_search_preview(&mut h.stoat);
+
+        assert_eq!(prompt_text(&h), "def", "the recall filled the prompt");
+        assert_eq!(
+            pane_spans(&mut h),
+            [(4, 7)],
+            "and the preview sits on the recalled pattern's match"
+        );
+    }
+
+    /// One list serves both directions, so a pattern typed forward comes back
+    /// in the reverse prompt.
+    #[test]
+    fn the_reverse_prompt_recalls_what_the_forward_one_recorded() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def ghi\n");
+        submit(&mut h, "abc");
+
+        h.type_keys("g ?");
+        h.type_keys("alt-up");
+        assert_eq!(prompt_text(&h), "abc", "the pattern is shared across both");
+        assert_eq!(
+            h.stoat.search_input.as_ref().expect("open").direction,
+            SearchDirection::Reverse,
+            "and the prompt still runs backward"
+        );
+    }
+
+    /// The needle filters the walk, so typing narrows what Alt-Up reaches.
+    #[test]
+    fn the_typed_text_is_the_needle_the_walk_filters_on() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def ghi\n");
+        submit(&mut h, "abc");
+        submit(&mut h, "def");
+
+        h.type_keys("/");
+        h.type_text("ab");
+        super::sync_search_preview(&mut h.stoat);
+        h.type_keys("alt-up");
+
+        assert_eq!(
+            prompt_text(&h),
+            "abc",
+            "the needle skips the newer pattern it does not match"
+        );
+    }
+
+    /// A cancelled prompt records nothing, so an abandoned pattern never
+    /// crowds out the ones the user actually ran.
+    #[test]
+    fn a_cancelled_prompt_records_no_pattern() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def\n");
+        submit(&mut h, "abc");
+
+        h.type_keys("/");
+        h.type_text("def");
+        h.type_keys("escape");
+
+        assert_eq!(
+            h.stoat.active_workspace().search_history.entries(),
+            ["abc"],
+            "only the submitted pattern is in the list"
+        );
+    }
     /// The editor sits on the match before Enter, which is the whole point of
     /// the preview. The user judges the query by what they see.
     #[test]
