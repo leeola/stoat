@@ -806,8 +806,10 @@ on key {
         q -> CloseCommits();
         j -> CommitsNext();
         n -> CommitsNext();
+        Down -> CommitsNext();
         k -> CommitsPrev();
         p -> CommitsPrev();
+        Up -> CommitsPrev();
         g -> CommitsFirst();
         G -> CommitsLast();
         r -> CommitsRefresh();

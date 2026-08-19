@@ -318,6 +318,42 @@ fn spawn_commit_preview_load(
 mod tests {
     use crate::app::Stoat;
 
+    #[test]
+    fn the_arrows_step_the_commits_selection() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "one", &[("a.rs", "1\n")]),
+                ("b2c3d4e5", "two", &[("a.rs", "2\n")]),
+            ],
+        );
+        h.open_commits("/repo");
+
+        let selected = |h: &crate::test_harness::TestHarness| {
+            h.stoat
+                .active_workspace()
+                .commits
+                .as_ref()
+                .expect("commits state")
+                .selected_sha()
+                .expect("selection")
+                .to_string()
+        };
+        let top = selected(&h);
+
+        h.type_keys("down");
+        let after_down = selected(&h);
+        h.type_keys("up");
+
+        assert_eq!(
+            (after_down, selected(&h)),
+            ("a1b2c3d4".to_string(), top),
+            "down steps onto the next row and up comes back"
+        );
+    }
+
     /// Rows scrolled past do not each get a build of their own.
     ///
     /// A dropped task keeps running on the blocking pool, so one build per

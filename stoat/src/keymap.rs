@@ -1716,6 +1716,29 @@ mod tests {
     }
 
     #[test]
+    fn the_commits_list_walks_on_the_arrows_as_well_as_j_and_k() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let in_commits = TestState::new()
+            .set("mode", StateValue::String("normal".into()))
+            .set("view", StateValue::String("commits".into()));
+        let bound = |code| {
+            keymap
+                .lookup(&in_commits, &KeyEvent::new(code, KeyModifiers::NONE))
+                .expect("the arrow is bound in the commits view")[0]
+                .name
+                .clone()
+        };
+
+        assert_eq!(
+            (bound(KeyCode::Down), bound(KeyCode::Up)),
+            ("CommitsNext".to_string(), "CommitsPrev".to_string()),
+            "the arrows step the selection the way j and k do"
+        );
+    }
+
+    #[test]
     fn space_pane_display_binds_digits_to_focus_pane() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
