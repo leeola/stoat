@@ -442,6 +442,79 @@ mod tests {
         h.advance_clock(CODE_SEARCH_DEBOUNCE);
     }
 
+    /// The prompt's text, for asserting what a recall wrote into it.
+    fn prompt_text(h: &TestHarness) -> String {
+        let ws = h.stoat.active_workspace();
+        h.stoat
+            .code_search
+            .as_ref()
+            .expect("the modal is open")
+            .input
+            .text(ws)
+    }
+
+    /// Alt-Up walks back through submitted queries, newest first, and Alt-Down
+    /// walks toward the newest again.
+    #[test]
+    fn alt_up_and_alt_down_walk_the_submitted_queries() {
+        let mut h = open_over(&[("a.rs", "alpha\nbeta\n")]);
+        run_query(&mut h, "alpha");
+        h.type_keys("enter");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        run_query(&mut h, "beta");
+        h.type_keys("enter");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        h.type_keys("alt-up");
+        assert_eq!(prompt_text(&h), "beta", "the newest query comes back first");
+        h.type_keys("alt-up");
+        assert_eq!(prompt_text(&h), "alpha", "and the one before it next");
+        h.type_keys("alt-down");
+        assert_eq!(prompt_text(&h), "beta", "Alt-Down walks toward the newest");
+    }
+
+    /// A recalled query re-arms the scan, so the recall lists matches rather
+    /// than filling the prompt over an empty list.
+    #[test]
+    fn a_recalled_query_re_runs_the_scan() {
+        let mut h = open_over(&[("a.rs", "alpha\nbeta\n")]);
+        run_query(&mut h, "alpha");
+        h.type_keys("enter");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        h.type_keys("alt-up");
+        h.settle();
+        h.advance_clock(CODE_SEARCH_DEBOUNCE);
+
+        assert_eq!(prompt_text(&h), "alpha", "the recall filled the prompt");
+        assert_eq!(
+            h.stoat.code_search.as_ref().expect("open").matches.len(),
+            1,
+            "and the scan ran for it"
+        );
+    }
+
+    /// The needle filters the walk, so typing narrows what Alt-Up reaches.
+    #[test]
+    fn the_typed_text_is_the_needle_the_walk_filters_on() {
+        let mut h = open_over(&[("a.rs", "alpha\nbeta\n")]);
+        run_query(&mut h, "alpha");
+        h.type_keys("enter");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        run_query(&mut h, "beta");
+        h.type_keys("enter");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        run_query(&mut h, "al");
+        h.type_keys("alt-up");
+
+        assert_eq!(
+            prompt_text(&h),
+            "alpha",
+            "the needle skips the newer query it does not match"
+        );
+    }
     /// Open `name` under the root, type `insert` into it, and leave it dirty
     /// and unsaved, then open the code-search modal over the workspace.
     fn open_over_with_edit(files: &[(&str, &str)], name: &str, insert: &str) -> TestHarness {

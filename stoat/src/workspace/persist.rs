@@ -87,6 +87,10 @@ pub(crate) struct WorkspaceStateV1 {
     /// legacy files that predate the field.
     #[serde(default)]
     pub search_history: Vec<String>,
+    /// Code-search queries the modal recalls, oldest first. Empty on legacy
+    /// files that predate the field.
+    #[serde(default)]
+    pub code_search_history: Vec<String>,
     /// One entry per tab in display order, mirroring the in-memory shape: the
     /// entry at [`Self::active_tab`] is `None` because that tree is saved in
     /// [`Self::panes`]. Empty on legacy files, which restore as a single tab.
@@ -257,6 +261,7 @@ impl Workspace {
             last_finder_scope: self.last_finder_scope.clone(),
             palette_history: self.palette_history.entries().to_vec(),
             search_history: self.search_history.entries().to_vec(),
+            code_search_history: self.code_search_history.entries().to_vec(),
             tabs: self
                 .tabs
                 .iter()
@@ -391,6 +396,7 @@ impl Workspace {
         self.last_finder_scope = state.last_finder_scope;
         self.palette_history = InputHistory::from_entries(state.palette_history);
         self.search_history = InputHistory::from_entries(state.search_history);
+        self.code_search_history = InputHistory::from_entries(state.code_search_history);
 
         // Exactly the active slot may be empty, since that tree is in `panes`.
         let coherent = parked.len() > 1
@@ -1584,6 +1590,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn code_search_history_round_trips_through_save_and_restore() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        ws.code_search_history = InputHistory::from_entries(vec!["impl Foo".into()]);
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
+        assert!(
+            fresh.code_search_history.entries().is_empty(),
+            "fresh workspace remembers nothing"
+        );
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+        assert_eq!(fresh.code_search_history.entries().to_vec(), ["impl Foo"]);
+    }
     #[test]
     fn legacy_state_without_search_history_loads_empty() {
         let exec = executor();

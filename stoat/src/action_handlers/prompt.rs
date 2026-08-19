@@ -60,6 +60,9 @@ pub(crate) fn prompt_history_prev(stoat: &mut Stoat) -> UpdateEffect {
         Some(ActiveModal::Search) => {
             super::search::search_history_prev(stoat).unwrap_or(UpdateEffect::None)
         },
+        Some(ActiveModal::CodeSearch) => {
+            super::code_search::code_search_history_prev(stoat).unwrap_or(UpdateEffect::None)
+        },
         _ => UpdateEffect::None,
     }
 }
@@ -74,6 +77,9 @@ pub(crate) fn prompt_history_next(stoat: &mut Stoat) -> UpdateEffect {
         },
         Some(ActiveModal::Search) => {
             super::search::search_history_next(stoat).unwrap_or(UpdateEffect::None)
+        },
+        Some(ActiveModal::CodeSearch) => {
+            super::code_search::code_search_history_next(stoat).unwrap_or(UpdateEffect::None)
         },
         _ => UpdateEffect::None,
     }

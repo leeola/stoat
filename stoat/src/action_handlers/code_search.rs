@@ -6,6 +6,7 @@ use crate::{
         SearchMode, MATCH_CAP,
     },
     debounce,
+    input_history::InputHistory,
     pane::View,
     picker::PreviewSource,
 };
@@ -111,6 +112,8 @@ pub(crate) fn code_search_select(stoat: &mut Stoat) -> bool {
     let target = finder.selected_match().map(|m| (m.path.clone(), m.offset));
     {
         let ws = stoat.active_workspace_mut();
+        let query = finder.input.text(ws);
+        ws.code_search_history.push(query);
         finder.dispose(ws);
     }
     if let Some((path, offset)) = target {
@@ -126,6 +129,40 @@ pub(crate) fn code_search_select(stoat: &mut Stoat) -> bool {
     true
 }
 
+/// Recall the previous submitted query into the code-search prompt,
+/// fish-style.
+///
+/// Returns `None` when the modal is closed. The already-typed text is the
+/// substring needle. The per-frame sync re-arms the scan for the recalled text,
+/// so a recall searches exactly as typing the same query would.
+pub(crate) fn code_search_history_prev(stoat: &mut Stoat) -> Option<UpdateEffect> {
+    recall(stoat, |history, current| history.prev(current))
+}
+
+/// Recall the next query toward the newest, restoring the originally-typed text
+/// past the newest match. Returns `None` when the modal is closed.
+pub(crate) fn code_search_history_next(stoat: &mut Stoat) -> Option<UpdateEffect> {
+    recall(stoat, |history, current| history.next(current))
+}
+
+/// Walk the code-search history with `step` and write the result into the
+/// prompt.
+fn recall(
+    stoat: &mut Stoat,
+    step: impl FnOnce(&mut InputHistory, &str) -> Option<String>,
+) -> Option<UpdateEffect> {
+    let active_idx = stoat.active_workspace;
+    let current = {
+        let ws = &stoat.workspaces[active_idx];
+        stoat.code_search.as_ref()?.input.text(ws)
+    };
+
+    let ws = &mut stoat.workspaces[active_idx];
+    let recalled = step(&mut ws.code_search_history, &current)?;
+    let finder = stoat.code_search.as_mut()?;
+    finder.input.replace_text(ws, &recalled);
+    Some(UpdateEffect::Redraw)
+}
 /// Re-arm the debounced scan when the query changed and sync the preview onto
 /// the selected match.
 ///
@@ -144,6 +181,12 @@ pub(crate) fn sync_code_search(stoat: &mut Stoat) {
             .input
             .text(ws)
     };
+    // Typing after a recall ends the walk, so the next Alt-Up captures the
+    // edited text as a fresh needle.
+    stoat
+        .active_workspace_mut()
+        .code_search_history
+        .reset_if_edited(&query);
     let changed = stoat
         .code_search
         .as_ref()

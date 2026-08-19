@@ -1024,6 +1024,8 @@ on key {
         Ctrl-u -> PickerDetailUp();
         PageDown -> PickerPageDown();
         PageUp -> PickerPageUp();
+        Alt-Up -> PromptHistoryPrev();
+        Alt-Down -> PromptHistoryNext();
         BackTab -> CodeSearchModeToggle();
     }
     modal == palette && mode == insert {
