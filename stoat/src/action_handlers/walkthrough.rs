@@ -292,7 +292,12 @@ fn jump_to_range(
 ) -> Option<Landing> {
     action_handlers::jump::push_jump(stoat);
     let target = stoat.active_workspace().panes.focus();
+    // A stop in another file focuses another editor, which carries its own
+    // mode. The mode belongs to the reader rather than to whichever buffer a
+    // jump puts under them, so a tour read in walkthrough mode keeps it.
+    let mode = stoat.focused_mode().to_owned();
     crate::buffer_lifecycle::open_file_in_pane(stoat, target, path);
+    stoat.set_focused_mode(mode);
 
     let offset = focused_offset_of(stoat, range.start)?;
     let effect = action_handlers::movement::jump_to_offset(stoat, offset);
@@ -1038,5 +1043,31 @@ mod tests {
             );
             assert_eq!(h.stoat.pending_message.as_deref(), Some(status));
         }
+    }
+
+    /// A tour is read a step at a time, so the mode has to survive each step
+    /// for the next one to take a bare key.
+    #[test]
+    fn the_walkthrough_mode_holds_until_escape() {
+        let mut h = harness_with_tour();
+        open(&mut h.stoat, "tour");
+
+        h.type_keys("space W n");
+        assert_eq!(h.stoat.focused_mode(), "walkthrough");
+        assert_eq!(popup_lines(&h.stoat), ["second - 2/2", "The exit."]);
+
+        h.type_keys("p");
+        assert_eq!(
+            popup_lines(&h.stoat),
+            ["first - 1/2", "The entry point."],
+            "a bare p walks back, taking no space W prefix",
+        );
+
+        h.type_keys("escape");
+        assert_eq!(h.stoat.focused_mode(), "normal");
+        assert!(
+            h.stoat.active_workspace().walkthrough.is_some(),
+            "escape leaves the mode, not the tour, so space W returns to it",
+        );
     }
 }

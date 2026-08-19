@@ -1095,7 +1095,7 @@ on key {
         r -> [ReloadAll(), SetMode(normal)];
         g -> SetMode(space_goto);
         G -> SetMode(space_git);
-        W -> SetMode(space_walkthrough);
+        W -> SetMode(walkthrough);
         d -> [Diff(), SetMode(normal)];
         s -> [SaveSelection(), SetMode(normal)];
         j -> [JumpBackward(), SetMode(normal)];
@@ -1165,21 +1165,12 @@ on key {
         m -> JumpToMoveSource();
         M -> JumpToMoveTarget();
     }
-    mode == space_walkthrough {
-        Escape -> SetMode(normal);
-        W -> SetMode(walkthrough_pin);
-        n -> [WalkthroughNext(), SetMode(normal)];
-        p -> [WalkthroughPrev(), SetMode(normal)];
-        a -> [WalkthroughNextAnnotation(), SetMode(normal)];
-        A -> [WalkthroughPrevAnnotation(), SetMode(normal)];
-        s -> [WalkthroughShowNarration(), SetMode(normal)];
-        d -> [WalkthroughDone(), SetMode(normal)];
-    }
-    # The walkthrough chord, pinned. Reading a tour is a run of steps rather
-    # than one, so n and p walk the stops and a and A the annotations until
-    # Escape, on the same mechanism git_pin uses: no binding chains
-    # SetMode(normal), so the mode holds.
-    mode == walkthrough_pin {
+    # Reading a tour is a run of steps rather than one, so `space W` holds this
+    # mode instead of running a single arm. n and p walk the stops and a and A
+    # the annotations until Escape, on the same mechanism git_pin uses: no
+    # binding chains SetMode(normal), so the mode holds. Escape leaves the tour
+    # open for `space W` to return to, and d ends it.
+    mode == walkthrough {
         Escape -> SetMode(normal);
         n -> WalkthroughNext();
         p -> WalkthroughPrev();

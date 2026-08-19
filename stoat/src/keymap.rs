@@ -1839,6 +1839,49 @@ mod tests {
         );
     }
 
+    /// Reading a tour is a run of steps, so the mode `space W` reaches has to
+    /// outlast the key that runs a step.
+    #[test]
+    fn space_w_holds_the_walkthrough_mode_across_a_step() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let space = TestState::new().set("mode", StateValue::String("space".into()));
+        let to_walkthrough = keymap
+            .lookup(&space, &key_event(KeyCode::Char('W'), KeyModifiers::NONE))
+            .expect("W is bound in space mode");
+        assert_eq!(to_walkthrough[0].name, "SetMode");
+        assert_eq!(
+            to_walkthrough[0].args[0].value,
+            Value::Ident("walkthrough".into()),
+            "space W reaches the mode itself, with no one-shot layer between",
+        );
+
+        let walkthrough = TestState::new().set("mode", StateValue::String("walkthrough".into()));
+        for (key, action) in [
+            ('n', "WalkthroughNext"),
+            ('p', "WalkthroughPrev"),
+            ('s', "WalkthroughShowNarration"),
+        ] {
+            let bound = keymap
+                .lookup(
+                    &walkthrough,
+                    &key_event(KeyCode::Char(key), KeyModifiers::NONE),
+                )
+                .unwrap_or_else(|| panic!("{key} is bound in walkthrough mode"));
+            assert_eq!(
+                (bound.len(), bound[0].name.as_str()),
+                (1, action),
+                "{key} resets no mode, so a second press steps again",
+            );
+        }
+
+        let esc = keymap
+            .lookup(&walkthrough, &key_event(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("Escape is bound in walkthrough mode");
+        assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
+    }
+
     /// Every list modal answers the same keys with the same verbs.
     ///
     /// The scheme drifted once already, each picker minting its own actions
