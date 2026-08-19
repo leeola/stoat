@@ -6,12 +6,9 @@ use crate::{
 };
 use std::collections::HashMap;
 
-pub(super) fn help_select_prev(stoat: &mut Stoat) -> UpdateEffect {
-    apply_to_help(stoat, |h| h.move_selection(-1))
-}
-
-pub(super) fn help_select_next(stoat: &mut Stoat) -> UpdateEffect {
-    apply_to_help(stoat, |h| h.move_selection(1))
+/// Move the help list's selection by `delta` rows.
+pub(super) fn help_move(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+    apply_to_help(stoat, |h| h.move_selection(delta))
 }
 
 /// Rows a help list page covers.
@@ -49,11 +46,11 @@ pub(super) fn help_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(super) fn help_scroll_detail_up(stoat: &mut Stoat) -> UpdateEffect {
+pub(crate) fn help_scroll_detail_up(stoat: &mut Stoat) -> UpdateEffect {
     apply_to_help(stoat, |h| h.scroll_detail(-5))
 }
 
-pub(super) fn help_scroll_detail_down(stoat: &mut Stoat) -> UpdateEffect {
+pub(crate) fn help_scroll_detail_down(stoat: &mut Stoat) -> UpdateEffect {
     apply_to_help(stoat, |h| h.scroll_detail(5))
 }
 

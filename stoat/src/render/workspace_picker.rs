@@ -21,7 +21,7 @@ const HEADER_ROWS: u16 = 3;
 /// Lay the workspace picker's modal out within `area`, returning its outer box
 /// and the inner rect holding the header and rows, or [`None`] when `area` is
 /// too small to host it or there is nothing to list.
-fn workspace_picker_layout(area: Rect, entries_len: usize) -> Option<(Rect, Rect)> {
+pub(crate) fn workspace_picker_layout(area: Rect, entries_len: usize) -> Option<(Rect, Rect)> {
     if entries_len == 0 {
         return None;
     }

@@ -152,14 +152,6 @@ impl DiagnosticsPicker {
         self.selected
     }
 
-    pub fn select_next(&mut self) {
-        self.move_selection(1);
-    }
-
-    pub fn select_prev(&mut self) {
-        self.move_selection(-1);
-    }
-
     /// Page the selection by half the rendered list height in `dir` (negative
     /// up, positive down). Falls back to a single row before the first render
     /// sets [`Self::viewport_rows`].
@@ -167,7 +159,7 @@ impl DiagnosticsPicker {
         self.move_selection(dir * crate::picker::nav_page_step(self.viewport_rows));
     }
 
-    fn move_selection(&mut self, delta: i32) {
+    pub(crate) fn move_selection(&mut self, delta: i32) {
         crate::picker::nav_move(self.entries.len(), &mut self.selected, delta);
     }
 }
@@ -305,12 +297,12 @@ mod tests {
             diag(2, 0, "third", DiagnosticSeverity::ERROR),
         ]);
         let mut picker = DiagnosticsPicker::new(&diagnostics, &buffer);
-        picker.select_prev();
-        picker.select_prev();
+        picker.move_selection(-1);
+        picker.move_selection(-1);
         assert_eq!(picker.selected(), 0);
-        picker.select_next();
-        picker.select_next();
-        picker.select_next();
+        picker.move_selection(1);
+        picker.move_selection(1);
+        picker.move_selection(1);
         assert_eq!(picker.selected(), 2);
     }
 }

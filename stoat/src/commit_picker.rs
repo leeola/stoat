@@ -2195,6 +2195,41 @@ mod tests {
         h.assert_snapshot("commit_picker_open");
     }
 
+    /// The picker is a boxed modal, so a press on one of its rows selects that
+    /// row rather than reaching the pane it covers.
+    #[test]
+    fn a_press_on_a_commit_row_selects_it() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let mut h = seeded_picker_harness();
+        h.snapshot();
+
+        let lanes = h.stoat.commit_picker.as_ref().and_then(|p| p.graph_lanes);
+        let layout = crate::render::commit_picker::commit_picker_layout(
+            h.stoat.size(),
+            lanes,
+            crate::app::modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::CommitPicker),
+            crate::app::modal_split_percent(&h.stoat.modal_split, ModalKind::CommitPicker),
+        )
+        .expect("the picker lays out");
+
+        h.stoat.update(crate::test_fixture::mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            layout.list.x + 1,
+            layout.list.y + 2,
+        ));
+
+        assert_eq!(
+            h.stoat
+                .commit_picker
+                .as_ref()
+                .expect("the press does not close the picker")
+                .selected,
+            2,
+            "the press lands on the third row and selects it"
+        );
+    }
+
     /// Clock the seeded picker measures its ages against, three days and change
     /// past the commits the fake repo dates to. Fixed so the age column reads
     /// the same on every run rather than drifting with the wall clock, and off

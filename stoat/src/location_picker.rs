@@ -46,14 +46,6 @@ impl LocationPicker {
         self.selected
     }
 
-    pub(crate) fn select_next(&mut self) {
-        self.move_selection(1);
-    }
-
-    pub(crate) fn select_prev(&mut self) {
-        self.move_selection(-1);
-    }
-
     /// Page the selection by half the rendered list height in `dir` (negative
     /// up, positive down). Falls back to a single row before the first render
     /// sets [`Self::viewport_rows`].
@@ -63,11 +55,7 @@ impl LocationPicker {
 
     /// Move the selection to `index`, clamped to the last entry so a stale row
     /// number from a hit test cannot select past the list.
-    pub(crate) fn set_selected(&mut self, index: usize) {
-        self.selected = index.min(self.entries.len().saturating_sub(1));
-    }
-
-    fn move_selection(&mut self, delta: i32) {
+    pub(crate) fn move_selection(&mut self, delta: i32) {
         crate::picker::nav_move(self.entries.len(), &mut self.selected, delta);
     }
 }
@@ -89,32 +77,19 @@ mod tests {
     #[test]
     fn select_next_prev_track_selection() {
         let mut picker = LocationPicker::new(vec![entry(1), entry(2), entry(3)]);
-        picker.select_next();
+        picker.move_selection(1);
         assert_eq!(picker.selected(), 1);
-        picker.select_prev();
+        picker.move_selection(-1);
         assert_eq!(picker.selected(), 0);
-    }
-
-    #[test]
-    fn set_selected_clamps_to_the_last_entry() {
-        let mut picker = LocationPicker::new(vec![entry(1), entry(2)]);
-        picker.set_selected(1);
-        assert_eq!(picker.selected(), 1);
-        picker.set_selected(9);
-        assert_eq!(
-            picker.selected(),
-            1,
-            "past the end clamps to the last entry"
-        );
     }
 
     #[test]
     fn navigation_clamps_within_bounds() {
         let mut picker = LocationPicker::new(vec![entry(1), entry(2)]);
-        picker.select_prev();
+        picker.move_selection(-1);
         assert_eq!(picker.selected(), 0);
-        picker.select_next();
-        picker.select_next();
+        picker.move_selection(1);
+        picker.move_selection(1);
         assert_eq!(picker.selected(), 1);
     }
 }

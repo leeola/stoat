@@ -7,7 +7,7 @@ use crate::{
 /// consumer owns the focused [`crate::input_view::InputView`]. Consumer
 /// bindings are added as sites migrate to [`crate::input_view::InputView`];
 /// this acts as a no-op for prompt-mode contexts without a registered owner.
-pub(super) fn submit_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
+pub(crate) fn submit_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
     if super::search::search_submit(stoat) {
         return UpdateEffect::Redraw;
     }
@@ -136,12 +136,4 @@ pub(super) fn prompt_insert_newline(stoat: &mut Stoat) -> UpdateEffect {
         return effect;
     }
     UpdateEffect::None
-}
-
-pub(super) fn palette_select_prev(stoat: &mut Stoat) -> UpdateEffect {
-    super::palette::palette_move_selection(stoat, -1).unwrap_or(UpdateEffect::None)
-}
-
-pub(super) fn palette_select_next(stoat: &mut Stoat) -> UpdateEffect {
-    super::palette::palette_move_selection(stoat, 1).unwrap_or(UpdateEffect::None)
 }

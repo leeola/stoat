@@ -17,7 +17,7 @@ pub(crate) mod movement;
 mod palette;
 mod pane;
 pub(crate) mod picker;
-mod prompt;
+pub(crate) mod prompt;
 mod rebase;
 pub(crate) mod review;
 pub(crate) mod review_walk;
@@ -53,7 +53,7 @@ pub(crate) use commits::pump_commits;
 pub(crate) use file_finder::{
     close_file_finder, file_finder_move_selection, sync_file_finder_preview,
 };
-pub(crate) use palette::{palette_move_selection, sync_palette_picker};
+pub(crate) use palette::sync_palette_picker;
 pub(crate) use pane::{close_pane_by_id, restore_pane_after_term_exit};
 #[cfg(test)]
 pub(crate) use review::install_review_session;

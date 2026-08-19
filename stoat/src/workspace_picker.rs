@@ -301,11 +301,15 @@ impl WorkspacePicker {
     }
 
     pub fn select_next(&mut self) {
-        picker::nav_move(self.filtered.len(), &mut self.selected, 1);
+        self.move_selection(1);
     }
 
     pub fn select_prev(&mut self) {
-        picker::nav_move(self.filtered.len(), &mut self.selected, -1);
+        self.move_selection(-1);
+    }
+
+    pub(crate) fn move_selection(&mut self, delta: i32) {
+        picker::nav_move(self.filtered.len(), &mut self.selected, delta);
     }
 
     /// Page the selection by half the rendered list height in `dir` (negative

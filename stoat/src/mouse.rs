@@ -17,7 +17,7 @@ use crate::{
     editor_state::{EditorId, ScrollGlide},
     host::ClipboardKind,
     keymap::WheelDirection,
-    keymap_state::StoatKeymapState,
+    keymap_state::{active_modal, ActiveModal, StoatKeymapState},
     minimap::emit::minimap_view_window,
     pane::{FocusTarget, View},
     render::commit_picker::MIN_LIST_ROWS,
@@ -56,6 +56,239 @@ pub(crate) fn mouse_button(button: IpcMouseButton) -> Option<MouseButton> {
     }
 }
 
+/// Where an open boxed modal's list and preview sit, and how far the list runs.
+///
+/// Hit tests read this rather than each modal's own layout call, so one
+/// pointer contract covers every one of them. The rects come from the same
+/// layout functions the paint uses, so a clicked row always names the row
+/// drawn there.
+pub(crate) struct ModalSurfaces {
+    /// Rows the list occupies. A press here resolves to a row index.
+    list: Rect,
+    /// The preview or detail pane, when the modal shows one. A wheel here
+    /// scrolls that pane instead of stepping the list.
+    preview: Option<Rect>,
+    /// Rows the list currently holds, which bounds a resolved index.
+    len: usize,
+    /// The selected row, which fixes the list's scroll window.
+    selected: usize,
+}
+
+impl ModalSurfaces {
+    /// The list row `mouse` lands on, or [`None`] off the list and past its
+    /// last row.
+    ///
+    /// The window start comes from the same helper the paint uses, so the
+    /// resolved row is the one drawn under the pointer.
+    fn row_at(&self, mouse: MouseEvent) -> Option<usize> {
+        if !self.list.contains(Position::new(mouse.column, mouse.row)) {
+            return None;
+        }
+        let start = crate::render::picker::window_start(self.selected, self.list.height as usize);
+        let index = start + (mouse.row - self.list.y) as usize;
+        (index < self.len).then_some(index)
+    }
+}
+
+/// The open boxed modal's surfaces, or [`None`] when none is open.
+///
+/// A boxed modal is one drawn as a bordered box over the editor. The
+/// bottom-line prompts are deliberately absent. The editor stays fully visible
+/// under those, so a click there still belongs to the editor.
+///
+/// `quit_confirm` and the run modal report no list. They own the pointer all
+/// the same, since the gate reads "some modal is open" from this returning
+/// `Some`.
+fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
+    let size = stoat.size();
+    let zoom = |kind| modal_zoom_steps(&stoat.modal_zoom, kind);
+    let split = |kind| modal_split_percent(&stoat.modal_split, kind);
+
+    let plain = |rect: Option<(Rect, Rect)>, len: usize, selected: usize| {
+        rect.map(|(_, inner)| ModalSurfaces {
+            list: inner,
+            preview: None,
+            len,
+            selected,
+        })
+    };
+
+    match active_modal(stoat)? {
+        ActiveModal::FileFinder => {
+            let finder = stoat.file_finder.as_ref()?;
+            let layout = crate::render::file_finder::file_finder_layout(
+                size,
+                finder.content_size,
+                zoom(ModalKind::FileFinder),
+                split(ModalKind::FileFinder),
+            )?;
+            let core = finder.active_core_ref();
+            Some(ModalSurfaces {
+                list: layout.list,
+                preview: layout.preview,
+                len: core.picklist.filtered.len(),
+                selected: core.picklist.selected,
+            })
+        },
+        ActiveModal::CodeSearch => {
+            let finder = stoat.code_search.as_ref()?;
+            // Search hits are unbounded, so code search asks for the whole area
+            // through the finder's layout, exactly as its renderer does.
+            let layout = crate::render::file_finder::file_finder_layout(
+                size,
+                (u16::MAX, u16::MAX),
+                zoom(ModalKind::CodeSearch),
+                split(ModalKind::CodeSearch),
+            )?;
+            Some(ModalSurfaces {
+                list: layout.list,
+                preview: layout.preview,
+                len: finder.matches.len(),
+                selected: finder.selected,
+            })
+        },
+        ActiveModal::SymbolFinder => {
+            let finder = stoat.symbol_finder.as_ref()?;
+            let (_, _, list, preview) = crate::render::symbol_finder::symbol_finder_layout(
+                size,
+                finder.filtered.len() as u16,
+                zoom(ModalKind::SymbolFinder),
+                split(ModalKind::SymbolFinder),
+            )?;
+            Some(ModalSurfaces {
+                list,
+                preview,
+                len: finder.filtered.len(),
+                selected: finder.selected,
+            })
+        },
+        ActiveModal::CommitPicker => {
+            let picker = stoat.commit_picker.as_ref()?;
+            let layout = crate::render::commit_picker::commit_picker_layout(
+                size,
+                picker.graph_lanes,
+                zoom(ModalKind::CommitPicker),
+                split(ModalKind::CommitPicker),
+            )?;
+            Some(ModalSurfaces {
+                list: layout.list,
+                preview: layout.preview,
+                len: picker.filtered.len(),
+                selected: picker.selected,
+            })
+        },
+        ActiveModal::Palette => {
+            let palette = stoat.command_palette.as_ref()?;
+            let rows = palette.list_rows_hint();
+            let zoom = zoom(ModalKind::Palette);
+            if palette.command.is_none() {
+                let layout =
+                    crate::render::command_palette::palette_filter_layout(size, rows, zoom)?;
+                return Some(ModalSurfaces {
+                    list: layout.list,
+                    preview: None,
+                    len: palette.filtered.len(),
+                    selected: palette.selected,
+                });
+            }
+            let picker = palette
+                .arg_picker
+                .as_ref()
+                .filter(|_| palette.arg_source().is_some())?;
+            let list = crate::render::command_palette::palette_arg_list_rect(size, rows, zoom)?;
+            let core = picker.active_core_ref();
+            Some(ModalSurfaces {
+                list,
+                preview: crate::render::command_palette::palette_arg_body(size, rows, zoom)
+                    .and_then(|(_, preview)| preview),
+                len: core.picklist.filtered.len(),
+                selected: core.picklist.selected,
+            })
+        },
+        ActiveModal::Help => {
+            let help = stoat.help.as_ref()?;
+            let layout = crate::render::help::help_layout(
+                size,
+                crate::render::help::help_content_rows(help),
+                zoom(ModalKind::Help),
+            )?;
+            Some(ModalSurfaces {
+                list: layout.list,
+                preview: Some(layout.detail),
+                len: help.filtered().len(),
+                selected: help.selected(),
+            })
+        },
+        ActiveModal::Jumplist => {
+            let picker = stoat.jumplist_picker.as_ref()?;
+            plain(
+                crate::render::jumplist_picker::jumplist_picker_layout(
+                    size,
+                    picker.entries().len(),
+                ),
+                picker.entries().len(),
+                picker.selected(),
+            )
+        },
+        ActiveModal::Diagnostics => {
+            let picker = stoat.diagnostics_picker.as_ref()?;
+            plain(
+                crate::render::diagnostics_picker::diagnostics_picker_layout(
+                    size,
+                    picker.entries().len(),
+                ),
+                picker.entries().len(),
+                picker.selected(),
+            )
+        },
+        ActiveModal::Location => {
+            let picker = stoat.location_picker.as_ref()?;
+            plain(
+                crate::render::location_picker::location_picker_layout(
+                    size,
+                    picker.entries().len(),
+                ),
+                picker.entries().len(),
+                picker.selected(),
+            )
+        },
+        ActiveModal::WorkspacePicker => {
+            let picker = stoat.workspace_picker.as_ref()?;
+            plain(
+                crate::render::workspace_picker::workspace_picker_layout(
+                    size,
+                    picker.entries().len(),
+                ),
+                picker.entries().len(),
+                picker.selected(),
+            )
+        },
+        // The run modal is all output, so the whole screen reads as its
+        // preview and the wheel scrolls that output.
+        ActiveModal::Run => Some(ModalSurfaces {
+            list: Rect::new(0, 0, 0, 0),
+            preview: Some(size),
+            len: 0,
+            selected: 0,
+        }),
+        // Nothing to point at. It owns the pointer all the same, so a press
+        // never reaches the panes it covers, and keys alone answer it.
+        ActiveModal::QuitConfirm => Some(ModalSurfaces {
+            list: Rect::new(0, 0, 0, 0),
+            preview: None,
+            len: 0,
+            selected: 0,
+        }),
+        // The bottom-line prompts leave the editor visible, so the pointer
+        // stays the editor's.
+        ActiveModal::Rename
+        | ActiveModal::Search
+        | ActiveModal::SplitSelection
+        | ActiveModal::FilterSelections
+        | ActiveModal::ShellInput => None,
+    }
+}
+
 /// Route a pointer event to the open finder, palette, or commit picker.
 ///
 /// Two gestures act. A left press on the modal's list/preview separator arms
@@ -82,66 +315,21 @@ fn handle_modal_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
 
-    let size = stoat.size();
-
-    let (list, selected, filtered_len) = if let Some(finder) = stoat.file_finder.as_ref() {
-        let Some(layout) = crate::render::file_finder::file_finder_layout(
-            size,
-            finder.content_size,
-            modal_zoom_steps(&stoat.modal_zoom, ModalKind::FileFinder),
-            modal_split_percent(&stoat.modal_split, ModalKind::FileFinder),
-        ) else {
-            return UpdateEffect::None;
-        };
-        let core = finder.active_core_ref();
-        (
-            layout.list,
-            core.picklist.selected,
-            core.picklist.filtered.len(),
-        )
-    } else if let Some(palette) = stoat.command_palette.as_ref() {
-        let rows = palette.list_rows_hint();
-        let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::Palette);
-        if palette.command.is_none() {
-            let Some(layout) =
-                crate::render::command_palette::palette_filter_layout(size, rows, zoom)
-            else {
-                return UpdateEffect::None;
-            };
-            (layout.list, palette.selected, palette.filtered.len())
-        } else if palette.arg_source().is_some()
-            && let Some(picker) = palette.arg_picker.as_ref()
-        {
-            let Some(list) =
-                crate::render::command_palette::palette_arg_list_rect(size, rows, zoom)
-            else {
-                return UpdateEffect::None;
-            };
-            let core = picker.active_core_ref();
-            (list, core.picklist.selected, core.picklist.filtered.len())
-        } else {
-            return UpdateEffect::None;
-        }
-    } else {
+    let Some(surfaces) = boxed_modal_surfaces(stoat) else {
+        return UpdateEffect::None;
+    };
+    let Some(index) = surfaces.row_at(mouse) else {
         return UpdateEffect::None;
     };
 
-    if !list.contains(Position::new(mouse.column, mouse.row)) {
-        return UpdateEffect::None;
-    }
-    let rows = list.height as usize;
-    let start_row = crate::render::picker::window_start(selected, rows);
-    let index = start_row + (mouse.row - list.y) as usize;
-    if index >= filtered_len {
-        return UpdateEffect::None;
+    // A press on the row already selected submits it. The two-step keeps a
+    // misclick from acting, and needs none of the timing machinery a
+    // double-click does.
+    if index == surfaces.selected {
+        return action_handlers::prompt::submit_prompt_input(stoat);
     }
 
-    let delta = index as i32 - selected as i32;
-    if stoat.file_finder.is_some() {
-        action_handlers::file_finder_move_selection(stoat, delta)
-    } else {
-        action_handlers::palette_move_selection(stoat, delta).unwrap_or(UpdateEffect::Redraw)
-    }
+    action_handlers::picker::picker_step(stoat, index as i32 - surfaces.selected as i32)
 }
 
 /// The bordered box `kind`'s modal would occupy at `zoom`, sized from the
@@ -353,48 +541,6 @@ fn drag_modal_separator(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Route a mouse press to the open location picker.
-///
-/// A left press on a row selects it, and a press on the row already selected
-/// jumps to it. The two-step keeps a misclick from navigating away, which
-/// single-click-to-jump could not, and needs none of the timing machinery a
-/// double-click would. Every other press, drag, and release is swallowed so
-/// the buffer beneath keeps its cursor and focus.
-fn handle_location_picker_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
-    let MouseEventKind::Down(MouseButton::Left) = mouse.kind else {
-        return UpdateEffect::None;
-    };
-    let Some(picker) = stoat.location_picker.as_ref() else {
-        return UpdateEffect::None;
-    };
-    let (entries_len, selected) = (picker.entries().len(), picker.selected());
-
-    let Some((_, inner)) =
-        crate::render::location_picker::location_picker_layout(stoat.size(), entries_len)
-    else {
-        return UpdateEffect::None;
-    };
-    if !inner.contains(Position::new(mouse.column, mouse.row)) {
-        return UpdateEffect::None;
-    }
-
-    let start = crate::render::picker::window_start(selected, inner.height as usize);
-    let index = start + (mouse.row - inner.y) as usize;
-    if index >= entries_len {
-        return UpdateEffect::None;
-    }
-    if index == selected {
-        return action_handlers::picker::location_picker_select(stoat);
-    }
-
-    stoat
-        .location_picker
-        .as_mut()
-        .expect("picker present")
-        .set_selected(index);
-    UpdateEffect::Redraw
-}
-
 pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
     if matches!(
         mouse.kind,
@@ -406,21 +552,12 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
         return handle_hover(stoat, mouse.column, mouse.row);
     }
 
-    if stoat.location_picker.is_some() {
-        return handle_location_picker_mouse(stoat, mouse);
-    }
-
-    // Any open modal with a list owns the pointer. A left click selects a row
-    // or grabs the modal's separator, and every other press, drag, or release
-    // is swallowed so nothing reaches divider arming, focus, or the panes
-    // beneath the modal covering them. The wheel is unaffected --
-    // handle_mouse_scroll returns above this.
-    if stoat.file_finder.is_some()
-        || stoat.command_palette.is_some()
-        || stoat.commit_picker.is_some()
-        || stoat.code_search.is_some()
-        || stoat.symbol_finder.is_some()
-    {
+    // Any open boxed modal owns the pointer. A left click selects a row or
+    // grabs the modal's separator, and every other press, drag, or release is
+    // swallowed so nothing reaches divider arming, focus, or the panes beneath
+    // the modal covering them. The wheel is unaffected. handle_mouse_scroll
+    // returns above this.
+    if boxed_modal_surfaces(stoat).is_some() {
         return handle_modal_mouse(stoat, mouse);
     }
 
@@ -784,112 +921,86 @@ fn wheel_binding(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
 /// or accelerates a momentum glide. A `View::Run` pane (split or dock) does
 /// plain stepped scrolling of its output, three rows per notch, clamped to
 /// the top. Anything else drops the event.
-fn handle_mouse_scroll(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
-    if let Some(effect) = wheel_binding(stoat, mouse) {
-        return effect;
-    }
-
-    // The location picker is modal, so it owns the wheel wherever the
-    // pointer sits and browses its candidates with it.
-    if let Some(picker) = stoat.location_picker.as_mut() {
-        match mouse.kind {
-            MouseEventKind::ScrollDown => picker.select_next(),
-            MouseEventKind::ScrollUp => picker.select_prev(),
-            _ => return UpdateEffect::None,
-        }
-        return UpdateEffect::Redraw;
-    }
-
-    // A wheel while a finder or palette modal is open moves its selection
-    // rather than scrolling the pane beneath, so the event never falls
-    // through. The two modals are mutually exclusive, so two checks suffice.
-    if stoat.file_finder.is_some() || stoat.command_palette.is_some() {
-        let down = match mouse.kind {
-            MouseEventKind::ScrollDown => true,
-            MouseEventKind::ScrollUp => false,
-            _ => return UpdateEffect::None,
-        };
-        let size = stoat.size();
-
-        // A wheel over the visible preview pane scrolls the preview content
-        // instead of moving the selection, mirroring the editor-pane path.
-        let preview = if let Some(finder) = stoat.file_finder.as_ref() {
-            crate::render::file_finder::file_finder_layout(
-                size,
-                finder.content_size,
-                modal_zoom_steps(&stoat.modal_zoom, ModalKind::FileFinder),
-                modal_split_percent(&stoat.modal_split, ModalKind::FileFinder),
-            )
-            .and_then(|layout| layout.preview)
-            .map(|rect| (rect, finder.active_core_ref().preview.editor))
-        } else if let Some(palette) = stoat.command_palette.as_ref() {
-            if palette.arg_source().is_some()
-                && let Some(picker) = palette.arg_picker.as_ref()
-            {
-                crate::render::command_palette::palette_arg_body(
-                    size,
-                    palette.list_rows_hint(),
-                    modal_zoom_steps(&stoat.modal_zoom, ModalKind::Palette),
-                )
-                .and_then(|(_, preview)| preview)
-                .map(|rect| (rect, picker.active_core_ref().preview.editor))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if let Some((rect, editor_id)) = preview
-            && rect.contains(Position::new(mouse.column, mouse.row))
-        {
-            if let Some(editor) = stoat.active_workspace_mut().editors.get_mut(editor_id) {
-                action_handlers::view::wheel_scroll(editor, down);
-            }
-            return UpdateEffect::None;
-        }
-
-        let delta = if down { 1 } else { -1 };
-        return if stoat.file_finder.is_some() {
-            action_handlers::file_finder_move_selection(stoat, delta)
-        } else {
-            action_handlers::palette_move_selection(stoat, delta).unwrap_or(UpdateEffect::Redraw)
-        };
-    }
-
-    // The commit picker is modal too, so a wheel over it is the picker's.
-    // Over the diff it scrolls the diff. Anywhere else it walks the list and
-    // the diff follows the selection. Without this arm the event falls
-    // through to whatever pane the modal is covering.
-    if stoat.commit_picker.is_some() {
-        let down = match mouse.kind {
-            MouseEventKind::ScrollDown => true,
-            MouseEventKind::ScrollUp => false,
-            _ => return UpdateEffect::None,
-        };
-
-        let lanes = stoat.commit_picker.as_ref().and_then(|p| p.graph_lanes);
-        let preview = crate::render::commit_picker::commit_picker_layout(
-            stoat.size(),
-            lanes,
-            modal_zoom_steps(&stoat.modal_zoom, ModalKind::CommitPicker),
-            modal_split_percent(&stoat.modal_split, ModalKind::CommitPicker),
-        )
-        .and_then(|layout| layout.preview);
-
-        if let Some(rect) = preview
-            && rect.contains(Position::new(mouse.column, mouse.row))
-            && let Some(picker) = stoat.commit_picker.as_mut()
-        {
+/// Scroll the open modal's preview pane one wheel step.
+///
+/// Each modal holds its preview differently. Most back it with a real editor
+/// and scroll through the same path an editor pane does. The commit picker and
+/// help keep their own row offset instead, since neither preview is a buffer.
+fn scroll_modal_preview(stoat: &mut Stoat, down: bool) -> UpdateEffect {
+    let editor = match active_modal(stoat) {
+        Some(ActiveModal::FileFinder) => stoat
+            .file_finder
+            .as_ref()
+            .map(|f| f.active_core_ref().preview.editor),
+        Some(ActiveModal::CodeSearch) => stoat.code_search.as_ref().map(|f| f.preview.editor),
+        Some(ActiveModal::SymbolFinder) => stoat.symbol_finder.as_ref().map(|f| f.preview.editor),
+        Some(ActiveModal::Palette) => stoat
+            .command_palette
+            .as_ref()
+            .and_then(|p| p.arg_picker.as_ref())
+            .map(|p| p.active_core_ref().preview.editor),
+        Some(ActiveModal::CommitPicker) => {
+            let Some(picker) = stoat.commit_picker.as_mut() else {
+                return UpdateEffect::None;
+            };
             picker.preview_scroll = match down {
                 true => picker.preview_scroll.saturating_add(PREVIEW_WHEEL_ROWS),
                 false => picker.preview_scroll.saturating_sub(PREVIEW_WHEEL_ROWS),
             };
             return UpdateEffect::Redraw;
-        }
+        },
+        Some(ActiveModal::Help) => {
+            return match down {
+                true => action_handlers::help::help_scroll_detail_down(stoat),
+                false => action_handlers::help::help_scroll_detail_up(stoat),
+            };
+        },
+        // The run modal is all output, so the whole box is its preview.
+        Some(ActiveModal::Run) => {
+            let Some(run_id) = stoat.modal_run else {
+                return UpdateEffect::None;
+            };
+            let rows = stoat.size().height.saturating_sub(1) as usize;
+            let Some(run_state) = stoat.active_workspace_mut().runs.get_mut(run_id) else {
+                return UpdateEffect::None;
+            };
+            run_state.wheel_scroll(down, rows);
+            return UpdateEffect::Redraw;
+        },
+        _ => None,
+    };
 
-        let delta = if down { 1 } else { -1 };
-        return action_handlers::review_walk::commit_picker_step(stoat, delta);
+    let Some(editor_id) = editor else {
+        return UpdateEffect::None;
+    };
+    if let Some(editor) = stoat.active_workspace_mut().editors.get_mut(editor_id) {
+        action_handlers::view::wheel_scroll(editor, down);
+    }
+    UpdateEffect::None
+}
+
+fn handle_mouse_scroll(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
+    if let Some(effect) = wheel_binding(stoat, mouse) {
+        return effect;
+    }
+
+    // An open boxed modal owns the wheel wherever the pointer sits, so the
+    // event never reaches the pane it covers. Over the preview it scrolls that
+    // pane, and anywhere else it walks the list.
+    if let Some(surfaces) = boxed_modal_surfaces(stoat) {
+        let down = match mouse.kind {
+            MouseEventKind::ScrollDown => true,
+            MouseEventKind::ScrollUp => false,
+            _ => return UpdateEffect::None,
+        };
+        let over_preview = surfaces
+            .preview
+            .is_some_and(|rect| rect.contains(Position::new(mouse.column, mouse.row)));
+
+        if over_preview {
+            return scroll_modal_preview(stoat, down);
+        }
+        return action_handlers::picker::picker_step(stoat, if down { 1 } else { -1 });
     }
 
     // A wheel over the open hover popup scrolls the popup, not the pane
@@ -2093,6 +2204,178 @@ mod tests {
         assert!(
             h.stoat.pending_hover.is_none(),
             "a mouse focus change closes the hover popup"
+        );
+    }
+
+    /// An open boxed modal owns the wheel wherever the pointer sits, so the
+    /// pane it covers never scrolls under it.
+    #[test]
+    fn a_wheel_over_code_search_walks_its_list_and_not_the_pane() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 40);
+        h.seed_focused_buffer(&"line\n".repeat(200));
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        h.stoat
+            .code_search
+            .as_mut()
+            .expect("code search open")
+            .matches = (0..20)
+            .map(|i| crate::code_search::SearchMatch {
+                path: Arc::from(Path::new("/a.rs")),
+                line: i,
+                column: 0,
+                offset: 0,
+                snippet: format!("hit {i}"),
+            })
+            .collect();
+
+        let scroll_row = |h: &mut crate::test_harness::TestHarness| {
+            let ws = h.stoat.active_workspace();
+            let id = match ws.panes.pane(ws.panes.focus()).view {
+                View::Editor(id) => id,
+                _ => panic!("focused pane is not an editor"),
+            };
+            ws.editors[id].scroll_row
+        };
+        let before = scroll_row(&mut h);
+        h.stoat
+            .update(mouse_event(MouseEventKind::ScrollDown, 20, 20));
+
+        assert_eq!(
+            (
+                h.stoat.code_search.as_ref().expect("still open").selected,
+                scroll_row(&mut h),
+            ),
+            (1, before),
+            "the wheel steps the match list and leaves the covered pane alone"
+        );
+    }
+
+    /// A press inside an open modal belongs to the modal, so the buffer under
+    /// it keeps the cursor it had.
+    #[test]
+    fn a_click_inside_the_jumplist_modal_leaves_the_editor_cursor() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 40);
+        h.seed_focused_buffer("alpha\nbeta\ngamma\n");
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::MoveDown);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenJumplistPicker);
+        h.snapshot();
+
+        let before = crate::test_harness::editor::head_offsets(&mut h.stoat);
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 60, 20));
+
+        assert_eq!(
+            crate::test_harness::editor::head_offsets(&mut h.stoat),
+            before,
+            "the press never reaches the buffer the modal covers"
+        );
+    }
+
+    /// The bottom-line prompts leave the editor visible, so a press there is
+    /// still the editor's. This pins that exclusion.
+    #[test]
+    fn a_click_with_the_search_prompt_open_still_places_the_cursor() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 40);
+        h.seed_focused_buffer("alpha\nbeta\ngamma\n");
+        h.type_keys("/");
+        h.snapshot();
+        assert!(h.stoat.search_input.is_some(), "the prompt is open");
+
+        let before = crate::test_harness::editor::head_offsets(&mut h.stoat);
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 2));
+
+        assert_ne!(
+            crate::test_harness::editor::head_offsets(&mut h.stoat),
+            before,
+            "a bottom-line prompt does not take the pointer"
+        );
+    }
+
+    /// A press selects the clicked row, and a press on the row already
+    /// selected acts on it. The two-step keeps a misclick from navigating.
+    #[test]
+    fn two_presses_on_a_diagnostics_row_select_it_then_jump() {
+        use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+
+        let mut h = crate::test_harness::TestHarness::with_size(120, 40);
+        let path = h.write_file("diag.rs", "alpha\nbeta\ngamma\n");
+        h.open_file(&path);
+        let diag = |line: u32| Diagnostic {
+            range: Range::new(Position::new(line, 0), Position::new(line, 1)),
+            severity: Some(DiagnosticSeverity::ERROR),
+            message: format!("problem {line}"),
+            ..Default::default()
+        };
+        h.seed_diagnostics(path.clone(), vec![diag(0), diag(1), diag(2)]);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenDiagnosticsPicker);
+        h.snapshot();
+
+        let surfaces = boxed_modal_surfaces(&h.stoat).expect("the picker is a boxed modal");
+        let (col, second_row) = (surfaces.list.x + 1, surfaces.list.y + 2);
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            col,
+            second_row,
+        ));
+        let selected = h
+            .stoat
+            .diagnostics_picker
+            .as_ref()
+            .expect("still open after the first press")
+            .selected();
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            col,
+            second_row,
+        ));
+
+        assert_eq!(
+            (selected, h.stoat.diagnostics_picker.is_some()),
+            (2, false),
+            "the first press selects the clicked row and the second acts on it"
+        );
+    }
+
+    /// The run modal is all output, so its wheel scrolls that output rather
+    /// than the editor it hides.
+    #[test]
+    fn a_wheel_over_the_run_modal_scrolls_its_output() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 40);
+        h.seed_focused_buffer(&"line\n".repeat(200));
+        let executor = h.stoat.executor.clone();
+        let run_id = {
+            let ws = h.stoat.active_workspace_mut();
+            let run = crate::run::RunState::new(PathBuf::from("/tmp"), ws, executor);
+            ws.runs.insert(run)
+        };
+        h.stoat.modal_run = Some(run_id);
+        {
+            let run = h
+                .stoat
+                .active_workspace_mut()
+                .runs
+                .get_mut(run_id)
+                .expect("run state");
+            run.scroll_offset = 8;
+        }
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::ScrollDown, 60, 20));
+
+        assert_eq!(
+            h.stoat
+                .active_workspace()
+                .runs
+                .get(run_id)
+                .expect("run state")
+                .scroll_offset,
+            0,
+            "the wheel walks the run output's own offset"
         );
     }
 }

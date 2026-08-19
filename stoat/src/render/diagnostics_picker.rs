@@ -48,7 +48,7 @@ const WORKSPACE_COLUMNS: [Column; 4] = [
 /// Lay the diagnostics picker's modal out within `area`, returning its outer
 /// box and the inner rect holding the diagnostic rows, or [`None`] when `area`
 /// is too small to host it or there is nothing to list.
-fn diagnostics_picker_layout(area: Rect, entries_len: usize) -> Option<(Rect, Rect)> {
+pub(crate) fn diagnostics_picker_layout(area: Rect, entries_len: usize) -> Option<(Rect, Rect)> {
     if entries_len == 0 {
         return None;
     }
@@ -254,7 +254,7 @@ mod tests {
     fn the_last_of_more_diagnostics_than_fit_paints_as_selected() {
         let mut picker = picker_over(20);
         for _ in 1..picker.entries().len() {
-            picker.select_next();
+            picker.move_selection(1);
         }
         assert_eq!(picker.selected(), 19, "the last entry is selected");
 

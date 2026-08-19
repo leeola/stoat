@@ -16962,7 +16962,7 @@ mod tests {
             .location_picker
             .as_mut()
             .expect("open")
-            .set_selected(14);
+            .move_selection(14);
         h.snapshot();
 
         // Rows are read individually rather than by scanning the whole frame.

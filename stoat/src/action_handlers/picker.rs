@@ -9,42 +9,36 @@ use crate::{
 ///
 /// One verb for every small picker, since they differ only in which state
 /// holds the list. A modal with no list, or none open at all, does nothing.
-pub(super) fn picker_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
-    let forward = delta > 0;
+pub(crate) fn picker_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+    /// Every modal's selection speaks the same delta, so one dispatch serves
+    /// a key that steps one row and a click that jumps to a chosen one.
+    macro_rules! shift {
+        ($field:expr) => {
+            match $field {
+                Some(picker) => {
+                    picker.move_selection(delta);
+                    UpdateEffect::Redraw
+                },
+                None => UpdateEffect::None,
+            }
+        };
+    }
+
     match active_modal(stoat) {
-        Some(ActiveModal::Jumplist) => match forward {
-            true => jumplist_picker_next(stoat),
-            false => jumplist_picker_prev(stoat),
-        },
-        Some(ActiveModal::Diagnostics) => match forward {
-            true => diagnostics_picker_next(stoat),
-            false => diagnostics_picker_prev(stoat),
-        },
-        Some(ActiveModal::Location) => match forward {
-            true => location_picker_next(stoat),
-            false => location_picker_prev(stoat),
-        },
-        Some(ActiveModal::WorkspacePicker) => match forward {
-            true => super::workspace::workspace_picker_next(stoat),
-            false => super::workspace::workspace_picker_prev(stoat),
-        },
+        Some(ActiveModal::Jumplist) => shift!(stoat.jumplist_picker.as_mut()),
+        Some(ActiveModal::Diagnostics) => shift!(stoat.diagnostics_picker.as_mut()),
+        Some(ActiveModal::Location) => shift!(stoat.location_picker.as_mut()),
+        Some(ActiveModal::WorkspacePicker) => shift!(stoat.workspace_picker.as_mut()),
+        Some(ActiveModal::CodeSearch) => shift!(stoat.code_search.as_mut()),
         Some(ActiveModal::FileFinder) => super::file_finder_move_selection(stoat, delta),
         Some(ActiveModal::SymbolFinder) => {
             crate::symbol_finder::symbol_finder_move_selection(stoat, delta)
         },
         Some(ActiveModal::CommitPicker) => super::review_walk::commit_picker_step(stoat, delta),
-        Some(ActiveModal::CodeSearch) => match forward {
-            true => super::code_search::code_search_next(stoat),
-            false => super::code_search::code_search_prev(stoat),
+        Some(ActiveModal::Palette) => {
+            super::palette::palette_move_selection(stoat, delta).unwrap_or(UpdateEffect::Redraw)
         },
-        Some(ActiveModal::Palette) => match forward {
-            true => super::prompt::palette_select_next(stoat),
-            false => super::prompt::palette_select_prev(stoat),
-        },
-        Some(ActiveModal::Help) => match forward {
-            true => super::help::help_select_next(stoat),
-            false => super::help::help_select_prev(stoat),
-        },
+        Some(ActiveModal::Help) => super::help::help_move(stoat, delta),
         _ => UpdateEffect::None,
     }
 }
@@ -93,20 +87,6 @@ pub(super) fn picker_end(stoat: &mut Stoat, last: bool) -> UpdateEffect {
     }
 }
 
-pub(super) fn jumplist_picker_next(stoat: &mut Stoat) -> UpdateEffect {
-    if let Some(picker) = stoat.jumplist_picker.as_mut() {
-        picker.select_next();
-    }
-    UpdateEffect::Redraw
-}
-
-pub(super) fn jumplist_picker_prev(stoat: &mut Stoat) -> UpdateEffect {
-    if let Some(picker) = stoat.jumplist_picker.as_mut() {
-        picker.select_prev();
-    }
-    UpdateEffect::Redraw
-}
-
 /// Page the jumplist picker's selection by half its visible rows in `dir`.
 pub(super) fn jumplist_picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
     if let Some(picker) = stoat.jumplist_picker.as_mut() {
@@ -136,20 +116,6 @@ pub(super) fn jumplist_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     super::jump::apply_jump_entry(stoat, entry);
     if let Some(jumplist) = focused_pane_jumplist(stoat) {
         jumplist.set_cursor(idx);
-    }
-    UpdateEffect::Redraw
-}
-
-pub(super) fn diagnostics_picker_next(stoat: &mut Stoat) -> UpdateEffect {
-    if let Some(picker) = stoat.diagnostics_picker.as_mut() {
-        picker.select_next();
-    }
-    UpdateEffect::Redraw
-}
-
-pub(super) fn diagnostics_picker_prev(stoat: &mut Stoat) -> UpdateEffect {
-    if let Some(picker) = stoat.diagnostics_picker.as_mut() {
-        picker.select_prev();
     }
     UpdateEffect::Redraw
 }
@@ -196,20 +162,6 @@ pub(super) fn diagnostics_picker_select(stoat: &mut Stoat) -> UpdateEffect {
         None => local_offset,
     };
     stoat.collapse_focused_cursor_to(offset);
-    UpdateEffect::Redraw
-}
-
-pub(super) fn location_picker_next(stoat: &mut Stoat) -> UpdateEffect {
-    if let Some(picker) = stoat.location_picker.as_mut() {
-        picker.select_next();
-    }
-    UpdateEffect::Redraw
-}
-
-pub(super) fn location_picker_prev(stoat: &mut Stoat) -> UpdateEffect {
-    if let Some(picker) = stoat.location_picker.as_mut() {
-        picker.select_prev();
-    }
     UpdateEffect::Redraw
 }
 

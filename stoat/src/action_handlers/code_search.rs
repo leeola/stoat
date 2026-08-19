@@ -79,20 +79,6 @@ pub(crate) fn code_search_mode_toggle(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(crate) fn code_search_next(stoat: &mut Stoat) -> UpdateEffect {
-    if let Some(finder) = stoat.code_search.as_mut() {
-        finder.move_selection(1);
-    }
-    UpdateEffect::Redraw
-}
-
-pub(crate) fn code_search_prev(stoat: &mut Stoat) -> UpdateEffect {
-    if let Some(finder) = stoat.code_search.as_mut() {
-        finder.move_selection(-1);
-    }
-    UpdateEffect::Redraw
-}
-
 /// Page the code-search selection by half its rendered list height in `dir`
 /// (-1 up, 1 down). Before the first render the viewport is unset and the step
 /// falls back to a single row.
