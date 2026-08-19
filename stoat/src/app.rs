@@ -9948,7 +9948,7 @@ mod tests {
     fn workspace_picker_binding_is_rebindable() {
         let mut h = Stoat::test();
         h.stoat.keymap = compile_keymap(
-            "on key { modal == workspace_picker { Ctrl-x -> WorkspacePickerClose(); } }",
+            "on key { modal == workspace_picker { Ctrl-x -> CancelPromptInput(); } }",
         );
         h.stoat.hints_cache = None;
 

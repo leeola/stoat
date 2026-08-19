@@ -1,133 +1,56 @@
 use crate::{action::define_action, ActionKind, ActionPriority};
 
 define_action!(
-    JumplistPickerNextDef,
-    JumplistPickerNext,
-    "JumplistPickerNext",
-    ActionKind::JumplistPickerNext,
-    "next jumplist row",
-    "Move the jumplist picker's selection to the next row.",
+    PickerNextDef,
+    PickerNext,
+    "PickerNext",
+    ActionKind::PickerNext,
+    "next picker row",
+    "Move the open list modal's selection to the next row. Each modal binds this in its own keymap block, so one verb serves them all.",
     ActionPriority::Common,
     palette_visible = false
 );
 
 define_action!(
-    JumplistPickerPrevDef,
-    JumplistPickerPrev,
-    "JumplistPickerPrev",
-    ActionKind::JumplistPickerPrev,
-    "previous jumplist row",
-    "Move the jumplist picker's selection to the previous row.",
+    PickerPrevDef,
+    PickerPrev,
+    "PickerPrev",
+    ActionKind::PickerPrev,
+    "previous picker row",
+    "Move the open list modal's selection to the previous row, the counterpart to PickerNext.",
     ActionPriority::Common,
     palette_visible = false
 );
 
 define_action!(
-    JumplistPickerPageDownDef,
-    JumplistPickerPageDown,
-    "JumplistPickerPageDown",
-    ActionKind::JumplistPickerPageDown,
-    "page the jumplist down",
-    "Move the jumplist picker's selection down by half the visible rows, matching how every other modal list pages.",
+    PickerPageDownDef,
+    PickerPageDown,
+    "PickerPageDown",
+    ActionKind::PickerPageDown,
+    "page the picker down",
+    "Move the open list modal's selection down by half the visible rows.",
     ActionPriority::Common,
     palette_visible = false
 );
 
 define_action!(
-    JumplistPickerPageUpDef,
-    JumplistPickerPageUp,
-    "JumplistPickerPageUp",
-    ActionKind::JumplistPickerPageUp,
-    "page the jumplist up",
-    "Move the jumplist picker's selection up by half the visible rows, the counterpart to JumplistPickerPageDown.",
+    PickerPageUpDef,
+    PickerPageUp,
+    "PickerPageUp",
+    ActionKind::PickerPageUp,
+    "page the picker up",
+    "Move the open list modal's selection up by half the visible rows, the counterpart to PickerPageDown.",
     ActionPriority::Common,
     palette_visible = false
 );
 
 define_action!(
-    JumplistPickerSelectDef,
-    JumplistPickerSelect,
-    "JumplistPickerSelect",
-    ActionKind::JumplistPickerSelect,
-    "jump to selected row",
-    "Jump the focused editor to the location under the jumplist picker's selection.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    JumplistPickerCloseDef,
-    JumplistPickerClose,
-    "JumplistPickerClose",
-    ActionKind::JumplistPickerClose,
-    "close jumplist picker",
-    "Dismiss the jumplist picker without jumping.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    DiagnosticsPickerNextDef,
-    DiagnosticsPickerNext,
-    "DiagnosticsPickerNext",
-    ActionKind::DiagnosticsPickerNext,
-    "next diagnostic row",
-    "Move the diagnostics picker's selection to the next row.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    DiagnosticsPickerPrevDef,
-    DiagnosticsPickerPrev,
-    "DiagnosticsPickerPrev",
-    ActionKind::DiagnosticsPickerPrev,
-    "previous diagnostic row",
-    "Move the diagnostics picker's selection to the previous row.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    DiagnosticsPickerPageDownDef,
-    DiagnosticsPickerPageDown,
-    "DiagnosticsPickerPageDown",
-    ActionKind::DiagnosticsPickerPageDown,
-    "page the diagnostics list down",
-    "Move the diagnostics picker's selection down by half the visible rows, matching how every other modal list pages.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    DiagnosticsPickerPageUpDef,
-    DiagnosticsPickerPageUp,
-    "DiagnosticsPickerPageUp",
-    ActionKind::DiagnosticsPickerPageUp,
-    "page the diagnostics list up",
-    "Move the diagnostics picker's selection up by half the visible rows, the counterpart to DiagnosticsPickerPageDown.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    DiagnosticsPickerSelectDef,
-    DiagnosticsPickerSelect,
-    "DiagnosticsPickerSelect",
-    ActionKind::DiagnosticsPickerSelect,
-    "jump to selected diagnostic",
-    "Jump the focused editor to the diagnostic under the picker's selection, opening its file first for workspace-scope entries.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    DiagnosticsPickerCloseDef,
-    DiagnosticsPickerClose,
-    "DiagnosticsPickerClose",
-    ActionKind::DiagnosticsPickerClose,
-    "close diagnostics picker",
-    "Dismiss the diagnostics picker without jumping.",
+    PickerCompleteDef,
+    PickerComplete,
+    "PickerComplete",
+    ActionKind::PickerComplete,
+    "complete from the picker",
+    "Fill the open list modal's prompt from its selected row. A modal with nothing to complete does nothing.",
     ActionPriority::Common,
     palette_visible = false
 );
@@ -249,72 +172,6 @@ define_action!(
     ActionKind::CommitPickerClose,
     "close commit picker",
     "Dismiss the commit picker without starting a review.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    LocationPickerNextDef,
-    LocationPickerNext,
-    "LocationPickerNext",
-    ActionKind::LocationPickerNext,
-    "next location row",
-    "Move the goto-location picker's selection to the next row.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    LocationPickerPrevDef,
-    LocationPickerPrev,
-    "LocationPickerPrev",
-    ActionKind::LocationPickerPrev,
-    "previous location row",
-    "Move the goto-location picker's selection to the previous row.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    LocationPickerPageDownDef,
-    LocationPickerPageDown,
-    "LocationPickerPageDown",
-    ActionKind::LocationPickerPageDown,
-    "page the location list down",
-    "Move the goto-location picker's selection down by half the visible rows, matching how every other modal list pages.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    LocationPickerPageUpDef,
-    LocationPickerPageUp,
-    "LocationPickerPageUp",
-    ActionKind::LocationPickerPageUp,
-    "page the location list up",
-    "Move the goto-location picker's selection up by half the visible rows, the counterpart to LocationPickerPageDown.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    LocationPickerSelectDef,
-    LocationPickerSelect,
-    "LocationPickerSelect",
-    ActionKind::LocationPickerSelect,
-    "jump to selected location",
-    "Jump the focused editor to the goto candidate under the picker's selection.",
-    ActionPriority::Common,
-    palette_visible = false
-);
-
-define_action!(
-    LocationPickerCloseDef,
-    LocationPickerClose,
-    "LocationPickerClose",
-    ActionKind::LocationPickerClose,
-    "close location picker",
-    "Dismiss the goto-location picker without jumping.",
     ActionPriority::Common,
     palette_visible = false
 );

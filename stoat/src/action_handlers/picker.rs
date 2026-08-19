@@ -1,8 +1,49 @@
 use super::focused_pane_jumplist;
 use crate::{
     app::{Stoat, UpdateEffect},
+    keymap_state::{active_modal, ActiveModal},
     pane::{FocusTarget, View},
 };
+
+/// Step the open list modal's selection by `delta` rows.
+///
+/// One verb for every small picker, since they differ only in which state
+/// holds the list. A modal with no list, or none open at all, does nothing.
+pub(super) fn picker_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+    match (active_modal(stoat), delta) {
+        (Some(ActiveModal::Jumplist), 1) => jumplist_picker_next(stoat),
+        (Some(ActiveModal::Jumplist), _) => jumplist_picker_prev(stoat),
+        (Some(ActiveModal::Diagnostics), 1) => diagnostics_picker_next(stoat),
+        (Some(ActiveModal::Diagnostics), _) => diagnostics_picker_prev(stoat),
+        (Some(ActiveModal::Location), 1) => location_picker_next(stoat),
+        (Some(ActiveModal::Location), _) => location_picker_prev(stoat),
+        (Some(ActiveModal::WorkspacePicker), 1) => super::workspace::workspace_picker_next(stoat),
+        (Some(ActiveModal::WorkspacePicker), _) => super::workspace::workspace_picker_prev(stoat),
+        _ => UpdateEffect::None,
+    }
+}
+
+/// Page the open list modal's selection by half its visible rows in `dir`.
+pub(super) fn picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    match active_modal(stoat) {
+        Some(ActiveModal::Jumplist) => jumplist_picker_page(stoat, dir),
+        Some(ActiveModal::Diagnostics) => diagnostics_picker_page(stoat, dir),
+        Some(ActiveModal::Location) => location_picker_page(stoat, dir),
+        Some(ActiveModal::WorkspacePicker) => super::workspace::workspace_picker_page(stoat, dir),
+        _ => UpdateEffect::None,
+    }
+}
+
+/// Fill the open list modal's prompt from its selection.
+///
+/// Only the workspace picker carries a prompt to complete into. The others
+/// have nothing to fill, so they do nothing rather than reporting an error.
+pub(super) fn picker_complete(stoat: &mut Stoat) -> UpdateEffect {
+    match active_modal(stoat) {
+        Some(ActiveModal::WorkspacePicker) => super::workspace::workspace_picker_complete(stoat),
+        _ => UpdateEffect::None,
+    }
+}
 
 pub(super) fn jumplist_picker_next(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(picker) = stoat.jumplist_picker.as_mut() {
@@ -243,6 +284,30 @@ mod tests {
     use crate::test_harness::{editor, keys, stoat};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use stoat_action::{MoveDown, SaveSelection};
+
+    /// One verb set serves every list modal, so the verbs reach the dispatch
+    /// whether or not a modal is open. With none open there is no list to
+    /// step, and reporting a redraw repaints the frame for nothing.
+    #[test]
+    fn a_picker_verb_with_no_modal_open_is_noop() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "alpha\nbeta\n");
+        assert_eq!(
+            (
+                dispatch(&mut stoat, &stoat_action::PickerNext),
+                dispatch(&mut stoat, &stoat_action::PickerPrev),
+                dispatch(&mut stoat, &stoat_action::PickerPageDown),
+                dispatch(&mut stoat, &stoat_action::PickerComplete),
+            ),
+            (
+                UpdateEffect::None,
+                UpdateEffect::None,
+                UpdateEffect::None,
+                UpdateEffect::None
+            ),
+            "no open list leaves every picker verb with nothing to do"
+        );
+    }
 
     #[test]
     fn open_jumplist_picker_with_empty_jumplist_is_noop() {

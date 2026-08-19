@@ -674,18 +674,11 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::OpenWorkspaceDiagnosticsPicker => {
             picker::open_workspace_diagnostics_picker(stoat)
         },
-        ActionKind::JumplistPickerNext => picker::jumplist_picker_next(stoat),
-        ActionKind::JumplistPickerPrev => picker::jumplist_picker_prev(stoat),
-        ActionKind::JumplistPickerPageDown => picker::jumplist_picker_page(stoat, 1),
-        ActionKind::JumplistPickerPageUp => picker::jumplist_picker_page(stoat, -1),
-        ActionKind::JumplistPickerSelect => picker::jumplist_picker_select(stoat),
-        ActionKind::JumplistPickerClose => picker::jumplist_picker_close(stoat),
-        ActionKind::DiagnosticsPickerNext => picker::diagnostics_picker_next(stoat),
-        ActionKind::DiagnosticsPickerPrev => picker::diagnostics_picker_prev(stoat),
-        ActionKind::DiagnosticsPickerPageDown => picker::diagnostics_picker_page(stoat, 1),
-        ActionKind::DiagnosticsPickerPageUp => picker::diagnostics_picker_page(stoat, -1),
-        ActionKind::DiagnosticsPickerSelect => picker::diagnostics_picker_select(stoat),
-        ActionKind::DiagnosticsPickerClose => picker::diagnostics_picker_close(stoat),
+        ActionKind::PickerNext => picker::picker_step(stoat, 1),
+        ActionKind::PickerPrev => picker::picker_step(stoat, -1),
+        ActionKind::PickerPageDown => picker::picker_page(stoat, 1),
+        ActionKind::PickerPageUp => picker::picker_page(stoat, -1),
+        ActionKind::PickerComplete => picker::picker_complete(stoat),
         ActionKind::GitReview => {
             let action = action
                 .as_any()
@@ -714,12 +707,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::CommitPickerBack => review_walk::commit_picker_back(stoat),
         ActionKind::CommitPickerSelect => review_walk::commit_picker_select(stoat),
         ActionKind::CommitPickerClose => review_walk::commit_picker_close(stoat),
-        ActionKind::LocationPickerNext => picker::location_picker_next(stoat),
-        ActionKind::LocationPickerPrev => picker::location_picker_prev(stoat),
-        ActionKind::LocationPickerPageDown => picker::location_picker_page(stoat, 1),
-        ActionKind::LocationPickerPageUp => picker::location_picker_page(stoat, -1),
-        ActionKind::LocationPickerSelect => picker::location_picker_select(stoat),
-        ActionKind::LocationPickerClose => picker::location_picker_close(stoat),
         ActionKind::OpenCodeSearch => code_search::open_code_search(stoat),
         ActionKind::CodeSearchNext => code_search::code_search_next(stoat),
         ActionKind::CodeSearchPrev => code_search::code_search_prev(stoat),
@@ -1159,13 +1146,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             ));
             UpdateEffect::Redraw
         },
-        ActionKind::WorkspacePickerNext => workspace::workspace_picker_next(stoat),
-        ActionKind::WorkspacePickerPrev => workspace::workspace_picker_prev(stoat),
-        ActionKind::WorkspacePickerPageDown => workspace::workspace_picker_page(stoat, 1),
-        ActionKind::WorkspacePickerPageUp => workspace::workspace_picker_page(stoat, -1),
-        ActionKind::WorkspacePickerComplete => workspace::workspace_picker_complete(stoat),
-        ActionKind::WorkspacePickerSelect => workspace::workspace_picker_select(stoat),
-        ActionKind::WorkspacePickerClose => workspace::workspace_picker_close(stoat),
         ActionKind::CloseWorkspace => workspace::close_workspace(stoat),
         ActionKind::RenameWorkspace => {
             let action = action
@@ -2776,9 +2756,9 @@ mod tests {
             .join("\n");
 
         for expected in [
-            "complete selected workspace",
-            "page the workspace list down",
-            "close workspace picker",
+            "complete from the picker",
+            "page the picker down",
+            "cancel prompt input",
         ] {
             assert!(
                 painted.contains(expected),

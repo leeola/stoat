@@ -1,4 +1,7 @@
-use crate::app::{Stoat, UpdateEffect};
+use crate::{
+    app::{Stoat, UpdateEffect},
+    keymap_state::{active_modal, ActiveModal},
+};
 
 /// Submit the currently focused prompt input. Dispatches based on which
 /// consumer owns the focused [`crate::input_view::InputView`]. Consumer
@@ -32,6 +35,9 @@ pub(super) fn submit_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(effect) = super::palette::palette_submit(stoat) {
         return effect;
     }
+    if let Some(effect) = picker_submit(stoat) {
+        return effect;
+    }
     if stoat.help.is_some() {
         return super::help::help_submit(stoat);
     }
@@ -39,6 +45,32 @@ pub(super) fn submit_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
         return super::run::run_submit(stoat);
     }
     UpdateEffect::None
+}
+
+/// Take the open list modal's selection, or `None` when no such modal is open.
+///
+/// The four small pickers ride the shared prompt actions rather than carrying
+/// select and close verbs of their own, so Enter means the same thing over a
+/// picker as it does over any other prompt.
+fn picker_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
+    match active_modal(stoat)? {
+        ActiveModal::Jumplist => Some(super::picker::jumplist_picker_select(stoat)),
+        ActiveModal::Diagnostics => Some(super::picker::diagnostics_picker_select(stoat)),
+        ActiveModal::Location => Some(super::picker::location_picker_select(stoat)),
+        ActiveModal::WorkspacePicker => Some(super::workspace::workspace_picker_select(stoat)),
+        _ => None,
+    }
+}
+
+/// Dismiss the open list modal, or `None` when no such modal is open.
+fn picker_cancel(stoat: &mut Stoat) -> Option<UpdateEffect> {
+    match active_modal(stoat)? {
+        ActiveModal::Jumplist => Some(super::picker::jumplist_picker_close(stoat)),
+        ActiveModal::Diagnostics => Some(super::picker::diagnostics_picker_close(stoat)),
+        ActiveModal::Location => Some(super::picker::location_picker_close(stoat)),
+        ActiveModal::WorkspacePicker => Some(super::workspace::workspace_picker_close(stoat)),
+        _ => None,
+    }
 }
 
 fn focused_target(stoat: &Stoat) -> Option<crate::input_view::SubmitTarget> {
@@ -81,6 +113,9 @@ pub(super) fn cancel_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
         return effect;
     }
     if let Some(effect) = super::palette::palette_cancel(stoat) {
+        return effect;
+    }
+    if let Some(effect) = picker_cancel(stoat) {
         return effect;
     }
     // Help handles Escape in two stages. The first leaves the search input in
