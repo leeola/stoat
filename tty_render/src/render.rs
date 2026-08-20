@@ -94,7 +94,7 @@ pub struct Frame<'a> {
 /// the physical rasterization size, the logical points scaled by the display
 /// density, so glyphs stay crisp on a high-DPI display. Width and height keep a
 /// placeholder ratio to it (0.6 and 1.2) until real font metrics replace them.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct CellMetrics {
     pub(crate) font_size: f32,
     pub(crate) width: f32,

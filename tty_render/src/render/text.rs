@@ -312,6 +312,29 @@ struct TextCompositeSlot {
     /// [`Self::epoch`] answers a different question, whether the rows may be
     /// drawn again untouched.
     instance_epoch: u64,
+    /// What the text-run instances and their rects were built from, or `None`
+    /// before the first build.
+    run_build: Option<RunBuild>,
+}
+
+/// The answers a pool's text-run instances and their backing rects were built
+/// against.
+///
+/// The runs back chrome that changes far more rarely than the cells do. A frame
+/// where every one of these still holds skips the build and the upload, the way
+/// the live grid's own run pass does.
+#[derive(Clone, Copy, PartialEq)]
+struct RunBuild {
+    /// The grid's [`Grid::text_runs_epoch`], which moves whenever a run does.
+    epoch: u64,
+    /// The atlas content epoch the run glyphs resolved their texels against.
+    atlas_epoch: u64,
+    /// The cell box the runs were laid out in.
+    metrics: CellMetrics,
+    /// The region origin their positions snapped against.
+    origin: [f32; 2],
+    /// The slot the draw's globals take back to display row zero.
+    anchor: u32,
 }
 
 /// The instanced glyph pipeline together with the font system, glyph atlas, and
@@ -1547,6 +1570,7 @@ impl TextPass {
 
         let slot = self.composite_slots.entry(pool, || new_slot(device));
         let held_instance_epoch = slot.instance_epoch;
+        let held_run_build = slot.run_build;
         let mut glyph_rows = mem::take(&mut slot.glyph_rows);
         let mut underline_rows = mem::take(&mut slot.underline_rows);
         let mut glyph_instances = mem::take(&mut slot.glyph_instances);
@@ -1617,29 +1641,40 @@ impl TextPass {
         // land against the final atlas.
         let atlas_dims = self.atlas.texture_dims();
 
-        let mut run_instances = mem::take(&mut self.composite_run_scratch);
         let run_anchor = rotation.slot(0) as u32;
-        self.build_text_run_instances_into(
-            device,
-            queue,
-            grid,
-            origin_cells,
-            run_anchor,
-            &mut run_instances,
-        );
+        let mut run_build = RunBuild {
+            epoch: grid.text_runs_epoch(),
+            atlas_epoch,
+            metrics,
+            origin: origin_cells,
+            anchor: run_anchor,
+        };
+        let runs_held = held_run_build == Some(run_build);
 
+        let mut run_instances = mem::take(&mut self.composite_run_scratch);
         let mut run_rects = mem::take(&mut self.composite_rect_scratch);
-        self.build_run_rects_into(grid, &mut run_rects);
-        let target = self.composite_slots.entry(pool, || new_slot(device));
-        target.rects.count = run_rects.len() as u32;
-        upload_instances(
-            device,
-            queue,
-            &run_rects,
-            &mut target.rects.instances,
-            &mut target.rects.capacity,
-            "composite text run rect instances",
-        );
+        if !runs_held {
+            self.build_text_run_instances_into(
+                device,
+                queue,
+                grid,
+                origin_cells,
+                run_anchor,
+                &mut run_instances,
+            );
+            self.build_run_rects_into(grid, &mut run_rects);
+
+            let target = self.composite_slots.entry(pool, || new_slot(device));
+            target.rects.count = run_rects.len() as u32;
+            upload_instances(
+                device,
+                queue,
+                &run_rects,
+                &mut target.rects.instances,
+                &mut target.rects.capacity,
+                "composite text run rect instances",
+            );
+        }
         self.composite_rect_scratch = run_rects;
 
         // Shape the exposed pool rows through the same per-row primitive
@@ -1666,11 +1701,14 @@ impl TextPass {
             }
         }
 
-        // The runs packed before the rows above, so either pass may have grown
+        // Any run pack ran before the rows above, so either pass may have grown
         // the atlas since the runs froze their UVs. Every run glyph is resident
-        // now, so a second pass reads final UVs without growing again. The grid
+        // now, so a second pass reads final UVs without growing again. A frame
+        // that skipped the run build still has to bake them again here, since
+        // what moved is where the glyphs they already named now sit. The grid
         // build below already resolves post-pack.
-        if self.atlas.texture_dims() != atlas_dims {
+        let runs_moved = self.atlas.texture_dims() != atlas_dims;
+        if runs_moved {
             self.build_text_run_instances_into(
                 device,
                 queue,
@@ -1680,16 +1718,23 @@ impl TextPass {
                 &mut run_instances,
             );
         }
-        let target = self.composite_slots.entry(pool, || new_slot(device));
-        target.text_runs.count = run_instances.len() as u32;
-        upload_instances(
-            device,
-            queue,
-            &run_instances,
-            &mut target.text_runs.instances,
-            &mut target.text_runs.capacity,
-            "composite text run instances",
-        );
+        if !runs_held || runs_moved {
+            // Whatever the pack settled on, since that is what these resolved
+            // against. A held list keeps the epoch it was recorded with, so an
+            // eviction the row pack caused rebuilds it next frame.
+            run_build.atlas_epoch = self.atlas.content_epoch();
+
+            let target = self.composite_slots.entry(pool, || new_slot(device));
+            target.text_runs.count = run_instances.len() as u32;
+            upload_instances(
+                device,
+                queue,
+                &run_instances,
+                &mut target.text_runs.instances,
+                &mut target.text_runs.capacity,
+                "composite text run instances",
+            );
+        }
         self.composite_run_scratch = run_instances;
 
         // An atlas move relocates every UV, so instances built for the rows this
@@ -1765,6 +1810,7 @@ impl TextPass {
         target.baked_origin = origin_cells;
         target.row_offset = row_offset;
         target.instance_epoch = instance_epoch;
+        target.run_build = Some(run_build);
         target.glyph_rows = glyph_rows;
         target.underline_rows = underline_rows;
         target.glyph_instances = glyph_instances;
@@ -3354,6 +3400,7 @@ fn new_slot(device: &Device) -> TextCompositeSlot {
         underline_rows: Vec::new(),
         glyph_instances: Vec::new(),
         instance_epoch: 0,
+        run_build: None,
     }
 }
 
@@ -6335,6 +6382,143 @@ mod tests {
             bytemuck::cast_slice::<TextInstance, u8>(&at_rest),
             bytemuck::cast_slice::<TextInstance, u8>(&rebuilt),
             "because the shift rides the globals and never enters an instance",
+        );
+    }
+
+    /// The chrome a pool's text runs back changes far more rarely than its
+    /// cells do, so a frame that moved neither the runs nor where they sit
+    /// builds none of them again.
+    ///
+    /// Read off the build scratch, emptied between the two frames so a refill is
+    /// the only thing that can put anything back in it.
+    #[test]
+    fn a_composite_whose_runs_held_builds_none_of_them_again() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+        let resolution = [640.0, 480.0];
+        let mut grid = Grid::new(3, 20);
+        fill_row(&mut grid, 0, "alpha");
+        let run = |col: i16| TextRun {
+            col,
+            row: 32,
+            scale: 160,
+            color: Rgb::new(255, 255, 255),
+            bg: Some(Rgb::new(20, 20, 20)),
+            text: "charlie".into(),
+            seq: 0,
+        };
+        grid.set_text_runs(vec![run(32)]);
+
+        let composite = |pass: &mut TextPass, grid: &Grid, scrolled| {
+            pass.prepare_composite(
+                &device,
+                &queue,
+                grid,
+                &[],
+                resolution,
+                0.0,
+                [0.0; 2],
+                true,
+                scrolled,
+                0,
+                0,
+            );
+        };
+
+        composite(&mut pass, &grid, None);
+        assert!(
+            !pass.composite_run_scratch.is_empty() && !pass.composite_rect_scratch.is_empty(),
+            "the fixture has to build both run glyphs and a run rect",
+        );
+
+        pass.composite_run_scratch.clear();
+        pass.composite_rect_scratch.clear();
+        composite(&mut pass, &grid, None);
+        assert!(
+            pass.composite_run_scratch.is_empty(),
+            "a run list that held must not be built again",
+        );
+        assert!(
+            pass.composite_rect_scratch.is_empty(),
+            "nor the rects backing it",
+        );
+
+        // A scroll leaves the runs where they were declared and moves the slot
+        // that carries them there, so the same list has to be baked again.
+        composite(&mut pass, &grid, Some(1));
+        assert!(
+            !pass.composite_run_scratch.is_empty(),
+            "a rotation that moved the anchor has to bake the runs again",
+        );
+
+        pass.composite_run_scratch.clear();
+        pass.composite_rect_scratch.clear();
+        grid.set_text_runs(vec![run(48)]);
+        composite(&mut pass, &grid, None);
+        assert!(
+            !pass.composite_run_scratch.is_empty() && !pass.composite_rect_scratch.is_empty(),
+            "a run that moved has to be built again",
+        );
+    }
+
+    /// An eviction hands the texels a pool's runs named to another glyph, so a
+    /// held run list is held only while the atlas has not moved under it.
+    #[test]
+    fn a_composite_bakes_its_runs_again_when_the_atlas_moved_under_them() {
+        let Some((device, queue, mut pass)) = headless_text_pass_font(60) else {
+            return;
+        };
+        let resolution = [640.0, 480.0];
+
+        let mut grid = Grid::new(3, 10);
+        fill_row(&mut grid, 0, "alpha");
+        grid.set_text_runs(vec![TextRun {
+            col: 0,
+            row: 0,
+            scale: 256,
+            color: Rgb::new(255, 255, 255),
+            bg: None,
+            text: "42".into(),
+            seq: 0,
+        }]);
+
+        let composite = |pass: &mut TextPass, grid: &Grid| {
+            pass.prepare_composite(
+                &device,
+                &queue,
+                grid,
+                &[],
+                resolution,
+                0.0,
+                [0.0; 2],
+                true,
+                None,
+                0,
+                0,
+            );
+        };
+        composite(&mut pass, &grid);
+
+        // A later frame, so this pool's run glyphs are no longer protected, and
+        // then more glyphs than the atlas holds, so packing them evicts.
+        let before = pass.atlas.content_epoch();
+        pass.atlas.begin_frame();
+        for cp in 0..300u32 {
+            pass.atlas
+                .get_or_insert_procedural(&device, &queue, cp, 20, 20, || vec![255u8; 400]);
+        }
+        assert_ne!(
+            pass.atlas.content_epoch(),
+            before,
+            "the pack has to evict, or this proves nothing",
+        );
+
+        pass.composite_run_scratch.clear();
+        composite(&mut pass, &grid);
+        assert!(
+            !pass.composite_run_scratch.is_empty(),
+            "runs whose texels moved have to be baked again",
         );
     }
 
