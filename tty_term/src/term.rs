@@ -20,7 +20,7 @@ use alacritty_terminal::{
     event::{Event, EventListener, WindowSize},
     grid::{Dimensions, Scroll},
     index::{Column, Line, Point, Side},
-    selection::{Selection, SelectionType},
+    selection::{Selection, SelectionRange, SelectionType},
     term::{viewport_to_point, Config, TermDamage, TermMode},
     vte::ansi::{Handler, NamedColor, Processor, Rgb as VteRgb},
     Term,
@@ -32,8 +32,8 @@ use decorate::{
 };
 use parking_lot::Mutex;
 use project::{
-    default_palette, detect_shift, indexed, named_color, project_cell, project_cursor,
-    project_term_cells, row_bounds, selection_span,
+    default_palette, detect_shift, indexed, mark_selection_change, named_color, project_cell,
+    project_cursor, project_term_cells, row_bounds,
 };
 use scan::{notification_from_osc, EscEvent, EscScanner, ESC, XTVERSION_REPLY};
 use std::{
@@ -351,11 +351,14 @@ pub struct Terminal {
     /// A gutter emits a text run per visible line and each opens its own
     /// capture, so allocating per capture would allocate per line per frame.
     capture_scratch: Vec<u8>,
-    /// The inclusive viewport row span the selection covered at the previous
-    /// [`Self::project`], so a growing or shrinking drag can damage the rows it
-    /// entered or left and repaint their INVERSE overlay. `None` when there was
-    /// no selection.
-    last_selection_span: Option<(usize, usize)>,
+    /// The selection as it stood at the previous [`Self::project`], so the next
+    /// one damages the rows whose overlay moved. `None` when there was no
+    /// selection.
+    ///
+    /// The range rather than the rows it spans. A drag inside one row moves the
+    /// overlay without moving the span, and the terminal deliberately leaves
+    /// the selection out of its own damage for exactly this comparison.
+    last_selection: Option<SelectionRange>,
     /// Accumulated renderer-facing decoration row-damage since the renderer last
     /// drained it via [`Self::take_decoration_damage`]. Distinct from VT
     /// [`Damage`]: it marks rows where an APC border or scale changed, which the
@@ -909,7 +912,7 @@ impl Terminal {
             row_scratch: Vec::new(),
             row_flags_spare: Vec::new(),
             capture_scratch: Vec::new(),
-            last_selection_span: None,
+            last_selection: None,
             decoration_damage: Vec::new(),
             last_history: 0,
             pools: BTreeMap::new(),
@@ -2699,23 +2702,29 @@ impl Terminal {
         // scroll and leave the renderer's auto-scroll ease idle.
         let scrolled = if offset > 0 { 0 } else { grew };
 
-        // Repaint rows the selection entered or left since the last projection,
-        // so its INVERSE overlay tracks a drag even on rows VT damage did not
-        // touch. A `Damage::Full` frame already covers every row.
-        let span = selection.and_then(|s| selection_span(&s, offset, rows));
-        if span != self.last_selection_span
+        // Repaint the rows whose selection overlay changed since the last
+        // projection, so it tracks a drag even where VT damage did not land. A
+        // `Damage::Full` frame already covers every row.
+        //
+        // Compared by range rather than by the rows it spans. A drag inside one
+        // row leaves the span equal while the overlay moves, and a drag that
+        // crosses a row changes only its edges however tall the selection is.
+        if selection != self.last_selection
             && let Damage::Partial(rows_dirty) = &mut dirty
         {
-            // An idle frame carries an empty vec, so grow it before marking the
-            // entered rows. A genuinely-damaged frame already sizes it to rows.
+            // An idle frame carries an empty vec, so grow it before marking. A
+            // genuinely-damaged frame already sizes it to rows.
             rows_dirty.resize(rows, None);
-            for (lo, hi) in span.into_iter().chain(self.last_selection_span) {
-                for slot in rows_dirty.iter_mut().skip(lo).take(hi - lo + 1) {
-                    *slot = whole_row(cols);
-                }
-            }
+            mark_selection_change(
+                self.last_selection,
+                selection,
+                offset,
+                rows,
+                cols,
+                rows_dirty,
+            );
         }
-        self.last_selection_span = span;
+        self.last_selection = selection;
 
         // Read the cells straight from the terminal grid rather than filtering
         // the whole viewport per cell. `display_iter` maps grid `line + offset`
@@ -3067,9 +3076,10 @@ impl Dimensions for GridSize {
 #[cfg(test)]
 mod tests {
     use super::{
-        insert_room, whole_row, Arc, Cursor, CursorShape, Damage, MinimapJournal, TermEvent,
-        Terminal, ESC, MAX_CAPTURE_BYTES, MAX_DECORATIONS, MAX_MINIMAP_LINES, MAX_MINIMAP_STORES,
-        MAX_MINIMAP_VIEWS, MAX_POOLS, XTVERSION_REPLY,
+        insert_room, mark_selection_change, whole_row, Arc, Cursor, CursorShape, Damage,
+        MinimapJournal, SelectionRange, TermEvent, Terminal, ESC, MAX_CAPTURE_BYTES,
+        MAX_DECORATIONS, MAX_MINIMAP_LINES, MAX_MINIMAP_STORES, MAX_MINIMAP_VIEWS, MAX_POOLS,
+        XTVERSION_REPLY,
     };
     use crate::{
         grid::{
@@ -3079,7 +3089,10 @@ mod tests {
         },
         theme::Theme,
     };
-    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::{
+        grid::Dimensions,
+        index::{Column, Line, Point},
+    };
     use stoatty_protocol::command::{
         encode_bar, encode_border, encode_config_reload, encode_fill, encode_fill_end,
         encode_font_step, encode_hello, encode_icon, encode_ident_reply, encode_line_layout,
@@ -7177,6 +7190,115 @@ mod tests {
         assert!(
             !damage.is_dirty(5),
             "a row outside the selection stays clean"
+        );
+    }
+
+    #[test]
+    fn a_drag_inside_one_row_damages_that_row() {
+        let mut terminal = Terminal::new(6, 8, Theme::default());
+        let mut grid = Grid::new(6, 8);
+        terminal.advance(b"abcdef");
+        terminal.start_selection(0, 0, false);
+        terminal.update_selection(0, 1, true);
+        terminal.project(&mut grid);
+
+        // The span is row 0 either way, so only comparing the range notices.
+        terminal.update_selection(0, 3, true);
+        let (_, _, damage) = terminal.project(&mut grid);
+        assert!(damage.is_dirty(0), "the row the drag widened within");
+        assert!(!damage.is_dirty(1), "and no row it never reached");
+    }
+
+    #[test]
+    fn a_shrinking_drag_damages_the_row_it_left() {
+        let mut terminal = Terminal::new(6, 8, Theme::default());
+        let mut grid = Grid::new(6, 8);
+        terminal.advance(b"a\r\nb\r\nc\r\nd");
+        terminal.start_selection(0, 0, false);
+        terminal.update_selection(3, 0, true);
+        terminal.project(&mut grid);
+
+        terminal.update_selection(1, 0, true);
+        let (_, _, damage) = terminal.project(&mut grid);
+        assert!(damage.is_dirty(2), "row 2 left the selection");
+        assert!(damage.is_dirty(3), "and so did row 3");
+        assert!(
+            damage.is_dirty(1),
+            "row 1 is the new end, bounded by a column"
+        );
+    }
+
+    #[test]
+    fn a_tall_selection_growing_by_a_row_leaves_its_middle_alone() {
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng");
+        terminal.start_selection(0, 0, false);
+        terminal.update_selection(5, 0, true);
+        terminal.project(&mut grid);
+
+        terminal.update_selection(6, 0, true);
+        let (_, _, damage) = terminal.project(&mut grid);
+        assert!(damage.is_dirty(6), "the row the drag entered");
+        assert!(damage.is_dirty(5), "and the row that stopped being the end");
+        for row in 1..=4 {
+            assert!(
+                !damage.is_dirty(row),
+                "row {row} was inverted end to end before and after",
+            );
+        }
+    }
+
+    /// A selection from `(top, left)` to `(bottom, right)`, at display offset
+    /// zero so its lines read as viewport rows.
+    fn range(top: i32, left: usize, bottom: i32, right: usize, is_block: bool) -> SelectionRange {
+        SelectionRange {
+            start: Point::new(Line(top), Column(left)),
+            end: Point::new(Line(bottom), Column(right)),
+            is_block,
+        }
+    }
+
+    fn changed_rows(old: Option<SelectionRange>, new: Option<SelectionRange>) -> Vec<usize> {
+        let mut dirty = vec![None; 8];
+        mark_selection_change(old, new, 0, 8, 8, &mut dirty);
+        dirty
+            .iter()
+            .enumerate()
+            .filter_map(|(row, damage)| damage.is_some().then_some(row))
+            .collect()
+    }
+
+    /// Nothing in the terminal builds a block selection today, so this states
+    /// the rule against the function rather than through a drag.
+    #[test]
+    fn a_block_selection_marks_every_row_it_spans() {
+        assert_eq!(
+            changed_rows(Some(range(1, 0, 4, 1, true)), Some(range(1, 0, 4, 3, true)),),
+            vec![1, 2, 3, 4],
+            "every row of a block is bounded by the same columns it widened",
+        );
+    }
+
+    #[test]
+    fn a_simple_selection_marks_only_its_edges_and_what_it_crossed() {
+        assert_eq!(
+            changed_rows(
+                Some(range(1, 0, 5, 0, false)),
+                Some(range(1, 0, 6, 0, false)),
+            ),
+            vec![1, 5, 6],
+            "the row entered, the row that stopped being the end, and the anchor",
+        );
+        assert_eq!(
+            changed_rows(None, Some(range(2, 0, 3, 0, false))),
+            vec![2, 3],
+            "a selection appearing marks what it covers",
+        );
+        assert_eq!(
+            changed_rows(Some(range(2, 0, 3, 0, false)), None),
+            vec![2, 3],
+            "and one leaving marks what it covered",
         );
     }
 

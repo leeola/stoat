@@ -7,7 +7,7 @@
 
 use super::{Cursor, CursorShape, ResponseSink, PALETTE_LEN};
 use crate::{
-    grid::{BorderId, Cell, Flags, Grid, Rgb, RowDamage, Scale, UnderlineStyle},
+    grid::{whole_row, BorderId, Cell, Flags, Grid, Rgb, RowDamage, Scale, UnderlineStyle},
     theme::Theme,
 };
 use alacritty_terminal::{
@@ -144,6 +144,72 @@ pub(super) fn selection_span(
         return None;
     }
     Some((top, bottom.min(rows - 1)))
+}
+
+/// Mark every viewport row whose selection overlay differs between `old` and
+/// `new`.
+///
+/// A row inside both ranges is inverted end to end in both, so it did not
+/// change, which is what keeps a drag across a tall selection from repainting
+/// all of it. Two kinds of row did change: one exactly one range covers, which
+/// entered or left the selection, and an endpoint row, which is bounded by its
+/// own range's column and so moves under a drag that stays within it.
+///
+/// A block selection bounds every row it covers by the same columns, so moving
+/// those columns moves all of them and both spans mark whole.
+pub(super) fn mark_selection_change(
+    old: Option<SelectionRange>,
+    new: Option<SelectionRange>,
+    offset: i32,
+    rows: usize,
+    cols: usize,
+    rows_dirty: &mut [RowDamage],
+) {
+    let old_span = old.and_then(|range| selection_span(&range, offset, rows));
+    let new_span = new.and_then(|range| selection_span(&range, offset, rows));
+
+    let mut mark = |row: usize| {
+        if let Some(slot) = rows_dirty.get_mut(row) {
+            *slot = whole_row(cols);
+        }
+    };
+
+    if old.is_some_and(|range| range.is_block) || new.is_some_and(|range| range.is_block) {
+        for (lo, hi) in old_span.into_iter().chain(new_span) {
+            for row in lo..=hi {
+                mark(row);
+            }
+        }
+        return;
+    }
+
+    // Walked and tested rather than split into difference intervals. The union
+    // of two viewport spans is a few dozen rows at most and the test is a pair
+    // of comparisons, while what costs is the marking, which only reaches the
+    // rows that changed.
+    let covers = |span: Option<(usize, usize)>, row: usize| {
+        span.is_some_and(|(lo, hi)| row >= lo && row <= hi)
+    };
+    let union = old_span.iter().chain(&new_span);
+    if let (Some(lo), Some(hi)) = (
+        union.clone().map(|&(lo, _)| lo).min(),
+        union.map(|&(_, hi)| hi).max(),
+    ) {
+        for row in lo..=hi {
+            if covers(old_span, row) != covers(new_span, row) {
+                mark(row);
+            }
+        }
+    }
+
+    for range in old.into_iter().chain(new) {
+        for line in [range.start.line, range.end.line] {
+            let row = line.0 + offset;
+            if row >= 0 {
+                mark(row as usize);
+            }
+        }
+    }
 }
 
 pub(super) fn project_cell(
