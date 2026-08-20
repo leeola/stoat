@@ -304,7 +304,7 @@ pub struct DisplayMap {
     /// A diff recompute stamps a new version even when it found exactly the
     /// same hunks, so the version alone cannot say whether the blocks need
     /// replacing. This can, and a refresh that matches it does nothing.
-    inserted_diff_block_signature: Vec<(DiffHunkStatus, u32, Range<usize>)>,
+    inserted_diff_block_signature: Vec<(DiffHunkStatus, u32, u32, Range<usize>)>,
     /// Ids of the spacer blocks the conflict view installs to pad a picked
     /// chunk whose center shrank below its taller side, tracked so each refresh
     /// replaces the previous set rather than stacking duplicates.
@@ -316,6 +316,20 @@ pub struct DisplayMap {
     /// [`DisplaySnapshot::line_diff_status`] but gains no extra rows. The
     /// side-by-side diff view sets this to render the removed base lines.
     show_deleted_blocks: bool,
+    /// Whether a modified hunk's base rows pair with its live rows rather than
+    /// blocking above them.
+    ///
+    /// The two-column diff view pairs, putting each base row in the left column
+    /// of the live row it replaced, so a block holds only the base rows that
+    /// have no live row to sit beside. The unified layout has one column and so
+    /// nowhere to pair into, and keeps every base row as a block row of its own.
+    ///
+    /// Set from the painted width, since that is what decides which layout the
+    /// view is in. Off by default, which is the stacked form.
+    pair_modified_hunks: bool,
+    /// The `pair_modified_hunks` value applied at the last block re-splice, for
+    /// the same reason as [`Self::last_show_deleted_blocks`].
+    last_pair_modified_hunks: bool,
     /// The `show_deleted_blocks` value applied at the last block re-splice, so a
     /// mid-session toggle re-splices even when the diff version is unchanged.
     last_show_deleted_blocks: bool,
@@ -381,6 +395,8 @@ impl DisplayMap {
             conflict_padding_block_ids: Vec::new(),
             last_diff_version: 0,
             show_deleted_blocks: false,
+            pair_modified_hunks: false,
+            last_pair_modified_hunks: false,
             last_show_deleted_blocks: false,
             cached_snapshot: None,
             highlights_dirty: false,
@@ -408,6 +424,18 @@ impl DisplayMap {
             return;
         }
         self.show_deleted_blocks = show;
+        self.cached_snapshot = None;
+        self.settings_generation += 1;
+    }
+
+    /// Choose whether a modified hunk's base rows pair with its live rows. See
+    /// [`Self::pair_modified_hunks`]. Nulls the snapshot cache so the next
+    /// snapshot re-splices the blocks under the new answer.
+    pub(crate) fn set_pair_modified_hunks(&mut self, pair: bool) {
+        if self.pair_modified_hunks == pair {
+            return;
+        }
+        self.pair_modified_hunks = pair;
         self.cached_snapshot = None;
         self.settings_generation += 1;
     }
@@ -807,10 +835,10 @@ impl DisplayMap {
     /// for blocks that never moved.
     fn resplice_diff_blocks(
         &mut self,
-        signature: Vec<(DiffHunkStatus, u32, Range<usize>)>,
+        signature: Vec<(DiffHunkStatus, u32, u32, Range<usize>)>,
         diff_map: Option<&DiffMap>,
     ) {
-        let mut standing: HashMap<(DiffHunkStatus, u32, Range<usize>), CustomBlockId> = self
+        let mut standing: HashMap<(DiffHunkStatus, u32, u32, Range<usize>), CustomBlockId> = self
             .inserted_diff_block_signature
             .drain(..)
             .zip(self.inserted_diff_block_ids.drain(..))
@@ -819,7 +847,7 @@ impl DisplayMap {
         // Built in the same order as the signature, since both walk one filtered
         // pass over the hunks.
         let props = match diff_map.filter(|_| self.show_deleted_blocks) {
-            Some(dm) => dm.deleted_blocks(),
+            Some(dm) => dm.deleted_blocks(self.pair_modified_hunks),
             None => Vec::new(),
         };
 
@@ -942,11 +970,12 @@ impl DisplayMap {
         let diff_version = diff_map.as_ref().map(|dm| dm.version()).unwrap_or(0);
         if diff_version != self.last_diff_version
             || self.show_deleted_blocks != self.last_show_deleted_blocks
+            || self.pair_modified_hunks != self.last_pair_modified_hunks
         {
             let signature = if self.show_deleted_blocks {
                 diff_map
                     .as_ref()
-                    .map(|dm| dm.deleted_block_signature())
+                    .map(|dm| dm.deleted_block_signature(self.pair_modified_hunks))
                     .unwrap_or_default()
             } else {
                 Vec::new()
@@ -961,6 +990,7 @@ impl DisplayMap {
 
             self.last_diff_version = diff_version;
             self.last_show_deleted_blocks = self.show_deleted_blocks;
+            self.last_pair_modified_hunks = self.pair_modified_hunks;
         }
         let companion_view =
             self.companion
@@ -989,6 +1019,7 @@ impl DisplayMap {
             companion_display_snapshot: None,
             block_snapshot,
             diff_map,
+            pairs_modified_hunks: self.pair_modified_hunks,
             text_highlights: self.text_highlights.clone(),
             semantic_token_highlights: self.semantic_token_highlights.clone(),
             lsp_token_highlights: self.lsp_token_highlights.clone(),
@@ -1037,6 +1068,10 @@ pub struct DisplaySnapshot {
     clip_at_line_ends: bool,
     diagnostics_max_severity: Option<DiagnosticSeverity>,
     settings_generation: u64,
+    /// What [`DisplayMap::pair_modified_hunks`] said when these blocks were
+    /// spliced, so the paint reads the same answer the block set was built
+    /// from rather than re-deriving it.
+    pairs_modified_hunks: bool,
 }
 
 /// Everything that decides a snapshot's painted text, gathered so two frames
@@ -1552,8 +1587,15 @@ impl DisplaySnapshot {
     pub fn has_deletion_after(&self, buffer_line: u32) -> bool {
         self.diff_map
             .as_ref()
-            .map(|dm| dm.has_deletion_after(buffer_line))
+            .map(|dm| dm.has_deletion_after(buffer_line, self.pairs_modified_hunks))
             .unwrap_or(false)
+    }
+
+    /// Whether this snapshot's blocks were spliced with a modified hunk's base
+    /// rows paired against its live rows. See
+    /// [`DisplayMap::pair_modified_hunks`].
+    pub(crate) fn pairs_modified_hunks(&self) -> bool {
+        self.pairs_modified_hunks
     }
 
     pub fn token_detail_for_line(&self, buffer_line: u32) -> Option<&TokenDetail> {

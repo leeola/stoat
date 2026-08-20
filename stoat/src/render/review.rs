@@ -5,7 +5,7 @@ use super::{
     TEXT_SCALE_COMPACT,
 };
 use crate::{
-    diff_map::{ChangeKind, DiffHunk},
+    diff_map::{ChangeKind, DiffHunk, DiffHunkStatus},
     display_map::{
         highlights::HighlightStyle, BlockRowKind, CachedHighlightEndpoints, DisplaySnapshot,
         RowHighlightCursor,
@@ -146,6 +146,12 @@ pub(crate) fn render_diff_view(
     soften_scale: f32,
 ) {
     let stoatty = scene.is_some();
+    // The base rows pair with the live ones only where there are two columns to
+    // pair across, so the width decides it, and it has to be settled before the
+    // snapshot because it changes which blocks the display map splices.
+    editor
+        .display_map
+        .set_pair_modified_hunks(inner.width >= DIFF_TWO_COLUMN_MIN);
     let snapshot = editor.display_map.snapshot();
     paint_diff_rows(
         &snapshot,
@@ -194,6 +200,13 @@ pub(crate) struct DiffRowState {
     pub(crate) kind: DiffRowKind,
     pub(crate) status: DiffStatus,
     pub(crate) staged: Option<bool>,
+    /// Whether a base row sits beside this one in the left column.
+    ///
+    /// A modified hunk pairs base row i with live row i as far as its base text
+    /// reaches, so its first rows carry one and its last do not. False for
+    /// every other status: an unchanged row mirrors its own base line by a
+    /// different route, and an added one has no base row at all.
+    pub(crate) paired: bool,
     /// Display-column ranges to wash, empty for a row no hunk refines.
     pub(crate) change_spans: Vec<(std::ops::Range<usize>, ChangeKind)>,
 }
@@ -221,6 +234,7 @@ fn diff_row_key(
     buffer_version: u64,
     map_version: usize,
     diff_version: usize,
+    paired: bool,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     scroll_row.hash(&mut hasher);
@@ -228,6 +242,7 @@ fn diff_row_key(
     buffer_version.hash(&mut hasher);
     map_version.hash(&mut hasher);
     diff_version.hash(&mut hasher);
+    paired.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -247,6 +262,7 @@ pub(crate) fn diff_row_states<'c>(
         snapshot.buffer_snapshot().version(),
         snapshot.version(),
         snapshot.diff_map().map_or(0, |dm| dm.version()),
+        snapshot.pairs_modified_hunks(),
     );
     if cache.as_ref().is_none_or(|c| c.key != key) {
         *cache = Some(DiffRowCache {
@@ -272,6 +288,7 @@ fn build_diff_row_states(
                 kind,
                 status: DiffStatus::Unchanged,
                 staged: None,
+                paired: false,
                 change_spans: Vec::new(),
             };
         };
@@ -284,9 +301,12 @@ fn build_diff_row_states(
             &mut hunk_scratch,
             &mut change_spans,
         );
+        let status = snapshot.line_diff_status(buffer_row);
         DiffRowState {
             kind,
-            status: snapshot.line_diff_status(buffer_row),
+            status,
+            paired: status == DiffStatus::Modified
+                && paired_with_base(snapshot, buffer_row, &mut hunk_scratch),
             staged: marked
                 .then(|| {
                     snapshot
@@ -298,6 +318,31 @@ fn build_diff_row_states(
         }
     })
     .collect()
+}
+
+/// Whether the modified row `buffer_row` has a base row beside it.
+///
+/// A modified hunk's base rows pair with its live rows one for one from the
+/// hunk's start, so a row is paired while its offset into the hunk is inside the
+/// base text the hunk removed. Past that the live side outruns the base and the
+/// left column is blank; the base rows past the live side block after the hunk
+/// instead.
+fn paired_with_base<'a>(
+    snapshot: &'a DisplaySnapshot,
+    buffer_row: u32,
+    hunk_scratch: &mut Vec<&'a DiffHunk>,
+) -> bool {
+    if !snapshot.pairs_modified_hunks() {
+        return false;
+    }
+    let Some(dm) = snapshot.diff_map() else {
+        return false;
+    };
+    dm.hunks_in_range_into(buffer_row..buffer_row + 1, hunk_scratch);
+    hunk_scratch.iter().any(|hunk| {
+        hunk.status == DiffHunkStatus::Modified
+            && buffer_row.saturating_sub(hunk.buffer_start_line) < dm.base_line_count(hunk)
+    })
 }
 
 /// One diff body's gutter shape and the narrowest rect it still splits in two.
@@ -545,61 +590,22 @@ pub(crate) fn paint_diff_rows(
             DiffRowKind::Block => {
                 line_buf.clear();
                 snapshot.write_display_line(&mut line_buf, display_row);
-                draw_diff_num(
+                paint_base_side(
+                    snapshot,
                     &mut rich,
                     buf,
                     &mut num_text,
                     inner,
-                    left_num_x,
+                    (left_num_x, status_left_x, left_text_x, left_content_w),
                     y,
-                    base_line + 1,
-                    dim_style,
-                );
-                let token_spans = snapshot
-                    .diff_map()
-                    .and_then(|dm| dm.base_highlights_for_line(base_line))
-                    .unwrap_or(&[]);
-                let changes = base_changes
-                    .get(&base_line)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                let staged = snapshot
-                    .diff_map()
-                    .and_then(|dm| dm.base_line_staged(base_line));
-                let side = tints.as_ref().map(|t| t.side(staged.unwrap_or(false)));
-                paint_base_row(
-                    buf,
-                    left_text_x,
-                    y,
+                    base_line,
                     &line_buf,
-                    left_content_w,
-                    token_spans,
-                    del_style,
-                    changes,
-                    side.map(|c| c.removed_span),
-                    side.map(|c| c.moved_span),
-                    None,
-                    tints.as_ref().map(|t| t.bg),
+                    &base_changes,
+                    tints.as_ref(),
+                    (del_style, dim_style),
+                    theme,
                     soften_scale,
                 );
-                if let Some(staged) = staged {
-                    let change_scope =
-                        if changes.iter().any(|(_, k)| matches!(k, ChangeKind::Moved)) {
-                            s::DIFF_MOVED
-                        } else {
-                            s::DIFF_DELETED
-                        };
-                    draw_diff_status(
-                        &mut rich,
-                        buf,
-                        inner,
-                        status_left_x,
-                        y,
-                        change_scope,
-                        staged,
-                        theme,
-                    );
-                }
                 base_line += 1;
             },
             DiffRowKind::BufferRow { buffer_row } => {
@@ -677,6 +683,10 @@ pub(crate) fn paint_diff_rows(
                         theme,
                     );
                 }
+                // An unchanged row mirrors its own line, which is the same text
+                // on both sides. A paired modified row shows the base line it
+                // replaced, painted as a removed row rather than a mirror. A
+                // row past its hunk's base rows has nothing on the left.
                 if status == DiffStatus::Unchanged {
                     line_buf.clear();
                     snapshot.write_display_line(&mut line_buf, display_row);
@@ -707,6 +717,28 @@ pub(crate) fn paint_diff_rows(
                         None,
                         soften_row,
                         None,
+                        soften_scale,
+                    );
+                    base_line += 1;
+                } else if row_state.paired {
+                    let text = snapshot
+                        .diff_map()
+                        .and_then(|dm| dm.base_line_text(base_line))
+                        .unwrap_or("");
+                    paint_base_side(
+                        snapshot,
+                        &mut rich,
+                        buf,
+                        &mut num_text,
+                        inner,
+                        (left_num_x, status_left_x, left_text_x, left_content_w),
+                        y,
+                        base_line,
+                        text,
+                        &base_changes,
+                        tints.as_ref(),
+                        (del_style, dim_style),
+                        theme,
                         soften_scale,
                     );
                     base_line += 1;
@@ -954,6 +986,86 @@ fn paint_status_bars(
     }
 }
 
+/// Paint one base line into the left column: its number, its text under the
+/// removed style with the base change-span washes, and its staged status.
+///
+/// Both sides of the diff reach here. A block row is a base line with no live
+/// row beside it, and a paired modified row is one that has both, so the two
+/// paint the left column identically and differ only in where the text comes
+/// from.
+///
+/// `columns` is `(number, status, text, content width)` for the left side, and
+/// `styles` is `(removed, dim)`.
+#[allow(clippy::too_many_arguments)]
+fn paint_base_side(
+    snapshot: &DisplaySnapshot,
+    rich: &mut Option<DiffRichGutter<'_>>,
+    buf: &mut Buffer,
+    num_text: &mut String,
+    inner: Rect,
+    columns: (u16, u16, u16, usize),
+    y: u16,
+    base_line: u32,
+    text: &str,
+    base_changes: &crate::diff_map::BaseChangeSpans,
+    tints: Option<&DiffTints>,
+    styles: (Style, Style),
+    theme: &crate::theme::Theme,
+    soften_scale: f32,
+) {
+    use crate::theme::scope as s;
+    let (num_x, status_x, text_x, content_w) = columns;
+    let (del_style, dim_style) = styles;
+
+    draw_diff_num(
+        rich,
+        buf,
+        num_text,
+        inner,
+        num_x,
+        y,
+        base_line + 1,
+        dim_style,
+    );
+
+    let token_spans = snapshot
+        .diff_map()
+        .and_then(|dm| dm.base_highlights_for_line(base_line))
+        .unwrap_or(&[]);
+    let changes = base_changes
+        .get(&base_line)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let staged = snapshot
+        .diff_map()
+        .and_then(|dm| dm.base_line_staged(base_line));
+    let side = tints.map(|t| t.side(staged.unwrap_or(false)));
+    paint_base_row(
+        buf,
+        text_x,
+        y,
+        text,
+        content_w,
+        token_spans,
+        del_style,
+        changes,
+        side.map(|c| c.removed_span),
+        side.map(|c| c.moved_span),
+        None,
+        tints.map(|t| t.bg),
+        soften_scale,
+    );
+
+    if let Some(staged) = staged {
+        let change_scope = if changes.iter().any(|(_, k)| matches!(k, ChangeKind::Moved)) {
+            s::DIFF_MOVED
+        } else {
+            s::DIFF_DELETED
+        };
+        draw_diff_status(rich, buf, inner, status_x, y, change_scope, staged, theme);
+    }
+}
+
 /// Base-file line number at the top of the viewport (display row `scroll_row`).
 ///
 /// Every display row above `scroll_row` is base-present (a deleted-base block
@@ -963,9 +1075,9 @@ fn paint_status_bars(
 /// walk from the document start.
 fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
     let buffer_rows_above = snapshot.buffer_rows_above(scroll_row);
-    let changed = snapshot
-        .diff_map()
-        .map_or(0, |dm| dm.changed_rows_before(buffer_rows_above));
+    let changed = snapshot.diff_map().map_or(0, |dm| {
+        dm.rows_without_base_before(buffer_rows_above, snapshot.pairs_modified_hunks())
+    });
     scroll_row.saturating_sub(changed)
 }
 
@@ -1986,13 +2098,13 @@ mod tests {
         // one, so they are checked where the key is formed. Each is in it
         // because the rows go stale against it, and a key that dropped one would
         // keep painting the state from before that change.
-        let base = diff_row_key(3, 20, 7, 11, 13);
+        let base = diff_row_key(3, 20, 7, 11, 13, true);
         for moved in [
-            diff_row_key(4, 20, 7, 11, 13),
-            diff_row_key(3, 21, 7, 11, 13),
-            diff_row_key(3, 20, 8, 11, 13),
-            diff_row_key(3, 20, 7, 12, 13),
-            diff_row_key(3, 20, 7, 11, 14),
+            diff_row_key(4, 20, 7, 11, 13, true),
+            diff_row_key(3, 21, 7, 11, 13, true),
+            diff_row_key(3, 20, 8, 11, 13, true),
+            diff_row_key(3, 20, 7, 12, 13, true),
+            diff_row_key(3, 20, 7, 11, 14, true),
         ] {
             assert_ne!(moved, base, "an input moved without changing the key");
         }
@@ -2000,14 +2112,29 @@ mod tests {
 
     #[test]
     fn base_line_at_matches_the_reference_walk() {
-        // The original per-row walk, kept as the correctness oracle.
+        // The per-row walk, kept as the correctness oracle. A row carries a base
+        // line when the left column paints one on it: every block row, every
+        // unchanged row, and, where the layout pairs, a modified row still
+        // inside its hunk's base text.
         fn reference(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
             let mut base_line = 0;
             for row in 0..scroll_row {
                 match snapshot.classify_row(row) {
                     BlockRowKind::Block { .. } => base_line += 1,
                     BlockRowKind::BufferRow { buffer_row } => {
-                        if snapshot.line_diff_status(buffer_row) == DiffStatus::Unchanged {
+                        let status = snapshot.line_diff_status(buffer_row);
+                        let paired = snapshot.pairs_modified_hunks()
+                            && status == DiffStatus::Modified
+                            && snapshot.diff_map().is_some_and(|dm| {
+                                dm.hunks_in_range(buffer_row..buffer_row + 1)
+                                    .iter()
+                                    .any(|hunk| {
+                                        hunk.status == DiffHunkStatus::Modified
+                                            && buffer_row.saturating_sub(hunk.buffer_start_line)
+                                                < dm.base_line_count(hunk)
+                                    })
+                            });
+                        if status == DiffStatus::Unchanged || paired {
                             base_line += 1;
                         }
                     },
@@ -2026,24 +2153,39 @@ mod tests {
             ("1\n2\n3\n4\n5\n", "1\nTWO\nTHREE\n5\n"),
             ("p\nq\nr\ns\nt\n", "p\nq\nr\n"),
         ];
+        // Both layouts, since pairing changes which rows carry a base line and
+        // which of them block.
         let mut saw_blocks = false;
+        let mut saw_pairs = false;
         for (base, text) in fixtures {
-            let mut editor = diff_editor(base, text);
-            let snapshot = editor.display_map.snapshot();
-            let total = snapshot.line_count();
-            saw_blocks |= total > snapshot.buffer_line_count();
-            for row in 0..total {
-                assert_eq!(
-                    base_line_at(&snapshot, row),
-                    reference(&snapshot, row),
-                    "base_line_at disagrees with the walk at row {row}/{total} for {base:?}->{text:?}"
-                );
+            let mut stacked_rows = 0;
+            for pair in [false, true] {
+                let mut editor = diff_editor(base, text);
+                editor.display_map.set_pair_modified_hunks(pair);
+                let snapshot = editor.display_map.snapshot();
+                let total = snapshot.line_count();
+                saw_blocks |= total > snapshot.buffer_line_count();
+                match pair {
+                    false => stacked_rows = total,
+                    // Pairing puts a base row beside a live one rather than on a
+                    // row of its own, so a fixture it reaches is shorter.
+                    true => saw_pairs |= total < stacked_rows,
+                }
+                for row in 0..total {
+                    assert_eq!(
+                        base_line_at(&snapshot, row),
+                        reference(&snapshot, row),
+                        "base_line_at disagrees with the walk at row {row}/{total} \
+                         for {base:?}->{text:?} paired={pair}"
+                    );
+                }
             }
         }
         assert!(
             saw_blocks,
             "fixtures must splice deleted-base block rows to exercise the block case"
         );
+        assert!(saw_pairs, "and pair rows to exercise the paired case");
     }
 
     /// A diff-view editor over `text`, diffed against `base`, with the view and
@@ -2358,45 +2500,32 @@ mod tests {
         let right = |y| line_text(&buf, y, 68..120);
 
         assert!(
-            left(0).contains("keep"),
-            "row0 left mirrors context: {:?}",
-            left(0)
-        );
-        assert!(
-            right(0).contains("keep"),
-            "row0 right shows buffer: {:?}",
+            left(0).contains("keep") && right(0).contains("keep"),
+            "row0 mirrors context: left={:?} right={:?}",
+            left(0),
             right(0)
         );
 
+        // The replaced line and its replacement share a row, which is what
+        // makes the two sides read as aligned.
         assert!(
-            left(1).contains("old"),
-            "row1 left shows deleted base: {:?}",
-            left(1)
-        );
-        assert_eq!(
-            right(1).trim(),
-            "",
-            "row1 right blank for a deletion: {:?}",
+            left(1).contains("old") && right(1).contains("new"),
+            "row1 pairs the base line with the one that replaced it: left={:?} right={:?}",
+            left(1),
             right(1)
         );
 
         assert!(
-            right(2).contains("new"),
-            "row2 right shows the new line: {:?}",
+            left(2).contains("tail") && right(2).contains("tail"),
+            "row2 context mirrors both sides: left={:?} right={:?}",
+            left(2),
             right(2)
         );
-        assert_eq!(
-            left(2).trim(),
-            "",
-            "row2 left blank for a modified line: {:?}",
-            left(2)
-        );
 
-        assert!(
-            left(3).contains("tail") && right(3).contains("tail"),
-            "row3 context mirrors both sides: left={:?} right={:?}",
-            left(3),
-            right(3)
+        assert_eq!(
+            (left(3).trim(), right(3).trim()),
+            ("", ""),
+            "and the file ends there, with no row left over for the change",
         );
 
         assert_eq!(
@@ -2408,6 +2537,115 @@ mod tests {
             (buf[(7, 0)].symbol(), buf[(67, 0)].symbol()),
             ("│", "│"),
             "each side carries a gutter/code separator after its status column"
+        );
+    }
+
+    /// The rows a length difference costs belong at the end of the hunk, not
+    /// scattered through it, so the base rows pair as far as they can and only
+    /// the excess takes rows of its own.
+    #[test]
+    fn a_longer_base_hunk_pairs_then_trails_its_excess() {
+        let mut editor = diff_editor("keep\nold1\nold2\nold3\ntail\n", "keep\nnew1\ntail\n");
+        let area = Rect::new(0, 0, 120, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &Theme::empty(),
+            &mut buf,
+            None,
+            1.0,
+        );
+
+        let left = |y| line_text(&buf, y, 8..59);
+        let right = |y| line_text(&buf, y, 68..120);
+
+        assert!(
+            left(1).contains("old1") && right(1).contains("new1"),
+            "row1 pairs the first base row with the live one: left={:?} right={:?}",
+            left(1),
+            right(1)
+        );
+        assert!(
+            left(2).contains("old2") && right(2).trim().is_empty(),
+            "row2 trails the first excess base row: left={:?} right={:?}",
+            left(2),
+            right(2)
+        );
+        assert!(
+            left(3).contains("old3") && right(3).trim().is_empty(),
+            "row3 the second: left={:?} right={:?}",
+            left(3),
+            right(3)
+        );
+        assert!(
+            left(4).contains("tail") && right(4).contains("tail"),
+            "row4 is context again: left={:?} right={:?}",
+            left(4),
+            right(4)
+        );
+
+        // The left numbers count the base file straight down the column, which
+        // is what a reader checks an alignment against. The status glyphs share
+        // the gutter, so only the number itself is read.
+        let number = |y| {
+            line_text(&buf, y, 0..7)
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_owned()
+        };
+        assert_eq!(
+            (0..5).map(number).collect::<Vec<_>>(),
+            ["1", "2", "3", "4", "5"],
+            "the base line numbers read 1..5 down the left column",
+        );
+    }
+
+    /// The other way round: more live rows than base rows leaves the left column
+    /// blank past the pairing, which the paint gives without a block.
+    #[test]
+    fn a_longer_live_hunk_blanks_its_trailing_left_rows() {
+        let mut editor = diff_editor("keep\nold\ntail\n", "keep\nnew1\nnew2\ntail\n");
+        let area = Rect::new(0, 0, 120, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &Theme::empty(),
+            &mut buf,
+            None,
+            1.0,
+        );
+
+        let left = |y| line_text(&buf, y, 8..59);
+        let right = |y| line_text(&buf, y, 68..120);
+
+        assert!(
+            left(1).contains("old") && right(1).contains("new1"),
+            "row1 pairs the one base row with the first live one: left={:?} right={:?}",
+            left(1),
+            right(1)
+        );
+        assert!(
+            left(2).trim().is_empty() && right(2).contains("new2"),
+            "row2 has no base row to show: left={:?} right={:?}",
+            left(2),
+            right(2)
+        );
+        assert!(
+            left(3).contains("tail") && right(3).contains("tail"),
+            "row3 is context again: left={:?} right={:?}",
+            left(3),
+            right(3)
+        );
+
+        assert_eq!(
+            line_text(&buf, 3, 0..7).trim(),
+            "3",
+            "and the base file has only three lines, so the context is its third",
         );
     }
 

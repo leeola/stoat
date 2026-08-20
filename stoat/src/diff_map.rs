@@ -13,9 +13,7 @@ use std::{
         Arc, Mutex,
     },
 };
-use stoat_text::{
-    Anchor, Bias, ContextLessSummary, Dimension, Dimensions, Item, Point, SeekTarget, SumTree,
-};
+use stoat_text::{Anchor, Bias, ContextLessSummary, Dimension, Item, Point, SeekTarget, SumTree};
 
 static DIFF_MAP_VERSION_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
@@ -282,12 +280,9 @@ impl<'a> LiveHunks<'a> {
 ///
 /// `max_start` carries the largest `buffer_start_line` in a subtree for keyed
 /// seeking, so it replaces on combine because hunks are ordered by start.
-/// `changed_rows` sums the buffer rows covered by non-deleted hunks, letting a
-/// cursor answer how many changed rows precede a buffer row in one seek.
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct HunkKey {
     max_start: Option<u32>,
-    changed_rows: u32,
 }
 
 impl ContextLessSummary for HunkKey {
@@ -295,7 +290,6 @@ impl ContextLessSummary for HunkKey {
         if other.max_start.is_some() {
             self.max_start = other.max_start;
         }
-        self.changed_rows += other.changed_rows;
     }
 }
 
@@ -317,33 +311,11 @@ impl<'a> SeekTarget<'a, HunkKey, HunkKeyRef<'a>> for HunkKeyRef<'_> {
     }
 }
 
-/// Cumulative buffer rows covered by non-deleted hunks, for seeking how many
-/// changed rows precede a buffer position.
-#[derive(Clone, Copy, Default, Debug)]
-struct ChangedRows(u32);
-
-impl<'a> Dimension<'a, HunkKey> for ChangedRows {
-    fn zero(_cx: ()) -> Self {
-        Self(0)
-    }
-    fn add_summary(&mut self, summary: &'a HunkKey, _cx: ()) {
-        self.0 += summary.changed_rows;
-    }
-}
-
 impl Item for DiffHunk {
     type Summary = HunkKey;
     fn summary(&self, _cx: ()) -> HunkKey {
-        let changed_rows = if self.status == DiffHunkStatus::Deleted {
-            0
-        } else {
-            self.buffer_line_range
-                .end
-                .saturating_sub(self.buffer_line_range.start)
-        };
         HunkKey {
             max_start: Some(self.buffer_start_line),
-            changed_rows,
         }
     }
 }
@@ -368,6 +340,12 @@ type BaseStaged = BTreeMap<u32, bool>;
 pub struct DiffMap {
     hunks: SumTree<DiffHunk>,
     base_text: Option<Arc<String>>,
+    /// Byte offset of each base line's start, so a line's text is a slice
+    /// rather than a walk. Empty when there is no base text.
+    ///
+    /// Shared behind `Arc` because a snapshot takes a clone of the map and the
+    /// table is as long as the base file.
+    base_line_starts: Arc<Vec<usize>>,
     base_highlights: Option<Arc<BaseHighlights>>,
     /// Base-side change spans keyed by base line, resolved once at construction
     /// from `hunks` and `base_text` since both are immutable after it. Shared
@@ -433,9 +411,17 @@ impl DiffMap {
             }
         });
 
+        let base_line_starts = Arc::new(
+            base_text
+                .as_ref()
+                .map(|text| line_starts(text))
+                .unwrap_or_default(),
+        );
+
         Self {
             hunks,
             base_text,
+            base_line_starts,
             base_highlights: None,
             base_changes,
             base_staged,
@@ -758,47 +744,103 @@ impl DiffMap {
         self.staged_tally
     }
 
-    pub fn has_deletion_after(&self, line: u32) -> bool {
-        let target_line = line + 1;
-        let target = HunkKeyRef(Some(&target_line));
+    /// Whether a block of removed base lines sits directly below `line`.
+    ///
+    /// The two kinds of block land in different places, so this asks after
+    /// both. A hunk with no live rows to pair against blocks above the row it
+    /// was removed before, which is the row after this one. A Modified hunk
+    /// pairs its base rows with its live ones and blocks only what is left
+    /// over, after its own last live row, so it answers here when that row is
+    /// this one and its base outruns its live side.
+    pub fn has_deletion_after(&self, line: u32, pair_modified: bool) -> bool {
+        let after = line + 1;
         let mut cursor = self.hunks.cursor::<HunkKeyRef<'_>>(());
-        cursor.seek(&target, Bias::Left);
-        match cursor.item() {
-            Some(hunk) => {
-                hunk.buffer_start_line == target_line
-                    && matches!(
-                        hunk.status,
-                        DiffHunkStatus::Deleted | DiffHunkStatus::Modified
-                    )
-                    && !hunk.base_byte_range.is_empty()
-            },
-            None => false,
+        cursor.seek(&HunkKeyRef(Some(&after)), Bias::Left);
+        if let Some(hunk) = cursor.item()
+            && hunk.buffer_start_line == after
+            && !hunk.base_byte_range.is_empty()
+            && match hunk.status {
+                DiffHunkStatus::Deleted => true,
+                DiffHunkStatus::Modified => self.paired_rows(hunk, pair_modified) == 0,
+                _ => false,
+            }
+        {
+            return true;
         }
+
+        // A Modified hunk's block hangs off its last live row, so the hunk that
+        // could answer starts at or before this row rather than after it.
+        let mut cursor = self.hunks.cursor::<HunkKeyRef<'_>>(());
+        cursor.seek(&HunkKeyRef(Some(&line)), Bias::Right);
+        cursor.prev();
+        cursor.item().is_some_and(|hunk| {
+            hunk.status == DiffHunkStatus::Modified
+                && !hunk.base_byte_range.is_empty()
+                && hunk.buffer_line_range.end == after
+                && self.paired_rows(hunk, pair_modified) > 0
+                && self.base_line_count(hunk) > self.paired_rows(hunk, pair_modified)
+        })
     }
 
-    /// Buffer rows covered by non-deleted hunks strictly before `buffer_row`.
+    /// Buffer rows before `buffer_row` that have no base line beside them.
     ///
-    /// One cursor seek finds the hunk at or before `buffer_row`, then this sums
-    /// the changed rows before it plus that hunk's own rows below `buffer_row`.
-    /// Lets the diff view map a viewport top to its base line without walking
-    /// every row from the document start.
-    pub fn changed_rows_before(&self, buffer_row: u32) -> u32 {
-        let target = HunkKeyRef(Some(&buffer_row));
-        let mut cursor = self
-            .hunks
-            .cursor::<Dimensions<HunkKeyRef<'_>, ChangedRows>>(());
-        cursor.seek(&target, Bias::Right);
-        cursor.prev();
-        let before = cursor.start().1 .0;
-        let partial = match cursor.item() {
-            Some(hunk) => hunk
-                .buffer_line_range
-                .end
-                .min(buffer_row)
-                .saturating_sub(hunk.buffer_start_line),
-            None => 0,
+    /// A row is base-present when the left column paints something on it: an
+    /// unchanged row mirrors its base line, and a modified row is paired with
+    /// one for as far as the hunk's base text reaches. Past that the hunk's
+    /// live rows outrun its base rows and the left column is blank, and an
+    /// added hunk has no base rows at all.
+    ///
+    /// Lets the diff view map a viewport top to its base line. A hunk walk
+    /// rather than a tree dimension, since the count depends on each hunk's
+    /// base line count, which is not in the summary, and a file's hunks are
+    /// few.
+    pub fn rows_without_base_before(&self, buffer_row: u32, pair_modified: bool) -> u32 {
+        self.hunks
+            .iter()
+            .take_while(|hunk| hunk.buffer_start_line < buffer_row)
+            .map(|hunk| {
+                let rows = hunk
+                    .buffer_line_range
+                    .end
+                    .min(buffer_row)
+                    .saturating_sub(hunk.buffer_start_line);
+                match hunk.status {
+                    DiffHunkStatus::Added => rows,
+                    DiffHunkStatus::Modified if pair_modified => {
+                        rows.saturating_sub(self.base_line_count(hunk))
+                    },
+                    DiffHunkStatus::Modified => rows,
+                    DiffHunkStatus::Deleted | DiffHunkStatus::Moved => 0,
+                }
+            })
+            .sum()
+    }
+
+    /// One base line's text, with its trailing newline excluded.
+    ///
+    /// `None` past the end of the base text, and for a map with none at all,
+    /// which is what a caller painting a row beyond the base file sees.
+    pub(crate) fn base_line_text(&self, line: u32) -> Option<&str> {
+        let text = self.base_text.as_ref()?;
+        let start = *self.base_line_starts.get(line as usize)?;
+        let end = self
+            .base_line_starts
+            .get(line as usize + 1)
+            .copied()
+            .unwrap_or(text.len());
+        Some(text[start..end].trim_end_matches('\n'))
+    }
+
+    /// Base lines `hunk` removed, which is how many of its live rows have a
+    /// base row to pair with.
+    ///
+    /// Zero without base text, since nothing can be paired against text the map
+    /// does not hold.
+    pub(crate) fn base_line_count(&self, hunk: &DiffHunk) -> u32 {
+        let Some(text) = self.base_text.as_ref() else {
+            return 0;
         };
-        before + partial
+        text[hunk.base_byte_range.clone()].lines().count() as u32
     }
 
     /// What [`Self::deleted_blocks`] would produce, reduced to what tells one
@@ -807,18 +849,25 @@ impl DiffMap {
     /// A diff recompute stamps a new version whether or not any hunk moved, so
     /// a caller that re-splices on the version alone re-splices constantly.
     /// Comparing the blocks themselves is not open to it, since
-    /// [`BlockProperties`] carries a render closure. These three fields are
+    /// [`BlockProperties`] carries a render closure. These four fields are
     /// every input the blocks are built from, so equal signatures mean an
-    /// identical set.
-    pub fn deleted_block_signature(&self) -> Vec<(DiffHunkStatus, u32, Range<usize>)> {
+    /// identical set. The live range's end is among them because a Modified
+    /// hunk pairs its base rows against its live ones, so a hunk that kept its
+    /// start and its base bytes still blocks differently once its live row
+    /// count moves.
+    pub fn deleted_block_signature(
+        &self,
+        pair_modified: bool,
+    ) -> Vec<(DiffHunkStatus, u32, u32, Range<usize>)> {
         if self.base_text.is_none() {
             return Vec::new();
         }
-        self.deleted_block_hunks()
+        self.deleted_block_hunks(pair_modified)
             .map(|hunk| {
                 (
                     hunk.status,
                     hunk.buffer_start_line,
+                    hunk.buffer_line_range.end,
                     hunk.base_byte_range.clone(),
                 )
             })
@@ -828,24 +877,67 @@ impl DiffMap {
     /// The hunks that render as deleted-line blocks, shared by
     /// [`Self::deleted_blocks`] and [`Self::deleted_block_signature`] so the
     /// signature cannot drift from the set it stands for.
-    fn deleted_block_hunks(&self) -> impl Iterator<Item = &DiffHunk> {
-        self.hunks.iter().filter(|h| {
-            matches!(h.status, DiffHunkStatus::Deleted | DiffHunkStatus::Modified)
-                && !h.base_byte_range.is_empty()
+    ///
+    /// A hunk whose base rows all pair with live rows is not among them: the
+    /// paint puts those in the left column of the rows they pair with, leaving
+    /// nothing for a block to hold.
+    fn deleted_block_hunks(&self, pair_modified: bool) -> impl Iterator<Item = &DiffHunk> {
+        self.hunks.iter().filter(move |hunk| {
+            matches!(
+                hunk.status,
+                DiffHunkStatus::Deleted | DiffHunkStatus::Modified
+            ) && !hunk.base_byte_range.is_empty()
+                && self.base_line_count(hunk) > self.paired_rows(hunk, pair_modified)
         })
     }
 
-    pub fn deleted_blocks(&self) -> Vec<BlockProperties> {
+    /// How many of `hunk`'s base rows the paint puts beside a live row.
+    ///
+    /// A Modified hunk pairs base row i with live row i as far as the shorter
+    /// side reaches. Nothing else pairs: a Deleted hunk has no live rows of its
+    /// own, and an Added one no base rows.
+    ///
+    /// `pair_modified` is off for the unified layout, which has one column and
+    /// so nowhere to put a base row beside a live one. There every base row
+    /// blocks, and the two sides read as a stacked diff.
+    fn paired_rows(&self, hunk: &DiffHunk, pair_modified: bool) -> u32 {
+        match hunk.status {
+            DiffHunkStatus::Modified if pair_modified => hunk.buffer_line_range.len() as u32,
+            _ => 0,
+        }
+    }
+
+    /// The base lines that have no live row to sit beside, as blocks.
+    ///
+    /// A Modified hunk's base rows are paired with its live rows one for one as
+    /// far as the shorter side reaches, and the paint puts them in the left
+    /// column of those rows. Only the excess needs a row of its own, and it
+    /// goes after the hunk's last live row, so the filler a length difference
+    /// costs lands at the hunk's end rather than in the middle of it. A hunk
+    /// whose base is no longer than its live side yields no block at all.
+    ///
+    /// A Deleted hunk has no live rows to pair with, so all of it blocks, above
+    /// the row it was deleted before.
+    pub fn deleted_blocks(&self, pair_modified: bool) -> Vec<BlockProperties> {
         let base_text = match &self.base_text {
             Some(t) => t,
             None => return Vec::new(),
         };
 
-        self.deleted_block_hunks()
+        self.deleted_block_hunks(pair_modified)
             .map(|hunk| {
+                let paired = self.paired_rows(hunk, pair_modified);
                 let content = &base_text[hunk.base_byte_range.clone()];
-                let lines: Vec<String> = content.lines().map(String::from).collect();
-                let placement_line = hunk.buffer_start_line.saturating_sub(1);
+                let lines: Vec<String> = content
+                    .lines()
+                    .skip(paired as usize)
+                    .map(String::from)
+                    .collect();
+
+                let placement_line = match hunk.status {
+                    DiffHunkStatus::Modified if paired > 0 => hunk.buffer_line_range.end - 1,
+                    _ => hunk.buffer_start_line.saturating_sub(1),
+                };
                 let mut props = BlockProperties::from_text(
                     BlockPlacement::Below(placement_line),
                     lines,
@@ -1535,7 +1627,7 @@ fn line_of(line_starts: &[usize], byte: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail};
-    use crate::host::DiffStatus;
+    use crate::{display_map::BlockPlacement, host::DiffStatus};
     use std::sync::Arc;
 
     #[test]
@@ -2261,10 +2353,10 @@ mod tests {
         let dm = DiffMap::default();
         assert_eq!(dm.status_for_line(0), DiffStatus::Unchanged);
         assert_eq!(dm.status_for_line(100), DiffStatus::Unchanged);
-        assert!(!dm.has_deletion_after(0));
+        assert!(!dm.has_deletion_after(0, true));
         assert!(dm.is_empty());
         assert_eq!(dm.total_deleted_lines(), 0);
-        assert!(dm.deleted_blocks().is_empty());
+        assert!(dm.deleted_blocks(true).is_empty());
     }
 
     #[test]
@@ -2276,8 +2368,8 @@ mod tests {
         assert_eq!(dm.status_for_line(6), DiffStatus::Added);
         assert_eq!(dm.status_for_line(7), DiffStatus::Added);
         assert_eq!(dm.status_for_line(8), DiffStatus::Unchanged);
-        assert!(!dm.has_deletion_after(4));
-        assert!(dm.deleted_blocks().is_empty());
+        assert!(!dm.has_deletion_after(4, true));
+        assert!(dm.deleted_blocks(true).is_empty());
     }
 
     #[test]
@@ -2286,11 +2378,11 @@ mod tests {
         let dm = DiffMap::from_hunks([deleted_hunk(2, 0..13)], Some(Arc::new(base.to_string())));
 
         assert_eq!(dm.status_for_line(2), DiffStatus::Unchanged);
-        assert!(dm.has_deletion_after(2));
-        assert!(!dm.has_deletion_after(1));
-        assert!(!dm.has_deletion_after(3));
+        assert!(dm.has_deletion_after(2, true));
+        assert!(!dm.has_deletion_after(1, true));
+        assert!(!dm.has_deletion_after(3, true));
 
-        let blocks = dm.deleted_blocks();
+        let blocks = dm.deleted_blocks(true);
         assert_eq!(blocks.len(), 1);
         let ctx = crate::display_map::BlockContext {
             block_id: crate::display_map::BlockId::Custom(crate::display_map::CustomBlockId(0)),
@@ -2318,10 +2410,59 @@ mod tests {
         assert_eq!(dm.status_for_line(3), DiffStatus::Modified);
         assert_eq!(dm.status_for_line(4), DiffStatus::Modified);
         assert_eq!(dm.status_for_line(5), DiffStatus::Unchanged);
-        assert!(dm.has_deletion_after(2));
 
-        let blocks = dm.deleted_blocks();
-        assert_eq!(blocks.len(), 1);
+        // One base line against two live rows, so the base row pairs with the
+        // first of them and nothing is left to block.
+        assert_eq!(dm.deleted_blocks(true).len(), 0);
+        assert!(!dm.has_deletion_after(2, true));
+        assert!(!dm.has_deletion_after(4, true));
+    }
+
+    /// A base longer than the live side pairs what it can and blocks the rest
+    /// after the hunk's last live row, so the filler a length difference costs
+    /// lands at the end of the hunk rather than above it.
+    #[test]
+    fn a_longer_base_hunk_blocks_only_its_excess_after_the_live_rows() {
+        let base = "a\nb\nc\n";
+        let dm = DiffMap::from_hunks(
+            [modified_hunk(3..4, 0..6)],
+            Some(Arc::new(base.to_string())),
+        );
+
+        let blocks = dm.deleted_blocks(true);
+        assert_eq!(blocks.len(), 1, "the two base rows past the live one block");
+        assert_eq!(
+            (blocks[0].placement, blocks[0].height),
+            (BlockPlacement::Below(3), Some(2)),
+            "and hang off the hunk's last live row",
+        );
+
+        assert!(dm.has_deletion_after(3, true), "the block sits below row 3");
+        assert!(!dm.has_deletion_after(2, true), "not above the hunk");
+    }
+
+    /// The count the diff view maps a viewport top through. A row is
+    /// base-present while its hunk's base rows reach it, so an added hunk's
+    /// rows all count and a modified hunk's only past its paired prefix.
+    #[test]
+    fn rows_without_base_counts_added_and_unpaired_modified_rows() {
+        let base = "a\n";
+        let dm = DiffMap::from_hunks(
+            [added_hunk(1..3), modified_hunk(5..8, 0..2)],
+            Some(Arc::new(base.to_string())),
+        );
+
+        assert_eq!(
+            dm.rows_without_base_before(5, true),
+            2,
+            "the added hunk's rows"
+        );
+        assert_eq!(
+            dm.rows_without_base_before(7, true),
+            3,
+            "and the modified hunk's second row, its first being paired",
+        );
+        assert_eq!(dm.rows_without_base_before(9, true), 4, "and its third");
     }
 
     #[test]
@@ -2340,12 +2481,14 @@ mod tests {
         assert_eq!(dm.status_for_line(1), DiffStatus::Added);
         assert_eq!(dm.status_for_line(2), DiffStatus::Added);
         assert_eq!(dm.status_for_line(3), DiffStatus::Unchanged);
-        assert!(dm.has_deletion_after(4));
+        assert!(dm.has_deletion_after(4, true));
         assert_eq!(dm.status_for_line(7), DiffStatus::Modified);
         assert_eq!(dm.status_for_line(8), DiffStatus::Modified);
         assert_eq!(dm.status_for_line(9), DiffStatus::Unchanged);
 
-        assert_eq!(dm.deleted_blocks().len(), 2);
+        // The deleted hunk blocks whole; the modified one's single base line
+        // pairs with the first of its two live rows.
+        assert_eq!(dm.deleted_blocks(true).len(), 1);
     }
 
     #[test]
@@ -2406,8 +2549,8 @@ mod tests {
     fn deleted_hunk_after_line_zero() {
         let base = "removed\n";
         let dm = DiffMap::from_hunks([deleted_hunk(0, 0..8)], Some(Arc::new(base.to_string())));
-        assert!(dm.has_deletion_after(0));
-        assert!(!dm.has_deletion_after(1));
+        assert!(dm.has_deletion_after(0, true));
+        assert!(!dm.has_deletion_after(1, true));
     }
 
     #[test]
