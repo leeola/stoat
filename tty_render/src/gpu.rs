@@ -681,6 +681,10 @@ impl Renderer {
     /// regions, overlays, icons, or bars, since the pool carries plain composed
     /// page rows.
     ///
+    /// `scrolled_rows` is how far the pool's content moved since the frame that
+    /// last composited it, which lets the passes carry the rows it kept. `None`
+    /// means nothing carries and every row is shaped again.
+    ///
     /// `pool` is the terminal's id for this pool, under which each pass keeps its
     /// composite buffers. Two entries sharing an id would have the later one's
     /// instances drawn for both, so callers pass each pool its own.
@@ -696,6 +700,7 @@ impl Renderer {
         shift_rows: f32,
         origin_cells: [f32; 2],
         content_changed: bool,
+        scrolled_rows: Option<isize>,
         occludable: bool,
         pool: u32,
         slot: usize,
@@ -712,9 +717,7 @@ impl Renderer {
             shift_rows,
             origin_cells,
             content_changed,
-            // A single draw with no frame before it to carry rows from, so the
-            // composite shapes every row.
-            None,
+            scrolled_rows,
             occludable,
             pool,
             slot,

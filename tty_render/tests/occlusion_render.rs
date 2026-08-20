@@ -312,7 +312,7 @@ fn a_box_occludes_the_pool_composite_beneath_it() {
 
     render_live(&mut renderer);
     renderer.composite_pool(
-        &device, &queue, &view, &pool, &panels, full, 0.0, [0.0; 2], true, true, 0, 0,
+        &device, &queue, &view, &pool, &panels, full, 0.0, [0.0; 2], true, None, true, 0, 0,
     );
     let occluded = read_back(&device, &queue, &target, width, height);
     assert_eq!(
@@ -330,7 +330,7 @@ fn a_box_occludes_the_pool_composite_beneath_it() {
     // composited with occludable=false paints through the box.
     render_live(&mut renderer);
     renderer.composite_pool(
-        &device, &queue, &view, &pool, &panels, full, 0.0, [0.0; 2], true, false, 0, 0,
+        &device, &queue, &view, &pool, &panels, full, 0.0, [0.0; 2], true, None, false, 0, 0,
     );
     let bled = read_back(&device, &queue, &target, width, height);
     assert_eq!(

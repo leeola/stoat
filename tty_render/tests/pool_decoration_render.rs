@@ -133,6 +133,7 @@ fn pool_decorations_composite_and_glide_with_the_shift() {
             shift,
             [0.0; 2],
             true,
+            None,
             true,
             0,
             0,

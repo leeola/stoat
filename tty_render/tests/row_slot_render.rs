@@ -19,7 +19,7 @@ use stoatty_render::{
     render::cell_size,
 };
 use stoatty_term::{
-    grid::{whole_row, Grid, Overlay, Rgb, UnderlineStyle},
+    grid::{whole_row, Grid, Overlay, Rgb, TextRun, UnderlineStyle},
     term::Damage,
 };
 use wgpu::{
@@ -253,6 +253,41 @@ fn overlay_content_lines_do_not_wrap_at_the_grid_height() {
     );
 }
 
+/// A composited pool declares its text runs absolutely, not per grid row, so
+/// nothing about the rotation the live grid is carrying may reach them. A run
+/// baked at slot zero under rotating globals lands where the rotation maps zero
+/// back to, which is most of the grid height away from where it was declared.
+#[test]
+fn a_pool_text_run_paints_on_its_own_row_after_the_live_grid_scrolls() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("row_slot_render: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let mut harness = Harness::new(&device, COLS as u32);
+    harness.render(&device, &queue, &line_screen(0), &Damage::Full, 0);
+    harness.render(&device, &queue, &line_screen(1), &Damage::Full, 1);
+
+    let run_color = Rgb::new(240, 40, 200);
+    let mut pool = Grid::new(ROWS as usize, COLS);
+    pool.set_text_runs(vec![TextRun {
+        col: 0,
+        row: 2 * 16,
+        scale: 256,
+        color: run_color,
+        bg: None,
+        text: "MMM".into(),
+        seq: 0,
+    }]);
+
+    let pixels = harness.composite(&device, &queue, &pool, 0.0, None);
+    assert_eq!(
+        harness.rows_painting(&pixels, run_color),
+        vec![2],
+        "the run must paint on the row it declared",
+    );
+}
+
 /// One renderer and one surface across a run of frames, so the caches and the
 /// rotation carry between them the way they do in a live terminal.
 struct Harness {
@@ -346,6 +381,34 @@ impl Harness {
                 decoration_damage: &Damage::Partial(Vec::new()),
                 scrolled_rows,
             },
+        );
+
+        read_back(device, queue, &self.target, self.width, self.height)
+    }
+
+    /// Composite `pool` over what the surface already holds, and read it back.
+    fn composite(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        pool: &Grid,
+        shift_rows: f32,
+        scrolled_rows: Option<isize>,
+    ) -> Vec<u8> {
+        self.renderer.composite_pool(
+            device,
+            queue,
+            &self.view,
+            pool,
+            &[],
+            [0, 0, self.width, self.height],
+            shift_rows,
+            [0.0; 2],
+            true,
+            scrolled_rows,
+            false,
+            1,
+            0,
         );
 
         read_back(device, queue, &self.target, self.width, self.height)

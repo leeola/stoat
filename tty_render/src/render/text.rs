@@ -1109,13 +1109,20 @@ impl TextPass {
         if runs_rebuilt {
             let epoch_at_build = self.atlas.content_epoch();
             let mut instances = mem::take(&mut self.text_run_build_scratch);
-            self.build_text_run_instances_into(device, queue, grid, [0.0; 2], &mut instances);
+            self.build_text_run_instances_into(device, queue, grid, [0.0; 2], 0, &mut instances);
             // Packing a run glyph can move the UVs the instances already emitted
             // this pass froze. An eviction reuses a slot without resizing the
             // texture, so only the content epoch reveals it. Every run glyph is
             // resident after the first pass, so a second one reads final UVs.
             if self.atlas.content_epoch() != epoch_at_build {
-                self.build_text_run_instances_into(device, queue, grid, [0.0; 2], &mut instances);
+                self.build_text_run_instances_into(
+                    device,
+                    queue,
+                    grid,
+                    [0.0; 2],
+                    0,
+                    &mut instances,
+                );
             }
             self.text_run_build_scratch = instances;
 
@@ -1575,7 +1582,15 @@ impl TextPass {
         let atlas_dims = self.atlas.texture_dims();
 
         let mut run_instances = mem::take(&mut self.composite_run_scratch);
-        self.build_text_run_instances_into(device, queue, grid, origin_cells, &mut run_instances);
+        let run_anchor = rotation.slot(0) as u32;
+        self.build_text_run_instances_into(
+            device,
+            queue,
+            grid,
+            origin_cells,
+            run_anchor,
+            &mut run_instances,
+        );
 
         let mut run_rects = mem::take(&mut self.composite_rect_scratch);
         self.build_run_rects_into(grid, &mut run_rects);
@@ -1629,6 +1644,7 @@ impl TextPass {
                 queue,
                 grid,
                 origin_cells,
+                run_anchor,
                 &mut run_instances,
             );
         }
@@ -1853,9 +1869,10 @@ impl TextPass {
         queue: &Queue,
         grid: &Grid,
         origin: [f32; 2],
+        anchor: u32,
     ) -> Vec<TextInstance> {
         let mut instances = Vec::new();
-        self.build_text_run_instances_into(device, queue, grid, origin, &mut instances);
+        self.build_text_run_instances_into(device, queue, grid, origin, anchor, &mut instances);
         instances
     }
 
@@ -1870,6 +1887,12 @@ impl TextPass {
     /// pixel snap lands on the absolute screen grid rather than the region's. A
     /// screen-anchored draw passes zero.
     ///
+    /// `anchor` is the slot the draw's globals take back to display row zero.
+    /// A run sits where it declared rather than on a grid row, so the row term
+    /// the shader adds for the slot has to come out zero. An unrotated draw
+    /// passes zero. A rotated one passes the slot its rotation puts row zero
+    /// in, which is what keeps the rotation off a run that never scrolls.
+    ///
     /// `out` is cleared first, so a reused scratch buffer holds only this
     /// frame's instances.
     fn build_text_run_instances_into(
@@ -1878,6 +1901,7 @@ impl TextPass {
         queue: &Queue,
         grid: &Grid,
         origin: [f32; 2],
+        anchor: u32,
         out: &mut Vec<TextInstance>,
     ) {
         out.clear();
@@ -1923,8 +1947,7 @@ impl TextPass {
                     texel_size,
                     fg: pack_fg(run.color, info.kind),
                     seq: run.seq,
-                    // A text run is placed absolutely rather than per grid row.
-                    row: 0,
+                    row: anchor,
                 });
             }
         }
@@ -5011,7 +5034,7 @@ mod tests {
         queue: &wgpu::Queue,
         grid: &Grid,
     ) {
-        let fresh = pass.build_text_run_instances(device, queue, grid, [0.0; 2]);
+        let fresh = pass.build_text_run_instances(device, queue, grid, [0.0; 2], 0);
         assert!(!fresh.is_empty(), "the run contributes glyph instances");
         assert_eq!(
             bytemuck::cast_slice::<TextInstance, u8>(&pass.composite_run_scratch),

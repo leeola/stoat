@@ -284,6 +284,7 @@ impl Harness {
             shift,
             [0.0; 2],
             true,
+            None,
             true,
             0,
             0,

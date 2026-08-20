@@ -112,6 +112,7 @@ fn oversized_scissors_are_clamped_not_validated() {
         0.0,
         [0.0; 2],
         true,
+        None,
         true,
         0,
         0,
