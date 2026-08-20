@@ -787,6 +787,15 @@ pub struct Stoat {
     /// channel, which parks the arm once it closes instead of waking the loop on
     /// every poll. Born closed, since a process with no UI thread never reports.
     stoatty_rx: UnboundedReceiver<Option<u32>>,
+    /// Pixels per cell as the tty reports them, or `None` while it has not.
+    ///
+    /// An image is transmitted in pixels and placed in cells, so fitting one to
+    /// a pane needs the ratio between them, and only the tty knows it. Re-read
+    /// on every resize, since a window that changed size or font has changed it.
+    pub(crate) cell_pixels: Option<(u16, u16)>,
+    /// Carries [`Self::cell_pixels`] from the ui thread, which owns the tty this
+    /// is read from.
+    cell_pixels_rx: UnboundedReceiver<Option<(u16, u16)>>,
     /// Whether the window-event socket is currently connected. Gates pane
     /// detach, which needs stoatty to host the aux window and report its events.
     pub(crate) window_ipc_connected: bool,
@@ -1923,6 +1932,7 @@ impl Stoat {
         // installs the UI thread's end. Closed is the truthful state for a
         // process that has no UI thread to hear from.
         let (_, stoatty_rx) = tokio::sync::mpsc::unbounded_channel::<Option<u32>>();
+        let (_, cell_pixels_rx) = tokio::sync::mpsc::unbounded_channel::<Option<(u16, u16)>>();
 
         let env_host: Arc<dyn EnvHost> = Arc::new(LocalEnv);
         let home = env_host.var("HOME").map(PathBuf::from);
@@ -1980,6 +1990,8 @@ impl Stoat {
             window_ipc_tx,
             window_ipc_rx,
             stoatty_rx,
+            cell_pixels: None,
+            cell_pixels_rx,
             window_ipc_connected: false,
             zoom_claimed: false,
             aux_windows: std::collections::BTreeMap::new(),
@@ -2285,6 +2297,16 @@ impl Stoat {
     /// wants.
     pub fn set_stoatty_rx(&mut self, stoatty_rx: UnboundedReceiver<Option<u32>>) {
         self.stoatty_rx = stoatty_rx;
+    }
+
+    /// Listen for the UI thread's reports of the tty's cell pixel size.
+    ///
+    /// Handed over the same way and for the same reason as
+    /// [`Self::set_stoatty_rx`]: the ui thread owns the tty. Left uncalled,
+    /// [`Self::cell_pixels`] stays absent, which is what a run with no terminal
+    /// under it should see.
+    pub fn set_cell_pixels_rx(&mut self, cell_pixels_rx: UnboundedReceiver<Option<(u16, u16)>>) {
+        self.cell_pixels_rx = cell_pixels_rx;
     }
 
     /// Record that a stoatty is listening, repainting the frames that went out
@@ -3219,6 +3241,12 @@ impl Stoat {
         }
         while let Ok(present) = self.stoatty_rx.try_recv() {
             effect = effect.merge(self.handle_stoatty_present(present));
+            coalesced += 1;
+        }
+        // The last report wins: an intermediate size from a drag that is already
+        // over describes a window that no longer exists.
+        while let Ok(cell_pixels) = self.cell_pixels_rx.try_recv() {
+            self.cell_pixels = cell_pixels;
             coalesced += 1;
         }
         self.drain_index_updates();

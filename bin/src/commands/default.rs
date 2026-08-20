@@ -228,6 +228,9 @@ fn run_tui(
     // handshake, which only it can run: the reply arrives on raw stdin, which
     // that thread owns.
     let (stoatty_tx, stoatty_rx) = tokio::sync::mpsc::unbounded_channel::<Option<u32>>();
+    // The tty's cell size, for the same reason: only that thread can ask it.
+    let (cell_pixels_tx, cell_pixels_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Option<(u16, u16)>>();
 
     let mouse_capture_policy = stoat::default_mouse_capture_policy();
     let mouse_captured = stoat::resolve_mouse_captured(mouse_capture_policy, &LocalEnv);
@@ -236,7 +239,14 @@ fn run_tui(
     // would hold the event channel open past a natural shutdown.
     let driver_tx = inputs.is_some().then(|| event_tx.clone());
 
-    let ui_handle = stoat::ui::spawn(event_tx, render_rx, apc_rx, stoatty_tx, mouse_captured);
+    let ui_handle = stoat::ui::spawn(
+        event_tx,
+        render_rx,
+        apc_rx,
+        stoatty_tx,
+        cell_pixels_tx,
+        mouse_captured,
+    );
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -348,6 +358,7 @@ fn run_tui(
         );
         stoat.set_apc_tx(apc_tx.clone());
         stoat.set_stoatty_rx(stoatty_rx);
+        stoat.set_cell_pixels_rx(cell_pixels_rx);
         stoat.set_window_ipc(window_socket_path());
         stoat.set_version_info(VERSION_INFO);
         stoat.set_lsp_auto_spawn(true);

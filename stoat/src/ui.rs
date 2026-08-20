@@ -107,11 +107,16 @@ pub fn install_panic_hook() {
 /// peer's protocol version when a stoatty replied, `None` when none did. The
 /// app cannot learn it any other way, since the handshake needs raw mode and
 /// sole ownership of fd 0, both of which live on this thread.
+///
+/// `cell_pixels_tx` carries the tty's cell size the same way, and unlike the
+/// handshake it carries it again on every resize, since a window that changed
+/// size or font has changed the answer.
 pub fn spawn(
     event_tx: UnboundedSender<Event>,
     mut render_rx: watch::Receiver<Option<RenderFrame>>,
     mut apc_rx: UnboundedReceiver<Vec<u8>>,
     stoatty_tx: UnboundedSender<Option<u32>>,
+    cell_pixels_tx: UnboundedSender<Option<(u16, u16)>>,
     mouse_captured: bool,
 ) -> thread::JoinHandle<io::Result<()>> {
     thread::spawn(move || {
@@ -133,6 +138,7 @@ pub fn spawn(
                 &mut render_rx,
                 &mut apc_rx,
                 &stoatty_tx,
+                &cell_pixels_tx,
                 &mut terminal,
             )
             .await;
@@ -151,6 +157,7 @@ async fn run(
     render_rx: &mut watch::Receiver<Option<RenderFrame>>,
     apc_rx: &mut UnboundedReceiver<Vec<u8>>,
     stoatty_tx: &UnboundedSender<Option<u32>>,
+    cell_pixels_tx: &UnboundedSender<Option<(u16, u16)>>,
     terminal: &mut ratatui::DefaultTerminal,
 ) -> io::Result<()> {
     // Main thread needs terminal dimensions before it can render the first frame
@@ -167,6 +174,7 @@ async fn run(
     // what upgrades the session once one arrives.
     let (stoatty, typed) = stoatty_handshake();
     let _ = stoatty_tx.send(stoatty);
+    let _ = cell_pixels_tx.send(tty_cell_pixels());
 
     // What was typed while the handshake owned fd 0, replayed before the input
     // thread starts so it arrives ahead of anything typed after. Decoding is
@@ -186,7 +194,8 @@ async fn run(
     // all, which is the one thing this thread exists to prevent.
     thread::spawn({
         let event_tx = event_tx.clone();
-        move || forward_input(&event_tx, crossterm::event::read)
+        let cell_pixels_tx = cell_pixels_tx.clone();
+        move || forward_input(&event_tx, &cell_pixels_tx, crossterm::event::read)
     });
 
     // What the terminal carries, so a frame whose squiggle is already on screen
@@ -360,6 +369,38 @@ fn log_input_latency(perf: &crate::perf::PerfStats) {
     }
 }
 
+/// One cell's pixel size, from a winsize the tty reported.
+///
+/// The winsize gives the whole text area and the grid it holds, so a cell is
+/// the quotient. `None` when any field is zero, which is what a terminal that
+/// does not report pixels sends, and is also the only division there is nothing
+/// to do about.
+fn cell_pixels_from_winsize(ws: &libc::winsize) -> Option<(u16, u16)> {
+    if ws.ws_col == 0 || ws.ws_row == 0 || ws.ws_xpixel == 0 || ws.ws_ypixel == 0 {
+        return None;
+    }
+    Some((ws.ws_xpixel / ws.ws_col, ws.ws_ypixel / ws.ws_row))
+}
+
+/// Ask the tty how many pixels a cell is, or `None` when it will not say.
+///
+/// An image client sizes what it draws from this, and a terminal that reports
+/// no pixels leaves it with nothing to divide by. Most do report them, and the
+/// stoatty this usually runs inside always does.
+fn tty_cell_pixels() -> Option<(u16, u16)> {
+    // SAFETY: TIOCGWINSZ writes a winsize through the pointer and reads nothing
+    // else. The struct is fully initialized before the call, so a driver that
+    // writes none of it still leaves defined bytes behind.
+    let ws = unsafe {
+        let mut ws: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &raw mut ws) != 0 {
+            return None;
+        }
+        ws
+    };
+    cell_pixels_from_winsize(&ws)
+}
+
 /// Forward every event `read` produces onto `event_tx` until either end goes
 /// away.
 ///
@@ -367,11 +408,24 @@ fn log_input_latency(perf: &crate::perf::PerfStats) {
 /// an event. It is a parameter so the loop's two exits can be driven without
 /// a terminal.
 ///
+/// A resize also re-reads the tty's cell size onto `cell_pixels_tx`, since a
+/// window that changed size or font has changed that answer too.
+///
 /// Returns when a send fails, meaning the main loop is gone, or when `read`
 /// errors. Neither is recoverable from here, and the caller's thread has
 /// nothing else to do.
-fn forward_input(event_tx: &UnboundedSender<Event>, mut read: impl FnMut() -> io::Result<Event>) {
+fn forward_input(
+    event_tx: &UnboundedSender<Event>,
+    cell_pixels_tx: &UnboundedSender<Option<(u16, u16)>>,
+    mut read: impl FnMut() -> io::Result<Event>,
+) {
     while let Ok(event) = read() {
+        // A resized window has a new cell count and may have a new cell size,
+        // and the tty answers for both. Read before forwarding, so the app has
+        // the new size by the time it lays out against the new grid.
+        if matches!(event, Event::Resize(..)) {
+            let _ = cell_pixels_tx.send(tty_cell_pixels());
+        }
         if event_tx.send(event).is_err() {
             break;
         }
@@ -541,7 +595,8 @@ mod tests {
         // Counted past exhaustion so a loop that reads through the error trips
         // here rather than spinning forever on a reader that never runs out.
         let mut past_end = 0;
-        forward_input(&tx, || match queued.next() {
+        let (px_tx, _px_rx) = tokio::sync::mpsc::unbounded_channel();
+        forward_input(&tx, &px_tx, || match queued.next() {
             Some(event) => Ok(event),
             None => {
                 past_end += 1;
@@ -568,7 +623,8 @@ mod tests {
         // Bounded so a loop that never notices the closed channel ends here
         // rather than spinning on a read that always succeeds.
         let mut reads = 0;
-        forward_input(&tx, || {
+        let (px_tx, _px_rx) = tokio::sync::mpsc::unbounded_channel();
+        forward_input(&tx, &px_tx, || {
             reads += 1;
             match reads > 4 {
                 true => Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
@@ -599,5 +655,66 @@ mod tests {
         copy_clamped(&mut dst, &src);
 
         assert_eq!(dst, Buffer::with_lines(["xy ", "   "]));
+    }
+
+    /// The winsize gives the text area and the grid it holds, so a cell is the
+    /// quotient of the two.
+    #[test]
+    fn a_cell_is_the_text_area_over_the_grid() {
+        let ws = libc::winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 640,
+            ws_ypixel: 384,
+        };
+
+        assert_eq!(cell_pixels_from_winsize(&ws), Some((8, 16)));
+    }
+
+    /// A terminal that does not report pixels sends zeros, which is also the
+    /// only division there is nothing to do about.
+    #[test]
+    fn a_zero_field_reports_nothing_rather_than_dividing() {
+        let full = libc::winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 640,
+            ws_ypixel: 384,
+        };
+
+        for (name, ws) in [
+            (
+                "no pixel width",
+                libc::winsize {
+                    ws_xpixel: 0,
+                    ..full
+                },
+            ),
+            (
+                "no pixel height",
+                libc::winsize {
+                    ws_ypixel: 0,
+                    ..full
+                },
+            ),
+            ("no columns", libc::winsize { ws_col: 0, ..full }),
+            ("no rows", libc::winsize { ws_row: 0, ..full }),
+        ] {
+            assert_eq!(cell_pixels_from_winsize(&ws), None, "{name}");
+        }
+    }
+
+    /// A text area that does not divide evenly is the ordinary case, since the
+    /// window keeps whatever pixels the last cell leaves over.
+    #[test]
+    fn a_ragged_text_area_reports_the_whole_cells_it_holds() {
+        let ws = libc::winsize {
+            ws_row: 10,
+            ws_col: 10,
+            ws_xpixel: 85,
+            ws_ypixel: 165,
+        };
+
+        assert_eq!(cell_pixels_from_winsize(&ws), Some((8, 16)));
     }
 }
