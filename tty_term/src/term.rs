@@ -2185,7 +2185,11 @@ impl Terminal {
         if !fill.discard
             && let Some(pool) = self.pools.get_mut(&fill.pool)
         {
-            let grid = pool.page_pool.fill(fill.index);
+            // The box project_term_cells writes, so the slot clears only what
+            // the paint below will not reach.
+            let grid =
+                pool.page_pool
+                    .fill(fill.index, fill.term.screen_lines(), fill.term.columns());
             project_term_cells(grid, &fill.term, &self.theme, &self.palette);
             pool.page_pool
                 .set_decorations(fill.index, text_runs, bars, polylines);
@@ -6804,6 +6808,54 @@ mod tests {
             (16, 8),
             "and the page built for it is the same size, not the size asked for",
         );
+    }
+
+    /// A slot outlives the geometry its last page was painted at, so a fill
+    /// clamped smaller than the slot leaves the rest of it holding that page.
+    ///
+    /// A pool on a detached window keeps its pages across a viewport resize,
+    /// which is what makes the two sizes disagree. The fill that lands next is
+    /// clamped to the shrunken viewport and paints a corner of the slot.
+    #[test]
+    fn a_page_smaller_than_its_slot_shows_none_of_the_page_before_it() {
+        let mut terminal = Terminal::new(16, 16, Theme::default());
+        terminal.advance(&encode_pool_region(&PoolRegionCommand {
+            pool: 0,
+            top: 0,
+            left: 0,
+            width: 16,
+            height: 16,
+            window: 1,
+        }));
+
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+        for _ in 0..16 {
+            stream.extend_from_slice(b"AAAAAAAAAAAAAAAA");
+        }
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+        assert_eq!(
+            pool_page(&terminal, 0, 0).get(15, 15).ch,
+            'A',
+            "the first page has to fill its slot, or this proves nothing",
+        );
+
+        terminal.resize(2, 2);
+
+        // Index 5 lands on index 0's slot, painted through a context the resize
+        // clamped to four rows and columns.
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 5 });
+        stream.extend_from_slice(b"z");
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        let page = pool_page(&terminal, 0, 5);
+        let stale = (0..page.rows())
+            .flat_map(|row| (0..page.cols()).map(move |col| (row, col)))
+            .filter(|&(row, col)| page.get(row, col).ch == 'A')
+            .collect::<Vec<_>>();
+        assert_eq!(stale, Vec::new(), "no cell may keep the page before it");
+        assert_eq!(page.get(0, 0).ch, 'z', "and the new page paints its corner");
     }
 
     /// A fill into a region declared before the viewport shrank is bounded too.

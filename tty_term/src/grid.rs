@@ -274,7 +274,28 @@ impl Grid {
     ///
     /// Moves the three decoration epochs, as [`Self::resize`] does.
     pub fn clear(&mut self) {
-        self.cells.fill(Cell::default());
+        self.clear_except(0, 0);
+    }
+
+    /// Reset the grid, leaving the cells in the top-left `rows` by `cols` box
+    /// as they are.
+    ///
+    /// A caller that recycles a grid by painting a box over it writes those
+    /// cells twice, once to zero them and once to paint them. Naming the box
+    /// leaves them to the paint. The box clamps to the grid, so naming one
+    /// larger than the grid keeps every cell.
+    ///
+    /// Everything that is not a cell goes regardless. A cell write replaces
+    /// none of it, so the border table, the decorations, the minimap stores,
+    /// and the line starts are reset whatever box the caller names.
+    fn clear_except(&mut self, rows: usize, cols: usize) {
+        let kept_rows = rows.min(self.rows);
+        let kept_cols = cols.min(self.cols);
+        for row in 0..kept_rows {
+            self.row_mut(row)[kept_cols..].fill(Cell::default());
+        }
+        self.cells[kept_rows * self.cols..].fill(Cell::default());
+
         self.border_table.clear();
         self.overlays.clear();
         self.scroll_region = None;
@@ -867,20 +888,26 @@ impl PagePool {
         PagePool { pages }
     }
 
-    /// Recycle the slot for document page `index` and return its cleared grid
-    /// for the caller to write the page's content into.
+    /// Recycle the slot for document page `index` and return its grid for the
+    /// caller to write the page's content into.
+    ///
+    /// `painted_rows` by `painted_cols` is the top-left box the caller
+    /// overwrites in full. Everything outside it is cleared; inside it the last
+    /// page is left standing for the paint to replace, which is what keeps an
+    /// ordinary fill from writing every cell twice. A caller that paints less
+    /// than it claims leaves the last page showing there.
     ///
     /// [`Self::page`] resolves `index` to this grid afterward. If the slot held
     /// a different page, that page is dropped and its buffer reused in place, so
     /// a sliding window allocates nothing. Any page-targeted decorations from
     /// the departed page are dropped too. The caller writes the new page's via
     /// [`Self::set_decorations`].
-    pub fn fill(&mut self, index: u64) -> &mut Grid {
+    pub fn fill(&mut self, index: u64, painted_rows: usize, painted_cols: usize) -> &mut Grid {
         let slot = self.slot(index);
         let page = &mut self.pages[slot];
         page.refilled = page.index == Some(index);
         page.index = Some(index);
-        page.grid.clear();
+        page.grid.clear_except(painted_rows, painted_cols);
         page.text_runs.clear();
         page.bars.clear();
         page.polylines.clear();
@@ -1067,9 +1094,9 @@ struct Page {
     /// Digest of what this slot last committed, so a refill that paints the
     /// same bytes is recognized as one.
     ///
-    /// A digest rather than the content itself because [`PagePool::fill`]
-    /// clears the slot before the caller paints, so there is nothing left to
-    /// compare against by the time there is something to compare.
+    /// A digest rather than the content itself because the caller paints over
+    /// the slot in place, so there is nothing left to compare against by the
+    /// time there is something to compare.
     content_hash: u64,
     grid: Grid,
     /// Page-targeted text runs captured from the fill that painted this slot,
@@ -2347,7 +2374,7 @@ mod tests {
         let mut pool = PagePool::new(2, 3, 4);
         assert!(pool.page(0).is_none(), "an unfilled pool has no pages");
 
-        pool.fill(7).get_mut(1, 2).ch = 'Z';
+        pool.fill(7, 0, 0).get_mut(1, 2).ch = 'Z';
 
         assert_eq!(pool.page(7).map(|g| g.get(1, 2).ch), Some('Z'));
         assert!(
@@ -2359,12 +2386,12 @@ mod tests {
     #[test]
     fn page_pool_recycles_the_slot_a_slid_page_vacated() {
         let mut pool = PagePool::new(2, 2, 2);
-        pool.fill(0).get_mut(0, 0).ch = 'a';
-        pool.fill(1).get_mut(0, 0).ch = 'b';
+        pool.fill(0, 0, 0).get_mut(0, 0).ch = 'a';
+        pool.fill(1, 0, 0).get_mut(0, 0).ch = 'b';
 
         // Index 2 maps to index 0's slot (2 % 2 == 0), so it recycles 0's
         // buffer in place.
-        let recycled = pool.fill(2);
+        let recycled = pool.fill(2, 0, 0);
         assert_eq!(recycled.get(0, 0).ch, ' ', "the recycled buffer is cleared");
         assert_eq!(
             (recycled.rows(), recycled.cols()),
@@ -2384,7 +2411,7 @@ mod tests {
     #[test]
     fn page_pool_clears_decorations_on_recycle() {
         let mut pool = PagePool::new(1, 1, 1);
-        pool.fill(0).set_icons(vec![Icon {
+        pool.fill(0, 0, 0).set_icons(vec![Icon {
             top: 0,
             left: 0,
             kind: IconKind::Error,
@@ -2395,20 +2422,21 @@ mod tests {
         }]);
 
         assert!(
-            pool.fill(1).icons().is_empty(),
-            "recycling drops the prior page's decorations"
+            pool.fill(1, 1, 1).icons().is_empty(),
+            "recycling drops the prior page's decorations, even where the \
+             incoming paint covers every cell and nothing is cleared",
         );
     }
 
     #[test]
     fn page_pool_rebuild_resizes_pages_and_drops_content() {
         let mut pool = PagePool::new(2, 2, 2);
-        pool.fill(0);
+        pool.fill(0, 0, 0);
 
         pool.rebuild(3, 5);
 
         assert!(pool.page(0).is_none(), "rebuild drops buffered pages");
-        let page = pool.fill(0);
+        let page = pool.fill(0, 0, 0);
         assert_eq!(
             (page.rows(), page.cols()),
             (3, 5),
@@ -2416,10 +2444,66 @@ mod tests {
         );
     }
 
+    /// A fill names the box its caller paints, so the paint does not write
+    /// every cell twice over. Everything outside that box is still the last
+    /// page's, and still has to go.
+    #[test]
+    fn a_fill_clears_around_the_box_its_caller_paints() {
+        let mut pool = PagePool::new(3, 4, 2);
+        let first = pool.fill(0, 0, 0);
+        for row in 0..3 {
+            for col in 0..4 {
+                first.get_mut(row, col).ch = 'a';
+            }
+        }
+
+        // Index 2 shares index 0's slot, and this fill paints only the top-left
+        // two by two of it.
+        let second = pool.fill(2, 2, 2);
+        let kept = (0..2)
+            .map(|row| {
+                (0..2)
+                    .map(|col| second.get(row, col).ch)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kept,
+            ["aa", "aa"],
+            "the box is left for the paint to replace"
+        );
+
+        let page = pool.page(2).expect("the slot holds the page");
+        let rows = (0..3)
+            .map(|row| (0..4).map(|col| page.get(row, col).ch).collect::<String>())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            ["aa  ", "aa  ", "    "],
+            "the column tails and the rows past the box are cleared",
+        );
+    }
+
+    /// A box larger than the grid names every cell, which is the ordinary fill:
+    /// a page painted at the size of the slot it lands on.
+    #[test]
+    fn a_fill_box_past_the_grid_keeps_every_cell() {
+        let mut pool = PagePool::new(2, 2, 1);
+        let first = pool.fill(0, 0, 0);
+        first.get_mut(1, 1).ch = 'z';
+
+        let second = pool.fill(1, 9, 9);
+        assert_eq!(
+            second.get(1, 1).ch,
+            'z',
+            "nothing is cleared out from under a paint that covers the grid",
+        );
+    }
+
     #[test]
     fn page_pool_capacity_is_at_least_one() {
         let mut pool = PagePool::new(1, 1, 0);
-        pool.fill(0).get_mut(0, 0).ch = 'x';
+        pool.fill(0, 0, 0).get_mut(0, 0).ch = 'x';
         assert_eq!(
             pool.page(0).map(|g| g.get(0, 0).ch),
             Some('x'),
@@ -2428,7 +2512,7 @@ mod tests {
     }
 
     fn fill_page_rows(pool: &mut PagePool, index: u64, rows: &[char]) {
-        let grid = pool.fill(index);
+        let grid = pool.fill(index, 0, 0);
         for (row, &ch) in rows.iter().enumerate() {
             grid.get_mut(row, 0).ch = ch;
         }
