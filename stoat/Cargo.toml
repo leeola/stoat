@@ -29,6 +29,7 @@ stoatty_protocol = { path = "../tty_protocol" }
 vscode_theme = { path = "../vscode_theme" }
 stoat_widgets = { path = "../widgets" }
 ast-grep-core.workspace = true
+emojis.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 serde = { workspace = true, features = ["derive"] }

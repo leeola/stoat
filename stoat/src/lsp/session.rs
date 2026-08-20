@@ -525,9 +525,11 @@ mod tests {
 
         open_buffer(&mut h, root.join("a.rs"));
 
+        // Names the server rather than asking whether any spawn happened. The
+        // in-process global has no environment to wait for and starts regardless.
         assert!(
-            !h.stoat.lsp_registry.spawn_attempted_any(),
-            "the spawn is deferred, not attempted, while the env loads",
+            !h.stoat.lsp_registry.spawn_attempted("rust-analyzer"),
+            "the subprocess spawn is deferred, not attempted, while the env loads",
         );
         let buffer_id = h
             .stoat
@@ -598,6 +600,66 @@ mod tests {
             .find(|item| item.label == "format_on_save")
             .expect("in-process stcfg server offers format_on_save");
         assert_eq!(format_item.source, CompletionSource::Lsp);
+    }
+
+    #[test]
+    fn any_buffer_completes_emoji_shortcodes_and_accepting_leaves_the_glyph() {
+        use crate::completion::{request::COMPLETION_DEBOUNCE, CompletionSource};
+
+        let mut h = TestHarness::with_size(80, 24);
+        h.allow_host_swap();
+        // Markdown has no server of its own, so only the global one answers.
+        h.stoat.lsp_registry = crate::lsp::registry::LspRegistry::new();
+        h.stoat.set_lsp_auto_spawn(true);
+        let root = seed(&mut h, &[("notes.md", "")]);
+        open_buffer(&mut h, root.join("notes.md"));
+
+        h.type_keys("i");
+        h.type_text("hi :smil");
+        // did_change syncs the buffer to the server before the completion
+        // request reads it.
+        h.advance_clock(crate::lsp::sync::LSP_DID_CHANGE_DEBOUNCE);
+        h.advance_clock(COMPLETION_DEBOUNCE);
+
+        let popup = h
+            .stoat
+            .pending_completion
+            .clone()
+            .expect("completion popup armed");
+        let smile = popup
+            .items
+            .iter()
+            .position(|item| item.label == ":smile:")
+            .expect("the shortcode server offers :smile:");
+        assert_eq!(popup.items[smile].source, CompletionSource::Lsp);
+
+        h.stoat
+            .pending_completion
+            .as_mut()
+            .expect("popup")
+            .selected_idx = smile;
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::AcceptCompletion);
+
+        let buffer_id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&root.join("notes.md"))
+            .expect("the buffer is open");
+        let text = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .read()
+            .expect("buffer lock")
+            .rope()
+            .to_string();
+        assert_eq!(
+            text, "hi \u{1f604}",
+            "accepting leaves the emoji, not the shortcode",
+        );
     }
 
     #[test]

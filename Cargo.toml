@@ -36,6 +36,7 @@ unused_qualifications = "warn"
 
 [workspace.dependencies]
 ast-grep-core = "0.44"
+emojis = "0.9"
 snafu = "0.9"
 percent-encoding = "2.3"
 tracing = "0.1"

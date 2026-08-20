@@ -44,10 +44,20 @@ impl ResolvedServer {
 }
 
 /// The servers that route every buffer unless `lsp.globals` names others.
+const BUILTIN_GLOBAL_SERVERS: &[&str] = &["emoji-ls"];
+
+/// The builtin definitions of the global servers, looked up by name the way a
+/// per-language builtin is.
 ///
-/// Empty so far. Nothing yet has a subject that spans every language, and the
-/// emoji shortcode server is what fills this.
-const BUILTIN_GLOBAL_SERVERS: &[&str] = &[];
+/// `only` is completion because a shortcode table has nothing to say about
+/// anything else. An unfiltered selector puts this server in the diagnostics
+/// and hover fan-outs of every buffer, where it answers nothing.
+const GLOBAL_SERVERS: &[BuiltinServer] = &[BuiltinServer {
+    name: "emoji-ls",
+    source: BuiltinSource::InProcess(emoji_host),
+    only: &[LanguageServerFeature::Completion],
+    except: &[],
+}];
 
 /// One entry in the builtin per-language server table.
 struct BuiltinServer {
@@ -86,6 +96,10 @@ fn builtin_servers(language: &str) -> &'static [BuiltinServer] {
 
 fn stcfg_host() -> Arc<dyn LspHost> {
     Arc::new(crate::lsp::stcfg::StcfgLsp::new())
+}
+
+fn emoji_host() -> Arc<dyn LspHost> {
+    Arc::new(crate::lsp::emoji::EmojiLsp::new())
 }
 
 /// The LSP language name for a file `extension` that has no tree-sitter grammar.
@@ -209,6 +223,7 @@ fn builtin_by_name(name: &str) -> Option<&'static BuiltinServer> {
     BUILTIN_LANGUAGES
         .iter()
         .flat_map(|&language| builtin_servers(language))
+        .chain(GLOBAL_SERVERS)
         .find(|server| server.name == name)
 }
 
@@ -277,9 +292,15 @@ mod tests {
 
     #[test]
     fn globals_come_from_config_and_resolve_like_any_server() {
-        assert!(
-            resolve_global_servers(&Settings::default()).is_empty(),
-            "no builtin global exists until the emoji server lands",
+        let builtin = resolve_global_servers(&Settings::default());
+        assert_eq!(
+            builtin.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["emoji-ls"],
+        );
+        assert_eq!(
+            builtin[0].only,
+            HashSet::from([LanguageServerFeature::Completion]),
+            "a shortcode table joins no fan-out but completion's",
         );
 
         let settings = Settings {
