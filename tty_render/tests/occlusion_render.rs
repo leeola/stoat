@@ -10,11 +10,11 @@
 //! GPU adapter is present, so a GPU-less CI stays green.
 
 use stoatty_render::{
-    gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, headless_device, FontConfig, Frame, PoolComposite, Renderer, Scroll},
     render::cell_size,
 };
 use stoatty_term::{
-    grid::{Bar, BorderStyle, Grid, Icon, IconKind, Panel, PanelShadow, Rgb, TextRun},
+    grid::{Bar, BorderStyle, Grid, Icon, IconKind, Panel, PanelShadow, Polyline, Rgb, TextRun},
     term::Damage,
 };
 use wgpu::{
@@ -338,6 +338,191 @@ fn a_box_occludes_the_pool_composite_beneath_it() {
         rgb(pool_bg),
         "a non-pane pool bleeds through the box"
     );
+}
+
+/// A pool prepared in the same frame as the live grid leaves the live grid's
+/// occluders alone.
+///
+/// The two occlude against different panels: a pool that is a box's own content
+/// is never occluded, so its list keeps only the boxes drawn above pools, while
+/// the live list keeps every box. Every pass prepares before any of them draws,
+/// so one buffer between them hands the live draw whatever the pool wrote, under
+/// the live panel count. Two boxes are enough to see it: the pool's one box
+/// lands where the live list held the box over the bar, and the bar comes out
+/// from under it.
+#[test]
+fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("occlusion_render: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let format = TextureFormat::Rgba8Unorm;
+    let font_size = 30;
+    let [cell_w, cell_h] = cell_size(font_size, 1.0);
+    let (cell_w, cell_h) = (cell_w.round() as u32, cell_h.round() as u32);
+    let (width, height) = (128u32, cell_h * 6);
+
+    let grid_bg = Rgb::new(10, 20, 30);
+    let bar_color = Rgb::new(200, 50, 50);
+    let run_bg = Rgb::new(50, 200, 50);
+    let line_color = Rgb::new(220, 200, 40);
+    let border = Rgb::new(128, 128, 128);
+
+    let target = device.create_texture(&TextureDescriptor {
+        label: Some("occlusion pool target"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&TextureViewDescriptor::default());
+
+    let mut renderer = Renderer::new(
+        &device,
+        format,
+        [width, height],
+        build_font_system(),
+        FontConfig {
+            size: font_size,
+            scale_factor: 1.0,
+            family: &["JetBrains Mono".to_owned()],
+            ligatures: true,
+        },
+        Rgb::new(0, 0, 0),
+        Rgb::new(0, 0, 0),
+    );
+
+    let (rows, cols) = renderer.grid_size();
+    assert!(rows >= 5 && cols >= 7, "grid too small: {rows}x{cols}");
+
+    let box_panel = |left: u16, width: u16, above_pools: bool, seq: u32| Panel {
+        top: 0,
+        left,
+        width,
+        height: rows as u16,
+        style: BorderStyle::Light,
+        border,
+        corner_radius: 0,
+        fill: None,
+        shadow: PanelShadow::None_,
+        inset_x: 0,
+        above_pools,
+        anchor: None,
+        seq,
+    };
+
+    // The plain box covers the bar and is declared later than it, so the seq
+    // test hides the bar under it. The above-pools box is the one a non-pane
+    // pool keeps, and it is declared earlier than the bar so it can hide
+    // nothing: whatever it covers, it covers with a seq the bar outranks.
+    let mut grid = Grid::new(rows, cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            grid.get_mut(r, c).bg = grid_bg;
+        }
+    }
+    grid.set_panels(vec![
+        box_panel(2, 4, false, 100),
+        box_panel(cols as u16 - 1, 1, true, 1),
+    ]);
+    grid.set_bars(vec![Bar {
+        x: 0,
+        y: 16,
+        width: cols as u16 * 16,
+        height: 16,
+        color: bar_color,
+        seq: 50,
+    }]);
+    // The three passes that occlude a live primitive each keep their own
+    // occluder buffer, so each needs something of its own on the row below.
+    grid.set_text_runs(vec![TextRun {
+        col: 0,
+        row: 32,
+        scale: 256,
+        color: Rgb::new(0, 0, 0),
+        bg: Some(run_bg),
+        text: " ".repeat(cols).into(),
+        seq: 50,
+    }]);
+    grid.set_polylines(vec![Polyline {
+        points: (0..=cols as i16)
+            .map(|col| [col * 16, 16 * 3 + 8])
+            .collect(),
+        width: 8,
+        color: line_color,
+        seq: 50,
+    }]);
+
+    // A pool that is box content rather than a pane, which is what narrows its
+    // occluder list to the above-pools box alone.
+    let pool = Grid::new(rows, cols);
+    let pools = [PoolComposite {
+        id: 0,
+        grid: &pool,
+        origin_cells: [0.0; 2],
+        scissor: [0, 0, cell_w, cell_h],
+        shift_rows: 0.0,
+        content_changed: true,
+        scrolled_rows: None,
+        occludable: false,
+    }];
+
+    renderer.render_pools_into(
+        &device,
+        &queue,
+        &view,
+        &grid,
+        Frame {
+            cursor: None,
+            cursor_corners: None,
+            scroll: Scroll {
+                grid: 0.0,
+                document: 0.0,
+                scrollback: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage: &Damage::Full,
+            decoration_damage: &Damage::Partial(Vec::new()),
+            scrolled_rows: 0,
+        },
+        &pools,
+        &[],
+    );
+    let pixels = read_back(&device, &queue, &target, width, height);
+
+    let cell = |row: u32, col: u32| -> (u8, u8, u8) {
+        let x = col * cell_w + cell_w / 2;
+        let y = row * cell_h + cell_h / 2;
+        let i = ((y * width + x) * 4) as usize;
+        (pixels[i], pixels[i + 1], pixels[i + 2])
+    };
+    let rgb = |c: Rgb| (c.r, c.g, c.b);
+
+    for (row, color, what) in [
+        (1, bar_color, "bar"),
+        (2, run_bg, "run background"),
+        (3, line_color, "stroked path"),
+    ] {
+        assert_eq!(
+            cell(row, 0),
+            rgb(color),
+            "the {what} paints where no box covers it, or this proves nothing",
+        );
+        assert_ne!(
+            cell(row, 3),
+            rgb(color),
+            "and the {what} stays hidden under the box that covers it",
+        );
+    }
 }
 
 /// Copy `texture` into a mappable buffer and return its RGBA bytes, row-major

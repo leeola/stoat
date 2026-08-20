@@ -12,8 +12,8 @@ use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
     render::{
         globals_offset, globals_slot_index, occlusion_globals, row_len, row_uploads, CellMetrics,
-        CompositeSlot, CompositeSlots, Frame, Occluder, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
-        MAX_COMPOSITE_POOLS,
+        CompositeSlot, CompositeSlots, Frame, Occluder, OccluderBuffer, GLOBALS_SLOTS,
+        GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
     },
 };
 use bytemuck::{Pod, Zeroable};
@@ -351,6 +351,9 @@ pub struct TextPass {
     /// each draw scrolls correctly without rewriting one buffer mid-pass.
     globals: Buffer,
     globals_bind_group: BindGroup,
+    /// Bound by the composite draws, over the same globals buffer as
+    /// [`Self::globals_bind_group`] and [`Self::composite_occluders`].
+    composite_globals_bind_group: BindGroup,
     /// Globals carrying the scroll-region offset; bound for the region glyph draw.
     region_globals: Buffer,
     region_globals_bind_group: BindGroup,
@@ -400,18 +403,22 @@ pub struct TextPass {
     /// through the globals uniform rather than through the split, so a region
     /// that only scrolled keeps the instances it had.
     last_region_rect: Option<(u16, u16, u16, u16)>,
-    /// The group-0 layout the three globals bind groups share, kept so they can
-    /// be rebuilt when [`Self::occluders`] reallocates.
+    /// The group-0 layout the four globals bind groups share, kept so they can
+    /// be rebuilt when either occluder buffer reallocates.
     globals_layout: BindGroupLayout,
-    /// One occluder per live panel at binding 1, shared by all three globals
-    /// bind groups. Read by the run-glyph and run-rect fragment shaders to
-    /// discard run fragments a later box covers.
-    occluders: Buffer,
-    /// The occluder list last written to [`Self::occluders`], so a frame whose
-    /// panels have not moved skips the upload. Panels change on layout events, not
-    /// per frame, so most frames match.
-    last_occluders: Vec<Occluder>,
-    occluder_capacity: usize,
+    /// One occluder per live panel at binding 1, shared by the three live
+    /// globals bind groups. Read by the run-glyph and run-rect fragment shaders
+    /// to discard run fragments a later box covers.
+    occluders: OccluderBuffer,
+    /// The occluders the composited pools read, bound by
+    /// [`Self::composite_globals_bind_group`].
+    ///
+    /// A pool occludes against a different set of panels than the live grid
+    /// does, and a frame prepares every pass before any of them draws, so one
+    /// buffer would hold whichever list was written last and hand it to every
+    /// draw. The dedup makes that worse rather than better: two lists that
+    /// differ never recognize each other's bytes, so each frame uploads twice.
+    composite_occluders: OccluderBuffer,
     atlas_layout: BindGroupLayout,
     sampler: Sampler,
     atlas_bind_group: BindGroup,
@@ -768,10 +775,12 @@ impl TextPass {
         let underline_pipeline = build_underline_pipeline(device, &shader, &globals_layout, format);
         let rect_pipeline = build_rect_pipeline(device, &shader, &globals_layout, format);
 
-        // The three globals buffers and the run-rect and glyph pipelines all
-        // read the same panel occluders at binding 1, so it is allocated before
-        // their bind groups.
-        let occluders = alloc_occluders(device, INITIAL_CAPACITY);
+        // The globals buffers and the run-rect and glyph pipelines read panel
+        // occluders at binding 1, so both lists are allocated before their bind
+        // groups.
+        let occluders = OccluderBuffer::new(device, "text occluders", INITIAL_CAPACITY);
+        let composite_occluders =
+            OccluderBuffer::new(device, "text composite occluders", INITIAL_CAPACITY);
 
         // Three globals buffers share one layout but carry a different scroll_y,
         // so the plain, region, and screen-anchored draws each scroll correctly
@@ -781,21 +790,28 @@ impl TextPass {
         let (globals, globals_bind_group) = make_globals(
             device,
             &globals_layout,
-            &occluders,
+            &occluders.buffer,
             "text globals",
             GLOBALS_SLOTS,
+        );
+        let composite_globals_bind_group = make_globals_bind_group(
+            device,
+            &globals_layout,
+            &globals,
+            &composite_occluders.buffer,
+            "text composite globals",
         );
         let (region_globals, region_globals_bind_group) = make_globals(
             device,
             &globals_layout,
-            &occluders,
+            &occluders.buffer,
             "text region globals",
             1,
         );
         let (static_globals, static_globals_bind_group) = make_globals(
             device,
             &globals_layout,
-            &occluders,
+            &occluders.buffer,
             "text static globals",
             1,
         );
@@ -867,8 +883,8 @@ impl TextPass {
             last_region_rect: None,
             globals_layout,
             occluders,
-            last_occluders: Vec::new(),
-            occluder_capacity: INITIAL_CAPACITY,
+            composite_occluders,
+            composite_globals_bind_group,
             atlas_layout,
             sampler,
             atlas_bind_group,
@@ -970,49 +986,60 @@ impl TextPass {
         self.run_shape_cache.clear();
     }
 
-    /// Upload the panel occluders, reallocating the buffer and rebuilding all
-    /// three globals bind groups when the panel count outgrows the current
-    /// capacity.
+    /// Upload the live grid's panel occluders, rebuilding all three live
+    /// globals bind groups when the list outgrows the buffer and it has to be
+    /// replaced.
     ///
-    /// A list matching the one already in the buffer is not re-sent. Panels move on
-    /// layout events rather than per frame, so most frames land here, including the
-    /// idle ones a blinking cursor drives.
+    /// See also:
+    /// - [`Self::upload_composite_occluders`] for the pools' list, which is a different one and
+    ///   needs a buffer of its own.
     fn upload_occluders(&mut self, device: &Device, queue: &Queue, occluders: &[Occluder]) {
-        if !crate::render::upload_needed(occluders, &self.last_occluders) {
+        if !self.occluders.upload(device, queue, occluders) {
             return;
         }
 
-        if occluders.len() > self.occluder_capacity {
-            self.occluder_capacity = occluders.len().next_power_of_two();
-            self.occluders = alloc_occluders(device, self.occluder_capacity);
-            self.globals_bind_group = make_globals_bind_group(
-                device,
-                &self.globals_layout,
-                &self.globals,
-                &self.occluders,
-                "text globals",
-            );
-            self.region_globals_bind_group = make_globals_bind_group(
-                device,
-                &self.globals_layout,
-                &self.region_globals,
-                &self.occluders,
-                "text region globals",
-            );
-            self.static_globals_bind_group = make_globals_bind_group(
-                device,
-                &self.globals_layout,
-                &self.static_globals,
-                &self.occluders,
-                "text static globals",
-            );
-        }
-        if !occluders.is_empty() {
-            queue.write_buffer(&self.occluders, 0, bytemuck::cast_slice(occluders));
+        self.globals_bind_group = make_globals_bind_group(
+            device,
+            &self.globals_layout,
+            &self.globals,
+            &self.occluders.buffer,
+            "text globals",
+        );
+        self.region_globals_bind_group = make_globals_bind_group(
+            device,
+            &self.globals_layout,
+            &self.region_globals,
+            &self.occluders.buffer,
+            "text region globals",
+        );
+        self.static_globals_bind_group = make_globals_bind_group(
+            device,
+            &self.globals_layout,
+            &self.static_globals,
+            &self.occluders.buffer,
+            "text static globals",
+        );
+    }
+
+    /// Upload the composited pools' panel occluders, rebuilding the composite
+    /// bind group when the list outgrows the buffer and it has to be replaced.
+    fn upload_composite_occluders(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        occluders: &[Occluder],
+    ) {
+        if !self.composite_occluders.upload(device, queue, occluders) {
+            return;
         }
 
-        self.last_occluders.clear();
-        self.last_occluders.extend_from_slice(occluders);
+        self.composite_globals_bind_group = make_globals_bind_group(
+            device,
+            &self.globals_layout,
+            &self.globals,
+            &self.composite_occluders.buffer,
+            "text composite globals",
+        );
     }
 
     /// The glyph atlas content epoch, which changes when an eviction moves a
@@ -1492,9 +1519,9 @@ impl TextPass {
         pool: u32,
         slot: usize,
     ) {
-        // The composite draws bind self.globals, so the occlusion rides that buffer
-        // alone.
-        self.upload_occluders(device, queue, occluders);
+        // The composite draws bind the composite globals group, so the occlusion
+        // rides that group's own buffer.
+        self.upload_composite_occluders(device, queue, occluders);
         let (panel_count, occlude_all) = occlusion_globals(occluders);
         // Held before the composite slot below takes the name.
         let globals_slot = slot;
@@ -2279,7 +2306,11 @@ impl TextPass {
 
         if target.glyphs.count > 0 {
             render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_bind_group(0, &self.globals_bind_group, &[globals_offset(slot)]);
+            render_pass.set_bind_group(
+                0,
+                &self.composite_globals_bind_group,
+                &[globals_offset(slot)],
+            );
             render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
             render_pass.set_vertex_buffer(0, target.glyphs.instances.slice(..));
             render_pass.draw(0..6, 0..target.glyphs.count);
@@ -2287,7 +2318,11 @@ impl TextPass {
 
         if target.underlines.count > 0 {
             render_pass.set_pipeline(&self.underline_pipeline);
-            render_pass.set_bind_group(0, &self.globals_bind_group, &[globals_offset(slot)]);
+            render_pass.set_bind_group(
+                0,
+                &self.composite_globals_bind_group,
+                &[globals_offset(slot)],
+            );
             render_pass.set_vertex_buffer(0, target.underlines.instances.slice(..));
             render_pass.draw(0..6, 0..target.underlines.count);
         }
@@ -2313,7 +2348,11 @@ impl TextPass {
 
         if target.rects.count > 0 {
             render_pass.set_pipeline(&self.rect_pipeline);
-            render_pass.set_bind_group(0, &self.globals_bind_group, &[globals_offset(slot)]);
+            render_pass.set_bind_group(
+                0,
+                &self.composite_globals_bind_group,
+                &[globals_offset(slot)],
+            );
             render_pass.set_vertex_buffer(0, target.rects.instances.slice(..));
             render_pass.draw(0..6, 0..target.rects.count);
         }
@@ -2323,7 +2362,11 @@ impl TextPass {
         }
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.globals_bind_group, &[globals_offset(slot)]);
+        render_pass.set_bind_group(
+            0,
+            &self.composite_globals_bind_group,
+            &[globals_offset(slot)],
+        );
         render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
         render_pass.set_vertex_buffer(0, target.text_runs.instances.slice(..));
         render_pass.draw(0..6, 0..target.text_runs.count);
@@ -3652,15 +3695,6 @@ fn make_globals_bind_group(
                 resource: occluders.as_entire_binding(),
             },
         ],
-    })
-}
-
-fn alloc_occluders(device: &Device, capacity: usize) -> Buffer {
-    device.create_buffer(&BufferDescriptor {
-        label: Some("text occluders"),
-        size: (capacity * size_of::<Occluder>()) as u64,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
     })
 }
 

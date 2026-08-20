@@ -419,6 +419,81 @@ impl Renderer {
         self.finish_frame(device, queue, encoder, timing);
     }
 
+    /// Draw a frame for `grid` with `pools` composited over it, into `view`.
+    ///
+    /// The headless twin of [`GpuContext::render_with_pools`]. Every pass
+    /// prepares before any of them draws, which is what a frame carrying pools
+    /// needs and what compositing them one at a time through
+    /// [`Self::composite_pool`] cannot give. Submits the frame but does not
+    /// present or poll.
+    ///
+    /// The deferred cursor is not drawn. A caller that wants one runs
+    /// [`Self::draw_cursor_over`] afterward, as it does after a composite.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_pools_into(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        view: &TextureView,
+        grid: &Grid,
+        frame: Frame<'_>,
+        pools: &[PoolComposite<'_>],
+        anchored: &[AnchoredPanel],
+    ) {
+        self.prepare_frame(device, queue, grid, &frame, anchored);
+
+        let panels = grid.panels();
+        for (slot, pool) in pools.iter().enumerate() {
+            if self.pool_scissor(pool.scissor).is_none() {
+                continue;
+            }
+            self.prepare_pool(
+                device,
+                queue,
+                pool.grid,
+                panels,
+                pool.shift_rows,
+                pool.origin_cells,
+                pool.content_changed,
+                pool.scrolled_rows,
+                pool.occludable,
+                pool.id,
+                slot,
+            );
+        }
+
+        #[cfg(feature = "perf")]
+        let timing = self.prepare_gpu_timing(device, queue);
+        #[cfg(not(feature = "perf"))]
+        let timing = false;
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        {
+            let mut render_pass = self.begin_frame_pass(&mut encoder, view, timing);
+            self.record_frame(&mut render_pass, CursorLayer::Deferred);
+
+            // A ridden panel goes over the pane composites it floats above, and
+            // under the non-pane composites, which are the box content it
+            // frames, exactly as the surface path orders them.
+            for (slot, pool) in pools.iter().enumerate() {
+                if pool.occludable
+                    && let Some(scissor) = self.pool_scissor(pool.scissor)
+                {
+                    self.record_pool(&mut render_pass, scissor, pool.id, slot);
+                }
+            }
+            self.record_riding_panels(&mut render_pass);
+            for (slot, pool) in pools.iter().enumerate() {
+                if !pool.occludable
+                    && let Some(scissor) = self.pool_scissor(pool.scissor)
+                {
+                    self.record_pool(&mut render_pass, scissor, pool.id, slot);
+                }
+            }
+        }
+        self.finish_frame(device, queue, encoder, timing);
+    }
+
     /// Upload every live-grid pass's buffers for `frame`, touching no encoder.
     ///
     /// Split from the recording so a caller compositing pools can prepare the live

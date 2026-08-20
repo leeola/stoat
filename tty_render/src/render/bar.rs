@@ -9,7 +9,7 @@
 
 use crate::render::{
     globals_offset, occlusion_globals, CellMetrics, CompositeSlot, CompositeSlots, Occluder,
-    GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+    OccluderBuffer, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use std::mem;
@@ -103,12 +103,19 @@ pub struct BarPass {
     /// One occluder per live panel, read by the fragment shader to discard bar
     /// fragments a later box covers. Bound alongside the globals, and rebuilt
     /// into a new bind group whenever it reallocates.
-    occluders: Buffer,
-    /// The occluder list last written to [`Self::occluders`], so a frame whose
-    /// panels have not moved skips the upload. Panels change on layout events, not
-    /// per frame, so most frames match.
-    last_occluders: Vec<Occluder>,
-    occluder_capacity: usize,
+    occluders: OccluderBuffer,
+    /// The occluders the composited pools read, bound by
+    /// [`Self::composite_bind_group`].
+    ///
+    /// A pool occludes against a different set of panels than the live grid
+    /// does, and a frame prepares every pass before any of them draws, so one
+    /// buffer would hold whichever list was written last and hand it to every
+    /// draw. The dedup makes that worse rather than better: two lists that
+    /// differ never recognize each other's bytes, so each frame uploads twice.
+    composite_occluders: OccluderBuffer,
+    /// Bound by the composite draws, over the same globals as
+    /// [`Self::bind_group`] and [`Self::composite_occluders`].
+    composite_bind_group: BindGroup,
     /// The uniform last written, so an unchanged frame skips that write too.
     last_globals: Option<Globals>,
     metrics: CellMetrics,
@@ -200,8 +207,16 @@ impl BarPass {
             mapped_at_creation: false,
         });
 
-        let occluders = alloc_occluders(device, INITIAL_CAPACITY);
-        let bind_group = make_bind_group(device, &bind_group_layout, &globals, &occluders);
+        let occluders = OccluderBuffer::new(device, "bar occluders", INITIAL_CAPACITY);
+        let composite_occluders =
+            OccluderBuffer::new(device, "bar composite occluders", INITIAL_CAPACITY);
+        let bind_group = make_bind_group(device, &bind_group_layout, &globals, &occluders.buffer);
+        let composite_bind_group = make_bind_group(
+            device,
+            &bind_group_layout,
+            &globals,
+            &composite_occluders.buffer,
+        );
 
         let instances = alloc_instances(device, INITIAL_CAPACITY);
 
@@ -218,9 +233,9 @@ impl BarPass {
             count: 0,
             composite_slots: CompositeSlots::new(),
             occluders,
-            last_occluders: Vec::new(),
+            composite_occluders,
+            composite_bind_group,
             last_globals: None,
-            occluder_capacity: INITIAL_CAPACITY,
             metrics,
         }
     }
@@ -287,33 +302,39 @@ impl BarPass {
         mem::swap(&mut self.built, &mut self.last_instances);
     }
 
-    /// Upload the panel occluders, reallocating the buffer and rebuilding the
-    /// bind group when the panel count outgrows the current capacity.
+    /// Upload the live grid's panel occluders, rebuilding the bind group when
+    /// the list outgrows the buffer and it has to be replaced.
     ///
-    /// A list matching the one already in the buffer is not re-sent. Panels move on
-    /// layout events rather than per frame, so most frames land here, including the
-    /// idle ones a blinking cursor drives.
+    /// See also:
+    /// - [`Self::upload_composite_occluders`] for the pools' list, which is a different one and
+    ///   needs a buffer of its own.
     fn upload_occluders(&mut self, device: &Device, queue: &Queue, occluders: &[Occluder]) {
-        if !crate::render::upload_needed(occluders, &self.last_occluders) {
-            return;
-        }
-
-        if occluders.len() > self.occluder_capacity {
-            self.occluder_capacity = occluders.len().next_power_of_two();
-            self.occluders = alloc_occluders(device, self.occluder_capacity);
+        if self.occluders.upload(device, queue, occluders) {
             self.bind_group = make_bind_group(
                 device,
                 &self.bind_group_layout,
                 &self.globals,
-                &self.occluders,
+                &self.occluders.buffer,
             );
         }
-        if !occluders.is_empty() {
-            queue.write_buffer(&self.occluders, 0, bytemuck::cast_slice(occluders));
-        }
+    }
 
-        self.last_occluders.clear();
-        self.last_occluders.extend_from_slice(occluders);
+    /// Upload the composited pools' panel occluders. See
+    /// [`Self::upload_occluders`].
+    fn upload_composite_occluders(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        occluders: &[Occluder],
+    ) {
+        if self.composite_occluders.upload(device, queue, occluders) {
+            self.composite_bind_group = make_bind_group(
+                device,
+                &self.bind_group_layout,
+                &self.globals,
+                &self.composite_occluders.buffer,
+            );
+        }
     }
 
     /// Upload one instance per bar of a pool grid being composited.
@@ -349,7 +370,7 @@ impl BarPass {
         pool: u32,
         slot: usize,
     ) {
-        self.upload_occluders(device, queue, occluders);
+        self.upload_composite_occluders(device, queue, occluders);
         let (panel_count, occlude_all) = occlusion_globals(occluders);
 
         let globals = Globals {
@@ -422,7 +443,7 @@ impl BarPass {
         };
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[globals_offset(slot)]);
+        render_pass.set_bind_group(0, &self.composite_bind_group, &[globals_offset(slot)]);
         render_pass.set_vertex_buffer(0, target.instances.slice(..));
         render_pass.draw(0..6, 0..target.count);
     }
@@ -443,15 +464,6 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
         label: Some("bar instances"),
         size: (capacity * size_of::<BarInstance>()) as u64,
         usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
-}
-
-fn alloc_occluders(device: &Device, capacity: usize) -> Buffer {
-    device.create_buffer(&BufferDescriptor {
-        label: Some("bar occluders"),
-        size: (capacity * size_of::<Occluder>()) as u64,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
 }

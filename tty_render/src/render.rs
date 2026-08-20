@@ -3,7 +3,7 @@
 use bytemuck::{Pod, Zeroable};
 use std::ops::Range;
 use stoatty_term::{grid::Panel, term::Damage};
-use wgpu::{Buffer, Queue};
+use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, Queue};
 
 pub mod background;
 pub mod bar;
@@ -273,6 +273,76 @@ impl<T> CompositeSlots<T> {
             .find(|(id, _)| *id == pool)
             .map(|(_, slot)| slot)
     }
+}
+
+/// One pass's occluder storage buffer and the list last written to it.
+///
+/// A pass that occludes needs two of these, because the live grid and the pools
+/// composited over it occlude against different panels. A frame prepares every
+/// pass before any of them draws, so a shared buffer holds whichever list was
+/// written last and every draw reads that one. The dedup below turns that from a
+/// wrong frame into a wrong frame that also uploads twice: two lists that differ
+/// never recognize each other's bytes as already present.
+pub(crate) struct OccluderBuffer {
+    pub(crate) buffer: Buffer,
+    /// What the buffer holds, so a frame whose panels have not moved skips the
+    /// upload. Panels change on layout events rather than per frame, so most
+    /// frames match.
+    last: Vec<Occluder>,
+    capacity: usize,
+    /// Names the buffer for the debug label, kept because a grow allocates a new
+    /// one under the same name.
+    label: &'static str,
+}
+
+impl OccluderBuffer {
+    pub(crate) fn new(device: &Device, label: &'static str, capacity: usize) -> OccluderBuffer {
+        OccluderBuffer {
+            buffer: alloc_occluders(device, label, capacity),
+            last: Vec::new(),
+            capacity,
+            label,
+        }
+    }
+
+    /// Write `occluders` into the buffer, reporting whether the buffer was
+    /// replaced.
+    ///
+    /// A replaced buffer leaves every bind group over it naming one the GPU no
+    /// longer has, so a `true` answer means the caller has to rebuild its own.
+    /// A list the buffer already holds writes nothing and answers `false`.
+    pub(crate) fn upload(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        occluders: &[Occluder],
+    ) -> bool {
+        if !upload_needed(occluders, &self.last) {
+            return false;
+        }
+
+        let grown = occluders.len() > self.capacity;
+        if grown {
+            self.capacity = occluders.len().next_power_of_two();
+            self.buffer = alloc_occluders(device, self.label, self.capacity);
+        }
+        if !occluders.is_empty() {
+            queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(occluders));
+        }
+
+        self.last.clear();
+        self.last.extend_from_slice(occluders);
+        grown
+    }
+}
+
+fn alloc_occluders(device: &Device, label: &'static str, capacity: usize) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some(label),
+        size: (capacity * size_of::<Occluder>()) as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 /// Whether `built` differs from what was last uploaded, and so has to be sent
