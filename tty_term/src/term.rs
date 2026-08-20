@@ -2189,9 +2189,17 @@ impl Terminal {
             project_term_cells(grid, &fill.term, &self.theme, &self.palette);
             pool.page_pool
                 .set_decorations(fill.index, text_runs, bars, polylines);
-            pool.content_version = pool.content_version.wrapping_add(1);
-            let window = pool.region.window;
-            self.mark_window_dirty(window);
+
+            // A caller watching this version refills every page it buffers
+            // whenever the version moves, so most fills repaint bytes that did
+            // not change. Reporting one of those costs a recompose of
+            // everything the pool feeds, which is why the version moves only
+            // when the page does.
+            if pool.page_pool.content_changed(fill.index) {
+                pool.content_version = pool.content_version.wrapping_add(1);
+                let window = pool.region.window;
+                self.mark_window_dirty(window);
+            }
         }
 
         // Parked whether or not the page landed, since a pool dropped mid-fill
@@ -3079,7 +3087,7 @@ mod tests {
         insert_room, mark_selection_change, whole_row, Arc, Cursor, CursorShape, Damage,
         MinimapJournal, SelectionRange, TermEvent, Terminal, ESC, MAX_CAPTURE_BYTES,
         MAX_DECORATIONS, MAX_MINIMAP_LINES, MAX_MINIMAP_STORES, MAX_MINIMAP_VIEWS, MAX_POOLS,
-        XTVERSION_REPLY,
+        PAGE_POOL_CAPACITY, XTVERSION_REPLY,
     };
     use crate::{
         grid::{
@@ -5910,6 +5918,64 @@ mod tests {
             ' ',
             "page content never reaches the live grid"
         );
+    }
+
+    /// Paint `text` into page `index` of pool 2, which is declared against
+    /// window 3, and report the pool version and window events it produced.
+    fn refill(terminal: &mut Terminal, index: u64, text: &[u8]) -> (u64, Vec<TermEvent>) {
+        terminal.take_events();
+        let mut stream = encode_fill(&FillCommand { pool: 2, index });
+        stream.extend_from_slice(text);
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+        (
+            terminal.pool_content_version(2).expect("pool declared"),
+            terminal.take_events(),
+        )
+    }
+
+    /// A caller watching the version refills every page it buffers whenever the
+    /// version moves, so most fills repaint bytes that did not change. Each one
+    /// reported as a change costs a recompose of everything the pool feeds.
+    #[test]
+    fn an_identical_refill_moves_neither_the_version_nor_the_window() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_window_pool(&mut terminal, 2, 3);
+
+        let (first, painted) = refill(&mut terminal, 0, b"hi");
+        assert_eq!(painted, vec![TermEvent::WindowDirty(3)]);
+
+        let (again, quiet) = refill(&mut terminal, 0, b"hi");
+        assert_eq!(again, first, "the same bytes are not a new version of them");
+        assert_eq!(quiet, Vec::new(), "and nothing needs repainting");
+    }
+
+    #[test]
+    fn a_refill_that_paints_something_else_moves_both() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_window_pool(&mut terminal, 2, 3);
+
+        let (first, _) = refill(&mut terminal, 0, b"hi");
+        let (second, dirtied) = refill(&mut terminal, 0, b"ho");
+
+        assert_ne!(second, first);
+        assert_eq!(dirtied, vec![TermEvent::WindowDirty(3)]);
+    }
+
+    #[test]
+    fn a_slot_taking_another_page_moves_both_however_it_looks() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_window_pool(&mut terminal, 2, 3);
+
+        let (first, _) = refill(&mut terminal, 0, b"hi");
+        // A page a whole capacity along shares page 0's slot, so this lands the
+        // same bytes in the same place and only the page index differs. The
+        // pool composes by document row through that index, so what the slot
+        // answers for moved even though what it holds did not.
+        let (second, dirtied) = refill(&mut terminal, PAGE_POOL_CAPACITY as u64, b"hi");
+
+        assert_ne!(second, first, "the slot answers for a different page now");
+        assert_eq!(dirtied, vec![TermEvent::WindowDirty(3)]);
     }
 
     /// The commit copies the fill's screen a row at a time, mapping each page row to

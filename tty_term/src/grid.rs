@@ -6,8 +6,10 @@
 //! are stored fully resolved, so the renderer needs no palette of its own.
 
 use from_command::{bar_from_command, fill_polyline, text_run_from_command, StoredTextRun};
+use rustc_hash::FxHasher;
 use std::{
     collections::HashMap,
+    hash::{Hash, Hasher},
     mem,
     ops::{BitOr, BitOrAssign, Range},
     sync::Arc,
@@ -287,6 +289,16 @@ impl Grid {
         self.popovers_epoch += 1;
         self.text_runs_epoch += 1;
         self.minimap_epoch += 1;
+    }
+
+    /// Feed everything this grid's cells put on screen into `hasher`.
+    ///
+    /// The border table goes in alongside the cells because [`Self::clear`]
+    /// resets it, so the same [`BorderId`] names different borders across two
+    /// fills. Hashing the id alone reads two different grids as one.
+    pub(crate) fn hash_content(&self, hasher: &mut impl Hasher) {
+        self.cells.hash(hasher);
+        self.border_table.hash(hasher);
     }
 
     /// The border set `id` names, or the borderless set for an id this grid
@@ -844,6 +856,8 @@ impl PagePool {
         let pages = (0..capacity.max(1))
             .map(|_| Page {
                 index: None,
+                refilled: false,
+                content_hash: 0,
                 grid: Grid::new(rows, cols),
                 text_runs: Vec::new(),
                 bars: Vec::new(),
@@ -864,12 +878,34 @@ impl PagePool {
     pub fn fill(&mut self, index: u64) -> &mut Grid {
         let slot = self.slot(index);
         let page = &mut self.pages[slot];
+        page.refilled = page.index == Some(index);
         page.index = Some(index);
         page.grid.clear();
         page.text_runs.clear();
         page.bars.clear();
         page.polylines.clear();
         &mut page.grid
+    }
+
+    /// Whether the page just written into `index`'s slot renders differently
+    /// from what that slot last held, recording the new content for the next
+    /// comparison either way.
+    ///
+    /// Called once per fill, after the cells are painted and
+    /// [`Self::set_decorations`] has run, since it digests both. `true` for a
+    /// slot that changed page, whose composition moved whatever the page holds.
+    ///
+    /// A pool refills pages that did not change, which is what this exists for.
+    /// A caller watching one version refills every buffered page when it moves,
+    /// and most of those repaint the same bytes. Reporting that as a change
+    /// costs a recompose of everything the pool feeds.
+    pub fn content_changed(&mut self, index: u64) -> bool {
+        let slot = self.slot(index);
+        let hash = self.pages[slot].content_hash();
+        let page = &mut self.pages[slot];
+        let same = page.refilled && page.content_hash == hash;
+        page.content_hash = hash;
+        !same
     }
 
     /// Store the page-targeted decorations captured for document page `index`,
@@ -1021,6 +1057,20 @@ impl DocumentOffset {
 /// across pages.
 struct Page {
     index: Option<u64>,
+    /// Whether the fill now open recycled this slot onto the page it already
+    /// held, so a commit tells a refill from a slide onto a new page.
+    ///
+    /// A slide always counts as a change. The pool composes by document row
+    /// through the page index, so reading a different page out of this slot
+    /// moves the composition whatever that page holds.
+    refilled: bool,
+    /// Digest of what this slot last committed, so a refill that paints the
+    /// same bytes is recognized as one.
+    ///
+    /// A digest rather than the content itself because [`PagePool::fill`]
+    /// clears the slot before the caller paints, so there is nothing left to
+    /// compare against by the time there is something to compare.
+    content_hash: u64,
     grid: Grid,
     /// Page-targeted text runs captured from the fill that painted this slot,
     /// page-local and pre-converted to the grid form at capture time. Empty for a
@@ -1035,11 +1085,23 @@ struct Page {
     polylines: Vec<Polyline>,
 }
 
+impl Page {
+    /// A digest of everything this slot puts on screen.
+    fn content_hash(&self) -> u64 {
+        let mut hasher = FxHasher::default();
+        self.grid.hash_content(&mut hasher);
+        self.text_runs.hash(&mut hasher);
+        self.bars.hash(&mut hasher);
+        self.polylines.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
 /// A single grid cell: one character and how to render it.
 ///
 /// The base attribute set every cell carries. stoatty-specific per-cell
 /// attributes (border edges, popover anchors) are added by later feature items.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Cell {
     pub ch: char,
     pub fg: Rgb,
@@ -1110,7 +1172,7 @@ impl Default for Cell {
 /// See also:
 /// - [`Grid::cell_borders`] to read a cell's set.
 /// - [`Grid::set_border_edge`] to stamp one edge of a run of cells.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct BorderId(u16);
 
 impl BorderId {
@@ -1132,7 +1194,7 @@ pub enum BorderEdge {
 /// Each edge is independently present or absent. The renderer draws a line
 /// along every present edge, so a region framed by setting the perimeter cells'
 /// outer edges reads as a panel border without any box-drawing glyphs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Borders {
     pub top: Option<Border>,
     pub right: Option<Border>,
@@ -1141,7 +1203,7 @@ pub struct Borders {
 }
 
 /// A border drawn along one cell edge.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Border {
     pub style: BorderStyle,
     pub color: Rgb,
@@ -1153,7 +1215,7 @@ pub struct Border {
 /// mirror the box-drawing line weights. [`BorderStyle::Rounded`] is a light line
 /// whose corners arc where two adjacent edges of a cell meet, so a framed region
 /// reads as a panel with rounded corners.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum BorderStyle {
     Light,
     Heavy,
@@ -1187,7 +1249,7 @@ pub enum PanelShadow {
 /// [`Scale::Single`].
 ///
 /// See also [`Grid::place_scaled`], which stamps a block.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Scale {
     #[default]
     Single,
@@ -1459,7 +1521,7 @@ pub enum IconKind {
 /// the run can sit at a fractional position; [`Self::scale`] is the glyph size
 /// in 256ths of the cell size (256 = grid size). The run advances one scaled
 /// cell width per character and is vertically centered within the target row.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TextRun {
     pub col: i16,
     pub row: i16,
@@ -1482,7 +1544,7 @@ pub struct TextRun {
 /// along the cell width, [`Self::y`] and [`Self::height`] along the cell height,
 /// all in sixteenths of a cell (16 = one cell), so a bar can be a fraction of a
 /// cell wide.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Bar {
     pub x: i16,
     pub y: i16,
@@ -1500,7 +1562,7 @@ pub struct Bar {
 /// axis-aligned. Every coordinate and [`Self::width`] is in sixteenths of a
 /// cell (16 = one cell). A single point, or two equal ones, draws a dot, which
 /// is how the commit graph marks a node.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Polyline {
     /// Vertices in draw order, each `[x, y]`.
     pub points: Vec<[i16; 2]>,
@@ -1600,7 +1662,7 @@ pub struct MinimapView {
 ///
 /// Mirrors the standard VT underline styles (SGR `4:1`-`4:5`); the renderer
 /// draws each as a distinct shape rather than a glyph.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum UnderlineStyle {
     None,
     Straight,
@@ -1615,7 +1677,7 @@ pub enum UnderlineStyle {
 /// The grid stores resolved colors rather than terminal-palette references:
 /// named and indexed colors are resolved upstream when the driver projects
 /// parsed content onto the grid, so the renderer consumes concrete channels.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Rgb {
     pub r: u8,
     pub g: u8,
@@ -1654,7 +1716,7 @@ impl Rgba {
 /// A compact bitset rather than a struct of bools so a [`Cell`] stays small and
 /// `Copy`. Underline is not here: it is a styled, separately-colored decoration,
 /// so it rides on [`Cell::underline`] and [`Cell::underline_color`] instead.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Flags(u8);
 
 impl Flags {

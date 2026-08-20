@@ -4256,6 +4256,7 @@ dependencies = [
  "image",
  "memchr",
  "parking_lot",
+ "rustc-hash 2.1.2",
  "stoatty_protocol",
  "tracing",
 ]
