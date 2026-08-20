@@ -1,8 +1,10 @@
 // Panel pass. One instance per off-grid modal-chrome region draws a soft drop
 // shadow, an optional interior fill, and a hairline stroke frame around a cell
 // rectangle with rounded corners. Unlike an overlay it is not opaque: it is
-// chrome layered with the grid, so it draws before the grid text and the framed
-// cells render over the fill.
+// chrome layered with the grid, so the body draws before the grid text and the
+// framed cells render over the fill. The stroke draws after that text instead:
+// a frame surrounds the cells it frames, and ink reaching a cell edge would
+// otherwise break the line around it.
 
 struct Globals {
     resolution: vec2<f32>,

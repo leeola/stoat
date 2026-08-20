@@ -198,11 +198,15 @@ impl GpuTimer {
     }
 }
 
-/// Where a frame's cursor block draws.
+/// Where a frame's cursor block and panel frame strokes draw.
 ///
-/// A plain frame draws it among the grid's layers, beneath the overlays. A frame
-/// compositing pools cannot, because the pools paint over the cursor's cell. The
-/// block has to follow them, so it is recorded after the pools instead.
+/// A plain frame draws them among the grid's layers, beneath the overlays. A
+/// frame compositing pools cannot, because the pools paint over the cells they
+/// sit on. Both have to follow the composites, so they are recorded after them.
+///
+/// That leaves the deferred strokes above the overlays and icons the frame
+/// recorded earlier, where an inline frame puts them below. The cursor has
+/// carried that same asymmetry since pools existed.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum CursorLayer {
     /// Among the grid's layers, below the overlays and icons.
@@ -521,7 +525,20 @@ impl Renderer {
     /// The scissor is restored to the full surface afterward, since the draws
     /// that follow set their own.
     pub(crate) fn record_riding_panels(&self, render_pass: &mut RenderPass<'_>) {
-        self.panel.draw_riding(render_pass);
+        self.panel.draw_riding_under(render_pass);
+        render_pass.set_scissor_rect(0, 0, self.width, self.height);
+    }
+
+    /// Record every panel's frame stroke, for a frame that deferred them.
+    ///
+    /// Run after the pool composites. They paint over the cells a frame sits on,
+    /// so a stroke recorded before them is a stroke a gliding pane erases.
+    ///
+    /// Leaves the full-surface scissor set, since the riding strokes each apply
+    /// their own and the draws that follow set theirs.
+    pub(crate) fn record_panel_strokes(&self, render_pass: &mut RenderPass<'_>) {
+        self.panel.draw_stroke(render_pass);
+        self.panel.draw_riding_stroke(render_pass);
         render_pass.set_scissor_rect(0, 0, self.width, self.height);
     }
 
@@ -531,7 +548,9 @@ impl Renderer {
         // two sides a z-index can name to a terminal that draws its text in one
         // pass.
         self.image.draw_under(render_pass);
-        self.panel.draw(render_pass);
+        // The panel's body only. Its frame stroke records after the text below,
+        // so glyph ink reaching a cell edge cannot break the line around it.
+        self.panel.draw_under(render_pass);
         self.text.draw(render_pass);
         self.text.draw_region_text(render_pass);
         // The region draw leaves its scissor set, so restore the full
@@ -557,7 +576,11 @@ impl Renderer {
         self.minimap.draw(render_pass);
         render_pass.set_scissor_rect(0, 0, self.width, self.height);
         self.text.draw_text_runs(render_pass);
+        // The frame the body above belongs to, over everything it surrounds. A
+        // deferred frame leaves it to the caller for the cursor's reason: the
+        // pool composites paint over the cells it sits on.
         if cursor == CursorLayer::Inline {
+            self.panel.draw_stroke(render_pass);
             self.background.draw_cursor(render_pass);
         }
         self.overlay.draw(render_pass);
@@ -1519,9 +1542,11 @@ impl GpuContext {
                 }
             }
 
-            // A pool leaves its own scissor set, so the cursor starts from the full
-            // surface and applies its own.
+            // A pool leaves its own scissor set, so the strokes start from the full
+            // surface and the riding ones apply their own.
             render_pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            // Every frame stroke, now that nothing left will paint over it.
+            self.renderer.record_panel_strokes(&mut render_pass);
             self.renderer
                 .record_cursor_over(&mut render_pass, cursor_scissor);
         }
@@ -1878,6 +1903,149 @@ mod tests {
             near(bands.0, live_bg) && near(bands.1, gray) && near(bands.2, white),
             "one pass must leave the live grid where no pool covers it and each pool \
              inside its own scissor: got {bands:?}"
+        );
+    }
+
+    /// A pool composite paints over the cells a panel frame sits on, so a
+    /// stroke recorded before it is a stroke a gliding pane erases. The pools
+    /// path defers the strokes for that reason, the same way it defers the
+    /// cursor.
+    #[test]
+    fn a_deferred_panel_stroke_survives_the_pool_that_covers_its_cells() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("deferred panel stroke test: no wgpu adapter available, skipping");
+            return;
+        };
+
+        let format = TextureFormat::Rgba8Unorm;
+        let font_size = 30;
+        let cell = crate::render::cell_size(font_size, 1.0);
+        let (cell_w, cell_h) = (cell[0], cell[1].round() as u32);
+        let (width, height) = (128u32, cell_h * 4);
+        let (live_bg, pool_bg) = (Rgb::new(0, 0, 90), Rgb::new(80, 80, 80));
+
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("deferred stroke target"),
+            size: Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&TextureViewDescriptor::default());
+
+        let mut renderer = Renderer::new(
+            &device,
+            format,
+            [width, height],
+            build_font_system(),
+            FontConfig {
+                size: font_size,
+                scale_factor: 1.0,
+                family: &["JetBrains Mono".to_owned()],
+                ligatures: true,
+            },
+            live_bg,
+            Rgb::new(255, 255, 255),
+        );
+
+        let (rows, cols) = renderer.grid_size();
+        assert!(rows >= 4 && cols >= 6, "grid too small: {rows}x{cols}");
+
+        // A panel whose left edge falls inside the pool's band, so the composite
+        // covers the cells the frame is drawn on.
+        let mut live = Grid::new(rows, cols);
+        live.set_panels(vec![stoatty_term::grid::Panel {
+            top: 0,
+            left: 2,
+            width: 3,
+            height: rows as u16,
+            style: stoatty_term::grid::BorderStyle::Heavy,
+            border: Rgb::new(255, 0, 0),
+            corner_radius: 0,
+            fill: None,
+            shadow: stoatty_term::grid::PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+            anchor: None,
+            seq: 0,
+        }]);
+
+        let mut pool = Grid::new(rows, cols);
+        for row in 0..rows {
+            for col in 0..cols {
+                pool.get_mut(row, col).bg = pool_bg;
+            }
+        }
+
+        let no_decoration = Damage::Partial(Vec::new());
+        let frame = Frame {
+            cursor: None,
+            cursor_corners: None,
+            scroll: Scroll {
+                grid: 0.0,
+                document: 0.0,
+                scrollback: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage: &Damage::Full,
+            decoration_damage: &no_decoration,
+            scrolled_rows: 0,
+        };
+
+        // Covers the middle band, which the panel's left edge runs through.
+        let scissor = [0, cell_h, width, cell_h * 2];
+        renderer.prepare_frame(&device, &queue, &live, &frame, &[]);
+        renderer.prepare_pool(
+            &device,
+            &queue,
+            &pool,
+            &[],
+            0.0,
+            [0.0; 2],
+            true,
+            None,
+            true,
+            3,
+            0,
+        );
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        {
+            let mut render_pass = renderer.begin_frame_pass(&mut encoder, &view, false);
+            renderer.record_frame(&mut render_pass, CursorLayer::Deferred);
+            let scissor = renderer
+                .pool_scissor(scissor)
+                .expect("pool scissor is inside the target");
+            renderer.record_pool(&mut render_pass, scissor, 3, 0);
+            render_pass.set_scissor_rect(0, 0, width, height);
+            renderer.record_panel_strokes(&mut render_pass);
+        }
+        renderer.finish_frame(&device, &queue, encoder, false);
+
+        let shot = read_back(&device, &queue, &target, width, height);
+        let at = |x: u32, y: u32| {
+            let i = ((y * width + x) * 4) as usize;
+            [shot[i], shot[i + 1], shot[i + 2]]
+        };
+
+        let edge_x = (2.0 * cell_w).round() as u32;
+        let inside_pool = cell_h + cell_h / 2;
+        let reddest = (edge_x.saturating_sub(1)..=edge_x + 1)
+            .map(|x| at(x, inside_pool))
+            .max_by_key(|[r, g, _]| i32::from(*r) - i32::from(*g))
+            .expect("pixels across the edge");
+
+        assert!(
+            reddest[0] > 200 && reddest[1] < 100,
+            "the frame survives the composite covering its cells, got {reddest:?}",
         );
     }
 

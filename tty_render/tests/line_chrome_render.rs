@@ -12,7 +12,7 @@ use stoatty_render::{
     render::cell_size,
 };
 use stoatty_term::{
-    grid::{Border, BorderEdge, BorderStyle, Grid, Rgb},
+    grid::{Border, BorderEdge, BorderStyle, Grid, Panel, PanelShadow, Rgb},
     term::Damage,
 };
 use wgpu::{
@@ -139,6 +139,125 @@ fn a_cell_border_draws_over_the_block_glyph_filling_its_cell() {
         red > 0,
         "the bottom border should paint over the block glyph filling the cell, \
          but every pixel along that edge is the glyph's own ink"
+    );
+}
+
+/// A panel's frame surrounds the cells it frames, so glyph ink reaching a cell
+/// edge must not break the line around it. The block glyph is the adversarial
+/// case again: it fills its cell box exactly, so it covers every pixel of an
+/// edge it sits beside.
+#[test]
+fn a_panel_frame_draws_over_the_glyphs_it_surrounds() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("line_chrome_render: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let format = TextureFormat::Rgba8Unorm;
+    let font_size = 24;
+    let cell = cell_size(font_size, 1.0);
+    let (cell_w, cell_h) = (cell[0], cell[1]);
+    let (width, height) = (256u32, (cell_h * 8.0).round() as u32);
+
+    let surface = Rgb::new(0, 0, 0);
+    let target = device.create_texture(&TextureDescriptor {
+        label: Some("panel stroke target"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&TextureViewDescriptor::default());
+
+    let mut renderer = Renderer::new(
+        &device,
+        format,
+        [width, height],
+        build_font_system(),
+        FontConfig {
+            size: font_size,
+            scale_factor: 1.0,
+            family: &["JetBrains Mono".to_owned()],
+            ligatures: true,
+        },
+        surface,
+        Rgb::new(255, 255, 255),
+    );
+
+    let (rows, cols) = renderer.grid_size();
+    assert!(rows >= 6 && cols >= 8, "grid too small: {rows}x{cols}");
+
+    let mut grid = Grid::new(rows, cols);
+    // Block glyphs on both sides of the panel's left edge, each filling its cell
+    // exactly, so the frame has ink to survive on either side of it.
+    for col in [2, 3] {
+        let cell = grid.get_mut(2, col);
+        cell.ch = '\u{2588}';
+        cell.fg = Rgb::new(255, 255, 255);
+        cell.bg = surface;
+    }
+    grid.set_panels(vec![Panel {
+        top: 1,
+        left: 3,
+        width: 4,
+        height: 3,
+        style: BorderStyle::Heavy,
+        border: Rgb::new(255, 0, 0),
+        corner_radius: 0,
+        fill: Some(Rgb::new(0, 0, 60)),
+        shadow: PanelShadow::None_,
+        inset_x: 0,
+        above_pools: false,
+        anchor: None,
+        seq: 0,
+    }]);
+
+    renderer.render_into(
+        &device,
+        &queue,
+        &view,
+        &grid,
+        Frame {
+            cursor: None,
+            cursor_corners: None,
+            scroll: Scroll {
+                grid: 0.0,
+                document: 0.0,
+                scrollback: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage: &Damage::Full,
+            decoration_damage: &Damage::Partial(Vec::new()),
+            scrolled_rows: 0,
+        },
+    );
+
+    let pixels = read_back(&device, &queue, &target, width, height);
+    let at = |x: u32, y: u32| -> [u8; 3] {
+        let i = ((y * width + x) * 4) as usize;
+        [pixels[i], pixels[i + 1], pixels[i + 2]]
+    };
+
+    // The panel's left edge, at the boundary between the two block glyphs.
+    let edge_x = (3.0 * cell_w).round() as u32;
+    let mid_y = (2.5 * cell_h) as u32;
+
+    let reddest = (edge_x.saturating_sub(1)..=edge_x + 1)
+        .map(|x| at(x, mid_y))
+        .max_by_key(|[r, g, _]| i32::from(*r) - i32::from(*g))
+        .expect("pixels across the edge");
+
+    assert!(
+        reddest[0] > 200 && reddest[1] < 100,
+        "the frame survives the glyphs flanking it, got {reddest:?}",
     );
 }
 

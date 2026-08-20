@@ -1238,7 +1238,8 @@ pub struct Overlay {
 /// cell rectangle at
 /// (`top`, `left`). The framed cells keep rendering their own content, so unlike
 /// an opaque overlay the panel is chrome layered with the grid rather than over
-/// it.
+/// it. The frame itself is the one part that draws over everything it
+/// surrounds, so a glyph reaching a cell edge cannot break the line.
 ///
 /// [`Self::fill`] is [`Some`] to paint the interior that color, or [`None`] to
 /// leave the cells' own backgrounds showing through.

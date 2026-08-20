@@ -3,9 +3,14 @@
 //! Draws each [`Panel`] as a soft drop shadow confined to the box exterior, an
 //! optional interior fill, and a hairline stroke frame with rounded corners.
 //! Unlike the opaque overlay pass, a panel is chrome layered with the grid
-//! rather than over it, so this pass runs before the grid text. The framed cells
+//! rather than over it, so the body runs before the grid text. The framed cells
 //! render over the fill, and text outside the frame renders over the shadow. An
 //! unfilled panel leaves its interior showing the grid beneath it.
+//!
+//! The frame stroke is the exception, and the reason this pass draws in two
+//! halves. A frame surrounds the cells it frames, so glyph ink reaching a cell
+//! edge would break the line around it. The stroke records after the text, and
+//! in a frame compositing pools after those composites too.
 
 use crate::render::{AnchoredPanel, CellMetrics};
 use bytemuck::{Pod, Zeroable};
@@ -298,20 +303,11 @@ impl PanelPass {
         mem::swap(&mut self.built, &mut self.last_instances);
     }
 
-    /// Record the panel draw into `render_pass`.
+    /// Record the shadow, fill, and overhang of every non-riding panel.
     ///
     /// A no-op when the grid carries no panel. Run before the grid text, so the
-    /// framed cells render over the fill.
-    pub fn draw(&self, render_pass: &mut RenderPass<'_>) {
-        if self.count == 0 {
-            return;
-        }
-
-        self.draw_under(render_pass);
-        self.draw_stroke(render_pass);
-    }
-
-    /// Record the shadow, fill, and overhang of every non-riding panel.
+    /// framed cells render over the fill. The frame stroke that belongs to this
+    /// body is [`Self::draw_stroke`], recorded after that text.
     pub fn draw_under(&self, render_pass: &mut RenderPass<'_>) {
         self.draw_slots(render_pass, &self.pipeline_under);
     }
@@ -347,17 +343,11 @@ impl PanelPass {
         }
     }
 
-    /// Draw the panels riding a compositing pool, each clipped to its host.
+    /// Record the shadow, fill, and overhang of every riding panel.
     ///
     /// Recorded after the host's composite rather than with the rest of the
-    /// chrome, so the frame lands over the pooled surface it belongs to instead
+    /// chrome, so the body lands over the pooled surface it belongs to instead
     /// of being painted over by it. A no-op on a frame with no ride.
-    pub fn draw_riding(&self, render_pass: &mut RenderPass<'_>) {
-        self.draw_riding_under(render_pass);
-        self.draw_riding_stroke(render_pass);
-    }
-
-    /// Record the shadow, fill, and overhang of every riding panel.
     pub fn draw_riding_under(&self, render_pass: &mut RenderPass<'_>) {
         self.draw_riding_slots(render_pass, &self.pipeline_under);
     }
@@ -575,7 +565,10 @@ mod tests {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.draw(&mut render_pass);
+            // Both halves, in the order the frame chain records them, so this
+            // measures the composite a real frame produces.
+            pass.draw_under(&mut render_pass);
+            pass.draw_stroke(&mut render_pass);
         }
         encoder.copy_texture_to_buffer(
             TexelCopyTextureInfo {
