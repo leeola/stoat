@@ -920,6 +920,73 @@ mod tests {
         );
     }
 
+    /// The search pairs two similar comments through a replacement edge rather
+    /// than as two unrelated runs. That pairing has to reach the reader: the
+    /// pair carries down to the char refinement, which narrows it to the word
+    /// that changed.
+    #[test]
+    fn a_one_word_edit_inside_a_similar_comment_refines_to_that_word() {
+        let lhs = "// step aaa here\n";
+        let rhs = "// step zzz here\n";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        assert_eq!(
+            (
+                refined(&result, Side::Lhs, lhs),
+                refined(&result, Side::Rhs, rhs)
+            ),
+            (
+                (DiffChangeKind::Replaced, true, vec!["aaa"]),
+                (DiffChangeKind::Replaced, true, vec!["zzz"])
+            ),
+            "the pair narrows to the one word that changed, on both sides"
+        );
+    }
+
+    /// A string atom takes the same replacement edge a comment does, so a word
+    /// edited inside a longer literal narrows the same way.
+    #[test]
+    fn a_one_word_edit_inside_a_similar_string_refines_to_that_word() {
+        let lhs = "fn f() { let s = \"one aaa three\"; }\n";
+        let rhs = "fn f() { let s = \"one zzz three\"; }\n";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        assert_eq!(
+            (
+                refined(&result, Side::Lhs, lhs),
+                refined(&result, Side::Rhs, rhs)
+            ),
+            (
+                (DiffChangeKind::Replaced, true, vec!["aaa"]),
+                (DiffChangeKind::Replaced, true, vec!["zzz"])
+            ),
+            "the literal keeps its unchanged words out of the mark"
+        );
+    }
+
+    /// One side's change, as its kind, its prose flag, and the text its refined
+    /// spans cover. An unrefined change reports an empty span list.
+    fn refined<'a>(
+        result: &DiffResult,
+        side: Side,
+        text: &'a str,
+    ) -> (DiffChangeKind, bool, Vec<&'a str>) {
+        let change = result
+            .changes
+            .iter()
+            .find(|c| c.side == side)
+            .unwrap_or_else(|| panic!("a change on the {side:?} side"));
+        (
+            change.kind,
+            change.prose,
+            change
+                .refined_spans
+                .iter()
+                .map(|range| &text[range.clone()])
+                .collect(),
+        )
+    }
+
     /// A run coalesces byte-adjacent atoms of one kind, and one code atom in it
     /// is enough to end its claim on prose.
     #[test]

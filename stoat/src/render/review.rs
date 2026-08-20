@@ -2900,6 +2900,30 @@ mod tests {
         );
     }
 
+    /// The search reads two similar comments as a pair rather than as two
+    /// unrelated runs, and the pair has to reach the reader. Without it the row
+    /// arrives gutter-marked with nothing receding and nothing bold, saying
+    /// only that the line changed somewhere.
+    #[test]
+    fn diff_view_marks_the_changed_word_of_a_similar_comment() {
+        let h = diff_harness("// step aaa here\n", "// step zzz here\n");
+        let buf = h.rendered_buffer();
+
+        let row = (0..buf.area.height)
+            .find(|&y| line_text(buf, y, 68..buf.area.width).contains("zzz"))
+            .expect("the edited comment rendered on the right");
+        let bold = |cols: std::ops::Range<u16>| {
+            cols.filter(|&x| buf[(x, row)].modifier.contains(Modifier::BOLD))
+                .map(|x| buf[(x, row)].symbol().to_string())
+                .collect::<String>()
+        };
+        assert_eq!(
+            (bold(68..buf.area.width), bold(8..59)),
+            ("zzz".to_string(), "aaa".to_string()),
+            "each column marks its own changed word and leaves the rest of the comment alone"
+        );
+    }
+
     /// Bold says "these chars differ from the ones beside them in the other
     /// text". Added prose has no counterpart to differ from, so it stays plain
     /// however unstructured it is.

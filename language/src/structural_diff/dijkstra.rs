@@ -499,18 +499,14 @@ pub fn populate_change_map(
                     rhs_changes.mark(rhs_id, ChangeKind::Unchanged);
                 }
             },
-            Edge::ReplacedComment { .. } | Edge::ReplacedString { .. } => {
-                // The replacement edge pairs two atoms structurally rather
-                // than emitting two Novel runs. Both sides are marked
-                // Unchanged so collect_changes skips them. Surfacing the
-                // similarity itself is a follow-up concern.
-                if let Some(lhs_id) = step.lhs {
-                    lhs_changes.mark(lhs_id, ChangeKind::Unchanged);
-                }
-                if let Some(rhs_id) = step.rhs {
-                    rhs_changes.mark(rhs_id, ChangeKind::Unchanged);
-                }
-            },
+            // A replacement edge pairs two similar atoms structurally, which is
+            // what keeps a tweaked comment beside its counterpart instead of
+            // matching against something else. It marks neither side, leaving
+            // both Pending so the run pairing and the char refinement narrow
+            // the pair to the chars that actually differ. Marking them
+            // Unchanged would pair them and then hide what the pairing found.
+            Edge::ReplacedComment { .. } | Edge::ReplacedString { .. } => {},
+
             // Novel edges leave the node Pending. The downstream collector
             // emits it as a Novel DiffChange.
             Edge::NovelAtomLHS | Edge::EnterNovelDelimiterLHS => {},
