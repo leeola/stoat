@@ -189,6 +189,12 @@ The subset stoatty implements:
 | `m` | `0`, `1` | Chunks accumulate and decode once, joined |
 | `q` | `0`, `1`, `2` | 1 drops the success reply, 2 drops errors too |
 | `d` | The full table minus animation frames | Case selects whether the image data goes too |
+| `z` | Any | Negative draws behind the text, the rest in front |
+| `c`, `r`, `x`, `y`, `w`, `h`, `X`, `Y` | Any | The cell box, the source crop, and the offset inside the first cell |
+
+Stoatty's own chrome draws over an image whatever its z-index says. A panel or a
+popover is the editor talking to the user, and a program cannot place its way in
+front of that.
 
 A frame that named neither `i` nor `I` gets no reply, since it asked for none.
 One that named `I` is answered with both the number it sent and the id stoatty
@@ -214,6 +220,8 @@ Deliberate deviations, so a reader is not left hunting for a bug:
   the live grid and are dropped once fully off-screen.
 - Unicode placeholders, relative placements, and the below-background z bucket
   are out.
+- Pools and aux windows draw no images. A client places against the live grid,
+  and an aux window owns a separate GPU device.
 
 ## Evolving a command
 

@@ -27,5 +27,9 @@ name = "example_hello_app"
 path = "examples/example_hello_app.rs"
 
 [[example]]
+name = "example_image_app"
+path = "examples/example_image_app.rs"
+
+[[example]]
 name = "example_smooth_scroll_history_app"
 path = "examples/example_smooth_scroll_history_app.rs"

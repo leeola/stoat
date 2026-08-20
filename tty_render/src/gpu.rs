@@ -17,6 +17,7 @@ use crate::{
         bar::BarPass,
         decoration::DecorationPass,
         icon::IconPass,
+        image::ImagePass,
         minimap::MinimapPass,
         overlay::OverlayPass,
         panel::PanelPass,
@@ -260,6 +261,7 @@ pub struct Renderer {
     bar: BarPass,
     polyline: PolylinePass,
     minimap: MinimapPass,
+    image: ImagePass,
     /// Perf HUD overlay pass, composited topmost. Present only under `perf`.
     #[cfg(feature = "perf")]
     hud: HudPass,
@@ -323,6 +325,7 @@ impl Renderer {
             bar: BarPass::new(device, format, metrics),
             polyline: PolylinePass::new(device, format, metrics),
             minimap: MinimapPass::new(device, format, metrics),
+            image: ImagePass::new(device, format, metrics),
             #[cfg(feature = "perf")]
             hud: HudPass::new(device, format),
             width: size[0],
@@ -366,6 +369,7 @@ impl Renderer {
         self.bar.set_metrics(metrics);
         self.polyline.set_metrics(metrics);
         self.minimap.set_metrics(metrics);
+        self.image.set_metrics(metrics);
     }
 
     /// Re-point the two colors baked in at construction, the surface clear and
@@ -466,6 +470,7 @@ impl Renderer {
             .prepare(device, queue, grid.polylines(), &self.occluders, resolution);
         self.minimap
             .prepare(device, queue, grid, &self.occluders, resolution);
+        self.image.prepare(device, queue, grid, resolution);
     }
 
     /// Open the frame's render pass on `encoder`, clearing `view` to the theme
@@ -522,12 +527,19 @@ impl Renderer {
 
     pub(crate) fn record_frame(&self, render_pass: &mut RenderPass<'_>, cursor: CursorLayer) {
         self.background.draw(render_pass);
+        // A placement at a negative z sits behind the text, which is one of the
+        // two sides a z-index can name to a terminal that draws its text in one
+        // pass.
+        self.image.draw_under(render_pass);
         self.panel.draw(render_pass);
         self.text.draw(render_pass);
         self.text.draw_region_text(render_pass);
         // The region draw leaves its scissor set, so restore the full
         // surface before the decoration, cursor, and overlay draws that follow.
         render_pass.set_scissor_rect(0, 0, self.width, self.height);
+        // The other side of the z-index. Stoatty's own chrome records later
+        // still, so a panel or popover stays over an image a client placed.
+        self.image.draw_over(render_pass);
         // Cell borders frame the cells they surround, so they draw over the
         // glyphs rather than under them. Ink that reaches a cell edge would
         // otherwise break the line it sits inside.

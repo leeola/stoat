@@ -43,11 +43,17 @@
 ///
 /// A peer reports what it can render, so an emitter can hold back a command the
 /// other end predates rather than sending bytes it will print raw. Bumped
-/// whenever a command is added or an existing one grows a field.
+/// whenever a command is added, an existing one grows a field, or the terminal
+/// answers something it did not answer before.
+///
+/// Version 2 draws Kitty graphics images. That is a capability rather than a
+/// command of this protocol, but an emitter still has to know: a client that
+/// streams an image to a terminal that will not draw it has sent a great many
+/// bytes for nothing.
 ///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 pub mod command;
 pub mod detect;
