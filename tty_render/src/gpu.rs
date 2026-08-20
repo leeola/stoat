@@ -26,10 +26,10 @@ use crate::{
         CellMetrics, Occluder, PoolOccluders,
     },
 };
-use cosmic_text::FontSystem;
+use cosmic_text::{fontdb, FontSystem};
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::{mem, thread, time::Instant};
+use std::{mem, sync::Arc, thread, time::Instant};
 use stoatty_term::{
     grid::{Grid, Panel, Rgb},
     term::Damage,
@@ -48,10 +48,7 @@ use {
         render::hud::{self, HudPass},
     },
     std::{
-        sync::{
-            atomic::{AtomicBool, Ordering},
-            Arc,
-        },
+        sync::atomic::{AtomicBool, Ordering},
         time::Duration,
     },
     wgpu::{
@@ -352,6 +349,12 @@ impl Renderer {
             #[cfg(feature = "perf")]
             last_gpu: None,
         }
+    }
+
+    /// The font database this renderer's font system holds, for a second one to
+    /// build its own from without a second scan of the system's fonts.
+    pub fn fonts(&self) -> SharedFonts {
+        self.text.fonts()
     }
 
     /// The (rows, cols) cell grid that fills the target at the current size.
@@ -1194,6 +1197,11 @@ fn clamp_scissor(scissor: [u32; 4], width: u32, height: u32) -> Option<[u32; 4]>
 /// capabilities.
 pub struct GpuContext {
     surface: Surface<'static>,
+    /// The handles another window's context can build on rather than requesting
+    /// its own, held past their use here for [`GpuContext::shared`]. The device
+    /// and queue below are the same two, kept beside the surface because that is
+    /// where this context reaches for them.
+    shared: SharedGpu,
     device: Device,
     queue: Queue,
     config: SurfaceConfiguration,
@@ -1207,6 +1215,56 @@ pub struct GpuContext {
     /// Whether to composite the perf HUD topmost. Toggled from the app.
     #[cfg(feature = "perf")]
     show_perf_hud: bool,
+}
+
+/// The GPU handles one window's context was built on, for a second window to
+/// build on rather than requesting its own.
+///
+/// Every one of these is a handle onto state wgpu already holds, so a clone
+/// costs a refcount. What it saves the second window is the asking: an instance,
+/// an adapter request, and a device request, each of which talks to the driver.
+///
+/// The pipelines, atlases, and buffers stay per-window. They are what a
+/// [`Renderer`] builds, and two windows drawing different grids need their own.
+#[derive(Clone)]
+pub struct SharedGpu {
+    instance: Instance,
+    adapter: Adapter,
+    device: Device,
+    queue: Queue,
+}
+
+/// The font database one window's context enumerated, for a second window to
+/// build its font system from.
+///
+/// Enumerating the installed fonts reads the system's font directories and
+/// costs hundreds of milliseconds. The database is what that reading produces,
+/// and it clones, so a second window copies the answer rather than asking the
+/// disk the same question. The bundled faces come with it, since they are loaded
+/// into the same database.
+///
+/// Held behind an [`Arc`] because a font system owns its database, so the copy
+/// has to happen once per window that builds one. Carrying this around costs a
+/// refcount instead of a second one.
+#[derive(Clone)]
+pub struct SharedFonts {
+    locale: String,
+    db: Arc<fontdb::Database>,
+}
+
+impl SharedFonts {
+    /// Take what `font_system` found, so another one can be built from it.
+    pub(crate) fn of(font_system: &FontSystem) -> SharedFonts {
+        SharedFonts {
+            locale: font_system.locale().to_owned(),
+            db: Arc::new(font_system.db().clone()),
+        }
+    }
+
+    /// Build a font system holding this database, reading nothing.
+    fn build(&self) -> FontSystem {
+        FontSystem::new_with_locale_and_db(self.locale.clone(), (*self.db).clone())
+    }
 }
 
 /// A [`FontSystem`] being built on a background thread, handed to
@@ -1369,6 +1427,12 @@ impl GpuContext {
 
         GpuContext {
             surface,
+            shared: SharedGpu {
+                instance,
+                adapter,
+                device: device.clone(),
+                queue: queue.clone(),
+            },
             device,
             queue,
             config,
@@ -1378,6 +1442,94 @@ impl GpuContext {
             #[cfg(feature = "perf")]
             show_perf_hud: false,
         }
+    }
+
+    /// Build a context for `window` on the handles another window's context
+    /// already holds, or `None` when its adapter cannot present to this
+    /// window's surface.
+    ///
+    /// Only what is really per-window is created: the surface, its
+    /// configuration, and a [`Renderer`]. The instance, adapter, and device
+    /// requests are the ones [`Self::new`] pays and this one skips, and the
+    /// font system is built from `fonts` rather than from a second scan of the
+    /// system's font directories.
+    ///
+    /// The adapter is asked because a surface on another window may be one it
+    /// cannot present to, and wgpu aborts rather than errors when a device is
+    /// used with such a surface. A `None` answer is a cue to fall back to
+    /// [`Self::new`], which picks an adapter for this surface in particular.
+    ///
+    /// `window` is anything carrying window and display handles; the surface
+    /// takes ownership of it, so it must outlive the context.
+    pub fn with_shared<W>(
+        shared: &SharedGpu,
+        window: W,
+        size: [u32; 2],
+        fonts: &SharedFonts,
+        font: FontConfig<'_>,
+        background: Rgb,
+        cursor: Rgb,
+    ) -> Option<GpuContext>
+    where
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
+    {
+        let [width, height] = size;
+        let surface = shared.instance.create_surface(window).ok()?;
+        if !shared.adapter.is_surface_supported(&surface) {
+            return None;
+        }
+
+        let caps = surface.get_capabilities(&shared.adapter);
+        let (surface_format, view_format) = surface_formats(&caps.formats);
+        let config = SurfaceConfiguration {
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width,
+            height,
+            present_mode: PresentMode::Fifo,
+            alpha_mode: CompositeAlphaMode::Auto,
+            view_formats: match view_format == surface_format {
+                true => vec![],
+                false => vec![view_format],
+            },
+            desired_maximum_frame_latency: 1,
+        };
+        surface.configure(&shared.device, &config);
+
+        let renderer = Renderer::new(
+            &shared.device,
+            view_format,
+            size,
+            fonts.build(),
+            font,
+            background,
+            cursor,
+        );
+
+        Some(GpuContext {
+            surface,
+            shared: shared.clone(),
+            device: shared.device.clone(),
+            queue: shared.queue.clone(),
+            config,
+            view_format,
+            renderer,
+            perf: FrameProfiler::new(),
+            #[cfg(feature = "perf")]
+            show_perf_hud: false,
+        })
+    }
+
+    /// The GPU handles this context was built on, for a second window to build
+    /// on through [`Self::with_shared`].
+    pub fn shared(&self) -> SharedGpu {
+        self.shared.clone()
+    }
+
+    /// The font database this context's font system holds, for a second window
+    /// to build its own from through [`Self::with_shared`].
+    pub fn fonts(&self) -> SharedFonts {
+        self.renderer.fonts()
     }
 
     /// Re-configure the surface to `width`x`height` physical pixels.
@@ -1835,8 +1987,8 @@ pub fn headless_device() -> Option<(Device, Queue)> {
 mod tests {
     use super::{
         build_font_system, clamp_scissor, grid_dims, headless_device, needs_configure,
-        surface_formats, CommandEncoderDescriptor, CursorLayer, FontConfig, Frame, PoolComposite,
-        Renderer, Scroll, SurfaceConfiguration, TextureFormat,
+        surface_formats, CommandEncoderDescriptor, CursorLayer, FontConfig, FontSystem, Frame,
+        PoolComposite, Renderer, Scroll, SharedFonts, SurfaceConfiguration, TextureFormat,
     };
     use crate::render::CellMetrics;
     use stoatty_term::{
@@ -1848,6 +2000,34 @@ mod tests {
         TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect, TextureDescriptor,
         TextureDimension, TextureUsages, TextureViewDescriptor,
     };
+
+    /// A second window builds its font system from what the first found rather
+    /// than reading the system's font directories again, so what it carries has
+    /// to be the same answer: the same faces under the same locale, bundled ones
+    /// included.
+    #[test]
+    fn a_font_system_built_from_a_shared_database_holds_what_the_scan_found() {
+        let scanned = build_font_system();
+        let faces = |system: &FontSystem| {
+            system
+                .db()
+                .faces()
+                .map(|face| (face.id, face.families.clone()))
+                .collect::<Vec<_>>()
+        };
+        let found = faces(&scanned);
+        assert!(
+            !found.is_empty(),
+            "the bundled faces are always there, or this proves nothing",
+        );
+
+        let shared = SharedFonts::of(&scanned).build();
+        assert_eq!(
+            (faces(&shared), shared.locale()),
+            (found, scanned.locale()),
+            "the shared database is the scan's answer, carried whole",
+        );
+    }
 
     /// The live grid and every pool land in their own regions from a single render
     /// pass, which is the sequence [`GpuContext::render_with_pools`] records.

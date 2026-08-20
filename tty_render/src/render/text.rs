@@ -1042,6 +1042,12 @@ impl TextPass {
         );
     }
 
+    /// The locale and font database this pass shapes with, for another pass to
+    /// build its own font system from.
+    pub(crate) fn fonts(&self) -> crate::gpu::SharedFonts {
+        crate::gpu::SharedFonts::of(&self.font_system)
+    }
+
     /// The glyph atlas content epoch, which changes when an eviction moves a
     /// glyph.
     ///

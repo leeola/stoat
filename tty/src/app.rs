@@ -53,7 +53,10 @@ use stoatty_protocol::{
     window_ipc::{MouseKind, WindowIpcEvent},
 };
 use stoatty_render::{
-    gpu::{AnchoredPanel, FontConfig, FontLoad, Frame, GpuContext, PoolComposite, Scroll},
+    gpu::{
+        AnchoredPanel, FontConfig, FontLoad, Frame, GpuContext, PoolComposite, Scroll, SharedFonts,
+        SharedGpu,
+    },
     render,
 };
 use stoatty_term::{
@@ -502,6 +505,14 @@ struct AuxWindowConfig<'a> {
 
 struct State {
     window: Arc<Window>,
+    /// The GPU handles and font database the primary window's context was built
+    /// on, for the aux windows to build on rather than each asking the driver
+    /// and the font directories the same questions again.
+    ///
+    /// `None` until the primary context lands, which is before any aux window
+    /// can be opened, since opening one is driven by the child over the window
+    /// socket the primary serves.
+    shared_gpu: Option<(SharedGpu, SharedFonts)>,
     /// The title last pushed to [`Self::window`], so a repeated one costs no platform
     /// write. `None` until the first title lands, which leaves the window showing the
     /// title it was created with.
@@ -864,6 +875,7 @@ impl ApplicationHandler<PtyEvent> for App {
         window.request_redraw();
         self.state = Some(State {
             window,
+            shared_gpu: Some((gpu.shared(), gpu.fonts())),
             pending_resize: PendingResize::default(),
             last_title: None,
             first_frame_start: Some(self.start),
@@ -2004,23 +2016,51 @@ fn open_aux_window(
     let theme = config.theme;
     let font_family = config.font_family.to_vec();
     let ligatures = config.ligatures;
+    let shared = state.shared_gpu.clone();
     let spawn = std::thread::Builder::new()
         .name(format!("aux-gpu-{window_id}"))
         .spawn(move || {
-            let gpu = GpuContext::new(
-                window,
-                size.width.max(1),
-                size.height.max(1),
-                FontLoad::spawn(),
-                FontConfig {
-                    size: font_size,
-                    scale_factor,
-                    family: &font_family,
-                    ligatures,
+            let dims = [size.width.max(1), size.height.max(1)];
+            let font = || FontConfig {
+                size: font_size,
+                scale_factor,
+                family: &font_family,
+                ligatures,
+            };
+
+            // The primary's adapter may not present to this window's surface,
+            // and the shared path says so rather than guessing. A full init
+            // picks an adapter for this surface in particular, at the cost of
+            // the asking and a second font scan.
+            let shared = shared.as_ref().and_then(|(gpu, fonts)| {
+                GpuContext::with_shared(
+                    gpu,
+                    window.clone(),
+                    dims,
+                    fonts,
+                    font(),
+                    theme.background,
+                    theme.cursor,
+                )
+            });
+            let gpu = match shared {
+                Some(gpu) => gpu,
+                None => {
+                    tracing::info!(
+                        window = window_id,
+                        "aux window building its own gpu context",
+                    );
+                    GpuContext::new(
+                        window,
+                        dims[0],
+                        dims[1],
+                        FontLoad::spawn(),
+                        font(),
+                        theme.background,
+                        theme.cursor,
+                    )
                 },
-                theme.background,
-                theme.cursor,
-            );
+            };
             let _ = proxy.send_event(PtyEvent::AuxGpuReady {
                 window: window_id,
                 gpu: Box::new(gpu),

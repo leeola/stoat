@@ -18,7 +18,9 @@ use stoatty_term::{
     term::Damage,
 };
 use wgpu::{
-    Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+    BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, Extent3d, MapMode, Origin3d,
+    PollType, Queue, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo,
+    TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
     TextureViewDescriptor,
 };
 
@@ -226,4 +228,159 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             scrolled_rows: 0,
         },
     );
+}
+
+/// Two renderers on one device draw their own grids.
+///
+/// A second window builds its context on the handles the first already holds,
+/// so both renderers create their pipelines, atlases, and buffers against the
+/// same device. Nothing in a renderer may reach state another one owns: each
+/// clears to its own background and paints its own cells, and neither may show
+/// the other's.
+#[test]
+fn two_renderers_on_one_device_draw_their_own_grids() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("headless_render: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let format = TextureFormat::Rgba8Unorm;
+    let (width, height) = (128, 128);
+    let build = |background: Rgb| {
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("shared device target"),
+            size: Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&TextureViewDescriptor::default());
+        let renderer = Renderer::new(
+            &device,
+            format,
+            [width, height],
+            build_font_system(),
+            FontConfig {
+                size: 30,
+                scale_factor: 1.0,
+                family: &["JetBrains Mono".to_owned()],
+                ligatures: true,
+            },
+            background,
+            Rgb::new(0, 0, 0),
+        );
+        (target, view, renderer)
+    };
+
+    let mine_bg = Rgb::new(200, 40, 40);
+    let theirs_bg = Rgb::new(40, 200, 40);
+    let (mine_target, mine_view, mut mine) = build(mine_bg);
+    let (theirs_target, theirs_view, mut theirs) = build(theirs_bg);
+
+    // Prepared one after the other and drawn one after the other, which is the
+    // order two windows redrawing on one device reach the device in.
+    let (rows, cols) = mine.grid_size();
+    let mut mine_grid = Grid::new(rows, cols);
+    mine_grid.get_mut(0, 0).bg = mine_bg;
+    let mut theirs_grid = Grid::new(rows, cols);
+    theirs_grid.get_mut(0, 0).bg = theirs_bg;
+
+    render_blank(&device, &queue, &mine_view, &mut mine, &mine_grid);
+    render_blank(&device, &queue, &theirs_view, &mut theirs, &theirs_grid);
+
+    let corner = |target: &wgpu::Texture| {
+        let pixels = read_back(&device, &queue, target, width, height);
+        (pixels[0], pixels[1], pixels[2])
+    };
+    let rgb = |c: Rgb| (c.r, c.g, c.b);
+
+    assert_eq!(
+        (corner(&mine_target), corner(&theirs_target)),
+        (rgb(mine_bg), rgb(theirs_bg)),
+        "each renderer's target holds its own grid, not the one drawn after it",
+    );
+}
+
+/// Draw `grid` into `view` with nothing eased and everything damaged.
+fn render_blank(
+    device: &Device,
+    queue: &Queue,
+    view: &wgpu::TextureView,
+    renderer: &mut Renderer,
+    grid: &Grid,
+) {
+    renderer.render_into(
+        device,
+        queue,
+        view,
+        grid,
+        Frame {
+            cursor: None,
+            cursor_corners: None,
+            scroll: Scroll {
+                grid: 0.0,
+                document: 0.0,
+                scrollback: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage: &Damage::Full,
+            decoration_damage: &Damage::Partial(Vec::new()),
+            scrolled_rows: 0,
+        },
+    );
+}
+
+/// Copy `texture` into a mappable buffer and return its RGBA bytes, row-major
+/// with no padding (the caller sizes the texture so `4 * width` is 256-aligned).
+fn read_back(
+    device: &Device,
+    queue: &Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let buffer = device.create_buffer(&BufferDescriptor {
+        label: Some("shared device readback"),
+        size: u64::from(width * height * 4),
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+    encoder.copy_texture_to_buffer(
+        TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: None,
+            },
+        },
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+
+    buffer.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("poll readback");
+    buffer.slice(..).get_mapped_range().to_vec()
 }
