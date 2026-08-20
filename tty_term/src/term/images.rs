@@ -16,7 +16,8 @@
 
 use std::{collections::HashMap, sync::Arc};
 use stoatty_protocol::kitty::{
-    Action, Compression, ControlData, Format, GraphicsFrame, Medium, Response, ResponseResult,
+    Action, Compression, ControlData, DeleteKind, Format, GraphicsFrame, Medium, Response,
+    ResponseResult,
 };
 
 /// Largest base64 payload one transmission may accumulate.
@@ -43,6 +44,44 @@ const MAX_IMAGES: usize = 1024;
 /// Bytes per pixel in the store's one internal format.
 const RGBA: usize = 4;
 
+/// Placements one screen may hold at once.
+///
+/// A client that places without deleting would grow the list for the session,
+/// and every placement costs work in the projection that rebuilds them.
+const MAX_PLACEMENTS: usize = 512;
+
+/// Cell size assumed while the app has not reported the real one.
+///
+/// A placement sized from pixels needs some cell size to divide by. Guessing a
+/// conventional one puts the image roughly right, where dividing by zero would
+/// put nothing anywhere.
+const FALLBACK_CELL: (u32, u32) = (8, 16);
+
+/// One image placed on the screen.
+///
+/// The anchor is the cursor cell at the moment the placement was applied, not a
+/// position in the scrollback. Scrolling shifts the anchor by exactly what the
+/// cell grid shifted by, which is what keeps an image with the text it belongs
+/// to without tracking a buffer position.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Placement {
+    pub image: u32,
+    pub placement: u32,
+    /// Anchor row, as a signed value so a placement scrolled off the top is
+    /// recognized rather than wrapping to the bottom.
+    pub row: i32,
+    pub col: usize,
+    pub cols: usize,
+    pub rows: usize,
+    pub crop_x: u32,
+    pub crop_y: u32,
+    pub crop_w: u32,
+    pub crop_h: u32,
+    pub offset_x: u32,
+    pub offset_y: u32,
+    pub z: i32,
+}
+
 /// An image the store holds, decoded and ready to place.
 ///
 /// The pixels are shared rather than copied because a placement pass reads them
@@ -55,6 +94,11 @@ pub(crate) struct DecodedImage {
     /// Bumped whenever the id's pixels are replaced, so a consumer holding a
     /// placement can tell a re-transmission from the image it drew.
     pub generation: u64,
+    /// The client's image number, or zero when it transmitted by id instead.
+    ///
+    /// Kept because a delete may name an image by number, which is only
+    /// resolvable against what the transmission said.
+    pub number: u32,
 }
 
 /// A transmission still arriving, held until the frame that ends it.
@@ -67,6 +111,34 @@ struct Pending {
     payload: Vec<u8>,
 }
 
+/// What the terminal must do after a graphics frame.
+pub(crate) struct Applied {
+    /// The reply to send the client, if any.
+    pub response: Option<Response>,
+    /// Where the cursor should land, when the frame placed an image and the
+    /// client did not ask to keep the cursor still.
+    pub cursor: Option<(usize, usize)>,
+}
+
+impl Applied {
+    /// An outcome that only answers, leaving the cursor alone.
+    fn reply(response: Option<Response>) -> Self {
+        Self {
+            response,
+            cursor: None,
+        }
+    }
+}
+
+/// The screen state a graphics frame is applied against.
+#[derive(Clone, Copy)]
+pub(crate) struct Screen {
+    /// The cursor cell, which a placement anchors to.
+    pub cursor: (usize, usize),
+    /// Pixel size of one cell, which sizing divides by.
+    pub cell: (u32, u32),
+}
+
 /// Kitty images this terminal holds, and the transmission currently arriving.
 #[derive(Default)]
 pub(crate) struct ImageStore {
@@ -77,6 +149,14 @@ pub(crate) struct ImageStore {
     /// does not walk every image to find out whether it fits.
     bytes: usize,
     pending: Option<Pending>,
+    /// Placements on each screen, the primary first and the alternate second.
+    ///
+    /// A screen is its own surface, so an image placed on one is not on the
+    /// other. The pixels are shared, since they sit under an id rather than
+    /// under a screen.
+    placements: [Vec<Placement>; 2],
+    /// Which screen is showing, indexing [`Self::placements`].
+    screen: usize,
     /// Ids handed out for a client that transmits by number rather than by id.
     ///
     /// Counts down from the top so it cannot collide with the low ids a client
@@ -93,57 +173,195 @@ impl ImageStore {
         }
     }
 
-    /// Apply one graphics frame, returning the reply to send back.
+    /// The pixels held under `id`, for the projection joining a placement with
+    /// the image it names.
+    pub(crate) fn image(&self, id: u32) -> Option<&DecodedImage> {
+        self.images.get(&id)
+    }
+
+    /// Placements on the showing screen, for the projection to draw.
+    pub(crate) fn placements(&self) -> &[Placement] {
+        &self.placements[self.screen]
+    }
+
+    /// Place image `id` at `cursor`, or report why it cannot be placed.
     ///
-    /// `None` means say nothing, which covers a frame that named no image to
-    /// answer for, a quiet level that suppressed the reply, and a chunk that is
-    /// not the last of its transmission.
-    pub(crate) fn apply(&mut self, frame: GraphicsFrame) -> Option<Response> {
+    /// `cell` is the pixel size of one cell, which sizing falls back on when the
+    /// client states neither dimension of the box.
+    ///
+    /// Returns where the cursor should land, which is past the placement's last
+    /// row unless the client asked to keep it where it is.
+    pub(crate) fn place(
+        &mut self,
+        control: &ControlData,
+        id: u32,
+        cursor: (usize, usize),
+        cell: (u32, u32),
+    ) -> Result<Option<(usize, usize)>, ResponseResult> {
+        let Some(image) = self.images.get(&id) else {
+            return Err(error("ENOENT", "no image with that id"));
+        };
+
+        let (cols, rows) = placement_cells(control, image, cell);
+        let list = &mut self.placements[self.screen];
+        if list.len() >= MAX_PLACEMENTS {
+            return Err(error("ENOSPC", "too many placements"));
+        }
+
+        // A client placing over its own placement id replaces it rather than
+        // stacking a second copy in the same spot.
+        list.retain(|held| held.image != id || held.placement != control.placement);
+        list.push(Placement {
+            image: id,
+            placement: control.placement,
+            row: cursor.0 as i32,
+            col: cursor.1,
+            cols,
+            rows,
+            crop_x: control.src_x,
+            crop_y: control.src_y,
+            crop_w: control.src_w,
+            crop_h: control.src_h,
+            // An offset past the cell would put the image in a different cell
+            // than the one it is anchored to, so it saturates at the boundary.
+            offset_x: control.cell_x.min(cell.0.saturating_sub(1)),
+            offset_y: control.cell_y.min(cell.1.saturating_sub(1)),
+            z: control.z,
+        });
+
+        match control.cursor_policy {
+            0 => Ok(Some((cursor.0 + rows - 1, cursor.1 + cols))),
+            _ => Ok(None),
+        }
+    }
+
+    /// Remove the placements `control` names, freeing image data when the
+    /// client asked for it.
+    ///
+    /// The uppercase form of a delete selector frees the image itself once no
+    /// placement is left holding it, which is how a client reclaims the store
+    /// without tracking what it transmitted.
+    pub(crate) fn delete(&mut self, control: &ControlData, cursor: (usize, usize)) {
+        let target = control.delete;
+        let list = &mut self.placements[self.screen];
+
+        // Which images the delete touched, so a freeing delete knows what to
+        // consider dropping afterward.
+        let mut touched: Vec<u32> = Vec::new();
+        list.retain(|held| {
+            let hit = match target.kind {
+                DeleteKind::All => true,
+                DeleteKind::Id => {
+                    held.image == control.id
+                        && (control.placement == 0 || held.placement == control.placement)
+                },
+                DeleteKind::Number => self
+                    .images
+                    .get(&held.image)
+                    .is_some_and(|image| image.number != 0 && image.number == control.number),
+                DeleteKind::Cursor => held.covers(cursor.0 as i32, cursor.1),
+                DeleteKind::Cell => held.covers(control.src_y as i32, control.src_x as usize),
+                DeleteKind::CellZ => {
+                    held.covers(control.src_y as i32, control.src_x as usize) && held.z == control.z
+                },
+                DeleteKind::Column => held.spans_col(control.src_x as usize),
+                DeleteKind::Row => held.spans_row(control.src_y as i32),
+                DeleteKind::Z => held.z == control.z,
+                DeleteKind::IdRange => {
+                    (control.src_x..=control.src_y.max(control.src_x)).contains(&held.image)
+                },
+            };
+            if hit {
+                touched.push(held.image);
+            }
+            !hit
+        });
+
+        if !target.free_data {
+            return;
+        }
+        for image in touched {
+            let placed = self
+                .placements
+                .iter()
+                .any(|list| list.iter().any(|held| held.image == image));
+            if !placed && let Some(dropped) = self.images.remove(&image) {
+                self.bytes -= dropped.rgba.len();
+                self.order.retain(|&held| held != image);
+            }
+        }
+    }
+
+    /// Apply one graphics frame against the screen state in `screen`.
+    ///
+    /// The reply is `None` when the frame named no image to answer for, when
+    /// the client's quiet level suppressed it, and for a chunk that is not the
+    /// last of its transmission.
+    pub(crate) fn apply(&mut self, frame: GraphicsFrame, screen: Screen) -> Applied {
         let control = frame.control;
 
         // A continuation carries only `m` and `q`, so it is recognized by an
         // open transmission rather than by anything in the frame itself.
         if self.pending.is_some() && is_continuation(&control) {
-            return self.continue_transmission(control, frame.payload);
+            return self.continue_transmission(control, frame.payload, screen);
         }
 
         // Anything else arriving mid-transmission means the client abandoned it,
         // and the partial payload describes no image.
         if self.pending.take().is_some() {
-            return respond(
+            return Applied::reply(respond(
                 &control,
                 error("EINVAL", "graphics command during a transmission"),
-            );
+            ));
         }
 
         match control.action {
             Action::Transmit | Action::TransmitAndDisplay | Action::Query => {
-                self.begin_transmission(control, frame.payload)
+                self.begin_transmission(control, frame.payload, screen)
             },
-            // The placement half of the protocol is not built yet. Answering
-            // rather than ignoring is what lets a client stop waiting.
-            Action::Put | Action::Delete => {
-                respond(&control, error("EINVAL", "unsupported action"))
+            Action::Put => self.put(control, screen),
+            Action::Delete => {
+                self.delete(&control, screen.cursor);
+                Applied::reply(respond(&control, ResponseResult::Ok))
             },
+        }
+    }
+
+    /// Place an image the client transmitted earlier.
+    fn put(&mut self, control: ControlData, screen: Screen) -> Applied {
+        match self.place(&control, control.id, screen.cursor, screen.cell) {
+            Ok(cursor) => Applied {
+                response: respond(&control, ResponseResult::Ok),
+                cursor,
+            },
+            Err(result) => Applied::reply(respond(&control, result)),
         }
     }
 
     /// Take the first frame of a transmission, decoding it when it is also the
     /// last.
-    fn begin_transmission(&mut self, control: ControlData, payload: Vec<u8>) -> Option<Response> {
+    fn begin_transmission(
+        &mut self,
+        control: ControlData,
+        payload: Vec<u8>,
+        screen: Screen,
+    ) -> Applied {
         if control.medium != Medium::Direct {
-            return respond(&control, error("EBADF", "unsupported transmission medium"));
+            return Applied::reply(respond(
+                &control,
+                error("EBADF", "unsupported transmission medium"),
+            ));
         }
         if payload.len() > MAX_TRANSMIT_BYTES {
-            return respond(&control, error("EFBIG", "transmission too large"));
+            return Applied::reply(respond(&control, error("EFBIG", "transmission too large")));
         }
 
         match control.more {
             true => {
                 self.pending = Some(Pending { control, payload });
-                None
+                Applied::reply(None)
             },
-            false => self.finish(control, payload),
+            false => self.finish(control, payload, screen),
         }
     }
 
@@ -152,50 +370,63 @@ impl ImageStore {
         &mut self,
         control: ControlData,
         payload: Vec<u8>,
-    ) -> Option<Response> {
+        screen: Screen,
+    ) -> Applied {
         let pending = self.pending.as_mut().expect("checked by the caller");
         if pending.payload.len() + payload.len() > MAX_TRANSMIT_BYTES {
             let control = self.pending.take().expect("checked by the caller").control;
-            return respond(&control, error("EFBIG", "transmission too large"));
+            return Applied::reply(respond(&control, error("EFBIG", "transmission too large")));
         }
         pending.payload.extend_from_slice(&payload);
 
         if control.more {
-            return None;
+            return Applied::reply(None);
         }
 
         let pending = self.pending.take().expect("checked by the caller");
         // The opening frame's control data describes the image. The
         // continuation's only says the stream ended, and its quiet level is the
         // one the client repeated on every chunk.
-        self.finish(pending.control, pending.payload)
+        self.finish(pending.control, pending.payload, screen)
     }
 
-    /// Decode a complete payload and store it, or answer why not.
-    fn finish(&mut self, control: ControlData, payload: Vec<u8>) -> Option<Response> {
+    /// Decode a complete payload, store it, and place it when asked, or answer
+    /// why not.
+    fn finish(&mut self, control: ControlData, payload: Vec<u8>, screen: Screen) -> Applied {
         let decoded = match decode(&control, &payload) {
             Ok(decoded) => decoded,
-            Err(response) => return respond(&control, response),
+            Err(response) => return Applied::reply(respond(&control, response)),
         };
 
         // A query asks whether this would work, so having decoded it is the
         // whole answer and the pixels are dropped.
         if control.action == Action::Query {
-            return respond(&control, ResponseResult::Ok);
+            return Applied::reply(respond(&control, ResponseResult::Ok));
         }
 
         let id = match control.id {
             0 => self.assign_id(),
             id => id,
         };
-        match self.store(id, decoded) {
-            Ok(()) => respond_as(&control, id, ResponseResult::Ok),
-            Err(response) => respond_as(&control, id, response),
+        if let Err(response) = self.store(id, control.number, decoded) {
+            return Applied::reply(respond_as(&control, id, response));
+        }
+
+        if control.action != Action::TransmitAndDisplay {
+            return Applied::reply(respond_as(&control, id, ResponseResult::Ok));
+        }
+
+        match self.place(&control, id, screen.cursor, screen.cell) {
+            Ok(cursor) => Applied {
+                response: respond_as(&control, id, ResponseResult::Ok),
+                cursor,
+            },
+            Err(result) => Applied::reply(respond_as(&control, id, result)),
         }
     }
 
     /// Put `image` under `id`, evicting to stay inside the quota.
-    fn store(&mut self, id: u32, image: DecodedImage) -> Result<(), ResponseResult> {
+    fn store(&mut self, id: u32, number: u32, image: DecodedImage) -> Result<(), ResponseResult> {
         let incoming = image.rgba.len();
         if incoming > MAX_STORE_BYTES {
             return Err(error("ENOSPC", "image larger than the store"));
@@ -224,6 +455,7 @@ impl ImageStore {
             id,
             DecodedImage {
                 generation: self.generation,
+                number,
                 ..image
             },
         );
@@ -244,6 +476,74 @@ impl ImageStore {
     }
 }
 
+impl Placement {
+    /// The rows the placement occupies, as a half-open range.
+    fn row_range(&self) -> std::ops::Range<i32> {
+        self.row..self.row + self.rows as i32
+    }
+
+    /// Whether the placement covers the cell at `row`, `col`.
+    fn covers(&self, row: i32, col: usize) -> bool {
+        self.row_range().contains(&row) && (self.col..self.col + self.cols).contains(&col)
+    }
+
+    fn spans_col(&self, col: usize) -> bool {
+        (self.col..self.col + self.cols).contains(&col)
+    }
+
+    fn spans_row(&self, row: i32) -> bool {
+        self.row_range().contains(&row)
+    }
+}
+
+/// The cell box a placement occupies.
+///
+/// A client may state both dimensions, one, or neither. Both stretches the
+/// image into that box, and keeping the aspect ratio is then the client's
+/// business rather than the terminal's. One derives the other from the image's
+/// own aspect, so a client can size by width and get a proportional height.
+/// Neither divides the image's pixels by the cell, rounding up so a partial
+/// cell is still drawn into.
+///
+/// Every result is at least one cell, since a placement of no cells is one the
+/// client cannot see and cannot delete by position.
+fn placement_cells(
+    control: &ControlData,
+    image: &DecodedImage,
+    cell: (u32, u32),
+) -> (usize, usize) {
+    let (cell_w, cell_h) = match cell {
+        (0, _) | (_, 0) => FALLBACK_CELL,
+        cell => cell,
+    };
+
+    // The crop is what gets drawn, so it is what the size is derived from.
+    let source_w = match control.src_w {
+        0 => image.width.saturating_sub(control.src_x).max(1),
+        w => w,
+    };
+    let source_h = match control.src_h {
+        0 => image.height.saturating_sub(control.src_y).max(1),
+        h => h,
+    };
+
+    let by_pixels = |pixels: u32, per_cell: u32| pixels.div_ceil(per_cell).max(1) as usize;
+
+    match (control.cols, control.rows) {
+        (0, 0) => (by_pixels(source_w, cell_w), by_pixels(source_h, cell_h)),
+        (cols, 0) => {
+            let height =
+                (source_h as u64 * cols as u64 * cell_w as u64) / (source_w as u64 * cell_h as u64);
+            (cols as usize, (height as usize).max(1))
+        },
+        (0, rows) => {
+            let width =
+                (source_w as u64 * rows as u64 * cell_h as u64) / (source_h as u64 * cell_w as u64);
+            ((width as usize).max(1), rows as usize)
+        },
+        (cols, rows) => (cols as usize, rows as usize),
+    }
+}
 /// Whether `control` is a continuation frame rather than a new command.
 ///
 /// A continuation carries only `m` and `q`, so every other field sits at its
@@ -306,6 +606,7 @@ fn decode_png(bytes: &[u8]) -> Result<DecodedImage, ResponseResult> {
         width,
         height,
         generation: 0,
+        number: 0,
     })
 }
 
@@ -328,6 +629,7 @@ fn expand_rgb(control: &ControlData, bytes: &[u8]) -> Result<DecodedImage, Respo
         width,
         height,
         generation: 0,
+        number: 0,
     })
 }
 
@@ -342,6 +644,7 @@ fn take_rgba(control: &ControlData, bytes: Vec<u8>) -> Result<DecodedImage, Resp
         width,
         height,
         generation: 0,
+        number: 0,
     })
 }
 
@@ -407,7 +710,7 @@ fn respond_as(control: &ControlData, id: u32, result: ResponseResult) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::{ImageStore, MAX_DECODED_BYTES, MAX_IMAGES};
+    use super::{ImageStore, Screen, MAX_DECODED_BYTES, MAX_IMAGES, MAX_PLACEMENTS};
     use base64::Engine;
     use stoatty_protocol::kitty::{
         Action, Compression, ControlData, Format, GraphicsFrame, Medium, Response, ResponseResult,
@@ -428,6 +731,21 @@ mod tests {
         base64::engine::general_purpose::STANDARD
             .encode(bytes)
             .into_bytes()
+    }
+
+    /// A screen with the cursor at the origin and a conventional cell, for a
+    /// test whose subject is the transmission rather than the placement.
+    fn screen() -> Screen {
+        Screen {
+            cursor: (0, 0),
+            cell: (8, 16),
+        }
+    }
+
+    /// Apply `frame` against that screen and keep only the reply, which is what
+    /// the transmission tests are about.
+    fn reply(store: &mut ImageStore, frame: GraphicsFrame) -> Option<Response> {
+        store.apply(frame, screen()).response
     }
 
     fn frame(control: ControlData, payload: Vec<u8>) -> GraphicsFrame {
@@ -474,7 +792,7 @@ mod tests {
         };
 
         assert_eq!(
-            store.apply(frame(control, base64(&png_2x2([1, 2, 3, 255])))),
+            reply(&mut store, frame(control, base64(&png_2x2([1, 2, 3, 255])))),
             ok(7),
         );
 
@@ -504,7 +822,7 @@ mod tests {
         };
 
         assert_eq!(
-            store.apply(frame(control, base64(&[9, 8, 7, 6, 5, 4]))),
+            reply(&mut store, frame(control, base64(&[9, 8, 7, 6, 5, 4]))),
             ok(1)
         );
         assert_eq!(
@@ -531,7 +849,7 @@ mod tests {
             ..transmit(2)
         };
 
-        assert_eq!(store.apply(frame(control, base64(&deflated))), ok(2));
+        assert_eq!(reply(&mut store, frame(control, base64(&deflated))), ok(2));
         assert_eq!(
             stored(&store, 2).expect("stored").rgba.as_ref(),
             [4, 5, 6, 255]
@@ -555,7 +873,7 @@ mod tests {
         };
 
         assert_eq!(
-            store.apply(frame(control, head.to_vec())),
+            reply(&mut store, frame(control, head.to_vec())),
             None,
             "a chunk that is not the last says nothing",
         );
@@ -566,7 +884,7 @@ mod tests {
             ..ControlData::default()
         };
         assert_eq!(
-            store.apply(frame(continuation, middle.to_vec())),
+            reply(&mut store, frame(continuation, middle.to_vec())),
             None,
             "nor does a middle chunk, which carries only m and q",
         );
@@ -576,7 +894,7 @@ mod tests {
             ..ControlData::default()
         };
         assert_eq!(
-            store.apply(frame(last, tail.to_vec())),
+            reply(&mut store, frame(last, tail.to_vec())),
             ok(3),
             "the closing chunk answers under the opening frame's id",
         );
@@ -596,7 +914,7 @@ mod tests {
             more: true,
             ..transmit(4)
         };
-        store.apply(frame(control, base64(&png_2x2([1, 1, 1, 255]))));
+        reply(&mut store, frame(control, base64(&png_2x2([1, 1, 1, 255]))));
 
         let interrupting = ControlData {
             format: Format::Rgba,
@@ -604,7 +922,7 @@ mod tests {
             height: 1,
             ..transmit(5)
         };
-        let response = store.apply(frame(interrupting, base64(&[1, 2, 3, 4])));
+        let response = reply(&mut store, frame(interrupting, base64(&[1, 2, 3, 4])));
 
         assert_eq!(code(&response), Some("EINVAL"));
         assert_eq!(
@@ -626,7 +944,7 @@ mod tests {
                 ..transmit(6)
             };
             assert_eq!(
-                code(&store.apply(frame(control, Vec::new()))),
+                code(&reply(&mut store, frame(control, Vec::new()))),
                 Some("EBADF"),
                 "{medium:?} names data this terminal cannot read",
             );
@@ -645,7 +963,7 @@ mod tests {
         };
 
         assert_eq!(
-            code(&store.apply(frame(control, Vec::new()))),
+            code(&reply(&mut store, frame(control, Vec::new()))),
             Some("EFBIG"),
             "the size is refused before any buffer is grown to hold it",
         );
@@ -662,7 +980,7 @@ mod tests {
         };
 
         assert_eq!(
-            code(&store.apply(frame(control, base64(&[0; 8])))),
+            code(&reply(&mut store, frame(control, base64(&[0; 8])))),
             Some("EINVAL"),
         );
     }
@@ -684,16 +1002,16 @@ mod tests {
         };
         let png = base64(&png_2x2([2, 2, 2, 255]));
 
-        assert!(store.apply(frame(good(0), png.clone())).is_some());
+        assert!(reply(&mut store, frame(good(0), png.clone())).is_some());
         assert_eq!(
-            store.apply(frame(good(1), png)),
+            reply(&mut store, frame(good(1), png)),
             None,
             "quiet 1 drops the success reply",
         );
 
-        assert!(store.apply(frame(bad(1), Vec::new())).is_some());
+        assert!(reply(&mut store, frame(bad(1), Vec::new())).is_some());
         assert_eq!(
-            store.apply(frame(bad(2), Vec::new())),
+            reply(&mut store, frame(bad(2), Vec::new())),
             None,
             "quiet 2 drops errors too",
         );
@@ -709,7 +1027,10 @@ mod tests {
             ..ControlData::default()
         };
 
-        assert_eq!(store.apply(frame(control, base64(&png_2x2([3; 4])))), None);
+        assert_eq!(
+            reply(&mut store, frame(control, base64(&png_2x2([3; 4])))),
+            None
+        );
     }
 
     /// A client transmitting by number lets the terminal pick the id, so the
@@ -723,8 +1044,7 @@ mod tests {
             ..ControlData::default()
         };
 
-        let response = store
-            .apply(frame(control, base64(&png_2x2([4; 4]))))
+        let response = reply(&mut store, frame(control, base64(&png_2x2([4; 4]))))
             .expect("a numbered frame is answered");
 
         assert_eq!(response.number, 42, "the reply echoes the client's number");
@@ -751,7 +1071,7 @@ mod tests {
         };
 
         let (control, payload) = query(base64(&png_2x2([5; 4])));
-        assert_eq!(store.apply(frame(control, payload)), ok(13));
+        assert_eq!(reply(&mut store, frame(control, payload)), ok(13));
         assert_eq!(
             stored(&store, 13),
             None,
@@ -760,28 +1080,336 @@ mod tests {
 
         let (control, payload) = query(b"not base64 at all!!".to_vec());
         assert_eq!(
-            code(&store.apply(frame(control, payload))),
+            code(&reply(&mut store, frame(control, payload))),
             Some("EINVAL"),
             "and a bad one reports why rather than storing it",
         );
     }
 
-    /// The placement actions are a separate concern. Answering rather than
-    /// ignoring is what stops a client waiting on a reply that never comes.
+    /// A put names an image the client transmitted earlier, so naming one it
+    /// never sent has to say so rather than place nothing silently.
     #[test]
-    fn the_placement_actions_report_that_they_are_unsupported() {
+    fn a_put_of_an_unknown_id_reports_that_it_is_missing() {
         let mut store = ImageStore::new();
+        let control = ControlData {
+            action: Action::Put,
+            ..transmit(31)
+        };
 
-        for action in [Action::Put, Action::Delete] {
+        assert_eq!(
+            code(&reply(&mut store, frame(control, Vec::new()))),
+            Some("ENOENT")
+        );
+        assert!(store.placements().is_empty());
+    }
+
+    /// A transmit-and-display is one round trip for a client that wants the
+    /// image on screen, so it must place as well as store.
+    #[test]
+    fn a_transmit_and_display_places_the_image_it_stored() {
+        let mut store = ImageStore::new();
+        let control = ControlData {
+            action: Action::TransmitAndDisplay,
+            format: Format::Png,
+            ..transmit(32)
+        };
+
+        let applied = store.apply(
+            frame(control, base64(&png_2x2([1; 4]))),
+            Screen {
+                cursor: (3, 5),
+                cell: (8, 16),
+            },
+        );
+
+        assert_eq!(
+            store
+                .placements()
+                .iter()
+                .map(|p| (p.image, p.row, p.col))
+                .collect::<Vec<_>>(),
+            [(32, 3, 5)],
+            "the placement anchors to the cursor cell it was applied at",
+        );
+        assert!(applied.response.is_some());
+    }
+
+    /// The cursor lands past the image so the client's next line of text sits
+    /// below it rather than over it.
+    #[test]
+    fn a_placement_moves_the_cursor_past_itself_unless_told_not_to() {
+        let place = |cursor_policy| {
+            let mut store = ImageStore::new();
             let control = ControlData {
-                action,
-                ..transmit(14)
+                action: Action::TransmitAndDisplay,
+                format: Format::Rgba,
+                width: 16,
+                height: 32,
+                cursor_policy,
+                ..transmit(33)
             };
-            assert_eq!(
-                code(&store.apply(frame(control, Vec::new()))),
-                Some("EINVAL")
+            let payload = base64(&vec![0u8; 16 * 32 * 4]);
+            store
+                .apply(
+                    frame(control, payload),
+                    Screen {
+                        cursor: (1, 2),
+                        cell: (8, 16),
+                    },
+                )
+                .cursor
+        };
+
+        assert_eq!(
+            place(0),
+            Some((2, 4)),
+            "16x32 pixels over an 8x16 cell is 2x2 cells, so the cursor lands on \
+             its last row and past its last column",
+        );
+        assert_eq!(place(1), None, "and stays put when the client says so");
+    }
+
+    /// A client may state the cell box, one side of it, or neither, and each
+    /// case has to reach a size the image is actually drawn into.
+    #[test]
+    fn the_cell_box_comes_from_whichever_dimensions_the_client_stated() {
+        let sized = |cols, rows| {
+            let mut store = ImageStore::new();
+            let control = ControlData {
+                action: Action::TransmitAndDisplay,
+                format: Format::Rgba,
+                width: 32,
+                height: 32,
+                cols,
+                rows,
+                ..transmit(34)
+            };
+            let payload = base64(&vec![0u8; 32 * 32 * 4]);
+            store.apply(
+                frame(control, payload),
+                Screen {
+                    cursor: (0, 0),
+                    cell: (8, 16),
+                },
             );
+            let placed = store.placements()[0];
+            (placed.cols, placed.rows)
+        };
+
+        assert_eq!(
+            sized(0, 0),
+            (4, 2),
+            "neither divides the pixels by the cell"
+        );
+        assert_eq!(sized(6, 3), (6, 3), "both stretch into the box as given");
+        assert_eq!(
+            sized(8, 0),
+            (8, 4),
+            "one derives the other from the image's aspect, in cells",
+        );
+        assert_eq!(sized(0, 4), (8, 4), "either way round");
+    }
+
+    /// Every delete selector has to reach the placements it names, since a
+    /// client with no way to remove an image can only add.
+    #[test]
+    fn each_delete_selector_removes_what_it_names() {
+        use stoatty_protocol::kitty::{DeleteKind, DeleteTarget};
+
+        // Four placements of two images, spread so a positional selector picks
+        // out exactly one of them.
+        let populate = |store: &mut ImageStore| {
+            for (id, row, col, z) in [
+                (1u32, 0usize, 0usize, 0i32),
+                (1, 4, 0, 1),
+                (2, 0, 6, 0),
+                (2, 4, 6, 2),
+            ] {
+                let control = ControlData {
+                    action: Action::TransmitAndDisplay,
+                    format: Format::Rgba,
+                    width: 8,
+                    height: 16,
+                    z,
+                    placement: row as u32 + 1,
+                    ..transmit(id)
+                };
+                store.apply(
+                    frame(control, base64(&vec![0u8; 8 * 16 * 4])),
+                    Screen {
+                        cursor: (row, col),
+                        cell: (8, 16),
+                    },
+                );
+            }
+        };
+
+        let remaining = |kind, control: ControlData| {
+            let mut store = ImageStore::new();
+            populate(&mut store);
+            store.delete(
+                &ControlData {
+                    delete: DeleteTarget {
+                        kind,
+                        free_data: false,
+                    },
+                    ..control
+                },
+                (0, 0),
+            );
+            store.placements().len()
+        };
+
+        let plain = ControlData::default;
+        assert_eq!(
+            remaining(DeleteKind::All, plain()),
+            0,
+            "all clears the screen"
+        );
+        assert_eq!(
+            remaining(DeleteKind::Id, ControlData { id: 1, ..plain() }),
+            2,
+            "an id takes both of that image's placements",
+        );
+        assert_eq!(
+            remaining(
+                DeleteKind::Id,
+                ControlData {
+                    id: 1,
+                    placement: 1,
+                    ..plain()
+                }
+            ),
+            3,
+            "and narrows to one when the client names the placement",
+        );
+        assert_eq!(
+            remaining(DeleteKind::Cursor, plain()),
+            3,
+            "the cursor takes the one under it",
+        );
+        assert_eq!(
+            remaining(
+                DeleteKind::Cell,
+                ControlData {
+                    src_x: 6,
+                    src_y: 0,
+                    ..plain()
+                }
+            ),
+            3,
+            "a cell takes the placement covering it",
+        );
+        assert_eq!(
+            remaining(
+                DeleteKind::Column,
+                ControlData {
+                    src_x: 6,
+                    ..plain()
+                }
+            ),
+            2,
+            "a column takes both placements spanning it",
+        );
+        assert_eq!(
+            remaining(
+                DeleteKind::Row,
+                ControlData {
+                    src_y: 4,
+                    ..plain()
+                }
+            ),
+            2,
+            "and a row likewise",
+        );
+        assert_eq!(
+            remaining(DeleteKind::Z, ControlData { z: 2, ..plain() }),
+            3,
+            "a z-index takes the placements sitting at it",
+        );
+        assert_eq!(
+            remaining(
+                DeleteKind::IdRange,
+                ControlData {
+                    src_x: 2,
+                    src_y: 9,
+                    ..plain()
+                }
+            ),
+            2,
+            "an id range takes every image inside it",
+        );
+    }
+
+    /// The uppercase form is how a client reclaims the store without tracking
+    /// what it transmitted, so it must free an image no placement holds.
+    #[test]
+    fn an_uppercase_delete_frees_the_image_data_too() {
+        use stoatty_protocol::kitty::{DeleteKind, DeleteTarget};
+
+        let delete_all = |free_data| {
+            let mut store = ImageStore::new();
+            let control = ControlData {
+                action: Action::TransmitAndDisplay,
+                format: Format::Png,
+                ..transmit(41)
+            };
+            store.apply(frame(control, base64(&png_2x2([1; 4]))), screen());
+
+            store.delete(
+                &ControlData {
+                    delete: DeleteTarget {
+                        kind: DeleteKind::All,
+                        free_data,
+                    },
+                    ..ControlData::default()
+                },
+                (0, 0),
+            );
+            (store.placements().len(), stored(&store, 41).is_some())
+        };
+
+        assert_eq!(
+            delete_all(false),
+            (0, true),
+            "a lowercase delete takes the placement and keeps the pixels",
+        );
+        assert_eq!(
+            delete_all(true),
+            (0, false),
+            "the uppercase twin takes the pixels with it",
+        );
+    }
+
+    #[test]
+    fn placements_stop_at_their_cap() {
+        let mut store = ImageStore::new();
+        let control = ControlData {
+            action: Action::Transmit,
+            format: Format::Png,
+            ..transmit(51)
+        };
+        reply(&mut store, frame(control, base64(&png_2x2([1; 4]))));
+
+        let put = |store: &mut ImageStore, placement| {
+            let control = ControlData {
+                action: Action::Put,
+                placement,
+                ..transmit(51)
+            };
+            store.apply(frame(control, Vec::new()), screen()).response
+        };
+
+        for placement in 1..=MAX_PLACEMENTS as u32 {
+            put(&mut store, placement);
         }
+        assert_eq!(store.placements().len(), MAX_PLACEMENTS);
+
+        assert_eq!(
+            code(&put(&mut store, MAX_PLACEMENTS as u32 + 1)),
+            Some("ENOSPC"),
+            "one past the cap is refused rather than dropping an older one",
+        );
     }
 
     /// A transmit-and-display keeps its pixels even though nothing can place
@@ -796,7 +1424,7 @@ mod tests {
         };
 
         assert_eq!(
-            store.apply(frame(control, base64(&png_2x2([6; 4])))),
+            reply(&mut store, frame(control, base64(&png_2x2([6; 4])))),
             ok(15)
         );
         assert!(stored(&store, 15).is_some());
@@ -810,10 +1438,16 @@ mod tests {
             ..transmit(16)
         };
 
-        store.apply(frame(control(), base64(&png_2x2([7, 7, 7, 255]))));
+        reply(
+            &mut store,
+            frame(control(), base64(&png_2x2([7, 7, 7, 255]))),
+        );
         let first = stored(&store, 16).expect("stored").generation;
 
-        store.apply(frame(control(), base64(&png_2x2([8, 8, 8, 255]))));
+        reply(
+            &mut store,
+            frame(control(), base64(&png_2x2([8, 8, 8, 255]))),
+        );
         let second = stored(&store, 16).expect("stored");
 
         assert_eq!(&second.rgba[..4], &[8, 8, 8, 255], "the new pixels win");
@@ -834,7 +1468,7 @@ mod tests {
                 format: Format::Png,
                 ..transmit(id)
             };
-            store.apply(frame(control, png.clone()))
+            reply(store, frame(control, png.clone()))
         };
 
         for id in 1..=MAX_IMAGES as u32 {
@@ -849,5 +1483,52 @@ mod tests {
         );
         assert_eq!(stored(&store, 1), None, "and the oldest made room for it");
         assert!(stored(&store, 2).is_some(), "while the rest stay");
+    }
+
+    /// A client that transmits by number deletes by number too, and the store
+    /// is the only place that mapping exists.
+    #[test]
+    fn a_delete_by_number_finds_the_image_that_number_transmitted() {
+        use stoatty_protocol::kitty::{DeleteKind, DeleteTarget};
+
+        let mut store = ImageStore::new();
+        let control = ControlData {
+            action: Action::TransmitAndDisplay,
+            format: Format::Png,
+            number: 77,
+            ..ControlData::default()
+        };
+        store.apply(frame(control, base64(&png_2x2([1; 4]))), screen());
+        assert_eq!(store.placements().len(), 1);
+
+        store.delete(
+            &ControlData {
+                delete: DeleteTarget {
+                    kind: DeleteKind::Number,
+                    free_data: false,
+                },
+                number: 78,
+                ..ControlData::default()
+            },
+            (0, 0),
+        );
+        assert_eq!(
+            store.placements().len(),
+            1,
+            "another number names another image",
+        );
+
+        store.delete(
+            &ControlData {
+                delete: DeleteTarget {
+                    kind: DeleteKind::Number,
+                    free_data: false,
+                },
+                number: 77,
+                ..ControlData::default()
+            },
+            (0, 0),
+        );
+        assert!(store.placements().is_empty(), "its own number finds it");
     }
 }

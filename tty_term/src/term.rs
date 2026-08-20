@@ -22,7 +22,7 @@ use alacritty_terminal::{
     index::{Column, Line, Point, Side},
     selection::{Selection, SelectionType},
     term::{viewport_to_point, Config, TermDamage, TermMode},
-    vte::ansi::{NamedColor, Processor, Rgb as VteRgb},
+    vte::ansi::{Handler, NamedColor, Processor, Rgb as VteRgb},
     Term,
 };
 use decorate::{
@@ -1520,7 +1520,16 @@ impl Terminal {
             // places from later, and the reply goes back on the response path
             // the ident handshake uses.
             Command::Kitty(graphics) => {
-                if let Some(response) = self.images.apply(graphics) {
+                let cursor = self.cursor();
+                let applied = self.images.apply(
+                    graphics,
+                    images::Screen {
+                        cursor: (cursor.row, cursor.col),
+                        cell: (u32::from(self.cell_pixels.0), u32::from(self.cell_pixels.1)),
+                    },
+                );
+
+                if let Some(response) = applied.response {
                     let mut out = Vec::new();
                     kitty::encode_response_into(
                         &mut out,
@@ -1531,6 +1540,20 @@ impl Terminal {
                     );
                     self.responses.push(&out);
                 }
+
+                // A placement leaves the cursor past its last row, so text the
+                // client writes next lands below the image rather than over it.
+                if let Some((row, col)) = applied.cursor {
+                    let cols = self.term.columns();
+                    self.term.goto(
+                        row.min(self.term.screen_lines() - 1) as i32,
+                        col.min(cols - 1),
+                    );
+                }
+
+                // The placement list is grid state a projection has to rebuild,
+                // and nothing else marks it dirty.
+                self.damage_pending = true;
             },
         }
     }
@@ -2426,6 +2449,46 @@ impl Terminal {
         mem::take(&mut self.output_since_project)
     }
 
+    /// The placements the renderer should draw, joined with their pixels.
+    ///
+    /// A placement whose anchor row sits outside the screen is left out rather
+    /// than clamped, so an image scrolled off the top does not reappear pinned
+    /// to row zero. One whose image is gone is left out too, which is what a
+    /// delete that freed the data leaves behind for a frame.
+    fn placed_images(&self, rows: usize, cols: usize) -> Vec<grid::PlacedImage> {
+        self.images
+            .placements()
+            .iter()
+            .filter(|placement| {
+                placement.row >= 0 && (placement.row as usize) < rows && placement.col < cols
+            })
+            .filter_map(|placement| {
+                let image = self.images.image(placement.image)?;
+                Some(grid::PlacedImage {
+                    image: placement.image,
+                    placement: placement.placement,
+                    generation: image.generation,
+                    rgba: image.rgba.clone(),
+                    width: image.width,
+                    height: image.height,
+                    row: placement.row as usize,
+                    col: placement.col,
+                    cols: placement.cols,
+                    rows: placement.rows,
+                    crop: grid::ImageCrop {
+                        x: placement.crop_x,
+                        y: placement.crop_y,
+                        width: placement.crop_w,
+                        height: placement.crop_h,
+                    },
+                    offset_x: placement.offset_x,
+                    offset_y: placement.offset_y,
+                    z: placement.z,
+                })
+            })
+            .collect()
+    }
+
     /// The cursor [`Self::project`] would report, without projecting.
     ///
     /// For a frame that skipped the projection but still has to place something
@@ -2736,6 +2799,11 @@ impl Terminal {
         if self.decorations_dirty.minimaps || resized {
             apply_minimaps(grid, &self.minimaps, &self.minimap_seq, &self.minimap_views);
         }
+        // The placement list is rebuilt whole rather than diffed. A placement
+        // carries a refcount on its pixels rather than a copy, so rebuilding is
+        // a walk of a short list, and a projection that skipped it would leave
+        // the renderer drawing an image the client deleted.
+        grid.set_images(self.placed_images(rows, cols));
         // A resize empties the grid's stores, so re-clone them wholesale and drop
         // the journal the clone subsumes. Otherwise replay only the splices and
         // drops since the last projection. The grid's stores match the term's as
@@ -2965,6 +3033,14 @@ mod tests {
         PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
         TextRunCommand, WindowOpenCommand,
     };
+
+    /// Base64, for a test feeding a graphics payload.
+    fn base64_of(bytes: &[u8]) -> Vec<u8> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .encode(bytes)
+            .into_bytes()
+    }
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
         let mut terminal = Terminal::new(rows, cols, Theme::default());
@@ -7511,6 +7587,59 @@ mod tests {
         assert!(
             kitty::parse_response(&terminal.take_responses()).is_some(),
             "the frame acted rather than being dropped with the page decorations",
+        );
+    }
+
+    /// The renderer reads placements off the grid, so a placement that never
+    /// reaches the projection is one nothing draws.
+    #[test]
+    fn a_placement_reaches_the_grid_with_its_rect_and_pixels() {
+        use stoatty_protocol::kitty::{self, Action, ControlData, Format};
+
+        let mut terminal = Terminal::new(6, 20, Theme::default());
+        let mut grid = Grid::new(6, 20);
+        terminal.set_cell_pixels(8, 16);
+        terminal.advance(b"\r\n\r\n  ");
+        terminal.project(&mut grid);
+        let epoch = grid.images_epoch();
+
+        let mut out = Vec::new();
+        kitty::encode_into(
+            &mut out,
+            &ControlData {
+                action: Action::TransmitAndDisplay,
+                format: Format::Rgba,
+                width: 16,
+                height: 16,
+                id: 61,
+                ..ControlData::default()
+            },
+            &base64_of(&[7u8; 16 * 16 * 4]),
+        );
+        terminal.advance(&out);
+        terminal.project(&mut grid);
+
+        let placed = grid.images();
+        assert_eq!(placed.len(), 1, "the placement reaches the grid");
+        assert_eq!(
+            (
+                placed[0].image,
+                placed[0].row,
+                placed[0].col,
+                placed[0].cols,
+                placed[0].rows,
+            ),
+            (61, 2, 2, 2, 1),
+            "anchored at the cursor, sized 16x16 pixels over an 8x16 cell",
+        );
+        assert_eq!(
+            (placed[0].width, placed[0].height, placed[0].rgba.len()),
+            (16, 16, 16 * 16 * 4),
+            "carrying the whole image rather than an id to look up",
+        );
+        assert!(
+            grid.images_epoch() > epoch,
+            "and moving the epoch, so a cached render pass rebuilds",
         );
     }
 }

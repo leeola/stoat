@@ -71,6 +71,13 @@ pub struct Grid {
     popovers_epoch: u64,
     text_runs_epoch: u64,
     minimap_epoch: u64,
+    /// Images placed on this grid, in declaration order.
+    ///
+    /// Held apart from the cells because a placement covers a box of them and
+    /// draws from its own pixels, so nothing about it fits in a cell.
+    images: Vec<PlacedImage>,
+    /// Change counter for [`Self::images`], read like [`Self::popovers_epoch`].
+    images_epoch: u64,
 }
 
 impl Grid {
@@ -94,6 +101,8 @@ impl Grid {
             popovers_epoch: 0,
             text_runs_epoch: 0,
             minimap_epoch: 0,
+            images: Vec::new(),
+            images_epoch: 0,
         }
     }
 
@@ -124,6 +133,25 @@ impl Grid {
     /// reason.
     pub fn minimap_epoch(&self) -> u64 {
         self.minimap_epoch
+    }
+
+    /// Images placed on this grid, in declaration order.
+    pub fn images(&self) -> &[PlacedImage] {
+        &self.images
+    }
+
+    /// Change counter for [`Self::images`], moved by every replacement.
+    ///
+    /// Read like [`Self::popovers_epoch`], and maintained here for the same
+    /// reason.
+    pub fn images_epoch(&self) -> u64 {
+        self.images_epoch
+    }
+
+    /// Replace the placed images, moving [`Self::images_epoch`].
+    pub fn set_images(&mut self, images: Vec<PlacedImage>) {
+        self.images = images;
+        self.images_epoch += 1;
     }
 
     pub fn rows(&self) -> usize {
@@ -211,9 +239,8 @@ impl Grid {
     ///
     /// Content is not preserved. The driver repopulates the grid afterward.
     ///
-    /// Moves [`Self::popovers_epoch`], [`Self::text_runs_epoch`], and
-    /// [`Self::minimap_epoch`], since dropping those lists is as much a change
-    /// as replacing them.
+    /// Moves every decoration epoch, since dropping those lists is as much a
+    /// change as replacing them.
     pub fn resize(&mut self, rows: usize, cols: usize) {
         self.rows = rows;
         self.cols = cols;
@@ -229,10 +256,12 @@ impl Grid {
         self.minimaps.clear();
         self.minimap_contents.clear();
         self.line_start_rows.clear();
+        self.images.clear();
 
         self.popovers_epoch += 1;
         self.text_runs_epoch += 1;
         self.minimap_epoch += 1;
+        self.images_epoch += 1;
     }
 
     /// Reset every cell to [`Cell::default`] and drop all decorations, keeping
@@ -2552,4 +2581,52 @@ mod region_blit_tests {
             "the straddle row a caller does not want is left out"
         );
     }
+}
+
+/// An image placed on the grid, as the renderer needs to draw it.
+///
+/// Carries its own pixels rather than an id into a store, so a render pass
+/// reads one list and needs nothing else. The pixels are shared, so carrying
+/// them costs a refcount rather than a copy of the image.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PlacedImage {
+    /// The image these pixels came from, so a consumer can tell two placements
+    /// of one image apart from two images.
+    pub image: u32,
+    /// The client's id for this placement, or zero when it named none.
+    pub placement: u32,
+    /// Which transmission of [`Self::image`] this is, so a cache holding a
+    /// placement can tell a re-transmission from the pixels it drew.
+    pub generation: u64,
+    /// Decoded RGBA, the whole image rather than the cropped part.
+    pub rgba: Arc<[u8]>,
+    /// The image's own pixel size, which [`Self::crop`] indexes into.
+    pub width: u32,
+    pub height: u32,
+    /// Top-left cell of the box the image is drawn into.
+    pub row: usize,
+    pub col: usize,
+    /// Size of that box in cells. The image stretches to fill it.
+    pub cols: usize,
+    pub rows: usize,
+    /// The part of the source image to draw, as pixels. A zero width or height
+    /// means the rest of the image from that edge.
+    pub crop: ImageCrop,
+    /// Pixel offset inside the top-left cell, so a client can place an image
+    /// off the cell grid.
+    pub offset_x: u32,
+    pub offset_y: u32,
+    /// Where the placement sits relative to the text. Negative draws behind it.
+    pub z: i32,
+}
+
+/// The rectangle of a source image a placement draws.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ImageCrop {
+    pub x: u32,
+    pub y: u32,
+    /// Zero means the rest of the image from [`Self::x`].
+    pub width: u32,
+    /// Zero means the rest of the image from [`Self::y`].
+    pub height: u32,
 }

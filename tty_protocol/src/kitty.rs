@@ -88,6 +88,8 @@ pub enum DeleteKind {
     Row,
     /// Placements at z-index `z`.
     Z,
+    /// Every image whose id falls in the range `x..=y`, placements and all.
+    IdRange,
 }
 
 /// What a delete action removes, and whether the image data goes with it.
@@ -452,6 +454,7 @@ fn parse_control(control: &[u8]) -> Option<ControlData> {
                         'x' => DeleteKind::Column,
                         'y' => DeleteKind::Row,
                         'z' => DeleteKind::Z,
+                        'r' => DeleteKind::IdRange,
                         _ => return None,
                     },
                     free_data: letter.is_ascii_uppercase(),
@@ -543,6 +546,7 @@ fn write_control(out: &mut Vec<u8>, ctrl: &ControlData) {
             DeleteKind::Column => 'x',
             DeleteKind::Row => 'y',
             DeleteKind::Z => 'z',
+            DeleteKind::IdRange => 'r',
         };
         let letter = match ctrl.delete.free_data {
             true => letter.to_ascii_uppercase(),
@@ -836,6 +840,44 @@ mod tests {
                     result,
                 },
             );
+        }
+    }
+
+    /// The delete table has to survive a round trip whole, since a selector the
+    /// emitter cannot write is one the terminal will never be asked for.
+    #[test]
+    fn every_delete_selector_round_trips_in_both_cases() {
+        use super::{encode_into, DeleteKind};
+
+        let kinds = [
+            DeleteKind::All,
+            DeleteKind::Id,
+            DeleteKind::Number,
+            DeleteKind::Cursor,
+            DeleteKind::Cell,
+            DeleteKind::CellZ,
+            DeleteKind::Column,
+            DeleteKind::Row,
+            DeleteKind::Z,
+            DeleteKind::IdRange,
+        ];
+
+        for kind in kinds {
+            for free_data in [false, true] {
+                let control = ControlData {
+                    action: Action::Delete,
+                    delete: DeleteTarget { kind, free_data },
+                    ..ControlData::default()
+                };
+
+                let mut out = Vec::new();
+                encode_into(&mut out, &control, b"");
+                assert_eq!(
+                    parse(&out).expect("own output parses").control.delete,
+                    DeleteTarget { kind, free_data },
+                    "{kind:?} with free_data {free_data}",
+                );
+            }
         }
     }
 }
