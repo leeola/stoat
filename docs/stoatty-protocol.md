@@ -194,6 +194,20 @@ A frame that named neither `i` nor `I` gets no reply, since it asked for none.
 One that named `I` is answered with both the number it sent and the id stoatty
 assigned.
 
+
+Placements are anchored to the cursor cell at the moment they are applied, and
+they move with the screen's content:
+
+| Event | What happens to placements |
+|---|---|
+| Output scrolls the screen | They shift with it, and go once fully past the top |
+| A scroll region inside the margins | They stay put (a known wart, since no history grows) |
+| The screen is erased | Unaffected as data; a scroll that erase causes moves them |
+| A resize | One anchored past the new edge is dropped rather than moved |
+| The alternate screen | It keeps its own; leaving it drops them, and the images stay |
+| A full reset | Everything goes, images included |
+| Scrolled back into history | Not redrawn |
+
 Deliberate deviations, so a reader is not left hunting for a bug:
 
 - The scrolled-back history view does not redraw placements. They translate with

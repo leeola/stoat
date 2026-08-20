@@ -173,6 +173,66 @@ impl ImageStore {
         }
     }
 
+    /// Point the store at the alternate screen or back at the primary.
+    ///
+    /// Leaving the alternate screen drops its placements, since that screen and
+    /// what a program drew on it are both gone. The pixels stay under their ids,
+    /// because those belong to the client rather than to a screen.
+    pub(crate) fn set_alt_screen(&mut self, alt: bool) {
+        let screen = usize::from(alt);
+        if screen == self.screen {
+            return;
+        }
+        if !alt {
+            self.placements[1].clear();
+        }
+        self.screen = screen;
+    }
+
+    /// Shift every placement on the showing screen up by `rows`, dropping the
+    /// ones that have left it.
+    ///
+    /// The anchor is a screen row, so content scrolling under a placement means
+    /// the placement moves with it. A placement whose whole footprint has passed
+    /// the top is gone: nothing scrolls it back, since the history view does not
+    /// redraw placements.
+    pub(crate) fn scroll(&mut self, rows: i32, screen_rows: usize) {
+        if rows == 0 {
+            return;
+        }
+        let list = &mut self.placements[self.screen];
+        for placement in list.iter_mut() {
+            placement.row -= rows;
+        }
+        list.retain(|placement| {
+            placement.row + placement.rows as i32 > 0 && placement.row < screen_rows as i32
+        });
+    }
+
+    /// Drop placements a resize left outside the grid.
+    ///
+    /// A placement anchored past the new edge has no cell to sit on, and
+    /// clamping it would move an image the client never asked to move.
+    pub(crate) fn clamp_to(&mut self, rows: usize, cols: usize) {
+        for list in &mut self.placements {
+            list.retain(|placement| placement.row < rows as i32 && placement.col < cols);
+        }
+    }
+
+    /// Drop every image and placement, for a full terminal reset.
+    ///
+    /// A reset returns the terminal to its start state, and images the client
+    /// transmitted are part of what it built since. Kitty scopes this to a full
+    /// reset rather than to an erase or a soft reset, so a program clearing the
+    /// screen keeps the images it will place again.
+    pub(crate) fn reset(&mut self) {
+        self.images.clear();
+        self.order.clear();
+        self.bytes = 0;
+        self.placements = [Vec::new(), Vec::new()];
+        self.pending = None;
+    }
+
     /// The pixels held under `id`, for the projection joining a placement with
     /// the image it names.
     pub(crate) fn image(&self, id: u32) -> Option<&DecodedImage> {

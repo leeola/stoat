@@ -957,6 +957,11 @@ impl Terminal {
         self.damage_pending |= redraw;
         self.drain_listener_events();
         self.drain_staged();
+        // The alternate screen is its own surface for placements, and nothing
+        // reports entering or leaving it. Polled here rather than inside the
+        // parse body, because the mode only changes once the parser has run.
+        self.images
+            .set_alt_screen(self.term.mode().contains(TermMode::ALT_SCREEN));
         redraw
     }
 
@@ -988,6 +993,7 @@ impl Terminal {
         let scratch = &mut self.frame_scratch;
         let responses = &self.responses;
         let events = &mut self.pending_events;
+        let mut reset = false;
         self.esc.scan(scan, &mut |event| match event {
             EscEvent::Apc {
                 payload,
@@ -1002,7 +1008,15 @@ impl Terminal {
                     events.push(event);
                 }
             },
+            // Flagged rather than acted on here, so the reset lands after the
+            // parser has applied its own half and cannot be undone by it.
+            EscEvent::Ris => reset = true,
         });
+
+        if reset {
+            self.images.reset();
+            self.damage_pending = true;
+        }
 
         // Without a redirect every byte targets the live screen, so apply the
         // commands and feed the chunk to the one parser, preserving the
@@ -2799,6 +2813,17 @@ impl Terminal {
         if self.decorations_dirty.minimaps || resized {
             apply_minimaps(grid, &self.minimaps, &self.minimap_seq, &self.minimap_views);
         }
+        // Placements follow the scroll the terminal can vouch for, which is the
+        // history it grew. The slide above infers a shift when the whole screen
+        // is damaged, and that guess is deliberately allowed to be wrong. A wrong
+        // guess costs the projection a row comparison, where it would cost a
+        // placement its existence. A region scroll inside the margins grows no
+        // history either, so placements do not follow that.
+        self.images.scroll(scrolled as i32, rows);
+        if resized {
+            self.images.clamp_to(rows, cols);
+        }
+
         // The placement list is rebuilt whole rather than diffed. A placement
         // carries a refcount on its pixels rather than a copy, so rebuilding is
         // a walk of a short list, and a projection that skipped it would leave
@@ -7640,6 +7665,217 @@ mod tests {
         assert!(
             grid.images_epoch() > epoch,
             "and moving the epoch, so a cached render pass rebuilds",
+        );
+    }
+
+    /// Placements ride the text they were anchored beside, so output scrolling
+    /// the screen has to carry them along and drop them when they pass the top.
+    #[test]
+    fn scrolling_carries_a_placement_and_then_drops_it() {
+        use stoatty_protocol::kitty::{self, Action, ControlData, Format};
+
+        let mut terminal = Terminal::new(4, 20, Theme::default());
+        let mut grid = Grid::new(4, 20);
+        terminal.set_cell_pixels(8, 16);
+
+        let mut out = Vec::new();
+        kitty::encode_into(
+            &mut out,
+            &ControlData {
+                action: Action::TransmitAndDisplay,
+                format: Format::Rgba,
+                width: 8,
+                height: 16,
+                id: 71,
+                cursor_policy: 1,
+                ..ControlData::default()
+            },
+            &base64_of(&[7u8; 8 * 16 * 4]),
+        );
+        terminal.advance(&out);
+        terminal.project(&mut grid);
+        assert_eq!(grid.images().first().map(|i| i.row), Some(0));
+
+        // Two newlines past the last row, so the screen scrolls by two.
+        terminal.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
+        terminal.project(&mut grid);
+        assert!(
+            grid.images().is_empty(),
+            "a placement scrolled off the top is gone, not pinned to row zero",
+        );
+    }
+
+    /// The alternate screen is its own surface. A program that draws there and
+    /// leaves must not find its images still on the screen it returns to.
+    #[test]
+    fn the_alternate_screen_keeps_its_own_placements() {
+        use stoatty_protocol::kitty::{self, Action, ControlData, Format};
+
+        let mut terminal = Terminal::new(4, 20, Theme::default());
+        let mut grid = Grid::new(4, 20);
+        terminal.set_cell_pixels(8, 16);
+
+        let place = |terminal: &mut Terminal, id| {
+            let mut out = Vec::new();
+            kitty::encode_into(
+                &mut out,
+                &ControlData {
+                    action: Action::TransmitAndDisplay,
+                    format: Format::Rgba,
+                    width: 8,
+                    height: 16,
+                    id,
+                    cursor_policy: 1,
+                    ..ControlData::default()
+                },
+                &base64_of(&[7u8; 8 * 16 * 4]),
+            );
+            terminal.advance(&out);
+        };
+
+        place(&mut terminal, 81);
+        terminal.advance(b"\x1b[?1049h");
+        place(&mut terminal, 82);
+        terminal.project(&mut grid);
+        assert_eq!(
+            grid.images().iter().map(|i| i.image).collect::<Vec<_>>(),
+            [82],
+            "the alternate screen shows only what was placed on it",
+        );
+
+        terminal.advance(b"\x1b[?1049l");
+        terminal.project(&mut grid);
+        assert_eq!(
+            grid.images().iter().map(|i| i.image).collect::<Vec<_>>(),
+            [81],
+            "and leaving it restores the primary screen's own placement",
+        );
+
+        terminal.advance(b"\x1b[?1049h");
+        terminal.project(&mut grid);
+        assert!(
+            grid.images().is_empty(),
+            "coming back finds a fresh alternate screen, not the last program's",
+        );
+    }
+
+    /// A full reset returns the terminal to its start state, so the images a
+    /// client transmitted go with it. An erase does not: it clears the screen,
+    /// and the client places the same images again onto what it draws next.
+    #[test]
+    fn a_full_reset_drops_the_stored_images_where_an_erase_keeps_them() {
+        use stoatty_protocol::kitty::{self, Action, ControlData, Format, ResponseResult};
+
+        let mut terminal = Terminal::new(4, 20, Theme::default());
+        let mut grid = Grid::new(4, 20);
+        terminal.set_cell_pixels(8, 16);
+
+        let mut transmit = Vec::new();
+        kitty::encode_into(
+            &mut transmit,
+            &ControlData {
+                action: Action::Transmit,
+                format: Format::Rgba,
+                width: 8,
+                height: 16,
+                id: 91,
+                ..ControlData::default()
+            },
+            &base64_of(&[7u8; 8 * 16 * 4]),
+        );
+        terminal.advance(&transmit);
+        terminal.take_responses();
+
+        let mut put = Vec::new();
+        kitty::encode_into(
+            &mut put,
+            &ControlData {
+                action: Action::Put,
+                id: 91,
+                cursor_policy: 1,
+                ..ControlData::default()
+            },
+            b"",
+        );
+        let place = |terminal: &mut Terminal, grid: &mut Grid| {
+            terminal.advance(&put);
+            terminal.project(grid);
+            kitty::parse_response(&terminal.take_responses())
+                .expect("a put naming an id is answered")
+                .result
+        };
+
+        assert_eq!(place(&mut terminal, &mut grid), ResponseResult::Ok);
+        assert_eq!(grid.images().len(), 1);
+
+        terminal.advance(b"\x1b[2J");
+        assert_eq!(
+            place(&mut terminal, &mut grid),
+            ResponseResult::Ok,
+            "an erase leaves the image under its id, so a client can place it again",
+        );
+
+        terminal.advance(b"\x1bc");
+        terminal.project(&mut grid);
+        assert!(grid.images().is_empty(), "a reset takes the placements");
+        assert!(
+            matches!(
+                place(&mut terminal, &mut grid),
+                ResponseResult::Error { ref code, .. } if code == "ENOENT",
+            ),
+            "and the image itself, so the id names nothing afterward",
+        );
+    }
+
+    /// A narrower grid leaves a placement anchored past the right edge with no
+    /// cell to sit on. Nothing scrolls columns, so unlike a row it cannot come
+    /// back, and moving it would put the image where the client never asked.
+    #[test]
+    fn a_resize_drops_a_placement_anchored_past_the_new_width() {
+        use stoatty_protocol::kitty::{self, Action, ControlData, Format};
+
+        let mut terminal = Terminal::new(6, 20, Theme::default());
+        let mut grid = Grid::new(6, 20);
+        terminal.set_cell_pixels(8, 16);
+        // On the alternate screen, so a narrowing reflows nothing into history
+        // and the resize is the only thing that can drop the placement.
+        terminal.advance(b"\x1b[?1049h");
+        terminal.advance(b"               ");
+
+        let mut out = Vec::new();
+        kitty::encode_into(
+            &mut out,
+            &ControlData {
+                action: Action::TransmitAndDisplay,
+                format: Format::Rgba,
+                width: 8,
+                height: 16,
+                id: 95,
+                cursor_policy: 1,
+                ..ControlData::default()
+            },
+            &base64_of(&[7u8; 8 * 16 * 4]),
+        );
+        terminal.advance(&out);
+        terminal.project(&mut grid);
+        assert_eq!(
+            grid.images().first().map(|image| image.col),
+            Some(15),
+            "anchored at the cursor, fifteen columns in",
+        );
+
+        terminal.resize(6, 8);
+        terminal.project(&mut grid);
+        assert!(
+            grid.images().is_empty(),
+            "eight columns leave nothing for a placement anchored at fifteen",
+        );
+
+        terminal.resize(6, 20);
+        terminal.project(&mut grid);
+        assert!(
+            grid.images().is_empty(),
+            "and widening again does not bring it back, since the resize dropped it",
         );
     }
 }

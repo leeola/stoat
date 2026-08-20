@@ -46,6 +46,11 @@ pub(super) enum EscEvent<'a> {
     /// An OSC 9 or OSC 777 notification, as its code and the bytes after the
     /// code's `;`.
     OscNotify { code: u32, payload: &'a [u8] },
+    /// A full reset (`ESC c`).
+    ///
+    /// The parser resets the screen itself, so this reports it only for the
+    /// state the driver keeps alongside.
+    Ris,
 }
 
 /// Recognizes the escape sequences the vte parser does not hand back, in one walk
@@ -155,6 +160,13 @@ impl EscScanner {
                             EscState::OscPrefix
                         },
                         ESC => EscState::Escape,
+                        // RIS. vte applies it to the screen, but nothing tells
+                        // the driver, and state the driver owns outside the
+                        // screen has to go with it.
+                        b'c' => {
+                            emit(EscEvent::Ris);
+                            EscState::Ground
+                        },
                         _ => EscState::Ground,
                     };
                 },
@@ -501,11 +513,14 @@ mod tests {
         let mut apc = Vec::new();
         let mut queries = 0;
         let mut notes = Vec::new();
+        let mut resets = 0;
         scanner.scan(input, &mut |event| match event {
             EscEvent::Apc { payload, .. } => apc.push(payload.to_vec()),
             EscEvent::XtVersion => queries += 1,
             EscEvent::OscNotify { code, payload } => notes.push((code, payload.to_vec())),
+            EscEvent::Ris => resets += 1,
         });
+        assert_eq!(resets, 0, "this stream carries no full reset");
 
         assert_eq!(
             (apc, queries, notes),
@@ -810,5 +825,32 @@ mod tests {
             );
             assert_eq!(got, whole, "split at {split} changed the payloads");
         }
+    }
+
+    /// A full reset is one byte after `ESC`, so it must not be confused with an
+    /// escape sequence that merely starts the same way.
+    #[test]
+    fn a_full_reset_is_reported_and_its_neighbors_are_not() {
+        let mut scanner = EscScanner::default();
+        let mut resets = 0;
+        let mut count = |input: &[u8]| {
+            resets = 0;
+            scanner.scan(input, &mut |event| {
+                if matches!(event, EscEvent::Ris) {
+                    resets += 1;
+                }
+            });
+            resets
+        };
+
+        assert_eq!(count(b"\x1bc"), 1, "ESC c is a full reset");
+        assert_eq!(count(b"a\x1bcb\x1bc"), 2, "amid other output too");
+        assert_eq!(count(b"\x1b[2J"), 0, "an erase is not");
+        assert_eq!(count(b"\x1b[c"), 0, "nor a device-attributes query");
+        assert_eq!(
+            count(b"\x1b_Gc;\x1b\\"),
+            0,
+            "nor the same byte inside an APC payload",
+        );
     }
 }
