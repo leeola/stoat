@@ -275,7 +275,6 @@ pub(crate) fn preview_row_count(session: &ReviewSession) -> usize {
 /// Parity with `:diff` comes from calling its painter, not from copying its
 /// treatment, so the two surfaces cannot drift.
 ///
-/// A commit preview has nothing staged, so every wash is the unstaged set.
 /// `spans` is reused across rows rather than allocated per row, and is left
 /// sorted for the painter's monotonic cursor.
 #[allow(clippy::too_many_arguments)]
@@ -287,7 +286,6 @@ fn paint_preview_side(
     width: usize,
     highlights: Option<&BaseHighlights>,
     tints: &DiffTints,
-    side_span_tint: [u8; 3],
     context: bool,
     spans: &mut Vec<(std::ops::Range<usize>, ChangeKind)>,
 ) {
@@ -326,8 +324,9 @@ fn paint_preview_side(
         token_spans,
         Style::default(),
         spans,
-        Some(side_span_tint),
-        Some(tints.unstaged.moved_span),
+        // Reached only where the tints resolved, which is the RGB theme this
+        // flag stands for.
+        true,
         soften_row,
         soften_gaps,
         // The commit preview is its own screen, so the diff view's soften knob
@@ -444,7 +443,6 @@ pub(crate) fn render_commit_preview(
                                     left_content_w,
                                     file.base_highlights.as_deref(),
                                     tints,
-                                    tints.unstaged.removed_span,
                                     true,
                                     &mut spans,
                                 );
@@ -456,7 +454,6 @@ pub(crate) fn render_commit_preview(
                                     right_content_w,
                                     file.buffer_highlights.as_deref(),
                                     tints,
-                                    tints.unstaged.added_span,
                                     true,
                                     &mut spans,
                                 );
@@ -502,7 +499,6 @@ pub(crate) fn render_commit_preview(
                                         left_content_w,
                                         file.base_highlights.as_deref(),
                                         tints,
-                                        tints.unstaged.removed_span,
                                         false,
                                         &mut spans,
                                     ),
@@ -541,7 +537,6 @@ pub(crate) fn render_commit_preview(
                                         right_content_w,
                                         file.buffer_highlights.as_deref(),
                                         tints,
-                                        tints.unstaged.added_span,
                                         false,
                                         &mut spans,
                                     ),
@@ -581,7 +576,11 @@ mod tests {
         review_session::{ReviewSession, ReviewSource},
         theme::Theme,
     };
-    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        style::{Color, Modifier},
+    };
     use std::{path::PathBuf, sync::Arc};
 
     /// The same RGB theme the diff-view tests use, so the washes engage.
@@ -671,38 +670,40 @@ mod tests {
         );
     }
 
-    /// A changed span keeps its token color and takes the wash as a
-    /// background, which is what makes a commit diff read like `:diff`.
+    /// A changed span is the one thing on the row that recedes nowhere, and it
+    /// carries no color behind it, which is what makes a commit diff read
+    /// like `:diff`.
     #[test]
-    fn a_changed_span_keeps_its_token_color_over_the_wash() {
+    fn a_changed_span_keeps_its_token_color_and_takes_no_wash() {
         let session = session("ctx\nold\n", "ctx\nnew\n", true);
         let buf = rendered(&session, &rgb_theme());
 
         let cell = cell_with(&buf, 2, "n");
         assert_eq!(
-            cell.style().fg,
-            Some(Color::Rgb(TOKEN_FG[0], TOKEN_FG[1], TOKEN_FG[2])),
-            "the changed token keeps full-strength syntax color"
-        );
-        assert!(
-            matches!(cell.style().bg, Some(Color::Rgb(..))),
-            "and carries a wash background: {:?}",
-            cell.style().bg
+            (cell.style().fg, cell.style().bg, cell.modifier),
+            (
+                Some(Color::Rgb(TOKEN_FG[0], TOKEN_FG[1], TOKEN_FG[2])),
+                Some(Color::Reset),
+                Modifier::empty()
+            ),
+            "the changed token keeps full-strength syntax color, no wash, and no underline"
         );
     }
 
-    /// A file the build never attached highlights to still washes its spans,
-    /// over softened fallback text rather than nothing.
+    /// The preview marks a change by holding it at full strength while its
+    /// neighbors recede, so a file the build never attached highlights to has
+    /// nothing to mark with and paints flat.
     #[test]
-    fn a_file_without_highlights_still_washes_its_spans() {
+    fn a_file_without_highlights_paints_no_marking_at_all() {
         let session = session("ctx\nold\n", "ctx\nnew\n", false);
         let buf = rendered(&session, &rgb_theme());
 
-        let cell = cell_with(&buf, 2, "n");
-        assert!(
-            matches!(cell.style().bg, Some(Color::Rgb(..))),
-            "the wash lands without any token spans: {:?}",
-            cell.style().bg
+        let changed = cell_with(&buf, 2, "n");
+        let gap = cell_with(&buf, 1, "c");
+        assert_eq!(
+            (changed.style().fg, gap.style().fg),
+            (Some(Color::Reset), Some(Color::Reset)),
+            "no color reaches the changed span or its receding neighbor"
         );
     }
 

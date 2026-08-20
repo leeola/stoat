@@ -290,8 +290,7 @@ fn paint_conflict_rows(
                     fallback_style,
                     inlay_style,
                     &[],
-                    None,
-                    None,
+                    true,
                     None,
                     None,
                     // This row softens nothing, so the scale it takes never applies.
