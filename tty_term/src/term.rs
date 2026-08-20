@@ -8123,4 +8123,34 @@ mod tests {
             Some((20, 6)),
         );
     }
+
+    /// The terminal reserves two cells for a wide character, but nothing
+    /// downstream knew, so a bitmap rasterized for both landed in one.
+    #[test]
+    fn a_wide_character_marks_its_cell_and_blanks_the_spacer() {
+        let (grid, _) = project(1, 8, "\u{1f600}ab".as_bytes());
+
+        assert_eq!(
+            (grid.get(0, 0).ch, grid.get(0, 1).ch),
+            ('\u{1f600}', ' '),
+            "the character sits in the first cell and the second is its spacer",
+        );
+        assert!(
+            grid.get(0, 0).flags.contains(Flags::WIDE),
+            "and the cell says it spans two",
+        );
+        assert!(
+            !grid.get(0, 1).flags.contains(Flags::WIDE),
+            "while the spacer does not claim a span of its own",
+        );
+        assert_eq!(
+            (grid.get(0, 2).ch, grid.get(0, 3).ch),
+            ('a', 'b'),
+            "and what follows starts past both cells",
+        );
+        assert!(
+            !grid.get(0, 2).flags.contains(Flags::WIDE),
+            "a narrow character claims one cell",
+        );
+    }
 }

@@ -1663,6 +1663,13 @@ impl Flags {
     pub const INVERSE: Flags = Flags(0b0000_1000);
     pub const HIDDEN: Flags = Flags(0b0001_0000);
     pub const STRIKEOUT: Flags = Flags(0b0010_0000);
+    /// The cell holds a character two cells wide, the second of which is the
+    /// blank spacer beside it.
+    ///
+    /// Carried so a renderer can give the glyph the box it actually occupies. A
+    /// bitmap rasterized larger than one cell otherwise lands unclamped, drawn
+    /// from one cell's origin across whatever sits beside it.
+    pub const WIDE: Flags = Flags(0b0100_0000);
 
     /// The empty set, carrying no attributes.
     pub const fn empty() -> Flags {

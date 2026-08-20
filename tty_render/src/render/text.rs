@@ -21,7 +21,7 @@ use cosmic_text::{fontdb::Weight, CacheKey, Family, Font, FontSystem, SwashCache
 use rustc_hash::FxHashMap;
 use std::{mem, ops::Range, sync::Arc};
 use stoatty_term::{
-    grid::{Cell, Grid, Overlay, Rgb, Scale, ScrollRegion, UnderlineStyle},
+    grid::{Cell, Flags, Grid, Overlay, Rgb, Scale, ScrollRegion, UnderlineStyle},
     term::Damage,
 };
 use wgpu::{
@@ -1766,6 +1766,27 @@ impl TextPass {
                             self.metrics,
                             origin,
                         )
+                    } else if info.kind == AtlasKind::Color {
+                        // A color bitmap is rasterized at whatever size the font
+                        // gives, so it is the one glyph that has to be held to
+                        // the cells it was placed in. A mask glyph keeps its own
+                        // placement: a CJK ideograph's overhang into its spacer
+                        // is how it is drawn.
+                        // Two cells across for a wide character, but always one
+                        // down: the span is horizontal.
+                        let span = match glyph.wide {
+                            true => 2.0,
+                            false => 1.0,
+                        };
+                        let (box_origin, box_size) = cell_box(
+                            glyph.row,
+                            glyph.col,
+                            glyph.scale,
+                            span,
+                            self.metrics,
+                            origin,
+                        );
+                        fit_glyph_box(pos, dim, box_origin, box_size)
                     } else {
                         (pos, dim)
                     }
@@ -2791,6 +2812,9 @@ impl TextPass {
                         fg,
                         scale: 1.0,
                         cell_fill: false,
+                        // A text run lays out its own glyphs rather than
+                        // placing them on cells, so none claims a cell box.
+                        wide: false,
                         info,
                         resolved_epoch: self.atlas.content_epoch(),
                     });
@@ -2835,6 +2859,8 @@ impl TextPass {
                 fg,
                 scale,
                 cell_fill: false,
+                // A procedural separator is drawn to the cell box already.
+                wide: false,
                 info,
                 resolved_epoch: self.atlas.content_epoch(),
             });
@@ -2855,6 +2881,7 @@ impl TextPass {
             fg,
             scale,
             cell_fill: is_cell_fill(cell.ch),
+            wide: cell.flags.contains(Flags::WIDE),
             info,
             resolved_epoch: self.atlas.content_epoch(),
         })
@@ -2925,6 +2952,7 @@ impl TextPass {
                             fg: overlay.content_fg,
                             scale: f32::from(scale),
                             cell_fill: false,
+                            wide: false,
                             info,
                             resolved_epoch: self.atlas.content_epoch(),
                         });
@@ -3038,6 +3066,10 @@ struct PendingGlyph {
     /// than drawn at its bitmap size. A [`GlyphSource::Procedural`] glyph already
     /// fills its cell, so this stays false for one.
     cell_fill: bool,
+    /// Whether the cell holds a two-cell-wide character, so a color bitmap is
+    /// fitted into the box it actually occupies rather than drawn from one
+    /// cell's origin at its own extent.
+    wide: bool,
     /// Where the glyph landed in the atlas when it was rasterized, so building its
     /// instance needs no second lookup.
     ///
@@ -3524,6 +3556,26 @@ fn cell_box_rect(
     ([left, top], [right - left, bottom - top])
 }
 
+/// The pixel rectangle of the cells a glyph occupies, `span` cells across and
+/// `scale` cells down.
+///
+/// Separate from [`cell_box_rect`], whose one scale governs both axes, because
+/// a wide character is two cells across and one down.
+fn cell_box(
+    row: usize,
+    col: usize,
+    scale: f32,
+    span: f32,
+    metrics: CellMetrics,
+    origin: [f32; 2],
+) -> ([f32; 2], [f32; 2]) {
+    let left = snap_cell(col as f32, origin[0], metrics.width);
+    let top = snap_cell(row as f32, origin[1], metrics.height);
+    let right = snap_cell(col as f32 + scale * span, origin[0], metrics.width);
+    let bottom = snap_cell(row as f32 + scale, origin[1], metrics.height);
+    ([left, top], [right - left, bottom - top])
+}
+
 /// Screen position of glyph `index` in a fractional, vertically-centered text
 /// run, in physical pixels.
 ///
@@ -3591,6 +3643,41 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
         color.g as f32 / 255.0,
         color.b as f32 / 255.0,
     ]
+}
+
+/// Scale a glyph's quad down into `box_size` and center it there, or leave it
+/// where it is when it already fits.
+///
+/// A color bitmap is rasterized at whatever size the font gives, which is not
+/// the size of the cells it was placed in. Left alone it draws from its cell's
+/// origin at its own extent, spilling across whatever sits beside it.
+///
+/// Never scaled up. A bitmap smaller than its box is one the font supplied at
+/// that size, and stretching it would blur a glyph that was already right.
+///
+/// `box_origin` is the box's top-left in pixels and `pos` the glyph's, both in
+/// the same space, so the result is a position in that space too.
+fn fit_glyph_box(
+    pos: [f32; 2],
+    dim: [f32; 2],
+    box_origin: [f32; 2],
+    box_size: [f32; 2],
+) -> ([f32; 2], [f32; 2]) {
+    if dim[0] <= 0.0 || dim[1] <= 0.0 || box_size[0] <= 0.0 || box_size[1] <= 0.0 {
+        return (pos, dim);
+    }
+
+    let scale = (box_size[0] / dim[0]).min(box_size[1] / dim[1]);
+    if scale >= 1.0 {
+        return (pos, dim);
+    }
+
+    let fitted = [dim[0] * scale, dim[1] * scale];
+    let centered = [
+        box_origin[0] + (box_size[0] - fitted[0]) / 2.0,
+        box_origin[1] + (box_size[1] - fitted[1]) / 2.0,
+    ];
+    (centered, fitted)
 }
 
 /// Pack a glyph's color and the atlas it samples into [`TextInstance::fg`], as
@@ -3844,13 +3931,13 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_underline_row, cell_box_rect, cell_glyph_scale, cell_rect_scissor, cursor_cell,
-        exposed_rows, fill_cell_box, font, glyph_origin, grid_build, is_cell_fill,
-        overlay_content_cells, pack_dim, pack_fg, region_split, row_len, row_slot, slots_of_rows,
-        text_run_origin, underline_rows_to_build, visible_lines, GlyphSource, GridBuild,
-        OverlayContent, PendingGlyph, RectInstance, RowRotation, RowShaping, TextGlobals,
-        TextInstance, TextPass, UnderlineInstance, DIM_FRACTION_BITS, KIND_COLOR, KIND_MASK,
-        STYLE_DOTTED,
+        build_underline_row, cell_box, cell_box_rect, cell_glyph_scale, cell_rect_scissor,
+        cursor_cell, exposed_rows, fill_cell_box, fit_glyph_box, font, glyph_origin, grid_build,
+        is_cell_fill, overlay_content_cells, pack_dim, pack_fg, region_split, row_len, row_slot,
+        slots_of_rows, text_run_origin, underline_rows_to_build, visible_lines, GlyphSource,
+        GridBuild, OverlayContent, PendingGlyph, RectInstance, RowRotation, RowShaping,
+        TextGlobals, TextInstance, TextPass, UnderlineInstance, DIM_FRACTION_BITS, KIND_COLOR,
+        KIND_MASK, STYLE_DOTTED,
     };
     use crate::{
         atlas::{AtlasKind, GlyphInfo},
@@ -4738,6 +4825,7 @@ mod tests {
             fg: Rgb::new(10, 20, 30),
             scale: 1.0,
             cell_fill: false,
+            wide: false,
             info,
             resolved_epoch: pass.atlas.content_epoch(),
         }];
@@ -5300,6 +5388,7 @@ mod tests {
             fg: Rgb::new(0, 0, 0),
             scale: 1.0,
             cell_fill: false,
+            wide: false,
             info: GlyphInfo {
                 kind: AtlasKind::Mask,
                 uv: [0.0; 4],
@@ -6608,5 +6697,69 @@ mod tests {
         let per_call = start.elapsed() / iterations;
 
         eprintln!("grid build without reshape {rows}x{cols}: {per_call:?} per frame");
+    }
+
+    /// A color bitmap is rasterized at whatever size the font gives, which is
+    /// not the size of the cells it was placed in.
+    #[test]
+    fn an_oversize_bitmap_shrinks_into_its_box_and_centers() {
+        // A 40x40 bitmap at the cell's origin, in a two-cell box 16 wide and 20
+        // tall. Width runs out first, so it scales to 16x16 and centers down the
+        // height it no longer fills.
+        assert_eq!(
+            fit_glyph_box([0.0, 0.0], [40.0, 40.0], [0.0, 0.0], [16.0, 20.0]),
+            ([0.0, 2.0], [16.0, 16.0]),
+        );
+    }
+
+    /// A bitmap smaller than its box is one the font supplied at that size, and
+    /// stretching it would blur a glyph that was already right.
+    #[test]
+    fn a_bitmap_that_fits_is_left_where_it_is() {
+        let placed = ([3.0, 4.0], [8.0, 10.0]);
+
+        assert_eq!(
+            fit_glyph_box(placed.0, placed.1, [0.0, 0.0], [16.0, 20.0]),
+            placed,
+            "a narrow bitmap keeps its own placement",
+        );
+        assert_eq!(
+            fit_glyph_box([0.0, 0.0], [16.0, 20.0], [0.0, 0.0], [16.0, 20.0]),
+            ([0.0, 0.0], [16.0, 20.0]),
+            "and one exactly the size of its box is untouched",
+        );
+    }
+
+    /// Every zero here would divide, and a glyph with no extent has nothing to
+    /// fit anyway.
+    #[test]
+    fn nothing_with_no_extent_is_fitted() {
+        let placed = ([1.0, 2.0], [0.0, 10.0]);
+        assert_eq!(
+            fit_glyph_box(placed.0, placed.1, [0.0, 0.0], [8.0, 8.0]),
+            placed
+        );
+
+        let placed = ([1.0, 2.0], [10.0, 10.0]);
+        assert_eq!(
+            fit_glyph_box(placed.0, placed.1, [0.0, 0.0], [0.0, 8.0]),
+            placed
+        );
+    }
+
+    /// The box is the cells the glyph occupies, which for a wide character is
+    /// two across and always one down.
+    #[test]
+    fn a_wide_cell_box_is_two_across_and_one_down() {
+        let metrics = CellMetrics::from_font_size(10, 1.0);
+        let (single_origin, single) = cell_box(2, 3, 1.0, 1.0, metrics, [0.0, 0.0]);
+        let (wide_origin, wide) = cell_box(2, 3, 1.0, 2.0, metrics, [0.0, 0.0]);
+
+        assert_eq!(wide_origin, single_origin, "both start on the same cell");
+        assert_eq!(wide[1], single[1], "and are the same height");
+        assert!(
+            (wide[0] - single[0] * 2.0).abs() <= 1.0,
+            "the wide box spans two cells, within a pixel of snapping",
+        );
     }
 }

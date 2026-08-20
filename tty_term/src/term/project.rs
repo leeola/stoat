@@ -236,6 +236,9 @@ fn map_flags(flags: TermFlags) -> Flags {
     if flags.contains(TermFlags::STRIKEOUT) {
         mapped |= Flags::STRIKEOUT;
     }
+    if flags.contains(TermFlags::WIDE_CHAR) {
+        mapped |= Flags::WIDE;
+    }
 
     mapped
 }
