@@ -6,10 +6,11 @@
 //! cosmic-text's [`SwashCache`], packed into the texture with an etagere
 //! allocator, and cached by [`CacheKey`] so repeated lookups are free.
 //!
-//! When an atlas fills, least-recently-used glyphs not needed this frame are
-//! evicted. If eviction cannot free enough room the texture grows: it doubles
-//! and copies the old texture into the new one, which preserves every glyph's
-//! coordinates.
+//! When an atlas fills it grows: the texture doubles and the old one is copied
+//! into it, which preserves every glyph's coordinates. Past [`ATLAS_BUDGET`] the
+//! growing stops and least-recently-used glyphs the current frame has not
+//! touched are evicted instead, and only when nothing can be evicted does the
+//! texture grow again, toward the device limit.
 
 use cosmic_text::{CacheKey, FontSystem, SwashCache, SwashImage};
 use etagere::{size2, AllocId, Allocation, BucketedAtlasAllocator};
@@ -24,7 +25,25 @@ use wgpu::{
 
 /// Edge length, in texels, of a freshly created atlas texture. Atlases double
 /// from here as they fill, up to the device's maximum texture dimension.
-const INITIAL_SIZE: u32 = 256;
+///
+/// Sized past a screenful of distinct glyphs, since every rung of the ladder
+/// below it copies the whole texture forward to climb.
+const INITIAL_SIZE: u32 = 512;
+
+/// Edge length past which an atlas stops growing and starts evicting.
+///
+/// The two answers are not priced the same. Growing copies the texture forward
+/// and etagere keeps every glyph's coordinates, so nothing built against the
+/// atlas goes stale. Evicting hands one glyph's texels to another, which moves
+/// the content epoch, and that rebuilds the whole grid, the text runs, the
+/// overlay bases, and every composite slot. Under glyph pressure that recurs
+/// every few frames.
+///
+/// So growing is tried first, and this is where memory starts to matter more
+/// than the rebuilds: a mask atlas at this size is 4MB and a color one 16MB.
+/// Past it, evicting is the cheaper answer, and the texture grows again only
+/// when there is nothing left to evict.
+const ATLAS_BUDGET: u32 = 2048;
 
 /// Which of the two atlases a glyph lives in, so the text pass can bind the
 /// matching texture and choose mask-vs-color blending.
@@ -314,9 +333,16 @@ impl Atlas {
         info
     }
 
-    /// Reserve a slot for a `width`x`height` glyph, growing the atlas when the
-    /// packer is full. `None` only when the atlas is at the device limit and
-    /// every sized glyph is needed this frame.
+    /// Reserve a slot for a `width`x`height` glyph.
+    ///
+    /// A full packer is answered in the order the answers cost: grow while under
+    /// [`ATLAS_BUDGET`], since a grow leaves every glyph where it was; then
+    /// evict a glyph this frame has not touched, which moves the ones cached
+    /// against it; then grow again toward the device limit, which is what a
+    /// frame using more than the budget holds is left with.
+    ///
+    /// `None` only when the atlas is at the device limit and every sized glyph
+    /// is needed this frame.
     fn allocate(
         &mut self,
         device: &Device,
@@ -324,50 +350,61 @@ impl Atlas {
         width: u32,
         height: u32,
     ) -> Option<Allocation> {
-        loop {
-            if let Some(allocation) = self.try_allocate(width, height) {
-                return Some(allocation);
-            }
-            if !self.grow(device, queue) {
-                return None;
-            }
-        }
-    }
-
-    /// Reserve a `width`x`height` region, evicting least-recently-used glyphs
-    /// that are not needed this frame until it fits. `None` if every sized
-    /// glyph is in use (the caller then grows the atlas).
-    fn try_allocate(&mut self, width: u32, height: u32) -> Option<Allocation> {
         let size = size2(width as i32, height as i32);
-
         loop {
             if let Some(allocation) = self.packer.allocate(size) {
                 return Some(allocation);
             }
+            if self.size < ATLAS_BUDGET && self.grow(device, queue) {
+                continue;
+            }
+            if self.evict() {
+                continue;
+            }
+            if self.grow(device, queue) {
+                continue;
+            }
+            return None;
+        }
+    }
 
-            let (_, mut glyph) = self.cache.peek_lru()?;
-            while glyph.alloc.is_none() {
-                if glyph.used_frame == self.frame {
-                    return None;
-                }
-                let _ = self.cache.pop_lru();
-                (_, glyph) = self.cache.peek_lru()?;
+    /// Drop the least-recently-used glyph this frame has not touched, freeing
+    /// the atlas space it held.
+    ///
+    /// `false` when the least-recently-used glyph left is one this frame drew,
+    /// which is what keeps a frame from evicting a glyph it is about to hand
+    /// back. The caller grows instead.
+    ///
+    /// An empty glyph holds no space, so dropping one frees nothing and the
+    /// walk carries on past it.
+    fn evict(&mut self) -> bool {
+        loop {
+            let Some((_, glyph)) = self.cache.peek_lru() else {
+                return false;
+            };
+            let (used_frame, alloc) = (glyph.used_frame, glyph.alloc);
+            if used_frame == self.frame {
+                return false;
             }
 
-            if glyph.used_frame == self.frame {
-                return None;
-            }
+            self.cache.pop_lru();
+            let Some(alloc) = alloc else {
+                continue;
+            };
 
-            let (_, evicted) = self.cache.pop_lru().expect("peeked entry is present");
-            self.packer
-                .deallocate(evicted.alloc.expect("sized glyph has an allocation"));
+            self.packer.deallocate(alloc);
             self.epoch = self.epoch.wrapping_add(1);
+            return true;
         }
     }
 
     /// Double the atlas (up to the device limit) and copy the old texture into
     /// the new one. etagere preserves existing coordinates across the grow, so
     /// a single GPU texture-to-texture copy relocates every packed glyph.
+    ///
+    /// [`ATLAS_BUDGET`] is not enforced here. It is the point the ladder in
+    /// [`Self::allocate`] stops preferring this to an eviction, not a size the
+    /// atlas may never reach.
     ///
     /// The epoch holds. A glyph keeps the texels it was cut at, and a cached
     /// instance names those rather than a fraction of the atlas, so nothing
@@ -532,7 +569,7 @@ fn num_channels(kind: AtlasKind) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{uv_rect, GlyphAtlas};
+    use super::{uv_rect, GlyphAtlas, ATLAS_BUDGET};
     use crate::gpu::headless_device;
     use wgpu::{
         BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, Extent3d, MapMode,
@@ -548,62 +585,117 @@ mod tests {
         assert_eq!(uv_rect(0, 0, 256, 256), [0.0, 0.0, 256.0, 256.0]);
     }
 
-    /// Residency is a stamp compared against the atlas's frame counter, so what
-    /// protects a glyph is having been touched since the last `begin_frame`.
-    /// Packing the same glyphs within one frame must grow the texture, since
-    /// none of them may be evicted, while packing them a frame apart must evict
-    /// instead and leave the texture where it was.
+    /// The two answers to a full atlas are not priced the same. Growing copies
+    /// the texture forward and every glyph keeps the texels it was cut at, so
+    /// nothing built against the atlas goes stale. Evicting hands one glyph's
+    /// texels to another, which is what the content epoch reports and what
+    /// rebuilds everything cached against it. So while there is room to grow
+    /// into, growing is the answer, whatever is evictable.
     #[test]
-    fn only_this_frame_s_glyphs_are_safe_from_eviction() {
+    fn the_atlas_grows_before_it_evicts_while_it_has_room() {
         let Some((device, queue)) = headless_device() else {
             eprintln!("atlas eviction test: no wgpu adapter, skipping");
             return;
         };
 
-        let glyph = 20u32;
-        let coverage = (glyph * glyph) as usize;
-        let pack = |atlas: &mut GlyphAtlas, per_frame: bool| {
-            for cp in 0..300u32 {
-                if per_frame {
-                    atlas.begin_frame();
-                }
-                atlas.get_or_insert_procedural(&device, &queue, cp, glyph, glyph, || {
-                    vec![255u8; coverage]
-                });
-            }
+        let mut atlas = GlyphAtlas::new(&device);
+        let (initial, _) = atlas.texture_dims();
+        // A frame apart, so every glyph but the last is a legal victim.
+        pack_procedural(&device, &queue, &mut atlas, 40, 300, PerFrame::Yes);
+
+        assert!(
+            atlas.texture_dims().0 > initial,
+            "the atlas grows past the glyphs it could have evicted instead",
+        );
+        assert_eq!(
+            atlas.content_epoch(),
+            0,
+            "and nothing moved, so nothing built against it is stale",
+        );
+    }
+
+    /// Past the budget the atlas stops growing and starts evicting, and what it
+    /// may take is anything the current frame has not touched. A frame that
+    /// packs more than the budget holds has touched all of it, so there is
+    /// nothing to take and the atlas grows again instead.
+    #[test]
+    fn past_its_budget_only_the_frame_s_own_glyphs_are_safe() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("atlas budget test: no wgpu adapter, skipping");
+            return;
         };
 
-        let mut within_one_frame = GlyphAtlas::new(&device);
-        let (initial, _) = within_one_frame.texture_dims();
-        within_one_frame.begin_frame();
-        pack(&mut within_one_frame, false);
-        assert!(
-            within_one_frame.texture_dims().0 > initial,
-            "glyphs packed in one frame are all protected, so the atlas grows",
-        );
+        // Each glyph is a sixteenth of the budget across, so a few hundred of
+        // them ask for more than the budget holds.
+        let (glyph, count) = (ATLAS_BUDGET / 16, 400);
 
         let mut a_frame_apart = GlyphAtlas::new(&device);
-        pack(&mut a_frame_apart, true);
+        pack_procedural(
+            &device,
+            &queue,
+            &mut a_frame_apart,
+            glyph,
+            count,
+            PerFrame::Yes,
+        );
         assert_eq!(
             a_frame_apart.texture_dims().0,
-            initial,
-            "a glyph left over from an earlier frame is evicted rather than grown around",
-        );
-
-        // Which of the two moved a glyph is what the epoch reports. Growing
-        // copies every glyph to the texels it already had, so an instance built
-        // against the atlas still draws the right pixels. Eviction hands those
-        // texels to another glyph, so it does not.
-        assert_eq!(
-            within_one_frame.content_epoch(),
-            0,
-            "growing moved nothing, so nothing built against it is stale",
+            ATLAS_BUDGET,
+            "the growing stops at the budget",
         );
         assert_ne!(
             a_frame_apart.content_epoch(),
             0,
-            "evicting did, so anything built against it has to be rebuilt",
+            "and a glyph no longer needed this frame makes the room instead",
         );
+
+        let mut within_one_frame = GlyphAtlas::new(&device);
+        within_one_frame.begin_frame();
+        pack_procedural(
+            &device,
+            &queue,
+            &mut within_one_frame,
+            glyph,
+            count,
+            PerFrame::No,
+        );
+        assert!(
+            within_one_frame.texture_dims().0 > ATLAS_BUDGET,
+            "a frame using every glyph it packed leaves nothing to evict",
+        );
+        assert_eq!(
+            within_one_frame.content_epoch(),
+            0,
+            "so the atlas grows past the budget rather than taking one back",
+        );
+    }
+
+    /// Whether each glyph is packed on a frame of its own, which is what leaves
+    /// the ones before it evictable.
+    enum PerFrame {
+        Yes,
+        No,
+    }
+
+    /// Pack `count` solid `glyph`-square procedural glyphs, each under its own
+    /// codepoint so none is a cache hit.
+    fn pack_procedural(
+        device: &Device,
+        queue: &Queue,
+        atlas: &mut GlyphAtlas,
+        glyph: u32,
+        count: u32,
+        per_frame: PerFrame,
+    ) {
+        let coverage = (glyph * glyph) as usize;
+        for cp in 0..count {
+            if matches!(per_frame, PerFrame::Yes) {
+                atlas.begin_frame();
+            }
+            atlas.get_or_insert_procedural(device, queue, cp, glyph, glyph, || {
+                vec![255u8; coverage]
+            });
+        }
     }
 
     #[test]
@@ -617,9 +709,9 @@ mod tests {
         let (initial, _) = atlas.texture_dims();
         let epoch_before = atlas.content_epoch();
 
-        // Insert 20x20 solid glyphs in one frame (no begin_frame, so none are
-        // evictable) until the mask atlas overflows and grows.
-        let glyph = 20u32;
+        // Solid glyphs in one frame (no begin_frame, so none are evictable)
+        // until the mask atlas overflows and grows.
+        let glyph = 40u32;
         let coverage = (glyph * glyph) as usize;
         let mut first = None;
         for cp in 0..300u32 {

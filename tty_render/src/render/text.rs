@@ -5295,7 +5295,7 @@ mod tests {
 
     #[test]
     fn composite_runs_reresolve_when_the_run_build_grows_the_atlas() {
-        let Some((device, queue, mut pass)) = headless_text_pass_font(60) else {
+        let Some((device, queue, mut pass)) = headless_text_pass_font(160) else {
             return;
         };
         let mut grid = Grid::new(2, 4);
@@ -5347,7 +5347,7 @@ mod tests {
 
     #[test]
     fn composite_runs_reresolve_when_the_row_pack_grows_the_atlas() {
-        let Some((device, queue, mut pass)) = headless_text_pass_font(60) else {
+        let Some((device, queue, mut pass)) = headless_text_pass_font(160) else {
             return;
         };
 
@@ -6506,7 +6506,7 @@ mod tests {
     /// held run list is held only while the atlas has not moved under it.
     #[test]
     fn a_composite_bakes_its_runs_again_when_the_atlas_moved_under_them() {
-        let Some((device, queue, mut pass)) = headless_text_pass_font(60) else {
+        let Some((device, queue, mut pass)) = headless_text_pass_font(160) else {
             return;
         };
         let resolution = [640.0, 480.0];
@@ -6541,12 +6541,17 @@ mod tests {
         composite(&mut pass, &grid);
 
         // A later frame, so this pool's run glyphs are no longer protected, and
-        // then more glyphs than the atlas holds, so packing them evicts.
+        // then more glyphs than the atlas grows to hold, so packing them evicts
+        // rather than growing again.
         let before = pass.atlas.content_epoch();
         pass.atlas.begin_frame();
-        for cp in 0..300u32 {
+        let glyph = 128u32;
+        let coverage = (glyph * glyph) as usize;
+        for cp in 0..400u32 {
             pass.atlas
-                .get_or_insert_procedural(&device, &queue, cp, 20, 20, || vec![255u8; 400]);
+                .get_or_insert_procedural(&device, &queue, cp, glyph, glyph, || {
+                    vec![255u8; coverage]
+                });
         }
         assert_ne!(
             pass.atlas.content_epoch(),
@@ -6622,7 +6627,7 @@ mod tests {
     /// the one after the pack is what corrects it.
     #[test]
     fn composite_globals_name_the_atlas_the_pack_grew_to() {
-        let Some((device, queue, mut pass)) = headless_text_pass_font(60) else {
+        let Some((device, queue, mut pass)) = headless_text_pass_font(160) else {
             return;
         };
         let mut grid = Grid::new(2, 4);
