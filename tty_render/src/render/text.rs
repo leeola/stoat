@@ -1230,15 +1230,22 @@ impl TextPass {
                 self.overlay_windows.push(window);
 
                 let anchor = [overlay.offset[0] as f32, overlay.offset[1] as f32];
-                scissors.push(cell_rect_scissor(
-                    overlay.top,
-                    overlay.left,
-                    overlay.width,
-                    overlay.height,
-                    anchor,
-                    resolution,
-                    metrics,
-                ));
+                // Held off the border ring, which is drawn inside the box edge
+                // and which content scrolled against that edge would otherwise
+                // paint over. The content's own one-cell inset already clears
+                // the rounded corners.
+                scissors.push(
+                    cell_rect_scissor(
+                        overlay.top,
+                        overlay.left,
+                        overlay.width,
+                        overlay.height,
+                        anchor,
+                        resolution,
+                        metrics,
+                    )
+                    .and_then(|scissor| inset_scissor(scissor, OVERLAY_RING_PX)),
+                );
             }
 
             self.overlay_pending = pending;
@@ -3851,6 +3858,29 @@ fn cell_rect_scissor(
     (w > 0 && h > 0).then_some([x, y, w, h])
 }
 
+/// Pixels the popover content is held back from its box edge.
+///
+/// The border ring is drawn just inside that edge and fades out two and a half
+/// pixels in, so content reaching the edge paints over it. Three is that extent
+/// rounded up to the whole pixel a scissor takes.
+///
+/// A constant rather than a function of the scale factor: the ring's own extent
+/// is in physical pixels, so this holds at every display density.
+const OVERLAY_RING_PX: u32 = 3;
+
+/// Shrink `scissor` by `inset` pixels on every side.
+///
+/// `None` when a side collapses, which is a box too small to hold anything once
+/// its frame is accounted for. A caller drops the draw rather than clipping it
+/// to nothing.
+fn inset_scissor(scissor: [u32; 4], inset: u32) -> Option<[u32; 4]> {
+    let [x, y, w, h] = scissor;
+    let shrink = inset.saturating_mul(2);
+    let (w, h) = (w.saturating_sub(shrink), h.saturating_sub(shrink));
+
+    (w > 0 && h > 0).then_some([x + inset, y + inset, w, h])
+}
+
 /// The instance-buffer slot holding display `row` of a grid `rows` tall.
 ///
 /// The inverse of what the vertex stages compute from a slot, so a row written
@@ -3933,11 +3963,11 @@ mod tests {
     use super::{
         build_underline_row, cell_box, cell_box_rect, cell_glyph_scale, cell_rect_scissor,
         cursor_cell, exposed_rows, fill_cell_box, fit_glyph_box, font, glyph_origin, grid_build,
-        is_cell_fill, overlay_content_cells, pack_dim, pack_fg, region_split, row_len, row_slot,
-        slots_of_rows, text_run_origin, underline_rows_to_build, visible_lines, GlyphSource,
-        GridBuild, OverlayContent, PendingGlyph, RectInstance, RowRotation, RowShaping,
-        TextGlobals, TextInstance, TextPass, UnderlineInstance, DIM_FRACTION_BITS, KIND_COLOR,
-        KIND_MASK, STYLE_DOTTED,
+        inset_scissor, is_cell_fill, overlay_content_cells, pack_dim, pack_fg, region_split,
+        row_len, row_slot, slots_of_rows, text_run_origin, underline_rows_to_build, visible_lines,
+        GlyphSource, GridBuild, OverlayContent, PendingGlyph, RectInstance, RowRotation,
+        RowShaping, TextGlobals, TextInstance, TextPass, UnderlineInstance, DIM_FRACTION_BITS,
+        KIND_COLOR, KIND_MASK, OVERLAY_RING_PX, STYLE_DOTTED,
     };
     use crate::{
         atlas::{AtlasKind, GlyphInfo},
@@ -6760,6 +6790,47 @@ mod tests {
         assert!(
             (wide[0] - single[0] * 2.0).abs() <= 1.0,
             "the wide box spans two cells, within a pixel of snapping",
+        );
+    }
+
+    /// The content is held off the ring on every side, so a line scrolled
+    /// against any edge stops short of it.
+    #[test]
+    fn a_scissor_insets_on_all_four_sides() {
+        assert_eq!(
+            inset_scissor([10, 20, 100, 50], 3),
+            Some([13, 23, 94, 44]),
+            "each origin moves in by the inset and each extent loses two of them",
+        );
+        assert_eq!(
+            inset_scissor([0, 0, 8, 8], 3),
+            Some([3, 3, 2, 2]),
+            "a rect with exactly enough room keeps what is left",
+        );
+    }
+
+    /// A box too small to hold anything once its frame is accounted for has no
+    /// content region, and clipping to nothing is not the same as not drawing.
+    #[test]
+    fn a_scissor_too_small_to_survive_the_inset_is_refused() {
+        assert_eq!(inset_scissor([0, 0, 6, 40], 3), None, "width collapses");
+        assert_eq!(inset_scissor([0, 0, 40, 6], 3), None, "height collapses");
+        assert_eq!(
+            inset_scissor([0, 0, 2, 2], 3),
+            None,
+            "and one smaller still"
+        );
+    }
+
+    /// The ring's extent is physical, so the inset that clears it is a constant
+    /// rather than something scaled with the display.
+    #[test]
+    fn the_ring_inset_covers_the_bands_outer_edge() {
+        // The shader fades the border band out at border_px + 1.0, which is 2.5
+        // pixels inside the box edge.
+        assert!(
+            f32::from(OVERLAY_RING_PX as u16) >= 2.5,
+            "the inset must reach past where the ring stops fading",
         );
     }
 }
