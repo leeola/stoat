@@ -278,8 +278,16 @@ struct TextCompositeSlot {
     /// glide therefore reuses the instances it built, where an origin carrying
     /// that drift moved every frame and rebuilt them.
     baked_origin: [f32; 2],
-    /// What each row shaped to, kept so a scrolled frame can slide them and
-    /// re-shape only the rows the scroll exposed.
+    /// How far the caches below are rotated, in rows.
+    ///
+    /// A scroll moves the pool's rows without changing them. Advancing this and
+    /// emptying only the slots the scroll exposed leaves every kept row where it
+    /// sits in the buffer, which is what lets a frame patch its rows instead of
+    /// rewriting the whole thing. text.wgsl takes a slot back to a display row
+    /// through the same number, carried in the globals.
+    row_offset: u32,
+    /// What each slot shaped to, kept so a scrolled frame re-shapes only the
+    /// rows the scroll exposed.
     ///
     /// Shaping a row rasterizes each of its glyphs and inserts them into the
     /// shared atlas, which is the cost worth carrying. An eased scroll moves the
@@ -288,13 +296,22 @@ struct TextCompositeSlot {
     ///
     /// Empty until the first full build, and emptied again whenever the row
     /// count changes, which is what makes a stale length mean "rebuild".
-    ///
-    /// The built instances are not kept beside these. Every one of them takes its
-    /// position from the glyph's own row and column, so repairing the row a
-    /// rotation moved is enough, and rebuilding the instances from the glyphs
-    /// costs a walk rather than a reshape.
     glyph_rows: Vec<Vec<PendingGlyph>>,
     underline_rows: Vec<Vec<UnderlineInstance>>,
+    /// The instances built from [`Self::glyph_rows`], one vector per slot.
+    ///
+    /// Held beside the shaped glyphs so a frame that shaped nothing new builds
+    /// nothing new either. A build walks every glyph in the pool and resolves
+    /// where the atlas put it, which is what a glide would otherwise pay again
+    /// for rows it never touched.
+    glyph_instances: Vec<Vec<TextInstance>>,
+    /// The atlas content epoch [`Self::glyph_instances`] resolved against.
+    ///
+    /// Read from before the build rather than after, so a pack that moved the
+    /// atlas partway through leaves a mismatch for the next frame to rebuild on.
+    /// [`Self::epoch`] answers a different question, whether the rows may be
+    /// drawn again untouched.
+    instance_epoch: u64,
 }
 
 /// The instanced glyph pipeline together with the font system, glyph atlas, and
@@ -571,11 +588,11 @@ pub struct TextPass {
     /// [`Self::overlay_instance_scratch`], swapped with
     /// [`Self::overlay_draws`] once filled.
     overlay_draw_scratch: Vec<OverlayDraw>,
-    /// Scratch reused across `prepare_composite` calls for a pool's shaped glyphs,
-    /// its glyph instances, its text-run instances, and its run rects, so a pool
-    /// re-composite allocates no per-frame temporary. Dedicated to the composite
-    /// path rather than shared with the live scratch above.
-    composite_pending_scratch: Vec<PendingGlyph>,
+    /// Scratch reused across `prepare_composite` calls for the slots a pool
+    /// rebuilt, the rows it uploads, its text-run instances, and its run rects,
+    /// so a pool re-composite allocates no per-frame temporary. Dedicated to the
+    /// composite path rather than shared with the live scratch above.
+    composite_slot_scratch: Vec<usize>,
     composite_upload_scratch: Vec<TextInstance>,
     composite_run_scratch: Vec<TextInstance>,
     composite_rect_scratch: Vec<RectInstance>,
@@ -899,7 +916,7 @@ impl TextPass {
             run_rect_build_scratch: Vec::new(),
             overlay_instance_scratch: Vec::new(),
             overlay_draw_scratch: Vec::new(),
-            composite_pending_scratch: Vec::new(),
+            composite_slot_scratch: Vec::new(),
             composite_upload_scratch: Vec::new(),
             composite_run_scratch: Vec::new(),
             composite_rect_scratch: Vec::new(),
@@ -1461,7 +1478,32 @@ impl TextPass {
 
         let metrics = self.metrics;
         let rows = grid.rows();
-        let row_offset = self.row_offset;
+
+        // The pool scrolls on its own clock, so it carries its own rotation. It
+        // is settled here, ahead of the globals write below, because the globals
+        // are what tell the shader which display row a slot holds.
+        let atlas_epoch = self.atlas.content_epoch();
+        let held = self.composite_slots.get(pool);
+        let held_offset = held.map_or(0, |target| target.row_offset);
+        let reusable = held.is_some_and(|target| {
+            target.epoch == atlas_epoch && target.baked_origin == origin_cells
+        });
+        let carries = reusable
+            && held.is_some_and(|target| {
+                target.glyph_rows.len() == rows
+                    && target.underline_rows.len() == rows
+                    && target.glyph_instances.len() == rows
+            });
+        let rotate_by = scrolled_rows
+            .filter(|&by| by != 0)
+            .filter(|_| carries && rows > 0);
+        let reusing = !content_changed && reusable;
+        let row_offset = match rotate_by {
+            _ if reusing => held_offset,
+            Some(by) => (held_offset + by.rem_euclid(rows as isize) as u32) % rows as u32,
+            None => 0,
+        };
+
         let globals_over = |atlas: (u32, u32)| TextGlobals {
             resolution,
             cell_size: [metrics.width, metrics.height],
@@ -1490,84 +1532,78 @@ impl TextPass {
         // the instances built for these rows on an earlier frame, unless the
         // atlas has since relocated their UVs or the region has moved out from
         // under the pixel snap they were built with.
-        if !content_changed
-            && self.composite_slots.get(pool).is_some_and(|target| {
-                target.epoch == self.atlas.content_epoch() && target.baked_origin == origin_cells
-            })
-        {
+        if reusing {
             return;
         }
 
-        // A glide moves the rows without changing them, so the shaping done for
-        // them last frame still describes them. Carrying it needs a cache of
-        // this shape and an atlas that has not moved since, because the kept
-        // glyphs hold the placements it gave them.
-        let epoch_before = self.atlas.content_epoch();
-        let rotate_by = scrolled_rows.filter(|&by| by != 0).filter(|_| {
-            self.composite_slots.get(pool).is_some_and(|slot| {
-                slot.epoch == epoch_before
-                    && slot.baked_origin == origin_cells
-                    && slot.glyph_rows.len() == rows
-                    && slot.underline_rows.len() == rows
-            })
-        });
-
-        let slot = self.composite_slots.entry(pool, || new_slot(device));
-        let mut glyph_rows = mem::take(&mut slot.glyph_rows);
-        let mut underline_rows = mem::take(&mut slot.underline_rows);
-
-        // Rows the frame has to shape for itself. A rotation leaves only the ones
-        // it scrolled into view. Anything else starts from nothing.
-        match rotate_by {
-            Some(by) => {
-                crate::render::rotate_row_cache(&mut glyph_rows, by, |glyph| {
-                    glyph.row = glyph.row.saturating_add_signed(-by);
-                });
-                crate::render::rotate_row_cache(&mut underline_rows, by, |underline| {
-                    underline.row = underline.row.saturating_add_signed(-by as i32);
-                });
-            },
-            None => {
-                glyph_rows.clear();
-                glyph_rows.resize_with(rows, Vec::new);
-                underline_rows.clear();
-                underline_rows.resize_with(rows, Vec::new);
-            },
-        }
-        let exposed = exposed_rows(rotate_by, rows);
         // A pool composes its own grid, whose height is its own.
         let rotation = RowRotation {
-            offset: self.row_offset,
-            rows: grid.rows(),
+            offset: row_offset,
+            rows,
         };
+        // Rows the frame has to shape for itself. A rotation leaves only the ones
+        // it scrolled into view. Anything else starts from nothing.
+        let exposed = exposed_rows(rotate_by, rows);
 
-        for row in exposed.clone() {
-            underline_rows[row].clear();
-            build_underline_row_into(grid, row, metrics, rotation, &mut underline_rows[row]);
-        }
-
-        self.underline_upload_scratch.clear();
-        for row in &underline_rows {
-            self.underline_upload_scratch.extend_from_slice(row);
-        }
-        let target = self.composite_slots.entry(pool, || new_slot(device));
-        target.underlines.count = self.underline_upload_scratch.len() as u32;
-        if !self.underline_upload_scratch.is_empty() {
-            if self.underline_upload_scratch.len() > target.underlines.capacity {
-                target.underlines.capacity =
-                    self.underline_upload_scratch.len().next_power_of_two();
-                target.underlines.instances = alloc_instances(
-                    device,
-                    "composite underline instances",
-                    instance_bytes::<UnderlineInstance>(target.underlines.capacity),
-                );
+        let slot = self.composite_slots.entry(pool, || new_slot(device));
+        let held_instance_epoch = slot.instance_epoch;
+        let mut glyph_rows = mem::take(&mut slot.glyph_rows);
+        let mut underline_rows = mem::take(&mut slot.underline_rows);
+        let mut glyph_instances = mem::take(&mut slot.glyph_instances);
+        if rotate_by.is_none() {
+            glyph_rows.clear();
+            glyph_rows.resize_with(rows, Vec::new);
+            underline_rows.clear();
+            underline_rows.resize_with(rows, Vec::new);
+            glyph_instances.clear();
+            glyph_instances.resize_with(rows, Vec::new);
+        } else {
+            // A scroll leaves a kept row's glyphs in the slot they were shaped
+            // into and advances the rotation instead, so what they name is the
+            // row they were shaped for. The slot is the authority on where they
+            // are now, and the instance build reads the row off each glyph.
+            for row in 0..rows {
+                for glyph in &mut glyph_rows[rotation.slot(row)] {
+                    glyph.row = row;
+                }
             }
-            queue.write_buffer(
-                &target.underlines.instances,
-                0,
-                bytemuck::cast_slice(&self.underline_upload_scratch),
-            );
         }
+
+        // The slots the shaping below writes, ascending, which is the order the
+        // upload plan walks the buffer in.
+        let mut rebuilt = mem::take(&mut self.composite_slot_scratch);
+        rebuilt.clear();
+        rebuilt.extend(exposed.clone().map(|row| rotation.slot(row)));
+        rebuilt.sort_unstable();
+
+        // A row that came back a different length displaced every row after it,
+        // so the buffer holds their old offsets from there on.
+        let mut underline_from = None;
+        for row in exposed.clone() {
+            let at = rotation.slot(row);
+            let before = underline_rows[at].len();
+            underline_rows[at].clear();
+            build_underline_row_into(grid, row, metrics, rotation, &mut underline_rows[at]);
+            if underline_rows[at].len() != before {
+                underline_from = Some(underline_from.map_or(at, |held: usize| held.min(at)));
+            }
+        }
+
+        let mut scratch = mem::take(&mut self.underline_upload_scratch);
+        let target = self.composite_slots.entry(pool, || new_slot(device));
+        upload_composite_rows(
+            device,
+            queue,
+            &underline_rows,
+            RowPlan {
+                rebuilt: &rebuilt,
+                rewrite_from: underline_from,
+            },
+            &mut target.underlines,
+            &mut scratch,
+            "composite underline instances",
+        );
+        self.underline_upload_scratch = scratch;
 
         // Pack the composite text runs and their background rects before the
         // grid glyphs, so a run-glyph atlas grow reflects in the grid resolve
@@ -1606,13 +1642,11 @@ impl TextPass {
         );
         self.composite_rect_scratch = run_rects;
 
-        // Shape every pool row fresh through the same per-row primitive
+        // Shape the exposed pool rows through the same per-row primitive
         // rasterize_visible uses, but into reused scratch, so glyph_row_cache and
         // its sibling shaping state stay the live frame's. rasterize_row inserts
-        // each glyph into the shared atlas, so build_text_instances below reads
+        // each glyph into the shared atlas, so the instance build below reads
         // final UVs once the atlas has reached its size for this pool.
-        let mut pending = mem::take(&mut self.composite_pending_scratch);
-        pending.clear();
         {
             let primary_name = self.family.clone();
             let primary = font::shape_family(primary_name.as_deref());
@@ -1626,12 +1660,10 @@ impl TextPass {
             };
 
             for row in exposed.clone() {
-                glyph_rows[row].clear();
-                self.rasterize_row(device, queue, grid, row, &shaping, &mut glyph_rows[row]);
+                let at = rotation.slot(row);
+                glyph_rows[at].clear();
+                self.rasterize_row(device, queue, grid, row, &shaping, &mut glyph_rows[at]);
             }
-        }
-        for row in &glyph_rows {
-            pending.extend_from_slice(row);
         }
 
         // The runs packed before the rows above, so either pass may have grown
@@ -1660,27 +1692,51 @@ impl TextPass {
         );
         self.composite_run_scratch = run_instances;
 
-        let mut instances = mem::take(&mut self.composite_upload_scratch);
-        self.build_text_instances_into(
-            device,
-            queue,
-            &pending,
-            rotation,
-            origin_cells,
-            &mut instances,
-        );
+        // An atlas move relocates every UV, so instances built for the rows this
+        // frame kept name texels another glyph now holds. Read before the build
+        // rather than after, so a pack inside it leaves a mismatch here next
+        // frame instead of a slot nothing ever rebuilds.
+        let instance_epoch = self.atlas.content_epoch();
+        let rebuild_all = rotate_by.is_none() || held_instance_epoch != instance_epoch;
+
+        let mut glyph_from = None;
+        for at in 0..rows {
+            if !rebuild_all && rebuilt.binary_search(&at).is_err() {
+                continue;
+            }
+            let before = glyph_instances[at].len();
+            self.build_text_instances_into(
+                device,
+                queue,
+                &glyph_rows[at],
+                rotation,
+                origin_cells,
+                &mut glyph_instances[at],
+            );
+            if glyph_instances[at].len() != before {
+                glyph_from = Some(glyph_from.map_or(at, |held: usize| held.min(at)));
+            }
+        }
+        if rebuild_all {
+            glyph_from = Some(0);
+        }
+
+        let mut scratch = mem::take(&mut self.composite_upload_scratch);
         let target = self.composite_slots.entry(pool, || new_slot(device));
-        target.glyphs.count = instances.len() as u32;
-        upload_instances(
+        upload_composite_rows(
             device,
             queue,
-            &instances,
-            &mut target.glyphs.instances,
-            &mut target.glyphs.capacity,
+            &glyph_instances,
+            RowPlan {
+                rebuilt: &rebuilt,
+                rewrite_from: glyph_from,
+            },
+            &mut target.glyphs,
+            &mut scratch,
             "composite text instances",
         );
-        self.composite_pending_scratch = pending;
-        self.composite_upload_scratch = instances;
+        self.composite_upload_scratch = scratch;
+        self.composite_slot_scratch = rebuilt;
 
         if self.atlas.texture_dims() != atlas_dims {
             self.atlas_bind_group = create_atlas_bind_group(
@@ -1707,8 +1763,48 @@ impl TextPass {
         let target = self.composite_slots.entry(pool, || new_slot(device));
         target.epoch = epoch;
         target.baked_origin = origin_cells;
+        target.row_offset = row_offset;
+        target.instance_epoch = instance_epoch;
         target.glyph_rows = glyph_rows;
         target.underline_rows = underline_rows;
+        target.glyph_instances = glyph_instances;
+    }
+
+    /// One pool's shaped glyphs, in display-row order.
+    #[cfg(test)]
+    fn composite_glyphs(&self, pool: u32) -> Vec<PendingGlyph> {
+        self.composite_rows(pool, |slot| &slot.glyph_rows)
+    }
+
+    /// One pool's built glyph instances, in display-row order.
+    #[cfg(test)]
+    fn composite_instances(&self, pool: u32) -> Vec<TextInstance> {
+        self.composite_rows(pool, |slot| &slot.glyph_instances)
+    }
+
+    /// Read one of a pool's per-slot caches back in display-row order.
+    ///
+    /// The caches sit in slot order, which the pool's rotation permutes, so two
+    /// pools holding the same rows by different routes hold them in different
+    /// places. Reading each back through its own rotation is what makes the two
+    /// comparable.
+    #[cfg(test)]
+    fn composite_rows<T: Copy>(
+        &self,
+        pool: u32,
+        cache: impl Fn(&TextCompositeSlot) -> &Vec<Vec<T>>,
+    ) -> Vec<T> {
+        let Some(slot) = self.composite_slots.get(pool) else {
+            return Vec::new();
+        };
+        let rows = cache(slot).len();
+        let rotation = RowRotation {
+            offset: slot.row_offset,
+            rows,
+        };
+        (0..rows)
+            .flat_map(|row| cache(slot)[rotation.slot(row)].iter().copied())
+            .collect()
     }
 
     /// Write `globals` into composited slot `slot`'s window of the shared
@@ -3253,8 +3349,11 @@ fn new_slot(device: &Device) -> TextCompositeSlot {
         rects: alloc_slot::<RectInstance>(device, "composite text run rect instances"),
         epoch: 0,
         baked_origin: [0.0; 2],
+        row_offset: 0,
         glyph_rows: Vec::new(),
         underline_rows: Vec::new(),
+        glyph_instances: Vec::new(),
+        instance_epoch: 0,
     }
 }
 
@@ -3264,6 +3363,70 @@ fn alloc_slot<T>(device: &Device, label: &str) -> CompositeSlot {
         capacity: INITIAL_CAPACITY,
         count: 0,
     }
+}
+
+/// Which of a per-row cache's rows a frame has to send to the GPU.
+struct RowPlan<'rows> {
+    /// The rows rebuilt this frame, ascending.
+    rebuilt: &'rows [usize],
+    /// The row past which the offsets the buffer was written with no longer
+    /// hold, because it or an earlier row came back a different length. `None`
+    /// means every rebuilt row kept its length and nothing after it moved.
+    rewrite_from: Option<usize>,
+}
+
+/// Upload the rows of `cache` that this frame changed into `target`'s buffer.
+///
+/// A buffer that has to grow comes back empty, so it is written whole instead of
+/// patched.
+fn upload_composite_rows<T: Pod>(
+    device: &Device,
+    queue: &Queue,
+    cache: &[Vec<T>],
+    plan: RowPlan<'_>,
+    target: &mut CompositeSlot,
+    scratch: &mut Vec<T>,
+    label: &str,
+) {
+    let total = row_len(cache);
+    target.count = total as u32;
+    if total == 0 {
+        return;
+    }
+
+    if total > target.capacity {
+        target.capacity = total.next_power_of_two();
+        target.instances = alloc_instances(device, label, instance_bytes::<T>(target.capacity));
+        write_rows(queue, cache, &target.instances, scratch, 0, 0..cache.len());
+        return;
+    }
+
+    for (offset, run) in row_uploads(cache, plan.rebuilt, plan.rewrite_from) {
+        write_rows(queue, cache, &target.instances, scratch, offset, run);
+    }
+}
+
+/// Write rows `range` of `cache` into `buffer`, `offset` instances from its
+/// start.
+fn write_rows<T: Pod>(
+    queue: &Queue,
+    cache: &[Vec<T>],
+    buffer: &Buffer,
+    scratch: &mut Vec<T>,
+    offset: usize,
+    range: Range<usize>,
+) {
+    scratch.clear();
+    scratch.extend(cache[range].iter().flatten().copied());
+    if scratch.is_empty() {
+        return;
+    }
+
+    queue.write_buffer(
+        buffer,
+        instance_bytes::<T>(offset),
+        bytemuck::cast_slice(scratch),
+    );
 }
 
 /// Upload `instances` into `buffer`, growing it (and `capacity`) when the count
@@ -6010,7 +6173,7 @@ mod tests {
             0,
             0,
         );
-        let carried = pass.composite_pending_scratch.clone();
+        let carried = pass.composite_glyphs(0);
 
         // The same rows reached without a scroll, every one of them shaped here.
         let Some((device, queue, mut fresh_pass)) = headless_text_pass() else {
@@ -6029,7 +6192,7 @@ mod tests {
             0,
             0,
         );
-        let fresh = fresh_pass.composite_pending_scratch.clone();
+        let fresh = fresh_pass.composite_glyphs(0);
 
         assert!(!fresh.is_empty(), "the fixture has to shape something");
         assert_eq!(
@@ -6089,7 +6252,7 @@ mod tests {
                 0,
             );
             (
-                pass.composite_upload_scratch.clone(),
+                pass.composite_instances(0),
                 pass.composite_run_scratch.clone(),
             )
         };
@@ -6155,7 +6318,7 @@ mod tests {
                 0,
                 0,
             );
-            pass.composite_upload_scratch.clone()
+            pass.composite_instances(0)
         };
 
         let at_rest = composite(&mut pass, 0.0, true);

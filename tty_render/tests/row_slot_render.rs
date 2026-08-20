@@ -288,6 +288,121 @@ fn a_pool_text_run_paints_on_its_own_row_after_the_live_grid_scrolls() {
     );
 }
 
+/// A screen like [`line_screen`] whose lines differ in how much they hold and
+/// in where they hold it.
+///
+/// A row that comes back a different length displaces every row after it in the
+/// buffer, which is where the upload plan has to stop patching. A line and the
+/// line a screen below it therefore mark different numbers of cells, so every
+/// scroll resizes the slot it exposes.
+///
+/// They also mark cells that do not overlap, so a slot that kept what it held
+/// paints the old line beside the new one rather than under it.
+fn varied_screen(top: u32) -> Grid {
+    let mut grid = Grid::new(ROWS as usize, COLS);
+    for row in 0..ROWS {
+        let line = top + row;
+        let color = line_color(line);
+        for col in 0..=(line % 5).min(2) as usize {
+            let cell = grid.get_mut(row as usize, col);
+            cell.underline = UnderlineStyle::Straight;
+            cell.underline_color = color;
+        }
+
+        let from = 3 + (line % 5) as usize;
+        for col in from..(from + (line % 5) as usize + 1).min(COLS) {
+            let block = grid.get_mut(row as usize, col);
+            block.ch = '\u{2588}';
+            block.fg = color;
+        }
+    }
+    grid
+}
+
+/// A composited pool that carried its rows across a scroll paints them where a
+/// pool built from nothing paints them.
+///
+/// The pool keeps each row in the slot it shaped the row into and advances a
+/// rotation, then uploads only the rows the scroll exposed. A plan that mislaid
+/// a row leaves it drawn from another row's bytes, or drops it. Marked twice
+/// over, since the underlines and the glyphs travel in separate buffers with
+/// their own plans.
+///
+/// The underline strip is compared byte for byte, which it can be: an underline
+/// instance carries no row in its geometry, only the slot the shader reads a row
+/// back from. The glyph columns are not. A carried glyph keeps the pixel snap of
+/// the row it was shaped for, so a row that moved sits up to half a pixel off the
+/// grid until something reshapes it, which is the row cache's standing trade and
+/// the live grid's too.
+#[test]
+fn a_scrolled_composite_paints_what_a_rebuilt_one_paints() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("row_slot_render: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let blank = Grid::new(ROWS as usize, COLS);
+
+    // The rotation walks a row at a time, then jumps far enough that the slots
+    // the jump exposes run off the end of the buffer and wrap.
+    let mut carried = Harness::new(&device, COLS as u32);
+    carried.render(&device, &queue, &blank, &Damage::Full, 0);
+    carried.composite(&device, &queue, &varied_screen(0), 0.0, None);
+    for top in 1..=5 {
+        carried.composite(&device, &queue, &varied_screen(top), 0.0, Some(1));
+    }
+    let scrolled = carried.composite(&device, &queue, &varied_screen(9), 0.0, Some(4));
+
+    let mut fresh = Harness::new(&device, COLS as u32);
+    fresh.render(&device, &queue, &blank, &Damage::Full, 0);
+    let rebuilt = fresh.composite(&device, &queue, &varied_screen(9), 0.0, None);
+
+    for row in 0..ROWS {
+        let color = line_color(9 + row);
+        assert_eq!(
+            carried.rows_underlined(&rebuilt, color),
+            vec![row],
+            "the rebuilt pool has to underline row {row} for the line it holds",
+        );
+        assert_eq!(
+            carried.rows_underlined(&scrolled, color),
+            vec![row],
+            "the carried pool must underline row {row} for the line it holds",
+        );
+        assert_eq!(
+            carried.rows_blocked(&scrolled, color),
+            vec![row],
+            "the carried pool must block row {row} for the line it holds",
+        );
+    }
+
+    // Nothing left over from the line that scrolled off, nor from any line the
+    // palette holds that this screen never showed.
+    for line in [0, 7] {
+        let color = line_color(line);
+        assert_eq!(
+            carried.rows_underlined(&scrolled, color),
+            Vec::new(),
+            "no row may keep line {line}, which is off the screen",
+        );
+        assert_eq!(
+            carried.rows_blocked(&scrolled, color),
+            Vec::new(),
+            "no row may block line {line}, which is off the screen",
+        );
+    }
+
+    let strip = carried.strip(&scrolled, 0..carried.cell_w);
+    let differs = strip
+        .chunks_exact(4)
+        .zip(carried.strip(&rebuilt, 0..carried.cell_w).chunks_exact(4))
+        .position(|(got, want)| got != want);
+    assert_eq!(
+        differs, None,
+        "a carried underline must land on the pixels a rebuilt one lands on",
+    );
+}
+
 /// One renderer and one surface across a run of frames, so the caches and the
 /// rotation carry between them the way they do in a live terminal.
 struct Harness {
@@ -412,6 +527,19 @@ impl Harness {
         );
 
         read_back(device, queue, &self.target, self.width, self.height)
+    }
+
+    /// The pixels of `columns`, every row of them, in row-major order.
+    fn strip(&self, pixels: &[u8], columns: Range<u32>) -> Vec<u8> {
+        (0..self.height)
+            .flat_map(|y| {
+                columns.clone().flat_map(move |x| {
+                    let i = ((y * self.width + x) * 4) as usize;
+                    i..i + 4
+                })
+            })
+            .map(|i| pixels[i])
+            .collect()
     }
 
     /// The grid rows carrying a pixel within tolerance of `color`, ascending.
