@@ -171,7 +171,8 @@ pub(crate) fn dispose_view(
                     .detach();
             }
         },
-        View::Label(_) => {},
+        // An image pane owns nothing to dispose. It holds a path and a size.
+        View::Label(_) | View::Image { .. } => {},
     }
 }
 
@@ -193,6 +194,8 @@ pub(crate) fn restore_pane_after_term_exit(stoat: &mut Stoat, pane_id: PaneId) {
         View::Editor(id) => ws.editors.contains_key(*id),
         View::Run(id) => ws.runs.contains_key(*id),
         View::Agent(id) | View::Terminal(id) => ws.terms.contains_key(*id),
+        // An image pane refers to nothing that could have gone away.
+        View::Image { .. } => true,
         View::Label(_) => false,
     });
 

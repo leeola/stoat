@@ -296,6 +296,7 @@ fn pane_predicate(ws: &Workspace) -> Option<&'static str> {
         View::Run(_) => "run",
         View::Agent(_) => "agent",
         View::Terminal(_) => "terminal",
+        View::Image { .. } => "image",
     })
 }
 

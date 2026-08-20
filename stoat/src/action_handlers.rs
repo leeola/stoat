@@ -1501,6 +1501,70 @@ pub(crate) fn read_string_via_host(fs: &dyn FsHost, path: &Path) -> std::io::Res
     String::from_utf8(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
+/// What opening a file found in it.
+///
+/// The open path has to tell an image from text before it decides what kind of
+/// pane to make, and it has only the bytes to go on. Reading them once and
+/// answering both questions is what keeps a large file off the disk twice.
+pub(crate) enum OpenContent {
+    Text(String),
+    /// An image, as its pixel dimensions. The bytes are dropped: nothing yet
+    /// draws them, and holding a decoded image per open pane would cost far
+    /// more than the label that is shown instead.
+    Image {
+        px: (u32, u32),
+    },
+}
+
+/// Read `path` through the supplied [`FsHost`], as an image or as text.
+///
+/// An image is recognized by its leading bytes rather than by its name. A name
+/// is what someone typed, and a file whose suffix disagrees with its contents is
+/// exactly where guessing from the name goes wrong in both directions.
+///
+/// Anything that is not a recognized image is read as UTF-8 and fails the same
+/// way it always has, so a genuinely undecodable file still reports what is
+/// wrong with it.
+pub(crate) fn read_open_content(fs: &dyn FsHost, path: &Path) -> std::io::Result<OpenContent> {
+    let mut buf = Vec::new();
+    fs.read(path, &mut buf)?;
+
+    if is_image(&buf)
+        && let Some(px) = image_dimensions(&buf)
+    {
+        return Ok(OpenContent::Image { px });
+    }
+
+    String::from_utf8(buf)
+        .map(OpenContent::Text)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Whether `bytes` opens with the signature of an image format this can size.
+///
+/// A signature check rather than a decode, so the common case of opening a text
+/// file pays a handful of byte comparisons instead of a decoder's guess.
+fn is_image(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        || bytes.starts_with(b"\xff\xd8\xff")
+        || bytes.starts_with(b"GIF87a")
+        || bytes.starts_with(b"GIF89a")
+        || bytes.starts_with(b"BM")
+        || (bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"))
+}
+
+/// The pixel size of an image, read from its header alone.
+///
+/// `None` for a file that opens like an image and is not one, which is a
+/// truncated or corrupt file rather than something to show a size for.
+fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2954,5 +3018,80 @@ mod tests {
             "the recalled palette takes the keys typed into it",
         );
         assert_eq!(h.stoat.focused_mode(), "insert", "its input stays live");
+    }
+
+    /// A file's name is what someone typed. Sniffing the bytes is what makes an
+    /// image with the wrong suffix, or a text file with an image's suffix, open
+    /// as what it actually is.
+    #[test]
+    fn an_image_is_recognized_by_its_leading_bytes() {
+        for (name, bytes, image) in [
+            ("png", b"\x89PNG\r\n\x1a\nrest".as_slice(), true),
+            ("jpeg", b"\xff\xd8\xff\xe0rest".as_slice(), true),
+            ("gif87", b"GIF87arest".as_slice(), true),
+            ("gif89", b"GIF89arest".as_slice(), true),
+            ("bmp", b"BMrest".as_slice(), true),
+            ("webp", b"RIFF\0\0\0\0WEBPrest".as_slice(), true),
+            (
+                "riff that is not webp",
+                b"RIFF\0\0\0\0WAVErest".as_slice(),
+                false,
+            ),
+            ("text", b"hello".as_slice(), false),
+            ("empty", b"".as_slice(), false),
+            ("one byte of a png", b"\x89".as_slice(), false),
+            ("riff cut short", b"RIFF\0\0\0".as_slice(), false),
+        ] {
+            assert_eq!(is_image(bytes), image, "{name}");
+        }
+    }
+
+    /// A 2x3 PNG, built rather than pasted so the bytes and the size a test
+    /// asserts cannot drift apart.
+    fn png_2x3() -> Vec<u8> {
+        let buffer = image::RgbaImage::from_pixel(2, 3, image::Rgba([1, 2, 3, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        buffer
+            .write_to(&mut out, image::ImageFormat::Png)
+            .expect("encode png");
+        out.into_inner()
+    }
+
+    #[test]
+    fn reading_an_image_reports_its_size_and_reading_text_reports_its_text() {
+        let fs = crate::host::FakeFs::new();
+        fs.insert_file("/w/pic.png", png_2x3());
+        fs.insert_file("/w/notes.txt", b"hello");
+        // An image whose name says otherwise, which is the case a suffix check
+        // gets wrong.
+        fs.insert_file("/w/pic.txt", png_2x3());
+
+        let read = |path: &str| match read_open_content(&fs, Path::new(path)) {
+            Ok(OpenContent::Image { px }) => Ok(Some(px)),
+            Ok(OpenContent::Text(text)) => {
+                assert_eq!(text, "hello", "{path} read as text");
+                Ok(None)
+            },
+            Err(e) => Err(e.kind()),
+        };
+
+        assert_eq!(read("/w/pic.png"), Ok(Some((2, 3))));
+        assert_eq!(read("/w/pic.txt"), Ok(Some((2, 3))), "the bytes decide");
+        assert_eq!(read("/w/notes.txt"), Ok(None));
+    }
+
+    /// A file that is neither an image nor text still has to say what is wrong
+    /// with it, which is the behavior this replaced for images only.
+    #[test]
+    fn a_file_that_is_neither_still_reports_bad_data() {
+        let fs = crate::host::FakeFs::new();
+        fs.insert_file("/w/bin", [0xff, 0xfe, 0x00, 0x80]);
+
+        assert_eq!(
+            read_open_content(&fs, Path::new("/w/bin"))
+                .err()
+                .map(|e| e.kind()),
+            Some(std::io::ErrorKind::InvalidData),
+        );
     }
 }

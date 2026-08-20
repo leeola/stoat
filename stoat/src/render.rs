@@ -318,6 +318,9 @@ pub(crate) struct FrameCtx<'a> {
     /// [`review::diff_soften_scale`]. `1.0` paints the shipped
     /// fractions and `0.0` disables softening. Read only by diff-view panes.
     pub(crate) diff_soften_scale: f32,
+    /// Whether the terminal can draw an image, which is a stoatty new enough to
+    /// have the pass for it. An image pane says what is missing when it cannot.
+    pub(crate) images_capable: bool,
     /// Whether editor panes reserve their own per-pane right-edge minimap strip.
     /// `true` only in [`MinimapMode::PerPane`] under stoatty. Single mode gates
     /// this off and declares one shared strip over the reserved band instead.
@@ -696,6 +699,7 @@ pub(crate) fn frame(
         wrap_column: stoat.settings.editor_wrap_column.unwrap_or(80).max(1),
         inactive_dim,
         diff_soften_scale: review::diff_soften_scale(stoat.diff_soften),
+        images_capable: stoat.stoatty && stoat.stoatty_protocol >= 2,
         minimap_enabled: minimap_enabled && minimap_mode == MinimapMode::PerPane,
         minimap_chrome,
         minimap_band: single_minimap_rect,

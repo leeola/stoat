@@ -2,6 +2,7 @@ use crate::{editor_state::EditorId, jumplist::JumpList, run::RunId, term_session
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 use slotmap::{new_key_type, SlotMap};
+use std::path::PathBuf;
 use stoat_text::BufferId;
 
 new_key_type! {
@@ -60,6 +61,15 @@ pub struct Divider {
 pub enum View {
     Label(String),
     Editor(EditorId),
+    /// An image file, shown as its name and size until something can draw it.
+    ///
+    /// Carries no buffer and no editor. There is nothing to edit, nothing to
+    /// save, and no language to serve, so an editor behind it would only need
+    /// explaining away at every turn.
+    Image {
+        path: PathBuf,
+        px: (u32, u32),
+    },
     Run(RunId),
     Agent(TermId),
     Terminal(TermId),

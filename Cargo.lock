@@ -4009,6 +4009,7 @@ dependencies = [
  "git2",
  "globset",
  "ignore",
+ "image",
  "insta",
  "libc",
  "lsp-types",

@@ -540,6 +540,10 @@ impl Workspace {
             View::Agent(_) => "agent".to_string(),
             View::Terminal(_) => "term".to_string(),
             View::Run(_) => "run".to_string(),
+            View::Image { path, .. } => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "image".to_string()),
             View::Label(_) => "pane".to_string(),
         }
     }
@@ -1062,7 +1066,11 @@ impl Workspace {
                         visible.push(editor.buffer_id);
                     }
                 },
-                View::Label(_) | View::Run(_) | View::Agent(_) | View::Terminal(_) => {},
+                View::Label(_)
+                | View::Run(_)
+                | View::Agent(_)
+                | View::Terminal(_)
+                | View::Image { .. } => {},
             }
         }
         for id in self.buffers.preview_buffer_ids() {

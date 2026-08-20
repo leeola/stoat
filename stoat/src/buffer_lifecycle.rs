@@ -11,8 +11,8 @@
 
 use crate::{
     action_handlers::{
-        file::display_name, focused_editor_mut, gc_editor_if_unreferenced, jump,
-        read_string_via_host,
+        file::display_name, focused_editor_mut, gc_editor_if_unreferenced, jump, read_open_content,
+        OpenContent,
     },
     app::{Stoat, UpdateEffect},
     badge::{Anchor, Badge, BadgeSource, BadgeState},
@@ -53,7 +53,7 @@ pub(crate) struct PendingFileOpen {
     target: PaneId,
     disk_mtime: Option<SystemTime>,
     _task: Task<()>,
-    result: Arc<Mutex<Option<std::io::Result<String>>>>,
+    result: Arc<Mutex<Option<std::io::Result<OpenContent>>>>,
 }
 
 pub(crate) fn open_file_in_pane(
@@ -74,9 +74,9 @@ pub(crate) fn open_file_in_pane(
         return None;
     }
 
-    let content = match read_string_via_host(&*stoat.fs_host, &absolute) {
+    let content = match read_open_content(&*stoat.fs_host, &absolute) {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "\n".to_string(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => OpenContent::Text("\n".to_string()),
         Err(e) => {
             tracing::error!("failed to read {}: {}", absolute.display(), e);
             stoat.set_status(format!("cannot open {}: {e}", display_name(&absolute)));
@@ -84,7 +84,40 @@ pub(crate) fn open_file_in_pane(
         },
     };
     let workspace = stoat.active_workspace;
-    finish_open(stoat, workspace, target, &absolute, &content, disk_mtime)
+    match content {
+        OpenContent::Text(text) => {
+            finish_open(stoat, workspace, target, &absolute, &text, disk_mtime)
+        },
+        OpenContent::Image { px } => {
+            show_image(stoat, workspace, target, &absolute, px);
+            None
+        },
+    }
+}
+
+/// Point `target` at an image file, replacing whatever it showed.
+///
+/// No buffer and no editor: there is nothing to edit, nothing to save, and no
+/// language to serve. The pane holds the path and the size, which is everything
+/// drawing it later needs.
+fn show_image(
+    stoat: &mut Stoat,
+    workspace: WorkspaceId,
+    target: PaneId,
+    absolute: &Path,
+    px: (u32, u32),
+) {
+    let Some(ws) = stoat.workspaces.get_mut(workspace) else {
+        return;
+    };
+    if !ws.panes.contains(target) {
+        return;
+    }
+    ws.panes.pane_mut(target).view = View::Image {
+        path: absolute.to_path_buf(),
+        px,
+    };
+    stoat.set_status(format!("{} is an image", display_name(absolute)));
 }
 
 /// Read `absolute` on the blocking pool and queue it for install into the
@@ -109,14 +142,14 @@ fn spawn_pending_open(
         return;
     }
 
-    let result: Arc<Mutex<Option<std::io::Result<String>>>> = Arc::new(Mutex::new(None));
+    let result: Arc<Mutex<Option<std::io::Result<OpenContent>>>> = Arc::new(Mutex::new(None));
     let task = {
         let result = result.clone();
         let fs_host = stoat.fs_host.clone();
         let redraw = stoat.redraw_notify.clone();
         let path = absolute.clone();
         stoat.executor.spawn_blocking(move || {
-            let content = read_string_via_host(&*fs_host, &path);
+            let content = read_open_content(&*fs_host, &path);
             *result.lock().expect("pending open mutex") = Some(content);
             redraw.notify_one();
         })
@@ -167,7 +200,9 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
     for pending in ready {
         let content = match pending.result.lock().expect("pending open mutex").take() {
             Some(Ok(c)) => c,
-            Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => "\n".to_string(),
+            Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                OpenContent::Text("\n".to_string())
+            },
             Some(Err(e)) => {
                 tracing::error!("failed to read {}: {}", pending.path.display(), e);
                 stoat.set_status(format!("cannot open {}: {e}", display_name(&pending.path)));
@@ -183,14 +218,21 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
         if !ws.panes.contains(pending.target) {
             continue;
         }
-        finish_open(
-            stoat,
-            pending.workspace,
-            pending.target,
-            &pending.path,
-            &content,
-            pending.disk_mtime,
-        );
+        match content {
+            OpenContent::Text(text) => {
+                finish_open(
+                    stoat,
+                    pending.workspace,
+                    pending.target,
+                    &pending.path,
+                    &text,
+                    pending.disk_mtime,
+                );
+            },
+            OpenContent::Image { px } => {
+                show_image(stoat, pending.workspace, pending.target, &pending.path, px);
+            },
+        }
     }
 
     // The badge belongs to whichever workspace raised it, which is not
@@ -1083,5 +1125,45 @@ mod tests {
         assert!(!editor::focused_dirty(&h.stoat));
         assert_eq!(dispatch(&mut h.stoat, &CloseBuffer), UpdateEffect::Redraw);
         assert!(h.stoat.active_workspace().buffers.get(scratch_id).is_none());
+    }
+
+    /// Opening an image used to report "cannot open", which reads as a broken
+    /// file rather than a file this is not an editor for.
+    #[test]
+    fn opening_an_image_shows_it_rather_than_refusing_it() {
+        let mut h = TestHarness::with_size(40, 10);
+        let png = {
+            let buffer = image::RgbaImage::from_pixel(4, 2, image::Rgba([1, 2, 3, 255]));
+            let mut out = std::io::Cursor::new(Vec::new());
+            buffer
+                .write_to(&mut out, image::ImageFormat::Png)
+                .expect("encode png");
+            out.into_inner()
+        };
+        h.fake_fs().insert_file("/repo/pic.png", png);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: PathBuf::from("/repo/pic.png"),
+            },
+        );
+        h.settle();
+
+        let ws = h.stoat.active_workspace();
+        let view = &ws.panes.pane(ws.panes.focus()).view;
+        assert!(
+            matches!(view, View::Image { px: (4, 2), .. }),
+            "the pane shows the image and its size, got {view:?}",
+        );
+        assert!(
+            !h.stoat
+                .pending_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("cannot open"),
+            "and nothing reports it as unopenable",
+        );
     }
 }

@@ -584,7 +584,9 @@ fn stale_replacement(view: &View) -> Option<View> {
         View::Agent(_) => Some(View::Label("Agent (closed)".into())),
         // Terminal panes survive the sweep with a dead id. The app respawns a
         // fresh shell for each after restore. See action_handlers::terminal.
-        View::Terminal(_) | View::Label(_) | View::Editor(_) => None,
+        // An image pane refers to a file rather than a live session, so a
+        // restored one is as good as it was.
+        View::Terminal(_) | View::Label(_) | View::Editor(_) | View::Image { .. } => None,
     }
 }
 

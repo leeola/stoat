@@ -25,7 +25,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::Text,
+    text::{Line, Text},
     widgets::{Paragraph, StatefulWidget, Widget},
 };
 use slotmap::SlotMap;
@@ -68,6 +68,16 @@ pub(crate) fn render_pane(
     } = ctx;
 
     match &pane.view {
+        View::Image { path, px } => {
+            render_image_pane(
+                content_area,
+                buf,
+                path,
+                *px,
+                text_style,
+                frame.images_capable,
+            );
+        },
         View::Label(label) => {
             Paragraph::new(Text::styled(label.clone(), text_style))
                 .centered()
@@ -1345,6 +1355,7 @@ fn pane_status_info(
         View::Run(_) => owned("[run]"),
         View::Agent(_) => owned("[agent]"),
         View::Terminal(_) => owned("[term]"),
+        View::Image { path, .. } => owned(&crate::action_handlers::file::display_name(path)),
         View::Label(label) => owned(label),
     }
 }
@@ -1396,6 +1407,44 @@ fn status_filename<'a>(
         .rendered
 }
 
+/// Paint an image pane: the file's name, its pixel size, and, where the
+/// terminal cannot draw images, what is missing.
+///
+/// The pixels are not here. Nothing has been asked to send them yet, and a
+/// terminal without the capability would never receive them, so both cases show
+/// the same label rather than one showing an empty pane.
+fn render_image_pane(
+    area: Rect,
+    buf: &mut Buffer,
+    path: &Path,
+    px: (u32, u32),
+    text_style: Style,
+    capable: bool,
+) {
+    let (width, height) = px;
+    let mut lines = vec![Line::styled(
+        format!(
+            "{} - {width}x{height} px",
+            crate::action_handlers::file::display_name(path),
+        ),
+        text_style,
+    )];
+    if !capable {
+        lines.push(Line::styled("image display needs stoatty", text_style));
+    }
+
+    // Centered in the pane rather than at its top, since the label stands in
+    // for a picture that would fill it.
+    let rows = lines.len() as u16;
+    let band = Rect {
+        y: area.y + area.height.saturating_sub(rows) / 2,
+        height: rows.min(area.height),
+        ..area
+    };
+    Paragraph::new(Text::from(lines))
+        .centered()
+        .render(band, buf);
+}
 #[cfg(test)]
 mod tests {
     use super::{diff_base_lead, focused_staged_label, status_filename};
@@ -2214,5 +2263,47 @@ mod tests {
         let before = buf.clone();
         dim_pane_content(&mut buf, area, [0, 0, 0], 0.0);
         assert_eq!(buf, before, "amount 0 leaves the pane byte-identical");
+    }
+
+    /// The pane stands in for a picture, so it has to say which file and how
+    /// large, and say what is missing where nothing can draw it.
+    #[test]
+    fn an_image_pane_names_the_file_and_its_size() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+        use std::path::Path;
+
+        let painted = |capable| {
+            let area = Rect::new(0, 0, 40, 5);
+            let mut buf = Buffer::empty(area);
+            super::render_image_pane(
+                area,
+                &mut buf,
+                Path::new("/w/pic.png"),
+                (640, 480),
+                Style::default(),
+                capable,
+            );
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                        .trim()
+                        .to_owned()
+                })
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            painted(true),
+            ["pic.png - 640x480 px"],
+            "a terminal that can draw one needs only the label",
+        );
+        assert_eq!(
+            painted(false),
+            ["pic.png - 640x480 px", "image display needs stoatty"],
+            "and one that cannot is told why the picture is missing",
+        );
     }
 }

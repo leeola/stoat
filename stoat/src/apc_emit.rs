@@ -291,6 +291,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
         wrap_column: 80,
         inactive_dim: 0.0,
         diff_soften_scale: 1.0,
+        images_capable: false,
         minimap_enabled: false,
         minimap_chrome: None,
         minimap_band: None,
@@ -1992,7 +1993,8 @@ pub(crate) fn window_content_version(
             }
             input_view_version(&run.input, ws, &mut hasher)?;
         },
-        View::Editor(_) | View::Label(_) => return None,
+        // An image pane paints one label, so it feeds no pool.
+        View::Editor(_) | View::Label(_) | View::Image { .. } => return None,
     }
 
     Some(hasher.finish())
