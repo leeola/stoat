@@ -793,6 +793,13 @@ pub struct Stoat {
     /// a pane needs the ratio between them, and only the tty knows it. Re-read
     /// on every resize, since a window that changed size or font has changed it.
     pub(crate) cell_pixels: Option<(u16, u16)>,
+    /// Images this session has transmitted to the terminal, and where each one
+    /// currently sits.
+    ///
+    /// Held for the session because the protocol has no way to ask the terminal
+    /// what it already holds. An editor that forgot would re-transmit a file on
+    /// every frame that shows it.
+    pub(crate) images: crate::image_emit::ImageRuntime,
     /// Carries [`Self::cell_pixels`] from the ui thread, which owns the tty this
     /// is read from.
     cell_pixels_rx: UnboundedReceiver<Option<(u16, u16)>>,
@@ -1991,6 +1998,7 @@ impl Stoat {
             window_ipc_rx,
             stoatty_rx,
             cell_pixels: None,
+            images: crate::image_emit::ImageRuntime::default(),
             cell_pixels_rx,
             window_ipc_connected: false,
             zoom_claimed: false,
@@ -3011,6 +3019,7 @@ impl Stoat {
                         self.perf.record_input_to_publish(started.elapsed());
                     }
                     apc_emit::emit_apc_scene(self);
+                    crate::image_emit::emit_images(self);
                     apc_emit::emit_windows(self);
                     apc_emit::emit_smooth_scroll(self);
                     emit::emit_minimap(self);
@@ -3026,6 +3035,7 @@ impl Stoat {
             }
         }
 
+        crate::image_emit::emit_drop_all_images(self);
         apc_emit::emit_reset_default_colors(self);
 
         tracing::info!(target: "stoat::app", "stoat exiting");
@@ -18464,6 +18474,65 @@ mod tests {
         assert!(
             done_rx.try_recv().is_ok(),
             "closing the pane fires the waiter"
+        );
+    }
+
+    /// The whole point of the emission: an image pane on a capable terminal
+    /// puts the file's pixels on the wire and asks for them to be drawn.
+    #[test]
+    fn an_image_pane_transmits_its_file_and_places_it() {
+        use std::io::Cursor;
+        use stoat_action::OpenFile;
+        use stoatty_protocol::{
+            command::{decode_stream, Command},
+            kitty::Action,
+        };
+
+        let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.stoatty = true;
+        h.stoat.stoatty_protocol = 2;
+        h.stoat.cell_pixels = Some((8, 16));
+
+        let png = {
+            let buffer = image::RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255]));
+            let mut out = Cursor::new(Vec::new());
+            buffer
+                .write_to(&mut out, image::ImageFormat::Png)
+                .expect("encode png");
+            out.into_inner()
+        };
+        h.fake_fs().insert_file("/repo/pic.png", png);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        action_handlers::dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: PathBuf::from("/repo/pic.png"),
+            },
+        );
+        h.settle();
+
+        // The first pass starts the read; the second finds it done and sends.
+        crate::image_emit::emit_images(&mut h.stoat);
+        h.settle();
+        crate::image_emit::emit_images(&mut h.stoat);
+
+        let sent: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
+            .flatten()
+            .collect();
+        let actions: Vec<Action> = decode_stream(&sent)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Kitty(frame) => Some(frame.control.action),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            actions,
+            [Action::Transmit, Action::Delete, Action::Put],
+            "the pixels go out once, then the placement is cleared and set",
         );
     }
 }
