@@ -1392,6 +1392,19 @@ pub struct Stoat {
     /// listener or reading the developer's own state directory. The binary and
     /// the fixture harness set it via [`Self::set_agent_socket_dir`].
     pub(crate) agent_socket_dir: Option<PathBuf>,
+    /// Whether [`Self::serve_term_session`] actually binds a listener.
+    ///
+    /// Separate from [`Self::agent_socket_dir`] because the two grant
+    /// different things. A directory alone lets an owned child's environment
+    /// name a socket, which a test sets to check that naming. Binding one
+    /// needs a live Tokio reactor, which only the binary and the fixture
+    /// harness run, so no test ever enqueues the server task.
+    pub(crate) serve_agent_sockets: bool,
+    /// Workspaces whose hook socket is already served, so the spawn paths call
+    /// [`Self::serve_term_session`] freely without stacking listeners on one
+    /// path. A second bind of a live socket replaces the file and orphans the
+    /// children already connected through it.
+    pub(crate) served_agent_sockets: std::collections::HashSet<WorkspaceUid>,
     /// Landing slot for a finished direnv load, drained by
     /// [`crate::project_env::install_pending`] in [`Self::drive_background`].
     /// Shared rather than returned because the load runs detached on
@@ -2134,6 +2147,8 @@ impl Stoat {
             env_auto_load: false,
             diff_warm_auto: false,
             agent_socket_dir: None,
+            serve_agent_sockets: false,
+            served_agent_sockets: std::collections::HashSet::new(),
             pending_env: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_restore: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_saves: std::collections::HashMap::new(),
@@ -2728,6 +2743,14 @@ impl Stoat {
     /// harness pass the Stoat state directory.
     pub fn set_agent_socket_dir(&mut self, dir: PathBuf) {
         self.agent_socket_dir = Some(dir);
+    }
+
+    /// Allow [`Self::serve_term_session`] to bind listeners.
+    ///
+    /// Off by default, since the server task needs a live Tokio reactor. The
+    /// binary and the fixture harness turn it on alongside the directory.
+    pub fn set_serve_agent_sockets(&mut self, enabled: bool) {
+        self.serve_agent_sockets = enabled;
     }
 
     pub fn active_workspace(&self) -> &Workspace {
@@ -6476,13 +6499,24 @@ impl Stoat {
     /// which reaches it by `STOAT_AGENT_SOCK`, and a terminal pane's own shell
     /// carries the same variable.
     ///
-    /// Serves nothing and reports success when no directory is set, which is
-    /// the default a test runs under.
-    pub fn serve_term_session(&self, uid: WorkspaceUid) -> io::Result<()> {
-        let Some(dir) = self.agent_socket_dir.as_deref() else {
+    /// Every spawn into a workspace calls this. A `uid` is served once, and
+    /// later calls for it do nothing. Serves nothing and reports success
+    /// without [`Self::set_serve_agent_sockets`] or a directory, which is the
+    /// default a test runs under.
+    pub fn serve_term_session(&mut self, uid: WorkspaceUid) -> io::Result<()> {
+        if !self.serve_agent_sockets {
             return Ok(());
+        }
+        let socket_path = {
+            let Some(dir) = self.agent_socket_dir.as_deref() else {
+                return Ok(());
+            };
+            crate::run::agent_socket_path_in(dir, uid)
         };
-        let socket_path = crate::run::agent_socket_path_in(dir, uid);
+        if !self.served_agent_sockets.insert(uid) {
+            return Ok(());
+        }
+
         let tx = self.agent_event_tx.clone();
         let control_tx = self.agent_control_tx.clone();
         self.executor
@@ -9958,6 +9992,52 @@ mod tests {
         assert!(
             matches!(ws.panes.pane(only_pane).view, View::Agent(id) if id == term_id),
             "agent pane view unchanged",
+        );
+    }
+
+    // The server task needs a live reactor, so these never settle the
+    // scheduler. They count what was enqueued rather than run any of it, and
+    // the directory is a path nothing binds either way.
+    #[test]
+    fn agent_sockets_stay_unserved_without_the_production_flag() {
+        let mut h = Stoat::test();
+        h.stoat
+            .set_agent_socket_dir("/stoat-test-never-served".into());
+        let uid = h.stoat.active_workspace().uid();
+        let idle = h.pending_runnables();
+
+        assert!(h.stoat.serve_term_session(uid).is_ok());
+        assert!(h.stoat.serve_term_session(uid).is_ok());
+
+        assert_eq!(
+            h.pending_runnables(),
+            idle,
+            "a socket directory alone names a socket, it does not bind one",
+        );
+        assert!(h.stoat.served_agent_sockets.is_empty());
+    }
+
+    #[test]
+    fn a_workspaces_agent_socket_is_served_once() {
+        let mut h = Stoat::test();
+        h.stoat
+            .set_agent_socket_dir("/stoat-test-never-served".into());
+        h.stoat.set_serve_agent_sockets(true);
+        let uid = h.stoat.active_workspace().uid();
+        let idle = h.pending_runnables();
+
+        assert!(h.stoat.serve_term_session(uid).is_ok());
+        assert_eq!(h.pending_runnables(), idle + 1, "the socket is served");
+        assert!(h.stoat.serve_term_session(uid).is_ok());
+
+        assert_eq!(
+            h.pending_runnables(),
+            idle + 1,
+            "every spawn calls this, so a repeat must not stack a second listener",
+        );
+        assert_eq!(
+            h.stoat.served_agent_sockets.iter().collect::<Vec<_>>(),
+            vec![&uid],
         );
     }
 

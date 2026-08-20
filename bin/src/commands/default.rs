@@ -400,19 +400,24 @@ fn run_tui(
         }
 
         // Bind the active session's agent hook socket so an owned agent's hooks
-        // and runtime queries reach this process. Deferred until after state
+        // and runtime queries reach this process. A workspace opened later
+        // binds its own on the spawn that needs it. Deferred until after state
         // restore, which adopts the persisted session uid. Production-only like
-        // set_lsp_auto_spawn. The directory stays unset in tests, which is what
-        // keeps them from opening real sockets.
+        // set_lsp_auto_spawn, since binding needs the reactor only a real run
+        // has.
         match stoat::log::state_dir() {
-            Ok(dir) => stoat.set_agent_socket_dir(dir),
+            Ok(dir) => {
+                stoat.set_agent_socket_dir(dir);
+                stoat.set_serve_agent_sockets(true);
+            },
             Err(err) => tracing::warn!(
                 target: "stoat::bin",
                 %err,
                 "state directory unresolved; agent hooks and runtime queries disabled this session",
             ),
         }
-        if let Err(err) = stoat.serve_term_session(stoat.active_workspace().uid()) {
+        let active_uid = stoat.active_workspace().uid();
+        if let Err(err) = stoat.serve_term_session(active_uid) {
             tracing::warn!(
                 target: "stoat::bin",
                 %err,

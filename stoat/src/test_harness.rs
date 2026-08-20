@@ -604,6 +604,14 @@ impl TestHarness {
         self.scheduler.tick()
     }
 
+    /// How many spawned tasks are queued and not yet run.
+    ///
+    /// For a task a test must not run at all, such as one whose future needs a
+    /// real Tokio reactor, this is what says whether it was spawned.
+    pub fn pending_runnables(&self) -> usize {
+        self.scheduler.pending_runnables()
+    }
+
     /// Advance the fake clock by `duration`, firing every timer that
     /// expires inside the window, then settle the harness so any pending
     /// commit produced by those wake-ups is routed through the main dispatch

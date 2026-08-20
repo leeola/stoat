@@ -20,11 +20,18 @@ const AGENT_COLS: u16 = 80;
 /// screen emulator in the workspace's agent collection, and points the focused
 /// pane at the new [`View::Agent`]. A spawn failure leaves the pane unchanged.
 pub(super) fn spawn_claude_pane(stoat: &mut Stoat) -> UpdateEffect {
+    // The agent's hooks call back over this workspace's socket, so bind it
+    // before the spawn hands over the path. Repeat calls for a workspace
+    // already served cost nothing.
+    let uid = stoat.active_workspace().uid();
+    if let Err(err) = stoat.serve_term_session(uid) {
+        tracing::warn!(target: "stoat::agent", %err, "session hook socket bind failed");
+    }
+
     let host = stoat.terminal_host.clone();
     let executor = stoat.executor.clone();
     let pty_tx = stoat.pty_tx.clone();
     let ws = stoat.active_workspace_mut();
-    let uid = ws.uid;
     let cwd = ws.git_root.clone();
     let diff = ws.env.diff.clone();
 

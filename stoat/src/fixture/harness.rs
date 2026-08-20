@@ -176,6 +176,7 @@ impl LiveHarness {
 
         let uid = stoat.active_workspace().uid();
         stoat.set_agent_socket_dir(stoat_log::state_dir().context(SessionSocketSnafu)?);
+        stoat.set_serve_agent_sockets(true);
         {
             // Enter the runtime so the socket-serving task the call spawns has a
             // reactor to bind on, regardless of how the executor schedules.

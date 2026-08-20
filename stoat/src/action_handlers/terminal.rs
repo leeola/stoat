@@ -149,6 +149,14 @@ fn spawn_terminal_view(stoat: &mut Stoat) -> View {
         stoat.env_host().var("SHELL"),
     );
 
+    // The shell's environment names this workspace's socket, so bind it before
+    // handing over the path. Repeat calls for a workspace already served cost
+    // nothing.
+    let uid = stoat.active_workspace().uid();
+    if let Err(err) = stoat.serve_term_session(uid) {
+        tracing::warn!(target: "stoat::terminal", %err, "session hook socket bind failed");
+    }
+
     let host = stoat.terminal_host.clone();
     let executor = stoat.executor.clone();
     let pty_tx = stoat.pty_tx.clone();
@@ -161,8 +169,8 @@ fn spawn_terminal_view(stoat: &mut Stoat) -> View {
     // session it belongs to does not exist until the insert below.
     let token = TermSession::next_token();
     let session_env = socket_dir.map(|dir| TermSpawnEnv {
-        uid: ws.uid,
-        socket_path: agent_socket_path_in(&dir, ws.uid),
+        uid,
+        socket_path: agent_socket_path_in(&dir, uid),
         token,
     });
 
@@ -430,6 +438,25 @@ mod tests {
         assert_eq!(
             spawns[0].env, expected,
             "the shell is told which instance, socket, and terminal pane owns it",
+        );
+    }
+
+    // The server task is enqueued but never polled, since it needs a live
+    // reactor. The directory is a path nothing binds.
+    #[test]
+    fn a_terminal_spawn_serves_its_workspaces_socket() {
+        let mut h = Stoat::test();
+        h.stoat
+            .set_agent_socket_dir("/stoat-test-never-served".into());
+        h.stoat.set_serve_agent_sockets(true);
+        let uid = h.stoat.active_workspace().uid();
+
+        super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
+
+        assert_eq!(
+            h.stoat.served_agent_sockets.iter().collect::<Vec<_>>(),
+            vec![&uid],
+            "the shell's env names this socket, so something has to be on it",
         );
     }
 

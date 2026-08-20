@@ -113,6 +113,15 @@ impl TestScheduler {
         !state.runnables.is_empty() || !state.timers.is_empty()
     }
 
+    /// How many spawned tasks are queued and not yet run.
+    ///
+    /// Lets a test assert how much work a call enqueued without running any of
+    /// it, which is the only way to observe a task whose future must not be
+    /// polled off a real runtime.
+    pub fn pending_runnables(&self) -> usize {
+        self.state.lock().runnables.len()
+    }
+
     /// Create an [`Executor`] backed by this scheduler.
     pub fn executor(self: &Arc<Self>) -> Executor {
         Executor::new(self.clone())
