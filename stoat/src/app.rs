@@ -634,6 +634,15 @@ pub struct Stoat {
     /// writer. An entry can still sit outside that band after the terminal
     /// shrinks, since nothing rewrites the ledger on resize.
     pub(crate) modal_zoom: std::collections::BTreeMap<ModalKind, i8>,
+    /// Steps the user has applied to how far the diff view recedes unchanged
+    /// syntax behind changed content, scaling the shipped fractions per
+    /// [`crate::render::review::diff_soften_scale`].
+    ///
+    /// Session-scoped and deliberately not persisted, for [`Self::modal_zoom`]'s
+    /// reason: the level answers what is on screen right now. One level for the
+    /// whole session rather than one per editor, because how hard to recede is
+    /// a reading preference rather than a property of any one file.
+    pub(crate) diff_soften: i8,
     /// Share of its body each modal's list pane takes, as a percentage, for the
     /// kinds whose list/preview separator the user has dragged. An absent kind
     /// sits at [`crate::render::picker::DEFAULT_LIST_PERCENT`].
@@ -1931,6 +1940,7 @@ impl Stoat {
             theme_pool,
             imported_themes,
             modal_zoom: std::collections::BTreeMap::new(),
+            diff_soften: 0,
             modal_split: std::collections::BTreeMap::new(),
             command_palette: None,
             help: None,
@@ -2419,7 +2429,11 @@ impl Stoat {
     /// An open modal owns the combo. One with a zoom of its own grows or
     /// shrinks, and one sized entirely by its content swallows the step, since
     /// resizing a pane hidden behind it would be a change the user cannot see.
-    /// With no modal open the step resizes the focused pane against its split.
+    ///
+    /// With no modal open, the diff view takes the step as contrast rather than
+    /// size. There is no pane the reader is looking at to resize, and how far
+    /// unchanged code recedes is the one dial that screen has. Every other
+    /// screen and a plain pane resize the focused pane against its split.
     ///
     /// Modal levels are per modal kind and outlive the modal, so reopening one
     /// brings back the size the user last chose for it. A level is clamped to
@@ -2439,6 +2453,15 @@ impl Stoat {
         }
         if crate::render::zoom_context_modal(self) {
             return UpdateEffect::None;
+        }
+
+        if keymap_state::view_predicate(self.active_workspace()) == Some("diff") {
+            let stepped = i32::from(self.diff_soften).saturating_add(delta);
+            self.diff_soften = stepped.clamp(
+                crate::render::review::DIFF_SOFTEN_MIN.into(),
+                crate::render::review::DIFF_SOFTEN_MAX.into(),
+            ) as i8;
+            return UpdateEffect::Redraw;
         }
 
         self.active_workspace_mut().panes.resize_focused_pane(delta);
@@ -7332,6 +7355,65 @@ mod tests {
         );
     }
 
+    /// Inside the diff view there is no pane the reader is looking at to
+    /// resize, so the combo turns the one dial that screen has instead.
+    #[test]
+    fn a_zoom_step_in_the_diff_view_tunes_the_soften_and_leaves_the_panes_alone() {
+        let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+        let left = h.stoat.active_workspace().panes.focus();
+        let right = h
+            .stoat
+            .active_workspace_mut()
+            .panes
+            .split(crate::pane::Axis::Vertical);
+        h.stoat.active_workspace_mut().panes.set_focus(left);
+        let widths = |h: &crate::test_harness::TestHarness| {
+            (
+                h.stoat.active_workspace().panes.pane(left).area.width,
+                h.stoat.active_workspace().panes.pane(right).area.width,
+            )
+        };
+        let before = widths(&h);
+
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+        h.stoat.handle_window_ipc(zoom(1));
+
+        assert_eq!(
+            (h.stoat.diff_soften, widths(&h)),
+            (1, before),
+            "the step deepens the recede and moves no pane"
+        );
+
+        h.stoat.handle_window_ipc(zoom(-1));
+        h.stoat.handle_window_ipc(zoom(-1));
+        assert_eq!(
+            h.stoat.diff_soften, -1,
+            "the other direction walks back past zero"
+        );
+
+        for _ in 0..8 {
+            h.stoat.handle_window_ipc(zoom(-1));
+        }
+        assert_eq!(
+            h.stoat.diff_soften,
+            crate::render::review::DIFF_SOFTEN_MIN,
+            "the level stops where softening stops"
+        );
+
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(false);
+        let level = h.stoat.diff_soften;
+        h.stoat.handle_window_ipc(zoom(1));
+
+        assert_eq!(
+            (h.stoat.diff_soften, widths(&h) == before),
+            (level, false),
+            "a plain pane takes the step as a resize again"
+        );
+    }
     /// An open modal owns the combo, so the panes behind it must not move.
     #[test]
     fn a_zoom_step_with_a_modal_open_zooms_it_and_leaves_the_panes_alone() {
@@ -16674,46 +16756,154 @@ mod tests {
     #[test]
     fn editor_page_content_version_tracks_the_cursor_line() {
         let paint = PaintVersion::default();
-        let base =
-            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0, paint, 0);
+        let base = editor_page_content_version(
+            true,
+            3,
+            None,
+            Some(10),
+            0,
+            false,
+            0,
+            0.0,
+            1.0,
+            0,
+            paint,
+            0,
+        );
         assert_eq!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0, paint, 0),
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                false,
+                0,
+                0.0,
+                1.0,
+                0,
+                paint,
+                0
+            ),
             "identical inputs keep a buffered page cached"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(11), 0, false, 0, 0.0, 0, paint, 0),
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(11),
+                0,
+                false,
+                0,
+                0.0,
+                1.0,
+                0,
+                paint,
+                0
+            ),
             "a cursor-line move refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, None, 0, false, 0, 0.0, 0, paint, 0),
+            editor_page_content_version(true, 3, None, None, 0, false, 0, 0.0, 1.0, 0, paint, 0),
             "switching to absolute numbering refills"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, Some(72), Some(10), 0, false, 0, 0.0, 0, paint, 0),
+            editor_page_content_version(
+                true,
+                3,
+                Some(72),
+                Some(10),
+                0,
+                false,
+                0,
+                0.0,
+                1.0,
+                0,
+                paint,
+                0
+            ),
             "a wrap-width change refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, true, 7, 0.0, 0, paint, 0),
+            editor_page_content_version(true, 3, None, Some(10), 0, true, 7, 0.0, 1.0, 0, paint, 0),
             "a diff-view hunk change refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.25, 0, paint, 0),
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                false,
+                0,
+                0.0,
+                1.5,
+                0,
+                paint,
+                0
+            ),
+            "a soften step refills buffered pages rather than gliding stale colors"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                false,
+                0,
+                0.25,
+                1.0,
+                0,
+                paint,
+                0
+            ),
             "a focus change to a dimmed pane refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 1, paint, 0),
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                false,
+                0,
+                0.0,
+                1.0,
+                1,
+                paint,
+                0
+            ),
             "a buffer edit refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0, paint, 1),
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                false,
+                0,
+                0.0,
+                1.0,
+                0,
+                paint,
+                1
+            ),
             "a theme switch refills buffered pages"
         );
     }
@@ -16759,6 +16949,7 @@ mod tests {
                     false,
                     0,
                     0.0,
+                    1.0,
                     buffer_version,
                     paint_version,
                     0,

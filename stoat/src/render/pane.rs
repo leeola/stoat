@@ -108,6 +108,7 @@ pub(crate) fn render_pane(
                     },
                     Some(undercurls),
                     if is_focused { 0.0 } else { frame.inactive_dim },
+                    frame.diff_soften_scale,
                     frame.wrap_mode,
                     frame.wrap_column,
                 );

@@ -294,6 +294,8 @@ fn paint_conflict_rows(
                     None,
                     None,
                     None,
+                    // This row softens nothing, so the scale it takes never applies.
+                    1.0,
                     &mut row_cursor,
                 );
             },

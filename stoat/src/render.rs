@@ -313,6 +313,11 @@ pub(crate) struct FrameCtx<'a> {
     /// `0.0` disables dimming. Applied by [`crate::render::pane::render_pane`]
     /// to unfocused panes only.
     pub(crate) inactive_dim: f32,
+    /// Multiplier the diff view applies to how far it recedes unchanged syntax,
+    /// resolved from [`crate::app::Stoat::diff_soften`] per
+    /// [`review::diff_soften_scale`]. `1.0` paints the shipped
+    /// fractions and `0.0` disables softening. Read only by diff-view panes.
+    pub(crate) diff_soften_scale: f32,
     /// Whether editor panes reserve their own per-pane right-edge minimap strip.
     /// `true` only in [`MinimapMode::PerPane`] under stoatty. Single mode gates
     /// this off and declares one shared strip over the reserved band instead.
@@ -690,6 +695,7 @@ pub(crate) fn frame(
         wrap_mode: stoat.settings.editor_wrap.unwrap_or(WrapMode::EditorWidth),
         wrap_column: stoat.settings.editor_wrap_column.unwrap_or(80).max(1),
         inactive_dim,
+        diff_soften_scale: review::diff_soften_scale(stoat.diff_soften),
         minimap_enabled: minimap_enabled && minimap_mode == MinimapMode::PerPane,
         minimap_chrome,
         minimap_band: single_minimap_rect,

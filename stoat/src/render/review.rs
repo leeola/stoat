@@ -59,6 +59,32 @@ pub(crate) const CONTEXT_SOFTEN: f32 = 0.40;
 /// refinement marks pop hardest inside their own line.
 pub(crate) const MODIFIED_ROW_SOFTEN: f32 = 0.25;
 
+/// Furthest the diff view's soften may be turned down. Lands the scale on zero,
+/// which disables softening outright and restores the paint from before it.
+pub(crate) const DIFF_SOFTEN_MIN: i8 = -4;
+
+/// Furthest the soften may be turned up, doubling how far context recedes.
+pub(crate) const DIFF_SOFTEN_MAX: i8 = 4;
+
+/// Ceiling on a scaled soften fraction, leaving a twentieth of the syntax color.
+///
+/// Guards the formula rather than any level it currently reaches. A fraction of
+/// 1.0 would blend a foreground into the background exactly, which is text the
+/// user cannot read at all.
+const SOFTEN_CAP: f32 = 0.95;
+
+/// Multiplier `level` applies to [`CONTEXT_SOFTEN`] and [`MODIFIED_ROW_SOFTEN`].
+///
+/// Level 0 returns 1.0, so an untouched session paints the shipped fractions
+/// exactly. Each step is a quarter, which reaches both a full stop and a
+/// doubling within the four steps a user is willing to press.
+///
+/// A caller must skip [`soften_style`] entirely on a zero scale rather than pass
+/// it a zero amount, because that call drops bold whatever amount it is given.
+pub(crate) fn diff_soften_scale(level: i8) -> f32 {
+    1.0 + 0.25 * f32::from(level.clamp(DIFF_SOFTEN_MIN, DIFF_SOFTEN_MAX))
+}
+
 pub(crate) fn render_review(
     editor: &mut EditorState,
     inner: Rect,
@@ -117,6 +143,7 @@ pub(crate) fn render_diff_view(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     scene: Option<&mut ApcScene>,
+    soften_scale: f32,
 ) {
     let stoatty = scene.is_some();
     let snapshot = editor.display_map.snapshot();
@@ -129,6 +156,7 @@ pub(crate) fn render_diff_view(
         buf,
         scene,
         0.0,
+        soften_scale,
         Some(&mut editor.highlight_endpoint_cache),
         Some(&mut editor.diff_row_cache),
     );
@@ -426,6 +454,7 @@ pub(crate) fn paint_diff_rows(
     buf: &mut Buffer,
     scene: Option<&mut ApcScene>,
     dim: f32,
+    soften_scale: f32,
     endpoint_cache: Option<&mut Option<CachedHighlightEndpoints>>,
     row_cache: Option<&mut Option<DiffRowCache>>,
 ) {
@@ -551,6 +580,7 @@ pub(crate) fn paint_diff_rows(
                     side.map(|c| c.moved_span),
                     None,
                     tints.as_ref().map(|t| t.bg),
+                    soften_scale,
                 );
                 if let Some(staged) = staged {
                     let change_scope =
@@ -609,6 +639,7 @@ pub(crate) fn paint_diff_rows(
                     side.map(|c| c.moved_span),
                     soften_row,
                     soften_gaps,
+                    soften_scale,
                     &mut row_cursor,
                 );
                 if status == DiffStatus::Moved
@@ -676,6 +707,7 @@ pub(crate) fn paint_diff_rows(
                         None,
                         soften_row,
                         None,
+                        soften_scale,
                     );
                     base_line += 1;
                 }
@@ -837,6 +869,7 @@ pub(crate) fn paint_base_row(
     moved_span_tint: Option<[u8; 3]>,
     soften_row: Option<[u8; 3]>,
     soften_gaps: Option<[u8; 3]>,
+    soften_scale: f32,
 ) {
     debug_assert!(
         token_spans.is_sorted_by_key(|(range, _)| range.start),
@@ -861,8 +894,8 @@ pub(crate) fn paint_base_row(
             Some((range, hs)) if range.start <= byte_idx => hs.to_ratatui_style(),
             _ => fallback,
         };
-        if let Some(bg) = soften_row {
-            style = soften_style(style, bg, CONTEXT_SOFTEN);
+        if let Some(bg) = soften_row.filter(|_| soften_scale > 0.0) {
+            style = soften_style(style, bg, (CONTEXT_SOFTEN * soften_scale).min(SOFTEN_CAP));
         }
 
         while change_spans
@@ -876,8 +909,12 @@ pub(crate) fn paint_base_row(
                 style = apply_span_tint(style, kind, side_span_tint, moved_span_tint);
             },
             _ => {
-                if let Some(bg) = soften_gaps {
-                    style = soften_style(style, bg, MODIFIED_ROW_SOFTEN);
+                if let Some(bg) = soften_gaps.filter(|_| soften_scale > 0.0) {
+                    style = soften_style(
+                        style,
+                        bg,
+                        (MODIFIED_ROW_SOFTEN * soften_scale).min(SOFTEN_CAP),
+                    );
                 }
             },
         }
@@ -966,6 +1003,7 @@ pub(crate) fn paint_highlighted_row(
     moved_span_tint: Option<[u8; 3]>,
     soften_row: Option<[u8; 3]>,
     soften_gaps: Option<[u8; 3]>,
+    soften_scale: f32,
     row_cursor: &mut RowHighlightCursor,
 ) {
     debug_assert!(
@@ -986,14 +1024,18 @@ pub(crate) fn paint_highlighted_row(
                 .map(|hs| hs.to_ratatui_style())
                 .unwrap_or(fallback_style)
         };
-        let style = match soften_row {
-            Some(bg) => soften_style(style, bg, CONTEXT_SOFTEN),
+        let style = match soften_row.filter(|_| soften_scale > 0.0) {
+            Some(bg) => soften_style(style, bg, (CONTEXT_SOFTEN * soften_scale).min(SOFTEN_CAP)),
             None => style,
         };
         // Both variants resolve per chunk rather than per cell, because a
         // chunk's cells differ only in which side of a change span they fall on.
-        let gap_style = match soften_gaps {
-            Some(bg) => soften_style(style, bg, MODIFIED_ROW_SOFTEN),
+        let gap_style = match soften_gaps.filter(|_| soften_scale > 0.0) {
+            Some(bg) => soften_style(
+                style,
+                bg,
+                (MODIFIED_ROW_SOFTEN * soften_scale).min(SOFTEN_CAP),
+            ),
             None => style,
         };
 
@@ -2084,7 +2126,15 @@ mod tests {
         let area = Rect::new(0, 0, 120, 8);
         let mut buf = Buffer::empty(area);
         let theme = rgb_diff_theme();
-        render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, None);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &theme,
+            &mut buf,
+            None,
+            1.0,
+        );
 
         // The right buffer status column follows its five-cell number gutter, so
         // it paints its change bar at right_start + 5 and its staged bar after.
@@ -2148,7 +2198,15 @@ mod tests {
         let area = Rect::new(0, 0, 120, 8);
         let mut buf = Buffer::empty(area);
         let theme = rgb_diff_theme();
-        render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, None);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &theme,
+            &mut buf,
+            None,
+            1.0,
+        );
 
         let change_col = ((120 - 1) / 2 + 1 + 5) as u16;
         let barred: Vec<u16> = (0..area.height)
@@ -2187,6 +2245,7 @@ mod tests {
             &theme,
             &mut rich_buf,
             Some(&mut scene),
+            1.0,
         );
 
         assert!(
@@ -2252,6 +2311,7 @@ mod tests {
             &theme,
             &mut ascii_buf,
             None,
+            1.0,
         );
         assert!(has(&ascii_buf, "▎"), "the ASCII path paints status glyphs");
         assert!(has(&ascii_buf, "│"), "the ASCII path paints separators");
@@ -2289,6 +2349,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             None,
+            1.0,
         );
 
         // Width 120 is wide enough for the two-column layout. Left text spans
@@ -2362,6 +2423,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             None,
+            1.0,
         );
 
         // The gutter/code separator is painted at col 7, but a unified view has
@@ -2672,6 +2734,59 @@ mod tests {
         );
     }
 
+    /// The level reaches the paint through the whole live chain, which is what
+    /// makes it a knob rather than a field.
+    #[test]
+    fn the_soften_level_scales_how_far_a_context_row_recedes() {
+        let mut h = diff_harness("fn keep() {}\n", "fn keep() {}\nfn add() {}\n");
+
+        let bg = style_rgb(
+            h.stoat
+                .theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|s| s.bg),
+        )
+        .expect("rgb background");
+
+        let context_fg = |h: &mut crate::test_harness::TestHarness| {
+            h.snapshot();
+            let buf = h.rendered_buffer();
+            let y = (0..buf.area.height)
+                .find(|&y| line_text(buf, y, 68..buf.area.width).contains("fn keep"))
+                .expect("the context row renders");
+            let x = (68..buf.area.width)
+                .find(|&x| !buf[(x, y)].symbol().trim().is_empty())
+                .expect("a glyph on the row");
+            buf[(x, y)].style().fg
+        };
+
+        let shipped = context_fg(&mut h);
+
+        h.stoat.diff_soften = DIFF_SOFTEN_MIN;
+        let stopped = context_fg(&mut h);
+
+        h.stoat.diff_soften = DIFF_SOFTEN_MAX;
+        let deepest = context_fg(&mut h);
+
+        let blend = |amount: f32| {
+            let full = style_rgb(stopped).expect("rgb fg with no soften applied");
+            let [r, g, b] = dim_rgb(full, bg, amount);
+            Some(Color::Rgb(r, g, b))
+        };
+
+        assert_eq!(
+            (shipped, deepest),
+            (
+                blend(CONTEXT_SOFTEN),
+                blend(CONTEXT_SOFTEN * diff_soften_scale(DIFF_SOFTEN_MAX)),
+            ),
+            "level 0 paints the shipped fraction and the top level doubles it",
+        );
+        assert_ne!(
+            stopped, shipped,
+            "the bottom level stops the blend rather than shrinking it",
+        );
+    }
     #[test]
     fn diff_view_added_line_takes_no_line_wash() {
         // The second line is a pure insertion, so nothing is refined.
@@ -2775,7 +2890,7 @@ mod tests {
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
-        render_diff_view(&mut editor, area, fallback, &theme, &mut buf, None);
+        render_diff_view(&mut editor, area, fallback, &theme, &mut buf, None, 1.0);
 
         use crate::theme::scope as sc;
         let moved_span = tint(&theme, sc::DIFF_MOVED, SPAN_TINT);
@@ -2838,7 +2953,15 @@ mod tests {
         let theme = rgb_diff_theme();
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, None);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &theme,
+            &mut buf,
+            None,
+            1.0,
+        );
 
         let staged_span = tint(&theme, sc::DIFF_ADDED, STAGED_SPAN_TINT);
         let unstaged_span = tint(&theme, sc::DIFF_ADDED, SPAN_TINT);
@@ -2953,6 +3076,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             None,
+            1.0,
         );
 
         let row = buffer_text(&buf, 1);
@@ -2981,6 +3105,7 @@ mod tests {
             &Theme::empty(),
             &mut buf,
             None,
+            1.0,
         );
 
         let row = buffer_text(&buf, 1);
@@ -3007,6 +3132,7 @@ mod tests {
             Some([40, 50, 60]),
             None,
             None,
+            1.0,
         );
 
         for x in 0..3 {
@@ -3034,6 +3160,48 @@ mod tests {
         );
     }
 
+    /// A zero scale must skip the soften call rather than pass it a zero
+    /// amount, because that call drops bold whatever amount it is given.
+    #[test]
+    fn a_zero_soften_scale_leaves_the_row_untouched() {
+        let bold = Style::default()
+            .fg(Color::Rgb(200, 100, 50))
+            .add_modifier(Modifier::BOLD);
+        let bg = [0, 0, 0];
+
+        let paint = |scale: f32| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
+            paint_base_row(
+                &mut buf,
+                0,
+                0,
+                "word",
+                4,
+                &[],
+                bold,
+                &[],
+                None,
+                None,
+                Some(bg),
+                None,
+                scale,
+            );
+            (buf[(0, 0)].style().fg, buf[(0, 0)].modifier)
+        };
+
+        assert_eq!(
+            paint(0.0),
+            (Some(Color::Rgb(200, 100, 50)), Modifier::BOLD),
+            "a stopped soften keeps both the color and the weight",
+        );
+
+        let [r, g, b] = dim_rgb([200, 100, 50], bg, CONTEXT_SOFTEN * 2.0);
+        assert_eq!(
+            paint(2.0),
+            (Some(Color::Rgb(r, g, b)), Modifier::empty()),
+            "a doubled soften blends twice as far and drops the weight",
+        );
+    }
     #[test]
     fn paint_base_row_underlines_change_spans_without_tints() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
@@ -3051,6 +3219,7 @@ mod tests {
             None,
             None,
             None,
+            1.0,
         );
 
         for x in 0..6 {

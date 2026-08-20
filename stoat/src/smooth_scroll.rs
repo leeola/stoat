@@ -119,6 +119,7 @@ pub(crate) fn render_page_fill(
     gutter: &PageGutter,
     diff_view: bool,
     dim: f32,
+    soften_scale: f32,
     endpoints: Arc<[HighlightEndpoint]>,
     live: Option<&crate::diff_map::LiveHunks<'_>>,
 ) -> Vec<u8> {
@@ -132,6 +133,7 @@ pub(crate) fn render_page_fill(
         gutter,
         diff_view,
         dim,
+        soften_scale,
         endpoints,
         live,
     );
@@ -175,6 +177,7 @@ pub(crate) fn render_page_from_snapshot(
     gutter: &PageGutter,
     diff_view: bool,
     dim: f32,
+    soften_scale: f32,
     endpoints: Arc<[HighlightEndpoint]>,
     live: Option<&crate::diff_map::LiveHunks<'_>>,
 ) -> Vec<u8> {
@@ -196,6 +199,7 @@ pub(crate) fn render_page_from_snapshot(
             &mut buf,
             scene.as_mut(),
             dim,
+            soften_scale,
             None,
             None,
         );
@@ -908,6 +912,7 @@ mod tests {
                 None,
                 None,
                 0.0,
+                1.0,
                 WrapMode::None,
                 80,
             );
@@ -924,6 +929,7 @@ mod tests {
                 &gutter,
                 false,
                 0.0,
+                1.0,
                 page_endpoints(&snapshot, top_row, 4),
                 None,
             );
@@ -987,6 +993,7 @@ mod tests {
             None,
             None,
             0.0,
+            1.0,
             WrapMode::None,
             80,
         );
@@ -1002,6 +1009,7 @@ mod tests {
             &gutter,
             false,
             0.0,
+            1.0,
             page_endpoints(&snapshot, 0, 2),
             None,
         );
@@ -1076,6 +1084,7 @@ mod tests {
             None,
             None,
             0.0,
+            1.0,
             WrapMode::None,
             80,
         );
@@ -1091,6 +1100,7 @@ mod tests {
             &gutter,
             false,
             0.0,
+            1.0,
             page_endpoints(&snapshot, 0, 3),
             None,
         );
@@ -1149,6 +1159,7 @@ mod tests {
             &gutter,
             false,
             0.0,
+            1.0,
             page_endpoints(&snapshot, 0, 4),
             None,
         );
@@ -1161,6 +1172,7 @@ mod tests {
             &gutter,
             false,
             0.5,
+            1.0,
             page_endpoints(&snapshot, 0, 4),
             None,
         );
@@ -1236,6 +1248,7 @@ mod tests {
             &mut expected,
             None,
             0.0,
+            1.0,
             None,
             None,
         );
@@ -1250,6 +1263,7 @@ mod tests {
             &gutter,
             true,
             0.0,
+            1.0,
             page_endpoints(&snapshot, 0, 8),
             None,
         );
@@ -1487,7 +1501,8 @@ mod tests {
             let own = page_endpoints(&snapshot, page_top_row(index, height), height);
             let fill = |endpoints| {
                 render_page_fill(
-                    &snapshot, 5, index, fallback, 40, height, &gutter, false, 0.0, endpoints, None,
+                    &snapshot, 5, index, fallback, 40, height, &gutter, false, 0.0, 1.0, endpoints,
+                    None,
                 )
             };
             assert_eq!(fill(shared.clone()), fill(own), "page {index}");
@@ -1577,6 +1592,7 @@ mod tests {
                     &gutter,
                     false,
                     0.0,
+                    1.0,
                     page_endpoints(&snapshot, page_top_row(index, height), height),
                     live,
                 )
@@ -1632,6 +1648,7 @@ mod tests {
             &gutter,
             false,
             0.0,
+            1.0,
             page_endpoints(&snapshot, 6, 3),
             None,
         );
@@ -1655,6 +1672,7 @@ mod tests {
             &gutter,
             false,
             0.0,
+            1.0,
             page_endpoints(&snapshot, 6, 3),
             None,
         );
@@ -1710,6 +1728,7 @@ mod tests {
             &gutter,
             false,
             0.0,
+            1.0,
             page_endpoints(&snapshot, 0, 4),
             None,
         );

@@ -108,6 +108,8 @@ pub(crate) fn render_editor(
         None,
         None,
         0.0,
+        // Not a pane, so it never paints the diff view the scale applies to.
+        1.0,
         WrapMode::None,
         80,
     );
@@ -133,6 +135,7 @@ pub(crate) fn render_editor_with_overlay(
     mut scene: Option<&mut ApcScene>,
     undercurls: Option<&mut UndercurlBatch>,
     dim: f32,
+    soften_scale: f32,
     wrap: WrapMode,
     wrap_column: u32,
 ) {
@@ -148,7 +151,15 @@ pub(crate) fn render_editor_with_overlay(
 
     if editor.diff_view {
         editor.display_map.set_wrap_width(None);
-        render_diff_view(editor, inner, fallback_style, theme, buf, scene);
+        render_diff_view(
+            editor,
+            inner,
+            fallback_style,
+            theme,
+            buf,
+            scene,
+            soften_scale,
+        );
         return;
     }
 
@@ -2778,6 +2789,7 @@ mod tests {
             None,
             None,
             0.0,
+            1.0,
             WrapMode::None,
             80,
         );
@@ -2879,6 +2891,7 @@ mod tests {
             None,
             None,
             0.0,
+            1.0,
             WrapMode::None,
             80,
         );
@@ -2954,6 +2967,7 @@ mod tests {
                 None,
                 None,
                 0.0,
+                1.0,
                 WrapMode::None,
                 80,
             );
@@ -3049,6 +3063,7 @@ mod tests {
                 None,
                 None,
                 0.0,
+                1.0,
                 WrapMode::None,
                 80,
             );
@@ -3419,6 +3434,7 @@ mod tests {
             None,
             None,
             0.0,
+            1.0,
             WrapMode::None,
             80,
         );
@@ -3506,6 +3522,7 @@ mod tests {
             None,
             None,
             0.0,
+            1.0,
             WrapMode::None,
             80,
         );
@@ -3545,6 +3562,7 @@ mod tests {
             None,
             None,
             0.0,
+            1.0,
             WrapMode::None,
             80,
         );
@@ -3681,6 +3699,7 @@ mod tests {
             None,
             None,
             0.0,
+            1.0,
             wrap,
             wrap_column,
         );
@@ -3817,6 +3836,7 @@ mod tests {
                 None,
                 None,
                 0.0,
+                1.0,
                 WrapMode::EditorWidth,
                 80,
             );
@@ -3862,6 +3882,7 @@ mod tests {
             None,
             None,
             0.0,
+            1.0,
             wrap,
             80,
         );
@@ -4023,6 +4044,7 @@ mod tests {
             Some(&mut scene),
             None,
             0.0,
+            1.0,
             WrapMode::None,
             80,
         );
@@ -4103,6 +4125,7 @@ mod tests {
             Some(&mut scene),
             None,
             0.0,
+            1.0,
             WrapMode::None,
             80,
         );
@@ -4205,6 +4228,7 @@ mod tests {
             None,
             None,
             0.0,
+            1.0,
             WrapMode::None,
             80,
         );
@@ -4254,6 +4278,7 @@ mod tests {
             None,
             None,
             0.0,
+            1.0,
             WrapMode::None,
             80,
         );
@@ -4366,6 +4391,7 @@ mod tests {
             None,
             None,
             0.0,
+            1.0,
             WrapMode::None,
             80,
         );
@@ -4554,6 +4580,7 @@ mod tests {
             None,
             None,
             0.0,
+            1.0,
             WrapMode::None,
             80,
         );

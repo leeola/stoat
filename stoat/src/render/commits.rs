@@ -330,6 +330,9 @@ fn paint_preview_side(
         Some(tints.unstaged.moved_span),
         soften_row,
         soften_gaps,
+        // The commit preview is its own screen, so the diff view's soften knob
+        // never reaches it and its fractions stay as shipped.
+        1.0,
     );
 }
 /// Render a compact preview of a [`ReviewSession`]: each chunk's rows

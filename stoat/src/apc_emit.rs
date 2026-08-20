@@ -290,6 +290,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) {
         wrap_mode: WrapMode::EditorWidth,
         wrap_column: 80,
         inactive_dim: 0.0,
+        diff_soften_scale: 1.0,
         minimap_enabled: false,
         minimap_chrome: None,
         minimap_band: None,
@@ -773,6 +774,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             gutter: crate::smooth_scroll::PageGutter,
             diff_view: bool,
             dim: f32,
+            soften_scale: f32,
         },
         Review {
             snapshot: DisplaySnapshot,
@@ -832,6 +834,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         } else {
             inactive_dim
         };
+        let soften_scale = crate::render::review::diff_soften_scale(stoat.diff_soften);
         // scroll_row is the source of truth for the pool page. The wheel
         // glide refines it sub-row through scroll_offset, but cursor-follow
         // and jumps move scroll_row without the fraction, so trust the offset
@@ -891,6 +894,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 editor.diff_view,
                 editor.display_map.diff_version(),
                 dim,
+                soften_scale,
                 buffer_version,
                 paint_version,
                 theme_epoch,
@@ -1020,6 +1024,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                         current_line,
                     ),
                     diff_view: editor.diff_view,
+                    soften_scale,
                     dim,
                 });
             }
@@ -1124,6 +1129,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 editor.diff_view,
                 editor.display_map.diff_version(),
                 0.0,
+                // A modal preview is not the diff view the knob turns.
+                1.0,
                 editor.display_map.buffer_snapshot().version(),
                 editor.display_map.snapshot().paint_version(),
                 theme_epoch,
@@ -1162,6 +1169,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                         None,
                     ),
                     diff_view,
+                    // A modal preview is not the diff view the knob turns.
+                    soften_scale: 1.0,
                     dim: 0.0,
                 });
             }
@@ -1682,6 +1691,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 gutter,
                 diff_view,
                 dim,
+                soften_scale,
             } => {
                 // One job for the whole refill rather than one per page.
                 // Every page reads the same highlight endpoints and the same
@@ -1723,6 +1733,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                                 &gutter,
                                 diff_view,
                                 dim,
+                                soften_scale,
                                 endpoints.clone(),
                                 live.as_ref(),
                             );
@@ -2031,8 +2042,8 @@ pub(crate) fn display_map_stamp(buffer_version: u64, paint_version: PaintVersion
 /// A page stays cached while the surface scrolls, but must repaint when the
 /// syntax-highlight toggle recolors every row, a diagnostics change restyles
 /// the gutter, a gutter-width or wrap-width change reflows the text, the
-/// cursor's buffer line moves under relative numbering, or the theme changes
-/// every color on the page.
+/// cursor's buffer line moves under relative numbering, the diff view's soften
+/// level moves, or the theme changes every color on the page.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn editor_page_content_version(
     syntax_highlight: bool,
@@ -2043,6 +2054,7 @@ pub(crate) fn editor_page_content_version(
     diff_view: bool,
     diff_version: usize,
     dim: f32,
+    soften_scale: f32,
     buffer_version: u64,
     paint_version: PaintVersion,
     theme_epoch: u64,
@@ -2056,6 +2068,7 @@ pub(crate) fn editor_page_content_version(
     diff_view.hash(&mut hasher);
     diff_version.hash(&mut hasher);
     ((dim * 1000.0) as u32).hash(&mut hasher);
+    ((soften_scale * 1000.0) as u32).hash(&mut hasher);
     // A typed character and a fold both change page pixels and reach nothing
     // else here, so without the mapping stamp a file outside git (diff_version
     // stuck at 0) with no diagnostics glides pre-edit text.
