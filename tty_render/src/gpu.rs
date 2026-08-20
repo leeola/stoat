@@ -23,7 +23,7 @@ use crate::{
         panel::PanelPass,
         polyline::PolylinePass,
         text::TextPass,
-        CellMetrics, Occluder,
+        CellMetrics, Occluder, PoolOccluders,
     },
 };
 use cosmic_text::FontSystem;
@@ -864,17 +864,22 @@ impl Renderer {
     ) {
         let resolution = [self.width as f32, self.height as f32];
 
-        // All four passes occlude this pool against the same panels, so the list is
-        // built once here rather than in each of them. It cannot share
-        // `self.occluders`: that holds the live grid's unfiltered list, which the live
+        // All four passes occlude this pool against the same panels, so the list
+        // is built once here rather than in each of them. It cannot share
+        // `self.occluders`: that holds the live grid's list, which the live
         // passes still read on a frame that also composites pools.
-        crate::render::pool_occluders_into(occludable, panels, riding, &mut self.pool_occluders);
+        //
+        // Every pool of a frame builds the same list and reads as much of it as
+        // its own occludability names, so a second pool leaves the first one's
+        // bytes alone and the upload dedup recognizes them.
+        let above = crate::render::pool_occluders_into(panels, riding, &mut self.pool_occluders);
+        let occluders = PoolOccluders::new(&self.pool_occluders, above, occludable);
 
         self.background.prepare_composite(
             device,
             queue,
             pool_grid,
-            &self.pool_occluders,
+            occluders,
             resolution,
             shift_rows,
             origin_cells,
@@ -886,7 +891,7 @@ impl Renderer {
             device,
             queue,
             pool_grid,
-            &self.pool_occluders,
+            occluders,
             resolution,
             shift_rows,
             origin_cells,
@@ -899,7 +904,7 @@ impl Renderer {
             device,
             queue,
             pool_grid.bars(),
-            &self.pool_occluders,
+            occluders,
             resolution,
             shift_rows,
             origin_cells,
@@ -911,7 +916,7 @@ impl Renderer {
             device,
             queue,
             pool_grid.polylines(),
-            &self.pool_occluders,
+            occluders,
             resolution,
             shift_rows,
             origin_cells,

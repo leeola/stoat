@@ -7,8 +7,8 @@
 //! cell size, so a path tracks font zoom.
 
 use crate::render::{
-    globals_offset, occlusion_globals, CellMetrics, CompositeSlot, CompositeSlots, Occluder,
-    OccluderBuffer, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+    globals_offset, CellMetrics, CompositeSlot, CompositeSlots, Occluder, OccluderBuffer,
+    PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use std::mem;
@@ -385,20 +385,20 @@ impl PolylinePass {
     /// the other pools', reusing the shared globals uniform the live pass already
     /// wrote this frame. The slot itself is allocated on first use.
     ///
-    /// The paths are occluded against `occluders` with the seq test bypassed, so a
-    /// line gliding beneath a modal is hidden by it. Which panels reach that list is
-    /// the caller's decision, since all four of a pool's composite passes share it.
+    /// The paths are occluded against `occluders` with the seq test bypassed, so
+    /// a line gliding beneath a modal is hidden by it. `occluders` carries the
+    /// frame's whole list and how much of it covers this pool, and all four of a
+    /// pool's composite passes are handed the same one.
     ///
     /// See also:
-    /// - [`pool_occluders_into`](crate::render::pool_occluders_into) for how a pool's list is
-    ///   narrowed.
+    /// - [`PoolOccluders`] for why every pool of a frame reads one list.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_composite(
         &mut self,
         device: &Device,
         queue: &Queue,
         polylines: &[Polyline],
-        occluders: &[Occluder],
+        occluders: PoolOccluders<'_>,
         resolution: [f32; 2],
         shift_rows: f32,
         origin_cells: [f32; 2],
@@ -406,8 +406,8 @@ impl PolylinePass {
         pool: u32,
         slot: usize,
     ) {
-        self.upload_composite_occluders(device, queue, occluders);
-        let (panel_count, occlude_all) = occlusion_globals(occluders);
+        self.upload_composite_occluders(device, queue, occluders.all);
+        let (panel_count, occlude_all) = occluders.globals();
 
         let globals = Globals {
             resolution,
@@ -626,7 +626,10 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::{build_polyline_instances_into, PolylineInstance, PolylinePass};
-    use crate::{gpu::headless_device, render::CellMetrics};
+    use crate::{
+        gpu::headless_device,
+        render::{CellMetrics, PoolOccluders},
+    };
     use stoatty_term::grid::{Polyline, Rgb};
     use wgpu::{
         naga::{
@@ -801,7 +804,7 @@ mod tests {
             device,
             queue,
             paths,
-            &[],
+            PoolOccluders::new(&[], 0, true),
             [TARGET as f32, TARGET as f32],
             0.0,
             [0.0; 2],
@@ -949,7 +952,7 @@ mod tests {
             &device,
             &queue,
             &first,
-            &[],
+            PoolOccluders::new(&[], 0, true),
             [64.0, 64.0],
             0.0,
             [0.0; 2],
@@ -967,7 +970,7 @@ mod tests {
             &device,
             &queue,
             &moved,
-            &[],
+            PoolOccluders::new(&[], 0, true),
             [64.0, 64.0],
             -0.5,
             [0.0; 2],

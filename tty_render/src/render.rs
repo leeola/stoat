@@ -537,34 +537,85 @@ pub(crate) fn build_occluders_into(panels: &[Panel], riding: &[u32], out: &mut V
     );
 }
 
-/// Collect into `out` the occluders a pool composite uploads, given the panels on
-/// the live grid.
+/// Collect into `out` the occluders a frame's pool composites upload, and report
+/// how many of them lead the list.
 ///
-/// A pane pool sits beneath every box, so an occludable pool takes all `panels`.
-/// A non-pane pool is box content itself, drawn where a box already sits, so
-/// nothing occludes it except chrome that floats above every pooled surface.
-/// Those are exactly the panels flagged [`Panel::above_pools`], and the rest are
-/// filtered out.
+/// Every pool in a frame reads from one list, because the list a pool wants is
+/// a function of a single bool. A pane pool sits beneath every box, so it takes
+/// them all. A pool that is a box's own content is drawn where a box already
+/// sits, so nothing occludes it except chrome floating above every pooled
+/// surface, which is exactly the panels flagged [`Panel::above_pools`].
 ///
-/// All four of a pool's composite passes want the same list, so the caller holds the
-/// buffer and builds once per pool rather than once per pass.
+/// Those lead the list, which makes the second a prefix of the first: one
+/// upload serves both, and a pool names how much of it to read. Where a panel
+/// sits in the list changes nothing drawn, since the shader walks to that count
+/// and returns on the first box that covers the fragment.
 ///
 /// See also:
-/// - [`occlusion_globals`] for the count the composite shaders read off this list.
+/// - [`PoolOccluders`] for what one pool reads off this list.
 pub(crate) fn pool_occluders_into(
-    occludable: bool,
     panels: &[Panel],
     riding: &[u32],
     out: &mut Vec<Occluder>,
-) {
+) -> usize {
     out.clear();
+    let covers = |panel: &&Panel| !rides(panel, riding);
     out.extend(
         panels
             .iter()
-            .filter(|panel| !rides(panel, riding))
-            .filter(|panel| occludable || panel.above_pools)
+            .filter(covers)
+            .filter(|panel| panel.above_pools)
             .map(panel_occluder),
     );
+    let above = out.len();
+    out.extend(
+        panels
+            .iter()
+            .filter(covers)
+            .filter(|panel| !panel.above_pools)
+            .map(panel_occluder),
+    );
+    above
+}
+
+/// One pool composite's share of a frame's occluder list.
+#[derive(Clone, Copy)]
+pub(crate) struct PoolOccluders<'frame> {
+    /// The frame's whole list, which every pool uploads and shares.
+    pub(crate) all: &'frame [Occluder],
+    /// How many of them, counting from the front, cover this pool. Every one for
+    /// a pane pool, the above-pools ones alone for a pool that is box content.
+    covering: usize,
+}
+
+impl<'frame> PoolOccluders<'frame> {
+    /// The share a pool takes of `all`, whose first `above` entries are the
+    /// panels drawn above pools.
+    pub(crate) fn new(all: &'frame [Occluder], above: usize, occludable: bool) -> Self {
+        PoolOccluders {
+            all,
+            covering: match occludable {
+                true => all.len(),
+                false => above,
+            },
+        }
+    }
+
+    /// The `(panel_count, occlude_all)` this pool writes into its globals
+    /// uniform.
+    ///
+    /// The pair maps directly onto the `panel_count` and `occlude_all` fields
+    /// the bar, text, polyline, and background composite shaders read. An
+    /// `occlude_all` of 1 tells the shader to discard a fragment inside any
+    /// occluder it walks regardless of seq, which is what a pool wants: the
+    /// count has already narrowed the list to the panels that cover this pool,
+    /// so a seq test would only undo that. A count of zero occludes nothing.
+    pub(crate) fn globals(self) -> (u32, u32) {
+        match self.covering {
+            0 => (0, 0),
+            covering => (covering as u32, 1),
+        }
+    }
 }
 
 /// Whether `panel` is anchored to one of the pools in `riding`.
@@ -574,23 +625,6 @@ pub(crate) fn pool_occluders_into(
 /// punch a hole where it no longer is.
 pub(crate) fn rides(panel: &Panel, riding: &[u32]) -> bool {
     panel.anchor.is_some_and(|(host, _)| riding.contains(&host))
-}
-
-/// The `(panel_count, occlude_all)` a pool composite writes into its globals
-/// uniform for `occluders`.
-///
-/// The pair maps directly onto the `panel_count` and `occlude_all` fields the
-/// bar, text, polyline, and background composite shaders read. An `occlude_all`
-/// of 1 tells the shader to discard a fragment inside any uploaded occluder
-/// regardless of seq, which is what a pool wants: [`pool_occluders`] has already
-/// narrowed the list to the panels that cover this pool, so a seq test would only
-/// undo that. An empty list occludes nothing.
-pub(crate) fn occlusion_globals(occluders: &[Occluder]) -> (u32, u32) {
-    if occluders.is_empty() {
-        (0, 0)
-    } else {
-        (occluders.len() as u32, 1)
-    }
 }
 
 fn panel_occluder(panel: &Panel) -> Occluder {
@@ -632,9 +666,9 @@ pub fn cell_size(font_size: u32, scale_factor: f32) -> [f32; 2] {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_occluders_into, globals_offset, globals_upload_needed, occlusion_globals,
-        pool_occluders_into, rotate_row_cache, row_runs, row_uploads, upload_needed, CellMetrics,
-        CompositeSlots, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
+        build_occluders_into, globals_offset, globals_upload_needed, pool_occluders_into,
+        rotate_row_cache, row_runs, row_uploads, upload_needed, CellMetrics, CompositeSlots,
+        Occluder, PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
     };
     use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
 
@@ -925,45 +959,54 @@ mod tests {
         }
     }
 
+    /// Two pools of a frame read one list, so what separates them is how much of
+    /// it each reads. Putting the above-pools panels first is what makes the
+    /// shorter read a prefix of the longer.
     #[test]
-    fn occludable_pool_occludes_all_panels_without_a_seq_test() {
+    fn a_frame_s_two_pools_read_one_list_from_the_front() {
+        let panels = [panel(1, false), panel(2, true), panel(3, false)];
         let mut occluders = Vec::new();
-        pool_occluders_into(
-            true,
-            &[panel(1, false), panel(2, true)],
-            &[],
-            &mut occluders,
-        );
+        let above = pool_occluders_into(&panels, &[], &mut occluders);
 
         assert_eq!(
-            occluders.iter().map(|o| o.seq).collect::<Vec<_>>(),
-            [1, 2],
-            "a pane pool sits beneath every box, flagged or not"
+            (occluders.iter().map(|o| o.seq).collect::<Vec<_>>(), above),
+            (vec![2, 1, 3], 1),
+            "the panels above pools lead, and the rest keep their order behind them"
         );
+
+        let pane = PoolOccluders::new(&occluders, above, true);
         assert_eq!(
-            occlusion_globals(&occluders),
-            (2, 1),
-            "a pane pool reports every panel and bypasses the seq test"
+            pane.globals(),
+            (3, 1),
+            "a pane pool sits beneath every box and bypasses the seq test"
+        );
+
+        let content = PoolOccluders::new(&occluders, above, false);
+        assert_eq!(
+            content.globals(),
+            (1, 1),
+            "a pool that is box content reads only the boxes above every pooled \
+             surface, which is the front of the list"
         );
     }
 
+    /// A frame with no box above pools leaves a pool that is box content nothing
+    /// to read, whatever else covers the screen.
     #[test]
-    fn non_pane_pool_occludes_only_against_panels_above_pools() {
+    fn a_box_content_pool_with_no_box_above_pools_reads_nothing() {
         let mut occluders = Vec::new();
-        pool_occluders_into(
-            false,
-            &[panel(1, false), panel(2, true)],
-            &[],
-            &mut occluders,
-        );
+        let above = pool_occluders_into(&[panel(1, false), panel(2, false)], &[], &mut occluders);
 
         assert_eq!(
-            occluders.iter().map(|o| o.seq).collect::<Vec<_>>(),
-            [2],
-            "a non-pane pool is box content, so only chrome above every pooled \
-             surface covers it"
+            (occluders.len(), above),
+            (2, 0),
+            "both panels are in the list, and neither leads it"
         );
-        assert_eq!(occlusion_globals(&occluders), (1, 1));
+        assert_eq!(
+            PoolOccluders::new(&occluders, above, false).globals(),
+            (0, 0),
+            "so the pool walks none of them and is occluded by nothing"
+        );
     }
 
     /// A panel anchored to a compositing host draws shifted, after the pools, so
@@ -977,25 +1020,26 @@ mod tests {
         let panels = [panel(1, false), riding];
 
         let mut occluders = Vec::new();
-        pool_occluders_into(true, &panels, &[7], &mut occluders);
-        let pane = occluders.iter().map(|o| o.seq).collect::<Vec<_>>();
+        pool_occluders_into(&panels, &[7], &mut occluders);
+        let pool = occluders.iter().map(|o| o.seq).collect::<Vec<_>>();
 
         build_occluders_into(&panels, &[7], &mut occluders);
         let base = occluders.iter().map(|o| o.seq).collect::<Vec<_>>();
 
         assert_eq!(
-            (pane, base),
+            (pool, base),
             (vec![1], vec![1]),
-            "the ridden panel is out of the pane pool's list and the base list"
+            "the ridden panel is out of the pools' list and the base list"
         );
 
         // With the host parked, a live frame has placed the panel, so it
         // occludes from its own rect exactly as any other panel does.
-        pool_occluders_into(true, &panels, &[], &mut occluders);
+        pool_occluders_into(&panels, &[], &mut occluders);
         assert_eq!(
             occluders.iter().map(|o| o.seq).collect::<Vec<_>>(),
-            [1, 2],
-            "a panel whose host is not riding keeps its place"
+            [2, 1],
+            "a panel whose host is not riding keeps its place, ahead of the \
+             others because it floats above pools"
         );
     }
 
@@ -1124,52 +1168,24 @@ mod tests {
         );
     }
 
-    /// One buffer is filled once per pool per frame, so it has to hold only the pool
-    /// it was last filled for. A leftover panel from the pool before would occlude
-    /// this one against a box that does not cover it.
+    /// Every pool of a frame builds the same list, which is what lets them share
+    /// one buffer. A second pool that rewrote it would leave the first drawing
+    /// against boxes that do not cover it.
     #[test]
-    fn a_reused_occluder_buffer_holds_only_the_pool_it_was_filled_for() {
-        let mut occluders = Vec::new();
-        pool_occluders_into(
-            true,
-            &[panel(1, false), panel(2, true)],
-            &[],
-            &mut occluders,
-        );
-        pool_occluders_into(
-            false,
-            &[panel(3, false), panel(4, true)],
-            &[],
-            &mut occluders,
-        );
+    fn every_pool_of_a_frame_builds_the_same_list() {
+        let panels = [panel(1, false), panel(2, true)];
 
-        assert_eq!(
-            occluders.iter().map(|o| o.seq).collect::<Vec<_>>(),
-            [4],
-            "only the second pool's panel, and only the one above pools"
-        );
-        assert_eq!(
-            occlusion_globals(&occluders),
-            (1, 1),
-            "the count the shader reads follows the refilled list"
-        );
-    }
+        let mut first = Vec::new();
+        let above_first = pool_occluders_into(&panels, &[], &mut first);
 
-    #[test]
-    fn non_pane_pool_with_no_panel_above_pools_occludes_nothing() {
-        let mut occluders = Vec::new();
-        pool_occluders_into(
-            false,
-            &[panel(1, false), panel(2, false)],
-            &[],
-            &mut occluders,
-        );
+        let mut second = Vec::new();
+        let above_second = pool_occluders_into(&panels, &[], &mut second);
 
-        assert_eq!(occluders.len(), 0, "no panel floats above the pool");
+        let seqs = |list: &[Occluder]| list.iter().map(|o| o.seq).collect::<Vec<_>>();
         assert_eq!(
-            occlusion_globals(&occluders),
-            (0, 0),
-            "an empty list leaves the composite unoccluded, as before the flag"
+            (seqs(&first), above_first),
+            (seqs(&second), above_second),
+            "the list a pool builds depends on the frame, never on the pool",
         );
     }
 

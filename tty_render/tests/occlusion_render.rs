@@ -370,6 +370,7 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
     let bar_color = Rgb::new(200, 50, 50);
     let run_bg = Rgb::new(50, 200, 50);
     let line_color = Rgb::new(220, 200, 40);
+    let pane_bg = Rgb::new(240, 180, 20);
     let border = Rgb::new(128, 128, 128);
 
     let target = device.create_texture(&TextureDescriptor {
@@ -465,18 +466,38 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
     }]);
 
     // A pool that is box content rather than a pane, which is what narrows its
-    // occluder list to the above-pools box alone.
-    let pool = Grid::new(rows, cols);
-    let pools = [PoolComposite {
-        id: 0,
-        grid: &pool,
-        origin_cells: [0.0; 2],
-        scissor: [0, 0, cell_w, cell_h],
-        shift_rows: 0.0,
-        content_changed: true,
-        scrolled_rows: None,
-        occludable: false,
-    }];
+    // occluder list to the above-pools box alone. A pane pool beside it reads
+    // every box, so the two disagree on the list and one buffer between them
+    // would leave the pane pool drawing against this one's.
+    let content = Grid::new(rows, cols);
+    let mut pane = Grid::new(rows, cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            pane.get_mut(r, c).bg = pane_bg;
+        }
+    }
+    let pools = [
+        PoolComposite {
+            id: 0,
+            grid: &pane,
+            origin_cells: [0.0; 2],
+            scissor: [0, cell_h * 4, width, cell_h],
+            shift_rows: 0.0,
+            content_changed: true,
+            scrolled_rows: None,
+            occludable: true,
+        },
+        PoolComposite {
+            id: 1,
+            grid: &content,
+            origin_cells: [0.0; 2],
+            scissor: [0, 0, cell_w, cell_h],
+            shift_rows: 0.0,
+            content_changed: true,
+            scrolled_rows: None,
+            occludable: false,
+        },
+    ];
 
     renderer.render_pools_into(
         &device,
@@ -526,6 +547,19 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
             "and the {what} stays hidden under the box that covers it",
         );
     }
+
+    // The pane pool prepared beside the box-content one, on its own row.
+    assert_eq!(
+        cell(4, 0),
+        rgb(pane_bg),
+        "the pane pool paints where no box covers it, or this proves nothing",
+    );
+    assert_ne!(
+        cell(4, 3),
+        rgb(pane_bg),
+        "and stays hidden under the box that covers it, whatever the pool \
+         beside it reads",
+    );
 }
 
 /// A box riding the pool it floats above stops occluding that pool.

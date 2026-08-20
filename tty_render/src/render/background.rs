@@ -11,7 +11,7 @@
 //! [`Cell`]: stoatty_term::grid::Cell
 
 use crate::render::{
-    globals_offset, occlusion_globals, CellMetrics, CompositeSlot, CompositeSlots, Occluder,
+    globals_offset, CellMetrics, CompositeSlot, CompositeSlots, Occluder, PoolOccluders,
     GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
@@ -458,20 +458,19 @@ impl BackgroundPass {
     /// path. No cursor draws over a composite, so the shared globals carry none.
     ///
     /// The page cells are occluded against `occluders` with the seq test bypassed,
-    /// so a pooled cell gliding beneath a modal is hidden by it. Which panels reach
-    /// that list is the caller's decision, since all four of a pool's composite
-    /// passes share it.
+    /// so a pooled cell gliding beneath a modal is hidden by it. `occluders`
+    /// carries the frame's whole list and how much of it covers this pool, and
+    /// all four of a pool's composite passes are handed the same one.
     ///
     /// See also:
-    /// - [`pool_occluders_into`](crate::render::pool_occluders_into) for how a pool's list is
-    ///   narrowed.
+    /// - [`PoolOccluders`] for why every pool of a frame reads one list.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_composite(
         &mut self,
         device: &Device,
         queue: &Queue,
         grid: &Grid,
-        occluders: &[Occluder],
+        occluders: PoolOccluders<'_>,
         resolution: [f32; 2],
         grid_scroll: f32,
         origin_cells: [f32; 2],
@@ -479,8 +478,8 @@ impl BackgroundPass {
         pool: u32,
         slot: usize,
     ) {
-        self.upload_occluders(device, queue, occluders);
-        let (panel_count, occlude_all) = occlusion_globals(occluders);
+        self.upload_occluders(device, queue, occluders.all);
+        let (panel_count, occlude_all) = occluders.globals();
 
         let globals = Globals {
             resolution,

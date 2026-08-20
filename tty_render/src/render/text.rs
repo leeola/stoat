@@ -11,8 +11,8 @@
 use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
     render::{
-        globals_offset, globals_slot_index, occlusion_globals, row_len, row_uploads, CellMetrics,
-        CompositeSlot, CompositeSlots, Frame, Occluder, OccluderBuffer, GLOBALS_SLOTS,
+        globals_offset, globals_slot_index, row_len, row_uploads, CellMetrics, CompositeSlot,
+        CompositeSlots, Frame, Occluder, OccluderBuffer, PoolOccluders, GLOBALS_SLOTS,
         GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
     },
 };
@@ -1510,7 +1510,7 @@ impl TextPass {
         device: &Device,
         queue: &Queue,
         grid: &Grid,
-        occluders: &[Occluder],
+        occluders: PoolOccluders<'_>,
         resolution: [f32; 2],
         shift_rows: f32,
         origin_cells: [f32; 2],
@@ -1521,8 +1521,8 @@ impl TextPass {
     ) {
         // The composite draws bind the composite globals group, so the occlusion
         // rides that group's own buffer.
-        self.upload_composite_occluders(device, queue, occluders);
-        let (panel_count, occlude_all) = occlusion_globals(occluders);
+        self.upload_composite_occluders(device, queue, occluders.all);
+        let (panel_count, occlude_all) = occluders.globals();
         // Held before the composite slot below takes the name.
         let globals_slot = slot;
 
@@ -4244,7 +4244,7 @@ mod tests {
     use crate::{
         atlas::{AtlasKind, GlyphInfo},
         gpu::headless_device,
-        render::{row_uploads, CellMetrics, Frame, Scroll},
+        render::{row_uploads, CellMetrics, Frame, PoolOccluders, Scroll},
     };
     use stoatty_term::{
         grid::{whole_row, Cell, Grid, Overlay, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle},
@@ -5300,7 +5300,7 @@ mod tests {
             &device,
             &queue,
             &grid,
-            &[],
+            PoolOccluders::new(&[], 0, true),
             [640.0, 480.0],
             0.0,
             [0.0; 2],
@@ -5323,7 +5323,7 @@ mod tests {
             &device,
             &queue,
             &grid,
-            &[],
+            PoolOccluders::new(&[], 0, true),
             [640.0, 480.0],
             0.0,
             [0.0; 2],
@@ -5370,7 +5370,7 @@ mod tests {
             &device,
             &queue,
             &grid,
-            &[],
+            PoolOccluders::new(&[], 0, true),
             [640.0, 480.0],
             0.0,
             [0.0; 2],
@@ -6228,7 +6228,7 @@ mod tests {
             &device,
             &queue,
             &grid,
-            &[],
+            PoolOccluders::new(&[], 0, true),
             resolution,
             0.0,
             [0.0; 2],
@@ -6245,7 +6245,7 @@ mod tests {
             &device,
             &queue,
             &scrolled,
-            &[],
+            PoolOccluders::new(&[], 0, true),
             resolution,
             0.0,
             [0.0; 2],
@@ -6264,7 +6264,7 @@ mod tests {
             &device,
             &queue,
             &scrolled,
-            &[],
+            PoolOccluders::new(&[], 0, true),
             resolution,
             0.0,
             [0.0; 2],
@@ -6323,7 +6323,7 @@ mod tests {
                 &device,
                 &queue,
                 &grid,
-                &[],
+                PoolOccluders::new(&[], 0, true),
                 resolution,
                 0.0,
                 origin,
@@ -6390,7 +6390,7 @@ mod tests {
                 &device,
                 &queue,
                 &grid,
-                &[],
+                PoolOccluders::new(&[], 0, true),
                 resolution,
                 shift,
                 [2.0, 4.0],
@@ -6449,7 +6449,7 @@ mod tests {
                 &device,
                 &queue,
                 grid,
-                &[],
+                PoolOccluders::new(&[], 0, true),
                 resolution,
                 0.0,
                 [0.0; 2],
@@ -6522,7 +6522,7 @@ mod tests {
                 &device,
                 &queue,
                 grid,
-                &[],
+                PoolOccluders::new(&[], 0, true),
                 resolution,
                 0.0,
                 [0.0; 2],
@@ -6583,7 +6583,7 @@ mod tests {
                 &device,
                 &queue,
                 grid,
-                &[],
+                PoolOccluders::new(&[], 0, true),
                 resolution,
                 shift,
                 origin,
@@ -6627,7 +6627,7 @@ mod tests {
             &device,
             &queue,
             &grid,
-            &[],
+            PoolOccluders::new(&[], 0, true),
             [640.0, 480.0],
             0.0,
             [0.0; 2],

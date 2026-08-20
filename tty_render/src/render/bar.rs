@@ -8,8 +8,8 @@
 //! bars track font zoom.
 
 use crate::render::{
-    globals_offset, occlusion_globals, CellMetrics, CompositeSlot, CompositeSlots, Occluder,
-    OccluderBuffer, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+    globals_offset, CellMetrics, CompositeSlot, CompositeSlots, Occluder, OccluderBuffer,
+    PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use std::mem;
@@ -349,20 +349,19 @@ impl BarPass {
     /// capacity, and allocates the slot itself on first use.
     ///
     /// The bars are occluded against `occluders` with the seq test bypassed, so a
-    /// gutter bar gliding beneath a modal is hidden by it. Which panels reach that
-    /// list is the caller's decision, since all four of a pool's composite passes
-    /// share it.
+    /// gutter bar gliding beneath a modal is hidden by it. `occluders` carries
+    /// the frame's whole list and how much of it covers this pool, and all four
+    /// of a pool's composite passes are handed the same one.
     ///
     /// See also:
-    /// - [`pool_occluders_into`](crate::render::pool_occluders_into) for how a pool's list is
-    ///   narrowed.
+    /// - [`PoolOccluders`] for why every pool of a frame reads one list.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_composite(
         &mut self,
         device: &Device,
         queue: &Queue,
         bars: &[Bar],
-        occluders: &[Occluder],
+        occluders: PoolOccluders<'_>,
         resolution: [f32; 2],
         shift_rows: f32,
         origin_cells: [f32; 2],
@@ -370,8 +369,8 @@ impl BarPass {
         pool: u32,
         slot: usize,
     ) {
-        self.upload_composite_occluders(device, queue, occluders);
-        let (panel_count, occlude_all) = occlusion_globals(occluders);
+        self.upload_composite_occluders(device, queue, occluders.all);
+        let (panel_count, occlude_all) = occluders.globals();
 
         let globals = Globals {
             resolution,
@@ -535,7 +534,7 @@ mod tests {
     use super::{build_bar_instances_into, BarInstance, BarPass};
     use crate::{
         gpu::headless_device,
-        render::{background::BackgroundPass, CellMetrics},
+        render::{background::BackgroundPass, CellMetrics, PoolOccluders},
     };
     use stoatty_term::grid::{Bar, Grid, Rgb};
     use wgpu::{
@@ -671,7 +670,7 @@ mod tests {
             &device,
             &queue,
             &grid,
-            &[],
+            PoolOccluders::new(&[], 0, true),
             resolution,
             shift_rows,
             [0.0; 2],
@@ -694,7 +693,7 @@ mod tests {
             &device,
             &queue,
             &[bar],
-            &[],
+            PoolOccluders::new(&[], 0, true),
             resolution,
             shift_rows,
             [0.0; 2],
@@ -870,7 +869,7 @@ mod tests {
             &device,
             &queue,
             &[bar(16)],
-            &[],
+            PoolOccluders::new(&[], 0, true),
             [64.0, 64.0],
             0.0,
             [0.0; 2],
@@ -886,7 +885,7 @@ mod tests {
             &device,
             &queue,
             &[bar(32), bar(48)],
-            &[],
+            PoolOccluders::new(&[], 0, true),
             [64.0, 64.0],
             -0.5,
             [0.0; 2],
