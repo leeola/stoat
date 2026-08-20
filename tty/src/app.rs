@@ -2672,26 +2672,10 @@ fn redraw_aux(
         let mut pools = mem::take(&mut aux.pool_scratch);
         terminal.window_pools_into(aux.id, &mut pools);
 
-        // The base compose reads only each pool's content, scroll target, and
-        // region plus the window size, so recompose it only when their hash
-        // moves. A pure sub-cell glide leaves the base untouched and rides the
-        // overlay below.
-        let compose_hash = aux_compose_hash(&pools, rows, cols);
-        if aux.last_compose != Some(compose_hash) {
-            aux.last_compose = Some(compose_hash);
-            recomposed = true;
-            compose_aux_grid(
-                &terminal,
-                &pools,
-                &mut aux.grid,
-                &mut aux.scratch,
-                rows,
-                cols,
-            );
-        }
-
         // Step each window pool's ease and collect the ones still gliding, in
         // ascending-id z-order, dropping anim state for pools the app retired.
+        // Ahead of the compose below, which reads which pools came out of this
+        // with a composite over them.
         aux.pool_anims
             .retain(|id, _| pools.iter().any(|pool| pool.id == *id));
         for pool in &pools {
@@ -2708,6 +2692,23 @@ fn redraw_aux(
                     active.push(tile);
                 },
             }
+        }
+
+        // Recomposed only when the hash of what it reads moves. A pure sub-cell
+        // glide leaves the base untouched and rides the overlay below, and so
+        // does a whole-row one under a pool the overlay covers.
+        let compose_hash = aux_compose_hash(&pools, &active, rows, cols);
+        if aux.last_compose != Some(compose_hash) {
+            aux.last_compose = Some(compose_hash);
+            recomposed = true;
+            compose_aux_grid(
+                &terminal,
+                &pools,
+                &mut aux.grid,
+                &mut aux.scratch,
+                rows,
+                cols,
+            );
         }
 
         aux.pool_scratch = pools;
@@ -2782,16 +2783,32 @@ fn snap_shift_to_pixels(frac: f32, cell_h: f32) -> f32 {
 /// recompose when nothing they cover moved.
 ///
 /// Covers the window size and, per pool in z-order, its id, content version,
-/// scroll target, and region rectangle. The sub-cell glide fraction is not
-/// covered, since it rides the overlay rather than the base.
-fn aux_compose_hash(pools: &[PoolView], rows: usize, cols: usize) -> u64 {
+/// and region rectangle. The sub-cell glide fraction is not covered, since it
+/// rides the overlay rather than the base.
+///
+/// `covered` are the pools drawing a composite over their own region this
+/// frame, whose scroll target is left out. Such a pool hides the base beneath
+/// it whole, straddle row and all, so where the base holds it is not an input
+/// to anything on screen, and a glide moves that target on every tick.
+///
+/// Entering and leaving that set is what a glide costs: one recompose as the
+/// pool takes a composite, which puts the base at the destination, and one as
+/// it settles and its target is read again, which catches the base up to where
+/// the glide actually landed. The ticks between read nothing and cost nothing.
+///
+/// A content version or a region move is read whatever the pool is doing.
+/// Output arriving mid-glide has to reach the base before a settle reveals it,
+/// and a region that moved uncovers base the composite no longer draws over.
+fn aux_compose_hash(pools: &[PoolView], covered: &[ActivePool], rows: usize, cols: usize) -> u64 {
     let mut hasher = FxHasher::default();
     rows.hash(&mut hasher);
     cols.hash(&mut hasher);
     for pool in pools {
         pool.id.hash(&mut hasher);
         pool.content_version.hash(&mut hasher);
-        pool.scroll_target.pages().to_bits().hash(&mut hasher);
+        if !covered.iter().any(|tile| tile.id == pool.id) {
+            pool.scroll_target.pages().to_bits().hash(&mut hasher);
+        }
         pool.region.top.hash(&mut hasher);
         pool.region.left.hash(&mut hasher);
         pool.region.width.hash(&mut hasher);
@@ -3169,9 +3186,10 @@ fn selection_copy_text(terminal: &FairMutex<Terminal>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_has_focus, aux_drag_event, bell_should_ring, classify_window_open, forwards_zoom,
-        grid_pixels, selection_copy_text, snap_shift_to_pixels, swallow_super_combo, Input,
-        PendingResize, PtyWrite, Visibility, WindowOpenVerdict, MAX_AUX_WINDOWS,
+        app_has_focus, aux_compose_hash, aux_drag_event, bell_should_ring, classify_window_open,
+        forwards_zoom, grid_pixels, selection_copy_text, snap_shift_to_pixels, swallow_super_combo,
+        ActivePool, Input, PendingResize, PoolView, PtyWrite, Visibility, WindowOpenVerdict,
+        MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
     use super::{
@@ -3182,8 +3200,126 @@ mod tests {
     #[cfg(unix)]
     use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
-    use stoatty_term::{term::Terminal, theme::Theme};
+    use stoatty_term::{
+        grid::{DocumentOffset, PoolRegion},
+        term::Terminal,
+        theme::Theme,
+    };
     use winit::keyboard::ModifiersState;
+
+    /// A pool drawing a composite over its own region hides the base beneath it
+    /// whole, so where the base holds that pool is not an input to anything on
+    /// screen. A glide moves the target every tick, and reading it would cost a
+    /// full recompose and a full-damage render on each of them.
+    #[test]
+    fn a_covered_pool_s_target_is_not_read() {
+        let (mut pool, covered) = gliding_pool();
+        let before = aux_compose_hash(&[pool], &covered, 24, 80);
+
+        pool.scroll_target = DocumentOffset {
+            page: 3,
+            fraction: 0.25,
+        };
+        assert_eq!(
+            aux_compose_hash(&[pool], &covered, 24, 80),
+            before,
+            "the target of a pool an overlay covers moves nothing",
+        );
+        assert_ne!(
+            aux_compose_hash(&[pool], &[], 24, 80),
+            before,
+            "and the same move on an uncovered pool is what the base rests on",
+        );
+    }
+
+    /// A glide costs one recompose as it starts and one as it settles, and none
+    /// in between. Entering and leaving the covered set is what moves the hash
+    /// at each end, and the settle is the catch-up: the pool drops its composite
+    /// onto a base that has to hold where the glide left it.
+    #[test]
+    fn a_glide_moves_the_hash_at_each_end_and_not_between() {
+        let (mut pool, covered) = gliding_pool();
+        let at_rest = aux_compose_hash(&[pool], &[], 24, 80);
+
+        // The wheel moves the target and the pool takes a composite, both on the
+        // frame the glide starts.
+        pool.scroll_target = DocumentOffset {
+            page: 5,
+            fraction: 0.0,
+        };
+        let starting = aux_compose_hash(&[pool], &covered, 24, 80);
+        assert_ne!(at_rest, starting, "the base is composed at the destination");
+
+        // Every tick after moves the target again and reads none of it.
+        pool.scroll_target = DocumentOffset {
+            page: 5,
+            fraction: 0.5,
+        };
+        assert_eq!(
+            aux_compose_hash(&[pool], &covered, 24, 80),
+            starting,
+            "a tick under the overlay costs nothing",
+        );
+
+        assert_ne!(
+            aux_compose_hash(&[pool], &[], 24, 80),
+            starting,
+            "and the settle is read, so the base catches up to the landing",
+        );
+    }
+
+    /// Output arriving mid-glide has to reach the base before the settle reveals
+    /// it, and a region that moved uncovers base the composite no longer draws
+    /// over. Neither depends on whether an overlay covers the pool.
+    #[test]
+    fn a_covered_pool_still_reads_its_content_and_its_region() {
+        let (pool, covered) = gliding_pool();
+        let before = aux_compose_hash(&[pool], &covered, 24, 80);
+
+        let mut printed = pool;
+        printed.content_version = pool.content_version + 1;
+        assert_ne!(
+            aux_compose_hash(&[printed], &covered, 24, 80),
+            before,
+            "content arriving under an overlay still has to reach the base",
+        );
+
+        let mut moved = pool;
+        moved.region.top += 1;
+        assert_ne!(
+            aux_compose_hash(&[moved], &covered, 24, 80),
+            before,
+            "and a region that moved uncovers base the overlay left behind",
+        );
+    }
+
+    /// A pool at rest, and the one entry that says an overlay covers it.
+    fn gliding_pool() -> (PoolView, Vec<ActivePool>) {
+        let region = PoolRegion {
+            pool: 1,
+            window: 1,
+            top: 0,
+            left: 0,
+            width: 40,
+            height: 12,
+        };
+        let pool = PoolView {
+            id: 1,
+            region,
+            scroll_target: DocumentOffset::default(),
+            cursor_anchor: None,
+            anchor: None,
+            content_version: 7,
+        };
+        let covered = vec![ActivePool {
+            id: 1,
+            region,
+            frac: 0.0,
+            content_changed: false,
+            scrolled_rows: Some(0),
+        }];
+        (pool, covered)
+    }
 
     /// Every shift a glide ships moves the pool a whole number of pixels.
     ///
