@@ -650,6 +650,10 @@ pub struct Stoat {
     /// syntax behind changed content, scaling the shipped fractions per
     /// [`crate::render::review::diff_soften_scale`].
     ///
+    /// A higher level recedes further, which is less unchanged code on screen,
+    /// so the shrink half of the zoom combo raises it and the grow half lowers
+    /// it. [`Self::handle_zoom_step`] is the only writer.
+    ///
     /// Session-scoped and deliberately not persisted, for [`Self::modal_zoom`]'s
     /// reason: the level answers what is on screen right now. One level for the
     /// whole session rather than one per editor, because how hard to recede is
@@ -2502,6 +2506,11 @@ impl Stoat {
     /// unchanged code recedes is the one dial that screen has. Every other
     /// screen and a plain pane resize the focused pane against its split.
     ///
+    /// The diff branch subtracts the step where the others add it, because what
+    /// the reader is zooming there is the changed code. Deepening the recede
+    /// shows less of the unchanged context around it, so the shrink key raises
+    /// the level and the grow key lowers it.
+    ///
     /// Modal levels are per modal kind and outlive the modal, so reopening one
     /// brings back the size the user last chose for it. A level is clamped to
     /// [`Self::modal_zoom_range`] rather than the wider ledger range, so a press
@@ -2523,7 +2532,7 @@ impl Stoat {
         }
 
         if keymap_state::view_predicate(self.active_workspace()) == Some("diff") {
-            let stepped = i32::from(self.diff_soften).saturating_add(delta);
+            let stepped = i32::from(self.diff_soften).saturating_sub(delta);
             self.diff_soften = stepped.clamp(
                 crate::render::review::DIFF_SOFTEN_MIN.into(),
                 crate::render::review::DIFF_SOFTEN_MAX.into(),
@@ -7642,7 +7651,9 @@ mod tests {
     }
 
     /// Inside the diff view there is no pane the reader is looking at to
-    /// resize, so the combo turns the one dial that screen has instead.
+    /// resize, so the combo turns the one dial that screen has instead. What it
+    /// zooms there is the changed code, so the shrink key recedes the unchanged
+    /// context further and the grow key brings it back.
     #[test]
     fn a_zoom_step_in_the_diff_view_tunes_the_soften_and_leaves_the_panes_alone() {
         let mut h = crate::test_harness::TestHarness::with_size(101, 40);
@@ -7668,15 +7679,15 @@ mod tests {
 
         assert_eq!(
             (h.stoat.diff_soften, widths(&h)),
-            (1, before),
-            "the step deepens the recede and moves no pane"
+            (-1, before),
+            "the grow key brings the unchanged context back and moves no pane"
         );
 
         h.stoat.handle_window_ipc(zoom(-1));
         h.stoat.handle_window_ipc(zoom(-1));
         assert_eq!(
-            h.stoat.diff_soften, -1,
-            "the other direction walks back past zero"
+            h.stoat.diff_soften, 1,
+            "the shrink key recedes it further, walking back past zero"
         );
 
         for _ in 0..8 {
@@ -7684,8 +7695,8 @@ mod tests {
         }
         assert_eq!(
             h.stoat.diff_soften,
-            crate::render::review::DIFF_SOFTEN_MIN,
-            "the level stops where softening stops"
+            crate::render::review::DIFF_SOFTEN_MAX,
+            "and stops where the receding stops"
         );
 
         action_handlers::focused_editor_mut(&mut h.stoat)
