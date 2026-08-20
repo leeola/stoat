@@ -16,6 +16,7 @@ use crate::{
         background::{BackgroundPass, CursorState},
         bar::BarPass,
         decoration::DecorationPass,
+        grid_dims,
         icon::IconPass,
         image::ImagePass,
         minimap::MinimapPass,
@@ -1922,12 +1923,6 @@ impl GpuContext {
 /// Floors each axis with a one-cell minimum so a sub-cell sliver still yields a
 /// usable grid. A larger font (bigger cell) yields fewer cells for the same
 /// pixel size.
-fn grid_dims(width: u32, height: u32, metrics: CellMetrics) -> (usize, usize) {
-    let rows = (height as f32 / metrics.height).floor().max(1.0) as usize;
-    let cols = (width as f32 / metrics.width).floor().max(1.0) as usize;
-    (rows, cols)
-}
-
 /// Choose the surface format and the format its views render through, from a
 /// surface's supported formats.
 ///
@@ -1986,11 +1981,10 @@ pub fn headless_device() -> Option<(Device, Queue)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_font_system, clamp_scissor, grid_dims, headless_device, needs_configure,
-        surface_formats, CommandEncoderDescriptor, CursorLayer, FontConfig, FontSystem, Frame,
-        PoolComposite, Renderer, Scroll, SharedFonts, SurfaceConfiguration, TextureFormat,
+        build_font_system, clamp_scissor, headless_device, needs_configure, surface_formats,
+        CommandEncoderDescriptor, CursorLayer, FontConfig, FontSystem, Frame, PoolComposite,
+        Renderer, Scroll, SharedFonts, SurfaceConfiguration, TextureFormat,
     };
-    use crate::render::CellMetrics;
     use stoatty_term::{
         grid::{Grid, Rgb},
         term::Damage,
@@ -2407,14 +2401,6 @@ mod tests {
             !needs_configure(&config, 0, 600) && !needs_configure(&config, 800, 0),
             "a minimized window reports a zero dimension, which no surface is valid at",
         );
-    }
-
-    #[test]
-    fn grid_dims_shrink_as_font_grows() {
-        let dims = |font| grid_dims(800, 600, CellMetrics::from_font_size(font, 1.0));
-        assert_eq!(dims(15), (33, 88));
-        assert_eq!(dims(30), (16, 44));
-        assert_eq!(dims(60), (8, 22));
     }
 
     #[test]

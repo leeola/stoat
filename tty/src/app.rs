@@ -145,6 +145,8 @@ pub fn run(
     terminal: bool,
 ) {
     let start = Instant::now();
+    // Ahead of the config read, so the system-font scan overlaps that too.
+    let font_load = FontLoad::spawn();
     let mut config = load_config();
     let (program, args, stoat_dir) = if let Some((program, args)) = command {
         (program, args, None)
@@ -173,6 +175,7 @@ pub fn run(
     });
     run_with_config(
         start,
+        font_load,
         config,
         program,
         args,
@@ -196,16 +199,30 @@ pub fn run(
 /// the window is resized, not on a continuous timer.
 pub fn run_with_shell(program: String, args: Vec<String>, size: Option<[u16; 2]>) {
     let start = Instant::now();
-    run_with_config(start, load_config(), program, args, size, None, None);
+    let font_load = FontLoad::spawn();
+    run_with_config(
+        start,
+        font_load,
+        load_config(),
+        program,
+        args,
+        size,
+        None,
+        None,
+    );
 }
 
 /// Open the window running `program` with `args`, drawing with `config`'s theme
 /// and font, and run the event loop until the window closes.
 ///
 /// The shared core of [`run`] and [`run_with_shell`]. It takes an
-/// already-loaded `config` so each entry point loads it exactly once.
+/// already-loaded `config` so each entry point loads it exactly once, and an
+/// already-running `font_load` so the system-font scan overlaps that read as
+/// well as the event loop, the window, and the GPU setup after it.
+#[allow(clippy::too_many_arguments)]
 fn run_with_config(
     start: Instant,
+    font_load: FontLoad,
     config: Config,
     program: String,
     args: Vec<String>,
@@ -214,10 +231,6 @@ fn run_with_config(
     stoat_dir: Option<PathBuf>,
 ) {
     let theme = config.resolve_theme();
-
-    // Start the system-font scan before the event loop and window are built, so
-    // its enumeration overlaps them rather than only the later GPU setup.
-    let font_load = FontLoad::spawn();
 
     let event_loop = EventLoop::<PtyEvent>::with_user_event()
         .build()
@@ -300,8 +313,8 @@ struct App {
     /// Process-start instant captured at the entry point, used to log the total
     /// cold-start time when the first frame is presented.
     start: Instant,
-    /// The system-font scan started at `run_with_config` entry, taken in
-    /// `resumed` to hand to the renderer. `None` after the window is built.
+    /// The system-font scan started before the config read, taken in `resumed`
+    /// to hand to the renderer. `None` after the window is built.
     font_load: Option<FontLoad>,
     proxy: EventLoopProxy<PtyEvent>,
     program: String,
@@ -331,6 +344,17 @@ struct App {
     /// `None` for the winit default window. Read once at window creation.
     size: Option<[u16; 2]>,
     state: Option<State>,
+    /// Child output events that arrived before the window existed.
+    ///
+    /// The child is spawned ahead of GPU setup so its own startup overlaps
+    /// adapter, device, and pipeline creation. That leaves a window of tens to
+    /// hundreds of milliseconds where it is already writing and [`Self::state`]
+    /// is still `None`. Dropping what arrives there would lose a reply the child
+    /// blocks on, so it is held and replayed once the window is up.
+    ///
+    /// Bounded by what a child emits in that window, and the reader parses
+    /// inline with the child's writes, so a chatty child throttles itself.
+    pending_events: Vec<PtyEvent>,
 }
 
 impl App {
@@ -365,6 +389,7 @@ impl App {
             cursor_animation,
             size,
             state: None,
+            pending_events: Vec::new(),
         }
     }
 }
@@ -721,10 +746,10 @@ impl ApplicationHandler<PtyEvent> for App {
             return;
         }
 
-        // Take the font enumeration started at `run_with_config` entry, which has
-        // been running on a background thread through the event-loop and window
-        // build. A second resume finds it already taken and starts a fresh scan
-        // rather than panicking.
+        // Take the font enumeration started before the config read, which has
+        // been running on a background thread through the config, the event
+        // loop, and the window build. A second resume finds it already taken
+        // and starts a fresh scan rather than panicking.
         let font_load = self.font_load.take().unwrap_or_else(FontLoad::spawn);
 
         let mut attributes = with_app_name(Window::default_attributes().with_title(DEFAULT_TITLE));
@@ -752,24 +777,20 @@ impl ApplicationHandler<PtyEvent> for App {
             "display",
         );
 
-        let gpu = GpuContext::new(
-            window.clone(),
+        // The grid the surface will hold, resolved before the GPU exists so the
+        // child can start while adapter, device, and pipelines are still coming
+        // up. The cell rectangle depends on the font size and the scale factor
+        // alone, so this is the answer `gpu.grid_size()` gives later rather than
+        // a guess at it, and both go through one function to keep it that way.
+        let (spawn_rows, spawn_cols) = render::grid_size(
             size.width.max(1),
             size.height.max(1),
-            font_load,
-            FontConfig {
-                size: self.font_size,
-                scale_factor: scale_factor as f32,
-                family: &self.font_family,
-                ligatures: self.ligatures,
-            },
-            self.theme.background,
-            self.theme.cursor,
+            self.font_size,
+            scale_factor as f32,
         );
-
-        let (rows, cols) = gpu.grid_size();
-        let grid = Grid::new(rows, cols);
-        let terminal = Arc::new(FairMutex::new(Terminal::new(rows, cols, self.theme)));
+        let terminal = Arc::new(FairMutex::new(Terminal::new(
+            spawn_rows, spawn_cols, self.theme,
+        )));
         update_cell_pixels(&terminal, self.font_size, scale_factor as f32);
         if let Some(ident) = stoat_log::ident::get() {
             terminal
@@ -791,7 +812,7 @@ impl ApplicationHandler<PtyEvent> for App {
         let (window_socket, window_event_tx, window_client_connected) = open_window_event_socket();
 
         let (pixel_width, pixel_height) =
-            grid_pixels(self.font_size, scale_factor as f32, rows, cols);
+            grid_pixels(self.font_size, scale_factor as f32, spawn_rows, spawn_cols);
         let t_pty = Instant::now();
         let pty = {
             let proxy = self.proxy.clone();
@@ -807,8 +828,8 @@ impl ApplicationHandler<PtyEvent> for App {
                 stoat_log::ident::get().map(|i| i.id.as_str()),
                 window_socket.as_deref().and_then(Path::to_str),
                 &self.theme_name,
-                rows as u16,
-                cols as u16,
+                spawn_rows as u16,
+                spawn_cols as u16,
                 pixel_width,
                 pixel_height,
                 move |output| match output {
@@ -866,14 +887,50 @@ impl ApplicationHandler<PtyEvent> for App {
         };
         let pty_time = t_pty.elapsed();
 
+        let t_gpu = Instant::now();
+        let gpu = GpuContext::new(
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            font_load,
+            FontConfig {
+                size: self.font_size,
+                scale_factor: scale_factor as f32,
+                family: &self.font_family,
+                ligatures: self.ligatures,
+            },
+            self.theme.background,
+            self.theme.cursor,
+        );
+        let gpu_time = t_gpu.elapsed();
+
+        // The surface a platform grants can differ from the size asked for, and
+        // the child is already running against the size that was. A startup
+        // SIGWINCH is routine for a child, so correcting here costs less than
+        // waiting for the GPU to answer first.
+        let (rows, cols) = gpu.grid_size();
+        let grid = Grid::new(rows, cols);
+        if (rows, cols) != (spawn_rows, spawn_cols) {
+            let (pixel_width, pixel_height) =
+                grid_pixels(self.font_size, scale_factor as f32, rows, cols);
+            terminal.lock().resize(rows, cols);
+            let _ = pty.resize(rows as u16, cols as u16, pixel_width, pixel_height);
+            tracing::info!(
+                spawned = ?(spawn_rows, spawn_cols),
+                surface = ?(rows, cols),
+                "the surface differed from the pre-GPU grid",
+            );
+        }
+
         tracing::info!(
             window = ?window_time,
             pty = ?pty_time,
-            "window and pty ready",
+            gpu = ?gpu_time,
+            "window, pty, and gpu ready",
         );
 
         window.request_redraw();
-        self.state = Some(State {
+        let state = State {
             window,
             shared_gpu: Some((gpu.shared(), gpu.fonts())),
             pending_resize: PendingResize::default(),
@@ -927,11 +984,20 @@ impl ApplicationHandler<PtyEvent> for App {
             visibility: Visibility::default(),
             #[cfg(feature = "perf")]
             show_perf_hud: false,
-        });
+        };
+        self.state = Some(state);
+
+        // Whatever the child said while the GPU was coming up. Replaying it
+        // through the same arm that would have taken it live keeps one handling
+        // of each event kind, and an early query gets its reply.
+        for event in mem::take(&mut self.pending_events) {
+            self.user_event(event_loop, event);
+        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: PtyEvent) {
         let Some(state) = self.state.as_mut() else {
+            self.pending_events.push(event);
             return;
         };
 

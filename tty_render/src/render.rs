@@ -663,13 +663,72 @@ pub fn cell_size(font_size: u32, scale_factor: f32) -> [f32; 2] {
     [metrics.width, metrics.height]
 }
 
+/// The cell grid a `width` by `height` physical-pixel surface holds at
+/// `font_size` and `scale_factor`, as `(rows, cols)`.
+///
+/// A partial cell at the right or bottom edge is not a cell, so both counts
+/// floor, and a surface too small for even one still reports one rather than
+/// zero. A zero-row terminal has nowhere to put the cursor.
+///
+/// The cell rectangle comes from the font size and the scale factor alone, so a
+/// caller holding a window but no GPU yet gets the same answer
+/// [`crate::gpu::GpuContext::grid_size`] gives once the surface exists. Sizing a
+/// terminal and spawning its child before GPU setup rests on that.
+pub fn grid_size(width: u32, height: u32, font_size: u32, scale_factor: f32) -> (usize, usize) {
+    grid_dims(
+        width,
+        height,
+        CellMetrics::from_font_size(font_size, scale_factor),
+    )
+}
+
+/// The `(rows, cols)` a surface of `width` by `height` physical pixels holds at
+/// `metrics`, for callers that already have the cell rectangle.
+pub(crate) fn grid_dims(width: u32, height: u32, metrics: CellMetrics) -> (usize, usize) {
+    let rows = (height as f32 / metrics.height).floor().max(1.0) as usize;
+    let cols = (width as f32 / metrics.width).floor().max(1.0) as usize;
+    (rows, cols)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        build_occluders_into, globals_offset, globals_upload_needed, pool_occluders_into,
-        rotate_row_cache, row_runs, row_uploads, upload_needed, CellMetrics, CompositeSlots,
-        Occluder, PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
+        build_occluders_into, globals_offset, globals_upload_needed, grid_dims, grid_size,
+        pool_occluders_into, rotate_row_cache, row_runs, row_uploads, upload_needed, CellMetrics,
+        CompositeSlots, Occluder, PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+        MAX_COMPOSITE_POOLS,
     };
+
+    /// A bigger font means bigger cells, so the same surface holds fewer of
+    /// them.
+    #[test]
+    fn grid_dims_shrink_as_font_grows() {
+        let dims = |font| grid_dims(800, 600, CellMetrics::from_font_size(font, 1.0));
+        assert_eq!(dims(15), (33, 88));
+        assert_eq!(dims(30), (16, 44));
+        assert_eq!(dims(60), (8, 22));
+    }
+
+    /// The whole point of the public form is that a caller without a GPU
+    /// resolves the grid the GPU would report, so it must resolve through the
+    /// same rule rather than beside it.
+    #[test]
+    fn grid_size_answers_what_the_metrics_rule_answers() {
+        for (font, scale) in [(15u32, 1.0f32), (15, 2.0), (30, 1.0), (11, 1.5)] {
+            assert_eq!(
+                grid_size(800, 600, font, scale),
+                grid_dims(800, 600, CellMetrics::from_font_size(font, scale)),
+                "font {font} at scale {scale}"
+            );
+        }
+    }
+
+    /// A surface too small for one cell still reports a grid, because a
+    /// zero-row terminal has nowhere to put the cursor.
+    #[test]
+    fn a_surface_under_one_cell_still_holds_one() {
+        assert_eq!(grid_size(1, 1, 15, 1.0), (1, 1));
+    }
     use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
 
     /// Every pool reads its own aligned slot, and none reads the live grid's.
