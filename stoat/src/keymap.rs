@@ -2250,6 +2250,58 @@ mod tests {
         assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
     }
 
+    /// The pinned twin of `space G G`. `space g` releases after one key because
+    /// each of its arms chains SetMode(normal); dropping that chain is what
+    /// holds the mode, so n and p walk the changes until Escape.
+    #[test]
+    fn space_g_twice_pins_the_goto_mode_and_holds_it() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let space = TestState::new().set("mode", StateValue::String("space".into()));
+        let to_goto = keymap
+            .lookup(&space, &key_event(KeyCode::Char('g'), KeyModifiers::NONE))
+            .expect("g is bound in space mode");
+        assert_eq!(to_goto[0].name, "SetMode");
+        assert_eq!(to_goto[0].args[0].value, Value::Ident("space_goto".into()));
+
+        let space_goto = TestState::new().set("mode", StateValue::String("space_goto".into()));
+        let g = keymap
+            .lookup(
+                &space_goto,
+                &key_event(KeyCode::Char('g'), KeyModifiers::NONE),
+            )
+            .expect("g is bound in space_goto mode");
+        assert_eq!(g[0].name, "SetMode");
+        assert_eq!(g[0].args[0].value, Value::Ident("goto_pin".into()));
+
+        let pinned = TestState::new().set("mode", StateValue::String("goto_pin".into()));
+
+        for (key, action) in [('n', "GotoNextChange"), ('p', "GotoPrevChange")] {
+            let hop = keymap
+                .lookup(&pinned, &key_event(KeyCode::Char(key), KeyModifiers::NONE))
+                .expect("the hop is bound in goto_pin mode");
+            assert_eq!(
+                hop.len(),
+                1,
+                "hopping holds the mode, resetting nothing so presses repeat"
+            );
+            assert_eq!(hop[0].name, action);
+        }
+
+        let a = keymap
+            .lookup(&pinned, &key_event(KeyCode::Char('a'), KeyModifiers::NONE))
+            .expect("a is bound in goto_pin mode");
+        assert_eq!(a.len(), 1, "reaching the last buffer holds the mode too");
+        assert_eq!(a[0].name, "GotoLastAccessed");
+
+        let esc = keymap
+            .lookup(&pinned, &key_event(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("Escape is bound in goto_pin mode");
+        assert_eq!(esc[0].name, "SetMode");
+        assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
+    }
+
     #[test]
     fn space_g_opens_the_goto_submode_and_a_reaches_the_last_buffer() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);

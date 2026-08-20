@@ -1126,9 +1126,19 @@ on key {
     # git submode below also carries.
     mode == space_goto {
         Escape -> SetMode(normal);
+        g -> SetMode(goto_pin);
         a -> [GotoLastAccessed(), SetMode(normal)];
         n -> [GotoNextChange(), SetMode(normal)];
         p -> [GotoPrevChange(), SetMode(normal)];
+    }
+    # The goto chord, pinned, so n and p walk the changes until Escape. The
+    # doubled letter spells it the way `space G G` spells the git one, and it
+    # holds the mode by the same mechanism the git_pin comment below sets out.
+    mode == goto_pin {
+        Escape -> SetMode(normal);
+        a -> GotoLastAccessed();
+        n -> GotoNextChange();
+        p -> GotoPrevChange();
     }
     mode == space_git {
         Escape -> SetMode(normal);
