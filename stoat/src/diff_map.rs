@@ -43,6 +43,12 @@ pub struct ChangeSpan {
     pub byte_range: Range<usize>,
     pub kind: ChangeKind,
     pub move_metadata: Option<Arc<stoat_language::structural_diff::MoveMetadata>>,
+    /// The span sits inside a string, a comment, or a file with no grammar, so
+    /// no token boundary separates the changed chars from the text around them.
+    ///
+    /// The diff view marks such a span more heavily, having nothing else to
+    /// lead the eye to it.
+    pub prose: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -330,9 +336,10 @@ impl Item for DiffHunk {
 pub type BaseHighlights = Vec<Vec<(Range<usize>, HighlightStyle)>>;
 
 /// Base-side change spans keyed by 0-based base line, each range line-local
-/// within its line and tagged with its [`ChangeKind`], so the diff view's left
-/// column can wash each span by kind.
-pub(crate) type BaseChangeSpans = BTreeMap<u32, Vec<(Range<usize>, ChangeKind)>>;
+/// within its line and tagged with its [`ChangeKind`] and its
+/// [`ChangeSpan::prose`] flag, so the diff view's left column can mark each
+/// span by kind and by whether it sits in unstructured text.
+pub(crate) type BaseChangeSpans = BTreeMap<u32, Vec<(Range<usize>, ChangeKind, bool)>>;
 
 type BaseStaged = BTreeMap<u32, bool>;
 
@@ -1205,6 +1212,7 @@ pub(crate) fn changes_to_hunks(
                     byte_range: changes[*i].byte_range.clone(),
                     kind: ChangeKind::Moved,
                     move_metadata: metadata.clone(),
+                    prose: false,
                 })
                 .collect();
             let base_spans = lhs_indices
@@ -1213,6 +1221,7 @@ pub(crate) fn changes_to_hunks(
                     byte_range: changes[*i].byte_range.clone(),
                     kind: ChangeKind::Moved,
                     move_metadata: metadata.clone(),
+                    prose: false,
                 })
                 .collect();
             hunks.push(DiffHunk {
@@ -1252,6 +1261,7 @@ pub(crate) fn changes_to_hunks(
                     byte_range: changes[*i].byte_range.clone(),
                     kind: ChangeKind::Moved,
                     move_metadata: metadata.clone(),
+                    prose: false,
                 })
                 .collect();
             hunks.push(DiffHunk {
@@ -1418,6 +1428,7 @@ pub(crate) fn merge_structural_detail(
                         byte_range: range.clone(),
                         kind: span_kind(change),
                         move_metadata: change.move_metadata.clone(),
+                        prose: change.prose,
                     }),
             );
         }
@@ -1489,6 +1500,7 @@ fn replaced_change_spans(change: &stoat_language::structural_diff::DiffChange) -
             byte_range: range.clone(),
             kind: ChangeKind::Replaced,
             move_metadata: None,
+            prose: change.prose,
         })
         .collect()
 }
@@ -1543,7 +1555,7 @@ fn compute_base_change_spans(
             distribute_change_span(
                 &mut out,
                 &span.byte_range,
-                span.kind.clone(),
+                (span.kind.clone(), span.prose),
                 &starts,
                 base_text.len(),
             );
@@ -1553,7 +1565,8 @@ fn compute_base_change_spans(
 }
 
 /// Split an absolute base-text byte `range` into per-line-local ranges, pushing
-/// each onto `out` under its base line.
+/// each onto `out` under its base line with `mark`, the span's kind and prose
+/// flag.
 ///
 /// `line_starts` gives each base line's byte offset, and `text_len` closes the
 /// last line. A range spanning several lines contributes one clamped sub-range
@@ -1561,7 +1574,7 @@ fn compute_base_change_spans(
 fn distribute_change_span(
     out: &mut BaseChangeSpans,
     range: &Range<usize>,
-    kind: ChangeKind,
+    mark: (ChangeKind, bool),
     line_starts: &[usize],
     text_len: usize,
 ) {
@@ -1580,9 +1593,11 @@ fn distribute_change_span(
         let start = range.start.max(line_start);
         let end = range.end.min(line_end);
         if start < end {
-            out.entry(line as u32)
-                .or_default()
-                .push(((start - line_start)..(end - line_start), kind.clone()));
+            out.entry(line as u32).or_default().push((
+                (start - line_start)..(end - line_start),
+                mark.0.clone(),
+                mark.1,
+            ));
         }
     }
 }
@@ -2098,6 +2113,7 @@ mod tests {
                 pair_id: Some(0),
                 deletion_rhs_anchor: None,
                 refined_spans: Vec::new(),
+                prose: false,
             },
             DiffChange {
                 side: Side::Lhs,
@@ -2107,6 +2123,7 @@ mod tests {
                 pair_id: Some(1),
                 deletion_rhs_anchor: None,
                 refined_spans: Vec::new(),
+                prose: false,
             },
             DiffChange {
                 side: Side::Rhs,
@@ -2116,6 +2133,7 @@ mod tests {
                 pair_id: Some(0),
                 deletion_rhs_anchor: None,
                 refined_spans: Vec::new(),
+                prose: false,
             },
             DiffChange {
                 side: Side::Rhs,
@@ -2125,6 +2143,7 @@ mod tests {
                 pair_id: Some(1),
                 deletion_rhs_anchor: None,
                 refined_spans: Vec::new(),
+                prose: false,
             },
         ];
         let dm = DiffMap::from_structural_changes(
@@ -2179,6 +2198,7 @@ mod tests {
                 pair_id: Some(0),
                 deletion_rhs_anchor: None,
                 refined_spans: Vec::new(),
+                prose: false,
             },
             DiffChange {
                 side: Side::Rhs,
@@ -2188,6 +2208,7 @@ mod tests {
                 pair_id: Some(0),
                 deletion_rhs_anchor: None,
                 refined_spans: vec![brave.clone()],
+                prose: false,
             },
         ];
         let dm = DiffMap::from_structural_changes(
@@ -2208,6 +2229,7 @@ mod tests {
                 byte_range: brave.clone(),
                 kind: ChangeKind::Replaced,
                 move_metadata: None,
+                prose: false,
             }],
             "buffer spans narrow to the inserted word"
         );
@@ -2217,6 +2239,7 @@ mod tests {
                 byte_range: 8..21,
                 kind: ChangeKind::Replaced,
                 move_metadata: None,
+                prose: false,
             }],
             "base spans fall back to the whole replaced literal"
         );
@@ -2241,6 +2264,7 @@ mod tests {
                 pair_id: Some(0),
                 deletion_rhs_anchor: None,
                 refined_spans: Vec::new(),
+                prose: false,
             },
             DiffChange {
                 side: Side::Rhs,
@@ -2250,6 +2274,7 @@ mod tests {
                 pair_id: Some(0),
                 deletion_rhs_anchor: None,
                 refined_spans: Vec::new(),
+                prose: false,
             },
         ];
         let dm = DiffMap::from_structural_changes(
@@ -2267,7 +2292,7 @@ mod tests {
             .flat_map(|(&line, ranges)| {
                 ranges
                     .iter()
-                    .map(move |(r, kind)| (line, r.start, r.end, kind.clone()))
+                    .map(move |(r, kind, _)| (line, r.start, r.end, kind.clone()))
             })
             .collect();
         assert_eq!(
@@ -2295,6 +2320,7 @@ mod tests {
             pair_id: None,
             deletion_rhs_anchor: Some(1),
             refined_spans: Vec::new(),
+            prose: false,
         }];
         let dm = DiffMap::from_structural_changes(
             DiffResult {
@@ -2330,6 +2356,7 @@ mod tests {
             pair_id: None,
             deletion_rhs_anchor: None,
             refined_spans: Vec::new(),
+            prose: false,
         }];
         let dm = DiffMap::from_structural_changes(
             DiffResult {
@@ -2516,6 +2543,7 @@ mod tests {
                 byte_range: 0..5,
                 kind: ChangeKind::Novel,
                 move_metadata: None,
+                prose: false,
             }],
             base_spans: vec![],
         });
@@ -2791,6 +2819,7 @@ mod tests {
                 byte_range: 2..3,
                 kind: ChangeKind::Replaced,
                 move_metadata: None,
+                prose: false,
             }])],
             Some(base.clone()),
         );
@@ -2991,6 +3020,7 @@ mod tests {
                 pair_id: None,
                 deletion_rhs_anchor: None,
                 refined_spans: Vec::new(),
+                prose: false,
             },
             DiffChange {
                 side: Side::Rhs,
@@ -3000,6 +3030,7 @@ mod tests {
                 pair_id: None,
                 deletion_rhs_anchor: None,
                 refined_spans: Vec::new(),
+                prose: false,
             },
         ];
         let result = DiffResult {
@@ -3058,6 +3089,7 @@ mod tests {
                 pair_id: None,
                 deletion_rhs_anchor: None,
                 refined_spans: Vec::new(),
+                prose: false,
             },
             DiffChange {
                 side: Side::Lhs,
@@ -3067,6 +3099,7 @@ mod tests {
                 pair_id: None,
                 deletion_rhs_anchor: None,
                 refined_spans: Vec::new(),
+                prose: false,
             },
             DiffChange {
                 side: Side::Rhs,
@@ -3076,6 +3109,7 @@ mod tests {
                 pair_id: None,
                 deletion_rhs_anchor: None,
                 refined_spans: Vec::new(),
+                prose: false,
             },
         ];
         let dm = DiffMap::from_structural_changes(

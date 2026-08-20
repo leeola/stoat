@@ -112,6 +112,14 @@ pub struct DiffChange {
     /// This is supplementary display data only. It never alters `byte_range`,
     /// the pair structure, or hunk extents.
     pub refined_spans: Vec<Range<usize>>,
+    /// Every atom in the run is a string or comment atom, or the change comes
+    /// from a line diff, so the changed chars sit inside text with no token
+    /// boundary to mark them.
+    ///
+    /// A renderer marks a prose change more heavily for that reason. A run
+    /// mixing prose and code atoms is not prose, because the code atom brings
+    /// the boundary back.
+    pub prose: bool,
 }
 
 /// Provenance for a [`ChangeKind::Moved`] region. `sources` enumerates the

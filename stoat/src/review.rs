@@ -998,6 +998,7 @@ mod tests {
             pair_id: None,
             deletion_rhs_anchor: None,
             refined_spans: Vec::new(),
+            prose: false,
         }];
         assert_eq!(
             mark_changed_lines(&lines, &changes, Side::Lhs),
@@ -1017,6 +1018,7 @@ mod tests {
             pair_id: None,
             deletion_rhs_anchor: None,
             refined_spans: Vec::new(),
+            prose: false,
         }];
         let spans = collect_line_spans(&lines, &changes, Side::Rhs);
         assert_eq!(spans, vec![vec![6..11]]);
@@ -1034,6 +1036,7 @@ mod tests {
             pair_id: None,
             deletion_rhs_anchor: None,
             refined_spans: vec![0..3, 8..13],
+            prose: false,
         }];
         let spans = collect_line_spans(&lines, &changes, Side::Rhs);
         assert_eq!(

@@ -197,8 +197,10 @@ pub(crate) struct DiffRowState {
     /// every other status: an unchanged row mirrors its own base line by a
     /// different route, and an added one has no base row at all.
     pub(crate) paired: bool,
-    /// Display-column ranges to wash, empty for a row no hunk refines.
-    pub(crate) change_spans: Vec<(std::ops::Range<usize>, ChangeKind)>,
+    /// Display-column ranges to mark, each with its kind and its
+    /// [`crate::diff_map::ChangeSpan::prose`] flag. Empty for a row no hunk
+    /// refines.
+    pub(crate) change_spans: Vec<(std::ops::Range<usize>, ChangeKind, bool)>,
 }
 
 /// The visible rows' derived state, held across repaints.
@@ -778,16 +780,26 @@ pub(crate) fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTint
 
 /// Mark a cell `style` as inside a change span.
 ///
-/// An RGB theme marks nothing here. The chars outside the spans recede instead,
-/// so a changed char leads its line by being the one thing at full strength,
-/// and the diff paints no background at all.
+/// An RGB theme leaves a code span as it is. The chars outside the spans recede
+/// instead, so a changed char leads its line by being the one thing at full
+/// strength, and the diff paints no background at all.
+///
+/// A `prose` replacement bolds on top of that. The receding alone is too weak
+/// to find a changed char inside a string or a comment, where the whole literal
+/// carries one color and no token boundary falls beside the edit. Only a
+/// replacement bolds, because that is the case the reader compares char by
+/// char.
 ///
 /// A theme that cannot blend has no receding to lead against, so it underlines
 /// the span, which is the only mark left to it.
-fn mark_span(style: Style, rgb: bool) -> Style {
-    match rgb {
+fn mark_span(style: Style, kind: &ChangeKind, prose: bool, rgb: bool) -> Style {
+    let style = match rgb {
         true => style,
         false => style.add_modifier(Modifier::UNDERLINED),
+    };
+    match prose && matches!(kind, ChangeKind::Replaced) {
+        true => style.add_modifier(Modifier::BOLD),
+        false => style,
     }
 }
 
@@ -839,7 +851,7 @@ pub(crate) fn paint_base_row(
     max_cols: usize,
     token_spans: &[(std::ops::Range<usize>, HighlightStyle)],
     fallback: Style,
-    change_spans: &[(std::ops::Range<usize>, ChangeKind)],
+    change_spans: &[(std::ops::Range<usize>, ChangeKind, bool)],
     rgb: bool,
     soften_row: Option<[u8; 3]>,
     soften_gaps: Option<[u8; 3]>,
@@ -850,7 +862,7 @@ pub(crate) fn paint_base_row(
         "token_spans must be start-sorted for the monotonic cursor"
     );
     debug_assert!(
-        change_spans.is_sorted_by_key(|(range, _)| range.start),
+        change_spans.is_sorted_by_key(|(range, ..)| range.start),
         "change_spans must be start-sorted for the monotonic cursor"
     );
 
@@ -874,13 +886,13 @@ pub(crate) fn paint_base_row(
 
         while change_spans
             .get(span_cursor)
-            .is_some_and(|(r, _)| r.end <= byte_idx)
+            .is_some_and(|(r, ..)| r.end <= byte_idx)
         {
             span_cursor += 1;
         }
         match change_spans.get(span_cursor) {
-            Some((range, _)) if range.start <= byte_idx => {
-                style = mark_span(style, rgb);
+            Some((range, kind, prose)) if range.start <= byte_idx => {
+                style = mark_span(style, kind, *prose, rgb);
             },
             _ => {
                 if let Some(bg) = soften_gaps.filter(|_| soften_scale > 0.0) {
@@ -997,7 +1009,10 @@ fn paint_base_side(
     );
 
     if let Some(staged) = staged {
-        let change_scope = if changes.iter().any(|(_, k)| matches!(k, ChangeKind::Moved)) {
+        let change_scope = if changes
+            .iter()
+            .any(|(_, k, _)| matches!(k, ChangeKind::Moved))
+        {
             s::DIFF_MOVED
         } else {
             s::DIFF_DELETED
@@ -1049,7 +1064,7 @@ pub(crate) fn paint_highlighted_row(
     buf: &mut Buffer,
     fallback_style: Style,
     inlay_style: Style,
-    change_spans: &[(std::ops::Range<usize>, ChangeKind)],
+    change_spans: &[(std::ops::Range<usize>, ChangeKind, bool)],
     rgb: bool,
     soften_row: Option<[u8; 3]>,
     soften_gaps: Option<[u8; 3]>,
@@ -1057,7 +1072,7 @@ pub(crate) fn paint_highlighted_row(
     row_cursor: &mut RowHighlightCursor,
 ) {
     debug_assert!(
-        change_spans.is_sorted_by_key(|(range, _)| range.start),
+        change_spans.is_sorted_by_key(|(range, ..)| range.start),
         "change_spans must be start-sorted for the monotonic cursor"
     );
 
@@ -1099,12 +1114,14 @@ pub(crate) fn paint_highlighted_row(
             }
             while change_spans
                 .get(span_cursor)
-                .is_some_and(|(r, _)| r.end <= col)
+                .is_some_and(|(r, ..)| r.end <= col)
             {
                 span_cursor += 1;
             }
             let cell_style = match change_spans.get(span_cursor) {
-                Some((range, _)) if range.start <= col => mark_span(style, rgb),
+                Some((range, kind, prose)) if range.start <= col => {
+                    mark_span(style, kind, *prose, rgb)
+                },
                 _ => gap_style,
             };
             buf[(x, y)].set_char(ch).set_style(cell_style);
@@ -1133,7 +1150,7 @@ fn write_buffer_row_change_spans<'a>(
     snapshot: &'a DisplaySnapshot,
     buffer_row: u32,
     hunks: &mut Vec<&'a DiffHunk>,
-    out: &mut Vec<(std::ops::Range<usize>, ChangeKind)>,
+    out: &mut Vec<(std::ops::Range<usize>, ChangeKind, bool)>,
 ) -> bool {
     out.clear();
     hunks.clear();
@@ -1168,12 +1185,12 @@ fn write_buffer_row_change_spans<'a>(
                 .buffer_to_display(rope.offset_to_point(start))
                 .column as usize;
             let end_col = snapshot.buffer_to_display(rope.offset_to_point(end)).column as usize;
-            out.push((start_col..end_col, span.kind.clone()));
+            out.push((start_col..end_col, span.kind.clone(), span.prose));
         }
     }
     // Spans arrive per hunk and are not otherwise ordered. Start-sorting them
     // makes the painter's monotonic span cursor correct.
-    out.sort_by_key(|(range, _)| range.start);
+    out.sort_by_key(|(range, ..)| range.start);
     marked
 }
 
@@ -2843,6 +2860,74 @@ mod tests {
         );
     }
 
+    /// Inside a string the whole literal carries one color, so the receding
+    /// around a changed char is all that separates it. Bold gives the eye
+    /// something to land on that the color cannot.
+    #[test]
+    fn diff_view_bolds_a_changed_char_inside_a_string() {
+        // The two literals share no chars, which keeps the tree pass from
+        // pairing them as one similar string and dropping the change.
+        let h = diff_harness(
+            "fn f() {\n    g(\"aaaa\");\n}\n",
+            "fn f() {\n    g(\"zzzz\");\n}\n",
+        );
+        let buf = h.rendered_buffer();
+
+        let row = (0..buf.area.height)
+            .find(|&y| line_text(buf, y, 68..buf.area.width).contains("zzzz"))
+            .expect("the changed line rendered on the right");
+        let bold = |cols: std::ops::Range<u16>| {
+            cols.filter(|&x| buf[(x, row)].modifier.contains(Modifier::BOLD))
+                .map(|x| buf[(x, row)].symbol().to_string())
+                .collect::<String>()
+        };
+        assert_eq!(
+            (bold(68..buf.area.width), bold(8..59)),
+            ("zzzz".to_string(), "aaaa".to_string()),
+            "both columns bold their changed chars and nothing else of the literal"
+        );
+    }
+
+    /// Bold says "these chars differ from the ones beside them in the other
+    /// text". Added prose has no counterpart to differ from, so it stays plain
+    /// however unstructured it is.
+    #[test]
+    fn diff_view_keeps_an_added_comment_unbolded() {
+        // The buffer opens two changed runs against the base's one, so the
+        // pairing pass claims `h` and leaves the comment with no counterpart.
+        let h = diff_harness(
+            "fn f() {\n    g();\n}\n",
+            "fn f() {\n    h();\n    // note here\n}\n",
+        );
+        let buf = h.rendered_buffer();
+
+        let row = (0..buf.area.height)
+            .find(|&y| line_text(buf, y, 68..buf.area.width).contains("note here"))
+            .expect("the added comment rendered on the right");
+        let bold = (68..buf.area.width)
+            .filter(|&x| buf[(x, row)].modifier.contains(Modifier::BOLD))
+            .map(|x| buf[(x, row)].symbol().to_string())
+            .collect::<String>();
+        assert_eq!(bold, "", "an added comment carries no bold");
+    }
+
+    /// A renamed identifier already has a token boundary and a color change
+    /// beside it, so bolding it would mark what the reader can see.
+    #[test]
+    fn diff_view_keeps_a_renamed_identifier_unbolded() {
+        let h = diff_harness("fn alpha() {}\n", "fn beta() {}\n");
+        let buf = h.rendered_buffer();
+
+        let row = (0..buf.area.height)
+            .find(|&y| line_text(buf, y, 68..buf.area.width).contains("beta"))
+            .expect("the renamed line rendered on the right");
+        let bold = (68..buf.area.width)
+            .filter(|&x| buf[(x, row)].modifier.contains(Modifier::BOLD))
+            .map(|x| buf[(x, row)].symbol().to_string())
+            .collect::<String>();
+        assert_eq!(bold, "", "nothing on a code row bolds");
+    }
+
     /// A theme that cannot blend has no receding to lead a change with, so the
     /// view asks for the one mark left to it and underlines the changed chars.
     /// `paint_base_row_underlines_change_spans_on_a_theme_that_cannot_blend`
@@ -3042,6 +3127,7 @@ mod tests {
                     byte_range: 3..5,
                     kind: ChangeKind::Moved,
                     move_metadata: None,
+                    prose: false,
                 }],
                 base_spans: Vec::new(),
             });
@@ -3087,6 +3173,7 @@ mod tests {
                 byte_range: 3..5,
                 kind: ChangeKind::Replaced,
                 move_metadata: None,
+                prose: false,
             }],
             base_spans: Vec::new(),
         });
@@ -3112,7 +3199,7 @@ mod tests {
         write_buffer_row_change_spans(&snapshot, 1, &mut hunks, &mut spans);
         assert_eq!(
             spans,
-            vec![(0..2, ChangeKind::Replaced)],
+            vec![(0..2, ChangeKind::Replaced, false)],
             "the modified row reports the span covering its changed bytes",
         );
 
@@ -3134,6 +3221,7 @@ mod tests {
                 move_metadata: Some(Arc::new(structural_diff::MoveMetadata {
                     sources: vec![source],
                 })),
+                prose: false,
             }],
             base_spans: Vec::new(),
         });
@@ -3220,7 +3308,10 @@ mod tests {
     #[test]
     fn paint_base_row_leaves_change_spans_unwashed_on_an_rgb_theme() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
-        let change_spans = vec![(0..3, ChangeKind::Replaced), (3..6, ChangeKind::Moved)];
+        let change_spans = vec![
+            (0..3, ChangeKind::Replaced, false),
+            (3..6, ChangeKind::Moved, false),
+        ];
         paint_base_row(
             &mut buf,
             0,
@@ -3290,7 +3381,10 @@ mod tests {
     #[test]
     fn paint_base_row_underlines_change_spans_on_a_theme_that_cannot_blend() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
-        let change_spans = vec![(0..3, ChangeKind::Replaced), (3..6, ChangeKind::Moved)];
+        let change_spans = vec![
+            (0..3, ChangeKind::Replaced, false),
+            (3..6, ChangeKind::Moved, false),
+        ];
         paint_base_row(
             &mut buf,
             0,

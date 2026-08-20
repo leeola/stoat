@@ -287,20 +287,23 @@ fn paint_preview_side(
     highlights: Option<&BaseHighlights>,
     tints: &DiffTints,
     context: bool,
-    spans: &mut Vec<(std::ops::Range<usize>, ChangeKind)>,
+    spans: &mut Vec<(std::ops::Range<usize>, ChangeKind, bool)>,
 ) {
     spans.clear();
+    // A [`ReviewSide`] carries plain ranges, so no span here claims prose. The
+    // session serializes its rows, and the flag would have to cross that format
+    // to reach the preview.
     spans.extend(
         side.change_spans
             .iter()
-            .map(|range| (range.clone(), ChangeKind::Replaced)),
+            .map(|range| (range.clone(), ChangeKind::Replaced, false)),
     );
     spans.extend(
         side.moved_spans
             .iter()
-            .map(|range| (range.clone(), ChangeKind::Moved)),
+            .map(|range| (range.clone(), ChangeKind::Moved, false)),
     );
-    spans.sort_by_key(|(range, _)| range.start);
+    spans.sort_by_key(|(range, ..)| range.start);
 
     // line_num is 1-based, and the highlight index is 0-based per line.
     let token_spans = highlights
@@ -366,7 +369,7 @@ pub(crate) fn render_commit_preview(
     // One buffer for every number this loop paints, rather than one per row.
     let mut num_text = String::new();
     // Reused across rows the way num_text is, since every row rebuilds it.
-    let mut spans: Vec<(std::ops::Range<usize>, ChangeKind)> = Vec::new();
+    let mut spans: Vec<(std::ops::Range<usize>, ChangeKind, bool)> = Vec::new();
 
     let DiffColumns {
         left_num_x,

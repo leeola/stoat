@@ -122,6 +122,9 @@ impl Sink for ChangeSink<'_> {
                 pair_id,
                 deletion_rhs_anchor,
                 refined_spans: Vec::new(),
+                // The line pass runs where no grammar parsed, so nothing in
+                // the file carries a token boundary to mark an edit against.
+                prose: true,
             });
         }
         if rhs_count > 0 {
@@ -133,6 +136,7 @@ impl Sink for ChangeSink<'_> {
                 pair_id,
                 deletion_rhs_anchor: None,
                 refined_spans: Vec::new(),
+                prose: true,
             });
         }
     }
@@ -156,6 +160,18 @@ mod tests {
 
     fn changes(lhs: &str, rhs: &str) -> Vec<DiffChange> {
         diff_lines(lhs, rhs).changes
+    }
+
+    /// The line pass runs where nothing parsed, so the whole file is text with
+    /// no token boundary anywhere in it, whatever its extension says.
+    #[test]
+    fn every_line_change_reports_prose() {
+        let changes = changes("fn alpha() {}\nkeep\n", "fn beta() {}\nkeep\nadded\n");
+        assert!(!changes.is_empty(), "the fixture produces changes");
+        assert!(
+            changes.iter().all(|c| c.prose),
+            "every change the line pass emits reports prose"
+        );
     }
 
     #[test]

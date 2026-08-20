@@ -23,6 +23,7 @@
 use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
     dijkstra::{populate_change_map, shortest_path, SearchOutcome, DEFAULT_GRAPH_LIMIT},
+    graph::{is_comment_atom, is_string_atom},
     line_diff,
     lower::lower_tree,
     moves::{find_moves_changeset, ChangesetMoveRecord, FileMoveInput},
@@ -541,47 +542,75 @@ fn collect_changes(
     side: Side,
     out: &mut Vec<DiffChange>,
 ) {
-    let mut current: Option<(DiffChangeKind, Option<Arc<MoveMetadata>>, Range<usize>)> = None;
+    let mut current: Option<Run> = None;
     walk_emit_atoms(
         arena,
         root,
         changes,
         metadata,
-        &mut |kind, meta, byte_range| match &mut current {
-            Some((cur_kind, cur_meta, run))
-                if *cur_kind == kind
-                    && arc_opt_eq(cur_meta, &meta)
-                    && run.end == byte_range.start =>
-            {
-                run.end = byte_range.end;
-            },
-            Some((cur_kind, cur_meta, run)) => {
-                out.push(DiffChange {
-                    side,
-                    byte_range: run.clone(),
-                    kind: *cur_kind,
-                    move_metadata: cur_meta.clone(),
-                    pair_id: None,
-                    deletion_rhs_anchor: None,
-                    refined_spans: Vec::new(),
-                });
-                *cur_kind = kind;
-                *cur_meta = meta;
-                *run = byte_range;
-            },
-            None => current = Some((kind, meta, byte_range)),
+        &mut |kind, meta, byte_range, prose| {
+            let atom = Run {
+                kind,
+                meta,
+                byte_range,
+                prose,
+            };
+            match &mut current {
+                Some(run) => {
+                    if !run.take(&atom) {
+                        out.push(run.finish(side));
+                        *run = atom;
+                    }
+                },
+                None => current = Some(atom),
+            }
         },
     );
-    if let Some((kind, meta, run)) = current {
-        out.push(DiffChange {
+    if let Some(run) = current {
+        out.push(run.finish(side));
+    }
+}
+
+/// A stretch of same-kind atoms being coalesced, before it becomes a
+/// [`DiffChange`]. One atom is a run of length one.
+struct Run {
+    kind: DiffChangeKind,
+    meta: Option<Arc<MoveMetadata>>,
+    byte_range: Range<usize>,
+    prose: bool,
+}
+
+impl Run {
+    /// Take `atom` into this run, or refuse it and report false.
+    ///
+    /// An atom joins only where it continues the run exactly: the same kind,
+    /// the same move metadata, and no byte between it and the run's end.
+    ///
+    /// A run stops being prose the moment it takes one code atom, because that
+    /// atom carries the token boundary the changed chars can be read against.
+    fn take(&mut self, atom: &Run) -> bool {
+        if self.kind != atom.kind
+            || !arc_opt_eq(&self.meta, &atom.meta)
+            || self.byte_range.end != atom.byte_range.start
+        {
+            return false;
+        }
+        self.byte_range.end = atom.byte_range.end;
+        self.prose &= atom.prose;
+        true
+    }
+
+    fn finish(&self, side: Side) -> DiffChange {
+        DiffChange {
             side,
-            byte_range: run,
-            kind,
-            move_metadata: meta,
+            byte_range: self.byte_range.clone(),
+            kind: self.kind,
+            move_metadata: self.meta.clone(),
             pair_id: None,
             deletion_rhs_anchor: None,
             refined_spans: Vec::new(),
-        });
+            prose: self.prose,
+        }
     }
 }
 
@@ -598,13 +627,15 @@ fn walk_emit_atoms(
     id: SyntaxId,
     changes: &ChangeMap,
     metadata: &HashMap<SyntaxId, Arc<MoveMetadata>>,
-    callback: &mut impl FnMut(DiffChangeKind, Option<Arc<MoveMetadata>>, Range<usize>),
+    callback: &mut impl FnMut(DiffChangeKind, Option<Arc<MoveMetadata>>, Range<usize>, bool),
 ) {
     match arena.get(id) {
         Syntax::Atom(atom) => {
             if atom.byte_range.start >= atom.byte_range.end {
                 return;
             }
+            let node = arena.get(id);
+            let prose = is_comment_atom(node) || is_string_atom(node);
             match changes.get(id) {
                 ChangeKind::Moved => {
                     if let Some(meta) = metadata.get(&id) {
@@ -612,11 +643,12 @@ fn walk_emit_atoms(
                             DiffChangeKind::Moved,
                             Some(meta.clone()),
                             atom.byte_range.clone(),
+                            prose,
                         );
                     }
                 },
                 ChangeKind::Pending => {
-                    callback(DiffChangeKind::Novel, None, atom.byte_range.clone());
+                    callback(DiffChangeKind::Novel, None, atom.byte_range.clone(), prose);
                 },
                 ChangeKind::Unchanged => {},
             }
@@ -860,6 +892,63 @@ mod tests {
         let result = diff_with_language(&lang, source, source).unwrap();
         assert!(result.changes.is_empty());
         assert!(!result.fell_back_to_line_diff);
+    }
+
+    /// The painter has no syntax tree to consult, so a change carries down
+    /// whether it lands in text with no token boundary to read it against.
+    #[test]
+    fn a_change_inside_a_comment_or_a_string_reports_prose() {
+        let lang = rust_lang();
+        let lhs = "// x\nfn f() { let s = \"aaaa\"; }\n";
+        let rhs = "// the quick brown fox jumped\nfn g() { let s = \"zzzz\"; }\n";
+        let result = diff_with_language(&lang, lhs, rhs).unwrap();
+
+        let marks: Vec<(&str, bool)> = result
+            .changes
+            .iter()
+            .filter(|c| c.side == Side::Rhs)
+            .map(|c| (&rhs[c.byte_range.clone()], c.prose))
+            .collect();
+        assert_eq!(
+            marks,
+            vec![
+                ("// the quick brown fox jumped", true),
+                ("g", false),
+                ("zzzz", true)
+            ],
+            "the comment and the string report prose, the renamed function does not",
+        );
+    }
+
+    /// A run coalesces byte-adjacent atoms of one kind, and one code atom in it
+    /// is enough to end its claim on prose.
+    #[test]
+    fn a_run_that_takes_a_code_atom_stops_being_prose() {
+        let atom = |byte_range: Range<usize>, prose| Run {
+            kind: DiffChangeKind::Novel,
+            meta: None,
+            byte_range,
+            prose,
+        };
+
+        let mut run = atom(0..4, true);
+        assert!(
+            run.take(&atom(4..8, true)),
+            "an adjacent atom joins the run"
+        );
+        assert!(run.prose, "and two prose atoms leave it prose");
+
+        assert!(run.take(&atom(8..9, false)), "a code atom joins it too");
+        assert_eq!(
+            (run.prose, run.byte_range.clone()),
+            (false, 0..9),
+            "and takes the run's claim on prose with it",
+        );
+
+        assert!(
+            !run.take(&atom(20..24, true)),
+            "an atom the run does not reach is refused"
+        );
     }
 
     #[test]
