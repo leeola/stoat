@@ -16,7 +16,10 @@
 //! `command::` as it always has, so where a command lives is this module's
 //! business rather than its callers'.
 
-use crate::frame::{self, FrameScratch};
+use crate::{
+    frame::{self, FrameScratch},
+    kitty::{self, GraphicsFrame},
+};
 use bar::decode_bar;
 use border::decode_border;
 use icon::decode_icon;
@@ -234,6 +237,12 @@ pub enum Command {
     /// terminal's log records which process drives it. The terminal replies with
     /// its own [`IdentReply`].
     Hello(HelloCommand),
+    /// A Kitty graphics protocol frame, which rides the same APC introducer but
+    /// is not part of the stoatty sub-protocol.
+    ///
+    /// Decoded here because the terminal's scanner hands every APC payload to
+    /// one place. See [`crate::kitty`] for why the two never collide.
+    Kitty(GraphicsFrame),
 }
 
 /// Decode a stoatty APC frame into a typed [`Command`], or `None` to ignore it.
@@ -252,6 +261,13 @@ pub fn decode(bytes: &[u8]) -> Option<Command> {
 /// decode loop reuses the per-argument buffers across frames instead of
 /// allocating fresh ones each call.
 pub fn decode_with(bytes: &[u8], scratch: &mut FrameScratch) -> Option<Command> {
+    // Tried first because the two share an introducer and a leading `G`. A
+    // stoatty frame cannot parse as Kitty control data, so this falls through
+    // for everything but a real graphics frame.
+    if let Some(graphics) = kitty::parse(bytes) {
+        return Some(Command::Kitty(graphics));
+    }
+
     let (sub, args) = frame::decode_into(bytes, scratch)?;
     dispatch(sub, args)
 }
@@ -315,8 +331,11 @@ fn take_streamed(rest: &mut &[u8]) -> String {
     content
 }
 
-/// Append the full `Gstoatty` frame for any [`Command`] to `out` without
-/// allocating, dispatching on the variant.
+/// Append the frame for any [`Command`] to `out` without allocating,
+/// dispatching on the variant.
+///
+/// Every variant but [`Command::Kitty`] writes a `Gstoatty` frame. That one
+/// writes the foreign graphics format it was decoded from.
 ///
 /// The encode-side mirror of [`decode`]: an emitter assembling a scene appends
 /// each command into one reused buffer.
@@ -354,6 +373,9 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::ZoomCapture { on } => encode_zoom_capture_into(out, *on),
         Command::FontStep { delta } => encode_font_step_into(out, *delta),
         Command::Hello(c) => encode_hello_into(out, c),
+        // Chunked, because a graphics payload routinely exceeds what one frame
+        // carries and a caller reading this back walks whole frames either way.
+        Command::Kitty(c) => kitty::encode_chunked_into(out, &c.control, &c.payload),
     }
 }
 
@@ -402,6 +424,7 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
 #[cfg(test)]
 mod tests {
     use super::{border::decode_style, icon::decode_icon_kind, *};
+    use crate::kitty::{Action, ControlData, Format};
 
     /// The frame an encoder emits today with bytes appended to its head
     /// argument, the shape a later version's added field arrives in.
@@ -1051,5 +1074,48 @@ mod tests {
         let mut expected = encode_border(&border);
         expected.extend(encode_bar(&bar));
         assert_eq!(out, expected);
+    }
+
+    /// The Kitty branch runs ahead of the stoatty decode, so it must not claim
+    /// a frame whose sub-command happens to start with the same letters.
+    #[test]
+    fn a_stoatty_frame_still_decodes_past_the_kitty_branch() {
+        assert_eq!(
+            decode(b"\x1b_Gkitty;border\x1b\\"),
+            None,
+            "an unknown stoatty sub-command still degrades to nothing"
+        );
+
+        let border = BorderCommand {
+            top: 3,
+            left: 1,
+            width: 4,
+            height: 2,
+            style: BorderStyle::Light,
+            color: [7, 8, 9],
+        };
+        assert_eq!(
+            decode(&encode_border(&border)),
+            Some(Command::Border(border)),
+            "and a real one is untouched by the branch above it"
+        );
+    }
+
+    #[test]
+    fn a_graphics_frame_decodes_to_the_kitty_command() {
+        let decoded = decode(b"\x1b_Ga=T,i=2,f=100;cGF5\x1b\\");
+
+        assert_eq!(
+            decoded,
+            Some(Command::Kitty(GraphicsFrame {
+                control: ControlData {
+                    action: Action::TransmitAndDisplay,
+                    format: Format::Png,
+                    id: 2,
+                    ..ControlData::default()
+                },
+                payload: b"cGF5".to_vec(),
+            })),
+        );
     }
 }

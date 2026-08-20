@@ -52,4 +52,5 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub mod command;
 pub mod detect;
 pub mod frame;
+pub mod kitty;
 pub mod window_ipc;

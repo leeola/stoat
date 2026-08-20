@@ -258,7 +258,12 @@ pub fn first_frame_end(bytes: &[u8]) -> Option<usize> {
     }
 }
 
-fn strip_wrapper(bytes: &[u8]) -> &[u8] {
+/// Take the APC introducer and terminator off `bytes`, leaving the payload.
+///
+/// Every part is optional, so a caller handed a bare payload gets it back
+/// unchanged. Both terminators are accepted, since an intermediary that rewrites
+/// one sequence into the other is a thing that happens.
+pub(crate) fn strip_wrapper(bytes: &[u8]) -> &[u8] {
     let bytes = bytes.strip_prefix(INTRODUCER).unwrap_or(bytes);
 
     if let Some(body) = bytes.strip_suffix(TERMINATOR) {

@@ -1499,6 +1499,11 @@ impl Terminal {
             // pressed.
             Command::ZoomCapture { on } => self.pending_events.push(TermEvent::ZoomCapture(on)),
             Command::FontStep { delta } => self.pending_events.push(TermEvent::FontStep(delta)),
+            // FIXME: Deferring the image store and its query responses, which is
+            // its own unit of work. Dropping the frame until then is what a
+            // terminal without graphics support does, so a client sees no reply
+            // and falls back rather than waiting on one.
+            Command::Kitty(_) => {},
         }
     }
 
@@ -1710,7 +1715,8 @@ impl Terminal {
             | Command::Hello(_)
             | Command::ConfigReload
             | Command::ZoomCapture { .. }
-            | Command::FontStep { .. } => {},
+            | Command::FontStep { .. }
+            | Command::Kitty(_) => {},
         }
     }
 
