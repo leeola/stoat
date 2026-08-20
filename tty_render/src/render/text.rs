@@ -270,8 +270,13 @@ struct TextCompositeSlot {
     ///
     /// Positions snap against the absolute screen pixel grid, which folds the
     /// origin into the rounding, so a slot prepared at one origin describes no
-    /// other. The pool's content version does not stand in for this: it tracks
+    /// other. The pool's content version does not stand in for this. It tracks
     /// the region's size, never where the region sits.
+    ///
+    /// A region moving within a cell keeps this origin, since a sub-cell offset
+    /// travels in the globals shift rather than here. A pool riding another's
+    /// glide therefore reuses the instances it built, where an origin carrying
+    /// that drift moved every frame and rebuilt them.
     baked_origin: [f32; 2],
     /// What each row shaped to, kept so a scrolled frame can slide them and
     /// re-shape only the rows the scroll exposed.
@@ -6093,6 +6098,57 @@ mod tests {
             bytemuck::cast_slice::<TextInstance, u8>(&runs_moved),
             bytemuck::cast_slice::<TextInstance, u8>(&runs_rebuilt),
             "and the run glyphs a rebuild at its new origin holds"
+        );
+    }
+
+    /// A pool riding another's glide drifts sub-cell every frame. The drift
+    /// travels in the shift rather than the origin, so the origin the reuse
+    /// gate keys on stands still.
+    ///
+    /// This pins the half that makes the reuse safe. The shift never reaches
+    /// the instances, so the ones reused across a drift are the ones a rebuild
+    /// at that drift holds.
+    #[test]
+    fn a_sub_cell_drift_leaves_the_instances_a_rebuild_would_hold() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+        let resolution = [640.0, 480.0];
+        let mut grid = Grid::new(3, 20);
+        fill_row(&mut grid, 0, "alpha");
+        fill_row(&mut grid, 1, "bravo");
+
+        let composite = |pass: &mut TextPass, shift, content_changed| {
+            pass.prepare_composite(
+                &device,
+                &queue,
+                &grid,
+                &[],
+                resolution,
+                shift,
+                [2.0, 4.0],
+                content_changed,
+                None,
+                0,
+                0,
+            );
+            pass.composite_upload_scratch.clone()
+        };
+
+        let at_rest = composite(&mut pass, 0.0, true);
+        let drifted = composite(&mut pass, 0.375, false);
+        let rebuilt = composite(&mut pass, 0.375, true);
+
+        assert!(!rebuilt.is_empty(), "the fixture has to build glyphs");
+        assert_eq!(
+            bytemuck::cast_slice::<TextInstance, u8>(&drifted),
+            bytemuck::cast_slice::<TextInstance, u8>(&rebuilt),
+            "a drifted pool holds what a rebuild at that drift holds",
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<TextInstance, u8>(&at_rest),
+            bytemuck::cast_slice::<TextInstance, u8>(&rebuilt),
+            "because the shift rides the globals and never enters an instance",
         );
     }
 

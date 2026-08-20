@@ -10,11 +10,11 @@
 
 use crate::{
     anim::{
-        advance_pool_glide, anchored_cursor_pos, anchored_shift, block_corners, cursor_in_region,
-        cursor_position, intersect_scissor, refresh_popover_overflows, region_scissor,
-        seed_settle_flight, shift_scissor, step_cursor, step_grid_scroll, step_popover_scroll,
-        step_region_scroll, step_scrollback_scroll, ActivePool, AnchorRide, AnchoredCursor,
-        PoolAnim, PoolStep, EASE_BASELINE_FRAME, MAX_EASE_DT,
+        advance_pool_glide, anchored_cursor_pos, anchored_shift, block_corners, compose_gate,
+        cursor_in_region, cursor_position, intersect_scissor, refresh_popover_overflows,
+        region_scissor, seed_settle_flight, shift_scissor, step_cursor, step_grid_scroll,
+        step_popover_scroll, step_region_scroll, step_scrollback_scroll, ActivePool, AnchorRide,
+        AnchoredCursor, PoolAnim, PoolStep, EASE_BASELINE_FRAME, MAX_EASE_DT,
     },
     config::{self, Config, CursorAnimation},
     input::{
@@ -2211,17 +2211,29 @@ fn redraw(state: &mut State) {
                 .pool_anims
                 .entry(id)
                 .or_insert_with(|| PoolAnim::new(view.scroll_target.pages()));
-            let Some((frac, _)) = terminal.project_pool(id, &mut anim.document_grid, anim.scroll)
-            else {
+
+            // A ride moves where the pool is drawn, never what it holds, so the
+            // same gate the glide uses answers here. Without it every host frame
+            // re-projects the pool and tells the renderer to re-shape every row
+            // of it.
+            let gate = compose_gate(anim, view, &terminal, anim.scroll);
+            if gate.content_changed {
+                let composed = terminal
+                    .project_pool(id, &mut anim.document_grid, anim.scroll)
+                    .is_some();
+                anim.record_compose(&gate, composed);
+            }
+            if !anim.last_buffered {
                 continue;
-            };
+            }
+
             pool_easing = true;
             active.push(ActivePool {
                 id,
                 region: view.region,
-                frac,
-                content_changed: true,
-                scrolled_rows: None,
+                frac: gate.frac,
+                content_changed: gate.content_changed,
+                scrolled_rows: gate.scrolled_rows.or(Some(0)),
             });
         }
         // Pools composite in ascending id, which is their z-order, and a forced
@@ -2456,7 +2468,7 @@ fn redraw(state: &mut State) {
                 // then clips it, so the surface slides out of the pane edge
                 // rather than over the neighbour.
                 let ride = rides.iter().find(|ride| ride.pool == pool.id);
-                let (origin_y, scissor) = match ride {
+                let (ride_rows, scissor) = match ride {
                     Some(ride) => {
                         let dy_px = anchored_shift(
                             ride.top_rows,
@@ -2465,22 +2477,29 @@ fn redraw(state: &mut State) {
                             ch,
                         );
                         (
-                            region.top as f32 + dy_px / ch,
+                            dy_px / ch,
                             intersect_scissor(
                                 shift_scissor([x0, y0, x1 - x0, y1 - y0], dy_px),
                                 region_scissor(ride.host_region, cw, ch),
                             ),
                         )
                     },
-                    None => (region.top as f32, [x0, y0, x1 - x0, y1 - y0]),
+                    None => (0.0, [x0, y0, x1 - x0, y1 - y0]),
                 };
 
                 PoolComposite {
                     id: pool.id,
                     grid: &state.pool_anims[&pool.id].document_grid,
-                    origin_cells: [region.left as f32, origin_y],
+                    // The ride rides the shift below rather than this origin.
+                    // Every composite shader snaps against the origin and adds
+                    // its shift after, so the two land in the same pixel, while
+                    // an origin left on the whole-cell grid is one the renderer's
+                    // instance cache still recognizes a frame later.
+                    origin_cells: [region.left as f32, region.top as f32],
                     scissor,
-                    shift_rows: -snap_shift_to_pixels(pool.frac, ch),
+                    // Snapped once over the sum. Two roundings of two fractions
+                    // land a pixel from where their sum does.
+                    shift_rows: snap_shift_to_pixels(ride_rows - pool.frac, ch),
                     content_changed: pool.content_changed,
                     scrolled_rows: pool.scrolled_rows,
                     occludable: pool.id < NON_PANE_POOL_BASE,

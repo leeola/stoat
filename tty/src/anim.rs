@@ -590,6 +590,70 @@ pub(crate) enum PoolStep {
     Gliding(ActivePool),
 }
 
+/// What a pool's composed rows rest on this frame, and whether any of it moved
+/// since the frame that last composed them.
+pub(crate) struct ComposeGate {
+    /// Sub-cell fraction of the eased offset, the shift the composite rides at.
+    pub(crate) frac: f32,
+    /// Integer top document row the composed rows start at.
+    top: i64,
+    version: Option<u64>,
+    region_dims: (u16, u16),
+    /// Whether the rows have to be composed again.
+    pub(crate) content_changed: bool,
+    /// Rows the content moved since the last compose, or `None` when nothing
+    /// carries across.
+    pub(crate) scrolled_rows: Option<isize>,
+}
+
+/// Whether `anim`'s composed rows still describe the pool at `scroll`.
+///
+/// The rows rest on the integer top document row, the pooled page bytes, and
+/// the region size, and on nothing else. While all three hold, the offset moved
+/// only within a cell, so last frame's composite still describes the content
+/// and neither the projection here nor the copy downstream has to run.
+///
+/// Both the glide and a pool riding someone else's glide ask this, since a ride
+/// moves none of the three either.
+pub(crate) fn compose_gate(
+    anim: &PoolAnim,
+    pool: &PoolView,
+    terminal: &Terminal,
+    scroll: f32,
+) -> ComposeGate {
+    let page_rows = (pool.region.height as f32).max(1.0);
+    let doc_rows = scroll * page_rows;
+    let top = doc_rows.floor() as i64;
+    let version = terminal.pool_content_version(pool.id);
+    let region_dims = (pool.region.width, pool.region.height);
+
+    let carries = anim.last_version == version && anim.last_region_dims == Some(region_dims);
+    ComposeGate {
+        frac: doc_rows - top as f32,
+        top,
+        version,
+        region_dims,
+        content_changed: !carries || anim.last_top != Some(top),
+        // The distance from where the rows were to where they land. A version
+        // bump or a resize means the rows describe something else, so nothing
+        // carries.
+        scrolled_rows: match anim.last_top {
+            Some(last) if carries => isize::try_from(top - last).ok(),
+            _ => None,
+        },
+    }
+}
+
+impl PoolAnim {
+    /// Record what `gate` read, so the next frame compares against this one.
+    pub(crate) fn record_compose(&mut self, gate: &ComposeGate, buffered: bool) {
+        self.last_top = Some(gate.top);
+        self.last_version = gate.version;
+        self.last_region_dims = Some(gate.region_dims);
+        self.last_buffered = buffered;
+    }
+}
+
 /// Advance `anim`'s ease one frame toward `pool`'s scroll target and compose the
 /// pool's rows at the eased offset into `anim.document_grid`.
 ///
@@ -641,58 +705,32 @@ pub(crate) fn advance_pool_glide(
         return PoolStep::Settled;
     }
 
-    // The composed rows depend only on the integer top document row, the pooled
-    // page bytes, and the region size. While all three hold, the glide advanced
-    // only the sub-cell fraction, so the recompose here and the copy downstream
-    // are skipped and last frame's grids and buffered verdict are reused.
-    let doc_rows = scroll * page_rows;
-    let top = doc_rows.floor() as i64;
-    let frac = doc_rows - top as f32;
-    let version = terminal.pool_content_version(pool.id);
-    let region_dims = (pool.region.width, pool.region.height);
-    let content_changed = anim.last_top != Some(top)
-        || anim.last_version != version
-        || anim.last_region_dims != Some(region_dims);
-
-    // Read before the fields below are advanced, since this is the distance
-    // between where the rows were and where they are going. A version bump or a
-    // resize means the rows describe something else, so nothing carries.
-    let scrolled_rows = match anim.last_top {
-        Some(last)
-            if anim.last_version == version && anim.last_region_dims == Some(region_dims) =>
-        {
-            isize::try_from(top - last).ok()
-        },
-        _ => None,
-    };
+    let gate = compose_gate(anim, pool, terminal, scroll);
 
     // A resize reshapes document_grid, so a held composite from the old
     // dimensions no longer fits the region.
-    if anim.last_region_dims != Some(region_dims) {
+    if anim.last_region_dims != Some(gate.region_dims) {
         anim.held_frac = None;
     }
 
-    let buffered = if content_changed {
+    let buffered = if gate.content_changed {
         let composed = terminal
             .project_pool(pool.id, &mut anim.document_grid, scroll)
             .is_some();
-        anim.last_top = Some(top);
-        anim.last_version = version;
-        anim.last_region_dims = Some(region_dims);
-        anim.last_buffered = composed;
+        anim.record_compose(&gate, composed);
         composed
     } else {
         anim.last_buffered
     };
 
     if buffered {
-        anim.held_frac = Some(frac);
+        anim.held_frac = Some(gate.frac);
         PoolStep::Gliding(ActivePool {
             id: pool.id,
             region: pool.region,
-            frac,
-            content_changed,
-            scrolled_rows,
+            frac: gate.frac,
+            content_changed: gate.content_changed,
+            scrolled_rows: gate.scrolled_rows,
         })
     } else if let Some(held) = anim.held_frac {
         // The window is not buffered this frame. Re-push the last good composite
@@ -713,7 +751,96 @@ pub(crate) fn advance_pool_glide(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stoatty_term::grid::Rgb;
+    use stoatty_protocol::command::{
+        encode_fill, encode_fill_end, encode_pool_region, FillCommand, PoolRegionCommand,
+    };
+    use stoatty_term::{
+        grid::{DocumentOffset, Rgb},
+        theme::Theme,
+    };
+
+    /// A pool eight rows tall, and a terminal that has declared it.
+    fn gated_pool() -> (PoolView, Terminal) {
+        let mut terminal = Terminal::new(8, 4, Theme::default());
+        terminal.advance(&encode_pool_region(&PoolRegionCommand {
+            pool: 1,
+            top: 0,
+            left: 0,
+            width: 4,
+            height: 8,
+            window: 0,
+        }));
+        let view = PoolView {
+            id: 1,
+            region: PoolRegion {
+                pool: 1,
+                window: 0,
+                top: 0,
+                left: 0,
+                width: 4,
+                height: 8,
+            },
+            scroll_target: DocumentOffset::default(),
+            cursor_anchor: None,
+            anchor: None,
+            content_version: 0,
+        };
+        (view, terminal)
+    }
+
+    /// The composed rows rest on the top row, the page bytes, and the region
+    /// size. A glide between two frames moves none of those while it advances
+    /// within one cell, and a ride moves none of them at all.
+    #[test]
+    fn a_move_inside_one_cell_composes_nothing_again() {
+        let (view, terminal) = gated_pool();
+        let mut anim = PoolAnim::new(0.0);
+
+        // Eight rows to a page, so both of these rest on top row 2 and differ
+        // only in how far into it they sit.
+        let first = compose_gate(&anim, &view, &terminal, 0.25);
+        assert!(first.content_changed, "nothing has been composed yet");
+        assert_eq!((first.top, first.frac), (2, 0.0));
+        anim.record_compose(&first, true);
+
+        let drifted = compose_gate(&anim, &view, &terminal, 0.3);
+        assert!(!drifted.content_changed, "the same rows at a new fraction");
+        assert_eq!(drifted.scrolled_rows, Some(0), "and they moved no rows");
+        assert!((drifted.frac - 0.4).abs() < 1e-5, "got {}", drifted.frac);
+    }
+
+    #[test]
+    fn each_of_the_three_inputs_moving_composes_again() {
+        let (view, mut terminal) = gated_pool();
+        let mut anim = PoolAnim::new(0.0);
+        anim.record_compose(&compose_gate(&anim, &view, &terminal, 0.0), true);
+
+        let scrolled = compose_gate(&anim, &view, &terminal, 1.0);
+        assert!(scrolled.content_changed, "a new top row");
+        assert_eq!(scrolled.scrolled_rows, Some(8), "eight rows further down");
+
+        let mut narrower = view;
+        narrower.region.width = 2;
+        assert!(
+            compose_gate(&anim, &narrower, &terminal, 0.0).content_changed,
+            "a resized region reshapes the rows",
+        );
+
+        fill_page(&mut terminal, 1, 0, b"x");
+        let refilled = compose_gate(&anim, &view, &terminal, 0.0);
+        assert!(refilled.content_changed, "new page bytes");
+        assert_eq!(
+            refilled.scrolled_rows, None,
+            "and nothing of the old rows carries",
+        );
+    }
+
+    fn fill_page(terminal: &mut Terminal, pool: u32, index: u64, text: &[u8]) {
+        let mut stream = encode_fill(&FillCommand { pool, index });
+        stream.extend_from_slice(text);
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+    }
 
     fn popover(height: u16, scale: u8, content: &str) -> Overlay {
         Overlay {
